@@ -28,7 +28,8 @@
 //!    (`axiam.ssf_push`, `.retry`, `.dlq`), its env-var prefix
 //!    (`AXIAM__<SLUG>__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`,
 //!    `…__BACKOFF_CEILING_MS`, with the slug upper-cased) and its audit action prefix
-//!    (`ssf_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`).
+//!    (`ssf_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`, and,
+//!    from the minimal profile's in-process dispatcher only, `.delivery_abandoned`).
 //! 2. Implement [`OutboundDeliverer`] in the crate that owns the protocol,
 //!    returning that kind from [`OutboundDeliverer::kind`].
 //! 3. In `axiam-server`: call `AmqpManager::declare_outbound_topology(kind)`,

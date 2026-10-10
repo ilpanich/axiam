@@ -383,6 +383,7 @@ async fn serve(db: &Surreal<Db>, auth: &AuthConfig, tls: ServerConfig) -> Socket
             Arc::new(lockout),
             GrpcTls::Rustls(Arc::new(tls)),
             axiam_core::models::deployment::DeploymentProfile::Full,
+            std::future::pending(),
         )
         .await;
         panic!("the gRPC listener stopped: {result:?}");

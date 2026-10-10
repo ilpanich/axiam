@@ -3,7 +3,7 @@
 //!
 //! `POST /oauth2/bc-authorize` (see [`super::ciba`]) stores a request for a user
 //! the client named; the user is told (a mail with a link, T23.7.2) and decides
-//! here, in the console's end-user area, **after a full sign-in**. Three routes,
+//! here, in the console's end-user area, **after a full sign-in**. Four routes,
 //! the device grant's user routes' shape (`/api/v1/device/verify` and
 //! `/decide`) with the same two properties of that placement:
 //!
@@ -19,6 +19,7 @@
 //!
 //! | Route | Does |
 //! |---|---|
+//! | `GET /api/v1/ciba/requests?status=pending` | the signed-in user's own pending requests, each as the page below shows it |
 //! | `GET /api/v1/ciba/requests/{request_id}` | what the page shows, and the `version` it must send back |
 //! | `POST …/approve` | approve, conditional on that `version` |
 //! | `POST …/deny` | refuse, conditional on that `version` |
@@ -30,6 +31,20 @@
 //! `404 not_found`. The page must not become an oracle for which request ids
 //! exist or whose they are — the id is a handle, not a secret (D-68), so what
 //! protects a request is that only its own user, signed in, can see it.
+//!
+//! # The pending list (D-74, #566)
+//!
+//! The approval mail goes only to an address something vouches for (D-74), so an
+//! account without one — every federated account that never verified an address
+//! (T-160) — would never learn a record id. `GET /api/v1/ciba/requests` lists the
+//! caller's **own** pending, unexpired requests so the console can show them (a
+//! badge on the user menu) and open the page above by the `request_id` each
+//! carries. It is the same surface under the same rules: a console sign-in only,
+//! a bucket of its own in `ciba_approval_per_min`, and no oracle — the list holds
+//! only the caller's rows, so another user's, a decided and an expired request
+//! are simply absent. `status=pending` is the one filter; any other value is a
+//! `400`, and an absent one means the same. The `auth_req_id` is not stored in
+//! readable form and never leaves the token endpoint.
 //!
 //! # Step-up
 //!
@@ -57,7 +72,7 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::ciba::CibaRequest;
 use axiam_core::models::session::Amr;
 use axiam_core::repository::{AuditLogRepository, OAuth2ClientRepository, SessionRepository};
-use axiam_oauth2::ciba::{CibaApproval, CibaDecisionOutcome, step_up_required};
+use axiam_oauth2::ciba::{CibaApproval, CibaApprovalView, CibaDecisionOutcome, step_up_required};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -225,6 +240,94 @@ pub async fn get_request<C: Connection + Clone>(
             return server_error();
         }
     };
+    HttpResponse::Ok()
+        .append_header(("Cache-Control", "no-store"))
+        .json(approval_page(&state, tenant_id, view, &amr).await)
+}
+
+/// The `status` filter of the list. `pending` is the only one there is.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct CibaListQuery {
+    /// `pending` (the default). Any other value is a `400`.
+    pub status: Option<String>,
+}
+
+/// The signed-in user's pending requests.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CibaPendingList {
+    /// Soonest expiry first, at most 50. Each entry is what
+    /// `GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`.
+    pub requests: Vec<CibaApprovalPage>,
+}
+
+/// List the signed-in user's own pending CIBA sign-in requests.
+///
+/// For the account the approval mail never reaches (D-74): the console shows
+/// these and opens the page by `request_id`. Console sign-in only.
+#[utoipa::path(
+    get,
+    operation_id = "ciba_approval_list",
+    path = "/api/v1/ciba/requests",
+    tag = "ciba",
+    params(CibaListQuery),
+    responses(
+        (status = 200, description = "The caller's pending, unexpired requests (possibly none)", body = CibaPendingList),
+        (status = 400, description = "`status` is something other than `pending`"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: no session row behind it, \
+                                      or AXIAM minted it for an OAuth2 client"),
+        (status = 429, description = "The `ciba_approval_per_min` allowance of this route is spent"),
+    ),
+    security(("session" = [])),
+)]
+pub async fn list_requests<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    query: web::Query<CibaListQuery>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let tenant_id = user.principal_tenant_id;
+    let Ok(evidence) = session_evidence(&state, &user).await else {
+        return server_error();
+    };
+    let Some((_, amr)) = evidence else {
+        return session_required();
+    };
+    if query.status.as_deref().is_some_and(|s| s != "pending") {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "validation_error",
+            "message": "Only status=pending is supported.",
+        }));
+    }
+    let views = match state
+        .oauth2
+        .ciba_service
+        .list_pending_for_approval(tenant_id, user.user_id)
+        .await
+    {
+        Ok(views) => views,
+        Err(e) => {
+            tracing::error!(error = %e, "the CIBA pending-request list failed");
+            return server_error();
+        }
+    };
+    let mut requests = Vec::with_capacity(views.len());
+    for view in views {
+        requests.push(approval_page(&state, tenant_id, view, &amr).await);
+    }
+    HttpResponse::Ok()
+        .append_header(("Cache-Control", "no-store"))
+        .json(CibaPendingList { requests })
+}
+
+/// What the page shows for `view`, given the authentication behind the
+/// caller's session (`amr`): shared by the single page and the list, so the
+/// two cannot disagree about a request.
+async fn approval_page<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    view: CibaApprovalView,
+    amr: &[Amr],
+) -> CibaApprovalPage {
     let client_name = state
         .oauth2_client_repo
         .get_by_client_id(tenant_id, &view.client_id)
@@ -236,20 +339,18 @@ pub async fn get_request<C: Connection + Clone>(
         .filter_map(|v| axiam_oauth2::acr::Acr::from_wire(v))
         .map(|acr| acr.as_str().to_owned())
         .collect();
-    HttpResponse::Ok()
-        .append_header(("Cache-Control", "no-store"))
-        .json(CibaApprovalPage {
-            request_id: view.request_id,
-            version: view.version,
-            client_id: view.client_id,
-            client_name,
-            scopes: view.scopes,
-            binding_message: view.binding_message,
-            requested_acr,
-            step_up_required: step_up_required(&view.acr_values, &amr)
-                .map(|acr| acr.as_str().to_owned()),
-            expires_at: view.expires_at,
-        })
+    CibaApprovalPage {
+        request_id: view.request_id,
+        version: view.version,
+        client_id: view.client_id,
+        client_name,
+        scopes: view.scopes,
+        binding_message: view.binding_message,
+        requested_acr,
+        step_up_required: step_up_required(&view.acr_values, amr)
+            .map(|acr| acr.as_str().to_owned()),
+        expires_at: view.expires_at,
+    }
 }
 
 /// Approve a pending CIBA sign-in request, conditional on the version read.

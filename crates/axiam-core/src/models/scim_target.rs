@@ -450,7 +450,9 @@ pub struct ScimTargetState {
     pub tenant_id: Uuid,
     /// When a delivery last succeeded.
     pub last_success_at: Option<DateTime<Utc>>,
-    /// When a delivery attempt last failed or dead-lettered.
+    /// When a delivery attempt last failed or dead-lettered. A delivery the
+    /// per-target breaker refused made no request and does not stamp it: the
+    /// breaker's window is measured from here (#550).
     pub last_failure_at: Option<DateTime<Utc>>,
     /// Why, in the deliverer's fixed vocabulary.
     pub last_failure_reason: Option<String>,

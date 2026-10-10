@@ -75,7 +75,8 @@ registry (`/api/v1/tenants/{tenant_id}/ssf/streams`) and the outbound SCIM
 targets (`/api/v1/scim-targets`) list only `bearer`, and a service-account
 token is `401` on each (contract §29.3 rule 9, §30.3 rule 8, §31.3 rule 9,
 §32.3 rule 10). **CIBA approval is narrower still**:
-`GET /api/v1/ciba/requests/{request_id}` and its `approve` / `deny` take the
+`GET /api/v1/ciba/requests` (the pending list), `GET /api/v1/ciba/requests/{request_id}` and its
+`approve` / `deny` take the
 `session` scheme above plus a CSRF token, so neither a service principal nor a
 client credential can approve a request (§33, §33.3 rule 16).
 
@@ -275,9 +276,18 @@ on another device (CIBA Core 1.0, poll and ping modes; no push mode).
   endpoint (a CIBA client is never public), starts a request
 - `POST /oauth2/token` with `grant_type=urn:openid:params:grant-type:ciba` and
   the `auth_req_id` — the client polls, or polls once after AXIAM pings it
+- `GET /api/v1/ciba/requests?status=pending` (tag `ciba`) — the signed-in
+  user's own pending requests: client name, binding message, scopes, requested
+  `acr`, expiry, and the `request_id` and `version` the approval page uses; never
+  the `auth_req_id`. Another user's, a decided and an expired request are absent.
+  Only `status=pending` exists (any other value is `400`). It is how an account
+  with no vouched address (sent no approval mail, D-74) finds a request: the
+  console's user menu shows a badge with the count. A token with a `client_id` is
+  `403`; the route has a rate-limit bucket of its own
+  (`AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN`)
 - `GET /api/v1/ciba/requests/{request_id}`, `POST …/approve`, `POST …/deny`
   (tag `ciba`) — the console page `/ciba/approve` the user decides on; not SDK
-  surface
+  surface, nor is the list
 
 Contract [§33](../../sdks/CONTRACT.md#§33-ciba--client-initiated-backchannel-authentication-contract-158);
 website [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba).
@@ -326,6 +336,11 @@ the tenant is the token's.
 - `GET`/`PUT`/`DELETE /api/v1/scim-targets/{id}`
 - `POST /api/v1/scim-targets/{id}/reconcile` — reconcile now (`202`)
 
+`PUT` is a replacement. Send the `updated_at` you read as `expected_updated_at`
+and a target changed since is a `409` (reload and retry) instead of a silent
+overwrite of another administrator's edit; omitted, the write is conditional only
+on the version the server reads during the request, so the last writer wins.
+
 Contract [§31](../../sdks/CONTRACT.md#§31-outbound-scim-targets-management-api-contract-157);
 website [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound).
 
@@ -350,6 +365,15 @@ website [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/dire
 every AMQP queue and message type AXIAM publishes/consumes (authz
 request/response, audit events, notifications, outbound mail, webhook
 delivery + its DLQ/retry chain).
+
+**A server in the minimal profile (`AXIAM__AMQP__ENABLED=false`) reads no AMQP
+queue.** The authorization-request and audit-ingestion consumers are not started
+(`GET /health` lists `amqp_authz` and `amqp_audit_ingestion` under
+`unavailable`), so a message published to a broker is never read by AXIAM, and a
+broker confirm never means AXIAM recorded an event or decided a request: it says
+only that the broker accepted the message. Use REST or gRPC against such a
+server; an AMQP client is for a full-profile deployment. See
+[the deployment guide](../deployment/README.md#what-it-does-not-provide).
 
 **Important — this is a hand-authored snapshot, not a generated artifact.**
 Unlike the REST OpenAPI spec, there is no codegen link between

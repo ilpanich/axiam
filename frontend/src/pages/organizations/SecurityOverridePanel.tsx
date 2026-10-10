@@ -7,6 +7,7 @@ import {
   readOidcPolicy,
   readServerCertAllowedNames,
   settingsService,
+  surfaceLayer,
   validateCimdPolicy,
   type CimdPolicy,
   type DynamicRegistrationMode,
@@ -18,6 +19,7 @@ import {
   ServerNamesSummary,
 } from "@/pages/settings/serverNamesPolicy";
 import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
+import { SurfaceSwitches } from "@/pages/settings/surfaceSwitches";
 import {
   MAX_DELETION_GRACE_PERIOD_DAYS,
   type SecuritySettings,
@@ -60,6 +62,8 @@ interface OverrideGroups {
   cimd: boolean;
   /** S-7 — its own group, because an absent list and an empty one differ. */
   serverNames: boolean;
+  /** P23W4-07 — the SAML IdP and SSF switches; disable-only. */
+  surfaces: boolean;
 }
 
 const NO_GROUPS: OverrideGroups = {
@@ -75,6 +79,7 @@ const NO_GROUPS: OverrideGroups = {
   dcr: false,
   cimd: false,
   serverNames: false,
+  surfaces: false,
 };
 
 /** The panel's editable state — flat, seconds where the backend uses seconds. */
@@ -112,6 +117,9 @@ interface FormState {
   cimd: CimdPolicy;
   // S-7 — rows as typed; cleaned on save.
   server_cert_allowed_names: string[];
+  // P23W4-07 — the disable-only surface switches.
+  saml_idp_enabled: boolean;
+  ssf_enabled: boolean;
 }
 
 /** Seed the form from the effective settings, so an un-overridden group opens
@@ -194,6 +202,8 @@ function groupsFromOverride(o: TenantSettingsOverride): OverrideGroups {
     // One key, because the posture is one object: `Option<CimdPolicy>`.
     cimd: o.cimd !== undefined,
     serverNames: o.server_cert_allowed_names !== undefined,
+    surfaces:
+      o.saml_idp_enabled !== undefined || o.ssf_enabled !== undefined,
   };
 }
 
@@ -262,6 +272,10 @@ function overrideFromForm(
     out.server_cert_allowed_names = cleanAllowedNames(
       form.server_cert_allowed_names
     );
+  }
+  if (groups.surfaces) {
+    out.saml_idp_enabled = form.saml_idp_enabled;
+    out.ssf_enabled = form.ssf_enabled;
   }
   return out;
 }
@@ -874,6 +888,44 @@ export function TenantSecurityOverridePanel({
                 certificate at all, whatever the organization lists. Unchecked,
                 it follows the organization&rsquo;s list as that list changes.
               </p>
+            </div>
+          )}
+          {/* SAML identity provider and SSF transmitter (P23W4-07). Its own
+              group, and necessary for the reason DCR's is: this endpoint
+              replaces the whole override, so a tenant's `false` that no group
+              carried was silently dropped by an unrelated save. */}
+          <GroupToggle
+            label="Override SAML identity provider and security events"
+            checked={groups.surfaces}
+            onChange={(v) => setGroups((g) => ({ ...g, surfaces: v }))}
+          />
+          {groups.surfaces && (
+            <div className="ml-6 space-y-3">
+              <SurfaceSwitches
+                idPrefix="tso"
+                scope="tenant"
+                editing
+                value={{
+                  saml_idp_enabled: form.saml_idp_enabled,
+                  ssf_enabled: form.ssf_enabled,
+                }}
+                onChange={(patch) =>
+                  setForm((prev) => (prev ? { ...prev, ...patch } : prev))
+                }
+                layers={{
+                  saml_idp_enabled: surfaceLayer(
+                    effective?.oidc?.saml_idp_enabled ?? false,
+                    override?.saml_idp_enabled,
+                    true
+                  ),
+                  ssf_enabled: surfaceLayer(
+                    effective?.oidc?.ssf_enabled ?? false,
+                    override?.ssf_enabled,
+                    true
+                  ),
+                }}
+                ssfInactiveReason={effective?.oidc?.ssf_inactive_reason}
+              />
             </div>
           )}
           {/* What the server reads back for this tenant — its override

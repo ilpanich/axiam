@@ -414,15 +414,30 @@ async fn main() -> std::io::Result<()> {
     // the password before Argon2id rather than used as one.
     // SECURITY: do NOT log the pepper value. Wrapped in `SecretString`
     // (SECHRD-12) so the value can never be accidentally `Debug`-printed.
-    if let Some(value) = read_secret(keys::AUTH_PEPPER) {
+    //
+    // The pepper reaches `config.auth.pepper` from `AXIAM__AUTH__PEPPER` (the
+    // configuration layer, the variable operators set) or from the provider
+    // (`auth_pepper`; `AXIAM__AUTH__AUTH_PEPPER` under the env provider); the
+    // log names what actually happened.
+    use axiam_server::legacy_env::{PEPPER_CONFIG_VAR, PepperSource, pepper_unset_message};
+    let provider_pepper = read_secret(keys::AUTH_PEPPER);
+    let source = PepperSource::resolve(provider_pepper.is_some(), config.auth.pepper.is_some());
+    if let Some(value) = provider_pepper {
         config.auth.pepper = Some(secrecy::SecretString::from((*value).clone()));
-        tracing::info!(provider = secret_provider.describe(), "Auth pepper loaded");
-    } else {
-        tracing::info!(
-            "AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper; \
-             client-secret hashing is mandatory-keyed and will fail closed in a release build \
-             (OBS-1)"
-        );
+    }
+    match source {
+        PepperSource::SecretProvider => {
+            tracing::info!(provider = secret_provider.describe(), "Auth pepper loaded");
+        }
+        PepperSource::Configuration => {
+            tracing::info!(
+                variable = PEPPER_CONFIG_VAR,
+                "Auth pepper loaded from configuration"
+            );
+        }
+        PepperSource::Unset => {
+            tracing::info!("{}", pepper_unset_message());
+        }
     }
 
     // OBS-1: install the process-wide client-secret hasher. Client secrets are

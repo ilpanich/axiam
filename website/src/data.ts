@@ -527,7 +527,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "**Outbound SCIM provisioning.** Register downstream SCIM 2.0 service providers and AXIAM pushes the tenant's user and group lifecycle to them, reconciles nightly and on demand, notifies on a dead letter and propagates GDPR erasure (contract §31). The credential is sealed and bound to the URL it is sent to. Deleting a target deprovisions nothing downstream, and delivery is one attempt at a time per replica, so an unresponsive downstream holds the others back until [ilpanich/axiam#550](https://github.com/ilpanich/axiam/issues/550) is decided.",
+        text: "**Outbound SCIM provisioning.** Register downstream SCIM 2.0 service providers and AXIAM pushes the tenant's user and group lifecycle to them, reconciles nightly and on demand, notifies on a dead letter and propagates GDPR erasure (contract §31). The credential is sealed and bound to the URL it is sent to. Deleting a target deprovisions nothing downstream. Delivery is one attempt at a time per replica, and a per-target breaker stops calling a downstream after five consecutive failures until its backoff has passed, so an unresponsive one no longer holds the others back for every queued reference ([ilpanich/axiam#550](https://github.com/ilpanich/axiam/issues/550)).",
       },
       {
         type: "p",

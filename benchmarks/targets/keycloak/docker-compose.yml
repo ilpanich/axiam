@@ -72,8 +72,8 @@ services:
       BENCH_REQUIRE_CLIENT_CERT: "${BENCH_REQUIRE_CLIENT_CERT:-false}"
       BENCH_KC_HTTP_ENABLED: "${BENCH_KC_HTTP_ENABLED:-true}"
     ports:
-      - "${BENCH_APP_PORT:-8090}:8080"
-      - "${BENCH_TLS_PORT:-8443}:8443"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_APP_PORT:-8090}:8080"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_TLS_PORT:-8443}:8443"
     volumes:
       - ../../profiles/certs:/certs:ro
     depends_on:

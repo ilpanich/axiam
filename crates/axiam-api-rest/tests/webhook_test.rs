@@ -1050,6 +1050,91 @@ async fn deliver_once_blocks_ssrf_loopback_url() {
     );
 }
 
+/// P23W5-10 (T-112): the deliverer never follows a redirect. A loopback
+/// receiver answers `307` to a second loopback URL; the second receives
+/// nothing, the first exactly one POST, and the attempt is a retry whose
+/// reason says the redirect was not followed (the old `guarded_fetch` would
+/// have followed it and, refusing the loopback hop, failed with a different
+/// reason).
+#[actix_rt::test]
+async fn a_307_from_the_receiver_is_never_followed_and_the_delivery_is_retried() {
+    use axiam_core::outbound::{DeliveryOutcome, OutboundDeliverer, OutboundKind, OutboundMessage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve(listener: TcpListener, hits: Arc<AtomicUsize>, response: String) {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    }
+
+    let target = TcpListener::bind("127.0.0.1:0").await.expect("bind target");
+    let target_port = target.local_addr().expect("addr").port();
+    let target_hits = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(serve(
+        target,
+        target_hits.clone(),
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+    ));
+
+    let receiver = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind receiver");
+    let receiver_port = receiver.local_addr().expect("addr").port();
+    let receiver_hits = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(serve(
+        receiver,
+        receiver_hits.clone(),
+        format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{target_port}/final\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    ));
+
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let service = WebhookDeliveryService::new(webhook_repo.clone(), Some(TEST_WEBHOOK_ENC_KEY))
+        .admitting_private_networks_for_tests();
+    let webhook = webhook_repo
+        .create(axiam_core::models::webhook::CreateWebhook {
+            tenant_id,
+            url: format!("http://127.0.0.1:{receiver_port}/hook"),
+            events: vec!["user.created".into()],
+            secret: service.encrypt_secret("test-secret").expect("encrypt"),
+            retry_policy: None,
+        })
+        .await
+        .expect("create test webhook");
+
+    let msg = OutboundMessage {
+        kind: OutboundKind::Webhook,
+        tenant_id,
+        target_id: webhook.id,
+        delivery_id: Uuid::new_v4(),
+        event_type: "user.created".into(),
+        payload: serde_json::json!({"key": "value"}),
+        attempt: 0,
+    };
+    let outcome = service.deliver_attempt(&msg).await.expect("an outcome");
+
+    assert_eq!(
+        outcome,
+        DeliveryOutcome::Retry {
+            reason: "the receiver answered with a redirect, which is not followed".into()
+        }
+    );
+    assert_eq!(receiver_hits.load(Ordering::SeqCst), 1, "one POST, no more");
+    assert_eq!(
+        target_hits.load(Ordering::SeqCst),
+        0,
+        "the redirect target received nothing"
+    );
+}
+
 /// A webhook secret encrypted under one key cannot be decrypted with a
 /// DIFFERENT key — `deliver_once` must surface a decrypt failure rather than
 /// panicking or silently proceeding with garbage HMAC input.

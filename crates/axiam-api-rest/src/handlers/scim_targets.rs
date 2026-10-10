@@ -217,6 +217,15 @@ pub struct ScimTargetInput {
     /// `deactivate` (default: `PATCH active=false`) or `delete`.
     #[serde(default)]
     pub deprovision: DeprovisionPolicy,
+    /// The `updated_at` of the target as the client read it (P23W5-09,
+    /// T-416). **Update only; create ignores it.** When present, the
+    /// replacement lands only if the target still has that version, else
+    /// `409` (reload and retry): two administrators who opened the form at the
+    /// same version cannot silently overwrite each other. When absent the
+    /// replacement is conditional on the version the server reads during the
+    /// request — last-writer-wins between administrators, as before.
+    #[serde(default)]
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 /// `Debug` names the credential's presence and nothing else.
@@ -760,7 +769,10 @@ pub async fn get_target<C: Connection + Clone>(
                                       `auth.type` without the credential — the message names \
                                       the field"),
         (status = 404, description = "No such target in this tenant"),
-        (status = 409, description = "The target changed since it was read (reload it and retry)"),
+        (status = 409, description = "The target changed since it was read — since the \
+                                      `expected_updated_at` the request carried, or, when it \
+                                      carried none, since the server read it during the request \
+                                      (reload it and retry)"),
         (status = 429, description = "Rate limit"),
         (status = 503, description = "A credential was given and the deployment cannot seal it"),
     ),
@@ -795,6 +807,17 @@ pub async fn update_target<C: Connection + Clone>(
     )?;
     need_sealing(&state, checked.credential.is_some())?;
 
+    // P23W5-09: the version the client read, when it said which. The checks
+    // above ran against `old`, so a different version is already a conflict.
+    let expected_updated_at = match input.expected_updated_at {
+        Some(read) if read != old.updated_at => {
+            return Err(AxiamApiError(AxiamError::Conflict {
+                reason: "the SCIM target changed since it was read; read it again and retry".into(),
+            }));
+        }
+        Some(read) => read,
+        None => old.updated_at,
+    };
     let credential_set = checked.credential.is_some();
     let update = ScimTargetUpdate {
         name: input.name.trim().to_owned(),
@@ -808,8 +831,9 @@ pub async fn update_target<C: Connection + Clone>(
         deprovision: input.deprovision,
         // T-406: the replacement was checked against `old` (the binding, the
         // groups); it lands only if `old` is still the target's version, else
-        // `409` and the administrator reloads.
-        expected_updated_at: Some(old.updated_at),
+        // `409` and the administrator reloads. T-416: `old` is the version the
+        // client read when it sent one.
+        expected_updated_at: Some(expected_updated_at),
     };
     let changed = changed_fields(&old, &update, credential_set);
     let updated = state

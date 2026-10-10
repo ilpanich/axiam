@@ -310,3 +310,77 @@ async fn unauthenticated_request_is_rejected() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+/// #551, T-117: a rule's notification window is 15 minutes when omitted, is
+/// stored and returned when given, can be changed, and is refused outside
+/// 1 … 1440 on create and on update (zero would be "mail every event").
+#[actix_web::test]
+async fn the_notification_window_defaults_and_is_bounded() {
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let post = |body: Value| {
+        test::TestRequest::post()
+            .uri("/api/v1/notification-rules")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+
+    // Omitted: the default.
+    let resp = test::call_service(&app, post(valid_body())).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: Value = test::read_body_json(resp).await;
+    assert_eq!(created["window_minutes"], 15);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Given, at both bounds.
+    for minutes in [1, 1440] {
+        let mut body = valid_body();
+        body["window_minutes"] = json!(minutes);
+        let resp = test::call_service(&app, post(body)).await;
+        assert_eq!(resp.status().as_u16(), 201, "{minutes}");
+        let created: Value = test::read_body_json(resp).await;
+        assert_eq!(created["window_minutes"], minutes);
+    }
+
+    // Outside them, or not a count of minutes at all.
+    for minutes in [json!(0), json!(1441), json!(-5), json!("15")] {
+        let mut body = valid_body();
+        body["window_minutes"] = minutes.clone();
+        let resp = test::call_service(&app, post(body)).await;
+        assert_eq!(resp.status().as_u16(), 400, "{minutes}");
+    }
+
+    let put = |body: Value| {
+        test::TestRequest::put()
+            .uri(&format!("/api/v1/notification-rules/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let resp = test::call_service(&app, put(json!({ "window_minutes": 60 }))).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let updated: Value = test::read_body_json(resp).await;
+    assert_eq!(updated["window_minutes"], 60);
+
+    for minutes in [0, 1441] {
+        let resp = test::call_service(&app, put(json!({ "window_minutes": minutes }))).await;
+        assert_eq!(resp.status().as_u16(), 400, "{minutes}");
+    }
+    // A refused update changed nothing.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/notification-rules/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let fetched: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(fetched["window_minutes"], 60);
+}

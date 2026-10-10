@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::messaging::MailTransportPublisher;
-use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
+use axiam_api_rest::handlers::gdpr::write_audit_with_dead_letter;
 use axiam_api_rest::ssf_emitter::{InitiatingEntity, with_cause};
 use axiam_auth::AuthService;
 use axiam_auth::crypto::{encrypt_separate, gdpr_pseudonym};
@@ -1020,12 +1020,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     // sweep this destroys nothing anyone could want back —
                     // an expired entry describes only tokens that have
                     // expired on their own `exp`.
-                    Self::record(
-                        &self.job_health,
-                        "revocation_feed",
-                        self.sweep_revocation_feed().await,
-                        tracing::Level::DEBUG,
-                    );
+                    // Recorded only when the feed is on, as the directory sync
+                    // is only when it is configured: `/health/jobs` registers
+                    // it on the same condition (`job_health::sweep_jobs`).
+                    if self.revoked_session_repo.is_some() {
+                        Self::record(
+                            &self.job_health,
+                            "revocation_feed",
+                            self.sweep_revocation_feed().await,
+                            tracing::Level::DEBUG,
+                        );
+                    }
 
                     // G-5 (T23.5.3, D-48): events held for a poll or paused SSF
                     // stream for more than seven days. DEBUG: an expired event
@@ -1540,7 +1545,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // A DB-write failure here is dead-lettered to BOTH an append-only
         // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
         // this legally-significant record must never be silently lost.
-        write_erasure_audit_with_dlq(
+        write_audit_with_dead_letter(
             self.audit_repo.as_ref(),
             CreateAuditLogEntry {
                 tenant_id,

@@ -7,6 +7,327 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A signed-in user's pending CIBA requests are listed, so an account with no
+  vouched address can approve one (#566).** D-74 mails the approval prompt only
+  to an address something vouches for, and the approval page was reached only by
+  the mail's link, so a federated account (which stays `PendingVerification`,
+  T-160) never learned its request's id and the client saw `expired_token`. New
+  `GET /api/v1/ciba/requests?status=pending` returns the caller's **own** pending,
+  unexpired requests, soonest expiry first (at most 50): the client's name, the
+  binding message, the scopes, the requested `acr`, the expiry, and the
+  `request_id` and `version` the existing approval page uses; never the
+  `auth_req_id`. Another user's, a decided and an expired request are absent, so
+  the list is no oracle (T-430). Only `status=pending` exists; any other value is
+  `400`. The route is a console surface under the approval routes' rules: a
+  console sign-in only (a token AXIAM minted for an OAuth2 client is `403`), and a
+  rate-limit bucket of its own under `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN`
+  (default 30 a minute per IP, never moved by a profile). The console's user menu
+  shows a badge with the count, refreshed about once a minute and when the menu
+  opens, and lists the requests, each opening the approval page. The decisions are
+  unchanged (CSRF, the version read, the deciding session audited). The D-74
+  decision stands; the limitation noted under 1.0.0-beta18 (a federated account
+  gets no approval mail and cannot reach the page) no longer holds. T-446, T-431
+  and T-447 are amended (statuses unchanged).
+
+- **The console shows and switches the SAML identity provider and the SSF
+  transmitter (#536).** Until now an administrator could not see from the
+  console which third parties receive security events about a tenant's users, nor
+  turn either surface off during an incident: `saml_idp_enabled` and
+  `ssf_enabled` were changed only through the settings API, and there was no SSF
+  page. **Settings:** both are now switches on the organization's Settings tab
+  (the only place either is turned on), on the tenant's Settings page and as a
+  group in the tenant's Security Overrides, with the layered state shown: a
+  surface the organization disabled reads "Disabled by the organization" and
+  cannot be switched on, one the tenant switched off says so, and an enabled SSF
+  transmitter that is inactive (a deployment of more than one tenant without
+  per-tenant issuers) says why. **SSF Streams** (Identity group, `/ssf`, seen with
+  `ssf_streams:read`; register, replace and delete need `ssf_streams:write`) lists
+  each stream's receiver, audience, delivery method, endpoint, status and who set
+  it, with `events_delivered` beside `events_allowed`. The push
+  `authorization_header` is write-only and never shown; the form says that moving
+  a push endpoint to another origin requires it again and refuses the save
+  without it; an edit that loses a race (`409`, T-406) reloads the list and says
+  the stream changed. T-406 is amended (status unchanged). Upgraders: the tenant
+  Settings page now sends both switches at their effective values on every save;
+  before, a tenant that had switched a surface off was put back on the
+  organization's value by an unrelated save, and so was one saved from the Security
+  Overrides panel, which now carries a group for them.
+
+### Changed
+
+- **The SCIM target `PUT` can be made conditional on the version the
+  administrator read (#555, P23W5-09).** `PUT /api/v1/scim-targets/{id}` was
+  conditional only on the version the server read during the request, so two
+  administrators who opened the edit form at the same version both saved and the
+  second silently replaced the first's scope, mapping or deprovision policy.
+  `ScimTargetInput` gains an optional `expected_updated_at` (the `updated_at` the
+  client read): when present and the target has changed since, the answer is
+  `409` and nothing is written. The field is additive and ignored on create; a
+  body without it behaves exactly as before (last writer wins), so existing
+  clients and scripts keep working. The console now sends the `updated_at` its
+  edit form was opened from. The client SDKs gain the field with contract 1.60.
+  T-416 is amended (status unchanged).
+- **The webhook deliverer no longer follows redirects (#555, P23W5-10).**
+  Webhook deliveries went through `guarded_fetch`, which follows a `3xx` (every hop
+  SSRF-checked) and re-sends the HMAC-signed request and its body to the
+  `Location`, so a receiver's operator could forward deliveries - personal data in
+  event bodies - to a host the tenant never registered. They now go through
+  `guarded_fetch_no_redirect`, like SSF push, outbound SCIM and the CIBA ping: a
+  `3xx` is never followed and the attempt is retried (then dead-lettered like any
+  failure), with the reason `the receiver answered with a redirect, which is not
+  followed`. **Behaviour change for upgraders:** a webhook whose receiver answers
+  with a redirect (an `http` to `https` upgrade, a trailing-slash or host
+  canonicalisation, a load balancer hop) used to be delivered to the final URL and
+  now fails every attempt; register the receiver at its final URL. T-112 is
+  amended (status unchanged).
+- **The FAPI conformance workflow is gated on a regression, not on a browser
+  (#555, P23W5-11).** `fapi-conformance.yml` drives no browser, so every
+  interactive module ends `WAITING` on an unattended run and its last step failed
+  every run: a gate that is red by design signals nothing. The step now runs
+  `conformance/scripts/gate.py` over the suite's machine-readable results and the
+  new `conformance/baseline.json` (the 2026-09-25 runs) and fails only on a module
+  that `FAILED` (or could not start, was interrupted, or overran the module
+  timeout), a module below its baseline, a baselined module the run did not
+  report, or a plan that left no result or evaluated nothing; `WAITING` and
+  `SKIPPED` are tolerated and named in the job summary. Green means "no
+  regression", not "certified". The rules are unit-tested with fixture result
+  files (run by CI). The workflow also passes `inputs.axiam_image` (and the
+  step outcome) through `env:` instead of interpolating them into `run:` scripts,
+  closing a template injection for anyone who may dispatch it. Runbook: "The CI
+  gate". Release-pipeline only; no product behaviour changes.
+- **The minimal profile records a delivery its in-process dispatcher loses
+  (#555, P23W5-A4).** With `AXIAM__AMQP__ENABLED=false`, a webhook, SSF push,
+  outbound SCIM or CIBA-ping delivery that was queued or waiting for a retry when
+  the process stopped, or that a full queue refused, left at most a
+  `<kind>.delivery_attempt` audit row and no terminal one. An orderly stop now
+  writes one terminal **`<kind>.delivery_abandoned`** audit row (outcome
+  `Failure`, the system actor, the target as the resource, the delivery id, the
+  attempts made and a fixed `reason`) for every such delivery, and an enqueue the
+  queue refuses writes one too. The consumer gives an attempt already in flight
+  500 ms to finish (it keeps its own verdict if it does) and the teardown waits at
+  most 2 s (`OUTBOUND_DRAIN_DEADLINE`) before the audit drain; the 40 s grace
+  period and the 35 s fatal-stop backstop are unchanged. **For upgraders:**
+  `delivery_abandoned` is a new action, deliberately not `delivery_failed`, so a
+  tenant's `scim_delivery_failed` notification rule does not mail anyone when an
+  instance restarts; alert on `*.delivery_abandoned` separately if a lost
+  delivery matters. A `SIGKILL`, an out-of-memory kill and a stop that overruns
+  its deadline still lose the queue without a row, and queued mail has no such
+  row. The full profile is unchanged. T-445 is amended (status unchanged, still
+  Open).
+
+### Fixed
+
+- **The boot log no longer says the pepper is unset when it is set (#555).**
+  `AXIAM__AUTH__PEPPER` is read by the configuration layer, so a deployment that
+  set it worked (and a release build booted), but the secret-provider branch
+  logged `AXIAM__AUTH__PEPPER not set` because the provider looks for the logical
+  key `auth_pepper`, which the `env` provider resolves to
+  `AXIAM__AUTH__AUTH_PEPPER`. The log now says where the pepper came from - the
+  secret provider, or the configuration (`AXIAM__AUTH__PEPPER`) - and, when there
+  is none, `no auth pepper configured: set AXIAM__AUTH__PEPPER (or provide
+  `auth_pepper` through the secret provider; the env provider reads it from
+  AXIAM__AUTH__AUTH_PEPPER)`. Nothing is renamed: the logical key keeps its name
+  for the `file` and `vault` providers, and no variable an operator sets changes.
+- **The benchmark stacks publish their ports on loopback, not on every interface
+  (#567).** Every `benchmarks/targets/*/docker-compose*.yml` published its
+  application, TLS and (AXIAM) gRPC ports as `"${BENCH_APP_PORT:-8090}:8090"`,
+  which Docker binds on `0.0.0.0` - past `ufw` - while the benchmark posture raises
+  AXIAM's limiters and lockout threshold to 1 000 000, so a benchmark host on a LAN
+  offered four identity servers with their limits off to the LAN for the length of
+  a run. Each published port (and the optional cAdvisor stack's) is now
+  `${BENCH_BIND_ADDR:-127.0.0.1}:<host port>:<container port>`. The harness drives
+  the stacks on `localhost`, so a run needs nothing. **An operator who reaches a
+  stack from a container** (through `host.docker.internal:host-gateway`, the Docker
+  bridge) must set `BENCH_BIND_ADDR=0.0.0.0`: the FAPI conformance workflow now
+  does, and the conformance runbook says so. The run-6 runbook's interim "firewall
+  the ports" instruction is replaced by the loopback default.
+  `runner/bind-addr-selftest.sh` (a new step of the CI job "Bench Harness
+  Self-Tests") fails when any `ports:` entry of any compose file under
+  `benchmarks/` lacks the variable.
+- **`rl-prod-check` lists eight limiter families it had silently dropped (#568).**
+  `benchmarks/runner/rl_prod_check.py` carried no row for `bc_authorize_per_min`,
+  `ciba_approval_per_min`, `device_login_per_min`, `ssf_per_min`,
+  `ssf_admin_per_min`, `saml_admin_per_min`, `directory_admin_per_min` and
+  `scim_target_admin_per_min`, so `rl-prod-summary.md` could not say "not
+  checked" about them: a reader counting `RateLimitConfig`'s knobs against the
+  table's rows found the gap only by counting. Each now has a row with its
+  route and no scenario (driving them is a separate decision), and
+  `runner/rl-prod-posture-selftest.sh` fails when a `*_per_min` field of
+  `RateLimitConfig` has no row, so the next family cannot repeat it. Benchmark
+  tooling only; no server behaviour changes.
+- **Five cleanup sweeps are listed on `GET /health/jobs` from start (#535).** The
+  sweeps for SSO hand-off codes, unused dynamically registered clients, unused
+  CIMD clients and expired registration tokens, and the revocation-feed prune,
+  were recorded by the cleanup loop but not registered, so until their first run
+  the endpoint showed them as absent, which reads as "not deployed", the
+  silence T-129 exists to break. The first four are now registered on every
+  start (DCR and CIMD are tenant settings, so no process switch gates them).
+  The revocation-feed prune is registered, and recorded, only when
+  `auth.revocation_feed_enabled` is on: a deployment without the feed no longer
+  lists a `revocation_feed` job that had nothing to do. A test scans
+  `cleanup.rs` so that a sweep recorded and not registered fails the build.
+  T-129 is amended; its status is unchanged.
+- **A dying consumer or gRPC server no longer ends the process mid-flight, and
+  the gRPC server now stops with the REST listener (#554).** In the full profile
+  the authz, audit-ingestion and mail consumers and the gRPC server each ended
+  the process with `std::process::exit(1)` when they stopped, wherever it was:
+  audit rows still queued, requests in flight and a GDPR purge between its
+  erasure and its audit row were lost. Each now takes the stop a lost minimal-
+  profile lease takes: the REST listener stops accepting and finishes what is in
+  flight, the gRPC server is told to stop and awaited (up to 5 s), the audit
+  queue is drained, and `serve` returns an error naming the component, so the
+  process still exits non-zero and the orchestrator still restarts it. The
+  `exit(1)` remains only as a backstop if that has not finished within 35 s (the
+  REST shutdown, the gRPC stop, the audit drain and a margin; a lost lease keeps
+  its 15 s).
+  The gRPC server previously had no shutdown signal at all, so a `SIGTERM` left
+  it serving, with its calls cut off, until the runtime went; it now finishes
+  its calls first. `start_grpc_server` takes a trailing shutdown future
+  (`std::future::pending()` serves for the life of the process). T-444 is
+  amended; its status is unchanged.
+
+- **The stop grace period now covers the REST shutdown plus the audit drain
+  (#569).** On `SIGTERM` the REST listener waits up to 30 s (actix's default,
+  never set) for requests in flight, and the audit drain then takes up to 5 s
+  more, but the minimal Compose file and the benchmark overlay allowed 30 s in
+  all, the full production Compose file and the Kubernetes manifest the
+  platform defaults (10 s and 30 s), so a stop with a request still running
+  could be killed during the drain and lose the audit rows the orderly stop
+  exists to keep. The shutdown timeout is now set explicitly to 20 s, and the
+  grace period is **40 s** (20 s requests, 5 s gRPC, 5 s audit queue, margin) in
+  `docker-compose.prod.yml`, `docker-compose.minimal.yml`, the benchmark
+  harness's Compose files and `k8s/server/deployment.yml`
+  (`terminationGracePeriodSeconds: 40`). Upgraders who copied these settings
+  into their own manifests should set their grace period to at least 40 s;
+  `docs/deployment/README.md` ("Stopping, and the grace period") gives the
+  arithmetic. The benchmark harness's `bench-up` now also creates the
+  `docker/.secrets/*.hex` key files (and the directory) under `umask 077`
+  instead of writing them and then running `chmod 600`.
+
+### Security
+
+- **A tarpit SCIM downstream no longer stalls every tenant's outbound provisioning
+  on a replica (#550, P23W5-07, T-414).** Each replica's `scim_push` consumer
+  makes one delivery at a time, so a target that accepted connections and never
+  answered held every tenant's SCIM pushes for ten seconds (twenty with a token
+  request) per queued reference. The deliverer now has a **per-target breaker**:
+  a target with five or more consecutive failures whose last failure is inside
+  its window is not called — the attempt is a retry, reason `target is failing;
+  backing off`, with no request and no write to the target's delivery state. The
+  window is the consumer's own backoff (`AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and
+  `__BACKOFF_CEILING_MS`) applied to the failures past five: 5 s, then doubling
+  with each further failure, up to an hour by default. Once it has passed, the
+  next reference is tried; a success closes the breaker. Upgraders should know
+  that references queued for a failing target while its breaker is open use up
+  their `AXIAM__SCIM_PUSH__MAX_ATTEMPTS` without a request and dead-letter as
+  before (counted once in `dead_lettered_total`, notified at most once an hour);
+  reconciliation queues them again. The 10 000-member group bound
+  (`MAX_GROUP_MEMBERS`) is now pinned by a test. The issue's second option, a
+  per-target concurrency budget with more than one delivery in flight per
+  consumer, is **deferred to 1.0.x**.
+- **Lost request-audit rows are counted, signalled and dead-lettered (#553,
+  P23W5-A10, T-108).** The audit middleware drops a row when its 4 096-row queue
+  is full and loses one when the datastore refuses the append; each left a single
+  log line (the second at `WARN`) and nothing to alert on. Both are now counted
+  since process start and reported as a new, additive `request_audit` object on
+  `GET /health/jobs` (`dropped`, `failed`, `dead_lettered`, `not_recoverable`,
+  `dead_letter_configured`, `last_loss_at`, `recent_loss`; the endpoint's
+  exposure is unchanged). A loss in the last fifteen minutes turns the endpoint's
+  `status` to `degraded` (still HTTP 200), and the server logs the totals on the
+  `axiam.audit.loss` target at `ERROR`, the first time and then at most once a
+  minute; the per-row `Audit channel full` line is gone, so move any alert that
+  matched it. Upgraders: when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set, the lost rows
+  are now also appended to that file (one `CreateAuditLogEntry` JSON line each,
+  replayable like the GDPR records) through a queue to a writer task, so the
+  request path does no file I/O. With it unset, as in any deployment that does
+  not mount a volume for it, the rows are counted and logged only and the server
+  warns at start. Rows still in memory when a process is killed rather than
+  stopped are lost; an orderly stop drains both queues. The file is **bounded**
+  (R1W2-02, the wave's security review): the new setting
+  `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` (bytes; 192 MiB by default, at least 1 MiB;
+  any other value fails the boot) caps it, request-audit rows fill at most nine
+  tenths of it and are then refused and counted in `not_recoverable`, and
+  `request_audit` gains an additive `dead_letter_full`, which also turns `status`
+  to `degraded` until the file is replayed and moved with the server stopped. The
+  last tenth is kept for the GDPR records. A request row's `action` (the path)
+  and `ip_address` (the forwarded client address) are cut to 512 and 64 bytes
+  with a `...[truncated]` marker, in the dead-letter line and in the audit row
+  itself, so a client can no longer size the lines.
+- **The audit dead-letter file is provisioned in the production Compose file and
+  the Kubernetes manifests, and the GDPR request records use it (#552,
+  P23W5-A7/A8, T-108).** `AXIAM__GDPR_AUDIT_DLQ_FILE` was set only by
+  `docker-compose.minimal.yml`; in `docker-compose.prod.yml` and `k8s/` (whose
+  server runs with `readOnlyRootFilesystem: true`) it was unset, so an audit row
+  the datastore refused was logged and gone. **Operators: this adds a volume and a
+  setting.** `docker-compose.prod.yml` gets a named volume `gdpr-audit-dlq`
+  (project `docker`, so `docker_gdpr-audit-dlq`), a one-shot `gdpr-audit-dlq-init`
+  service that hands it to the server's user (the server now waits for it) and
+  `AXIAM__GDPR_AUDIT_DLQ_FILE=/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`;
+  `just prod-clean` (`down -v`) deletes the volume, so replay it first. The
+  Kubernetes server gets the same key in the `axiam-config` ConfigMap (so an
+  overlay that replaces the container's `env`, like the Raspberry Pi one, keeps
+  it) and an `emptyDir` volume `audit-dlq` with `sizeLimit: 256Mi`, mounted at
+  `/var/lib/axiam/audit-dlq`. The kubelet enforces that limit by evicting the
+  pod, and eviction deletes the `emptyDir` with the file in it, so the limit
+  must never be reached: the ConfigMap also sets the file's budget,
+  `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES=201326592` (192 MiB), below it, and both
+  Compose files set `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` (same default), since their
+  volume has no limit and shares the datastore's disk; raise a budget and its
+  volume's limit together (R1W2-02). An `emptyDir` survives a container restart and not
+  the pod's deletion (a rollout, a drain, an eviction): the Deployment is 2 to 10
+  replicas under an HPA and the file is per replica, so a shared ReadWriteOnce
+  claim does not fit and a per-replica one means a StatefulSet. Replay the file
+  before rolling the Deployment while it holds rows, or mount a per-replica volume
+  of your own at that path. Behaviour: the two GDPR request records,
+  `gdpr.data_export_requested` and `gdpr.erasure_requested`, whose refused append
+  was only logged, now take the same route as the erasure records (file and
+  `axiam.audit.dlq` event; the request itself still succeeds); the helper behind
+  it is renamed `write_audit_with_dead_letter`. With the variable unset the server
+  now logs one warning at start covering the request-audit rows and the GDPR
+  records alike. `docs/deployment/README.md` ("The audit dead-letter file") has the
+  replay recipe and what each volume survives. The recipe is now checked by a test
+  that runs its `jq` filter over lines the writer produced and reads the rows back
+  through the audit repository, and that test found a **defect in the previous
+  recipe**: its `CREATE audit_log SET …` let SurrealDB generate the record id, and
+  AXIAM's audit list cannot parse such an id (`invalid UUID`). The statement now
+  creates `type::record("audit_log", <string>rand::uuid::v7())`. If you replayed a
+  dead-letter file with the old statement, those rows make that tenant's audit
+  listing fail; find them by their non-UUID record id, remove them as the
+  datastore's root user (the append-only rule is a table permission) and replay
+  them with the new statement.
+- **A notification rule mails each recipient once per event type and window, not
+  once per event (#551, P23W5-13, T-117).** A rule for an event an attacker can
+  raise in volume — failed sign-ins spread over addresses and accounts — mailed
+  every recipient once per audit row; the batching the threat model recorded
+  never existed. Each rule now has a **window**, `window_minutes` on
+  `/api/v1/notification-rules` (an additive, optional field: 1 to 1440, **15 by
+  default**, `400` outside those bounds; the console's rule form edits it). Of
+  the events of one type that match one rule, the first in a window is mailed and
+  the rest are counted; the first mail after the window says how many were not
+  sent (`suppressed_count` and `window_note` in the built-in notification
+  template; a tenant's or organization's custom template shows them only if it
+  uses those placeholders). The window of (tenant, rule, event) is claimed in the
+  datastore (schema **v85**, the `notification_window` table), so several
+  replicas still mail once; if the claim cannot be made, nobody is mailed and the
+  audit row stands. Upgraders should know that existing rules take the 15-minute
+  default, so a second incident of the same event type within 15 minutes of the
+  first now arrives as a count in the next mail rather than as a mail of its own;
+  lower a rule's window (to 1 minute at least) where that matters.
+  `scim_delivery_failed` keeps its own limit of one notification per SCIM target
+  per hour and is not windowed again.
+  The window costs one datastore write per replica and window, not one per event,
+  and it is off the audit path (R1W2-01, the wave's security review): inside a
+  window a replica knows to be open it counts events in memory and writes the
+  count at its next claim and every ten seconds; a claim that loses a write
+  conflict four times is counted the same way; and notification rules run on a
+  task and bounded queue of their own beside the audit middleware's worker, so a
+  slow notification step drops notifications (counted, with a `WARN` on
+  `axiam.audit.notification` at most once a minute), never request-audit rows. A
+  count a replica holds is lost if the process is killed before its next flush,
+  and on several replicas a count can be reported one window late.
+
 ### Documentation
 
 - **SDK contract 1.60: the answers to #588 and the 1.0.0 additions.** The follow-up ports of
@@ -62,6 +383,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - §32.8 helper test 8 and §33.8 test 8 are tightened so that the two most common
     defects fail a required test. No wire change; `CONTRACT.md` is the only artefact
     to re-sync, from the merge commit.
+- **A minimal-profile server reads no AMQP queue, and a broker confirm never means
+  AXIAM recorded an event (#555, P23W5-A6).** With `AXIAM__AMQP__ENABLED=false` the
+  authorization-request and audit-ingestion consumers are not started, so a service
+  that publishes to a broker left running next to the server is confirmed by that
+  broker while nothing reads the message. The deployment guide's minimal-profile
+  section, the AMQP section of the API guide, the AsyncAPI description and the
+  website's minimal-profile page now say so. The matching informative note for
+  `sdks/CONTRACT.md` §8, to be fanned out to the seven AMQP SDKs' READMEs, ships
+  with contract 1.60.
 
 ## [1.0.0-beta19] - 2026-10-07
 

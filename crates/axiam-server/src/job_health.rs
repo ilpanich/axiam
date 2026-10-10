@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axiam_api_rest::health::{JobHealthReporter, JobStatus};
+use axiam_api_rest::health::{JobHealthReporter, JobStatus, RequestAuditHealth};
+use axiam_audit::RequestAuditLoss;
 use chrono::{DateTime, Utc};
 
 /// How many expected runs a job may miss before it is reported as stalled.
@@ -28,11 +29,14 @@ use chrono::{DateTime, Utc};
 const STALL_INTERVALS: u32 = 3;
 
 /// The jobs registered at start-up, so a job that has never run once still
-/// appears in `GET /health/jobs` (T-129). One list, read by `main`; a test pins
-/// that the single-logout sweeps are in it and in the cleanup loop.
+/// appears in `GET /health/jobs` (T-129). One list plus [`REVOCATION_FEED_JOB`],
+/// read by `main` through [`sweep_jobs`]; a test pins that every name the cleanup
+/// loop records is in one or the other.
 pub const SWEEP_JOBS: &[&str] = &[
     "saml_assertion_replay",
     "federation_login_state",
+    // P23W4-06 (#535): the SSO hand-off codes.
+    "sso_handoff_code",
     "saml_authn_request",
     // G-2 (T23.2.4): the single-logout participant rows and logout runs.
     "saml_sp_session",
@@ -51,7 +55,29 @@ pub const SWEEP_JOBS: &[&str] = &[
     "gdpr_purge",
     "gdpr_export",
     "audit_retention",
+    // P23W4-06 (#535): the dynamic-registration sweeps. DCR and CIMD are tenant
+    // settings, not a process switch, so the sweeps run on every start (each
+    // tenant's TTL decides what they touch) and are registered on every start.
+    "dcr_unused_clients",
+    "cimd_unused_clients",
+    "dcr_registration_tokens",
 ];
+
+/// The revocation-feed prune (T-39/T-143, P23W4-06). The one sweep in the loop
+/// that a process switch (`auth.revocation_feed_enabled`) turns on: the loop
+/// records it only when the feed is on, so it is registered only then. A
+/// deployment without the feed has no such job, and "not in the list" is how
+/// `/health/jobs` says so.
+pub const REVOCATION_FEED_JOB: &str = "revocation_feed";
+
+/// Every job to register at start (T-129): [`SWEEP_JOBS`], and the revocation
+/// feed's prune when `revocation_feed_enabled`.
+pub fn sweep_jobs(revocation_feed_enabled: bool) -> impl Iterator<Item = &'static str> {
+    SWEEP_JOBS
+        .iter()
+        .copied()
+        .chain(revocation_feed_enabled.then_some(REVOCATION_FEED_JOB))
+}
 
 #[derive(Default, Clone)]
 struct Entry {
@@ -71,6 +97,9 @@ pub struct JobHealth {
     /// distinguished from one that has stopped running. Without this, every
     /// job reads as stalled for the first few seconds after boot.
     started_at: DateTime<Utc>,
+    /// The request-audit middleware's loss counters (T-108), reported beside
+    /// the jobs. Not a job: it has no interval and nothing to stall.
+    request_audit: Option<RequestAuditLoss>,
 }
 
 impl JobHealth {
@@ -80,7 +109,14 @@ impl JobHealth {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
             interval,
             started_at: Utc::now(),
+            request_audit: None,
         }
+    }
+
+    /// Report `loss` as `request_audit` on `GET /health/jobs` (T-108).
+    pub fn with_request_audit(mut self, loss: RequestAuditLoss) -> Self {
+        self.request_audit = Some(loss);
+        self
     }
 
     /// Register a job so it appears in the snapshot before its first run.
@@ -147,6 +183,20 @@ impl JobHealthReporter for JobHealth {
             })
             .collect()
     }
+
+    fn request_audit(&self) -> Option<RequestAuditHealth> {
+        let s = self.request_audit.as_ref()?.snapshot();
+        Some(RequestAuditHealth {
+            dropped: s.dropped,
+            failed: s.failed,
+            dead_lettered: s.dead_lettered,
+            not_recoverable: s.not_recoverable,
+            dead_letter_configured: s.dead_letter_configured,
+            dead_letter_full: s.dead_letter_full,
+            last_loss_at: s.last_loss_at.map(|t| t.to_rfc3339()),
+            recent_loss: s.recent_loss,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -157,44 +207,130 @@ mod tests {
         JobHealth::new(Duration::from_secs(60))
     }
 
-    /// T-384: the single-logout stores are swept by the cleanup scheduler and
-    /// reported on `/health/jobs` — both sweeps are recorded by the loop in
-    /// `cleanup.rs`, both are registered (so listed before their first run), and
-    /// both appear in a tracker built the way `main` builds it.
+    /// Every job name `cleanup.rs` hands to `Self::record`, read from its source.
+    fn recorded_by_the_cleanup_loop() -> Vec<&'static str> {
+        const CALL: &str = "&self.job_health,";
+        let source = include_str!("cleanup.rs");
+        let names: Vec<_> = source
+            .match_indices(CALL)
+            .filter_map(|(at, _)| {
+                let rest = source[at + CALL.len()..].trim_start().strip_prefix('"')?;
+                rest.split('"').next()
+            })
+            .collect();
+        // A scan that finds nothing would pass every assertion below vacuously.
+        assert!(names.len() >= 15, "the scan reads the loop: {names:?}");
+        names
+    }
+
+    /// T-384, T-129 (P23W4-06): every sweep the cleanup loop records is
+    /// registered, so `/health/jobs` lists it before its first run. A job the
+    /// loop records and the list forgets reads as "not deployed" — the silence
+    /// T-129 exists to break — and each of the five that did (`sso_handoff_code`,
+    /// `revocation_feed`, `dcr_unused_clients`, `cimd_unused_clients`,
+    /// `dcr_registration_tokens`) did so until #535.
     #[test]
     fn the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered() {
-        let source = include_str!("cleanup.rs");
-        // T23.5.3 (T-395): the SSF buffer's expiry sweep is in the same loop and
-        // the same list, so `/health/jobs` shows it from boot.
+        let recorded = recorded_by_the_cleanup_loop();
+        // The single-logout, SSF, SCIM and CIBA sweeps, named so that dropping
+        // one from the loop fails here and not only by absence.
         for job in [
             "saml_sp_session",
             "saml_logout_run",
             "ssf_event_buffer",
             "ssf_step_up",
-            // T23.6.3 (P23W4-06): a job the loop records and `SWEEP_JOBS` forgets
-            // reads as "not deployed" on `/health/jobs`.
             "scim_reconcile",
-            // T23.7.1 (G-7): the CIBA pending-request sweep.
             "ciba_request",
         ] {
-            let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
-                let rest = &source[at + "&self.job_health,".len()..];
-                rest.trim_start().starts_with(&format!("\"{job}\""))
-            });
-            assert!(recorded, "{job} is swept by the loop");
+            assert!(recorded.contains(&job), "{job} is swept by the loop");
             assert!(SWEEP_JOBS.contains(&job), "{job} is registered");
         }
-        let tracker = tracker();
-        for job in SWEEP_JOBS {
-            tracker.register(job);
+
+        // The rule: with every switch on, nothing the loop records is missing,
+        // and nothing is registered that the loop never records.
+        let registered: Vec<_> = sweep_jobs(true).collect();
+        for job in &recorded {
+            assert!(
+                registered.contains(job),
+                "{job} is recorded but not registered"
+            );
         }
-        let names: Vec<_> = tracker.snapshot().into_iter().map(|s| s.name).collect();
-        assert!(names.iter().any(|n| n == "saml_sp_session"));
-        assert!(names.iter().any(|n| n == "saml_logout_run"));
-        assert!(names.iter().any(|n| n == "ssf_event_buffer"));
-        assert!(names.iter().any(|n| n == "ssf_step_up"));
-        assert!(names.iter().any(|n| n == "scim_reconcile"));
-        assert!(names.iter().any(|n| n == "ciba_request"));
+        for job in &registered {
+            assert!(
+                recorded.contains(job),
+                "{job} is registered but never recorded"
+            );
+        }
+    }
+
+    /// P23W4-06 (#535): the five jobs are on the snapshot before their first
+    /// run, and the revocation feed's prune is there only when the feed is on —
+    /// the loop does not record it otherwise.
+    #[test]
+    fn the_registered_sweeps_are_listed_before_their_first_run() {
+        let five = [
+            "sso_handoff_code",
+            "revocation_feed",
+            "dcr_unused_clients",
+            "cimd_unused_clients",
+            "dcr_registration_tokens",
+        ];
+        let snapshot = |feed: bool| {
+            let h = tracker();
+            for job in sweep_jobs(feed) {
+                h.register(job);
+            }
+            h.snapshot()
+        };
+
+        let on = snapshot(true);
+        for job in five {
+            let status = on.iter().find(|s| s.name == job).expect(job);
+            assert!(status.last_success_at.is_none() && status.last_failure_at.is_none());
+            assert!(!status.stalled, "{job} has just started");
+        }
+        let off = snapshot(false);
+        assert!(!off.iter().any(|s| s.name == "revocation_feed"));
+        for job in five.iter().filter(|j| **j != "revocation_feed") {
+            assert!(off.iter().any(|s| s.name == *job), "{job} is always on");
+        }
+    }
+
+    /// T-108: the request-audit counters ride on the reporter beside the jobs,
+    /// and are absent from a tracker that was not given them.
+    #[tokio::test]
+    async fn the_snapshot_reports_the_request_audit_loss_counters() {
+        use axiam_audit::DeadLetterWriter;
+        use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+
+        assert!(tracker().request_audit().is_none());
+
+        let loss = RequestAuditLoss::new(DeadLetterWriter::disabled());
+        let h = tracker().with_request_audit(loss.clone());
+        let before = h.request_audit().expect("counted");
+        assert_eq!((before.dropped, before.failed), (0, 0));
+        assert!(!before.recent_loss && before.last_loss_at.is_none());
+
+        let entry = || CreateAuditLogEntry {
+            tenant_id: uuid::Uuid::nil(),
+            actor_id: uuid::Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "GET /x".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: None,
+        };
+        loss.record_dropped(entry(), "audit channel full");
+        loss.record_failed(entry(), &"datastore down");
+        loss.record_failed(entry(), &"datastore down");
+
+        let after = h.request_audit().expect("counted");
+        assert_eq!((after.dropped, after.failed), (1, 2));
+        assert_eq!(after.not_recoverable, 3, "no file: all three are gone");
+        assert!(!after.dead_letter_configured);
+        assert!(!after.dead_letter_full);
+        assert!(after.recent_loss && after.last_loss_at.is_some());
     }
 
     #[test]

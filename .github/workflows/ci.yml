@@ -165,6 +165,12 @@ jobs:
       - name: Vault seeder never overwrites an existing secret
         run: python3 -m unittest discover -s scripts -p 'test_*.py' --verbose
 
+      # The conformance workflow's gate (P23W5-11) decides a run's verdict, and
+      # runs only when a human dispatches the workflow; its rules are pinned here
+      # so a change to them is seen on a pull request, not at the next dispatch.
+      - name: Conformance gate rules (fixtures)
+        run: python3 -m unittest discover -s conformance/scripts -p 'test_*.py' --verbose
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -756,6 +762,12 @@ jobs:
       - name: rl=prod posture self-test
         working-directory: benchmarks
         run: bash runner/rl-prod-posture-selftest.sh
+      # P23W6-06 (#567): every port a benchmark stack publishes is bound to
+      # ${BENCH_BIND_ADDR:-127.0.0.1}. A bare "8090:8090" binds every interface, past
+      # ufw, on a host running identity servers with their limiters raised. Hermetic.
+      - name: Benchmark bind-address self-test
+        working-directory: benchmarks
+        run: bash runner/bind-addr-selftest.sh
       # T23.10.2(a): the AXIAM deployment-profile guard. A minimal-profile pass whose
       # overlay silently did not apply would file full-profile cells under a
       # "minimal" label; the runner reads the profile off the container and refuses

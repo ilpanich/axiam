@@ -242,6 +242,7 @@ use crate::handlers;
         handlers::oauth2::end_session_at_cookie_path,
         handlers::device::verify,
         handlers::device::decide,
+        handlers::ciba_approval::list_requests,
         handlers::ciba_approval::get_request,
         handlers::ciba_approval::approve,
         handlers::ciba_approval::deny,
@@ -408,6 +409,7 @@ use crate::handlers;
         // envelope because it is the element type of `JobsHealthResponse::jobs`
         // and utoipa does not pull nested schemas in transitively from `paths`.
         crate::health::JobsHealthResponse,
+        crate::health::RequestAuditHealth,
         crate::health::JobStatus,
         // Auth
         handlers::auth::LoginRequest,
@@ -615,6 +617,7 @@ use crate::handlers;
         handlers::device::DecideRequest,
         handlers::device::DecideResponse,
         handlers::ciba_approval::CibaApprovalPage,
+        handlers::ciba_approval::CibaPendingList,
         handlers::ciba_approval::CibaDecisionBody,
         handlers::ciba_approval::CibaDecisionResponse,
         handlers::ciba_approval::CibaStepUpRequired,

@@ -1,5 +1,12 @@
 import { useNavigate, useMatches } from "react-router";
-import { Menu, LogOut, ChevronDown, Building2, Check } from "lucide-react";
+import {
+  Menu,
+  LogOut,
+  ChevronDown,
+  Building2,
+  Check,
+  ShieldQuestion,
+} from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { useCanActOnOrganization } from "@/lib/grantReach";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,6 +15,8 @@ import api from "@/lib/api";
 import { useTenantSwitch } from "@/hooks/useTenantSwitch";
 import { orgService, tenantService } from "@/services/organizations";
 import { usePermissions } from "@/hooks/usePermissions";
+import { usePendingSignInRequests } from "@/hooks/usePendingSignInRequests";
+import { approvalPath } from "@/services/ciba";
 import {
   useState,
   useEffect,
@@ -15,6 +24,9 @@ import {
   useCallback,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+
+/** How many waiting sign-in requests the user menu lists by name. */
+const MAX_LISTED_SIGN_INS = 5;
 
 interface TopbarProps {
   onMenuClick: () => void;
@@ -38,6 +50,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   const canActOnOrganization = useCanActOnOrganization();
   const queryClientInstance = useQueryClient();
   const { can } = usePermissions();
+  const pendingSignIns = usePendingSignInRequests();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
   const tenantPanelRef = useRef<HTMLDivElement>(null);
@@ -378,16 +391,28 @@ export function Topbar({ onMenuClick }: TopbarProps) {
             onClick={() => {
               setUserMenuOpen((v) => !v);
               setTenantMenuOpen(false);
+              // Fresh when the person looks, not only once a minute.
+              if (!userMenuOpen) {
+                void queryClientInstance.invalidateQueries({
+                  queryKey: ["ciba-pending-requests"],
+                });
+              }
             }}
             className={cn(
-              "flex items-center gap-2 px-3 py-1.5 rounded-md text-sm",
+              "relative flex items-center gap-2 px-3 py-1.5 rounded-md text-sm",
               "border border-primary/20 bg-white/5",
               "text-muted-foreground hover:text-foreground hover:border-primary/40",
               "transition-all duration-200",
             )}
             aria-expanded={userMenuOpen}
             aria-haspopup="menu"
-            aria-label="User menu"
+            aria-label={
+              pendingSignIns.length > 0
+                ? `User menu, ${pendingSignIns.length} sign-in ${
+                    pendingSignIns.length === 1 ? "request" : "requests"
+                  } waiting`
+                : "User menu"
+            }
           >
             <div
               className="h-6 w-6 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center text-primary text-xs font-semibold"
@@ -399,6 +424,15 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               {user?.username ?? "User"}
             </span>
             <ChevronDown size={14} aria-hidden="true" />
+            {pendingSignIns.length > 0 && (
+              <span
+                data-testid="pending-sign-ins-badge"
+                className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-primary text-[10px] leading-4 font-semibold text-primary-foreground text-center"
+                aria-hidden="true"
+              >
+                {pendingSignIns.length}
+              </span>
+            )}
           </button>
 
           {userMenuOpen && (
@@ -418,6 +452,40 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                 </p>
                 <p className="text-xs text-muted-foreground">{user?.email}</p>
               </div>
+              {/* A sign-in request an application started for this person (CIBA).
+                  Listed here because an account with no vouched address is sent
+                  no mail and would otherwise never find it (D-74). Each opens
+                  the approval page, where the decision is made. */}
+              {pendingSignIns.length > 0 && (
+                <div className="border-b border-primary/10 py-1">
+                  <p className="px-3 pt-1 pb-1 text-xs text-muted-foreground">
+                    Sign-in requests waiting for you
+                  </p>
+                  {pendingSignIns.slice(0, MAX_LISTED_SIGN_INS).map((r) => (
+                    <button
+                      key={r.request_id}
+                      role="menuitem"
+                      onClick={() => {
+                        closeAll();
+                        navigate(approvalPath(r.request_id));
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-foreground hover:bg-white/5 transition-colors"
+                    >
+                      <ShieldQuestion
+                        size={14}
+                        className="shrink-0 text-primary"
+                        aria-hidden="true"
+                      />
+                      <span className="truncate">{r.client_name}</span>
+                    </button>
+                  ))}
+                  {pendingSignIns.length > MAX_LISTED_SIGN_INS && (
+                    <p className="px-3 py-1 text-xs text-muted-foreground">
+                      and {pendingSignIns.length - MAX_LISTED_SIGN_INS} more
+                    </p>
+                  )}
+                </div>
+              )}
               <button
                 role="menuitem"
                 onClick={() => void handleLogout()}

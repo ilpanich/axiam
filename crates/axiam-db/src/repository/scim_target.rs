@@ -47,8 +47,8 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, DELETE_TARGET_MISSING, classify_write_error, delete_existence_guard,
-    is_write_conflict, map_delete_errors, paginate, parse_uuid, search_bind, search_filter,
-    take_first_or_not_found, write_conflict_backoff,
+    map_delete_errors, paginate, parse_uuid, retry_hot_row, search_bind, search_filter,
+    take_first_or_not_found,
 };
 
 const ENTITY: &str = "scim_target";
@@ -1018,34 +1018,7 @@ impl<C: Connection> SurrealScimTargetLinkRepository<C> {
 }
 
 // ---------------------------------------------------------------------------
-// State
-
-/// How many attempts a write to the delivery-state row gets before its
-/// conflict surfaces. The shared helper's four are sized for an occasional
-/// collision; this row is hot by design — every delivery of every message of one
-/// target, on every replica, increments it — so a burst of dead-letters needs
-/// more patience. A conflicted transaction commits nothing, so replaying an
-/// increment cannot double-count.
-const STATE_MAX_WRITE_ATTEMPTS: u32 = 32;
-
-/// Run `op`, retrying while it fails with a retryable write conflict, up to
-/// [`STATE_MAX_WRITE_ATTEMPTS`] times with the shared backoff.
-async fn retry_hot_row<T, F, Fut>(mut op: F) -> Result<T, DbError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, DbError>>,
-{
-    let mut attempt = 1;
-    loop {
-        match op().await {
-            Err(e) if attempt < STATE_MAX_WRITE_ATTEMPTS && is_write_conflict(&e.to_string()) => {
-                tokio::time::sleep(write_conflict_backoff(attempt)).await;
-                attempt += 1;
-            }
-            outcome => return outcome,
-        }
-    }
-}
+// State (its writes go through `retry_hot_row`: the row is hot by design)
 // ---------------------------------------------------------------------------
 
 const STATE_COLUMNS: &str = "tenant_id, target_id, last_success_at, last_failure_at, \
@@ -1209,6 +1182,11 @@ impl<C: Connection> ScimTargetStateRepository for SurrealScimTargetStateReposito
             Some(truncate_reason(reason)),
         )
         .await
+    }
+
+    async fn count_dead_letter(&self, tenant_id: Uuid, target_id: Uuid) -> AxiamResult<()> {
+        self.write_or_not_found(tenant_id, target_id, "dead_lettered_total += 1", None)
+            .await
     }
 
     async fn claim_reconciliation(

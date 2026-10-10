@@ -79,6 +79,7 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // caller approves or refuses a request addressed to *themselves*, and the
     // service answers `404` for anyone else's; "may approve sign-in requests"
     // is not a capability an operator should hand out.
+    "/api/v1/ciba/requests",
     "/api/v1/ciba/requests/{request_id}",
     "/api/v1/ciba/requests/{request_id}/approve",
     "/api/v1/ciba/requests/{request_id}/deny",
@@ -264,7 +265,7 @@ fn health_jobs_is_documented() {
         .as_ref()
         .expect("the document must carry components")
         .schemas;
-    for schema in ["JobsHealthResponse", "JobStatus"] {
+    for schema in ["JobsHealthResponse", "JobStatus", "RequestAuditHealth"] {
         assert!(
             schemas.contains_key(schema),
             "{schema} must be in components.schemas, or a generated client \

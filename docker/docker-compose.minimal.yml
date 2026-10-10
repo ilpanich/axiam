@@ -169,6 +169,10 @@ services:
       # this is unset; collect the container log as well. Replaying the file
       # into the audit trail is a manual step (docs/deployment/README.md).
       AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+      # Its byte budget (192 MiB by default; the volume has no bound and shares
+      # the datastore's disk). Past nine tenths of it request-audit rows are
+      # refused and counted; the last tenth is kept for the GDPR records.
+      AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES: "${AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES:-201326592}"
       # One proxy in front of /api: trusted_hops = proxies - 1 (see the long note
       # in docker-compose.prod.yml). Raise it only if you add a hop.
       AXIAM__RATE_LIMIT__TRUSTED_HOPS: "${AXIAM__RATE_LIMIT__TRUSTED_HOPS:-0}"
@@ -180,12 +184,15 @@ services:
         condition: service_completed_successfully
       surrealdb:
         condition: service_healthy
-    # An orderly stop writes the audit rows the middleware still holds (up to 5 s)
-    # and lets in-flight requests finish before the process exits; SIGKILL does
-    # not. Compose's default grace period is 10 s, which is shorter than a slow
-    # stop needs, so give it 30 s (the Kubernetes default, and above the 20 s the
-    # audit-durability review asks for).
-    stop_grace_period: 30s
+    # An orderly stop lets in-flight requests finish (up to 20 s, the REST
+    # listener's shutdown timeout), stops gRPC (up to 5 s), writes a
+    # `delivery_abandoned` audit row for each outbound delivery still queued
+    # in-process (up to 2 s) and the audit rows the middleware still holds (up
+    # to 5 s) before the process exits;
+    # SIGKILL does none of it. Compose's default grace period is 10 s, which is
+    # shorter than a slow stop needs, so give it 40 s: 20 + 5 + 2 + 5 and a margin
+    # (#569; docs/deployment/README.md, "Stopping, and the grace period").
+    stop_grace_period: 40s
     healthcheck:
       # Distroless has no shell; the binary carries its own healthcheck subcommand.
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]

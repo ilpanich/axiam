@@ -20,6 +20,23 @@
 //! 5. Report to the target's delivery state (`record_success`, `record_failure`,
 //!    `record_dead_letter`): atomic writes, never the target row.
 //!
+//! # The per-target breaker (#550, T-414)
+//!
+//! Between steps 2 and 3 the attempt reads the target's delivery state. A
+//! target with [`BREAKER_THRESHOLD`] or more consecutive failures whose last
+//! failure is within the breaker's window is **not called**: the attempt is a
+//! retry, reason `target is failing; backing off`, with no request, no read of
+//! the resource and no write to the delivery state, so a downstream that never
+//! answers costs the replica's one consumer a single request timeout per window
+//! instead of one per queued reference. The window is the consumer's backoff schedule applied to the
+//! failures past the threshold (the first retry's delay at the threshold,
+//! doubling with each further failure, never above the ceiling). Once it has
+//! passed, the next reference is attempted: a success closes the breaker, a
+//! failure stamps `last_failure_at` again and doubles the window. A refused
+//! delivery on the consumer's last attempt is counted as the dead letter it
+//! becomes (`count_dead_letter`) without stamping the failure, so a stream of
+//! refused references cannot hold the breaker open.
+//!
 //! # Status mapping
 //!
 //! | The downstream answers | Outcome |
@@ -37,12 +54,13 @@
 //! A reason is a fixed vocabulary — never a URL, a body, a name or a value.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::group::Group;
 use axiam_core::models::scim_target::{
     DeprovisionPolicy, NewScimTargetLink, ScimLinkState, ScimResourceType, ScimTarget,
-    ScimTargetAuth, ScimTargetLink, ScimTargetScope,
+    ScimTargetAuth, ScimTargetLink, ScimTargetScope, ScimTargetState,
 };
 use axiam_core::models::user::{User, UserStatus};
 use axiam_core::outbound::{
@@ -53,6 +71,7 @@ use axiam_core::repository::{
     GroupRepository, Pagination, ScimTargetLinkRepository, ScimTargetRepository,
     ScimTargetStateRepository, UserRepository,
 };
+use chrono::{DateTime, Utc};
 use reqwest::Method;
 use reqwest::header::HeaderValue;
 use url::Url;
@@ -70,6 +89,21 @@ use super::wire::{GroupRepresentation, UserRepresentation, digest_of};
 /// one `PATCH`, and an unbounded read of a group is not a thing an attempt does.
 const MAX_GROUP_MEMBERS: u64 = 10_000;
 const MEMBER_PAGE: u64 = 100;
+
+/// The dead-letter reason of a group larger than [`MAX_GROUP_MEMBERS`].
+const GROUP_TOO_LARGE_REASON: &str = "the group has more members than a push carries";
+
+/// Consecutive failures at which a target's breaker opens (#550, T-414).
+pub const BREAKER_THRESHOLD: u64 = 5;
+
+/// The retry reason of an attempt the open breaker refused.
+const BREAKER_REASON: &str = "target is failing; backing off";
+
+/// The breaker's window when the composition root has not told the deliverer
+/// the consumer's schedule: the dispatcher's defaults for
+/// `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS`.
+const DEFAULT_BACKOFF_BASE: Duration = Duration::from_secs(5);
+const DEFAULT_BACKOFF_CEILING: Duration = Duration::from_secs(60 * 60);
 
 /// The longest downstream id AXIAM will link.
 const MAX_DOWNSTREAM_ID_BYTES: usize = 256;
@@ -97,6 +131,10 @@ pub struct ScimPushDeliverer<T, L, S, U, G> {
     /// is a dead letter in the dispatcher's eyes, so the target's delivery
     /// state counts it as one (once).
     max_attempts: Option<u32>,
+    /// The consumer's backoff for this kind: the breaker's window is this
+    /// schedule applied to the failures past [`BREAKER_THRESHOLD`].
+    backoff_base: Duration,
+    backoff_ceiling: Duration,
 }
 
 /// What one attempt (or one reconciliation run) carries from step to step.
@@ -160,6 +198,8 @@ where
             tokens: TokenCache::default(),
             allow_private: false,
             max_attempts: None,
+            backoff_base: DEFAULT_BACKOFF_BASE,
+            backoff_ceiling: DEFAULT_BACKOFF_CEILING,
         }
     }
 
@@ -171,6 +211,16 @@ where
     #[must_use]
     pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
         self.max_attempts = Some(max_attempts);
+        self
+    }
+
+    /// Tell the deliverer the consumer's backoff schedule for this kind
+    /// (`OutboundRetryConfig::backoff_base_ms` and `backoff_ceiling_ms`), so
+    /// that the breaker's window follows the schedule the operator set.
+    #[must_use]
+    pub fn with_backoff(mut self, base: Duration, ceiling: Duration) -> Self {
+        self.backoff_base = base;
+        self.backoff_ceiling = ceiling;
         self
     }
 
@@ -191,7 +241,15 @@ where
     // -----------------------------------------------------------------------
 
     async fn deliver(&self, msg: &OutboundMessage) -> Result<DeliveryOutcome, OutboundError> {
-        let result = self.attempt(msg).await;
+        let result = match self.admit(msg).await {
+            Ok((target, resource_type, axiam_id)) => {
+                if self.backing_off(&target).await {
+                    return Ok(self.back_off(msg).await);
+                }
+                self.attempt(target, resource_type, axiam_id).await
+            }
+            Err(exit) => Err(exit),
+        };
         match result {
             Ok(status) => {
                 // A request was made and answered: the downstream is reachable
@@ -233,10 +291,7 @@ where
     /// the consumer has no attempt left for this message (it dead-letters it
     /// whatever the deliverer says), the dead letter it is. Written once.
     async fn record_unsuccessful(&self, msg: &OutboundMessage, reason: &str) {
-        let last = self
-            .max_attempts
-            .is_some_and(|max| msg.attempt.saturating_add(1) >= max);
-        let written = if last {
+        let written = if self.is_last_attempt(msg) {
             self.state
                 .record_dead_letter(msg.tenant_id, msg.target_id, reason)
                 .await
@@ -246,6 +301,40 @@ where
                 .await
         };
         self.note(written, msg);
+    }
+
+    /// Whether the consumer has no attempt left for this message after this
+    /// one (known only when the composition root told the deliverer).
+    fn is_last_attempt(&self, msg: &OutboundMessage) -> bool {
+        self.max_attempts
+            .is_some_and(|max| msg.attempt.saturating_add(1) >= max)
+    }
+
+    /// Whether the target's breaker is open now. A state that cannot be read
+    /// holds nothing back: the breaker only ever saves a request.
+    async fn backing_off(&self, target: &ScimTarget) -> bool {
+        match self.state.get(target.tenant_id, target.id).await {
+            Ok(state) => breaker_open(&state, Utc::now(), self.backoff_base, self.backoff_ceiling),
+            Err(_) => false,
+        }
+    }
+
+    /// The open breaker's outcome: a retry, with no request and no failure
+    /// recorded — nothing was tried, and a stamp would extend the window for as
+    /// long as references keep arriving. On the consumer's last attempt the
+    /// dead letter it makes of the message is counted, once, without the stamp.
+    async fn back_off(&self, msg: &OutboundMessage) -> DeliveryOutcome {
+        if self.is_last_attempt(msg) {
+            self.note(
+                self.state
+                    .count_dead_letter(msg.tenant_id, msg.target_id)
+                    .await,
+                msg,
+            );
+        }
+        DeliveryOutcome::Retry {
+            reason: BREAKER_REASON.to_owned(),
+        }
     }
 
     /// A delivery-state write that fails changes nothing about the outcome; it
@@ -261,9 +350,8 @@ where
         }
     }
 
-    /// The last response status of the attempt (`None` when no request was
-    /// made), or why it stopped.
-    async fn attempt(&self, msg: &OutboundMessage) -> Step<Option<u16>> {
+    /// Steps 1 and 2: the reference decoded and the target read, enabled.
+    async fn admit(&self, msg: &OutboundMessage) -> Step<(ScimTarget, ScimResourceType, Uuid)> {
         if msg.kind != OutboundKind::ScimPush {
             return Err(Exit::dead("the message is not a SCIM push"));
         }
@@ -278,7 +366,17 @@ where
         if !target.enabled {
             return Err(Exit::dead("target disabled"));
         }
+        Ok((target, resource_type, axiam_id))
+    }
 
+    /// Steps 3 to 5: the last response status of the attempt (`None` when no
+    /// request was made), or why it stopped.
+    async fn attempt(
+        &self,
+        target: ScimTarget,
+        resource_type: ScimResourceType,
+        axiam_id: Uuid,
+    ) -> Step<Option<u16>> {
         let mut run = Run::new(target);
         match resource_type {
             ScimResourceType::User => self.sync_user(&mut run, axiam_id).await?,
@@ -501,7 +599,7 @@ where
                 .await
                 .map_err(|_| Exit::fail("the group's members could not be read"))?;
             if page.total > MAX_GROUP_MEMBERS {
-                return Err(Exit::dead("the group has more members than a push carries"));
+                return Err(Exit::dead(GROUP_TOO_LARGE_REASON));
             }
             if page.items.is_empty() {
                 break;
@@ -1019,6 +1117,41 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The breaker's window for a target with `consecutive_failures`: `None` below
+/// [`BREAKER_THRESHOLD`], else `base` doubled once per failure past it, never
+/// above `ceiling` — the consumer's own schedule.
+fn breaker_window(
+    consecutive_failures: u64,
+    base: Duration,
+    ceiling: Duration,
+) -> Option<Duration> {
+    let past = consecutive_failures.checked_sub(BREAKER_THRESHOLD)?;
+    let doublings = u32::try_from(past).unwrap_or(u32::MAX);
+    Some(
+        base.saturating_mul(2u32.saturating_pow(doublings))
+            .min(ceiling),
+    )
+}
+
+/// Whether a target in `state` is backed off at `now`: at or past the threshold
+/// and failed last within the window.
+fn breaker_open(
+    state: &ScimTargetState,
+    now: DateTime<Utc>,
+    base: Duration,
+    ceiling: Duration,
+) -> bool {
+    let (Some(window), Some(failed_at)) = (
+        breaker_window(state.consecutive_failures, base, ceiling),
+        state.last_failure_at,
+    ) else {
+        return false;
+    };
+    // A stamp ahead of this replica's clock reads as "just now".
+    let elapsed = (now - failed_at).to_std().unwrap_or(Duration::ZERO);
+    elapsed < window
+}
+
 fn parse_reference(payload: &serde_json::Value) -> Option<(ScimResourceType, Uuid)> {
     let object = payload.as_object()?;
     let resource_type = ScimResourceType::from_wire(object.get("resource_type")?.as_str()?)?;
@@ -1103,6 +1236,61 @@ mod tests {
         ] {
             assert_eq!(parse_reference(&bad), None);
         }
+    }
+
+    fn state(consecutive_failures: u64, last_failure_at: Option<DateTime<Utc>>) -> ScimTargetState {
+        ScimTargetState {
+            target_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            last_success_at: None,
+            last_failure_at,
+            last_failure_reason: None,
+            consecutive_failures,
+            dead_lettered_total: 0,
+            last_reconciled_at: None,
+            reconcile_claimed_at: None,
+        }
+    }
+
+    #[test]
+    fn the_breaker_opens_at_the_threshold_and_its_window_doubles_to_the_ceiling() {
+        let (base, ceiling) = (DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_CEILING);
+        assert_eq!(BREAKER_THRESHOLD, 5);
+        assert_eq!(breaker_window(0, base, ceiling), None);
+        assert_eq!(breaker_window(BREAKER_THRESHOLD - 1, base, ceiling), None);
+        assert_eq!(
+            breaker_window(5, base, ceiling),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            breaker_window(6, base, ceiling),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            breaker_window(9, base, ceiling),
+            Some(Duration::from_secs(80))
+        );
+        assert_eq!(breaker_window(20, base, ceiling), Some(ceiling));
+        assert_eq!(breaker_window(u64::MAX, base, ceiling), Some(ceiling));
+
+        let now = Utc::now();
+        let ago = |secs| Some(now - chrono::Duration::seconds(secs));
+        // Open inside the window, closed once it has passed.
+        assert!(breaker_open(&state(5, ago(1)), now, base, ceiling));
+        assert!(!breaker_open(&state(5, ago(6)), now, base, ceiling));
+        assert!(breaker_open(&state(6, ago(6)), now, base, ceiling));
+        // Below the threshold, or with no failure stamped, never open.
+        assert!(!breaker_open(&state(4, ago(0)), now, base, ceiling));
+        assert!(!breaker_open(&state(50, None), now, base, ceiling));
+        // A stamp from a clock ahead of this one counts as just now.
+        assert!(breaker_open(&state(5, ago(-30)), now, base, ceiling));
+        // A zero base (an operator's choice) never opens it.
+        assert!(!breaker_open(
+            &state(50, ago(0)),
+            now,
+            Duration::ZERO,
+            ceiling
+        ));
     }
 
     #[test]

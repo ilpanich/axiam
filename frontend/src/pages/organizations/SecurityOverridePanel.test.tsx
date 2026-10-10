@@ -915,3 +915,66 @@ describe("TenantSecurityOverridePanel — S-7b server certificate names", () => 
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });
 });
+
+describe("TenantSecurityOverridePanel — SAML IdP and SSF switches (P23W4-07)", () => {
+  const group = () =>
+    screen.findByRole("checkbox", {
+      name: /Override SAML identity provider and security events/,
+    });
+
+  function mockSurfaces(
+    oidc: { saml_idp_enabled: boolean; ssf_enabled: boolean },
+    override: unknown
+  ) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/settings") return res({ ...effective, oidc });
+      if (url === "/api/v1/tenants/t1/settings") return res(override);
+      return res({});
+    });
+  }
+
+  it("is unchecked, and sends no surface key, while the tenant overrides neither", async () => {
+    mockSurfaces({ saml_idp_enabled: true, ssf_enabled: true }, {});
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    expect(await group()).not.toBeChecked();
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Override admin notifications/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const body = apiMock.put.mock.calls[0][1];
+    expect(body).not.toHaveProperty("saml_idp_enabled");
+    expect(body).not.toHaveProperty("ssf_enabled");
+  });
+
+  // The regression: this PUT replaces the override whole, so without the group
+  // a save of any other group discarded a surface the tenant had switched off.
+  it("re-checks a stored 'off' and carries it through a save of another group", async () => {
+    mockSurfaces({ saml_idp_enabled: true, ssf_enabled: false }, { ssf_enabled: false });
+    apiMock.put.mockResolvedValue(res({}));
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    expect(await group()).toBeChecked();
+    expect(screen.getByText(/Turned off for this tenant/)).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Override admin notifications/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      saml_idp_enabled: true,
+      ssf_enabled: false,
+      admin_notifications_enabled: true,
+    });
+  });
+
+  it("shows a surface the organization disabled as disabled above, and not switchable on", async () => {
+    mockSurfaces({ saml_idp_enabled: false, ssf_enabled: true }, {});
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+    await userEvent.click(await group());
+    expect(screen.getByText(/Disabled by the organization/)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/SAML 2.0 identity provider/, { exact: false })
+    ).toBeDisabled();
+  });
+});

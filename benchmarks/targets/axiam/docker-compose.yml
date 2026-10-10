@@ -30,11 +30,14 @@ services:
       context: ../../..
       dockerfile: docker/Dockerfile.server
     container_name: bench-axiam-server
+    # Same stop budget as docker/docker-compose.prod.yml (#569): 20 s of requests
+    # in flight + 5 s gRPC + 5 s audit drain + margin.
+    stop_grace_period: 40s
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}
     ports:
-      - "${BENCH_APP_PORT:-8090}:8090"
-      - "${BENCH_GRPC_PORT:-50051}:50051"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_APP_PORT:-8090}:8090"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_GRPC_PORT:-50051}:50051"
     environment:
       AXIAM__DB__URL: "surrealdb:8000"
       AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?run via 'just bench-up' which bootstraps bench secrets}"
@@ -317,12 +320,12 @@ services:
     cpus: ${BENCH_EDGE_CPUS:-1}
     mem_limit: ${BENCH_EDGE_MEM:-128m}
     ports:
-      - "${BENCH_TLS_PORT:-8443}:8443"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_TLS_PORT:-8443}:8443"
       # H6: the cleartext control listener (tls/_plain-control.inc), present
       # only in the two p2 confs. Publishing it unconditionally is harmless for
       # the confs that don't define an :8080 vhost — Docker will happily
       # publish a port nothing is listening on.
-      - "${BENCH_EDGE_PLAIN_PORT:-18080}:8080"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_EDGE_PLAIN_PORT:-18080}:8080"
     volumes:
       - ../../profiles/certs:/certs:ro
       # H6: the whole tls/ dir is mounted OUTSIDE conf.d (so nginx does not

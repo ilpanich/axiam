@@ -16,7 +16,8 @@
 //!   [`OutboundKind::ScimPush`](axiam_core::outbound::OutboundKind::ScimPush).
 //! * [`ScimPushDeliverer`] — the **attempt**. It implements the core
 //!   [`OutboundDeliverer`](axiam_core::outbound::OutboundDeliverer) the
-//!   dispatcher's consumer calls: one attempt, classify, never decide.
+//!   dispatcher's consumer calls: one attempt, classify, never decide — and no
+//!   request at all to a target whose per-target breaker is open (#550).
 //! * [`ScimReconciliation`] — the **repair** (T23.6.3, D-58): a nightly and an
 //!   on-demand run, claimed in the datastore so that one replica makes it, that
 //!   queues a reference for everything in scope and everything linked, reads
@@ -64,7 +65,7 @@ mod provisioner;
 mod reconcile;
 pub mod wire;
 
-pub use deliverer::ScimPushDeliverer;
+pub use deliverer::{BREAKER_THRESHOLD, ScimPushDeliverer};
 pub use provisioner::{ScimProvisioner, group_in_scope, reference_message};
 pub use reconcile::{
     LIST_PAGE_SIZE, Listing, RECONCILE_INTERVAL, RECONCILE_MAX_PAGES, RECONCILE_WALL_CLOCK,

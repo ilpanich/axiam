@@ -17,6 +17,9 @@
 #   the rl=prod branch of the justfile or printed by `--print-exports`; and nothing
 #   is exported that the compose file does not forward (a typo would pin nothing).
 #
+# It also pins that every `*_per_min` field of `RateLimitConfig` has a row in
+# rl_prod_check.py (#568).
+#
 # Hermetic: no docker, no k6. Usage: rl-prod-posture-selftest.sh   (from benchmarks/)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,6 +79,42 @@ done
 got="$(bash -c "set -euo pipefail; cd '$BENCH'; $pin
 env" | grep -oE '^AXIAM__RATE_LIMIT__[A-Z_]+_PER_MIN' | sort -u)"
 [ "$got" = "$printed" ] || say "the justfile's pin code does not export what --print-exports prints"
+
+# P23W6-11 (#568): every `*_per_min` field of `RateLimitConfig` has a row in
+# rl_prod_check.py's ENDPOINTS. Eight Phase 23 families were configured, shipped
+# and absent from the table, so `rl-prod-summary.md` could not even say "not
+# checked" about them. A row with `scenario: None` is enough: an unmeasured limiter
+# says so in the same table as the measured ones. The fields are read from the
+# struct definition (not the Default block), so a field added without a default is
+# caught here too. Rows the other way round (a key naming no field) are derived
+# rows such as authz_batch (shares authz_check) and the gRPC families, which are
+# not `RateLimitConfig` fields; a row naming nothing is caught by the last check.
+python3 - "$HERE" <<'PY' || fail=1
+import re, sys
+sys.path.insert(0, sys.argv[1])
+import rl_prod_check as rl
+
+with open(rl.REST_RATE_LIMIT_RS) as f:
+    text = f.read()
+m = re.search(r"pub struct RateLimitConfig\s*\{(.*?)\n\}\n", text, re.DOTALL)
+if not m:
+    sys.exit("[rl-prod-posture-selftest] could not find 'pub struct RateLimitConfig' in "
+             f"{rl.REST_RATE_LIMIT_RS} — update this self-test's extraction")
+fields = re.findall(r"^\s*pub (\w+_per_min):", m.group(1), re.MULTILINE)
+if len(fields) < 20:
+    sys.exit(f"[rl-prod-posture-selftest] read only {len(fields)} *_per_min fields from "
+             f"RateLimitConfig ({fields}) — the extraction has drifted")
+missing = [f for f in fields if f not in rl.ENDPOINTS]
+if missing:
+    sys.exit("[rl-prod-posture-selftest] RateLimitConfig fields with no row in "
+             "rl_prod_check.py ENDPOINTS (add one; `(None, <route>)` if no scenario "
+             f"drives it): {missing}")
+# ... and every row can be compared: read_configured_defaults() must extract it.
+configured = rl.read_configured_defaults()
+unread = [f for f in rl.ENDPOINTS if f not in configured]
+if unread:
+    sys.exit(f"[rl-prod-posture-selftest] ENDPOINTS rows with no configured limit: {unread}")
+PY
 
 [ "$fail" -eq 0 ] || { echo "[rl-prod-posture-selftest] FAILED" >&2; exit 1; }
 echo "[rl-prod-posture-selftest] OK — every rate-limit family the compose file neutralizes is pinned by rl=prod ($(echo "$compose" | wc -l) families: $(echo "$by_hand" | wc -l) by hand, $(echo "$printed" | wc -l) from source)."

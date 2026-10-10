@@ -29,7 +29,7 @@ use axiam_api_rest::{
     HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
     openapi_routes, register_api_v1_routes_with,
 };
-use axiam_audit::AuditMiddleware;
+use axiam_audit::{AuditMiddleware, DEAD_LETTER_FILE_ENV, DeadLetterWriter};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
     AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
@@ -75,6 +75,7 @@ use surrealdb::Connection;
 use tracing_actix_web::TracingLogger;
 
 use crate::cleanup;
+use crate::fatal_stop::{FatalStop, spawn_fatal_stop};
 use crate::messaging::{MailTransportPublisher, OutboundTransport};
 use crate::profile::{self, LeaseTiming, OnLeaseLost};
 
@@ -303,12 +304,14 @@ pub struct ServeOptions {
     pub rest_listener: Option<std::net::TcpListener>,
     /// The timing of the minimal profile's singleton lease.
     pub lease_timing: LeaseTiming,
-    /// The minimal profile's **backstop** for a lost lease. An instance whose
-    /// lease another instance takes over stops in order — the REST listener
-    /// stops accepting, the audit queue is drained, the cleanup task finishes —
-    /// and [`serve`] returns an error, so `main` exits non-zero (T23.8.2,
-    /// P23W5-A1). This runs only if that has not finished within
-    /// [`LeaseTiming::lost_stop_deadline`]; production exits the process.
+    /// The **backstop** for an orderly stop forced on the instance: the
+    /// minimal profile's lost lease, or a consumer or the gRPC server that died
+    /// (full profile). Such an instance stops in order — the REST listener
+    /// stops accepting, gRPC stops, the audit queue is drained, the cleanup
+    /// task finishes — and [`serve`] returns an error, so `main` exits non-zero
+    /// (T23.8.2, P23W5-A1, P23W5-A12). This runs only if that has not finished
+    /// within [`LeaseTiming::lost_stop_deadline`] (a lost lease) or
+    /// `FATAL_STOP_BACKSTOP` (a dead component); production exits the process.
     pub lease_lost_backstop: OnLeaseLost,
     /// **Test seam, never set in production.** Lets the webhook and SSF push
     /// deliverers reach a loopback `http://` receiver (their own
@@ -366,6 +369,9 @@ where
     // Losing the lease later raises `lease_lost`; the REST listener's run below
     // waits on it and stops in order (T23.8.2, P23W5-A1).
     let (lease_lost_tx, lease_lost) = tokio::sync::watch::channel(false);
+    // A consumer or the gRPC server that dies raises this; the REST listener's
+    // run below stops in order for it as it does for a lost lease (P23W5-A12).
+    let (fatal_stop, component_died) = FatalStop::new();
     let lease_renewal = if deployment_profile.is_minimal() {
         let guards = profile::enforce_minimal_profile(
             config.authz.decision_cache_broadcast_enabled,
@@ -1904,6 +1910,7 @@ where
         };
         let amqp_signing_key_clone = amqp_signing_key.clone();
         let authz_nonce_repo = amqp_nonce_repo.clone();
+        let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::authz_consumer::start_authz_consumer(
                 amqp_channel,
@@ -1913,8 +1920,7 @@ where
                 amqp_replay_skew,
             )
             .await;
-            tracing::error!("AMQP authz consumer exited — shutting down process");
-            std::process::exit(1);
+            died.raise("AMQP authz consumer");
         });
 
         // Create notification publisher (available for services to emit events).
@@ -1934,6 +1940,7 @@ where
         let amqp_audit_repo = audit_repo.clone();
         let audit_nonce_repo = amqp_nonce_repo.clone();
         let audit_signing_key = amqp_signing_key.clone();
+        let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::audit_consumer::start_audit_consumer(
                 audit_channel,
@@ -1943,8 +1950,7 @@ where
                 amqp_replay_skew,
             )
             .await;
-            tracing::error!("AMQP audit consumer exited — shutting down process");
-            std::process::exit(1);
+            died.raise("AMQP audit consumer");
         });
     }
 
@@ -2046,9 +2052,16 @@ where
     // T23.6.3 (D-58), the SCIM consumer below feeds it the dispatcher's own rows
     // — a dead letter is not an HTTP request, so without that second path a rule
     // for `scim_delivery_failed` would match nothing in a running server.
+    //
+    // A rule mails each recipient once per (rule, event, window) — the rule's
+    // `window_minutes` — and counts the rest, the next mail saying how many
+    // (#551, T-117). The window is claimed in the datastore, so every replica
+    // sees the same one. The SCIM consumer's dead letters keep their own gate
+    // (one per target per hour, D-73) and are not windowed again.
     let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
         Arc::new(axiam_audit::NotificationSink::new(
             notification_rule_repo.clone(),
+            axiam_db::SurrealNotificationWindowRepository::new(pool.handle_for_repo()),
             mail_outbound_publisher.clone(),
         ));
 
@@ -2079,7 +2092,8 @@ where
         debug_assert!(bound, "the provisioning sink is bound exactly once");
         // The attempt ceiling is told to the deliverer so that the dead letter
         // the consumer makes of a last failed attempt is counted on the target
-        // once.
+        // once; the backoff, so that the per-target breaker's window follows
+        // the schedule the operator set (#550, T-414).
         let scim_deliverer = Arc::new(
             axiam_scim::outbound::ScimPushDeliverer::new(
                 scim_target_repo,
@@ -2089,7 +2103,11 @@ where
                 group_repo.clone(),
                 Arc::clone(&scim_publisher),
             )
-            .with_max_attempts(scim_retry.max_attempts),
+            .with_max_attempts(scim_retry.max_attempts)
+            .with_backoff(
+                Duration::from_millis(scim_retry.backoff_base_ms),
+                Duration::from_millis(scim_retry.backoff_ceiling_ms),
+            ),
         );
         let mut scim_deliverers = OutboundDeliverers::new();
         scim_deliverers
@@ -2139,6 +2157,10 @@ where
         );
         tracing::info!("CIBA ping consumer spawned");
     }
+    // All four consumers are running: what stops them in order at the teardown
+    // (P23W5-A4). The broker keeps its queues; the in-process dispatcher writes
+    // a `delivery_abandoned` row for what it still holds.
+    let outbound_shutdown = outbound.shutdown();
 
     // Spawn the mail consumer on a background task (D-14): the AMQP consumer
     // with the broker, the in-process worker without it (G-8, D-59).
@@ -2161,6 +2183,7 @@ where
                 .create_channel()
                 .await
                 .expect("Failed to create AMQP mail consumer channel");
+            let died = fatal_stop.clone();
             tokio::spawn(async move {
                 axiam_amqp::start_mail_consumer(
                     mail_channel,
@@ -2172,8 +2195,7 @@ where
                     mail_org_repo,
                 )
                 .await;
-                tracing::error!("AMQP mail consumer exited — shutting down process");
-                std::process::exit(1);
+                died.raise("AMQP mail consumer");
             });
         } else if let Some(queue) = mail_queue {
             axiam_amqp::spawn_in_process_mail_worker_default(
@@ -2438,7 +2460,11 @@ where
         None => axiam_api_grpc::GrpcTls::Plaintext,
     };
 
-    tokio::spawn(async move {
+    // Resolved by the teardown once the REST listener has stopped (P23W5-A11);
+    // dropping the sender, on an early return, resolves it too.
+    let (grpc_stop, grpc_stopped) = tokio::sync::oneshot::channel::<()>();
+    let died = fatal_stop.clone();
+    let grpc_task = tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
             grpc_engine,
@@ -2457,11 +2483,14 @@ where
             grpc_lockout_policy,
             grpc_tls,
             deployment_profile,
+            async move {
+                let _ = grpc_stopped.await;
+            },
         )
         .await
         {
-            tracing::error!(error = %e, "gRPC server failed — shutting down process");
-            std::process::exit(1);
+            tracing::error!(error = %e, "gRPC server failed");
+            died.raise("gRPC server");
         }
     });
 
@@ -2470,8 +2499,32 @@ where
     // `NotificationDispatcher` is constructed nowhere and every rule an
     // administrator configures is inert — stored, listed by the API, shown in the
     // admin UI, and consulted by nothing.
-    let audit_middleware =
-        AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
+    //
+    // A request-audit row that is dropped (queue full) or fails to append is
+    // counted, reported on `/health/jobs` and, when `AXIAM__GDPR_AUDIT_DLQ_FILE`
+    // names a file, written to it (T-108). The GDPR records (the export and
+    // erasure requests, the erasure sweep's, a tenant deletion's) take the same
+    // file, so this is the one boot-time warning for all of them (#552).
+    // `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds the file (R1W2-02); a value that
+    // is not a whole number of bytes, or is below the minimum, fails the boot
+    // rather than leaving the file unbounded.
+    let dead_letter = DeadLetterWriter::from_env()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    if !dead_letter.is_configured() {
+        tracing::warn!(
+            env_var = DEAD_LETTER_FILE_ENV,
+            "no audit dead-letter file is configured — an audit row the datastore refuses \
+             (request-audit rows that are dropped or fail to append, and the GDPR export, \
+             erasure and tenant-deletion records) is counted and logged but cannot be \
+             recovered; point it at a volume that outlives the container"
+        );
+    }
+    let audit_middleware = AuditMiddleware::spawn_configured(
+        audit_repo.clone(),
+        Some(notification_sink),
+        dead_letter,
+        axiam_audit::middleware::CHANNEL_CAPACITY,
+    );
     // A handle kept outside the App factory closure, which takes ownership of
     // the middleware. Cloning shares the shutdown flag — see
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
@@ -2509,10 +2562,12 @@ where
     // because "absent from the list" and "never executed" are the same
     // silence this is meant to break.
     let job_health =
-        crate::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
-    // The list is `job_health::SWEEP_JOBS`, which a test checks against what the
-    // cleanup loop records.
-    for job in crate::job_health::SWEEP_JOBS {
+        crate::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs))
+            .with_request_audit(audit_middleware.loss());
+    // The list is `job_health::sweep_jobs`, which a test checks against what the
+    // cleanup loop records. The revocation feed's prune is in it only when the
+    // feed is on, which is the only time the loop records it.
+    for job in crate::job_health::sweep_jobs(revoked_session_repo.is_some()) {
         job_health.register(job);
     }
 
@@ -2943,6 +2998,14 @@ where
         "TCP_NODELAY configured on the REST listener (I5)"
     );
 
+    // How long a stop waits for requests in flight (#569). actix's default is
+    // 30 s; it is set so that this, `GRPC_STOP_DEADLINE`, `OUTBOUND_DRAIN_DEADLINE`
+    // and `AUDIT_DRAIN_DEADLINE` add up to less than the container's stop grace
+    // period (40 s in the shipped
+    // Compose files and Kubernetes manifests), or a stop with a request still
+    // running is killed during the audit drain.
+    http_server = http_server.shutdown_timeout(REST_SHUTDOWN_TIMEOUT_SECS);
+
     // Bind plaintext (proxy-terminated TLS, the default) or, when
     // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /
     // ASVS V9.1.2). `build_rustls_server_config` fails fast on any cert/key
@@ -2995,8 +3058,40 @@ where
         )
     });
 
+    // A consumer or the gRPC server that dies stops this instance the same way:
+    // in order, then non-zero (P23W5-A12). Its backstop covers the whole stop —
+    // not the lease's 15 s, which is tied to lease safety and shorter than the
+    // REST shutdown timeout alone.
+    let component_died_stop = {
+        let handle = http_server.handle();
+        spawn_fatal_stop(
+            component_died.clone(),
+            move || {
+                tokio::spawn(handle.stop(true));
+            },
+            FATAL_STOP_BACKSTOP,
+            Arc::clone(&opts.lease_lost_backstop),
+        )
+    };
+
     http_server.await?;
     let lease_was_lost = *lease_lost.borrow();
+    let dead_component = *component_died.borrow();
+
+    // The REST listener has stopped: stop gRPC after it, and wait for it before
+    // the audit drain below, so a call that audits through gRPC is not cut off
+    // by the drain (P23W5-A11). Bounded: a client holding a stream open cannot
+    // hold the stop up.
+    let _ = grpc_stop.send(());
+    if tokio::time::timeout(GRPC_STOP_DEADLINE, grpc_task)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            deadline_secs = GRPC_STOP_DEADLINE.as_secs_f64(),
+            "the gRPC server did not stop in time — stopping without it"
+        );
+    }
 
     // An orderly stop gives the minimal profile's lease up, so a successor (a
     // rolling update's next instance) does not wait out the TTL. A lost lease
@@ -3017,6 +3112,23 @@ where
     // `gdpr.user_pseudonymized` row are not separated.
     let _ = cleanup_shutdown_tx.send(true);
 
+    // The minimal profile's in-process outbound queues hold deliveries that die
+    // with this process: say so in the audit trail, one `delivery_abandoned` row
+    // per delivery queued or waiting for a retry (P23W5-A4). Nothing produces any
+    // more (the listeners have stopped; the cleanup task, signalled above, may
+    // still enqueue one, and a refused enqueue writes its own row), and the rows
+    // go straight to the repository, so this runs before the audit drain and
+    // within its own bound.
+    let unfinished = outbound_shutdown.stop(OUTBOUND_DRAIN_DEADLINE).await;
+    if !unfinished.is_empty() {
+        tracing::error!(
+            deadline_secs = OUTBOUND_DRAIN_DEADLINE.as_secs_f64(),
+            kinds = ?unfinished,
+            "in-process outbound deliveries could not be accounted for in time — they are lost \
+             without an audit row"
+        );
+    }
+
     // Write what the audit middleware still holds before the runtime goes
     // (T23.8.2). `drain` also tells the worker the close is the orderly one,
     // so a clean stop does not log `Audit worker channel closed` at WARN — see
@@ -3034,7 +3146,8 @@ where
         tracing::warn!(error = ?e, "cleanup task join error");
     }
 
-    // The teardown is done: disarm the lost-lease backstop.
+    // The teardown is done: disarm the backstops.
+    component_died_stop.abort();
     if let Some(stop) = lease_loss_stop {
         stop.abort();
     }
@@ -3046,10 +3159,58 @@ where
         ));
     }
 
+    if let Some(component) = dead_component {
+        return Err(std::io::Error::other(format!(
+            "the {component} stopped; this instance stopped in order and exits non-zero"
+        )));
+    }
+
     Ok(())
 }
+
+/// How long, in seconds, the REST listener waits for requests in flight once a
+/// stop begins (#569). Stop grace period = this + [`GRPC_STOP_DEADLINE`] +
+/// [`OUTBOUND_DRAIN_DEADLINE`] + [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 2 + 5
+/// and a margin of 8 = 40 s; the fatal-stop backstop ([`FATAL_STOP_BACKSTOP`],
+/// 35 s) sits inside it.
+const REST_SHUTDOWN_TIMEOUT_SECS: u64 = 20;
+
+/// How long the teardown waits for the gRPC server to finish its calls once the
+/// REST listener has stopped (P23W5-A11).
+const GRPC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the teardown waits for the in-process outbound consumers to write
+/// the `delivery_abandoned` rows of what they still hold (P23W5-A4, minimal
+/// profile). A consumer gives the attempt it is in `IN_FLIGHT_STOP_GRACE`
+/// (500 ms) to finish before it abandons it too, so a slow receiver delays the
+/// stop by at most that.
+const OUTBOUND_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+// The deadline has to outlast the grace, or a stuck attempt always overruns it.
+const _: () =
+    assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < OUTBOUND_DRAIN_DEADLINE.as_millis());
 
 /// How long the teardown waits for the audit middleware's queue to be written
 /// (T23.8.2). The queue holds at most 4 096 entries; written one at a time
 /// against a healthy datastore that is well under this.
 const AUDIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The stop grace period the shipped Compose files and Kubernetes manifest give
+/// the server (#569). Not read by the code; it is here so the check below can
+/// fail the build if the stop outgrows it.
+const SHIPPED_STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// When the backstop ends a process stopped by a dead consumer or gRPC server
+/// (#554): the whole orderly stop — REST shutdown, gRPC stop, outbound and audit
+/// drain — and a 3 s margin, so the backstop only runs for a stop that has overrun.
+/// A lost lease keeps its own, shorter `LeaseTiming::lost_stop_deadline`.
+const FATAL_STOP_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(
+    REST_SHUTDOWN_TIMEOUT_SECS
+        + GRPC_STOP_DEADLINE.as_secs()
+        + OUTBOUND_DRAIN_DEADLINE.as_secs()
+        + AUDIT_DRAIN_DEADLINE.as_secs()
+        + 3,
+);
+
+// The backstop must fire before the orchestrator's own SIGKILL, or it is moot.
+const _: () = assert!(FATAL_STOP_BACKSTOP.as_secs() < SHIPPED_STOP_GRACE_PERIOD.as_secs());

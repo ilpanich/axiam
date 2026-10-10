@@ -462,6 +462,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "scim_failure_notification_claim",
         sql: SCHEMA_V84,
     },
+    Migration {
+        version: 85,
+        name: "notification_rule_window",
+        sql: SCHEMA_V85,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4556,9 +4561,61 @@ DEFINE FIELD IF NOT EXISTS failure_notified_at ON TABLE scim_target_state
     TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v85 — #551, T-117: one notification mail per rule, event and window
+// -----------------------------------------------------------------------
+//
+// A rule mailed each recipient once per matching audit row, so an event an
+// attacker can raise in volume (a failed sign-in, spread over addresses and
+// accounts) mailed them once per attempt. Each rule now has a window
+// (`notification_rule.window_minutes`, 1 … 1440, NONE read as 15), and
+// `notification_window` holds one row per (tenant, rule, event): when the
+// window opened, the claimant that opened it, the events counted since, and
+// the count of the window before it, which the next mail reports. A window is
+// opened with a conditional write on `opened_at` (the D-73 pattern), so
+// replicas agree. Additive: one optional column and one table.
+const SCHEMA_V85: &str = "\
+DEFINE FIELD IF NOT EXISTS window_minutes ON TABLE notification_rule
+    TYPE option<int>;
+DEFINE TABLE IF NOT EXISTS notification_window SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE notification_window TYPE string;
+DEFINE FIELD IF NOT EXISTS rule_id ON TABLE notification_window TYPE string;
+DEFINE FIELD IF NOT EXISTS event ON TABLE notification_window TYPE string;
+DEFINE FIELD IF NOT EXISTS opened_at ON TABLE notification_window TYPE datetime;
+DEFINE FIELD IF NOT EXISTS opened_by ON TABLE notification_window TYPE string;
+DEFINE FIELD IF NOT EXISTS suppressed ON TABLE notification_window TYPE int;
+DEFINE FIELD IF NOT EXISTS carried ON TABLE notification_window TYPE int;
+DEFINE INDEX IF NOT EXISTS idx_notification_window_rule ON TABLE notification_window
+    COLUMNS tenant_id, rule_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #551, T-117 — v85 is the rule's window column and the window table,
+    /// and nothing else.
+    #[test]
+    fn v85_adds_only_the_notification_window() {
+        for statement in SCHEMA_V85.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v85 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("notification_window")
+                    || statement.contains("window_minutes ON TABLE notification_rule"),
+                "v85 defined something outside its scope: {statement}"
+            );
+        }
+        assert!(SCHEMA_V85.contains("TYPE option<int>"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V85.contains(forbidden),
+                "v85 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// W5 F4 review, T-418 — v84 is one optional column on the SCIM delivery
     /// state and nothing else.
@@ -5838,8 +5895,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&84),
-            "v84 is the newest migration (the W5 F4 review, T-418 / D-73 — \
+            Some(&85),
+            "v85 is the newest migration (#551, T-117 — `notification_rule.window_minutes` \
+             and the `notification_window` table, one notification mail per rule, event and \
+             window; v84 was the W5 F4 review, T-418 / D-73 — \
              `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \
              hour; v83 was T23.8.1 / G-8 — the minimal profile's singleton \
              lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \

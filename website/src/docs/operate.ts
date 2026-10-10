@@ -107,16 +107,20 @@ export const OPERATE_PAGES: DocPage[] = [
           ["Cross-replica decision-cache invalidation", "There is no second replica to tell; boot refuses the decision-cache broadcast being switched on."],
         ],
       },
+      {
+        type: "p",
+        text: "A minimal-profile server **reads no AMQP queue**: whatever a broker holds on `axiam.authz.request` or `axiam.audit.events`, AXIAM never consumes it. A service that publishes there is confirmed by its broker while nothing reads the message, so **a broker confirm never means AXIAM recorded an event** (or decided a request) — it says only that the broker accepted it. Use REST or gRPC against a minimal-profile server; an AMQP client belongs to a full-profile deployment.",
+      },
       { type: "h", id: "minimal-restart", text: "What a restart costs" },
       {
         type: "p",
-        text: "There is no durable queue and no dead-letter queue. A webhook, SSF, outbound SCIM or CIBA-ping delivery that is queued or sleeping for a retry when the process stops is **lost**, and leaves at most a `<kind>.delivery_attempt` audit row — never a terminal one; a delivery that exhausts its attempts leaves a `<kind>.delivery_failed` row, which is the whole record, so alert on it. A queued GDPR export notice cannot be re-sent (the download token exists only in that mail), so the subject requests a new export. If a lost webhook is not acceptable, run the full profile.",
+        text: "There is no durable queue and no dead-letter queue. A webhook, SSF, outbound SCIM or CIBA-ping delivery that is queued or sleeping for a retry when the process stops is **lost**; at an orderly stop, and when a full queue refuses an enqueue, it leaves a terminal `<kind>.delivery_abandoned` audit row with a fixed reason (after a `SIGKILL` it leaves at most a `<kind>.delivery_attempt` row). `delivery_abandoned` is deliberately not `delivery_failed`, so a restart mails nobody through the `scim_delivery_failed` notification; a delivery that exhausts its attempts leaves a `<kind>.delivery_failed` row, which is the whole record, so alert on it. A queued GDPR export notice cannot be re-sent (the download token exists only in that mail), so the subject requests a new export. If a lost webhook is not acceptable, run the full profile.",
       },
       {
         type: "list",
         items: [
-          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period above 20 s — the compose file sets 30 s, Kubernetes' default is enough.",
-          "**GDPR dead-letter file.** A failed write of `gdpr.user_pseudonymized` or `tenants.deleted` is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`, which `docker-compose.minimal.yml` puts on a **named volume**; the `axiam.audit.dlq` log event is the second sink. An operator replays the file into the trail by hand.",
+          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period of at least 40 s (20 s for requests in flight, 5 s for gRPC, 2 s for the in-process outbound queues, 5 s for the audit queue, and a margin): the Compose files and the Kubernetes manifest set it, but both platforms' defaults (10 s, 30 s) are too short.",
+          "**Audit dead-letter file.** An audit row the datastore refuses (the GDPR export, erasure and erasure-request records, `tenants.deleted`, and request-audit rows that are dropped or fail to append) is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`. Both Compose files put it on a **named volume**; the Kubernetes manifests on an `emptyDir`, which a container restart keeps and a pod deletion does not. `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds it (192 MiB by default, at least 1 MiB; anything else fails the boot): past nine tenths of it request-audit rows are refused and counted as not recoverable, and the last tenth is kept for the GDPR records. Keep it below the volume's limit: Kubernetes enforces an `emptyDir` `sizeLimit` by evicting the pod, which deletes the file. The request path and forwarded address a line carries are cut to 512 and 64 bytes. The `axiam.audit.dlq` log event is the second sink for the GDPR records. An operator replays the file into the trail by hand: `docs/deployment/README.md` has the recipe.",
           "**External audit producers.** Stop or re-point every service that publishes to `axiam.audit.events` before switching: nothing consumes it and a broker left running confirms the publish anyway.",
         ],
       },
@@ -1181,6 +1185,10 @@ export const OPERATE_PAGES: DocPage[] = [
           ["`last_error`", "The last error text, for whoever is now looking at this wondering what broke."],
           ["`last_success_at`", "When it last completed cleanly. `null` means never."],
         ],
+      },
+      {
+        type: "p",
+        text: "The same response carries `request_audit`, the count of request-audit rows this process lost since it started: `dropped` (the worker's 4 096-row queue was full when the request ended) and `failed` (the datastore refused the append), with `dead_lettered`, `not_recoverable`, `dead_letter_configured`, `dead_letter_full`, `last_loss_at` and `recent_loss`. A loss in the last fifteen minutes turns `status` to `degraded`; it clears itself once rows are being recorded again. A dead-letter file at its budget (`dead_letter_full`) is `degraded` too, until it is replayed and moved with the server stopped. When `AXIAM__GDPR_AUDIT_DLQ_FILE` is set the lost rows are appended to that file, in the form used for the GDPR records, and replayed by hand; when it is not, they are counted and logged only. An orderly stop drains the queue; a killed process can still lose the rows it held. The server logs the totals on the `axiam.audit.loss` target, at most once a minute.",
       },
       {
         type: "note",

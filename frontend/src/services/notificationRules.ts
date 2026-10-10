@@ -42,6 +42,15 @@ export function notificationEventLabel(eventId: string): string {
   return NOTIFICATION_EVENTS.find((e) => e.value === eventId)?.label ?? eventId;
 }
 
+// ─── Notification window (#551) ───────────────────────────────────────────────
+
+/**
+ * A rule mails one event type at most once per window and counts the rest;
+ * the next mail says how many were not sent. Bounds and default mirror
+ * crates/axiam-core/src/models/notification_rule.rs.
+ */
+export const NOTIFICATION_WINDOW_MINUTES = { min: 1, max: 1440, default: 15 } as const;
+
 // ─── Domain Models ────────────────────────────────────────────────────────────
 
 export interface NotificationRule {
@@ -52,6 +61,8 @@ export interface NotificationRule {
   events: string[];
   recipient_emails: string[];
   enabled: boolean;
+  /** Minutes in which one event type mails each recipient at most once. */
+  window_minutes?: number;
   created_at: string;
   updated_at: string;
 }
@@ -63,6 +74,7 @@ export interface CreateNotificationRulePayload {
   description: string;
   events: string[];
   recipient_emails: string[];
+  window_minutes?: number;
 }
 
 export interface UpdateNotificationRulePayload {
@@ -71,6 +83,7 @@ export interface UpdateNotificationRulePayload {
   events?: string[];
   recipient_emails?: string[];
   enabled?: boolean;
+  window_minutes?: number;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────

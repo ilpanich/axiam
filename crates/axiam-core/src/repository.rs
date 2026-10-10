@@ -30,7 +30,9 @@ use crate::models::{
     },
     group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup},
     mds::{MdsBlobMeta, MdsEntry},
-    notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
+    notification_rule::{
+        CreateNotificationRule, NotificationRule, NotificationWindowClaim, UpdateNotificationRule,
+    },
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
         CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient,
@@ -1853,6 +1855,16 @@ pub trait CibaRequestRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
 
+    /// The `pending`, unexpired requests addressed to `user_id`, soonest
+    /// expiry first, at most `limit`. A request for nobody (`user_id` unset) is
+    /// never listed, whoever asks.
+    fn list_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ciba::CibaRequest>>> + Send;
+
     /// `pending → approved`, conditional on `version = expected_version`, on
     /// the row's user being `user_id`, and on the request being unexpired.
     /// `false` when any precondition fails — the caller cannot tell which.
@@ -3016,6 +3028,46 @@ pub trait NotificationRuleRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
 }
 
+/// The notification windows of the rules (#551, T-117): one row per
+/// `(tenant, rule, event)`, so that a rule mails each recipient once per
+/// window for an event an attacker can raise at will, on any replica.
+pub trait NotificationWindowRepository: Send + Sync {
+    /// Claim the window of `(tenant_id, rule_id, event)` at `now`, atomically.
+    ///
+    /// When no window is open — none yet, or the last was opened at least
+    /// `window_secs` before `now` — this event opens one:
+    /// [`NotificationWindowClaim::Opened`], carrying how many events the
+    /// previous window counted. Otherwise the event is counted in the open
+    /// window: [`NotificationWindowClaim::Counted`]. The window's start is the
+    /// precondition of the write (the `claim_failure_notification` pattern,
+    /// D-73), so of two concurrent claimants exactly one opens it.
+    ///
+    /// A claim that keeps losing a write conflict gives up after a few attempts
+    /// and writes nothing: [`NotificationWindowClaim::Contended`]. It runs on
+    /// the notification path of every replica, and waiting out a contended row
+    /// there is what let one tenant's burst slow every replica (R1W2-01).
+    fn claim(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        now: DateTime<Utc>,
+        window_secs: i64,
+    ) -> impl Future<Output = AxiamResult<NotificationWindowClaim>> + Send;
+
+    /// Add `count` events, counted by a replica in memory and not yet written,
+    /// to the window of `(tenant_id, rule_id, event)` as it stands: the next
+    /// claim that opens a window carries them in its `suppressed` count. A
+    /// window that no longer exists (its rule was deleted) takes nothing.
+    fn add_uncounted(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        count: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
 // ---------------------------------------------------------------------------
 // PGP Keys (tenant-scoped)
 // ---------------------------------------------------------------------------
@@ -3855,6 +3907,17 @@ pub trait ScimTargetStateRepository: Send + Sync {
         tenant_id: Uuid,
         target_id: Uuid,
         reason: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// A delivery for which **no request was made** was dead-lettered (the
+    /// target's breaker was open on the message's last attempt, #550): increment
+    /// `dead_lettered_total` only. `last_failure_at` and the reason stay those
+    /// of the last request that failed, so that deliveries the breaker refuses
+    /// cannot keep it open.
+    fn count_dead_letter(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Claim a reconciliation run at `now` **if** the last claim was at least

@@ -39,7 +39,13 @@ Two consequences shape everything below.
   pass the plan — it will fail at client authentication in every module, which
   reads like forty failures and is one configuration problem. The benchmark
   harness's `p3-mtls` profile is the quickest way to get one:
-  `cd benchmarks && just target=axiam profile=p3-mtls bench-up`.
+  `cd benchmarks && BENCH_BIND_ADDR=0.0.0.0 just target=axiam profile=p3-mtls bench-up`.
+  `BENCH_BIND_ADDR=0.0.0.0` is required here: the benchmark stacks publish on
+  `127.0.0.1` by default (P23W6-06), and the suite and the front door reach AXIAM
+  at `host.docker.internal` through `host-gateway`, i.e. the Docker bridge, which
+  a loopback binding cuts off. It also opens the port to the host's network, with
+  the benchmark posture's limiters raised, so do it on a machine with no LAN
+  exposure, as CI's throwaway runner is.
 - **The listener must trust the conformance CA.** (In CI this is done for you; see
   "Running it in CI" below.) `just conformance-certs`
   writes `conformance/certs/ca.crt`; point
@@ -118,6 +124,7 @@ run could not have produced a result (run 37268155503 stopped at the first):
 | Concern | Benchmark default | What the conformance run needs |
 |---|---|---|
 | `bench-up` readiness | `docker compose up --wait` | `--wait` refuses the native-TLS overlay's `healthcheck: NONE` on `axiam-server`. `bench-up` now omits it for `p2-tls13`/`p3-mtls` and relies on its host-side `/health` gate, polling for a container that exited non-zero so a rejected config still fails in seconds. `p0`/`p1` keep `--wait`. |
+| Bind address | `BENCH_BIND_ADDR` `127.0.0.1` | `0.0.0.0`: the suite and the front door reach AXIAM through `host.docker.internal:host-gateway` (the Docker bridge), which a loopback binding cuts off. The workflow's staging step exports it; without it the symptom is a connection refused from the suite, not a TLS error. |
 | Listener port | `BENCH_TLS_PORT` 8443 | `AXIAM_MTLS_PORT` (8445): the front door (`AXIAM_TLS_PORT`, 8444) owns the issuer origin and proxies to this port. |
 | Client trust | `/certs/ca.crt` (benchmark CA only) | A bundle of the conformance CA **and** the benchmark CA, so the suite's clients are accepted and bench-up's readiness probe and the seeder (which present the benchmark client certificate) still pass. Exporting `AXIAM__SERVER__TLS__CLIENT_CA_PATH` from the workflow did nothing: compose forwards only the names its files list. |
 | Server identity | benchmark `server.crt` (CN=localhost) | `conformance/certs/server.crt`: the suite and the front door's `proxy_ssl_verify on` check `host.docker.internal`. |
@@ -133,6 +140,45 @@ environment. The workflow writes `axiam-server.log` and `conformance-rig.log`
 
 Time: no browser is driven, so every interactive module costs the full
 `module_timeout` (default 180 s). Dispatch with a small value for a smoke run.
+
+### The CI gate (P23W5-11)
+
+`just conformance-run` exits non-zero for any module that is not `PASSED` or
+`SKIPPED`, and a run without a browser leaves every interactive module `WAITING`,
+so the workflow's final step used to fail every run: a gate that is red by design
+signals nothing. D-60 counts the baseline green when every non-interactive module
+matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
+`conformance/scripts/gate.py` reads the suite's `*.results.json` (the files
+`run-plan.sh` writes, the same ones `report.py` renders) and the committed
+`conformance/baseline.json`, and exits non-zero on a regression only:
+
+| Result | Gate |
+|---|---|
+| `FAILED`, `COULD_NOT_START`, `INTERRUPTED` | red |
+| still `RUNNING` (or never answered) at the module timeout | red: a non-interactive module overran; raise `module_timeout` (the 60 s and 62 s modules need more than 30 s) |
+| `PASSED` in the baseline, `REVIEW` or `WARNING` now | red: below its baseline |
+| named by the baseline, absent from the run | red |
+| a plan with no result file, or a plan in which no module `PASSED` | red: the run did not happen, or evaluated nothing |
+| `WAITING` (parked on a browser) | tolerated and named; not a pass |
+| `SKIPPED` | tolerated and named |
+| a module the baseline has never heard of | red only if it failed outright |
+
+The workflow's last step runs it over the three FAPI plans and appends its output
+to the job summary. **Green means "no regression against the baseline", not "every
+module passed"** and not "certified": the `WAITING` modules (the `REVIEW` and
+`WARNING` ones among them) are exactly what the maintainer's browser-driven run
+decides. The baseline names only `PASSED`, `REVIEW` and `WARNING` modules; the two
+`SKIPPED` modules of 2026-09-25 (one in the Basic plan, one in `private_key_jwt`)
+are not named by those reports, so any `SKIPPED` is tolerated.
+
+To re-record the baseline after the maintainer's final run (alongside, not over:
+keep the dated reports), point the script at that run's results:
+`python3 conformance/scripts/gate.py --results <dir> --write-baseline > conformance/baseline.json`.
+Run it on a browser-driven run: an unattended one has no verdict for its
+interactive modules, and they would drop out of the baseline. The gate's rules are
+unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
+CI's docs job); the workflow also passes every `workflow_dispatch` input through
+`env:` rather than interpolating it into a `run:` script.
 
 ---
 

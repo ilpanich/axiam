@@ -19,6 +19,13 @@
 //! The audit vocabulary (`<slug>.delivery_succeeded`, `.delivery_attempt`,
 //! `.delivery_failed`, their metadata keys and the system actor) is built here
 //! and nowhere else.
+//!
+//! A fourth action, `<slug>.delivery_abandoned` ([`abandoned_entry`]), is not an
+//! outcome of an attempt: the minimal profile's in-process dispatcher writes it
+//! for a delivery it lost without a verdict (queued or waiting for a retry when
+//! the process stopped, or refused at enqueue). It is deliberately **not**
+//! `delivery_failed`: that row is what a tenant's `scim_delivery_failed`
+//! notification rule matches, and a stop is not a downstream outage.
 
 use tracing::warn;
 use uuid::Uuid;
@@ -97,6 +104,26 @@ pub(crate) fn failed_entry(msg: &OutboundMessage, error_detail: &str) -> CreateA
             "attempt": msg.attempt + 1,
             "error": error_detail,
             "next_retry_in_ms": null,
+        }),
+    )
+}
+
+/// The terminal row of a delivery the in-process dispatcher lost without a
+/// verdict (P23W5-A4): `<slug>.delivery_abandoned`, outcome `Failure`, with one
+/// of the dispatcher's fixed reasons. `attempts_made` is how many attempts ran
+/// before the loss (`0` for a message never attempted).
+///
+/// Not `delivery_failed` on purpose: `NotificationEventType::from_audit_action`
+/// maps only `scim_push.delivery_failed`, so this row mails nobody.
+pub(crate) fn abandoned_entry(msg: &OutboundMessage, reason: &str) -> CreateAuditLogEntry {
+    audit_entry(
+        msg,
+        "delivery_abandoned",
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "delivery_id": msg.delivery_id,
+            "attempts_made": msg.attempt,
+            "reason": reason,
         }),
     )
 }

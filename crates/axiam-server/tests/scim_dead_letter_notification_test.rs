@@ -30,7 +30,8 @@ use axiam_core::repository::{
     TenantRepository,
 };
 use axiam_db::{
-    SurrealAuditLogRepository, SurrealNotificationRuleRepository, SurrealOrganizationRepository,
+    SurrealAuditLogRepository, SurrealNotificationRuleRepository,
+    SurrealNotificationWindowRepository, SurrealOrganizationRepository,
     SurrealScimTargetRepository, SurrealScimTargetStateRepository, SurrealTenantRepository,
     run_migrations,
 };
@@ -111,6 +112,7 @@ async fn rules(db: &Surreal<Db>, tenant_id: Uuid) -> SurrealNotificationRuleRepo
             description: String::new(),
             events: vec![NotificationEventType::ScimDeliveryFailed],
             recipient_emails: vec!["soc@example.com".into(), "oncall@example.com".into()],
+            window_minutes: None,
         })
         .await
         .unwrap();
@@ -121,6 +123,7 @@ async fn rules(db: &Surreal<Db>, tenant_id: Uuid) -> SurrealNotificationRuleRepo
             description: String::new(),
             events: vec![NotificationEventType::LoginFailure],
             recipient_emails: vec!["other@example.com".into()],
+            window_minutes: None,
         })
         .await
         .unwrap();
@@ -161,7 +164,11 @@ async fn a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule() {
     let mail = RecordedMail::default();
     let audit = scim_dead_letter_audit(
         SurrealAuditLogRepository::new(db.clone()),
-        Arc::new(NotificationSink::new(rules, mail.clone())),
+        Arc::new(NotificationSink::new(
+            rules,
+            SurrealNotificationWindowRepository::new(db.clone()),
+            mail.clone(),
+        )),
         SurrealTenantRepository::new(db.clone()),
         SurrealScimTargetStateRepository::new(db.clone()),
     );
@@ -243,7 +250,11 @@ async fn a_targets_dead_letters_mail_each_recipient_once_an_hour_not_once_each()
     let mail = RecordedMail::default();
     let audit = scim_dead_letter_audit(
         SurrealAuditLogRepository::new(db.clone()),
-        Arc::new(NotificationSink::new(rules, mail.clone())),
+        Arc::new(NotificationSink::new(
+            rules,
+            SurrealNotificationWindowRepository::new(db.clone()),
+            mail.clone(),
+        )),
         SurrealTenantRepository::new(db.clone()),
         SurrealScimTargetStateRepository::new(db.clone()),
     );
@@ -299,4 +310,61 @@ async fn a_targets_dead_letters_mail_each_recipient_once_an_hour_not_once_each()
         .await
         .unwrap();
     assert_eq!(state.dead_lettered_total, 0);
+}
+
+/// P23W5-A4: the row the in-process dispatcher writes for a delivery it lost at
+/// a stop, or refused at enqueue (`scim_push.delivery_abandoned`), is appended
+/// like every row but reaches no notification rule. A rule for
+/// `scim_delivery_failed` exists and matches the dead letter; a restart is not a
+/// downstream outage, so the abandoned delivery mails nobody.
+#[tokio::test]
+async fn an_abandoned_delivery_row_mails_nobody() {
+    let (db, _org_id, tenant_id) = setup().await;
+    let rules = rules(&db, tenant_id).await;
+    let target_id = target(&db, tenant_id).await;
+
+    let mail = RecordedMail::default();
+    let audit = scim_dead_letter_audit(
+        SurrealAuditLogRepository::new(db.clone()),
+        Arc::new(NotificationSink::new(
+            rules,
+            SurrealNotificationWindowRepository::new(db.clone()),
+            mail.clone(),
+        )),
+        SurrealTenantRepository::new(db.clone()),
+        SurrealScimTargetStateRepository::new(db.clone()),
+    );
+
+    for _ in 0..3 {
+        audit
+            .append(dispatcher_row(
+                tenant_id,
+                target_id,
+                "scim_push.delivery_abandoned",
+                AuditOutcome::Failure,
+            ))
+            .await
+            .unwrap();
+    }
+    assert!(
+        mail.0.lock().unwrap().is_empty(),
+        "an abandoned delivery is not a scim_delivery_failed event"
+    );
+
+    // Every row was appended, and the rule still works for a real dead letter.
+    audit
+        .append(dispatcher_row(
+            tenant_id,
+            target_id,
+            "scim_push.delivery_failed",
+            AuditOutcome::Failure,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(mail.0.lock().unwrap().len(), 2);
+    let page = audit
+        .list(tenant_id, AuditLogFilter::default(), Pagination::default())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 4);
 }

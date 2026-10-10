@@ -5,6 +5,7 @@ import {
   notificationRuleService,
   notificationEventLabel,
   NOTIFICATION_EVENTS,
+  NOTIFICATION_WINDOW_MINUTES,
   type NotificationRule,
   type CreateNotificationRulePayload,
   type UpdateNotificationRulePayload,
@@ -44,6 +45,16 @@ function validateEmails(raw: string): string | null {
   return null;
 }
 
+/** The window as a whole number of minutes within the server's bounds, or null. */
+function parseWindow(raw: string): number | null {
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const minutes = Number(raw.trim());
+  const { min, max } = NOTIFICATION_WINDOW_MINUTES;
+  return minutes >= min && minutes <= max ? minutes : null;
+}
+
+const WINDOW_ERROR = `Alert window must be a whole number of minutes from ${NOTIFICATION_WINDOW_MINUTES.min} to ${NOTIFICATION_WINDOW_MINUTES.max}.`;
+
 // ─── Rule form fields ─────────────────────────────────────────────────────────
 
 interface RuleFormFieldsProps {
@@ -52,11 +63,13 @@ interface RuleFormFieldsProps {
   recipientEmails: string;
   enabled: boolean;
   description: string;
+  windowMinutes: string;
   onNameChange: (v: string) => void;
   onEventsChange: (v: string[]) => void;
   onRecipientEmailsChange: (v: string) => void;
   onEnabledChange: (v: boolean) => void;
   onDescriptionChange: (v: string) => void;
+  onWindowMinutesChange: (v: string) => void;
   idPrefix: string;
 }
 
@@ -66,11 +79,13 @@ function RuleFormFields({
   recipientEmails,
   enabled,
   description,
+  windowMinutes,
   onNameChange,
   onEventsChange,
   onRecipientEmailsChange,
   onEnabledChange,
   onDescriptionChange,
+  onWindowMinutesChange,
   idPrefix,
 }: RuleFormFieldsProps) {
   function toggleEvent(value: string, checked: boolean) {
@@ -135,6 +150,22 @@ function RuleFormFields({
         <p className="text-xs text-muted-foreground">One email address per line.</p>
       </div>
 
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-window`}>Alert window (minutes)</Label>
+        <Input
+          id={`${idPrefix}-window`}
+          type="number"
+          min={NOTIFICATION_WINDOW_MINUTES.min}
+          max={NOTIFICATION_WINDOW_MINUTES.max}
+          value={windowMinutes}
+          onChange={(e) => onWindowMinutesChange(e.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">
+          Each event type is mailed at most once per window; later events in the window are
+          counted, and the next email reports how many were not sent.
+        </p>
+      </div>
+
       <ToggleField
         id={`${idPrefix}-enabled`}
         label="Enabled"
@@ -164,6 +195,9 @@ function useRuleFormState() {
   const [recipientEmails, setRecipientEmails] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [description, setDescription] = useState("");
+  const [windowMinutes, setWindowMinutes] = useState(
+    String(NOTIFICATION_WINDOW_MINUTES.default),
+  );
   const [error, setError] = useState("");
 
   function reset() {
@@ -172,6 +206,7 @@ function useRuleFormState() {
     setRecipientEmails("");
     setEnabled(true);
     setDescription("");
+    setWindowMinutes(String(NOTIFICATION_WINDOW_MINUTES.default));
     setError("");
   }
 
@@ -181,6 +216,7 @@ function useRuleFormState() {
     setRecipientEmails(rule.recipient_emails.join("\n"));
     setEnabled(rule.enabled);
     setDescription(rule.description ?? "");
+    setWindowMinutes(String(rule.window_minutes ?? NOTIFICATION_WINDOW_MINUTES.default));
     setError("");
   }
 
@@ -195,6 +231,8 @@ function useRuleFormState() {
     setEnabled,
     description,
     setDescription,
+    windowMinutes,
+    setWindowMinutes,
     error,
     setError,
     reset,
@@ -247,11 +285,17 @@ export function NotificationRulesPage() {
       createForm.setError(emailError);
       return;
     }
+    const windowMinutes = parseWindow(createForm.windowMinutes);
+    if (windowMinutes === null) {
+      createForm.setError(WINDOW_ERROR);
+      return;
+    }
     const payload: CreateNotificationRulePayload = {
       name: createForm.name.trim(),
       description: createForm.description.trim(),
       events: createForm.events,
       recipient_emails: parseEmails(createForm.recipientEmails),
+      window_minutes: windowMinutes,
     };
     createMutation.mutate(payload);
   }
@@ -301,6 +345,11 @@ export function NotificationRulesPage() {
       editForm.setError(emailError);
       return;
     }
+    const windowMinutes = parseWindow(editForm.windowMinutes);
+    if (windowMinutes === null) {
+      editForm.setError(WINDOW_ERROR);
+      return;
+    }
     editMutation.mutate({
       id: editRule.id,
       payload: {
@@ -309,6 +358,7 @@ export function NotificationRulesPage() {
         events: editForm.events,
         recipient_emails: parseEmails(editForm.recipientEmails),
         enabled: editForm.enabled,
+        window_minutes: windowMinutes,
       },
     });
   }
@@ -465,11 +515,13 @@ export function NotificationRulesPage() {
           recipientEmails={createForm.recipientEmails}
           enabled={createForm.enabled}
           description={createForm.description}
+          windowMinutes={createForm.windowMinutes}
           onNameChange={createForm.setName}
           onEventsChange={createForm.setEvents}
           onRecipientEmailsChange={createForm.setRecipientEmails}
           onEnabledChange={createForm.setEnabled}
           onDescriptionChange={createForm.setDescription}
+          onWindowMinutesChange={createForm.setWindowMinutes}
           idPrefix="create"
         />
       </FormDialog>
@@ -491,11 +543,13 @@ export function NotificationRulesPage() {
           recipientEmails={editForm.recipientEmails}
           enabled={editForm.enabled}
           description={editForm.description}
+          windowMinutes={editForm.windowMinutes}
           onNameChange={editForm.setName}
           onEventsChange={editForm.setEvents}
           onRecipientEmailsChange={editForm.setRecipientEmails}
           onEnabledChange={editForm.setEnabled}
           onDescriptionChange={editForm.setDescription}
+          onWindowMinutesChange={editForm.setWindowMinutes}
           idPrefix="edit"
         />
       </FormDialog>

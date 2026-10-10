@@ -333,6 +333,17 @@ fails closed instead of starting with a password from the repository.
   one, and under GitHub Actions every generated value is registered with
   `::add-mask::` as it is loaded.
 
+### Published ports bind loopback (`BENCH_BIND_ADDR`)
+
+Every published port in every target's compose file (and the optional cAdvisor
+stack) is `${BENCH_BIND_ADDR:-127.0.0.1}:<host port>:<container port>`, so a
+benchmark host on a LAN does not offer identity servers with their limits raised
+to the LAN (P23W6-06). The harness drives the stacks on `localhost`, so a run
+needs nothing. Set `BENCH_BIND_ADDR=0.0.0.0` only when something in a container
+must reach a stack through the Docker bridge (`host.docker.internal:host-gateway`):
+the FAPI conformance rig, whose workflow exports it. `runner/bind-addr-selftest.sh`
+fails when a `ports:` entry lacks the variable.
+
 ### AXIAM's minimal profile (`deploy=minimal`)
 
 `just deploy=minimal target=axiam profile=p0-plaintext bench-up` layers

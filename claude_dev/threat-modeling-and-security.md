@@ -38,6 +38,201 @@
 > written on every receiver. Nothing else in the model changed. The model is
 > **469 threats, 426 mitigated / 22 open / 21 not applicable**.
 >
+> **The SCIM per-target breaker (`1.0.0`, #550, P23W5-07 — T-414 amended, still
+> Mitigated).** A downstream that accepts connections and never answers held
+> each replica's one `scim_push` consumer for ten seconds per queued reference,
+> for every tenant. The deliverer now reads a target's delivery state before it
+> calls it, and a target with five or more consecutive failures whose last
+> failure is inside its window — the consumer's own backoff, doubling with each
+> further failure up to the ceiling — is answered with a retry, `target is
+> failing; backing off`, without a request. The loopback tarpit test (ten
+> references ahead of one for a healthy target, the healthy delivery inside one
+> request timeout) and the 10 001-member dead-letter test the issue asked for
+> are cited in the entry. What stays is named there: the five attempts that open
+> a breaker and one per window still wait a full timeout, a slow downstream that
+> succeeds now and then never opens it, and the per-target concurrency budget is
+> deferred to `1.0.x`. Status and totals are unchanged.
+>
+> **Notification windows (`1.0.0`, #551, P23W5-13 — T-117 closed).** A
+> notification rule mailed each recipient once per matching audit row, so a
+> request-path event an attacker can produce in volume — failed sign-ins spread
+> over addresses and accounts — mailed them once per attempt; the batching this
+> entry recorded until model 2.35.0 never existed. Each rule now has a window,
+> `window_minutes` (1 to 1440, 15 by default): of the events of one type that
+> match one rule, the first in a window mails each recipient, the rest are
+> counted, and the next mail says how many were not sent. The window of
+> (tenant, rule, event) is claimed in the datastore with a conditional write,
+> as T-418's gate is (schema v85), so two replicas still mail once; that gate
+> keeps `scim_delivery_failed` at one notification per target per hour and the
+> window does not apply to it again. The entry cites the issue's test — a
+> hundred `LoginFailure` rows mail each recipient once and the next window's
+> mail carries the count — and the two-replica, per-rule and per-event tests.
+> What stays is named there: a second incident of the same event type inside a
+> window reaches the recipients only as a count. The model is **469 threats,
+> 427 mitigated / 21 open / 21 not applicable**; its version is unchanged until
+> the wave's last item.
+> *Amended after the wave's F4 review (R1W2-01, T-117 still Mitigated).* The
+> claim first ran inline on the audit middleware's one worker per replica, and
+> every replica wrote every event of a burst into the same window record, so a
+> failed-sign-in flood on one tenant slowed every replica's worker until
+> request-audit rows of every tenant were dropped. A replica now writes a window
+> once when it learns it is open and counts the rest in memory, adding the count
+> with one write at its next claim and every ten seconds; a claim that keeps
+> losing a write conflict gives up after four attempts and is counted the same
+> way; and the rules run on a queue and task of their own, so a slow
+> notification drops notifications (counted and logged), never audit rows. The
+> entry cites the burst test (a hundred rows through a 50 ms step, no audit row
+> lost) and the eight-replica test (eight writes for a thousand events). Status
+> and totals are unchanged.
+>
+> **Request-audit loss (`1.0.0`, #553, P23W5-A10 — T-108 closed).** The audit
+> middleware drops a request's row when its queue is full and loses one when the
+> append is refused; each left one log line and nothing to alert on, and the
+> transactional write and compliance notification the entry once described never
+> existed. Both are now counted since process start and reported as
+> `request_audit` on `GET /health/jobs`, which reads `degraded` for fifteen
+> minutes after a loss; the totals are logged at `ERROR` on `axiam.audit.loss`,
+> at most once a minute; and when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set each lost
+> row is appended to it, off the request path, in the form the GDPR records use.
+> The GDPR request records (`gdpr.data_export_requested`,
+> `gdpr.erasure_requested`), which only logged a refused append, now take the
+> same dead-letter route (#552, P23W5-A7/A8), and the file is provisioned in every
+> shipped deployment: a named volume in both Compose files, an `emptyDir` in the
+> Kubernetes manifests (it survives a container restart, not the pod's
+> deletion, so it is replayed before a rollout), with one boot warning when it is
+> unset.
+> The tenant notification rules were not used: they are per tenant and per
+> enumerated event, and run on the datastore whose failure is the news. The
+> entry cites the tests and names what stays: rows in memory at a kill, no file
+> configured (counted, not recoverable), and on Kubernetes a file that does not
+> outlive its pod.
+> The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
+> version is unchanged until the wave's last item.
+> *Amended after the wave's F4 review (R1W2-02, T-108 still Mitigated).* The
+> file had no bound, a client sized its lines (the request path, the forwarded
+> address), and on Kubernetes the volume's `sizeLimit` is enforced by evicting
+> the pod, which deletes the file at the moment it is fullest. The writer now
+> has a byte budget, `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` (192 MiB by default, set
+> below the 256 MiB limit in the ConfigMap): request rows fill nine tenths of
+> it and are then refused, counted as not recoverable and reported as
+> `dead_letter_full` on `/health/jobs`; the last tenth is kept for the GDPR
+> records; and a row's path and address are cut to 512 and 64 bytes. The
+> manifest and the deployment guide now say what eviction does. The entry
+> cites the budget, reserve, truncation and health tests. Status and totals
+> are unchanged.
+>
+> **Every fatal exit stops in order (`1.0.0`, #554, P23W5-A11/A12 — T-444
+> amended, still Mitigated).** The full profile ended the process with
+> `std::process::exit(1)` when the authz, audit-ingestion or mail consumer or the
+> gRPC server stopped — the audit rows still queued, the requests in flight and
+> a purge between its erasure and its audit row lost, the hazard the lost lease
+> had until T23.8.2. Each now raises the lost lease's stop: the REST listener
+> stops accepting, the gRPC server is told to stop and awaited (bounded at five
+> seconds) before the audit queue is drained, and `serve` returns an error naming
+> the component, so `main` exits non-zero; its backstop (35 s, the whole stop and
+> a margin) is its own, since the lease's 15 s is shorter than the REST
+> shutdown. The entry cites the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
+> AMQP consumer's death needs a broker to provoke and is covered at the
+> coordinator. The stop's budget is now set and written down (#569): the REST
+> listener waits at most 20 s for requests in flight, gRPC 5 s and the audit
+> drain 5 s, and the shipped Compose files and Kubernetes manifest allow 40 s,
+> since the platforms' defaults (10 s, 30 s) can kill the process during the
+> drain. Status and totals are unchanged.
+>
+> **The CIBA pending-request list (`1.0.0`, #566, P23W6-07 — T-446, T-431 and
+> T-447 amended, statuses unchanged).** D-74 mails the approval prompt only to an
+> address something vouches for, and the approval page was reached only by the
+> mail's link, so a federated account (`PendingVerification` for life, T-160)
+> never learned its request's id and the client saw `expired_token`. The decision
+> stands and the missing half is built: `GET /api/v1/ciba/requests?status=pending`
+> lists the signed-in user's own pending requests, each with the page's
+> `request_id` and `version` and never the `auth_req_id`, and the console's user
+> menu carries a badge that opens the existing page. It is an approval surface
+> under that surface's rules from its first commit: a console sign-in only (a
+> client-minted token is `403`), a rate-limit bucket of its own in
+> `ciba_approval_per_min`, and no oracle — another user's, a decided and an
+> expired request are absent. The entries cite the three tests the issue asked
+> for and the limiter test. T-160 is unchanged (it is the exchange path, and a
+> federated account is still pending for life); T-446's residual is closed. The
+> model is unchanged: **469 threats, 428 mitigated / 20 open / 21 not
+> applicable**, version 2.37.0.
+>
+> **Every recorded sweep is registered (`1.0.0`, #535, P23W4-06 — T-129
+> amended, still Mitigated).** Five sweeps the cleanup loop records — the SSO
+> hand-off codes, the dynamic-client, CIMD-client and registration-token
+> sweeps and the revocation-feed prune — were missing from the registered
+> list, so until their first run `GET /health/jobs` showed them as absent,
+> which reads as "not deployed". The first four are now registered on every
+> start (DCR and CIMD are tenant settings, not a process switch); the
+> revocation-feed prune is registered, and recorded, only when the feed is on.
+> The rule is pinned by a source scan over every name `cleanup.rs` records and
+> a snapshot test of the five before their first run; the entry cites both.
+> Status and totals are unchanged.
+>
+> **The console shows and switches the SAML IdP and SSF surfaces (`1.0.0`,
+> #536, P23W4-07 — T-406 amended, still Mitigated).** The SSF Streams page
+> lists the tenant's streams and edits them; the `409` the administrators'
+> `PUT` answers when a stream changed under the form (T-406) now has its
+> consumer — the page closes the stale form, reloads the list and says the
+> stream changed — and the page never shows the write-only push header and asks
+> for it again when an edit moves the endpoint to another origin. The two
+> disable-only switches (`saml_idp_enabled`, `ssf_enabled`) are controls on the
+> organization's Settings tab and the tenant's Settings page, with the layered
+> state shown, so an administrator can see which third parties receive security
+> events and turn either surface off during an incident without the API. Status
+> and totals are unchanged.
+>
+> **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
+> T-416 amended, still Mitigated).** The administrators' `PUT` was conditional
+> on the version the server read during the request, so two administrators who
+> opened the edit form at the same version both saved and the second silently
+> replaced the first's scope, mapping or deprovision policy. `ScimTargetInput`
+> now takes an optional `expected_updated_at`: when present the replacement
+> lands only if the target still has that version, else `409`, and the console
+> sends the `updated_at` it read. A body without it behaves as before — last
+> writer wins — which is the residual the entry now names for SDKs and scripts
+> until contract 1.60 gives them the field. Status and totals are unchanged.
+>
+> **The webhook deliverer follows no redirect (`1.0.0`, #555, P23W5-10 — T-112
+> amended, still Mitigated).** `WebhookDelivery` sent through `guarded_fetch`,
+> which follows a redirect (every hop SSRF-checked) and re-sends the signed
+> request and its body to the `Location`, so a receiver's operator could forward
+> deliveries — personal data in event bodies — to a host the tenant never
+> registered. It now sends through `guarded_fetch_no_redirect` and a `3xx` is a
+> retry, as for the SSF, SCIM and CIBA ping deliverers; a loopback receiver
+> answering `307` is shown never followed and retried, and a source scan pins the
+> single call. A receiver behind a redirect must be registered with its final
+> URL (CHANGELOG). Status and totals are unchanged.
+>
+> **The boot log names the pepper variable an operator sets (`1.0.0`, #555).**
+> The secret-provider branch of the boot sequence reported `AXIAM__AUTH__PEPPER
+> not set` on a deployment that had set it, because only the provider's
+> spelling (`AXIAM__AUTH__AUTH_PEPPER`) was consulted; it now says whether the
+> provider or the configuration supplied the pepper, and names both spellings
+> when neither did. No threat entry changes, and no variable is renamed.
+>
+> **A delivery the in-process dispatcher loses leaves a terminal row (`1.0.0`,
+> #555, P23W5-A4 — T-445 amended, still Open).** In the minimal profile a
+> webhook, SSF push, outbound SCIM or CIBA-ping delivery lost at stop, or
+> refused at enqueue, left at most a `<kind>.delivery_attempt` row. At an
+> orderly stop each kind's consumer now writes one `<kind>.delivery_abandoned`
+> row (fixed reason, outcome `Failure`) per message still queued and per retry
+> still waiting, before the audit drain and within a 2 s bound, and an enqueue
+> the queue refuses writes one too. The action is deliberately not
+> `delivery_failed`, which the `scim_delivery_failed` notification event
+> matches: a restart mails nobody. A kill, an out-of-memory kill and a stop that
+> overruns still lose the queue without a row, and mail has none, so the entry
+> stays Open. Status and totals are unchanged.
+>
+> **The conformance workflow gates on a regression (`1.0.0`, #555, P23W5-11).**
+> `fapi-conformance.yml` ended red on every unattended run (interactive modules
+> wait for a browser), so its gate signalled nothing; it now runs
+> `conformance/scripts/gate.py` against the suite's result files and
+> `conformance/baseline.json`, failing on a `FAILED` module, one below its
+> baseline or a missing plan, and tolerating `WAITING`/`SKIPPED`. The workflow's
+> dispatch inputs reach its scripts through `env:`. CI-only; no threat entry
+> changes.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):
@@ -1161,7 +1356,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 426 / 22 |
+| Mitigated / Open | 428 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1184,7 +1379,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 30 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 4 | 0 |
+| Audit, webhooks, email & notifications | 55 | 2 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1285,7 +1480,13 @@ authentication by certificate reads a certificate's status (not the TLS
 handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
 corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
-from an unknown name.
+from an unknown name. The 1.0.0 release wave closes T-117 (#551): each rule
+mails one event type at most once per window and counts the rest, the next mail
+carrying the count, off the audit worker's path and with one datastore write per
+replica and window rather than one per event (R1W2-01); and T-108 (#553): a request-audit row that is dropped or
+fails to append is counted, shown on `/health/jobs` and, where a dead-letter
+file is configured, kept in it, within a byte budget that keeps a reserve for
+the GDPR records (R1W2-02).
 
 ### Coverage by STRIDE category
 
@@ -1299,9 +1500,9 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Spoofing | 101 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
-| Repudiation | 16 | 2 | 1 |
+| Repudiation | 16 | 1 | 1 |
 | Information disclosure | 110 | 7 | 4 |
-| Denial of service | 59 | 4 | 4 |
+| Denial of service | 59 | 3 | 4 |
 | Elevation of privilege | 90 | 3 | 4 |
 
 ### Coverage by severity
@@ -1309,13 +1510,13 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 196 | 10 | 9 |
-| Medium | 195 | 9 | 9 |
+| High | 196 | 9 | 9 |
+| Medium | 195 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 22 still-open items are listed one by one in
+the weight the control carries. The 20 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2624,7 +2825,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 22 of 469. The 21
+Every threat the model records as open, most severe first — 20 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2639,7 +2840,6 @@ each.
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
 | T-102 — A revoked certificate stays valid to every relying party that does not terminate at AXIAM | High | Revocation (status in AXIAM's store; no CRL published) · *PKI, certificates & IoT device identity* |
-| T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
@@ -2647,7 +2847,6 @@ each.
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
-| T-117 — Alert flooding buries a real incident | Medium | Notification rules (admin alerts) · *Audit, webhooks, email & notifications* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
@@ -2657,10 +2856,9 @@ each.
 | T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
-With three exceptions — T-108, request audit that drops a row with only a log
-line to say so; T-117, notification mail that is not coalesced on the request
-path; and T-447, a relying party's access token that can approve a device
-authorization in its user's name, each with an issue body in the W5 F4 review —
+With one exception — T-447, a relying party's access token that can approve a
+device authorization in its user's name, with an issue body in the W5 F4
+review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
 and gaps on the SDK and distribution side — and one on the PKI's publication

@@ -198,6 +198,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer's log after upgrading. `axiam-email` moves from layer 1 to layer 2
   of the crate layering. Threat model 2.38.0: T-473 entered Mitigated, T-300
   amended; 473 threats, 432 mitigated / 20 open / 21 not applicable.
+- **`claims.id_token.sub` with a value is honoured, or refused — never
+  dropped** (#520, P23W1-11). OIDC Core §5.5.1 lets a relying party name the
+  subject it expects in the `claims` parameter
+  (`{"id_token":{"sub":{"value":"…"}}}`) and forbids a token for anybody else;
+  AXIAM ignored the member on every lane. On a client registered
+  `authn_request_params: honour` it is now answered exactly as a mismatched
+  `id_token_hint` is: a signed-in user who is not the named subject is sent to
+  sign in again, and if that sign-in still produces somebody else — or the
+  request carried `prompt=none` — the answer is `login_required`
+  (`account_selection_required` under `prompt=select_account`) and no code is
+  issued; a `sub` member that cannot be read is `invalid_request`.
+  **Behaviour change:** a `fapi2` client sending a `claims` whose
+  `id_token.sub` carries a `value` (or `values`) is refused `invalid_request`
+  at the authorization endpoint, inline or pushed, where the constraint
+  used to be dropped. A `sub` request without a value, and every request from
+  an `ignore`-lane client, are unchanged. Threat model 2.38.0: T-239 amended;
+  totals unchanged.
 
 ### Documentation
 

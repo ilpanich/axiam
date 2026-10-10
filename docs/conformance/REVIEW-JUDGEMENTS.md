@@ -686,7 +686,13 @@ and that the ACR-requesting conditions belong to the Brazil profile and not to
   `par_test.rs::a_fapi2_client_is_refused_an_essential_auth_time_it_pushed`). A
   voluntary `auth_time` request is unchanged. Like the W1 change, the 2026-09-25
   build predates it.
-- Neither change touches `claims` for `userinfo` members.
+- **1.0.0 release wave, #520 (P23W1-11).** A `claims.id_token.sub` carrying a
+  `value` (or `values`) is honoured on the honour lane — a mismatch with the
+  signed-in user reauthenticates and then answers `login_required`, as a
+  mismatched `id_token_hint` does — and refused `invalid_request` on `fapi2`,
+  where it used to be dropped (`fapi.rs::p23w1_11_a_fapi2_client_is_refused_a_claims_id_token_sub_with_a_value`).
+  A valueless `sub` request is unchanged on every lane.
+- None of these changes touches `claims` for `userinfo` members.
 
 **Why that is conformant.** For the part the code settles: AXIAM does not
 silently discard a request it cannot satisfy on the one lane where discarding

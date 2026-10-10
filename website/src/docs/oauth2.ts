@@ -141,7 +141,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**An unknown tenant is answered identically to a known one**, apart from the value it echoes — the document is not an enumeration oracle.",
           "`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` names the tenant an unparameterised request describes. It states a fact in a document and is not a fallback in a handler: no endpoint's behaviour changes, and a caller that names a different tenant gets that one. A value that does not parse as a UUID is ignored and **reported once at boot**, describing the value's shape and never the value — so a deployment that set it can tell that it did not take, without the variable's contents reaching a log.",
           "`mtls_endpoint_aliases` (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the seven back-channel endpoints (CIBA's `bc-authorize` among them). Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
-          "`claims_parameter_supported: true` — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr`.",
+          "`claims_parameter_supported: true` — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr` and a `claims.id_token.sub` value.",
         ],
       },
       {
@@ -316,14 +316,14 @@ export const OAUTH2_PAGES: DocPage[] = [
           ["`prompt`", "`login` reauthenticates; `none` is answered without interaction and is refused outright for an anonymous browser and on a return leg; `select_account` can answer `account_selection_required`. `none` combined with another value is `invalid_request`."],
           ["`max_age`", "A positive value is compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour. `max_age=0` is handled as `prompt=login` (OIDC Core: they are equivalent): the browser always signs in again and the code that follows carries the new `auth_time`."],
           ["`acr_values` / `claims.id_token.acr`", "Matched against the session's own recorded authentication evidence through a function no request parameter can reach. An **essential** `acr` the end user cannot reach is `unmet_authentication_requirements`."],
-          ["`id_token_hint`", "Checked against the established session; naming somebody else is `login_required`."],
+          ["`id_token_hint` / `claims.id_token.sub`", "Checked against the established session; naming somebody else sends the browser to sign in, and a mismatch that survives it (or meets `prompt=none`) is `login_required` — never a token for another user."],
           ["`login_hint`, `display`, `ui_locales`, `claims_locales`", "Cosmetic, and honoured without becoming an oracle: `login_hint` is carried and **looked up by nothing**, `display` is allow-listed, `ui_locales` is matched server-side (RFC 4647) against the five shipped locales, `claims_locales` is ignored."],
         ],
       },
       {
         type: "list",
         items: [
-          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` or for `id_token.auth_time` as essential — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
+          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr`, for `id_token.auth_time` as essential, or for `id_token.sub` with a value — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
           "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported`, at the authorization endpoint and at PAR alike, and a non-PAR `request_uri` gives `request_uri_not_supported`.",
           "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
           "**On the** `ignore` **lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",

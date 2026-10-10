@@ -147,7 +147,9 @@ pub enum Reason {
     /// The session is older than `max_age` — or there is no session.
     MaxAgeExceeded,
     /// `id_token_hint` names a different subject, a different client, or did
-    /// not verify.
+    /// not verify — or `claims.id_token.sub` names a value that is not this
+    /// subject (P23W1-11). The two are one reason because they are one
+    /// request: "the token must be for this end user".
     HintMismatch,
     /// The requested authentication context class is not satisfied.
     AcrUnsatisfied,
@@ -299,6 +301,19 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
             hint.subject_id == Some(req.subject) && hint.client_id == req.client_id
         });
 
+    // `claims.id_token.sub` with a value (OIDC Core §5.5.1; P23W1-11, #520):
+    // a positive answer only for that subject. Compared as the string the ID
+    // token's `sub` carries (`subject_types_supported: ["public"]`, the user's
+    // id), case-sensitively as §5.7 has it. It is the hint's twin, so it is
+    // answered the way a mismatched hint is: an interaction on the first leg
+    // (the browser may sign in as the named user), `login_required` once that
+    // interaction has happened or under `prompt=none` — never a token for
+    // somebody else. An anonymous browser never reaches this function: it is
+    // sent to sign in first, so the value is only ever compared against an
+    // authenticated subject and steers nothing before that.
+    let sub_mismatch =
+        !params.claims_sub.is_empty() && !params.claims_sub.contains(&req.subject.to_string());
+
     let asked_for_interaction = max_age_is_login
         || params
             .prompt
@@ -330,6 +345,13 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
                     .into(),
             ));
         }
+        if sub_mismatch {
+            return Outcome::Refuse(OAuth2Error::LoginRequired(
+                "claims.id_token.sub names a different end user than the session this request \
+                 arrives with"
+                    .into(),
+            ));
+        }
         if max_age_unmet {
             return Outcome::Refuse(OAuth2Error::LoginRequired(
                 "the authentication behind this session is older than the requested max_age, \
@@ -358,13 +380,14 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
         return Outcome::Proceed { acr: reported };
     }
 
-    let unmet = hint_mismatch || max_age_unmet || !acr_satisfied || asked_for_interaction;
+    let unmet =
+        hint_mismatch || sub_mismatch || max_age_unmet || !acr_satisfied || asked_for_interaction;
     if !unmet {
         return Outcome::Proceed { acr: reported };
     }
 
     if !req.return_leg {
-        let reason = if hint_mismatch {
+        let reason = if hint_mismatch || sub_mismatch {
             Reason::HintMismatch
         } else if max_age_unmet {
             Reason::MaxAgeExceeded
@@ -396,6 +419,17 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
         } else {
             OAuth2Error::LoginRequired(
                 "the end user who signed in is not the one the id_token_hint names".into(),
+            )
+        });
+    }
+    if sub_mismatch {
+        return Outcome::Refuse(if select_account {
+            OAuth2Error::AccountSelectionRequired(
+                "the end user who signed in is not the one claims.id_token.sub names".into(),
+            )
+        } else {
+            OAuth2Error::LoginRequired(
+                "the end user who signed in is not the one claims.id_token.sub names".into(),
             )
         });
     }
@@ -905,6 +939,105 @@ mod tests {
         let mut req = f.request(&p, 0, &[Amr::Pwd]);
         req.id_token_hint = None; // decoding failed
         assert_eq!(refusal_code(&evaluate(req)), "login_required");
+    }
+
+    // ---- P23W1-11 — claims.id_token.sub with a value ----------------------
+
+    /// P23W1-11 (#520) — a `claims.id_token.sub` naming this subject asks for
+    /// nothing; naming somebody else sends the browser to sign in (the request
+    /// may be satisfied by authenticating *as* that user, OIDC Core §5.5.1),
+    /// and once that has happened, or under `prompt=none`, it is refused —
+    /// never a code for a different end user.
+    #[test]
+    fn p23w1_11_claims_id_token_sub_must_name_the_authenticated_subject() {
+        let f = Fixture::new();
+        let own = format!(r#"{{"id_token":{{"sub":{{"value":"{}"}}}}}}"#, f.subject);
+        let p = params(RawAuthnParams {
+            claims: Some(&own),
+            ..Default::default()
+        });
+        assert!(proceeds(&evaluate(f.request(&p, 0, &[Amr::Pwd]))).is_some());
+        let mut back = f.request(&p, 0, &[Amr::Pwd]);
+        back.return_leg = true;
+        assert!(proceeds(&evaluate(back)).is_some());
+
+        // One of several values is enough.
+        let among = format!(
+            r#"{{"id_token":{{"sub":{{"values":["{}","{}"]}}}}}}"#,
+            Uuid::new_v4(),
+            f.subject
+        );
+        let p = params(RawAuthnParams {
+            claims: Some(&among),
+            ..Default::default()
+        });
+        assert!(proceeds(&evaluate(f.request(&p, 0, &[Amr::Pwd]))).is_some());
+
+        // Somebody else — and the same id in another case, since `sub` is a
+        // case-sensitive string (OIDC Core §5.7).
+        for other in [
+            Uuid::new_v4().to_string(),
+            f.subject.to_string().to_uppercase(),
+        ] {
+            let doc = format!(r#"{{"id_token":{{"sub":{{"value":"{other}"}}}}}}"#);
+            let p = params(RawAuthnParams {
+                claims: Some(&doc),
+                ..Default::default()
+            });
+            assert_eq!(
+                interaction(&evaluate(f.request(&p, 0, &[Amr::Pwd]))).reason,
+                Reason::HintMismatch,
+                "{other}"
+            );
+            let mut back = f.request(&p, 0, &[Amr::Pwd]);
+            back.return_leg = true;
+            assert_eq!(refusal_code(&evaluate(back)), "login_required", "{other}");
+
+            let silent =
+                format!(r#"{{"id_token":{{"sub":{{"value":"{other}","essential":true}}}}}}"#);
+            let p = params(RawAuthnParams {
+                prompt: Some("none"),
+                claims: Some(&silent),
+                ..Default::default()
+            });
+            assert_eq!(
+                refusal_code(&evaluate(f.request(&p, 0, &[Amr::Pwd]))),
+                "login_required",
+                "{other}"
+            );
+
+            let p = params(RawAuthnParams {
+                prompt: Some("select_account"),
+                claims: Some(&doc),
+                ..Default::default()
+            });
+            let mut back = f.request(&p, 0, &[Amr::Pwd]);
+            back.return_leg = true;
+            assert_eq!(
+                refusal_code(&evaluate(back)),
+                "account_selection_required",
+                "{other}"
+            );
+        }
+    }
+
+    /// P23W1-11 — a `sub` member with no value constrains nothing.
+    #[test]
+    fn p23w1_11_a_valueless_id_token_sub_changes_no_outcome() {
+        let f = Fixture::new();
+        for doc in [
+            r#"{"id_token":{"sub":null}}"#,
+            r#"{"id_token":{"sub":{"essential":true}}}"#,
+        ] {
+            let p = params(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert!(
+                proceeds(&evaluate(f.request(&p, 0, &[Amr::Pwd]))).is_some(),
+                "{doc}"
+            );
+        }
     }
 
     // ---- T3.* — acr -------------------------------------------------------

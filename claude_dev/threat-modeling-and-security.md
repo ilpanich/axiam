@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118 and T-300 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300 and T-239 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -114,7 +114,14 @@
 > a limiter of their own. The tests refuse each class at save and at send with
 > nothing dialled, admit a private relay inside the allow-list, and send to a
 > name that answers a public address at the save and loopback at the send
-> without reaching the loopback listener. The model is
+> without reaching the loopback listener. It amends **T-239** (#520,
+> P23W1-11): a `claims` parameter asking for `id_token.sub` with a value was
+> dropped on every lane, where OIDC Core §5.5.1 forbids a token for any other
+> user. The honour lane now answers it as it answers a mismatched
+> `id_token_hint` — sign in again, then `login_required`, and at once under
+> `prompt=none` — and a `fapi2` client, which that lane never serves, is
+> refused it with `invalid_request`; the tests cover both lanes and the
+> ignore-lane twin. The model is
 > **473 threats, 432 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

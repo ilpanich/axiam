@@ -1903,6 +1903,112 @@ async fn m4_i4_twin_an_id_token_hint_is_ignored_on_the_ignore_lane() {
     assert!(query_param(&loc, "code").is_some(), "{loc}");
 }
 
+/// **P23W1-11 (#520) — `claims.id_token.sub` with a value, over HTTP (OIDC
+/// Core §5.5.1).** Naming the signed-in user is a code; naming somebody else
+/// sends the browser to sign in (the request is satisfiable by authenticating
+/// as the named user), is `login_required` when that sign-in still produced
+/// somebody else, and is `login_required` straight away under `prompt=none` —
+/// never a code, and so never an ID token, for a different user.
+#[actix_rt::test]
+async fn p23w1_11_claims_id_token_sub_is_honoured_on_the_honour_lane() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+    let claims_for = |sub: Uuid| -> String {
+        url::form_urlencoded::byte_serialize(
+            format!(r#"{{"id_token":{{"sub":{{"value":"{sub}"}}}}}}"#).as_bytes(),
+        )
+        .collect()
+    };
+
+    let own = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        &format!("&claims={}", claims_for(user_id)),
+    )
+    .await;
+    assert_eq!(own["sub"], serde_json::json!(user_id.to_string()), "{own}");
+
+    let somebody_else = claims_for(Uuid::new_v4());
+    let resp = authorize(
+        &app,
+        &token,
+        &format!("{}&claims={somebody_else}", base_query(&client_id)),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with("/login?return_to=") && loc.contains("&reauth=1"),
+        "a sub naming somebody else must send the browser to sign in, not mint a code: {loc}"
+    );
+
+    for extra in ["&axiam_login_hop=1", "&prompt=none"] {
+        let resp = authorize(
+            &app,
+            &token,
+            &format!("{}&claims={somebody_else}{extra}", base_query(&client_id)),
+        )
+        .await;
+        assert_eq!(error_of(&resp), "login_required", "{extra}");
+    }
+}
+
+/// **P23W1-11's invariant-1 twin.** The same mismatched `sub` from a client on
+/// the `ignore` lane — every client registered today — is dropped as it always
+/// was, and the code is issued.
+#[actix_rt::test]
+async fn p23w1_11_i1_twin_claims_id_token_sub_is_ignored_on_the_ignore_lane() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, ignore_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+    let somebody_else: String = url::form_urlencoded::byte_serialize(
+        format!(
+            r#"{{"id_token":{{"sub":{{"value":"{}"}}}}}}"#,
+            Uuid::new_v4()
+        )
+        .as_bytes(),
+    )
+    .collect();
+
+    let resp = authorize(
+        &app,
+        &token,
+        &format!("{}&claims={somebody_else}", base_query(&client_id)),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(query_param(&loc, "code").is_some(), "{loc}");
+}
+
 // ---------------------------------------------------------------------------
 // T23.1.4 — id_token_hint and prompt=select_account, over HTTP
 // ---------------------------------------------------------------------------

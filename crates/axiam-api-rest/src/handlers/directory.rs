@@ -430,20 +430,7 @@ fn require_own_tenant(
 
 /// The machine-readable name of an address-guard rule, for the audit row.
 const fn guard_rule(error: &GuardError) -> &'static str {
-    match error {
-        GuardError::InvalidUrl => "address_guard.invalid_url",
-        GuardError::Ipv6Literal => "address_guard.ipv6_literal",
-        GuardError::Unresolvable => "address_guard.unresolvable",
-        GuardError::TooManyAddresses => "address_guard.too_many_addresses",
-        GuardError::Loopback => "address_guard.loopback",
-        GuardError::Unspecified => "address_guard.unspecified",
-        GuardError::LinkLocal => "address_guard.link_local",
-        GuardError::Multicast => "address_guard.multicast",
-        GuardError::SpecialPurpose => "address_guard.special_purpose",
-        GuardError::Metadata => "address_guard.metadata",
-        GuardError::PrivateNotAllowed => "address_guard.private_not_allowed",
-        GuardError::OwnListener => "address_guard.own_listener",
-    }
+    error.rule()
 }
 
 /// The one audit rule every resolution-dependent refusal of a host **name**

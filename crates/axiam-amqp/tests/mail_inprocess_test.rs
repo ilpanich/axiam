@@ -18,6 +18,7 @@ use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_email::EmailEgress;
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -87,6 +88,7 @@ async fn a_failing_message_is_retried_in_process_then_leaves_one_audit_row() {
     let (publisher, queue) = in_process_mail_channel();
     let _worker = spawn_in_process_mail_worker(
         queue,
+        EmailEgress::default(),
         SurrealEmailConfigRepository::new(db.clone(), email_key()),
         SurrealAuditLogRepository::new(db.clone()),
         SurrealUserRepository::new(db.clone()),

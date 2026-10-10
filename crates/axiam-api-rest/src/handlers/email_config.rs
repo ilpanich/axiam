@@ -11,8 +11,18 @@
 //! appear in any response body: both `EmailConfig` and `EmailConfigOverride`
 //! carry `#[serde(skip_serializing)]` secrets end-to-end (D-01, 28-01).
 //!
-//! PUT performs structural validation only (D-15) — no live SMTP/API
-//! connectivity check is ever made at write time.
+//! PUT performs structural validation (D-15) and, since #529, the outbound
+//! address policy on the provider it carries — the SMTP host through the
+//! connector address guard, an explicit `api_url` through the SSRF rule
+//! ([`axiam_email::egress`]) — at both scopes: an organization administrator
+//! is a customer of a multi-tenant deployment, not its operator, so the
+//! organization's configuration is no more trusted than a tenant's. That check
+//! resolves the host and opens no connection; the same rule runs again at every
+//! send. A refusal of a host **name** is one message whatever the name resolved
+//! to (P23W3-04); an IP literal's names the rule.
+//!
+//! The two `…/email-config/test` routes do connect, and each carries its own
+//! rate limiter (`email_test_per_min`).
 
 use actix_web::{HttpResponse, web};
 use axiam_core::error::{AxiamError, AxiamResult};
@@ -22,6 +32,7 @@ use axiam_core::models::email::{
 };
 use axiam_core::repository::{EmailConfigRepository, UserRepository};
 use axiam_db::SurrealEmailConfigRepository;
+use axiam_email::EmailEgress;
 use axiam_email::message::EmailMessage;
 use axiam_email::service::EmailService;
 use serde::Serialize;
@@ -98,6 +109,21 @@ fn validate_email_config_override(input: &EmailConfigOverride) -> AxiamResult<()
     }
 }
 
+/// The outbound address policy on a provider about to be saved (#529): the
+/// refusal is a `400` whose message, for a host **name**, says nothing about
+/// what the name resolved to (P23W3-04); the specific rule is in the operator's
+/// log, written by [`EmailEgress::check`].
+async fn check_provider_address(
+    egress: &EmailEgress,
+    provider: &ProviderConfig,
+) -> Result<(), AxiamApiError> {
+    egress.check(provider).await.map_err(|refusal| {
+        AxiamApiError(AxiamError::Validation {
+            message: refusal.public_message(),
+        })
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Organization scope
 // ---------------------------------------------------------------------------
@@ -158,6 +184,7 @@ pub async fn get_org_email_config<C: Connection + Clone>(
     responses(
         (status = 200, description = "Organization email configuration updated (secrets omitted)",
          body = EmailConfig),
+        (status = 400, description = "Validation error, or the outbound address policy refuses the provider's host"),
     ),
     security(("bearer" = []))
 )]
@@ -188,6 +215,11 @@ pub async fn set_org_email_config<C: Connection + Clone>(
     let input = body.into_inner();
     validate_email_config(&input)?;
     let repo = require_email_config_repo(&state)?;
+    // #529 — for a configuration that will send (D-33's reasoning for the
+    // directory: switching one off must always be possible).
+    if input.enabled {
+        check_provider_address(&state.mail.egress, &input.provider).await?;
+    }
     let config = repo.set_org_config(org_id, input).await?;
     Ok(HttpResponse::Ok().json(config))
 }
@@ -293,7 +325,7 @@ pub async fn get_tenant_email_config<C: Connection + Clone>(
     responses(
         (status = 200, description = "Tenant email configuration override updated (secrets omitted)",
          body = EmailConfigOverride),
-        (status = 400, description = "Validation error"),
+        (status = 400, description = "Validation error, or the outbound address policy refuses the provider's host"),
     ),
     security(("bearer" = []))
 )]
@@ -320,6 +352,13 @@ pub async fn set_tenant_email_config<C: Connection + Clone>(
     let input = body.into_inner();
     validate_email_config_override(&input)?;
     let repo = require_email_config_repo(&state)?;
+    // #529 — the provider the override carries, unless the override switches
+    // the tenant's mail off.
+    if let Some(provider) = &input.provider
+        && input.enabled != Some(false)
+    {
+        check_provider_address(&state.mail.egress, provider).await?;
+    }
     let overrides = repo.set_tenant_override(tenant_id, input).await?;
     Ok(HttpResponse::Ok().json(overrides))
 }
@@ -390,6 +429,13 @@ pub struct EmailTestResult {
 /// the endpoint can only mail the person invoking it; and it is gated on
 /// `email_config:write`, the permission that could change the sender identity
 /// anyway.
+///
+/// And three keep it from being a network probe (#529, P23W3-11). The provider
+/// connects only to an address the outbound policy admits; a refusal of a host
+/// name is one `400` sentence whatever the name resolved to, and a connection
+/// that fails after the policy admitted the address — refused, reset, timed
+/// out — is one generic answer too (the cause is in the operator's log); and
+/// each route has its own rate limiter (`email_test_per_min`).
 async fn run_email_test<C: Connection + Clone>(
     user: &AuthenticatedUser,
     state: &AppState<C>,
@@ -414,7 +460,10 @@ async fn run_email_test<C: Connection + Clone>(
         .await?
         .email;
 
-    let service = EmailService::from_config(&config).map_err(AxiamApiError)?;
+    // The provider is held to the outbound address policy at the send as it is
+    // at the save (#529): a name re-pointed since is refused here, with the
+    // same one-sentence answer.
+    let service = EmailService::from_config(&config, &state.mail.egress).map_err(AxiamApiError)?;
     let provider = service.provider_name().to_string();
 
     let sender = format!("{} <{}>", config.from_name, config.from_email);
@@ -449,7 +498,9 @@ async fn run_email_test<C: Connection + Clone>(
     responses(
         (status = 200, description = "The provider accepted the message",
          body = EmailTestResult),
-        (status = 400, description = "The provider rejected it, or no configuration applies"),
+        (status = 400, description = "No configuration applies, or the outbound address policy refuses the provider's host"),
+        (status = 429, description = "Too many test sends from this address"),
+        (status = 500, description = "The provider could not be reached or did not accept the message"),
     ),
     security(("bearer" = []))
 )]
@@ -490,7 +541,9 @@ pub async fn test_org_email_config<C: Connection + Clone>(
     responses(
         (status = 200, description = "The provider accepted the message",
          body = EmailTestResult),
-        (status = 400, description = "The provider rejected it, or no configuration applies"),
+        (status = 400, description = "No configuration applies, or the outbound address policy refuses the provider's host"),
+        (status = 429, description = "Too many test sends from this address"),
+        (status = 500, description = "The provider could not be reached or did not accept the message"),
     ),
     security(("bearer" = []))
 )]

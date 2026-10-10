@@ -142,6 +142,11 @@ pub struct MailState<C: Connection + Clone> {
     /// means email-config admin endpoints and mail delivery stay disabled
     /// (fail-closed) — mirrors the pre-existing behavior exactly.
     pub email_encryption_key: Option<[u8; 32]>,
+    /// #529: where an email provider may connect — the SMTP host through the
+    /// connector address guard (with `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`
+    /// and AXIAM's own listener ports), an `api_url` through the SSRF rule.
+    /// Checked when a configuration is saved and at every send.
+    pub egress: axiam_email::EmailEgress,
     pub email_verification_service: EmailVerificationServiceT<C>,
 
     // -- QUAL-07: hoisted per-request service constructions (13 call sites) --

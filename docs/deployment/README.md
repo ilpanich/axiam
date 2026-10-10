@@ -849,6 +849,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` | Max writes per minute per IP to the outbound SCIM target registry's management API — create, update, delete and reconcile now under `/api/v1/scim-targets` (default `30`). Each write can repoint where a tenant's user directory and the target's credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | Max requests per minute per IP to each CIBA approval route — `GET /api/v1/ciba/requests/{id}`, `POST …/approve`, `POST …/deny` (default `30`). One bucket per route, so reads cannot starve decisions. Human-driven and behind a session and CSRF token; every request id that is not the caller's own answers `404`. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__CRL_PER_MIN` | Max `GET /pki/v1/{org_id}/ca/{ca_id}/crl` (certificate revocation list) requests per minute per IP (default `60`). Unauthenticated, because a relying party fetches the list before it can validate anything; it does so once per `nextUpdate` and revalidates with `If-None-Match` between. The list is signed once and cached, so an admitted request costs a database read, not a signature. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Certificate revocation lists](../pki/README.md#certificate-revocation-lists). |
+| `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
@@ -1960,6 +1961,52 @@ allowlisted host. Every use is logged.
 
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
+
+## Email providers: where they may connect
+
+An organization or tenant administrator chooses the email provider — an SMTP
+host and port, or an HTTP provider's `api_url` — so AXIAM holds both to a rule
+**you** set (#529). The check runs when a configuration is saved and again at
+every send (the mail consumer's and the delivery self-test's), so a name
+re-pointed after the save is caught at the next message.
+
+- **SMTP** gets the directory's address guard: the host is resolved once and
+  every address must pass the table in
+  [Where a directory may be](#where-a-directory-may-be-the-address-guard-and-the-frame-cap)
+  — loopback, unspecified, link-local (the cloud metadata service), multicast
+  and special-purpose addresses are always refused, so is an address of this
+  host on AXIAM's REST or gRPC port, and a private address only inside a network
+  you list. The connection is then **pinned** to the address that was checked,
+  and the server's certificate is still verified against the configured host
+  name.
+- **HTTP providers** (SendGrid, Postmark, Resend, Brevo) with an explicit
+  `api_url` go through the outbound SSRF guard: `https` only, globally routable
+  addresses only, never a redirect (the API key is a credential), and the one
+  exception is a host named in
+  [`AXIAM__PKI__SSRF_ALLOWED_HOSTS`](#outbound-ssrf-guard--same-network-idps-axiam__pki__ssrf_allowed_hosts).
+  A provider's built-in URL is not affected.
+
+- **`AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`** — comma-separated CIDR blocks (or
+  single addresses) an SMTP provider may resolve into. Unset, no private address
+  is admitted. **A deployment whose mail relay is on a private network —
+  an in-cluster Postfix, a relay in the same VPC — must list that network**, or
+  every send to it fails (upgrading from a release before #529, this is the one
+  setting to check). A relay on `localhost` is refused whatever the list says:
+  run it as its own service and list its network. As for the directory list, do
+  not list the network AXIAM's own pods, services or load balancers are in, and
+  an entry that does not parse is ignored and logged at `error`. Separate from
+  `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` on purpose: where mail relays
+  live and where directories live are two decisions.
+
+What an administrator sees of a refusal: saving answers `400`, and the delivery
+self-test `400`, with one sentence for a host **name** whatever it resolved to
+("does not resolve to an address this deployment permits an email connection
+to") and the specific rule only for an address they typed. A connection that
+fails after the guard admitted the address — refused, reset, timed out, a
+failed TLS handshake — is one generic answer as well, and the
+`email.delivery_failed` audit row's `error_class` reads `connection_error` for
+all of them. The specific cause is in your log (`target: axiam::email`). The
+self-test routes are rate-limited (`AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN`).
 
 ## The issuer, and per-tenant path issuers (optional, T21.6)
 

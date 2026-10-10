@@ -214,6 +214,15 @@ ENDPOINTS = {
     # fetches a list once per nextUpdate, so it is not a throughput path, and a
     # cell would need a CA and a revoked certificate seeded per run.
     "crl_per_min": (None, "GET /pki/v1/{org_id}/ca/{ca_id}/crl (certificate revocation list)"),
+    # #529 (T-473). The email delivery self-test carries its limiter from the
+    # commit that added it. Unmeasured: each call connects to a real email
+    # provider and mails the caller, which no bench target has, and it is an
+    # administrator's console action, not a throughput path.
+    "email_test_per_min": (
+        None,
+        "POST /api/v1/{organizations/{org_id},tenants/{tenant_id}}/email-config/test "
+        "(email delivery self-test; one bucket per route)",
+    ),
 }
 
 
@@ -266,7 +275,9 @@ def read_configured_defaults():
                   # the unlimited /auth/webauthn/* surface.
                   "webauthn_per_min",
                   # #565: the certificate revocation list route.
-                  "crl_per_min"):
+                  "crl_per_min",
+                  # #529: the email delivery self-test routes.
+                  "email_test_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

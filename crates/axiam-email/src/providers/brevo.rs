@@ -3,26 +3,24 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::email::ApiProviderConfig;
-use reqwest::Client;
-
-use super::build_http_client;
+use crate::egress::EmailEgress;
 use crate::message::EmailMessage;
 use crate::provider::{EmailProvider, SendResult};
+use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::email::ApiProviderConfig;
 
 const DEFAULT_API_URL: &str = "https://api.brevo.com/v3/smtp/email";
 
 pub struct BrevoProvider {
-    client: Client,
+    egress: EmailEgress,
     api_key: String,
     api_url: String,
 }
 
 impl BrevoProvider {
-    pub fn new(config: &ApiProviderConfig) -> AxiamResult<Self> {
+    pub fn new(config: &ApiProviderConfig, egress: EmailEgress) -> AxiamResult<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            egress,
             api_key: config.api_key.clone(),
             api_url: config
                 .api_url
@@ -66,14 +64,15 @@ impl EmailProvider for BrevoProvider {
             }
 
             let resp = self
-                .client
-                .post(&self.api_url)
-                .header("api-key", &self.api_key)
-                .header("Accept", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| AxiamError::EmailDelivery(format!("Brevo request failed: {e}")))?;
+                .egress
+                .post("Brevo", &self.api_url, |client, url| {
+                    client
+                        .post(url)
+                        .header("api-key", &self.api_key)
+                        .header("Accept", "application/json")
+                        .json(&body)
+                })
+                .await?;
 
             if !resp.status().is_success() {
                 let status = resp.status();

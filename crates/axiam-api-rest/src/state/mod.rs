@@ -893,6 +893,8 @@ impl<C: Connection + Clone> AppState<C> {
                 mail_outbound_publisher: Arc::new(NoopMailPublisher),
                 email_config_repo: None,
                 email_encryption_key: None,
+                // The strict rule, as a deployment with nothing configured.
+                egress: axiam_email::EmailEgress::default(),
                 email_verification_service,
                 password_reset_service,
             },

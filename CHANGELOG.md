@@ -166,6 +166,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's on gRPC unless `AXIAM__GRPC__STRICT_REVOCATION=true`. Threat model
   2.38.0: T-472 entered Mitigated, T-118 corrected; 472 threats, 431
   mitigated / 20 open / 21 not applicable.
+- **The email provider is held to an outbound address policy** (#529,
+  P23W3-11, T-473). An organization or tenant administrator's SMTP host and
+  port, or an HTTP provider's `api_url`, was dialled as written — `lettre`
+  resolved the host itself and `reqwest` the URL — so a saved configuration,
+  or one press of `POST …/email-config/test`, made AXIAM open connections to
+  loopback, the cloud metadata service or the pod network and send an SMTP
+  greeting, or a `POST` carrying the provider's API key, there. The SMTP host
+  now gets the directory connector's address guard (moved, unchanged, to
+  `axiam_pki::address`, so both share one implementation): resolved once;
+  loopback, link-local (the metadata service), unspecified, multicast and
+  special-purpose addresses, and this host's addresses on AXIAM's REST and gRPC
+  ports, always refused; a private address only inside the new operator
+  allow-list **`AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`** (comma-separated CIDR
+  blocks, unset admits none); and the connection pinned to the vetted address
+  with the configured host as the TLS name. An explicit `api_url` goes through
+  `guarded_fetch_no_redirect`: `https`, globally routable, never redirected,
+  with `AXIAM__PKI__SSRF_ALLOWED_HOSTS` as its exception list. Both are checked
+  on `PUT` at organization and tenant scope (a `400`) and at every send. A host
+  name's refusal is one sentence whatever it resolved to, and a connection that
+  fails after the check — refused, reset, timed out — is one generic answer, at
+  the self-test and in the `email.delivery_failed` audit row's `error_class`
+  (`connection_error`). The two self-test routes get their own limiter,
+  **`AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN`** (default 10 a minute per IP per
+  route, never moved by a profile). **Behaviour change / upgrade notes:** an
+  email provider on a private address now needs its network listed in
+  `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`, or every send to it fails; a relay
+  on `localhost` is refused whatever the list says (run it as a service on a
+  listed network); an `api_url` must be `https`; a stored configuration that
+  breaks the rule keeps its row and fails at the send, so check the mail
+  consumer's log after upgrading. `axiam-email` moves from layer 1 to layer 2
+  of the crate layering. Threat model 2.38.0: T-473 entered Mitigated, T-300
+  amended; 473 threats, 432 mitigated / 20 open / 21 not applicable.
 
 ### Documentation
 

@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471 and T-472 enter; T-289, T-275, T-160 and T-118 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118 and T-300 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -96,8 +96,26 @@
 > populated tenant, is refused its last session's refresh at once, runs the
 > purge and finds every tenant-scoped table empty for it and another tenant
 > untouched. It amends **T-118**, whose text said the tenant's audit entries
-> went with it: they did not, and now the purge removes them. The model is
-> **472 threats, 431 mitigated / 20 open / 21 not applicable**.
+> went with it: they did not, and now the purge removes them. It enters
+> **T-473**, Mitigated (#529, P23W3-11): the email provider an organization or
+> tenant administrator configures — an SMTP host and port, or an HTTP
+> provider's `api_url` — was dialled as written, outside every outbound address
+> policy, so a saved configuration, or one press of the delivery self-test,
+> made AXIAM connect to loopback, the metadata service or the pod network and
+> send an SMTP greeting or a `POST` carrying the API key there: T-300's class,
+> for email. The SMTP host is now held to the directory's connector address
+> guard — moved to `axiam_pki::address` so both share one implementation,
+> which amends **T-300** — resolved once, the connection pinned to the vetted
+> address with the configured host as the TLS name, private ranges admitted
+> only inside `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`; an `api_url` goes
+> through `guarded_fetch_no_redirect`; both are checked when a configuration is
+> saved, at either scope, and at every send; a host name's refusal and an
+> unreachable provider each get one generic answer; and the test routes carry
+> a limiter of their own. The tests refuse each class at save and at send with
+> nothing dialled, admit a private relay inside the allow-list, and send to a
+> name that answers a public address at the save and loopback at the send
+> without reaching the loopback listener. The model is
+> **473 threats, 432 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1211,7 +1229,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 472 threats** and a
+The system is verified against a **STRIDE threat model of 473 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1234,8 +1252,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 472 |
-| Mitigated / Open | 431 / 20 |
+| Threats identified | 473 |
+| Mitigated / Open | 432 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1258,7 +1276,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 31 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 4 | 0 |
+| Audit, webhooks, email & notifications | 56 | 4 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1383,7 +1401,7 @@ the category recorded against it in the model.
 | Spoofing | 103 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
-| Information disclosure | 111 | 6 | 4 |
+| Information disclosure | 112 | 6 | 4 |
 | Denial of service | 59 | 4 | 4 |
 | Elevation of privilege | 90 | 2 | 4 |
 
@@ -1393,7 +1411,7 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 9 | 9 |
-| Medium | 198 | 8 | 9 |
+| Medium | 199 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
@@ -2715,7 +2733,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 20 of 472. The 21
+Every threat the model records as open, most severe first — 20 of 473. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

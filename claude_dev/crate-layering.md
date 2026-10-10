@@ -12,8 +12,8 @@ outward.
 | Layer | Name | Crates |
 |---:|---|---|
 | 0 | domain | `axiam-core`, `axiam-test-support` |
-| 1 | domain services | `axiam-auth`, `axiam-authz`, `axiam-pki`, `axiam-email` |
-| 2 | infrastructure | `axiam-db`, `axiam-audit` |
+| 1 | domain services | `axiam-auth`, `axiam-authz`, `axiam-pki` |
+| 2 | infrastructure | `axiam-db`, `axiam-audit`, `axiam-email` |
 | 3 | federation protocol | `axiam-federation`, `axiam-directory` |
 | 4 | authorization server | `axiam-oauth2` |
 | 5 | messaging adapter | `axiam-amqp` |
@@ -63,6 +63,20 @@ seam is a port in layer 0 — `axiam_core::models::directory::DirectoryAuthentic
 and handing it to `AuthService::with_directory_authenticator`. The same shape as
 the reactor gate (`DynReactorGate`), and for the same reason: the security
 crate asks a question without knowing what answers it.
+
+**`axiam-email` is layer 2, not layer 1 (moved by #529).** It was placed with
+the domain services, but it is the outbound mail transport — SMTP through
+`lettre`, the provider APIs through `reqwest` — an adapter in everything but
+name. #529 holds every connection it opens to the outbound address policy: the
+SMTP host to the connector address guard and the HTTP providers to
+`guarded_fetch_no_redirect`, both in `axiam-pki` (layer 1). Sharing that code
+rather than copying it needs the edge `axiam-email → axiam-pki`, which the rule
+allows only one layer out. Its consumers, `axiam-amqp` (5) and `axiam-api-rest`
+(6), are unaffected. The address guard itself moved from `axiam-directory` to
+`axiam-pki` in the same change, beside `guarded_fetch`: `axiam-core` would be
+lower, but it deliberately carries no runtime and the resolver needs one, and
+`axiam-pki` is where the other SSRF guard already lives; `axiam-directory`
+(layer 3) gains the inward edge to it.
 
 **`axiam-scim` sits above `axiam-api-rest` rather than beside it.** SCIM is a REST
 sub-surface mounted into the same Actix app: it consumes the REST crate's

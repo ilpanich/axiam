@@ -876,7 +876,14 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                // #529 (T-473): the self-test connects to the provider, so it
+                // carries its own limiter, one bucket per route, per IP.
                 web::resource("/organizations/{org_id}/email-config/test")
+                    .wrap(build_governor(rate_limit_cfg.email_test_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "email_test_org",
+                        rate_limit_cfg.email_test_per_min,
+                    ))
                     .route(web::post().to(
                         handlers::email_config::test_org_email_config::<C>,
                     )),
@@ -1406,7 +1413,14 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                // #529 (T-473): the self-test connects to the provider, so it
+                // carries its own limiter, one bucket per route, per IP.
                 web::resource("/tenants/{tenant_id}/email-config/test")
+                    .wrap(build_governor(rate_limit_cfg.email_test_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "email_test_tenant",
+                        rate_limit_cfg.email_test_per_min,
+                    ))
                     .route(web::post().to(
                         handlers::email_config::test_tenant_email_config::<C>,
                     )),

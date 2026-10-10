@@ -6,6 +6,7 @@
 //! issuing CA, and GnuPG/OpenPGP key management for audit signing and encrypted
 //! data exports.
 
+pub mod address;
 pub mod ca;
 pub mod ca_key_store;
 pub mod cert;

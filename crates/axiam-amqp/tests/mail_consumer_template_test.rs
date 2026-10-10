@@ -36,6 +36,7 @@ use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_email::EmailEgress;
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -248,6 +249,7 @@ async fn custom_tenant_template_is_used_when_present() {
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
     let outcome = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,
@@ -307,6 +309,7 @@ async fn template_fetch_error_falls_back_to_builtin_and_still_attempts_delivery(
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
     let outcome = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,

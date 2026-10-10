@@ -294,6 +294,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "https://iam.acme.dev",
           ],
           [
+            "AXIAM__AUTH__JWT_ISSUER",
+            "The `iss` claim AXIAM signs into its tokens when `AXIAM__AUTH__OAUTH2_ISSUER_URL` is unset — a bare identifier rather than a URL, which is enough to sign tokens and not enough to publish a conformant discovery document. Set the issuer URL on any deployment a third party talks to; the certificate revocation list distribution point falls back to it as well.",
+            "axiam",
+          ],
+          [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
             "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Seven aliases are published — the six back-channel endpoints and CIBA's `bc-authorize` — and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
             "https://mtls.iam.acme.dev",
@@ -456,6 +461,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__RATE_LIMIT__CRL_PER_MIN",
             "Max requests per minute, per IP, to GET /pki/v1/{org_id}/ca/{ca_id}/crl, each issuing CA's certificate revocation list. Unauthenticated, because a relying party fetches the list before it can validate anything; it does so once per nextUpdate and revalidates with If-None-Match between. The list is signed once and cached, so an admitted request costs a database read, not a signature. Never moved by a profile preset.",
             "60",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN",
+            "Max requests per minute, per IP, to each of POST /api/v1/organizations/{org_id}/email-config/test and POST /api/v1/tenants/{tenant_id}/email-config/test, the email delivery self-test. Each call connects to the effective email provider and mails the caller, so the bucket bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by a profile preset.",
+            "10",
           ],
           [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
@@ -811,6 +821,22 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__DIRECTORY__MAX_MESSAGE_BYTES",
             "Largest LDAP message accepted from a directory, in bytes; clamped to 64 KiB … 16 MiB, default 2 MiB. A longer declared length — or a malformed or too deeply nested message — ends the connection before anything is buffered, so a hostile directory cannot make the shared connector hold unbounded memory or crash its parser. Raise it only if an ordinary answer is refused (the log line says so); one entry of an Active Directory `memberOf` read is a few hundred kilobytes.",
             "2097152",
+          ],
+        ],
+      },
+      { type: "h", id: "email-provider-addresses", text: "Email provider addresses" },
+      {
+        type: "p",
+        text: "An organization or tenant administrator chooses the email provider, so AXIAM holds it to a deployment rule when a configuration is saved and again at every send. An SMTP host gets the directory connector's address guard: resolved once, loopback, link-local (the cloud metadata service), unspecified, multicast and special-purpose addresses and AXIAM's own ports on its own host always refused, a private address only inside a network listed below, and the connection pinned to the vetted address with the relay's certificate still checked against the configured host name. A provider's `api_url` (SendGrid, Postmark, Resend, Brevo) goes through the outbound SSRF guard: `https`, public addresses only unless the host is named in `AXIAM__PKI__SSRF_ALLOWED_HOSTS`, and never a redirect, since the API key is a credential.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS",
+            "Comma-separated CIDR blocks (or single addresses) an SMTP provider may resolve into. Unset — the default — admits no private address, so only a relay on a public address works. A deployment whose relay is on a private network (an in-cluster Postfix, a relay in the same VPC) must list that network, or every send to it fails; a relay on `localhost` is refused whatever the list says. List the relay's network and **not** the one AXIAM's own pods or services are in. Separate from the directory's list on purpose. A metadata endpoint inside a private range stays refused whatever the list says, and an entry that is not a valid block is ignored and logged at error.",
+            "10.30.0.0/24",
           ],
         ],
       },

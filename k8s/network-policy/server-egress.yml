@@ -89,6 +89,10 @@ spec:
     # via a kustomize overlay patch or Helm value). Mail will not send until
     # this is configured. NEVER widen this to 0.0.0.0/0 — SMTP egress must stay
     # scoped to a specific, operator-configured relay.
+    #
+    # The server applies its own rule too (#529): a relay on a private address
+    # (RFC 1918, CGNAT, ULA) is refused unless its network is also listed in
+    # AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS. Set both to the relay's CIDR.
     - to:
         - ipBlock:
             cidr: 192.0.2.0/24   # PLACEHOLDER (RFC 5737 TEST-NET-1) — replace with your SMTP relay CIDR

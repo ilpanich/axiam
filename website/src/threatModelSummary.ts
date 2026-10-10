@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 472,
+ "total": 473,
  "open": 20,
- "mitigated": 431,
+ "mitigated": 432,
  "notApplicable": 21,
  "areas": [
   {
@@ -113,7 +113,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 55,
+   "total": 56,
    "open": 4,
    "notApplicable": 0
   },
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 111,
+   "total": 112,
    "open": 6,
    "notApplicable": 4
   },
@@ -192,7 +192,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 198,
+   "total": 199,
    "open": 8,
    "notApplicable": 9
   },

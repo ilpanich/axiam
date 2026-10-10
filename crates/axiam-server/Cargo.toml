@@ -23,6 +23,9 @@ axiam-federation = { workspace = true }
 # G-3 (T23.3.2): the LDAP client behind the DirectoryAuthenticator port the
 # login path is given here.
 axiam-directory = { workspace = true }
+# #529 — the email provider's outbound address policy (`EmailEgress`), built
+# here from deployment configuration like the directory's.
+axiam-email = { workspace = true }
 axiam-audit = { workspace = true }
 axiam-pki = { workspace = true }
 # R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.

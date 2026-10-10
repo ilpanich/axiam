@@ -17,6 +17,10 @@ workspace = true
 # over `rustls` -- there is no system library to make optional (plan §7 rule 5).
 [dependencies]
 axiam-core = { workspace = true }
+# #529 — the address guard (`axiam_pki::address`) is shared with the SMTP email
+# provider and lives beside `guarded_fetch`; `address.rs` here keeps the LDAP URL
+# form and re-exports the rest. Layer 1, so the edge points inward.
+axiam-pki = { workspace = true }
 # Configuration validation (src/config.rs). `url` parses the server URL,
 # `x509-parser` checks that each trust anchor is a CA certificate -- the same
 # parser axiam-pki and axiam-federation use, so no new crate enters the graph.

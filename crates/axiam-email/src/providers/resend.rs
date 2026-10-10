@@ -3,26 +3,24 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::email::ApiProviderConfig;
-use reqwest::Client;
-
-use super::build_http_client;
+use crate::egress::EmailEgress;
 use crate::message::EmailMessage;
 use crate::provider::{EmailProvider, SendResult};
+use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::email::ApiProviderConfig;
 
 const DEFAULT_API_URL: &str = "https://api.resend.com/emails";
 
 pub struct ResendProvider {
-    client: Client,
+    egress: EmailEgress,
     api_key: String,
     api_url: String,
 }
 
 impl ResendProvider {
-    pub fn new(config: &ApiProviderConfig) -> AxiamResult<Self> {
+    pub fn new(config: &ApiProviderConfig, egress: EmailEgress) -> AxiamResult<Self> {
         Ok(Self {
-            client: build_http_client()?,
+            egress,
             api_key: config.api_key.clone(),
             api_url: config
                 .api_url
@@ -62,13 +60,11 @@ impl EmailProvider for ResendProvider {
             }
 
             let resp = self
-                .client
-                .post(&self.api_url)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| AxiamError::EmailDelivery(format!("Resend request failed: {e}")))?;
+                .egress
+                .post("Resend", &self.api_url, |client, url| {
+                    client.post(url).bearer_auth(&self.api_key).json(&body)
+                })
+                .await?;
 
             if !resp.status().is_success() {
                 let status = resp.status();

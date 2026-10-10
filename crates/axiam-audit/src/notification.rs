@@ -8,6 +8,12 @@
 //! not sent. The window is claimed in the datastore, so replicas agree. On
 //! publish error the error is logged and execution continues —
 //! fire-and-forget (D-14).
+//!
+//! A replica writes the window once when it learns the window is open, not once
+//! per event (R1W2-01): until the window it was told about ends, it counts
+//! matching events in memory and hands the count back with one write at its
+//! next claim or flush. Every replica writing every event of a burst into one
+//! record is what serialized them all.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
@@ -15,8 +21,23 @@ use axiam_core::models::notification_rule::{NotificationEventType, NotificationW
 use axiam_core::repository::{
     MailPublisher, NotificationRuleRepository, NotificationWindowRepository,
 };
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
+
+/// A window's key: `(tenant, rule, event)`.
+type WindowKey = (Uuid, Uuid, String);
+
+/// What this replica knows of one window (R1W2-01).
+#[derive(Debug, Default)]
+struct LocalWindow {
+    /// When the window this replica was last told about ends; `None` when it
+    /// does not know.
+    open_until: Option<DateTime<Utc>>,
+    /// Events this replica counted and has not yet written to the window.
+    uncounted: u64,
+}
 
 /// Dispatches audit events to matching notification rules by enqueuing
 /// one `OutboundMailMessage(Notification)` per matched recipient, at most
@@ -24,6 +45,10 @@ use uuid::Uuid;
 pub struct NotificationDispatcher<N: NotificationRuleRepository, W: NotificationWindowRepository> {
     rule_repo: N,
     windows: W,
+    /// The windows this replica knows to be open, and its unwritten counts.
+    /// Emptied by every [`Self::flush_local_counts`], so it holds at most the
+    /// windows claimed since the last one.
+    local: Mutex<HashMap<WindowKey, LocalWindow>>,
 }
 
 impl<N: NotificationRuleRepository, W: NotificationWindowRepository> NotificationDispatcher<N, W> {
@@ -32,7 +57,149 @@ impl<N: NotificationRuleRepository, W: NotificationWindowRepository> Notificatio
     /// without the windows: a rule for an event an attacker can raise at will
     /// would mail its recipients once per event (T-117).
     pub fn new(rule_repo: N, windows: W) -> Self {
-        Self { rule_repo, windows }
+        Self {
+            rule_repo,
+            windows,
+            local: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn local(&self) -> MutexGuard<'_, HashMap<WindowKey, LocalWindow>> {
+        // The map holds counts, not invariants a panicking holder could have
+        // broken half-way: keep using it.
+        self.local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Write every count this replica holds in memory to its window, and forget
+    /// the windows it knew to be open, so that the next event of each claims
+    /// again and learns the window as it now stands.
+    ///
+    /// The audit middleware's sink task calls this every
+    /// [`crate::middleware::SINK_FLUSH_INTERVAL`] and when it stops, so a
+    /// replica that sees no further event still delivers its count to the next
+    /// mail, and a burst costs each replica at most two writes per window and
+    /// interval: this one and the next claim. A count that cannot be written is
+    /// kept for the next flush.
+    pub async fn flush_local_counts(&self) {
+        let held = std::mem::take(&mut *self.local());
+        for ((tenant_id, rule_id, event), window) in held {
+            if window.uncounted == 0 {
+                continue;
+            }
+            if let Err(e) = self
+                .windows
+                .add_uncounted(tenant_id, rule_id, &event, window.uncounted)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    event = %event,
+                    rule_id = %rule_id,
+                    uncounted = window.uncounted,
+                    "a notification window's count could not be written; kept for the next flush"
+                );
+                self.local()
+                    .entry((tenant_id, rule_id, event))
+                    .or_default()
+                    .uncounted += window.uncounted;
+            }
+        }
+    }
+
+    /// Claim the window of `(tenant_id, rule_id, event)` for one event. `Some`
+    /// with the count to report when this event opens it; `None` when it was
+    /// counted — in the datastore, or here in memory — and is not mailed.
+    async fn claim_window(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        window_secs: i64,
+    ) -> Option<u64> {
+        let now = Utc::now();
+        let key = (tenant_id, rule_id, event.to_string());
+
+        // Inside a window this replica knows to be open: count it here, write
+        // nothing. Past the end of the one it knew, take what was counted in
+        // it, for the write below. (Not knowing — a contended or failed claim
+        // — keeps the count for the flush: that window is still open.)
+        let carried = {
+            let mut local = self.local();
+            let window = local.entry(key.clone()).or_default();
+            match window.open_until.take() {
+                Some(end) if now < end => {
+                    window.open_until = Some(end);
+                    window.uncounted += 1;
+                    return None;
+                }
+                Some(_) => std::mem::take(&mut window.uncounted),
+                None => 0,
+            }
+        };
+
+        // The window this replica knew has ended: its count goes to the
+        // datastore before the claim, so the mail that opens the next window
+        // reports it.
+        if carried > 0
+            && let Err(e) = self
+                .windows
+                .add_uncounted(tenant_id, rule_id, event, carried)
+                .await
+        {
+            tracing::warn!(
+                error = %e,
+                event = %event,
+                rule_id = %rule_id,
+                "a notification window's count could not be written; kept for the next flush"
+            );
+            self.local().entry(key.clone()).or_default().uncounted += carried;
+        }
+
+        let claim = self
+            .windows
+            .claim(tenant_id, rule_id, event, now, window_secs)
+            .await;
+        let mut local = self.local();
+        let window = local.entry(key).or_default();
+        match claim {
+            Ok(NotificationWindowClaim::Opened { suppressed }) => {
+                window.open_until = Some(now + Duration::seconds(window_secs));
+                Some(suppressed)
+            }
+            Ok(NotificationWindowClaim::Counted { open_until }) => {
+                window.open_until = Some(open_until);
+                tracing::debug!(
+                    event = %event,
+                    rule_id = %rule_id,
+                    "notification window open; event counted, not mailed"
+                );
+                None
+            }
+            // Another claimant wrote the window in this instant, so it is open;
+            // nothing was written for this event, so it is counted here.
+            Ok(NotificationWindowClaim::Contended) => {
+                window.uncounted += 1;
+                tracing::debug!(
+                    event = %event,
+                    rule_id = %rule_id,
+                    "notification window contended; event counted in memory, not mailed"
+                );
+                None
+            }
+            // Silence, not a flood (D-73); the event is still counted, here.
+            Err(e) => {
+                window.uncounted += 1;
+                tracing::warn!(
+                    error = %e,
+                    event = %event,
+                    rule_id = %rule_id,
+                    "the notification window could not be claimed; not notifying"
+                );
+                None
+            }
+        }
     }
 
     /// Match an audit event against notification rules and enqueue one
@@ -60,6 +227,15 @@ impl<N: NotificationRuleRepository, W: NotificationWindowRepository> Notificatio
     /// and not mailed. A claim that fails is not mailed either — silence, not
     /// a flood, as the background gate decides (D-73); the audit row exists
     /// either way.
+    ///
+    /// Inside a window this replica already knows to be open, the event is
+    /// counted in memory and nothing is written (R1W2-01); so is an event whose
+    /// claim kept losing a write conflict, or failed. Those counts reach the
+    /// datastore at this replica's next claim of the window or its next
+    /// [`Self::flush_local_counts`], and from there the next mail. A count that
+    /// arrives after another replica has already opened the next window is
+    /// reported by the mail after that one: late, never lost while the process
+    /// runs.
     ///
     /// An event raised by an AXIAM background process
     /// ([`NotificationEventType::is_system_event`]) is not windowed here: its
@@ -146,33 +322,16 @@ impl<N: NotificationRuleRepository, W: NotificationWindowRepository> Notificatio
                 )
             } else {
                 let window_secs = i64::from(rule.window_minutes) * 60;
-                match self
-                    .windows
-                    .claim(tenant_id, rule.id, &event_name, Utc::now(), window_secs)
+                let Some(suppressed) = self
+                    .claim_window(tenant_id, rule.id, &event_name, window_secs)
                     .await
-                {
-                    Ok(NotificationWindowClaim::Opened { suppressed }) => (
-                        suppressed,
-                        window_note(&event_name, rule.window_minutes, suppressed),
-                    ),
-                    Ok(NotificationWindowClaim::Counted) => {
-                        tracing::debug!(
-                            event = %event_name,
-                            rule_id = %rule.id,
-                            "notification window open; event counted, not mailed"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            event = %event_name,
-                            rule_id = %rule.id,
-                            "the notification window could not be claimed; not notifying"
-                        );
-                        continue;
-                    }
-                }
+                else {
+                    continue;
+                };
+                (
+                    suppressed,
+                    window_note(&event_name, rule.window_minutes, suppressed),
+                )
             };
 
             let mut context = context.clone();
@@ -254,8 +413,8 @@ fn window_note(event: &str, window_minutes: u32, suppressed: u64) -> String {
 /// them.
 ///
 /// Implements [`crate::middleware::AuditEventSink`] so
-/// `AuditMiddleware::spawn_with_sink` can drive it on the audit worker's task,
-/// off the request path.
+/// `AuditMiddleware::spawn_with_sink` can drive it on a task of its own, off
+/// the request path and off the audit worker (R1W2-01).
 pub struct NotificationSink<
     N: NotificationRuleRepository,
     W: NotificationWindowRepository,
@@ -278,12 +437,39 @@ impl<N: NotificationRuleRepository, W: NotificationWindowRepository, P: MailPubl
     }
 }
 
+impl<N: NotificationRuleRepository, W: NotificationWindowRepository, P: MailPublisher>
+    NotificationSink<N, W, P>
+{
+    /// Write the window counts this replica holds in memory (R1W2-01) — see
+    /// [`NotificationDispatcher::flush_local_counts`].
+    pub async fn flush_local_counts(&self) {
+        self.dispatcher.flush_local_counts().await;
+    }
+}
+
 impl<N, W, P> crate::middleware::AuditEventSink for NotificationSink<N, W, P>
 where
     N: NotificationRuleRepository + 'static,
     W: NotificationWindowRepository + 'static,
     P: MailPublisher + 'static,
 {
+    /// Only a row attributed to a tenant whose action and outcome name a
+    /// notification event: no rule could match any other, so the rest never
+    /// take a place in the sink's queue.
+    fn wants(&self, event: &crate::middleware::AuditEvent) -> bool {
+        let entry = &event.entry;
+        !entry.tenant_id.is_nil()
+            && !NotificationEventType::from_audit_action(
+                &entry.action,
+                &format!("{:?}", entry.outcome),
+            )
+            .is_empty()
+    }
+
+    fn flush(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.flush_local_counts())
+    }
+
     fn on_event<'a>(
         &'a self,
         event: &'a crate::middleware::AuditEvent,
@@ -595,9 +781,29 @@ mod tests {
     /// `(tenant, rule, event)` → when the window opened, events counted in it.
     type Windows = std::collections::HashMap<(Uuid, Uuid, String), (DateTime<Utc>, u64)>;
 
+    /// The windows, and how many writes — claims and added counts — they took.
     #[derive(Clone, Default)]
     struct MemWindows {
         open: Arc<Mutex<Windows>>,
+        claims: Arc<std::sync::atomic::AtomicUsize>,
+        adds: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl MemWindows {
+        fn claims(&self) -> usize {
+            self.claims.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn adds(&self) -> usize {
+            self.adds.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Move every window back by `secs`, as that much time passing would.
+        fn age(&self, secs: i64) {
+            for (opened_at, _) in self.open.lock().unwrap().values_mut() {
+                *opened_at -= chrono::Duration::seconds(secs);
+            }
+        }
     }
 
     impl NotificationWindowRepository for MemWindows {
@@ -609,14 +815,17 @@ mod tests {
             now: DateTime<Utc>,
             window_secs: i64,
         ) -> AxiamResult<NotificationWindowClaim> {
+            self.claims
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut open = self.open.lock().unwrap();
             let key = (tenant_id, rule_id, event.to_string());
+            let window = chrono::Duration::seconds(window_secs);
             match open.get_mut(&key) {
-                Some((opened_at, suppressed))
-                    if *opened_at > now - chrono::Duration::seconds(window_secs) =>
-                {
+                Some((opened_at, suppressed)) if *opened_at > now - window => {
                     *suppressed += 1;
-                    Ok(NotificationWindowClaim::Counted)
+                    Ok(NotificationWindowClaim::Counted {
+                        open_until: *opened_at + window,
+                    })
                 }
                 other => {
                     let carried = other.map_or(0, |(_, suppressed)| *suppressed);
@@ -626,6 +835,55 @@ mod tests {
                     })
                 }
             }
+        }
+
+        async fn add_uncounted(
+            &self,
+            tenant_id: Uuid,
+            rule_id: Uuid,
+            event: &str,
+            count: u64,
+        ) -> AxiamResult<()> {
+            self.adds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some((_, suppressed)) =
+                self.open
+                    .lock()
+                    .unwrap()
+                    .get_mut(&(tenant_id, rule_id, event.to_string()))
+            {
+                *suppressed += count;
+            }
+            Ok(())
+        }
+    }
+
+    /// A window record every claim loses to another claimant's write.
+    #[derive(Clone, Default)]
+    struct ContendedWindows {
+        added: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl NotificationWindowRepository for ContendedWindows {
+        async fn claim(
+            &self,
+            _tenant_id: Uuid,
+            _rule_id: Uuid,
+            _event: &str,
+            _now: DateTime<Utc>,
+            _window_secs: i64,
+        ) -> AxiamResult<NotificationWindowClaim> {
+            Ok(NotificationWindowClaim::Contended)
+        }
+
+        async fn add_uncounted(
+            &self,
+            _tenant_id: Uuid,
+            _rule_id: Uuid,
+            _event: &str,
+            count: u64,
+        ) -> AxiamResult<()> {
+            self.added.lock().unwrap().push(count);
+            Ok(())
         }
     }
 
@@ -641,6 +899,18 @@ mod tests {
             _now: DateTime<Utc>,
             _window_secs: i64,
         ) -> AxiamResult<NotificationWindowClaim> {
+            Err(axiam_core::error::AxiamError::Internal(
+                "datastore unavailable".into(),
+            ))
+        }
+
+        async fn add_uncounted(
+            &self,
+            _tenant_id: Uuid,
+            _rule_id: Uuid,
+            _event: &str,
+            _count: u64,
+        ) -> AxiamResult<()> {
             Err(axiam_core::error::AxiamError::Internal(
                 "datastore unavailable".into(),
             ))
@@ -1269,6 +1539,107 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("background process")
+        );
+    }
+
+    /// R1W2-01: eight replicas sharing one window, handed a burst between
+    /// them, write it once each — not once per event — and the next window's
+    /// mail still carries every event of the burst but the one mailed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn eight_replicas_write_a_window_once_each_not_once_per_event() {
+        let windows = MemWindows::default();
+        let rule = make_rule(vec!["soc@example.com"]);
+        let tenant_id = Uuid::new_v4();
+        let publisher = RecordingPublisher::new();
+        let replicas: Vec<_> = (0..8)
+            .map(|_| {
+                Arc::new(NotificationDispatcher::new(
+                    MockRuleRepo::new(vec![rule.clone()]),
+                    windows.clone(),
+                ))
+            })
+            .collect();
+
+        let mut burst = tokio::task::JoinSet::new();
+        for replica in &replicas {
+            let (replica, publisher) = (Arc::clone(replica), publisher.clone());
+            burst.spawn(async move {
+                for _ in 0..125 {
+                    login_failure(&replica, tenant_id, &publisher).await;
+                }
+            });
+        }
+        burst.join_all().await;
+        assert_eq!(publisher.count(), 1, "the window is opened once");
+        assert_eq!(windows.claims(), 8, "one claim per replica, not per event");
+
+        // Each replica's flush writes its count once.
+        for replica in &replicas {
+            replica.flush_local_counts().await;
+        }
+        assert_eq!(windows.adds(), 8);
+
+        windows.age(15 * 60);
+        login_failure(&replicas[0], tenant_id, &publisher).await;
+        let sent = publisher.messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].template_context["suppressed_count"], "999");
+    }
+
+    /// R1W2-01: when the window a replica knows has ended, the next event hands
+    /// the replica's count back before it claims, so the mail that opens the
+    /// next window reports it — with no flush in between.
+    #[tokio::test]
+    async fn a_count_kept_in_memory_reaches_the_mail_that_opens_the_next_window() {
+        let windows = MemWindows::default();
+        let rule = make_rule(vec!["soc@example.com"]);
+        let rule_id = rule.id;
+        let dispatcher =
+            NotificationDispatcher::new(MockRuleRepo::new(vec![rule]), windows.clone());
+        let publisher = RecordingPublisher::new();
+        let tenant_id = Uuid::new_v4();
+
+        for _ in 0..10 {
+            login_failure(&dispatcher, tenant_id, &publisher).await;
+        }
+        assert_eq!(windows.claims(), 1, "nine events counted in memory");
+
+        // The window ends, in the datastore and for this replica.
+        windows.age(15 * 60);
+        dispatcher
+            .local()
+            .get_mut(&(tenant_id, rule_id, "login_failure".to_string()))
+            .expect("the replica knows the window")
+            .open_until = Some(Utc::now());
+        login_failure(&dispatcher, tenant_id, &publisher).await;
+
+        let sent = publisher.messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].template_context["suppressed_count"], "9");
+    }
+
+    /// R1W2-01: a claim that keeps losing a write conflict mails nobody and
+    /// writes nothing; the replica counts the event and hands the count back
+    /// at its flush.
+    #[tokio::test]
+    async fn a_contended_claim_is_counted_in_memory_and_written_at_the_flush() {
+        let windows = ContendedWindows::default();
+        let dispatcher = NotificationDispatcher::new(
+            MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]),
+            windows.clone(),
+        );
+        let publisher = RecordingPublisher::new();
+        let tenant_id = Uuid::new_v4();
+        for _ in 0..5 {
+            assert_eq!(login_failure(&dispatcher, tenant_id, &publisher).await, 0);
+        }
+        assert_eq!(publisher.count(), 0);
+        assert!(windows.added.lock().unwrap().is_empty());
+        dispatcher.flush_local_counts().await;
+        assert_eq!(
+            *windows.added.lock().unwrap(),
+            vec![5],
+            "one write for all five"
         );
     }
 

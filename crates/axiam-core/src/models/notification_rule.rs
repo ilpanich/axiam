@@ -322,7 +322,17 @@ pub enum NotificationWindowClaim {
         suppressed: u64,
     },
     /// A window is open: the event was counted, not mailed.
-    Counted,
+    Counted {
+        /// When the open window ends. Until then a replica may count further
+        /// events in memory instead of writing each (R1W2-01).
+        open_until: DateTime<Utc>,
+    },
+    /// The claim kept losing a write conflict, so it wrote nothing: another
+    /// claimant wrote the window in that instant, which leaves it open (R1W2-01).
+    /// Not mailed, and **not counted** in the datastore: the caller counts the
+    /// event itself and hands the count back with
+    /// `NotificationWindowRepository::add_uncounted`.
+    Contended,
 }
 
 // -----------------------------------------------------------------------

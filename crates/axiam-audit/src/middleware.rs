@@ -10,13 +10,13 @@
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
@@ -90,20 +90,45 @@ pub struct AuditEvent {
 /// route in the application, so a type parameter here would spread through the
 /// whole server builder.
 ///
-/// Runs **after** the append and never blocks the response — the worker is
-/// already off the request path. An implementation must not propagate errors;
-/// audit recording is the guarantee here, and notification is best-effort on top
-/// of it.
+/// Runs **after** the append and never blocks the response. Nor does it block
+/// the audit worker (R1W2-01): the worker hands each row the sink
+/// [wants](Self::wants) to a bounded queue of the sink's own, read by a task of
+/// its own, and a row that finds that queue full loses its notification —
+/// counted and logged — never its audit row. An implementation must not
+/// propagate errors; audit recording is the guarantee here, and notification is
+/// best-effort on top of it.
 pub trait AuditEventSink: Send + Sync {
     /// React to `event`. Errors must be logged and swallowed, not returned.
     fn on_event<'a>(
         &'a self,
         event: &'a AuditEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+    /// Whether `event` can concern this sink at all. Asked on the audit worker
+    /// for every row, so it must be cheap and do no I/O; a row it declines is
+    /// not queued for the sink. Every row, by default.
+    fn wants(&self, event: &AuditEvent) -> bool {
+        let _ = event;
+        true
+    }
+
+    /// Write out whatever the sink keeps in memory. Called on the sink's task
+    /// every [`SINK_FLUSH_INTERVAL`] and once more when its queue closes.
+    /// Nothing, by default.
+    fn flush(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
-/// Default capacity for the audit write channel.
+/// Default capacity for the audit write channel. The sink's queue has the same
+/// capacity.
 pub const CHANNEL_CAPACITY: usize = 4096;
+
+/// How often the sink's task calls [`AuditEventSink::flush`].
+pub const SINK_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The least time between two WARN lines about dropped notifications.
+const NOTIFICATION_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// What travels on the worker's channel: an entry, or [`AuditMiddleware::drain`]'s
 /// barrier, acknowledged once every entry queued before it has been written.
@@ -122,6 +147,15 @@ pub struct AuditMiddleware {
     tx: mpsc::Sender<Queued>,
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
+    notifications_dropped: Arc<AtomicU64>,
+}
+
+/// The audit worker's way to the sink: the sink's queue, and the count of rows
+/// whose notification it refused.
+struct SinkQueue {
+    sink: Arc<dyn AuditEventSink>,
+    tx: mpsc::Sender<AuditEvent>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl AuditMiddleware {
@@ -153,10 +187,15 @@ impl AuditMiddleware {
     }
 
     /// As [`Self::spawn_with_sink`], with the dead-letter writer lost rows are
-    /// routed to and the channel's capacity.
+    /// routed to and the capacity of the channel (and of the sink's queue).
     ///
     /// The composition root passes [`DeadLetterWriter::from_env`]; tests pass a
     /// small capacity to fill the channel.
+    ///
+    /// With a sink, a second task runs it: the worker appends a row and queues
+    /// it for the sink without waiting, so a slow sink — a notification rule
+    /// whose window is contended across replicas — costs notifications, never
+    /// audit rows (R1W2-01).
     pub fn spawn_configured<A: AuditLogRepository + 'static>(
         repo: A,
         sink: Option<Arc<dyn AuditEventSink>>,
@@ -166,6 +205,16 @@ impl AuditMiddleware {
         let (tx, rx) = mpsc::channel(capacity);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let loss = RequestAuditLoss::new(dead_letter);
+        let notifications_dropped = Arc::new(AtomicU64::new(0));
+        let sink = sink.map(|sink| {
+            let (sink_tx, sink_rx) = mpsc::channel(capacity);
+            tokio::spawn(sink_worker(sink_rx, Arc::clone(&sink)));
+            SinkQueue {
+                sink,
+                tx: sink_tx,
+                dropped: Arc::clone(&notifications_dropped),
+            }
+        });
         tokio::spawn(audit_worker(
             rx,
             repo,
@@ -177,12 +226,19 @@ impl AuditMiddleware {
             tx,
             shutting_down,
             loss,
+            notifications_dropped,
         }
     }
 
     /// The counters of request-audit rows that were not recorded (T-108).
     pub fn loss(&self) -> RequestAuditLoss {
         self.loss.clone()
+    }
+
+    /// Rows whose notification was dropped, since start, because the sink's
+    /// queue was full (R1W2-01). Each of those rows was still appended.
+    pub fn notifications_dropped(&self) -> u64 {
+        self.notifications_dropped.load(Ordering::Relaxed)
     }
 
     /// Tell the worker that the channel is about to close on purpose.
@@ -249,11 +305,12 @@ impl AuditMiddleware {
 async fn audit_worker<A: AuditLogRepository>(
     mut rx: mpsc::Receiver<Queued>,
     repo: A,
-    sink: Option<Arc<dyn AuditEventSink>>,
+    sink: Option<SinkQueue>,
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
 ) {
     let mut written: u64 = 0;
+    let mut last_drop_report: Option<Instant> = None;
     while let Some(queued) = rx.recv().await {
         let event = match queued {
             Queued::Event(event) => event,
@@ -275,8 +332,24 @@ async fn audit_worker<A: AuditLogRepository>(
 
         written += 1;
 
-        if let Some(ref sink) = sink {
-            sink.on_event(&event).await;
+        // Queued, never awaited: the sink's work — a rule read, a window claim
+        // that may contend with every other replica's — runs on its own task.
+        // A full queue costs this row its notification, not the next row its
+        // place in the audit channel (R1W2-01).
+        if let Some(ref queue) = sink
+            && queue.sink.wants(&event)
+            && queue.tx.try_send(event).is_err()
+        {
+            let dropped = queue.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if last_drop_report.is_none_or(|t| t.elapsed() >= NOTIFICATION_DROP_REPORT_INTERVAL) {
+                last_drop_report = Some(Instant::now());
+                tracing::warn!(
+                    target: "axiam.audit.notification",
+                    notifications_dropped_total = dropped,
+                    "the notification queue is full: rows are being recorded without being \
+                     offered to the notification rules (logged at most once a minute)"
+                );
+            }
         }
     }
     if shutting_down.load(Ordering::SeqCst) {
@@ -291,6 +364,25 @@ async fn audit_worker<A: AuditLogRepository>(
              entries will be written"
         );
     }
+}
+
+/// The sink's task: hands it each queued row, and has it flush what it keeps in
+/// memory every [`SINK_FLUSH_INTERVAL`] and when the queue closes.
+async fn sink_worker(mut rx: mpsc::Receiver<AuditEvent>, sink: Arc<dyn AuditEventSink>) {
+    let mut flush = tokio::time::interval(SINK_FLUSH_INTERVAL);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick is immediate; there is nothing to flush yet.
+    flush.tick().await;
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => sink.on_event(&event).await,
+                None => break,
+            },
+            _ = flush.tick() => sink.flush().await,
+        }
+    }
+    sink.flush().await;
 }
 
 impl<S, B> Transform<S, ServiceRequest> for AuditMiddleware

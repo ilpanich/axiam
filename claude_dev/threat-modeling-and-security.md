@@ -71,6 +71,19 @@
 > window reaches the recipients only as a count. The model is **469 threats,
 > 427 mitigated / 21 open / 21 not applicable**; its version is unchanged until
 > the wave's last item.
+> *Amended after the wave's F4 review (R1W2-01, T-117 still Mitigated).* The
+> claim first ran inline on the audit middleware's one worker per replica, and
+> every replica wrote every event of a burst into the same window record, so a
+> failed-sign-in flood on one tenant slowed every replica's worker until
+> request-audit rows of every tenant were dropped. A replica now writes a window
+> once when it learns it is open and counts the rest in memory, adding the count
+> with one write at its next claim and every ten seconds; a claim that keeps
+> losing a write conflict gives up after four attempts and is counted the same
+> way; and the rules run on a queue and task of their own, so a slow
+> notification drops notifications (counted and logged), never audit rows. The
+> entry cites the burst test (a hundred rows through a 50 ms step, no audit row
+> lost) and the eight-replica test (eight writes for a thousand events). Status
+> and totals are unchanged.
 >
 > **Request-audit loss (`1.0.0`, #553, P23W5-A10 — T-108 closed).** The audit
 > middleware drops a request's row when its queue is full and loses one when the
@@ -1457,7 +1470,8 @@ corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
 from an unknown name. The 1.0.0 release wave closes T-117 (#551): each rule
 mails one event type at most once per window and counts the rest, the next mail
-carrying the count; and T-108 (#553): a request-audit row that is dropped or
+carrying the count, off the audit worker's path and with one datastore write per
+replica and window rather than one per event (R1W2-01); and T-108 (#553): a request-audit row that is dropped or
 fails to append is counted, shown on `/health/jobs` and, where a dead-letter
 file is configured, kept in it.
 

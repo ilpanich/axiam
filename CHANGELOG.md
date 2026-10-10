@@ -301,6 +301,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lower a rule's window (to 1 minute at least) where that matters.
   `scim_delivery_failed` keeps its own limit of one notification per SCIM target
   per hour and is not windowed again.
+  The window costs one datastore write per replica and window, not one per event,
+  and it is off the audit path (R1W2-01, the wave's security review): inside a
+  window a replica knows to be open it counts events in memory and writes the
+  count at its next claim and every ten seconds; a claim that loses a write
+  conflict four times is counted the same way; and notification rules run on a
+  task and bounded queue of their own beside the audit middleware's worker, so a
+  slow notification step drops notifications (counted, with a `WARN` on
+  `axiam.audit.notification` at most once a minute), never request-audit rows. A
+  count a replica holds is lost if the process is killed before its next flush,
+  and on several replicas a count can be reported one window late.
 
 ### Documentation
 

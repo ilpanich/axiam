@@ -7,6 +7,12 @@
 //! actor. The window of `(tenant, rule, event)` is claimed in the datastore,
 //! so "two replicas" is two sinks over one database. Real repositories
 //! throughout; only the mail broker is a recorder.
+//!
+//! Since R1W2-01 a sink counts the events of a window it knows to be open in
+//! memory and writes the count at its next claim or flush; the audit
+//! middleware's sink task flushes every ten seconds and when it stops. These
+//! tests age the window in the datastore to stand for time passing, so each
+//! flushes first, as that task would have by then.
 
 use std::sync::{Arc, Mutex};
 
@@ -151,6 +157,7 @@ async fn a_burst_of_a_hundred_login_failures_mails_each_recipient_once() {
 
     // Fifteen minutes on — the default window — the next failure is mailed,
     // and the mail says how many of the burst were not.
+    sink.flush_local_counts().await;
     age_windows(&db, rule_id, 15).await;
     sink.on_event(&sign_in(tenant_id, AuditOutcome::Failure))
         .await;
@@ -195,6 +202,7 @@ async fn two_replicas_sharing_one_datastore_mail_each_recipient_once() {
                     .on_event(&sign_in(tenant_id, AuditOutcome::Failure))
                     .await;
             }
+            replica.flush_local_counts().await;
         });
     }
     replicas.join_all().await;
@@ -302,6 +310,7 @@ async fn the_rules_own_window_is_honoured() {
         sink.on_event(&sign_in(tenant_id, AuditOutcome::Failure))
             .await;
     }
+    sink.flush_local_counts().await;
     age_windows(&db, minute, 2).await;
     age_windows(&db, hour, 2).await;
     sink.on_event(&sign_in(tenant_id, AuditOutcome::Failure))

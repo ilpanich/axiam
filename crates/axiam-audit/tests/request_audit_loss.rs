@@ -6,22 +6,26 @@
 //! a test double, no SurrealDB.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use actix_web::{App, HttpResponse, test, web};
 use axiam_audit::middleware::AuditMiddleware;
-use axiam_audit::{DeadLetterWriter, RequestAuditLoss};
+use axiam_audit::{AuditEvent, AuditEventSink, DeadLetterWriter, RequestAuditLoss};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::Utc;
 use uuid::Uuid;
 
-/// A datastore that refuses every append, or takes `delay` over each one.
+/// A datastore that refuses every append, or takes `delay` over each one, and
+/// counts the rows it took.
 #[derive(Clone)]
 struct Datastore {
     fail: bool,
     delay: Duration,
+    appended: Arc<AtomicUsize>,
 }
 
 impl Datastore {
@@ -29,6 +33,7 @@ impl Datastore {
         Self {
             fail: true,
             delay: Duration::ZERO,
+            appended: Arc::default(),
         }
     }
 
@@ -38,16 +43,33 @@ impl Datastore {
         Self {
             fail: false,
             delay: Duration::from_secs(3600),
+            appended: Arc::default(),
         }
+    }
+
+    /// Takes every row at once.
+    fn healthy() -> Self {
+        Self {
+            fail: false,
+            delay: Duration::ZERO,
+            appended: Arc::default(),
+        }
+    }
+
+    fn appended(&self) -> usize {
+        self.appended.load(Ordering::SeqCst)
     }
 }
 
 impl AuditLogRepository for Datastore {
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
-        tokio::time::sleep(self.delay).await;
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         if self.fail {
             return Err(AxiamError::Internal("datastore down".into()));
         }
+        self.appended.fetch_add(1, Ordering::SeqCst);
         Ok(AuditLogEntry {
             id: Uuid::new_v4(),
             tenant_id: input.tenant_id,
@@ -273,4 +295,70 @@ async fn an_unwritable_file_makes_the_rows_unrecoverable() {
     assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
     let s = loss.snapshot();
     assert_eq!((s.dead_lettered, s.not_recoverable), (0, 1));
+}
+
+/// A notification step that takes `delay` over every row, as a window claim
+/// contended across replicas did on the audit worker (R1W2-01).
+#[derive(Clone)]
+struct SlowSink {
+    delay: Duration,
+    seen: Arc<AtomicUsize>,
+}
+
+impl AuditEventSink for SlowSink {
+    fn on_event<'a>(
+        &'a self,
+        _event: &'a AuditEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            self.seen.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
+
+/// R1W2-01: a burst twelve times the audit queue, through a notification step
+/// that takes 50 ms per row, drops no audit row. The notification step runs on
+/// its own task behind its own queue; it is the notifications that overflow,
+/// and each is counted. (With the step on the audit worker, as before, the
+/// worker took 50 ms per row and the audit queue dropped most of the burst.)
+#[actix_web::test]
+async fn a_slow_notification_step_drops_no_audit_row() {
+    const CAPACITY: usize = 8;
+    const BURST: usize = 100;
+    let store = Datastore::healthy();
+    let sink = SlowSink {
+        delay: Duration::from_millis(50),
+        seen: Arc::default(),
+    };
+    let mw = AuditMiddleware::spawn_configured(
+        store.clone(),
+        Some(Arc::new(sink.clone())),
+        DeadLetterWriter::disabled(),
+        CAPACITY,
+    );
+    let app = test::init_service(App::new().wrap(mw.clone()).route(
+        "/api/thing",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+    for _ in 0..BURST {
+        let req = test::TestRequest::get().uri("/api/thing").to_request();
+        assert!(test::call_service(&app, req).await.status().is_success());
+        // A request's turn ends here; the workers get theirs.
+        tokio::task::yield_now().await;
+    }
+
+    wait_until("every row appended", || store.appended() == BURST).await;
+    let s = mw.loss().snapshot();
+    assert_eq!((s.dropped, s.failed), (0, 0), "no audit row was lost");
+    assert!(!s.recent_loss);
+
+    // Every row was either notified or its notification counted as dropped.
+    let dropped = mw.notifications_dropped();
+    assert!(dropped > 0, "the burst overflowed the notification queue");
+    wait_until("the notification queue to drain", || {
+        sink.seen.load(Ordering::SeqCst) + dropped as usize == BURST
+    })
+    .await;
 }

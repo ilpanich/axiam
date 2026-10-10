@@ -139,10 +139,13 @@ where
 /// How many attempts a write to a row that is hot by design gets before its
 /// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' four are sized for an occasional
 /// collision; a SCIM target's delivery state (every delivery of every message
-/// of one target, on every replica, increments it) and a notification window
-/// (every matching event of a burst, on every replica, counts in it) need more
-/// patience. A conflicted transaction commits nothing, so replaying an
-/// increment cannot double-count.
+/// of one target, on every replica, increments it) needs more patience. A
+/// conflicted transaction commits nothing, so replaying an increment cannot
+/// double-count.
+///
+/// Not for a write on a shared worker's path: waiting out one record there
+/// serializes every replica behind it. The notification window used this until
+/// R1W2-01 and now gives up after [`MAX_WRITE_ATTEMPTS`].
 pub const HOT_ROW_MAX_WRITE_ATTEMPTS: u32 = 32;
 
 /// [`retry_on_write_conflict`] for a hot row: up to

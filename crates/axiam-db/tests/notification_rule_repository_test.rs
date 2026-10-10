@@ -423,7 +423,10 @@ async fn a_window_is_claimed_once_and_carries_its_count_into_the_next() {
                 )
                 .await
                 .unwrap(),
-            NotificationWindowClaim::Counted
+            NotificationWindowClaim::Counted {
+                open_until: now + Duration::seconds(window)
+            },
+            "a counted claim says when the open window ends"
         );
     }
 
@@ -468,7 +471,9 @@ async fn a_window_is_claimed_once_and_carries_its_count_into_the_next() {
 }
 
 /// Concurrent claimants on one datastore — replicas — open a window once,
-/// and every other claim is counted.
+/// and every other claim is counted: in the datastore, or — a claim that kept
+/// losing a write conflict wrote nothing (R1W2-01) — by its claimant, which
+/// hands the count back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_claims_open_a_window_once() {
     let (db, tenant_id) = setup().await;
@@ -478,10 +483,17 @@ async fn concurrent_claims_open_a_window_once() {
     for _ in 0..16 {
         let windows = SurrealNotificationWindowRepository::new(db.clone());
         claims.spawn(async move {
-            windows
+            let claim = windows
                 .claim(tenant_id, rule, "login_failure", now, 900)
                 .await
-                .unwrap()
+                .unwrap();
+            if claim == NotificationWindowClaim::Contended {
+                windows
+                    .add_uncounted(tenant_id, rule, "login_failure", 1)
+                    .await
+                    .unwrap();
+            }
+            claim
         });
     }
     let claims = claims.join_all().await;
@@ -504,6 +516,60 @@ async fn concurrent_claims_open_a_window_once() {
             .await
             .unwrap(),
         NotificationWindowClaim::Opened { suppressed: 15 }
+    );
+}
+
+/// R1W2-01: a count a replica kept in memory is added to the window as it
+/// stands and reported by the mail that opens the next one; a window that does
+/// not exist (its rule was deleted) takes nothing and is not created.
+#[tokio::test]
+async fn an_uncounted_count_reaches_the_next_window_and_creates_nothing() {
+    let (db, tenant_id) = setup().await;
+    let windows = SurrealNotificationWindowRepository::new(db.clone());
+    let rule = Uuid::new_v4();
+    let now = Utc::now();
+
+    windows
+        .add_uncounted(tenant_id, rule, "login_failure", 7)
+        .await
+        .unwrap();
+    let mut rows = db
+        .query("SELECT count() AS n FROM notification_window GROUP ALL")
+        .await
+        .unwrap();
+    let n: Option<i64> = rows.take("n").unwrap();
+    assert_eq!(n.unwrap_or(0), 0, "no window, no row");
+
+    windows
+        .claim(tenant_id, rule, "login_failure", now, 900)
+        .await
+        .unwrap();
+    windows
+        .add_uncounted(tenant_id, rule, "login_failure", 41)
+        .await
+        .unwrap();
+    windows
+        .claim(
+            tenant_id,
+            rule,
+            "login_failure",
+            now + Duration::seconds(1),
+            900,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        windows
+            .claim(
+                tenant_id,
+                rule,
+                "login_failure",
+                now + Duration::seconds(900),
+                900,
+            )
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 42 }
     );
 }
 

@@ -130,6 +130,18 @@ sandbox); the conformance workflow (dispatch-only).
 
 **Severity: Medium. Wave-introduced. Proposed for a fix in the wave.**
 
+**Resolution:** fixed in the wave by the commit
+`fix(audit): the notification window is claimed off the audit worker, once per replica and window (#551, R1W2-01)`,
+which adds this line. All three proposals are taken: a conflict is an answer
+after four attempts (`NotificationWindowClaim::Contended`), a replica counts
+inside a window it knows to be open in memory and writes the count once
+(`add_uncounted`, at its next claim and every ten seconds), and the rules run
+on a queue and task of their own, so a full notification queue drops
+notifications, never audit rows. Tests: `a_slow_notification_step_drops_no_audit_row`
+(the §2 test: a hundred rows through a 50 ms step, a queue of eight, no row
+lost; it failed with the step on the worker) and
+`eight_replicas_write_a_window_once_each_not_once_per_event`. T-117 is amended.
+
 **The path.** `audit_worker` (`crates/axiam-audit/src/middleware.rs:249-281`) is
 one task per replica. For each row it appends (`:270`) and then awaits the
 notification sink inline (`:279`). Since #551 the sink, for every rule that

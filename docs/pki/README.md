@@ -1,6 +1,6 @@
 # AXIAM PKI / Certificate Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-10-09
 
 Task-oriented walkthrough of the certificate lifecycle: issuing an

@@ -1,6 +1,6 @@
 # AXIAM Documentation
 
-**Milestone:** `1.0.0-beta19` — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-10-09
 
 This is the top-level landing page for all AXIAM documentation. Each section

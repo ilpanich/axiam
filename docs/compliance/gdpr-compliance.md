@@ -3,17 +3,18 @@
 **Standard:** EU General Data Protection Regulation (GDPR) — Art. 15 (Right of
 Access), Art. 17 (Right to Erasure), Art. 7 (Conditions for Consent)
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Date:** 2026-07-06
 **Commit reviewed:** `1446151`
 **Last verified:** 2026-07-06
 
 **Scope:** This document describes AXIAM's implementation of data-subject
 export (Art. 15), account erasure/pseudonymization (Art. 17), and consent
-record-keeping (Art. 7) as of the v1.2 beta. It closes **CMPL-02** by citing
+record-keeping (Art. 7) as of the commit reviewed above. It closes **CMPL-02** by citing
 executable evidence (existing, re-run tests) rather than re-implementing
 already-proven behavior (D-04). This is a point-in-time, self-assessed
-description of the beta state — not a legal opinion or an external DPA audit.
+description as of that commit and the *Last verified* date — not a legal opinion
+or an external DPA audit.
 
 **Method (D-03 "trust but verify"):** every claim below is backed by (a) a
 named source-code location and (b) a named test in
@@ -516,6 +517,6 @@ endpoint.
 - **No production code was modified by this verification pass** — all four
   evidence tests already existed and already passed prior to this plan; this
   document is the net-new artifact.
-- **Milestone:** v1.2 (Beta) — this document will be re-verified (re-run
+- **Milestone:** `1.0.0` — this document will be re-verified (re-run
   tests, re-check the repository cross-check) at the next milestone that
   touches GDPR export/erasure/consent behavior.

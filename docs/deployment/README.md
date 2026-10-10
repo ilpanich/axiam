@@ -1,6 +1,6 @@
 # AXIAM Deployment Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-28
 
 This guide gets an operator from zero to a running AXIAM stack, for both a
@@ -53,11 +53,14 @@ than built from the working tree. Pin a different release with
 uncomment the `build:` blocks on those two services in
 `docker-compose.prod.yml` and restore `--build` in the `prod-up` recipe.
 
-Note that the released images carry no moving `latest` tag: `release.yml`
-applies `latest` only to stable releases, and every AXIAM release so far is a
-pre-release, so `:latest` does not exist in the registry. `AXIAM_IMAGE_TAG` is
-consequently **required**, and `just prod-up` supplies it from the workspace
-version so there is only one place a release number lives.
+A stable release is published under three tags — `1.0.0`, `1.0` and `latest` —
+and a pre-release only under its exact version (`release.yml` applies the moving
+`1.0` and `latest` tags to stable releases alone). **Pin the exact version in
+production**: `latest` and `1.0` move with every release, and an upgrade should
+be a change you made on purpose and read the CHANGELOG for. `AXIAM_IMAGE_TAG` is
+**required** all the same — the compose file refuses to start without it — and
+`just prod-up` supplies it from the workspace version so there is only one place
+a release number lives.
 
 `docker-compose.prod.yml` refuses to start without `AXIAM_IMAGE_TAG`,
 `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`,

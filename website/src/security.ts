@@ -12,7 +12,7 @@ import { threatHash } from "./securityLinks";
  * things are deliberately preserved from the source and must survive any edit:
  *
  * - the hedges ("in AXIAM's own request path", "self-assessment, not a certified
- *   audit", the beta caution) — they are load-bearing and scoped on purpose;
+ *   audit", the no-third-party-audit caution) — they are load-bearing and scoped on purpose;
  * - the absence of extra claims — a plausible additional bullet would be the one
  *   line on the page that nothing verifies;
  * - the shared-responsibility section — it is what makes the rest credible, and
@@ -558,7 +558,7 @@ export const SEC_SECTIONS: SecSection[] = [
     blocks: [
       {
         type: "p",
-        text: "AXIAM keeps an internal compliance self-assessment mapping its controls to recognised frameworks. This is a control-family self-assessment appropriate to a beta-stage product — **not** a certified ISO 27001 ISMS audit or a formal Cyber Resilience Act conformity assessment, and it says so plainly.",
+        text: "AXIAM keeps an internal compliance self-assessment mapping its controls to recognised frameworks. This is a control-family self-assessment appropriate to a first stable release that has had no independent audit — **not** a certified ISO 27001 ISMS audit or a formal Cyber Resilience Act conformity assessment, and it says so plainly.",
       },
       {
         type: "table",
@@ -679,7 +679,7 @@ export const SEC_SECTIONS: SecSection[] = [
       },
       {
         type: "warn",
-        text: "**Caution — this is beta software.** AXIAM is in active development and has not reached a stable release. It has not undergone an independent third-party penetration test or security certification. Do not use it to protect production systems until it reaches a stable, audited release. The controls described here are real and verified in the codebase, but a beta is a starting point for evaluation, not a guarantee.",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.0.0 is the first stable release: REST, gRPC, AMQP and the SDK contract are under semantic versioning from here, and security fixes ship in `1.0.x`. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
       },
     ],
   },

@@ -1,6 +1,6 @@
 # AXIAM gRPC API
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-06
 
 Low-latency gRPC surface for service-mesh authorization checks, JWT

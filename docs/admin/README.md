@@ -1,6 +1,6 @@
 # AXIAM Admin Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-06
 
 Task-oriented walkthroughs for the first-run admin bootstrap and the common

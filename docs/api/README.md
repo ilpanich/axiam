@@ -1,6 +1,6 @@
 # AXIAM API Documentation
 
-**Milestone:** `1.0.0-beta19` — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-10-09
 
 AXIAM exposes three API protocols. This page is the single landing point for

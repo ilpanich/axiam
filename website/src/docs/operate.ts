@@ -310,7 +310,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "AXIAM is pre-1.0. Treat these manifests as a solid starting point for a staging environment, and work through [Production hardening](#/docs/hardening) before anything real depends on them.",
+        text: "Treat these manifests as a solid starting point, not as your cluster's policy, and work through [Production hardening](#/docs/hardening) before anything real depends on them.",
       },
       {
         type: "cards",
@@ -1570,7 +1570,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "One item this checklist cannot give you: AXIAM is pre-1.0 and its security posture is a self-assessment backed by tests and a threat model, not a certified third-party audit. Weigh that against what the deployment is protecting.",
+        text: "One item this checklist cannot give you: AXIAM's security posture is a self-assessment backed by tests and a threat model, not a certified third-party audit — no independent third-party audit has been performed. Weigh that against what the deployment is protecting.",
       },
       {
         type: "cards",

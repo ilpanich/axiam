@@ -23,7 +23,7 @@ found during Phase 7 verification, its disposition, and remediation outcome.
 
 ## Deferred Findings Summary
 
-| # | Severity | Blocker for Beta? | Note |
+| # | Severity | Blocker for 1.0.0? | Note |
 |---|----------|-------------------|------|
 | — | — | — | No deferred finding remains open |
 
@@ -31,7 +31,27 @@ F-02, F-04, and F-05 were resolved (see the Findings table above), and F-03
 (HIBP breach-password check, issue #99) was subsequently implemented and its
 issue closed — every finding in this register is now Fixed.
 
-**No open deferred finding of any severity. Beta ships with no known High security holes (D-04).**
+**No open deferred finding of any severity. 1.0.0 ships with no known High security holes in this register (D-04).**
+
+**Re-verified 2026-10-10 against the threat model after the 1.0.0 waves**
+(`ThreatDragonModels/Axiam/Axiam.json`; the Security section of the website
+publishes the same list). This register records findings: defects with a fix
+owed, and there are none open. The threat model is the wider list, and it is
+not empty of High: ten entries are still `Open` at High or Critical severity —
+T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216 (High), and T-148 and
+T-306 (Critical). None is a defect awaiting a fix in AXIAM's code. Eight are
+residual risks the model assigns outside the application boundary — backups and
+snapshots (T-18, T-133), operator credentials on the cluster (T-124), the Vault
+and its unseal key (T-180, T-216), a key extracted from device firmware (T-94),
+a client secret committed to an integrator's repository (T-146); two sit in the
+SDK supply chain, where registry settings and two-factor publishing are outside
+this repository (T-135, T-148); and T-306, a leaked SAML signing key, is
+partly mitigated, with its exposure bounded by the two-year credential
+lifetime. The shared-responsibility checklist is how an operator takes those
+over. The two High entries that were open when the 1.0.0 work began — T-102
+(a revoked certificate stays valid to a relying party that does not terminate at
+AXIAM; #565) and T-108 (an action succeeds while its audit write fails; #553) —
+are Mitigated.
 
 ---
 

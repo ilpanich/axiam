@@ -356,6 +356,19 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("tightens the WebAuthn user-verification level and sends it, and shows it in view mode", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("User verification"), "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      webauthn_user_verification: "required",
+    });
+  });
+
   it("clears a prior success feedback message when re-entering edit mode", async () => {
     apiMock.get.mockResolvedValue(res(settings));
     apiMock.put.mockResolvedValue(res(settings));

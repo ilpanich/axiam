@@ -360,3 +360,132 @@ describe("SsfStreamsPage — create and delete", () => {
     await waitFor(() => expect(apiMock.delete).toHaveBeenCalledWith(`${STREAMS}/st1`));
   });
 });
+
+describe("SsfStreamsPage — form behaviour and failures", () => {
+  async function openCreate() {
+    mockGets();
+    renderWithProviders(<SsfStreamsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "New stream" }));
+    return screen.getByRole("dialog");
+  }
+
+  it("a poll stream hides the push fields, and the event ceiling can be narrowed and widened", async () => {
+    const dialog = await openCreate();
+    expect(within(dialog).getByLabelText("Push endpoint URL *")).toBeInTheDocument();
+
+    await userEvent.selectOptions(within(dialog).getByLabelText("Delivery method"), "poll");
+    expect(within(dialog).queryByLabelText("Push endpoint URL *")).not.toBeInTheDocument();
+
+    const first = SSF_EVENT_TYPES[0];
+    const box = within(dialog).getByRole("checkbox", { name: first.label });
+    expect(box).toBeChecked();
+    await userEvent.click(box);
+    expect(box).not.toBeChecked();
+    await userEvent.click(box);
+    expect(box).toBeChecked();
+  });
+
+  it("refuses a stream whose every event type was unticked, before any request", async () => {
+    const dialog = await openCreate();
+    await userEvent.type(within(dialog).getByLabelText("Receiver client id *"), "r");
+    await userEvent.type(within(dialog).getByLabelText("Audience *"), "a");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Delivery method"), "poll");
+    for (const event of SSF_EVENT_TYPES) {
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: event.label }));
+    }
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await screen.findByText("Allow at least one event type.")).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("sends the description and the email subject format the administrator chose", async () => {
+    const dialog = await openCreate();
+    apiMock.post.mockResolvedValue(res(stream({ id: "st9" })));
+    await userEvent.type(within(dialog).getByLabelText("Receiver client id *"), "poller-2");
+    await userEvent.type(within(dialog).getByLabelText("Audience *"), "poller-2-aud");
+    await userEvent.type(within(dialog).getByLabelText("Description"), "Nightly puller");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Delivery method"), "poll");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Subject format"), "email");
+    fireEvent.submit(dialog.querySelector("form")!);
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.post.mock.calls[0][1]).toMatchObject({
+      description: "Nightly puller",
+      delivery_method: "poll",
+      subject_format: "email",
+    });
+  });
+
+  it("keeps the dialog open with the server's sentence when registering fails", async () => {
+    const dialog = await openCreate();
+    apiMock.post.mockRejectedValue({
+      response: { status: 400, data: { error: "bad_request", message: "audience is already registered" } },
+    });
+    await userEvent.type(within(dialog).getByLabelText("Receiver client id *"), "r");
+    await userEvent.type(within(dialog).getByLabelText("Audience *"), "a");
+    await userEvent.selectOptions(within(dialog).getByLabelText("Delivery method"), "poll");
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await screen.findByText("audience is already registered")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("Cancel discards what was typed in the create dialog", async () => {
+    const dialog = await openCreate();
+    await userEvent.type(within(dialog).getByLabelText("Receiver client id *"), "half-typed");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "New stream" }));
+    expect(
+      within(screen.getByRole("dialog")).getByLabelText("Receiver client id *"),
+    ).toHaveValue("");
+  });
+
+  it("Cancel closes the edit dialog without a request", async () => {
+    mockGets();
+    renderWithProviders(<SsfStreamsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit SSF stream siem-receiver" }),
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("an edit that fails client-side validation shows the problem and sends nothing", async () => {
+    mockGets();
+    renderWithProviders(<SsfStreamsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit SSF stream siem-receiver" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Audience *"));
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await screen.findByText("Audience is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("backing out of the delete confirmation deletes nothing", async () => {
+    mockGets();
+    renderWithProviders(<SsfStreamsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete SSF stream siem-receiver" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(apiMock.delete).not.toHaveBeenCalled();
+    expect(screen.queryByText(/stops receiving events at once/)).not.toBeInTheDocument();
+  });
+
+  it("a failed delete closes the confirmation and says so in an alert", async () => {
+    mockGets();
+    apiMock.delete.mockRejectedValue({
+      response: { status: 500, data: { error: "internal", message: "store unavailable" } },
+    });
+    renderWithProviders(<SsfStreamsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete SSF stream siem-receiver" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("store unavailable");
+    expect(screen.queryByText(/stops receiving events at once/)).not.toBeInTheDocument();
+  });
+});

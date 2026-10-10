@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -313,5 +313,91 @@ describe("NotificationRulesPage", () => {
     await waitFor(() =>
       expect(apiMock.delete).toHaveBeenCalledWith("/api/v1/notification-rules/r2"),
     );
+  });
+  it("rejects an out-of-range alert window when the browser's own validation is bypassed", async () => {
+    apiMock.get.mockResolvedValue(res(rules));
+    renderWithProviders(<NotificationRulesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Rule/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Windowed");
+    await userEvent.click(within(dialog).getByLabelText("Login failure"));
+    await userEvent.type(
+      within(dialog).getByLabelText("Recipient Emails (one per line)"),
+      "a@example.com",
+    );
+    const window = within(dialog).getByLabelText("Alert window (minutes)");
+    await userEvent.clear(window);
+    await userEvent.type(window, "5000");
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(
+      await screen.findByText(/Alert window must be a whole number of minutes from 1 to 1440/),
+    ).toBeInTheDocument();
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("Cancel on the create dialog discards the draft", async () => {
+    apiMock.get.mockResolvedValue(res(rules));
+    renderWithProviders(<NotificationRulesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Rule/ }));
+    await userEvent.type(
+      within(screen.getByRole("dialog")).getByLabelText("Name *"),
+      "draft",
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /New Rule/ }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Name *")).toHaveValue("");
+  });
+
+  it("an edit must keep at least one event, valid recipients and a valid window", async () => {
+    apiMock.get.mockResolvedValue(res(rules));
+    renderWithProviders(<NotificationRulesPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit rule Security alerts" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const form = () => dialog.querySelector("form")!;
+
+    // Untick both events.
+    await userEvent.click(within(dialog).getByLabelText("Login failure"));
+    await userEvent.click(within(dialog).getByLabelText("Account locked"));
+    fireEvent.submit(form());
+    expect(await screen.findByText("At least one event is required.")).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByLabelText("Login failure"));
+    const emails = within(dialog).getByLabelText("Recipient Emails (one per line)");
+    await userEvent.clear(emails);
+    await userEvent.type(emails, "broken-address");
+    fireEvent.submit(form());
+    expect(await screen.findByText("Invalid email: broken-address")).toBeInTheDocument();
+
+    await userEvent.clear(emails);
+    await userEvent.type(emails, "ok@example.com");
+    const window = within(dialog).getByLabelText("Alert window (minutes)");
+    await userEvent.clear(window);
+    await userEvent.type(window, "0");
+    fireEvent.submit(form());
+    expect(
+      await screen.findByText(/Alert window must be a whole number of minutes/),
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("Cancel on the edit and delete dialogs changes nothing", async () => {
+    apiMock.get.mockResolvedValue(res(rules));
+    renderWithProviders(<NotificationRulesPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit rule Security alerts" }),
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Delete rule Empty events rule" }),
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+    expect(apiMock.delete).not.toHaveBeenCalled();
   });
 });

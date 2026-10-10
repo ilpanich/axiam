@@ -389,9 +389,101 @@ describe("Topbar", () => {
   });
 });
 
+describe("Topbar — organization-level tenant selector", () => {
+  const orgUser: AuthUser = { ...user, organization_level: true };
+  const tenantRows = [
+    { id: "t1", name: "Default", slug: "default", organization_id: "o1" },
+    { id: "t2", name: "Research", slug: "rd", organization_id: "o1" },
+  ];
+
+  function mockLookups() {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/organizations")
+        return res({ items: [{ id: "o1", name: "AXIAM Corp", slug: "axiam-corp" }], total: 1 });
+      if (url === "/api/v1/organizations/o1/tenants")
+        return res({ items: tenantRows, total: tenantRows.length });
+      if (url === "/api/v1/auth/me")
+        return res({
+          user: { ...orgUser, id: "u1" },
+          permissions: ["*"],
+          tenant_slug: "rd",
+          org_slug: "axiam-corp",
+        });
+      return res({ items: [], total: 0 });
+    });
+  }
+
+  async function openMenu(label: RegExp) {
+    await userEvent.click(screen.getByText(label).closest("button")!);
+    return screen.findByRole("menu", { name: "Tenant selector" });
+  }
+
+  it("shows the organization scope as current, and switching to a tenant re-reads /auth/me", async () => {
+    useAuthStore.setState({
+      user: orgUser,
+      orgSlug: "axiam-corp",
+      activeTenantId: null,
+      activeTenantName: null,
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Organization/);
+    expect(await screen.findByRole("menuitem", { name: /Organization/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Research/ }));
+
+    await waitFor(() => expect(useAuthStore.getState().activeTenantId).toBe("t2"));
+    expect(useAuthStore.getState().activeTenantName).toBe("Research");
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith("/api/v1/auth/me"));
+    await waitFor(() => expect(useAuthStore.getState().isSwitchingTenant).toBe(false));
+    // The menu closed on selection.
+    expect(screen.queryByRole("menu", { name: "Tenant selector" })).not.toBeInTheDocument();
+  });
+
+  it("returns to the organization scope from a tenant", async () => {
+    useAuthStore.setState({
+      user: orgUser,
+      orgSlug: "axiam-corp",
+      activeTenantId: "t2",
+      activeTenantName: "Research",
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Research/);
+    const research = await screen.findByRole("menuitem", { name: /Research/ });
+    expect(research).toHaveAttribute("aria-current", "true");
+    await userEvent.click(screen.getByRole("menuitem", { name: /^Organization/ }));
+
+    await waitFor(() => expect(useAuthStore.getState().activeTenantId).toBeNull());
+    await waitFor(() => expect(useAuthStore.getState().isSwitchingTenant).toBe(false));
+  });
+
+  it("does not offer the organization scope to a principal confined to particular tenants", async () => {
+    useAuthStore.setState({
+      user: { ...orgUser, reachable_tenant_ids: ["t2"] },
+      orgSlug: "axiam-corp",
+      activeTenantId: "t2",
+      activeTenantName: "Research",
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Research/);
+    await screen.findByRole("menuitem", { name: /Research/ });
+    expect(screen.queryByRole("menuitem", { name: /^Organization/ })).not.toBeInTheDocument();
+  });
+});
+
 afterEach(() => {
   useAuthStore.setState({
     user: null,
+    activeTenantId: null,
+    activeTenantName: null,
     isAuthenticated: false,
     isInitializing: false,
     tenantSlug: null,

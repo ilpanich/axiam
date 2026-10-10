@@ -901,6 +901,45 @@ describe("OrganizationDetailPage — settings tab", () => {
     expect(screen.queryByText("Organizations list")).not.toBeInTheDocument();
   });
 
+  it("asks the browser to confirm closing the tab while settings are dirty, and only then", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    await goToSettings();
+    const minLen = await screen.findByLabelText("Minimum length");
+
+    const clean = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+
+    fireEvent.change(minLen, { target: { value: "10" } });
+    await screen.findByText("Unsaved changes");
+    const dirty = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirty);
+    expect(dirty.defaultPrevented).toBe(true);
+  });
+
+  it("sends the pending-deletion window and the WebAuthn user-verification level that were edited", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    fireEvent.change(await screen.findByLabelText("Pending-deletion window (days)"), {
+      target: { value: "45" },
+    });
+    await userEvent.selectOptions(
+      screen.getByLabelText("User verification"),
+      "required",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        URLS.settings,
+        expect.objectContaining({
+          deletion_grace_period_days: 45,
+          webauthn_user_verification: "required",
+        })
+      )
+    );
+  });
+
   it("edits every settings field and submits the fully-updated payload", async () => {
     routeGet({ [URLS.org]: org, [URLS.settings]: settings });
     apiMock.put.mockResolvedValue(res(settings));

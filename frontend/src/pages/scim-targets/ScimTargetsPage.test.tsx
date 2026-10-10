@@ -511,3 +511,81 @@ describe("ScimTargetsPage — delete and reconcile", () => {
     expect(alert).toHaveTextContent(/running or has only just finished/);
   });
 });
+
+describe("ScimTargetsPage — form behaviour and dismissal", () => {
+  it("a group ticked by mistake can be unticked, and the target is created disabled when asked", async () => {
+    mockGets();
+    apiMock.post.mockResolvedValue(res(target({ id: "s7" })));
+    renderWithProviders(<ScimTargetsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New SCIM target/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Scoped");
+    await userEvent.type(
+      within(dialog).getByLabelText("Base URL *"),
+      "https://scim.example.com/scim/v2",
+    );
+    await userEvent.type(within(dialog).getByLabelText(/^Bearer token/), credentialValue());
+    await userEvent.selectOptions(within(dialog).getByLabelText("Users to provision"), "groups");
+    const finance = await within(dialog).findByRole("checkbox", { name: "Finance" });
+    await userEvent.click(finance);
+    expect(finance).toBeChecked();
+    await userEvent.click(finance);
+    expect(finance).not.toBeChecked();
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Engineering" }));
+
+    const enabled = within(dialog).getByLabelText("Enabled");
+    expect(enabled).toBeChecked();
+    await userEvent.click(enabled);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledTimes(1));
+    expect(apiMock.post.mock.calls[0][1]).toMatchObject({
+      enabled: false,
+      scope: { type: "groups", group_ids: ["g1"] },
+    });
+  });
+
+  it("an edit that fails validation shows the problem in the dialog and sends nothing", async () => {
+    mockGets();
+    renderWithProviders(<ScimTargetsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit SCIM target HR system" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.clear(within(dialog).getByLabelText("Name *"));
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await within(dialog).findByText("Name is required.")).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("Cancel on the create dialog discards the draft", async () => {
+    mockGets();
+    renderWithProviders(<ScimTargetsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New SCIM target/ }));
+    await userEvent.type(
+      within(screen.getByRole("dialog")).getByLabelText("Name *"),
+      "abandoned",
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /New SCIM target/ }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Name *")).toHaveValue("");
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it("Cancel on the edit and delete dialogs sends nothing", async () => {
+    mockGets();
+    renderWithProviders(<ScimTargetsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit SCIM target HR system" }),
+    );
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete SCIM target HR system" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+    expect(apiMock.delete).not.toHaveBeenCalled();
+  });
+});

@@ -143,7 +143,10 @@ The server pod mounts one volume it writes to: an `emptyDir` for the audit
 dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`, set in the ConfigMap). It is lost
 with the pod, so replay it before a rollout while it holds rows — see [the audit
 dead-letter file](#the-audit-dead-letter-file) for why it is not a claim and what
-to do if it must be.
+to do if it must be. Its `sizeLimit` is enforced by evicting the pod, which
+deletes the file, so the server's budget for it
+(`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`, 192 MiB in the ConfigMap) stays below the
+limit.
 
 Before applying, an operator must:
 0. Install cert-manager and apply [`k8s/certs/`](../../k8s/certs/) (or create
@@ -1851,6 +1854,24 @@ sink, a structured log event on the target `axiam.audit.dlq`.
    | `docker-compose.prod.yml` (project `docker`) | named volume `gdpr-audit-dlq` | container removal and recreation; lost by `just prod-clean` (`down -v`) |
    | `k8s/` | `emptyDir` named `audit-dlq`, `sizeLimit: 256Mi` | a container restart (OOMKill, failed probe); **not** the pod's deletion (rollout, drain, eviction, node loss) |
 
+   **The file's budget.** `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds it, in bytes:
+   192 MiB (`201326592`) when unset, at least 1 MiB; a value that is not a whole
+   number of bytes, or is below the minimum, fails the boot. Request-audit rows
+   fill at most nine tenths of the budget; past that each is refused, counted in
+   `not_recoverable`, and `/health/jobs` reports `dead_letter_full` (and
+   `degraded`) until the file is replayed and moved with the server stopped. The
+   last tenth is a reserve only the GDPR records write into, so a flood of
+   request rows cannot crowd out an erasure record; a GDPR record that would
+   cross the whole budget is refused too and kept on `axiam.audit.dlq` only. The
+   size is checked before each write, so the file can pass the budget by at most
+   one batch of rows. Each line's client-sized fields are cut with a
+   `...[truncated]` marker: `action` (the request's method and path) to 512
+   bytes and `ip_address` (the forwarded client address) to 64, which bounds a
+   request row's line to about a kilobyte; the audit row in the datastore is cut
+   the same way. Every shipped deployment states the budget: the ConfigMap key in
+   `k8s/server/configmap.yml`, `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` in both Compose
+   files.
+
    Back the Compose volumes up with the datastore. A volume Compose creates is
    root-owned, so each file has a one-shot init service (`volume-init`,
    `gdpr-audit-dlq-init`) that hands it to the server's user (65532).
@@ -1865,9 +1886,15 @@ sink, a structured log event on the target `axiam.audit.dlq`.
    while it holds rows. If the file must outlive the pod, replace the volume in
    `k8s/server/deployment.yml` with a per-replica one (a StatefulSet's
    `volumeClaimTemplates`, or a CSI ephemeral volume) and keep the path. The
-   `sizeLimit` bounds a datastore outage: a pod that exceeds it is evicted,
-   which is louder than filling the node's disk (a line is a few hundred
-   bytes). The path is the ConfigMap key `AXIAM__GDPR_AUDIT_DLQ_FILE` in
+   `sizeLimit` is a backstop that must never be reached: the kubelet enforces
+   it by **evicting the pod, and eviction deletes the `emptyDir` and the file
+   with it** — every unreplayed row, at the moment the file is fullest, and in a
+   datastore outage on every replica at about the same time. The budget above is
+   what keeps the file from reaching it, so keep `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`
+   below the `sizeLimit` and change the two together. On Compose the named
+   volume has no limit and shares the Docker root with the datastore's volume;
+   there the budget is what keeps a flood off the datastore's disk. The path is
+   the ConfigMap key `AXIAM__GDPR_AUDIT_DLQ_FILE` in
    `k8s/server/configmap.yml`, so an overlay that replaces the container's
    `env` (the Raspberry Pi overlay does) keeps it.
 2. **A structured log event** on the target `axiam.audit.dlq`, for the GDPR
@@ -1947,10 +1974,12 @@ reports both in a `request_audit` object beside `jobs`:
 | `dead_lettered` | Lost rows written to the dead-letter file. |
 | `not_recoverable` | Lost rows kept nowhere: no file is configured, or it could not take them. |
 | `dead_letter_configured` | Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a file. |
+| `dead_letter_full` | Whether the file has reached the request rows' share of its budget (`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`); further lost rows are refused by it and counted in `not_recoverable`. |
 | `last_loss_at`, `recent_loss` | When the last row was lost; whether that was in the last 15 minutes. |
 
 `status` is `degraded` while `recent_loss` is true and returns to `ok` by itself
-once rows are being recorded again; the endpoint stays HTTP 200, as for a
+once rows are being recorded again, and is `degraded` while `dead_letter_full`
+is true, which only a replay and a restart clear; the endpoint stays HTTP 200, as for a
 stalled job. Alert on `status == "degraded"`, or on the rate of `dropped +
 failed`. The counters are per process: a restart resets them and each replica
 reports its own. The server also logs one `ERROR` line on the target
@@ -1961,7 +1990,8 @@ the totals.
 is set, each dropped or failed row is appended to the same file as the GDPR
 records, in the same one-JSON-line form, and replayed with the same statement as
 above. The write is queued to a writer task (up to 1 024 rows), so the request
-path does no file I/O; a row the writer cannot keep is counted in
+path does no file I/O; a row the writer cannot keep — its queue is full, the
+file is at its budget, or the file cannot be written — is counted in
 `not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
 lines give the former, and the replayed row's `timestamp` is the replay's. With
 the variable unset the server logs one warning at start (it covers these rows
@@ -1971,7 +2001,7 @@ volume the server's user can write, in any other deployment.
 
 Still lost: a row that was in the queue (or the writer's queue) when the process
 was killed rather than stopped — an orderly stop drains both — and a row refused
-when the file is not configured or not writable.
+when the file is not configured, not writable or full.
 
 #### External audit producers
 

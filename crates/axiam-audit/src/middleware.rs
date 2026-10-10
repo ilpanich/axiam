@@ -490,7 +490,7 @@ where
                 },
             };
 
-            let entry = CreateAuditLogEntry {
+            let mut entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
                 actor_type,
@@ -503,6 +503,10 @@ where
                     "authenticated": authenticated,
                 })),
             };
+            // The path and the forwarded address are the client's to size; the
+            // row, its dead-letter line and the notification all see them cut
+            // to a bound (R1W2-02).
+            crate::dead_letter::bound_fields(&mut entry);
 
             // `try_send`, never `send`: a full channel must not hold the
             // response. The row it refuses comes back in the error and is

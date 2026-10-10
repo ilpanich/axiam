@@ -108,6 +108,18 @@
 > outlive its pod.
 > The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
 > version is unchanged until the wave's last item.
+> *Amended after the wave's F4 review (R1W2-02, T-108 still Mitigated).* The
+> file had no bound, a client sized its lines (the request path, the forwarded
+> address), and on Kubernetes the volume's `sizeLimit` is enforced by evicting
+> the pod, which deletes the file at the moment it is fullest. The writer now
+> has a byte budget, `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` (192 MiB by default, set
+> below the 256 MiB limit in the ConfigMap): request rows fill nine tenths of
+> it and are then refused, counted as not recoverable and reported as
+> `dead_letter_full` on `/health/jobs`; the last tenth is kept for the GDPR
+> records; and a row's path and address are cut to 512 and 64 bytes. The
+> manifest and the deployment guide now say what eviction does. The entry
+> cites the budget, reserve, truncation and health tests. Status and totals
+> are unchanged.
 >
 > **Every fatal exit stops in order (`1.0.0`, #554, P23W5-A11/A12 — T-444
 > amended, still Mitigated).** The full profile ended the process with
@@ -1473,7 +1485,8 @@ mails one event type at most once per window and counts the rest, the next mail
 carrying the count, off the audit worker's path and with one datastore write per
 replica and window rather than one per event (R1W2-01); and T-108 (#553): a request-audit row that is dropped or
 fails to append is counted, shown on `/health/jobs` and, where a dead-letter
-file is configured, kept in it.
+file is configured, kept in it, within a byte budget that keeps a reserve for
+the GDPR records (R1W2-02).
 
 ### Coverage by STRIDE category
 

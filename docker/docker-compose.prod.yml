@@ -280,6 +280,13 @@ services:
       # docs/deployment/README.md, "The audit dead-letter file". Unset, the server
       # warns at boot and a lost row is not recoverable.
       AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+      # R1W2-02: the file's byte budget (192 MiB by default). The named volume has
+      # no bound of its own and shares the Docker root with surrealdb-data, so this
+      # is what keeps a flood during a datastore outage off the datastore's disk:
+      # past nine tenths of it request-audit rows are refused (counted as
+      # not_recoverable, `dead_letter_full` on /health/jobs), and the last tenth is
+      # kept for the GDPR records.
+      AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES: "${AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES:-201326592}"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
@@ -474,6 +481,7 @@ volumes:
   # The audit dead-letter file (AXIAM__GDPR_AUDIT_DLQ_FILE). It holds audit rows
   # the datastore refused, so it is the only copy of them: back it up with the
   # datastore, and do not remove it (`docker compose down -v`) before replaying it.
+  # Its size is bounded by AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES, not by the volume.
   gdpr-audit-dlq:
 
 networks:

@@ -125,6 +125,15 @@ data:
   # it does and does not survive, are written beside it in the Deployment.
   # Replay: docs/deployment/README.md, "The audit dead-letter file".
   AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+  # The file's byte budget (R1W2-02): 192 MiB, the server's default, written out
+  # because it must stay BELOW the `audit-dlq` volume's `sizeLimit` (256Mi) in
+  # the Deployment -- change the two together. The kubelet enforces that limit
+  # by evicting the pod, which deletes the volume and the file in it; this budget
+  # is what keeps the file from reaching it. Request-audit rows fill at most nine
+  # tenths of it and are then refused (counted as not_recoverable, and
+  # /health/jobs reports `dead_letter_full`); the last tenth is kept for the GDPR
+  # records.
+  AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES: "201326592"
   # SEC-052: Narrow RUST_LOG — no internal module exposure in production
   RUST_LOG: "info"
   # ---------------------------------------------------------------------

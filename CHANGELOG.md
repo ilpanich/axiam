@@ -244,7 +244,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request path does no file I/O. With it unset, as in any deployment that does
   not mount a volume for it, the rows are counted and logged only and the server
   warns at start. Rows still in memory when a process is killed rather than
-  stopped are lost; an orderly stop drains both queues.
+  stopped are lost; an orderly stop drains both queues. The file is **bounded**
+  (R1W2-02, the wave's security review): the new setting
+  `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` (bytes; 192 MiB by default, at least 1 MiB;
+  any other value fails the boot) caps it, request-audit rows fill at most nine
+  tenths of it and are then refused and counted in `not_recoverable`, and
+  `request_audit` gains an additive `dead_letter_full`, which also turns `status`
+  to `degraded` until the file is replayed and moved with the server stopped. The
+  last tenth is kept for the GDPR records. A request row's `action` (the path)
+  and `ip_address` (the forwarded client address) are cut to 512 and 64 bytes
+  with a `...[truncated]` marker, in the dead-letter line and in the audit row
+  itself, so a client can no longer size the lines.
 - **The audit dead-letter file is provisioned in the production Compose file and
   the Kubernetes manifests, and the GDPR request records use it (#552,
   P23W5-A7/A8, T-108).** `AXIAM__GDPR_AUDIT_DLQ_FILE` was set only by
@@ -259,7 +269,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Kubernetes server gets the same key in the `axiam-config` ConfigMap (so an
   overlay that replaces the container's `env`, like the Raspberry Pi one, keeps
   it) and an `emptyDir` volume `audit-dlq` with `sizeLimit: 256Mi`, mounted at
-  `/var/lib/axiam/audit-dlq`. An `emptyDir` survives a container restart and not
+  `/var/lib/axiam/audit-dlq`. The kubelet enforces that limit by evicting the
+  pod, and eviction deletes the `emptyDir` with the file in it, so the limit
+  must never be reached: the ConfigMap also sets the file's budget,
+  `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES=201326592` (192 MiB), below it, and both
+  Compose files set `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` (same default), since their
+  volume has no limit and shares the datastore's disk; raise a budget and its
+  volume's limit together (R1W2-02). An `emptyDir` survives a container restart and not
   the pod's deletion (a rollout, a drain, an eviction): the Deployment is 2 to 10
   replicas under an HPA and the file is per replica, so a shared ReadWriteOnce
   claim does not fit and a per-replica one means a StatefulSet. Replay the file

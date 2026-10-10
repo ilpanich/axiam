@@ -362,3 +362,129 @@ async fn a_slow_notification_step_drops_no_audit_row() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// R1W2-02 — the dead-letter file's budget and its lines' bounds
+// ---------------------------------------------------------------------------
+
+/// A budget small enough to cross in a test: request rows may fill nine
+/// tenths of it, the GDPR records the rest.
+const BUDGET: u64 = 4096;
+
+fn request_row(action: &str) -> CreateAuditLogEntry {
+    CreateAuditLogEntry {
+        tenant_id: Uuid::nil(),
+        actor_id: Uuid::nil(),
+        actor_type: ActorType::System,
+        action: action.into(),
+        resource_id: None,
+        outcome: AuditOutcome::Failure,
+        ip_address: Some("203.0.113.7".into()),
+        metadata: Some(serde_json::json!({"http_status": 500, "authenticated": false})),
+    }
+}
+
+fn file_len(path: &PathBuf) -> u64 {
+    std::fs::metadata(path).map_or(0, |m| m.len())
+}
+
+/// Request rows that would take the file past the request rows' share of its
+/// budget are refused, counted as not recoverable, and the file reports full —
+/// from then on without even queueing them.
+#[tokio::test]
+async fn past_the_budget_request_rows_are_refused_and_counted() {
+    let path = dlq_path();
+    let writer = DeadLetterWriter::spawn_with_budget(&path, BUDGET);
+    let loss = RequestAuditLoss::new(writer.clone());
+    for _ in 0..40 {
+        loss.record_failed(request_row("GET /api/thing"), &"datastore down");
+    }
+    assert!(writer.flush(Duration::from_secs(10)).await);
+
+    let limit = axiam_audit::dead_letter::request_row_limit(BUDGET);
+    assert!(file_len(&path) <= limit, "{} > {limit}", file_len(&path));
+    let s = loss.snapshot();
+    assert!(s.dead_lettered > 0 && s.not_recoverable > 0, "{s:?}");
+    assert_eq!(s.dead_lettered + s.not_recoverable, 40);
+    assert_eq!(writer.refused_full(), s.not_recoverable);
+    assert!(s.dead_letter_full && writer.is_full());
+    assert_eq!(rows(&path).len() as u64, s.dead_lettered);
+
+    // Once full, a row is refused at submission.
+    assert_eq!(
+        writer.submit(request_row("GET /api/thing")),
+        axiam_audit::dead_letter::Submitted::Full
+    );
+    assert_eq!(writer.refused_full(), s.not_recoverable + 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The last tenth of the budget is the GDPR records' own: a record still fits
+/// after request rows filled their share, and the whole budget is the hard cap.
+#[tokio::test]
+async fn a_gdpr_record_still_fits_in_the_reserve() {
+    use axiam_audit::dead_letter::append_blocking;
+
+    let path = dlq_path();
+    let writer = DeadLetterWriter::spawn_with_budget(&path, BUDGET);
+    while writer.refused_full() == 0 {
+        writer.submit(request_row("GET /api/thing"));
+        assert!(writer.flush(Duration::from_secs(10)).await);
+    }
+    assert!(writer.is_full());
+
+    let mut erasure = request_row("gdpr.erasure_requested");
+    erasure.ip_address = None;
+    append_blocking(&path, &erasure, BUDGET).expect("the reserve takes a GDPR record");
+    assert_eq!(rows(&path).last().unwrap().action, "gdpr.erasure_requested");
+
+    // Past the whole budget even a GDPR record is refused, and says why.
+    let refused = loop {
+        if let Err(e) = append_blocking(&path, &erasure, BUDGET) {
+            break e;
+        }
+    };
+    assert_eq!(refused.kind(), std::io::ErrorKind::StorageFull);
+    assert!(file_len(&path) <= BUDGET);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A 20 KiB path and a 2 KiB forwarded address make a bounded row — in the
+/// datastore's row and in the dead-letter line alike.
+#[actix_web::test]
+async fn a_long_path_and_address_are_truncated_in_the_line() {
+    use axiam_audit::dead_letter::{MAX_ACTION_BYTES, MAX_ADDRESS_BYTES};
+
+    let path = dlq_path();
+    let mw = AuditMiddleware::spawn_configured(
+        Datastore::failing(),
+        None,
+        DeadLetterWriter::spawn(&path),
+        4096,
+    );
+    let app = test::init_service(
+        App::new()
+            .wrap(mw.clone())
+            .default_service(web::to(|| async { HttpResponse::NotFound().finish() })),
+    )
+    .await;
+    let long_path = format!("/{}", "a".repeat(20 * 1024));
+    let long_address = "9".repeat(2 * 1024);
+    let req = test::TestRequest::get()
+        .uri(&long_path)
+        .insert_header(("X-Forwarded-For", long_address.as_str()))
+        .to_request();
+    test::call_service(&app, req).await;
+    let loss = mw.loss();
+    wait_until("the failed append", || loss.snapshot().failed == 1).await;
+    assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.len() < 1024, "a {} byte line", text.len());
+    let row: CreateAuditLogEntry = serde_json::from_str(text.trim_end()).unwrap();
+    assert!(row.action.len() <= MAX_ACTION_BYTES);
+    assert!(row.action.starts_with("GET /aaaa") && row.action.ends_with("...[truncated]"));
+    let ip = row.ip_address.expect("the forwarded address is kept, cut");
+    assert!(ip.len() <= MAX_ADDRESS_BYTES && ip.ends_with("...[truncated]"));
+    let _ = std::fs::remove_file(&path);
+}

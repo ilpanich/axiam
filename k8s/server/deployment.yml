@@ -189,10 +189,18 @@ spec:
         # the file to outlive its pod mounts a per-replica volume of its own here
         # (a StatefulSet's volumeClaimTemplates, or a CSI ephemeral volume).
         #
-        # `sizeLimit` bounds what a datastore outage can write: a pod that exceeds
-        # it is evicted, which is a louder failure than filling the node's disk. A
-        # line is a few hundred bytes, so 256Mi is on the order of half a million
-        # rows.
+        # `sizeLimit` is not what bounds the file, and must never be reached: the
+        # kubelet enforces it by EVICTING the pod, and an evicted pod's `emptyDir`
+        # is deleted -- the file with every unreplayed row in it, at the moment it
+        # is fullest, and during a datastore outage on every replica at about the
+        # same time. What bounds the file is the server's byte budget,
+        # AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES in the ConfigMap (192 MiB), which sits
+        # below this limit with room to spare: past nine tenths of the budget
+        # request-audit rows are refused and counted (`dead_letter_full` on
+        # /health/jobs), and the last tenth is kept for the GDPR records. A line
+        # is at most about a kilobyte (the request path and the forwarded address
+        # are cut to a bound), a few hundred bytes for an honest request. Raise the
+        # two together, the budget below the limit.
         - name: audit-dlq
           emptyDir:
             sizeLimit: 256Mi

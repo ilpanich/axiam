@@ -211,6 +211,21 @@ eight concurrent claimants make at most eight writes per window.
 **Severity: Medium. Wave-introduced (the request-audit rows, prod Compose and
 k8s provisioning). Proposed for a fix in the wave.**
 
+**Resolution:** fixed in the wave by the commit
+`fix(audit): the dead-letter file has a byte budget with a reserve for the GDPR records (#553, #552, R1W2-02)`,
+which adds this line. All four proposals are taken: `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`
+(192 MiB by default, validated at boot) bounds the writer, request rows fill
+nine tenths of it and are then refused and counted in `not_recoverable`, and
+`request_audit.dead_letter_full` reports it (and `degraded`); the last tenth is
+the GDPR records' reserve (`append_blocking` is capped at the whole budget);
+`action` and `ip_address` are cut to 512 and 64 bytes in the line and the row;
+the k8s ConfigMap sets the budget below the 256 MiB `sizeLimit`, both Compose
+files state it, and the manifest and deployment guide now say that eviction
+deletes the file. Tests: `past_the_budget_request_rows_are_refused_and_counted`,
+`a_gdpr_record_still_fits_in_the_reserve` (the §3 test, with a 4 KiB budget),
+`a_long_path_and_address_are_truncated_in_the_line` (a 20 KiB path) and
+`jobs_reports_a_full_dead_letter_file_as_degraded`. T-108 is amended.
+
 **No bound in the writer.** `DeadLetterWriter`'s task appends every batch it is
 given (`crates/axiam-audit/src/dead_letter.rs:236-252`); `append_blocking`
 (`:55-62`) likewise. Nothing counts bytes. Since #553 every request-audit row

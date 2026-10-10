@@ -117,6 +117,11 @@ pub struct RequestAuditHealth {
     pub not_recoverable: u64,
     /// Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a dead-letter file.
     pub dead_letter_configured: bool,
+    /// Whether the dead-letter file has reached the request rows' share of its
+    /// budget (`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`): further request rows are
+    /// refused by it and counted in `not_recoverable` until it is replayed and
+    /// moved. Turns the endpoint's `status` to `degraded`.
+    pub dead_letter_full: bool,
     /// RFC 3339 timestamp of the most recent lost row.
     pub last_loss_at: Option<String>,
     /// Whether a row was lost in the last 15 minutes. Turns the endpoint's
@@ -139,8 +144,8 @@ impl JobHealthReporter for NoJobs {
 /// Response body for `GET /health/jobs`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct JobsHealthResponse {
-    /// `ok` when no job is stalled and no request-audit row was lost recently,
-    /// `degraded` otherwise.
+    /// `ok` when no job is stalled, no request-audit row was lost recently and
+    /// the dead-letter file is not full; `degraded` otherwise.
     pub status: &'static str,
     pub jobs: Vec<JobStatus>,
     /// Request-audit loss counters (T-108). Absent when the process does not
@@ -157,7 +162,7 @@ pub struct JobsHealthResponse {
 /// traffic to replicas running the same stuck code. Alert on
 /// `status == "degraded"`, or on a specific job's `stalled`. `request_audit`
 /// counts the request-audit rows this process lost (T-108); a loss in the last
-/// 15 minutes is `degraded` too.
+/// 15 minutes is `degraded` too, and so is a full dead-letter file.
 #[utoipa::path(
     get,
     path = "/health/jobs",
@@ -170,7 +175,9 @@ pub async fn jobs<C: Connection + Clone>(state: web::Data<AppState<C>>) -> HttpR
     let jobs = state.job_health.snapshot();
     let request_audit = state.job_health.request_audit();
     let status = if jobs.iter().any(|j| j.stalled)
-        || request_audit.as_ref().is_some_and(|a| a.recent_loss)
+        || request_audit
+            .as_ref()
+            .is_some_and(|a| a.recent_loss || a.dead_letter_full)
     {
         "degraded"
     } else {

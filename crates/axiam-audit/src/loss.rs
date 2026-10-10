@@ -52,10 +52,13 @@ pub struct RequestAuditLossSnapshot {
     /// Lost rows written to the dead-letter file.
     pub dead_lettered: u64,
     /// Lost rows kept nowhere: no file is configured, or the file's queue was
-    /// full, or the file could not be written.
+    /// full, or the file had reached its budget, or it could not be written.
     pub not_recoverable: u64,
     /// Whether a dead-letter file is configured.
     pub dead_letter_configured: bool,
+    /// Whether the dead-letter file has reached the request rows' share of its
+    /// budget, so lost rows are refused by it (R1W2-02).
+    pub dead_letter_full: bool,
     /// When the most recent row was lost, if any was.
     pub last_loss_at: Option<DateTime<Utc>>,
     /// Whether a row was lost within [`RECENT_LOSS_WINDOW`].
@@ -157,6 +160,7 @@ impl RequestAuditLoss {
             dead_lettered_total = s.dead_lettered,
             not_recoverable_total = s.not_recoverable,
             dead_letter_configured = s.dead_letter_configured,
+            dead_letter_full = s.dead_letter_full,
             "request audit rows are being lost (this line is logged at most once a minute; \
              GET /health/jobs `request_audit` carries the running counts)"
         );
@@ -188,6 +192,7 @@ impl RequestAuditLoss {
                 dropped + failed
             },
             dead_letter_configured: configured,
+            dead_letter_full: dead_letter.is_full(),
             last_loss_at,
             recent_loss,
         }

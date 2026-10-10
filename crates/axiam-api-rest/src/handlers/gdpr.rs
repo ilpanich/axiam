@@ -202,7 +202,13 @@ fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
     // request-audit worker's dead letters use (`axiam_audit::dead_letter`).
     match std::env::var(GDPR_AUDIT_DLQ_FILE_ENV) {
         Ok(path) => {
-            if let Err(e) = axiam_audit::dead_letter::append_blocking(Path::new(&path), entry) {
+            // The whole budget, the reserve above the request rows' share
+            // included (R1W2-02). An invalid value failed the boot already.
+            let max_bytes = axiam_audit::dead_letter::max_bytes_from_env()
+                .unwrap_or(axiam_audit::dead_letter::DEFAULT_MAX_BYTES);
+            if let Err(e) =
+                axiam_audit::dead_letter::append_blocking(Path::new(&path), entry, max_bytes)
+            {
                 tracing::error!(
                     error = %e,
                     path = %path,

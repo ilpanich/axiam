@@ -192,6 +192,7 @@ impl JobHealthReporter for JobHealth {
             dead_lettered: s.dead_lettered,
             not_recoverable: s.not_recoverable,
             dead_letter_configured: s.dead_letter_configured,
+            dead_letter_full: s.dead_letter_full,
             last_loss_at: s.last_loss_at.map(|t| t.to_rfc3339()),
             recent_loss: s.recent_loss,
         })
@@ -328,6 +329,7 @@ mod tests {
         assert_eq!((after.dropped, after.failed), (1, 2));
         assert_eq!(after.not_recoverable, 3, "no file: all three are gone");
         assert!(!after.dead_letter_configured);
+        assert!(!after.dead_letter_full);
         assert!(after.recent_loss && after.last_loss_at.is_some());
     }
 

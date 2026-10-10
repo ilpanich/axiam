@@ -204,6 +204,7 @@ fn request_audit(recent_loss: bool) -> RequestAuditHealth {
         dead_lettered: 9,
         not_recoverable: 1,
         dead_letter_configured: true,
+        dead_letter_full: false,
         last_loss_at: Some("2026-10-09T12:00:00+00:00".into()),
         recent_loss,
     }
@@ -226,6 +227,7 @@ async fn jobs_reports_the_request_audit_counters() {
     assert_eq!(a["dead_lettered"], 9);
     assert_eq!(a["not_recoverable"], 1);
     assert_eq!(a["dead_letter_configured"], true);
+    assert_eq!(a["dead_letter_full"], false);
     assert_eq!(a["recent_loss"], false);
     assert_eq!(body["status"], "ok", "a past loss alone is not degraded");
 }
@@ -233,6 +235,20 @@ async fn jobs_reports_the_request_audit_counters() {
 #[actix_rt::test]
 async fn jobs_reports_degraded_while_request_audit_rows_are_being_lost() {
     let body = get_jobs_with_audit(Some(request_audit(true))).await;
+    assert_eq!(body["status"], "degraded");
+}
+
+/// R1W2-02: a dead-letter file at its budget refuses every further request
+/// row, so it is reported, and is `degraded` with no recent loss: the next
+/// loss would not be recoverable.
+#[actix_rt::test]
+async fn jobs_reports_a_full_dead_letter_file_as_degraded() {
+    let body = get_jobs_with_audit(Some(RequestAuditHealth {
+        dead_letter_full: true,
+        ..request_audit(false)
+    }))
+    .await;
+    assert_eq!(body["request_audit"]["dead_letter_full"], true);
     assert_eq!(body["status"], "degraded");
 }
 

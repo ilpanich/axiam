@@ -169,6 +169,10 @@ services:
       # this is unset; collect the container log as well. Replaying the file
       # into the audit trail is a manual step (docs/deployment/README.md).
       AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+      # Its byte budget (192 MiB by default; the volume has no bound and shares
+      # the datastore's disk). Past nine tenths of it request-audit rows are
+      # refused and counted; the last tenth is kept for the GDPR records.
+      AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES: "${AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES:-201326592}"
       # One proxy in front of /api: trusted_hops = proxies - 1 (see the long note
       # in docker-compose.prod.yml). Raise it only if you add a hop.
       AXIAM__RATE_LIMIT__TRUSTED_HOPS: "${AXIAM__RATE_LIMIT__TRUSTED_HOPS:-0}"

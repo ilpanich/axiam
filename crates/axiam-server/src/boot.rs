@@ -2505,7 +2505,11 @@ where
     // names a file, written to it (T-108). The GDPR records (the export and
     // erasure requests, the erasure sweep's, a tenant deletion's) take the same
     // file, so this is the one boot-time warning for all of them (#552).
-    let dead_letter = DeadLetterWriter::from_env();
+    // `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds the file (R1W2-02); a value that
+    // is not a whole number of bytes, or is below the minimum, fails the boot
+    // rather than leaving the file unbounded.
+    let dead_letter = DeadLetterWriter::from_env()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     if !dead_letter.is_configured() {
         tracing::warn!(
             env_var = DEAD_LETTER_FILE_ENV,

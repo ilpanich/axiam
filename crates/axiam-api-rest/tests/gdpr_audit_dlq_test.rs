@@ -56,7 +56,6 @@ type TestDb = surrealdb::engine::local::Db;
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const TEST_PEER: &str = "127.0.0.1:12345";
-const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
 /// Test double that always fails, simulating a transient SurrealDB outage on
@@ -221,7 +220,7 @@ async fn setup() -> Fixture {
             tenant_id: tenant.id,
             username: "gdpr-user".into(),
             email: "gdpr-user@example.com".into(),
-            password: TEST_PASSWORD.into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

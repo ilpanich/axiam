@@ -969,3 +969,218 @@ async fn the_email_test_routes_are_rate_limited_per_ip() {
     let (status, _) = run_test(&app, &org_uri, &token, "203.0.113.50:4000").await;
     assert_ne!(status, 429, "one bucket per route");
 }
+
+// -------------------------------------------------------------------------
+// #525 (P23W2-05): an omitted secret follows only the same destination
+// -------------------------------------------------------------------------
+
+/// The stored SMTP password at `scope`, read past the HTTP layer (D-01).
+async fn stored_smtp_password(
+    db: &Surreal<TestDb>,
+    scope: &str,
+    org_id: Uuid,
+    tenant_id: Uuid,
+) -> String {
+    let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+    let provider = if scope == "org" {
+        repo.get_org_config(org_id).await.unwrap().unwrap().provider
+    } else {
+        repo.get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider
+            .unwrap()
+    };
+    match provider {
+        axiam_core::models::email::ProviderConfig::Smtp(smtp) => smtp.password,
+        other => panic!("expected SMTP, got {other:?}"),
+    }
+}
+
+/// An SMTP provider at `host`, without a password unless one is given.
+fn smtp_destination(
+    host: &str,
+    port: u16,
+    starttls: bool,
+    password: Option<&str>,
+) -> serde_json::Value {
+    let mut provider = serde_json::json!({
+        "kind": "smtp",
+        "host": host,
+        "port": port,
+        "username": "mailer",
+        "starttls": starttls
+    });
+    if let Some(password) = password {
+        provider["password"] = password.into();
+    }
+    serde_json::json!({
+        "enabled": true,
+        "from_name": "AXIAM",
+        "from_email": "noreply@example.com",
+        "provider": provider
+    })
+}
+
+/// Both scopes: an omitted password is kept for the same host, port and TLS
+/// mode, and refused `400 validation_error` — with nothing
+/// stored — when any of the three changes; a new password goes anywhere the
+/// address policy allows.
+async fn an_omitted_smtp_password_is_kept_only_for_the_same_server(scope: &str) {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let tenant_id = if scope == "org" {
+        organization_scope_tenant(&db, org_id).await
+    } else {
+        tenant_id
+    };
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let admin_id = create_admin(&db, tenant_id).await;
+    let token = mint_token(&auth, admin_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+    let uri = if scope == "org" {
+        format!("/api/v1/organizations/{org_id}/email-config")
+    } else {
+        format!("/api/v1/tenants/{tenant_id}/email-config")
+    };
+    const SERVER: &str = "smtp.example.com";
+    const OTHER: &str = "93.184.216.35";
+
+    let (status, body) = put(
+        &app,
+        &uri,
+        &token,
+        smtp_destination(SERVER, 587, true, Some(TEST_PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, 200, "{scope}: {body}");
+
+    // The same server: kept.
+    let (status, body) = put(
+        &app,
+        &uri,
+        &token,
+        smtp_destination(SERVER, 587, true, None),
+    )
+    .await;
+    assert_eq!(status, 200, "{scope}: {body}");
+    assert_eq!(
+        stored_smtp_password(&db, scope, org_id, tenant_id).await,
+        TEST_PASSWORD
+    );
+
+    // Another host, another port, another TLS mode: each refused.
+    for (label, changed) in [
+        ("host", smtp_destination(OTHER, 587, true, None)),
+        ("port", smtp_destination(SERVER, 2525, true, None)),
+        ("TLS mode", smtp_destination(SERVER, 587, false, None)),
+    ] {
+        let (status, body) = put(&app, &uri, &token, changed).await;
+        assert_eq!(status, 400, "{scope}, {label}: {body}");
+        assert_eq!(
+            body["error"], "validation_error",
+            "{scope}, {label}: {body}"
+        );
+        assert!(
+            body["message"].as_str().unwrap().contains("password again"),
+            "{scope}, {label}: {body}"
+        );
+    }
+    // Nothing was written: the configuration still names the first server.
+    let (status, body) = put(
+        &app,
+        &uri,
+        &token,
+        smtp_destination(SERVER, 587, true, None),
+    )
+    .await;
+    assert_eq!(status, 200, "{scope}: {body}");
+    assert_eq!(
+        stored_smtp_password(&db, scope, org_id, tenant_id).await,
+        TEST_PASSWORD
+    );
+
+    // With the password supplied, the server may change.
+    let (status, body) = put(
+        &app,
+        &uri,
+        &token,
+        smtp_destination(OTHER, 2525, false, Some("another-placeholder")),
+    )
+    .await;
+    assert_eq!(status, 200, "{scope}: {body}");
+    assert_eq!(
+        stored_smtp_password(&db, scope, org_id, tenant_id).await,
+        "another-placeholder"
+    );
+}
+
+#[actix_rt::test]
+async fn p23w2_05_an_omitted_smtp_password_is_kept_only_for_the_same_server_org_scope() {
+    an_omitted_smtp_password_is_kept_only_for_the_same_server("org").await;
+}
+
+#[actix_rt::test]
+async fn p23w2_05_an_omitted_smtp_password_is_kept_only_for_the_same_server_tenant_scope() {
+    an_omitted_smtp_password_is_kept_only_for_the_same_server("tenant").await;
+}
+
+/// The API-key twin: an `api_url` override is a destination too, so an
+/// omitted key is kept only for the same `api_url`, or when the override is
+/// dropped and the kind's own endpoint applies.
+#[actix_rt::test]
+async fn p23w2_05_an_omitted_api_key_is_kept_only_for_the_same_endpoint() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let admin_id = create_admin(&db, tenant_id).await;
+    let token = mint_token(&auth, admin_id, tenant_id, org_id);
+    let app = test_app!(db, auth, authz);
+    let uri = format!("/api/v1/tenants/{tenant_id}/email-config");
+    let resend = |api_url: Option<&str>, api_key: Option<&str>| {
+        let mut provider = serde_json::json!({ "kind": "resend" });
+        if let Some(url) = api_url {
+            provider["api_url"] = url.into();
+        }
+        if let Some(key) = api_key {
+            provider["api_key"] = key.into();
+        }
+        serde_json::json!({ "provider": provider })
+    };
+    let stored_key = || async {
+        let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+        match repo
+            .get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider
+            .unwrap()
+        {
+            axiam_core::models::email::ProviderConfig::Resend(api) => (api.api_key, api.api_url),
+            other => panic!("expected Resend, got {other:?}"),
+        }
+    };
+    const FIRST: &str = "https://93.184.216.34/emails";
+    const OTHER: &str = "https://93.184.216.35/emails";
+
+    let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), Some(TEST_PASSWORD))).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), None)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(stored_key().await.0, TEST_PASSWORD);
+
+    let (status, body) = put(&app, &uri, &token, resend(Some(OTHER), None)).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"], "validation_error", "{body}");
+    assert_eq!(
+        stored_key().await,
+        (TEST_PASSWORD.to_owned(), Some(FIRST.to_owned()))
+    );
+
+    // Back to the kind's own endpoint: kept.
+    let (status, body) = put(&app, &uri, &token, resend(None, None)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(stored_key().await, (TEST_PASSWORD.to_owned(), None));
+}

@@ -292,6 +292,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not plainly UTF-8 is now refused before either parser reads it, whatever the
   configuration; SHA-1 is refused as described under *Changed*. Threat model
   2.38.0: T-67 and T-69 amended; totals unchanged.
+- **An email provider's stored secret follows only the same server** (#525,
+  P23W2-05). Saving an email configuration without re-entering the secret
+  kept the stored one whenever the provider kind was unchanged, whatever the
+  destination — so an administrator who could edit the configuration, but
+  was never given the SMTP password, could point `host` at a server they run
+  and receive the password in the next `AUTH`. At organization and tenant
+  scope alike, an omitted SMTP password is now kept only when `host` (compared
+  without case), `port` and the TLS mode (`starttls`) are unchanged, and an
+  omitted API key only when `api_url` is unchanged or removed (the provider's
+  own endpoint); otherwise `PUT …/email-config` answers `400`
+  (`validation_error`) and stores nothing. A stored secret that is empty (an
+  unauthenticated relay) is not protected and follows the change as before.
+  **Behaviour change:** moving a configuration to another SMTP server, port
+  or TLS mode, or to another `api_url`, now requires entering the password or
+  API key in the same request.
 
 ### Documentation
 

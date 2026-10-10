@@ -48,11 +48,22 @@ by any `GET`. On the write path an empty credential means *"no new secret
 supplied — keep the stored one"*, which is why the admin panel can show a
 provider's settings without ever holding its key.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- Changing an unrelated field (a sender name, an API URL) does not require
-  re-typing the credential.
-- **Switching provider kind does.** A secret entered for SendGrid is not a
+- Changing an unrelated field (a sender name, the from address) does not
+  require re-typing the credential.
+- **Changing where the credential goes does** (#525). A stored SMTP password
+  is kept only while `host`, `port` and `starttls` stay as they are, and a
+  stored API key only while `api_url` stays as it is (or is removed, which
+  sends to the provider's own endpoint). A save that changes the destination
+  with a blank credential field is refused with `400 validation_error`
+  (*"the SMTP host, port or TLS mode changed: enter the password again"*,
+  or *"api_url changed: enter the API key again"*) and stores nothing —
+  otherwise anyone allowed to edit the configuration, but never given the
+  password, could point it at a server they run and receive the password in
+  the next `AUTH`. Enter the credential in the same save. A relay configured
+  with an empty password is not affected.
+- **Switching provider kind does too.** A secret entered for SendGrid is not a
   Resend credential, so a kind change with a blank credential field does not
   carry the old one across — the new configuration has no credential and is
   refused with *"email configuration is incomplete"* until you supply one.

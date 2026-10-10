@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 enters).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 enters; T-289 and T-275 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -56,7 +56,15 @@
 > listeners' TLS handshakes still consult no list and there is no OCSP
 > responder; both are `1.0.x` and stand in T-102 as residuals. The pass enters
 > **T-470**, Open: a CA whose key Vault's PKI engine holds publishes no list
-> AXIAM can sign, and AXIAM's revocations do not reach Vault's own. The model is
+> AXIAM can sign, and AXIAM's revocations do not reach Vault's own. It amends
+> **T-289** and **T-275** (#517): an administrator's client deletion revoked
+> nothing, so a `managed_by: cimd` client — whose `client_id` is its metadata
+> URL, written back by its next request — came back with every refresh token
+> issued before the delete. Both deletion paths now revoke the client's refresh
+> tokens through one function, the administrator's before the row goes; the
+> test deletes a CIMD client, lets it re-materialise, and is refused the
+> pre-delete refresh token. The sweep still revokes nothing, and T-275 says
+> why. The model is
 > **470 threats, 429 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

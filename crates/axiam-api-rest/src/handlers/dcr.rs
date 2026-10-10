@@ -49,7 +49,7 @@ use axiam_core::models::oauth2_registration_token::{
 use axiam_core::models::settings::{DynamicRegistrationMode, OidcPolicy};
 use axiam_core::repository::{
     AuditLogRepository, OAuth2ClientRepository, OAuth2RegistrationTokenRepository,
-    RefreshTokenRepository, SettingsRepository, TenantRepository,
+    SettingsRepository, TenantRepository,
 };
 use axiam_oauth2::dcr::{self, DcrError, RegistrationRequest, RegistrationResponse};
 use chrono::{DateTime, Duration, Utc};
@@ -970,28 +970,15 @@ pub async fn delete_registration<C: Connection + Clone>(
     }
 }
 
-/// See [`delete_registration`].
+/// See [`delete_registration`]. What deletion revokes, and why the rest need
+/// not be, is written once on
+/// [`revoke_client_grants`](crate::handlers::oauth2_clients::revoke_client_grants),
+/// which the administrator's `DELETE /api/v1/oauth2-clients/{id}` calls too.
 ///
-/// # What deletion revokes, and what it does not need to
-///
-/// * **The row and the management token** — one conditional delete.
-/// * **Refresh tokens** — `revoke_all_for_client`, the existing per-client
-///   revocation. Belt and braces: with the row gone the refresh grant already
-///   fails at client authentication, but a revoked row says so to anything
-///   that reads it, and does not depend on a `client_id` never being reused.
-/// * **Authorization codes and pushed requests** — redeemed only by
-///   authenticating the client, which no longer exists.
-/// * **Access tokens** — self-contained JWTs, revoked by nothing in AXIAM
-///   (RFC 7009 handling is a no-op for them too); they expire within the
-///   access-token lifetime, which is the residual the threat model records.
-/// * **The end user's sessions** — not the client's to revoke. They are the
-///   user's AXIAM sessions, shared with every other relying party; ending them
-///   because one client deregistered would be a forced logout a stranger
-///   could trigger. The revocation feed (`/oauth2/revocations`) lists revoked
-///   *sessions*, so nothing here reaches it.
-/// * **D4 consent records** — left in place. They are the end user's records
-///   of their own decisions, keyed by a `client_id` that is never reissued
-///   (128 random bits), withdrawable by that user, and inert without a client.
+/// The revocation follows the delete here rather than preceding it, because
+/// the delete *is* the credential check — conditional on the presented
+/// token's digest — and revoking first would let anybody naming a
+/// `client_id` revoke its tokens.
 async fn delete_inner<C: Connection + Clone>(
     http_req: &HttpRequest,
     tenant_id: Uuid,
@@ -1009,10 +996,9 @@ async fn delete_inner<C: Connection + Clone>(
         })?
         .ok_or(ConfigRefusal::InvalidToken)?;
 
-    if let Err(e) = state
-        .refresh_token_repo
-        .revoke_all_for_client(tenant_id, &deleted.client_id)
-        .await
+    if let Err(e) =
+        crate::handlers::oauth2_clients::revoke_client_grants(state, tenant_id, &deleted.client_id)
+            .await
     {
         // The client is gone, so its refresh tokens are already unusable at
         // the token endpoint; this is logged rather than turned into an error

@@ -621,6 +621,87 @@ async fn a_changed_document_is_picked_up_after_the_ttl() {
     );
 }
 
+/// **#517 — an administrator's delete is not undone by the next request.** A
+/// CIMD client's `client_id` is its metadata URL, so `materialise_if_cimd`
+/// writes the row back the next time the client presents it. Before #517 the
+/// admin `DELETE` revoked nothing, and every refresh token issued before it
+/// refreshed again against the re-materialised row.
+#[actix_rt::test]
+async fn a_deleted_cimd_client_rematerialises_without_its_refresh_tokens() {
+    let f = setup().await;
+    let (_server, client_id) = publisher(Value::Null).await;
+    set_org_settings(&f, cimd_policy(&host_of(&client_id))).await;
+    let app = test_app!(f);
+
+    let challenge = pkce_challenge(VERIFIER);
+    let query = format!(
+        "response_type=code&client_id={client_id}&redirect_uri={ACTUAL_CALLBACK}\
+         &scope=openid+profile&code_challenge={challenge}&code_challenge_method=S256\
+         &resource={MCP}"
+    );
+    let _ = get_authorize!(app, f, query.clone());
+    let (status, body) = admin!(
+        app,
+        f,
+        post,
+        "/api/v1/account/consents/oidc-scopes",
+        json!({ "client_id": client_id, "scopes": ["openid", "profile"] })
+    );
+    assert_eq!(status, 200, "{body}");
+    let (_, location, body) = get_authorize!(app, f, query.clone());
+    let location = location.unwrap_or_else(|| panic!("no redirect: {body}"));
+    let code = param(&location, "code").unwrap_or_else(|| panic!("no code in {location}"));
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={ACTUAL_CALLBACK}\
+             &client_id={client_id}&code_verifier={VERIFIER}&resource={MCP}"
+        )
+    );
+    assert_eq!(status, 200, "{tokens}");
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("the document grants refresh_token")
+        .to_owned();
+
+    // The administrator deletes the shadow row.
+    let before = stored_client(&f, &client_id).await.expect("materialised");
+    let (status, body) = admin!(
+        app,
+        f,
+        delete,
+        &format!("/api/v1/oauth2-clients/{}", before.id),
+        json!({})
+    );
+    assert_eq!(status, 204, "{body}");
+    assert!(stored_client(&f, &client_id).await.is_none(), "deleted");
+
+    // The client's next request writes the row back, from the same document.
+    let (status, _, body) = get_authorize!(app, f, query);
+    assert_eq!(status, 302, "{body}");
+    let after = stored_client(&f, &client_id)
+        .await
+        .expect("the document re-materialised the client");
+    assert_eq!(after.managed_by, ManagedBy::Cimd);
+    assert_ne!(after.id, before.id, "a new row under the same client_id");
+
+    // A refresh token issued before the delete does not come back with it.
+    let (status, body) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!("grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "a pre-delete refresh token must not refresh against the re-materialised row: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "{body}");
+}
+
 // ---------------------------------------------------------------------------
 // The registrations a document may not touch or invent
 // ---------------------------------------------------------------------------

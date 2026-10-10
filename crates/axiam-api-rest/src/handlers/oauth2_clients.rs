@@ -1022,7 +1022,7 @@ pub async fn update<C: Connection + Clone>(
     tag = "oauth2-clients",
     params(("id" = Uuid, Path, description = "OAuth2 client ID")),
     responses(
-        (status = 204, description = "OAuth2 client deleted"),
+        (status = 204, description = "OAuth2 client deleted; its refresh tokens are revoked first"),
         (status = 404, description = "OAuth2 client not found"),
     ),
     security(("bearer" = []))
@@ -1037,8 +1037,74 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
+    let client = state
+        .oauth2_client_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
+
+    // #517 — revoke first, and refuse the delete if that fails. The other
+    // order would leave a row-less client whose refresh tokens are still live,
+    // and a retry would answer `404`: for a `managed_by: cimd` client the next
+    // request re-materialises the row under the same `client_id` and every one
+    // of those tokens refreshes again.
+    revoke_client_grants(&state, user.tenant_id, &client.client_id).await?;
     state.oauth2_client_repo.delete(user.tenant_id, id).await?;
+
+    // A refresh that read the row before the delete can still have rotated a
+    // token between the two writes above; one more pass leaves nothing live.
+    // Logged rather than returned, because the client is already gone.
+    if let Err(e) = revoke_client_grants(&state, user.tenant_id, &client.client_id).await {
+        tracing::error!(
+            error = %e,
+            tenant_id = %user.tenant_id,
+            client_id = %client.client_id,
+            "a deleted client's refresh tokens could not be swept a second time"
+        );
+    }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Revoke what deleting a client must revoke. Both deletion paths call it:
+/// `DELETE /api/v1/oauth2-clients/{id}` (an administrator) and RFC 7592's
+/// `DELETE /oauth2/register/{client_id}` (the client itself).
+///
+/// # What deletion revokes, and what it does not need to
+///
+/// * **Refresh tokens** — `revoke_all_for_client`, the per-client revocation.
+///   This is not belt and braces. With the row gone the refresh grant fails
+///   at client authentication only while the `client_id` stays unused, and a
+///   `managed_by: cimd` client's `client_id` is its metadata URL, which
+///   `materialise_if_cimd` writes back on the client's next request (#517).
+///   A revoked row says so to anything that reads it, whatever the row's
+///   future.
+/// * **Authorization codes and pushed requests** — redeemed only by
+///   authenticating the client. For a CIMD client re-materialised inside a
+///   code's lifetime (600 s by default) that is a residual T-289 records.
+/// * **Access tokens** — self-contained JWTs, revoked by nothing in AXIAM
+///   (RFC 7009 handling is a no-op for them too); they expire within the
+///   access-token lifetime, which is the residual the threat model records.
+/// * **The end user's sessions** — not the client's to revoke. They are the
+///   user's AXIAM sessions, shared with every other relying party; ending them
+///   because one client was deleted would be a forced logout a stranger
+///   could trigger through RFC 7592. The revocation feed
+///   (`/oauth2/revocations`) lists revoked *sessions*, so nothing here
+///   reaches it.
+/// * **D4 consent records** — left in place. They are the end user's records
+///   of their own decisions, withdrawable by that user and inert without a
+///   client. A `dcr` or `admin` client's `client_id` is never reissued; a
+///   re-materialised CIMD client is the same document at the same URL, which
+///   is what the user consented to.
+pub(crate) async fn revoke_client_grants<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    client_id: &str,
+) -> Result<(), axiam_core::error::AxiamError> {
+    use axiam_core::repository::RefreshTokenRepository;
+
+    state
+        .refresh_token_repo
+        .revoke_all_for_client(tenant_id, client_id)
+        .await
 }
 
 #[cfg(test)]

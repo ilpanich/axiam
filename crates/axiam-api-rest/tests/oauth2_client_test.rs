@@ -379,6 +379,110 @@ async fn delete_oauth2_client_returns_204() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
+/// #517 — an administrator's delete revokes the client's refresh tokens
+/// before it removes the row, as RFC 7592's `DELETE /oauth2/register/{id}`
+/// already did. The refresh is refused either way once the row is gone; what
+/// the fix adds is the revoked mark, which keeps the token dead if the
+/// `client_id` ever names a row again (a CIMD client's always can —
+/// `cimd_test.rs::a_deleted_cimd_client_rematerialises_without_its_refresh_tokens`).
+#[actix_rt::test]
+async fn deleting_a_client_revokes_its_refresh_tokens() {
+    use axiam_core::models::oauth2_client::CreateRefreshToken;
+    use axiam_core::repository::RefreshTokenRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Refreshing Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "scopes": ["openid"]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+    let client_id = created["client_id"].as_str().unwrap();
+    let secret = created["client_secret"].as_str().unwrap();
+
+    // A refresh token as the code grant stores one.
+    let raw = axiam_auth::token::generate_refresh_token();
+    let hash = axiam_auth::token::hash_refresh_token(&raw);
+    let refresh_repo = axiam_db::repository::SurrealRefreshTokenRepository::new(db.clone());
+    refresh_repo
+        .create(CreateRefreshToken {
+            tenant_id,
+            token_hash: hash.clone(),
+            client_id: client_id.to_owned(),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: Vec::new(),
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+            expires_at: chrono::Utc::now() + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+    assert!(
+        refresh_repo
+            .get_by_token_hash(tenant_id, &hash)
+            .await
+            .is_ok()
+    );
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    let req = test::TestRequest::post()
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "grant_type=refresh_token&refresh_token={raw}&client_id={client_id}\
+             &client_secret={secret}"
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        status == 400 || status == 401,
+        "a deleted client's refresh token must not refresh: {status} {body}"
+    );
+    assert!(body.get("access_token").is_none(), "{body}");
+
+    // The row is marked revoked, not merely orphaned.
+    let mut found = db
+        .query("SELECT VALUE revoked FROM oauth2_refresh_token WHERE token_hash = $h")
+        .bind(("h", hash))
+        .await
+        .unwrap();
+    let revoked: Vec<bool> = found.take(0).unwrap();
+    assert_eq!(
+        revoked,
+        vec![true],
+        "the refresh token is revoked on delete"
+    );
+}
+
 #[actix_rt::test]
 async fn create_oauth2_client_rejects_empty_redirect_uris() {
     let (db, org_id, tenant_id) = setup_db().await;

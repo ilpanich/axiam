@@ -88,6 +88,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OCSP responder, and a `vault_pki` CA's revocations do not reach Vault's own
   list (T-470). Threat model 2.38.0: T-102 Mitigated, T-470 entered Open; 470
   threats, 429 mitigated / 20 open / 21 not applicable.
+- **Deleting an OAuth2 client revokes its refresh tokens** (#517, P23W1-05).
+  `DELETE /api/v1/oauth2-clients/{id}` removed the client row and revoked
+  nothing. For a client discovered through a Client ID Metadata Document
+  (`managed_by: cimd`) the `client_id` is the document's URL, so the client's
+  next request re-created the row and every refresh token issued before the
+  delete refreshed again. The administrator's delete now revokes the client's
+  refresh tokens before it removes the row, through the same function RFC
+  7592's `DELETE /oauth2/register/{client_id}` calls, and answers `500` without
+  deleting if the revocation cannot be written. **Behaviour change:** deleting
+  a client now signs its users out of it at the next refresh, for every kind of
+  client; access tokens already issued still run out on their own (at most the
+  access-token lifetime). The unused-client sweep still revokes nothing; it
+  evicts rows whose tokens, under the default 30-day clocks, have expired.
+  Threat model 2.38.0: T-289 and T-275 amended; totals unchanged.
 
 ### Documentation
 

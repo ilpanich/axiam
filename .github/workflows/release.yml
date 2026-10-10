@@ -122,12 +122,27 @@ jobs:
       # D-06 Step 2: scan — block on HIGH/CRITICAL fixable vulns before push.
       # Runs per architecture: an arm64 image can carry different package
       # versions (and therefore different CVEs) than its amd64 sibling.
+      #
+      # `limit-severities-for-sarif: true` is what makes `severity:` mean
+      # anything here. With `format: sarif` and without it, trivy-action's
+      # entrypoint prints "Building SARIF report with all severities" and
+      # UNSETS TRIVY_SEVERITY before its single `trivy image` run, so the
+      # exit-code gate fires on ANY fixable finding — LOW, MEDIUM and UNKNOWN
+      # included. That is why the server image failed this step on
+      # v1.0.0-beta17 and v1.0.0-beta18 with nothing HIGH or CRITICAL in it:
+      # the pinned distroless/cc-debian12 base carries libssl3 3.0.20-1~deb12u2
+      # (2 MEDIUM + 4 LOW CVEs fixed in 3.0.22-1~deb12u1) and tzdata 2026b
+      # (DLA-4792-1, UNKNOWN), and no distroless build ships the fixes yet.
+      # Reproduced with trivy 0.70.0 on 2026-10-10 against both arches of the
+      # pinned digest: all severities -> exit 1, HIGH,CRITICAL -> exit 0.
+      # ci.yml's fs and config scans already set this flag for the same reason.
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: image
           image-ref: axiam-${{ matrix.image }}:scan-${{ github.sha }}
           severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
           ignore-unfixed: true
           exit-code: 1
           format: sarif

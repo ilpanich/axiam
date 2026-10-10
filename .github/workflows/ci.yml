@@ -387,10 +387,12 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           # trivy-action writes ALL severities into the SARIF by default
-          # ("Building SARIF report with all severities") — the `severity`
-          # input only gates the table/exit-code. This flag makes the SARIF
-          # honour the filter too, so the code-scanning dashboard isn't flooded
-          # with LOW/MEDIUM advisories that fail the Trivy check.
+          # ("Building SARIF report with all severities") by UNSETTING
+          # TRIVY_SEVERITY before its single `trivy` run — so without this flag
+          # the exit-code gate ALSO fires on LOW/MEDIUM/UNKNOWN findings, not
+          # just the SARIF. This flag makes both honour the `severity` filter.
+          # (release.yml's image scan lacked it, and that alone blocked the
+          # v1.0.0-beta17/beta18 server images.)
           limit-severities-for-sarif: true
           ignore-unfixed: true
           # benchmarks/ and conformance/ are local test harnesses. Neither is a

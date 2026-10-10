@@ -2,7 +2,7 @@
 
 use axiam_core::models::email::{ApiProviderConfig, EmailConfig, ProviderConfig, SmtpConfig};
 use axiam_core::models::settings::SettingsScope;
-use axiam_email::EmailService;
+use axiam_email::{EmailEgress, EmailService};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -30,7 +30,7 @@ fn from_config_builds_sendgrid_service() {
         }),
         true,
     );
-    let service = EmailService::from_config(&cfg).unwrap();
+    let service = EmailService::from_config(&cfg, &EmailEgress::default()).unwrap();
     assert_eq!(service.provider_name(), "sendgrid");
 }
 
@@ -46,7 +46,7 @@ fn from_config_builds_smtp_service() {
         }),
         true,
     );
-    let service = EmailService::from_config(&cfg).unwrap();
+    let service = EmailService::from_config(&cfg, &EmailEgress::default()).unwrap();
     assert_eq!(service.provider_name(), "smtp");
 }
 
@@ -59,7 +59,9 @@ fn from_config_disabled_errors() {
         }),
         false,
     );
-    let err = EmailService::from_config(&cfg).unwrap_err().to_string();
+    let err = EmailService::from_config(&cfg, &EmailEgress::default())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("disabled"), "got: {err}");
 }
 
@@ -72,7 +74,7 @@ fn service_debug_impl_shows_provider_and_identity() {
         }),
         true,
     );
-    let service = EmailService::from_config(&cfg).unwrap();
+    let service = EmailService::from_config(&cfg, &EmailEgress::default()).unwrap();
     let dbg = format!("{service:?}");
     assert!(dbg.contains("EmailService"));
     assert!(dbg.contains("brevo"));

@@ -156,16 +156,17 @@ not need it, and needing it means the checkout is wrong.
   RabbitMQ and possibly Keycloak and authentik from it.
 - **`docker compose config`** needs every required variable; a bare run fails with
   `required variable … is missing a value`. That is the compose files failing closed.
-- **The stacks listen on every interface** (W6 F4 review, P23W6-06). Every target's
-  compose file publishes its application port (`BENCH_APP_PORT`, 8090), its TLS port
-  (`BENCH_TLS_PORT`, 8443) and, for AXIAM, gRPC (`BENCH_GRPC_PORT`, 50051) on all host
-  addresses, and the benchmark posture raises AXIAM's limiters and its lockout threshold
-  to 1 000 000. The credentials are generated per run, but on a G-box that sits on a LAN
-  anyone on that LAN reaches four identity servers with their limits off, and can disturb
-  a measurement. Firewall the three ports for anything but loopback for the length of the
-  run (Docker publishes past `ufw`, so a rule in the `DOCKER-USER` chain, or a host with
-  no LAN), and say in `RUN6-NOTES.md` which you did. The FAPI conformance rig needs the
-  ports on the Docker bridge, which is why the compose files do not bind loopback.
+- **The stacks listen on loopback only** (W6 F4 review, P23W6-06, fixed in #567).
+  Every target's compose file publishes its application port (`BENCH_APP_PORT`, 8090),
+  its TLS port (`BENCH_TLS_PORT`, 8443) and, for AXIAM, gRPC (`BENCH_GRPC_PORT`, 50051)
+  on `${BENCH_BIND_ADDR:-127.0.0.1}`, so a G-box on a LAN does not offer four identity
+  servers with their limits off (the benchmark posture raises AXIAM's limiters and its
+  lockout threshold to 1 000 000) to the LAN. The harness drives them on `localhost`,
+  so nothing needs changing for a run. Do **not** export `BENCH_BIND_ADDR=0.0.0.0` for
+  the matrix; only the FAPI conformance rig needs it, because it reaches AXIAM through
+  the Docker bridge. If you set it anyway, firewall the ports for the length of the run
+  (Docker publishes past `ufw`, so a rule in the `DOCKER-USER` chain, or a host with no
+  LAN), and say in `RUN6-NOTES.md` which you did.
 
 ### 1.3 Re-check for a later patch release (quay.io is unreachable from the sandbox)
 

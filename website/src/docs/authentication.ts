@@ -985,6 +985,14 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "note",
+        text: "**SHA-1 is refused since 1.0.0.** A response is verified with the SHA-2 RSA and ECDSA algorithms only — the rule AXIAM's own SAML identity provider applies to the requests it receives — and one that declares a DTD or an entity (`<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`), or is not plain UTF-8, is refused before it is parsed. An identity provider that still signs with SHA-1 fails at the signature check until it moves to SHA-256. If it cannot yet, set `allow_sha1_signatures: true` on that federation configuration (the console's *Accept SHA-1 signatures* switch): it restores the earlier rule for that provider alone, is recorded in the audit log as `federation.sha1_signatures_allowed` with the configuration and the administrator, and should be turned off once the provider signs with SHA-2. The DTD refusal has no switch.",
+      },
+      {
+        type: "note",
+        text: "**The IdP's metadata can be signature-checked, and is cached.** AXIAM reads three things from the identity provider's metadata document at `metadata_url`: its entity ID, its sign-in URL and that URL's binding. The assertion certificate is never taken from metadata, so forged metadata cannot forge a sign-in — but it can choose where users are sent to sign in. Set `idp_metadata_signing_cert_pem` (the console's *Metadata Signing Certificate*) to the certificate the provider signs its metadata with, and a document must then carry exactly one SHA-2 signature, on its `EntityDescriptor` root, that verifies against it; an unsigned or altered document is refused and no sign-in starts. Without it the document is trusted on the strength of its HTTPS fetch, as before 1.0.0. Either way, metadata is refused when it declares a DTD or is past its `validUntil`, and the parsed document is cached per server process for its `cacheDuration` (one hour when it states none), never less than five minutes or more than 24 hours and never past `validUntil`, so a sign-in no longer waits on the metadata host; editing the configuration drops the cached copy. When a refetch names a sign-in URL on another host than before, AXIAM writes a `federation.saml_sso_host_changed` audit row with the configuration and both hosts. Clearing the metadata certificate — which turns the check off — writes `federation.metadata_signing_cert_cleared`, and replacing it with a different one `federation.metadata_signing_cert_changed`, each naming the configuration and the administrator.",
+      },
+      {
+        type: "note",
         text: "SAML support is behind a default-on `saml` build feature that links `libxml`. A build made with `--no-default-features` — which is what CI's *Build (SAML off)* job produces — has every other capability and neither the SAML service provider nor the [SAML identity provider](#/docs/saml-idp) (whose service-provider registry API is the one part compiled into every build).",
       },
       {
@@ -1029,8 +1037,8 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
           },
           {
             title: "For SAML, supply the IdP signing certificate",
-            body: "`idp_signing_cert_pem` is the X.509 certificate assertions are verified against. Without it there is nothing to check a signature with.",
-            code: '"idp_signing_cert_pem": "-----BEGIN CERTIFICATE-----\\n..."',
+            body: "`idp_signing_cert_pem` is the X.509 certificate assertions are verified against. Without it there is nothing to check a signature with. Signatures must use SHA-2; `allow_sha1_signatures` (default `false`, SAML only, audited when turned on) is the escape hatch for an IdP that still signs with SHA-1. If the provider signs its metadata, add `idp_metadata_signing_cert_pem` too: from then on its metadata is read only through that signature.",
+            code: '"idp_signing_cert_pem": "-----BEGIN CERTIFICATE-----\\n...",\n"idp_metadata_signing_cert_pem": "-----BEGIN CERTIFICATE-----\\n..."',
           },
           {
             title: "Map the attributes onto AXIAM fields",

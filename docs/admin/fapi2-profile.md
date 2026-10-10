@@ -284,6 +284,24 @@ The deployment's mTLS listener must trust the issuing CA
 before AXIAM sees a request, so AXIAM's log shows nothing at all — check the
 listener first when a client "cannot connect".
 
+**The certificate must also be the client's organization's** (since 1.0.0,
+R1W1-02). The listener trusts every organization's anchors at once, so a match
+under *some* anchor does not say whose CA vouched for the DN. AXIAM therefore
+accepts, for a `tls_client_auth` client:
+
+- a certificate **AXIAM issued in the client's own tenant**; or
+- any other certificate whose verified chain **ends at a CA the client's
+  organization holds** — generated there, or imported there (a keyless import
+  is enough; the anchor still reaches the listener by being flagged or by your
+  own bundle) — and passes through no CA that only another organization, or
+  another tenant's signing CA, holds.
+
+A CA you trust only through your own `CLIENT_CA_PATH` bundle, and never imported
+into the client's organization, no longer authenticates a `tls_client_auth`
+client: import it there (`POST /api/v1/organizations/{org_id}/ca-certificates/import`
+with its `public_cert_pem`). Refusals answer `invalid_client`, and the log line
+names which rule refused. `self_signed_tls_client_auth` is unaffected.
+
 ### `self_signed_tls_client_auth` — the certificate is the credential
 
 Register the certificate's **`x5t#S256` thumbprint**: base64url, unpadded,

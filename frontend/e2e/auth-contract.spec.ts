@@ -142,6 +142,18 @@ async function mockAuthMe(page: Page): Promise<void> {
       }),
     });
   });
+  // Every authenticated page renders the user menu, whose badge lists the
+  // signed-in user's pending CIBA requests (#566). Left unmocked, that GET
+  // 401s against the backend and the api interceptor answers with a silent
+  // /auth/refresh POST and then a redirect to /login — the same failure the
+  // mfa-methods comment below records.
+  await page.route((url) => url.pathname === "/api/v1/ciba/requests", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ requests: [] }),
+    });
+  });
 }
 
 /**

@@ -4,6 +4,7 @@ import { ACR_MULTI_FACTOR, sanitizeRequiredAcr } from "@/lib/reauth";
 // ─── CIBA user approval (G-7, T23.7.2) ───────────────────────────────────────
 //
 // Mirrors `crates/axiam-api-rest/src/handlers/ciba_approval.rs`:
+//  - GET  /api/v1/ciba/requests?status=pending -> { requests: CibaApprovalRequest[] }
 //  - GET  /api/v1/ciba/requests/{id}          -> CibaApprovalRequest
 //  - POST /api/v1/ciba/requests/{id}/approve  -> { ok, decision }
 //  - POST /api/v1/ciba/requests/{id}/deny     -> { ok, decision }
@@ -39,7 +40,23 @@ export interface CibaStepUpRequired {
   required_acr: string;
 }
 
+/**
+ * The signed-in user's own pending requests, soonest expiry first. The way an
+ * account that was sent no approval mail (D-74: no vouched address) finds them;
+ * each entry is what the approval page shows for its `request_id`.
+ */
+export interface CibaPendingList {
+  requests: CibaApprovalRequest[];
+}
+
 export const cibaService = {
+  listPending: (): Promise<CibaPendingList> =>
+    api
+      .get<CibaPendingList>("/api/v1/ciba/requests", {
+        params: { status: "pending" },
+      })
+      .then((r) => r.data),
+
   get: (requestId: string): Promise<CibaApprovalRequest> =>
     api
       .get<CibaApprovalRequest>(`/api/v1/ciba/requests/${requestId}`)

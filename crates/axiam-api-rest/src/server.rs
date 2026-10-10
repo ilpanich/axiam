@@ -648,6 +648,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
+    // #565 (T-102) — each issuing CA's certificate revocation list. Public and
+    // outside every `AuthzMiddleware` scope: a relying party fetches it with no
+    // AXIAM credential, from the URL a certificate's distribution point names.
+    // A bucket of its own from the first commit (plan §7 rule 6), per IP.
+    cfg.service(
+        web::resource("/pki/v1/{org_id}/ca/{ca_id}/crl")
+            .wrap(build_governor(rate_limit_cfg.crl_per_min))
+            .wrap(RateLimitShared::<C>::new("crl", rate_limit_cfg.crl_per_min))
+            .route(web::get().to(handlers::crl::get_crl::<C>))
+            .route(web::head().to(handlers::crl::get_crl::<C>)),
+    );
     // G-5 / T23.5.2 — SSF 1.0 §7 transmitter metadata, at the host root like
     // every `.well-known` document, and the stream management API (§8) under
     // `/ssf/v1`. Every route has a bucket of its own (plan §7 rule 6), under
@@ -803,6 +814,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // cannot spend the allowance a decision needs; a request id is a
             // handle, not a secret (D-68), and every id that is not the
             // caller's own answers 404.
+            // The list is for the account the approval mail never reaches
+            // (D-74, #566), and a bucket of its own under the same allowance.
+            .service(
+                web::resource("/ciba/requests")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_list",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::get().to(handlers::ciba_approval::list_requests::<C>)),
+            )
             .service(
                 web::resource("/ciba/requests/{request_id}")
                     .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
@@ -865,7 +887,14 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                // #529 (T-473): the self-test connects to the provider, so it
+                // carries its own limiter, one bucket per route, per IP.
                 web::resource("/organizations/{org_id}/email-config/test")
+                    .wrap(build_governor(rate_limit_cfg.email_test_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "email_test_org",
+                        rate_limit_cfg.email_test_per_min,
+                    ))
                     .route(web::post().to(
                         handlers::email_config::test_org_email_config::<C>,
                     )),
@@ -1395,7 +1424,14 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     )),
             )
             .service(
+                // #529 (T-473): the self-test connects to the provider, so it
+                // carries its own limiter, one bucket per route, per IP.
                 web::resource("/tenants/{tenant_id}/email-config/test")
+                    .wrap(build_governor(rate_limit_cfg.email_test_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "email_test_tenant",
+                        rate_limit_cfg.email_test_per_min,
+                    ))
                     .route(web::post().to(
                         handlers::email_config::test_tenant_email_config::<C>,
                     )),
@@ -1846,7 +1882,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/metadata")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_metadata", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_metadata", rate_limit_cfg))
                 .route(web::get().to(saml_idp::metadata::<C>))
                 .route(web::head().to(saml_idp::metadata::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1854,7 +1890,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso", rate_limit_cfg))
                 .route(web::get().to(saml_idp::sso_redirect::<C>))
                 .route(web::post().to(saml_idp::sso_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1862,16 +1898,16 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso/continue")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso_continue", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso_continue", rate_limit_cfg))
                 .route(web::get().to(saml_idp::sso_continue::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
         .service(
             web::resource("/sso/idp-initiated")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new(
+                .wrap(RateLimitShared::<C>::browser_preset(
                     "saml_idp_sso_idp_initiated",
-                    per_min,
+                    rate_limit_cfg,
                 ))
                 .route(web::get().to(saml_idp::sso_idp_initiated::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1882,7 +1918,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso/logout")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso_logout", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso_logout", rate_limit_cfg))
                 .route(web::get().to(saml_idp_slo::sso_logout::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
@@ -1890,7 +1926,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/slo")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_slo", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_slo", rate_limit_cfg))
                 .route(web::get().to(saml_idp_slo::slo_redirect::<C>))
                 .route(web::post().to(saml_idp_slo::slo_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1927,8 +1963,21 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // rather than with actix's deserializer prose. Every other query
             // this extractor cannot read keeps the response it has always
             // had; see `handlers::oauth2::authorize_query_error`.
+            //
+            // #532 (P23W3-09, §7 rule 6): the browser-endpoint preset
+            // `end_session_per_min`, per IP, under a bucket of its own
+            // (`oauth2_authorize`) — the one the SAML SSO routes use. Every
+            // request reads the client, one carrying the sign-in cookie also
+            // reads the session and the account, and on a CIMD tenant a new
+            // URL-shaped `client_id` costs an outbound fetch. Both mounts
+            // register the one name, so alternating paths buys nothing.
             .service(
                 web::resource("/authorize")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::browser_preset(
+                        "oauth2_authorize",
+                        rate_limit_cfg,
+                    ))
                     .app_data(
                         web::QueryConfig::default()
                             .error_handler(handlers::oauth2::authorize_query_error),
@@ -2069,9 +2118,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/end_session")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::browser_preset(
                         "oauth2_end_session",
-                        rate_limit_cfg.end_session_per_min,
+                        rate_limit_cfg,
                     ))
                     .route(web::get().to(handlers::oauth2::end_session::<C>))
                     .route(web::post().to(handlers::oauth2::end_session::<C>)),
@@ -2087,9 +2136,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/authorize/logout")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::browser_preset(
                         "oauth2_end_session_cookie",
-                        rate_limit_cfg.end_session_per_min,
+                        rate_limit_cfg,
                     ))
                     .route(web::get().to(handlers::oauth2::end_session_at_cookie_path::<C>)),
             )

@@ -4,6 +4,7 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::EmailConfig;
 
+use crate::egress::EmailEgress;
 use crate::message::EmailMessage;
 use crate::provider::{EmailProvider, SendResult};
 use crate::providers;
@@ -31,18 +32,19 @@ impl std::fmt::Debug for EmailService {
 }
 
 impl EmailService {
-    /// Build an `EmailService` from a resolved `EmailConfig`.
+    /// Build an `EmailService` from a resolved `EmailConfig`, its provider
+    /// held to the deployment's outbound rule `egress` at every send (#529).
     ///
     /// Returns an error if the provider cannot be constructed (e.g.,
     /// invalid SMTP host) or if email is disabled.
-    pub fn from_config(config: &EmailConfig) -> AxiamResult<Self> {
+    pub fn from_config(config: &EmailConfig, egress: &EmailEgress) -> AxiamResult<Self> {
         if !config.enabled {
             return Err(AxiamError::EmailConfig(
                 "email is disabled for this scope".into(),
             ));
         }
 
-        let provider = providers::build_provider(&config.provider)?;
+        let provider = providers::build_provider(&config.provider, egress)?;
 
         Ok(Self {
             provider,

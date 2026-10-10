@@ -33,6 +33,7 @@ import {
   FolderTree,
   FileKey2,
   Share2,
+  RadioTower,
 } from "lucide-react";
 
 interface NavItem {
@@ -241,6 +242,15 @@ export const navSections: NavSection[] = [
         label: "SCIM Targets",
         icon: <Share2 size={18} />,
         requiredPermission: "scim_targets:read",
+      },
+      {
+        // G-5: AXIAM as a Shared Signals Framework transmitter — the receivers
+        // that are sent security events about this tenant's users. Acts on the
+        // caller's own tenant only, like the pages beside it.
+        to: "/ssf",
+        label: "SSF Streams",
+        icon: <RadioTower size={18} />,
+        requiredPermission: "ssf_streams:read",
       },
     ],
   },

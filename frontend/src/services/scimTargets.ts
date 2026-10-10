@@ -120,6 +120,12 @@ export interface ScimTargetInput {
   push_groups: boolean;
   user_name_from: UserNameSource;
   deprovision: DeprovisionPolicy;
+  /**
+   * Update only. The {@link ScimTarget.updated_at} the form was opened from: the
+   * server answers `409` when the target changed since (P23W5-09, T-416).
+   * Omitted, the write is last-writer-wins.
+   */
+  expected_updated_at?: string;
 }
 
 // ─── Client-side mirrors of the server's rules ───────────────────────────────

@@ -96,7 +96,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "status", text: "Project status" },
       {
         type: "warn",
-        text: "AXIAM is pre-1.0 and under active development. It should not carry production identity traffic until it reaches a stable release. The security posture described throughout these docs is a self-assessment backed by tests and a threat model — not a certified third-party audit.",
+        text: "AXIAM 1.0.0 is the first stable release: REST, gRPC, AMQP and the SDK contract are under semantic versioning from here, and security fixes ship in `1.0.x`. No independent third-party audit has been performed; the shared-responsibility checklist applies. The security posture described throughout these docs is a self-assessment backed by tests and a threat model — not a certified third-party audit.",
       },
       { type: "h", id: "start", text: "Where to go next" },
       {

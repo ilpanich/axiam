@@ -220,7 +220,10 @@ describe("Topbar", () => {
     expect(
       await screen.findByText(/No other tenant is visible to you/)
     ).toBeInTheDocument();
-    expect(apiMock.get).not.toHaveBeenCalled();
+    // The only read is the user menu's pending sign-in list, never a tenant lookup.
+    for (const [url] of apiMock.get.mock.calls) {
+      expect(url).toBe("/api/v1/ciba/requests");
+    }
   });
 
   it("opens the user menu showing username/email and a sign-out option", async () => {
@@ -293,6 +296,73 @@ describe("Topbar", () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
   });
 
+  // ─── Pending sign-in requests (CIBA, D-74, #566) ────────────────────────────
+
+  const pendingRequest = (id: string, name: string) => ({
+    request_id: id,
+    version: 0,
+    client_id: "cc_1",
+    client_name: name,
+    scopes: ["openid"],
+    binding_message: "W4SCT",
+    requested_acr: [],
+    step_up_required: null,
+    expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+  });
+
+  it("badges the user menu with the number of waiting sign-in requests", async () => {
+    apiMock.get.mockResolvedValue(
+      res({
+        requests: [
+          pendingRequest("0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6e", "Call Centre"),
+          pendingRequest("1c8f4b63-7d2f-4a1b-8e74-2a3b4c5d6e7f", "Kiosk"),
+        ],
+      }),
+    );
+    renderTopbar();
+
+    expect(await screen.findByTestId("pending-sign-ins-badge")).toHaveTextContent("2");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/ciba/requests", {
+      params: { status: "pending" },
+    });
+    expect(
+      screen.getByRole("button", { name: "User menu, 2 sign-in requests waiting" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no badge when nothing is waiting, or when the list is refused", async () => {
+    apiMock.get.mockResolvedValue(res({ requests: [] }));
+    const { unmount } = renderTopbar();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
+    expect(screen.queryByTestId("pending-sign-ins-badge")).not.toBeInTheDocument();
+    unmount();
+
+    apiMock.get.mockRejectedValue(new Error("403"));
+    renderTopbar();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("pending-sign-ins-badge")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("User menu")).toBeInTheDocument();
+  });
+
+  it("lists the waiting requests in the menu and opens the approval page", async () => {
+    const id = "0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6e";
+    apiMock.get.mockResolvedValue(res({ requests: [pendingRequest(id, "Call Centre")] }));
+    renderTopbar(vi.fn(), {
+      routes: [
+        {
+          path: "/organizations/:orgId",
+          element: <Topbar onMenuClick={vi.fn()} />,
+        },
+        { path: "/ciba/approve", element: <div>Approval page</div> },
+      ],
+    });
+    await screen.findByTestId("pending-sign-ins-badge");
+    await userEvent.click(screen.getByRole("button", { name: /^User menu/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Call Centre/ }));
+
+    expect(await screen.findByText("Approval page")).toBeInTheDocument();
+  });
+
   it("still clears auth and navigates to /login even when the logout request fails", async () => {
     apiMock.post.mockRejectedValue(new Error("network down"));
     renderTopbar(vi.fn(), {
@@ -319,9 +389,101 @@ describe("Topbar", () => {
   });
 });
 
+describe("Topbar — organization-level tenant selector", () => {
+  const orgUser: AuthUser = { ...user, organization_level: true };
+  const tenantRows = [
+    { id: "t1", name: "Default", slug: "default", organization_id: "o1" },
+    { id: "t2", name: "Research", slug: "rd", organization_id: "o1" },
+  ];
+
+  function mockLookups() {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/organizations")
+        return res({ items: [{ id: "o1", name: "AXIAM Corp", slug: "axiam-corp" }], total: 1 });
+      if (url === "/api/v1/organizations/o1/tenants")
+        return res({ items: tenantRows, total: tenantRows.length });
+      if (url === "/api/v1/auth/me")
+        return res({
+          user: { ...orgUser, id: "u1" },
+          permissions: ["*"],
+          tenant_slug: "rd",
+          org_slug: "axiam-corp",
+        });
+      return res({ items: [], total: 0 });
+    });
+  }
+
+  async function openMenu(label: RegExp) {
+    await userEvent.click(screen.getByText(label).closest("button")!);
+    return screen.findByRole("menu", { name: "Tenant selector" });
+  }
+
+  it("shows the organization scope as current, and switching to a tenant re-reads /auth/me", async () => {
+    useAuthStore.setState({
+      user: orgUser,
+      orgSlug: "axiam-corp",
+      activeTenantId: null,
+      activeTenantName: null,
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Organization/);
+    expect(await screen.findByRole("menuitem", { name: /Organization/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Research/ }));
+
+    await waitFor(() => expect(useAuthStore.getState().activeTenantId).toBe("t2"));
+    expect(useAuthStore.getState().activeTenantName).toBe("Research");
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith("/api/v1/auth/me"));
+    await waitFor(() => expect(useAuthStore.getState().isSwitchingTenant).toBe(false));
+    // The menu closed on selection.
+    expect(screen.queryByRole("menu", { name: "Tenant selector" })).not.toBeInTheDocument();
+  });
+
+  it("returns to the organization scope from a tenant", async () => {
+    useAuthStore.setState({
+      user: orgUser,
+      orgSlug: "axiam-corp",
+      activeTenantId: "t2",
+      activeTenantName: "Research",
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Research/);
+    const research = await screen.findByRole("menuitem", { name: /Research/ });
+    expect(research).toHaveAttribute("aria-current", "true");
+    await userEvent.click(screen.getByRole("menuitem", { name: /^Organization/ }));
+
+    await waitFor(() => expect(useAuthStore.getState().activeTenantId).toBeNull());
+    await waitFor(() => expect(useAuthStore.getState().isSwitchingTenant).toBe(false));
+  });
+
+  it("does not offer the organization scope to a principal confined to particular tenants", async () => {
+    useAuthStore.setState({
+      user: { ...orgUser, reachable_tenant_ids: ["t2"] },
+      orgSlug: "axiam-corp",
+      activeTenantId: "t2",
+      activeTenantName: "Research",
+    });
+    mockLookups();
+    renderTopbar();
+
+    await openMenu(/axiam-corp \/ Research/);
+    await screen.findByRole("menuitem", { name: /Research/ });
+    expect(screen.queryByRole("menuitem", { name: /^Organization/ })).not.toBeInTheDocument();
+  });
+});
+
 afterEach(() => {
   useAuthStore.setState({
     user: null,
+    activeTenantId: null,
+    activeTenantName: null,
     isAuthenticated: false,
     isInitializing: false,
     tenantSlug: null,

@@ -2,7 +2,9 @@
 
 use actix_web::{HttpResponse, web};
 use axiam_core::models::notification_rule::{
-    CreateNotificationRule, NotificationEventType, NotificationRule, UpdateNotificationRule,
+    CreateNotificationRule, DEFAULT_NOTIFICATION_WINDOW_MINUTES, MAX_NOTIFICATION_WINDOW_MINUTES,
+    MIN_NOTIFICATION_WINDOW_MINUTES, NotificationEventType, NotificationRule,
+    UpdateNotificationRule, is_valid_window_minutes,
 };
 use axiam_core::repository::{NotificationRuleRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -29,6 +31,13 @@ pub struct CreateNotificationRuleRequest {
     pub events: Vec<NotificationEventType>,
     /// Email addresses to notify.
     pub recipient_emails: Vec<String>,
+    /// Minutes in which one event type mails each recipient at most once:
+    /// the first event of a window is mailed, the rest are counted and the
+    /// next mail says how many were not sent (#551). 1 … 1440; 15 when
+    /// omitted.
+    #[schema(minimum = 1, maximum = 1440, default = 15)]
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -38,6 +47,10 @@ pub struct UpdateNotificationRuleRequest {
     pub events: Option<Vec<NotificationEventType>>,
     pub recipient_emails: Option<Vec<String>>,
     pub enabled: Option<bool>,
+    /// The rule's notification window in minutes, 1 … 1440 (#551).
+    #[schema(minimum = 1, maximum = 1440)]
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
 }
 
 /// Notification rule response.
@@ -50,6 +63,10 @@ pub struct NotificationRuleResponse {
     pub events: Vec<NotificationEventType>,
     pub recipient_emails: Vec<String>,
     pub enabled: bool,
+    /// Minutes in which one event type mails each recipient at most once;
+    /// further events are counted and reported by the next mail (#551).
+    #[schema(minimum = 1, maximum = 1440)]
+    pub window_minutes: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -64,6 +81,7 @@ impl From<NotificationRule> for NotificationRuleResponse {
             events: r.events,
             recipient_emails: r.recipient_emails,
             enabled: r.enabled,
+            window_minutes: r.window_minutes,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -100,6 +118,10 @@ pub async fn create<C: Connection + Clone>(
     validate_name(&req.name)?;
     validate_events(&req.events)?;
     validate_recipient_emails(&req.recipient_emails)?;
+    let window_minutes = req
+        .window_minutes
+        .unwrap_or(DEFAULT_NOTIFICATION_WINDOW_MINUTES);
+    validate_window_minutes(window_minutes)?;
 
     let rule = state
         .events
@@ -110,6 +132,7 @@ pub async fn create<C: Connection + Clone>(
             description: req.description,
             events: req.events,
             recipient_emails: req.recipient_emails,
+            window_minutes: Some(window_minutes),
         })
         .await?;
     Ok(HttpResponse::Created().json(NotificationRuleResponse::from(rule)))
@@ -219,6 +242,9 @@ pub async fn update<C: Connection + Clone>(
     if let Some(ref emails) = req.recipient_emails {
         validate_recipient_emails(emails)?;
     }
+    if let Some(minutes) = req.window_minutes {
+        validate_window_minutes(minutes)?;
+    }
 
     let rule = state
         .events
@@ -232,6 +258,7 @@ pub async fn update<C: Connection + Clone>(
                 events: req.events,
                 recipient_emails: req.recipient_emails,
                 enabled: req.enabled,
+                window_minutes: req.window_minutes,
             },
         )
         .await?;
@@ -305,6 +332,19 @@ fn validate_recipient_emails(emails: &[String]) -> Result<(), AxiamApiError> {
         if !email.contains('@') {
             return Err(validation_err(format!("invalid email address: {email}")));
         }
+    }
+    Ok(())
+}
+
+/// A window outside its bounds is refused, not clamped: zero would be "mail
+/// every event", the flood T-117 is about, and an administrator who asked for
+/// a week should be told it is not one.
+fn validate_window_minutes(minutes: u32) -> Result<(), AxiamApiError> {
+    if !is_valid_window_minutes(minutes) {
+        return Err(validation_err(format!(
+            "window_minutes must be between {MIN_NOTIFICATION_WINDOW_MINUTES} and \
+             {MAX_NOTIFICATION_WINDOW_MINUTES}"
+        )));
     }
     Ok(())
 }

@@ -765,6 +765,11 @@ pub struct CibaApproval {
     pub amr: Vec<Amr>,
 }
 
+/// The most pending requests one user's list returns. A user with more than
+/// this many open requests is being flooded (T-424); the soonest-expiring are
+/// shown and the rest wait their turn.
+pub const MAX_PENDING_LIST: u32 = 50;
+
 /// What the approval page may show (nothing the user's own request does not
 /// already say).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1172,6 +1177,38 @@ where
             acr_values: req.acr_values,
             expires_at: req.expires_at,
         }))
+    }
+
+    /// The signed-in user's own pending requests, soonest expiry first, at
+    /// most [`MAX_PENDING_LIST`] — what the console lists for an account the
+    /// approval mail never reached (D-74). Each entry is what
+    /// [`Self::lookup_for_approval`] would return for it.
+    ///
+    /// # Errors
+    ///
+    /// `server_error` for a datastore failure.
+    pub async fn list_pending_for_approval(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<CibaApprovalView>, OAuth2Error> {
+        let rows = self
+            .requests
+            .list_pending_for_user(tenant_id, user_id, MAX_PENDING_LIST)
+            .await
+            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|req| CibaApprovalView {
+                request_id: req.id,
+                version: req.version,
+                client_id: req.client_id,
+                scopes: req.scopes,
+                binding_message: req.binding_message,
+                acr_values: req.acr_values,
+                expires_at: req.expires_at,
+            })
+            .collect())
     }
 
     /// The user approves (T23.7.2's page, after full authentication).

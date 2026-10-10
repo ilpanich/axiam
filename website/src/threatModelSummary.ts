@@ -61,17 +61,17 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.37.0",
+ "version": "2.40.0",
  "diagramCount": 10,
- "total": 469,
- "open": 22,
- "mitigated": 426,
+ "total": 475,
+ "open": 17,
+ "mitigated": 437,
  "notApplicable": 21,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 33,
+   "total": 34,
    "open": 2,
    "notApplicable": 0
   },
@@ -79,20 +79,20 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 1,
    "title": "Authentication & session management",
    "total": 36,
-   "open": 1,
+   "open": 0,
    "notApplicable": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 85,
-   "open": 1,
+   "total": 86,
+   "open": 0,
    "notApplicable": 0
   },
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 125,
+   "total": 126,
    "open": 3,
    "notApplicable": 0
   },
@@ -106,15 +106,15 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 30,
-   "open": 2,
+   "total": 32,
+   "open": 1,
    "notApplicable": 0
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 55,
-   "open": 4,
+   "total": 56,
+   "open": 2,
    "notApplicable": 0
   },
   {
@@ -142,8 +142,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 101,
-   "open": 5,
+   "total": 105,
+   "open": 4,
    "notApplicable": 3
   },
   {
@@ -155,25 +155,25 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Repudiation",
    "total": 16,
-   "open": 2,
+   "open": 1,
    "notApplicable": 1
   },
   {
    "name": "Information disclosure",
-   "total": 110,
-   "open": 7,
+   "total": 112,
+   "open": 6,
    "notApplicable": 4
   },
   {
    "name": "Denial of service",
    "total": 59,
-   "open": 4,
+   "open": 3,
    "notApplicable": 4
   },
   {
    "name": "Elevation of privilege",
    "total": 90,
-   "open": 3,
+   "open": 2,
    "notApplicable": 4
   }
  ],
@@ -186,19 +186,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 196,
-   "open": 10,
+   "total": 197,
+   "open": 8,
    "notApplicable": 9
   },
   {
    "name": "Medium",
-   "total": 195,
-   "open": 9,
+   "total": 199,
+   "open": 6,
    "notApplicable": 9
   },
   {
    "name": "Low",
-   "total": 35,
+   "total": 36,
    "open": 1,
    "notApplicable": 1
   }
@@ -243,26 +243,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
-  },
-  {
-   "number": 102,
-   "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
-   "category": "Spoofing",
-   "severity": "High",
-   "diagramId": 5,
-   "area": "PKI, certificates & IoT device identity",
-   "element": "Revocation (status in AXIAM's store; no CRL published)",
-   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record §8, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
-  },
-  {
-   "number": 108,
-   "title": "Action succeeds while its audit write fails",
-   "category": "Repudiation",
-   "severity": "High",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Audit middleware & service",
-   "residualRisk": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
   },
   {
    "number": 124,
@@ -335,16 +315,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
   },
   {
-   "number": 117,
-   "title": "Alert flooding buries a real incident",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Notification rules (admin alerts)",
-   "residualRisk": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
-  },
-  {
    "number": 123,
    "title": "Final mail hop is not confidential",
    "category": "Information disclosure",
@@ -392,27 +362,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 7,
    "area": "Deployment & platform (Kubernetes)",
    "element": "AXIAM deployment (N replicas, HPA)",
-   "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
-  },
-  {
-   "number": 447,
-   "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
-   "category": "Elevation of privilege",
-   "severity": "Medium",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "/oauth2/authorize (+ consent)",
-   "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
-  },
-  {
-   "number": 469,
-   "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
-   "category": "Information disclosure",
-   "severity": "Medium",
-   "diagramId": 1,
-   "area": "Authentication & session management",
-   "element": "Login endpoints /auth/login + /auth/opaque/*",
-   "residualRisk": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
+   "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) stated what the deployment documentation must say and proposed a terminal row for a delivery abandoned at stop or refused at enqueue; that row is built (P23W5-A4, #555). At an orderly stop each kind's in-process consumer gives the attempt in flight 500 ms to finish, closes its channel and writes one `<kind>.delivery_abandoned` row (outcome `Failure`, the system actor, the target as resource, a fixed `reason`, the delivery id and the attempts made) for every message still queued and every retry still waiting, within `OUTBOUND_DRAIN_DEADLINE` (2 s) and before the audit drain; an enqueue the queue refuses (full, or the dispatcher gone) writes one too. The action is deliberately not `delivery_failed`: only `scim_push.delivery_failed` maps to the `scim_delivery_failed` notification event, so a restart mails nobody. Tests: `crates/axiam-amqp/src/outbound/inprocess.rs` `stopping_with_queued_deliveries_writes_one_abandoned_row_per_lost_delivery`, `stopping_with_a_retry_waiting_writes_an_abandoned_row_and_never_retries`, `an_attempt_that_outlives_the_grace_is_abandoned_with_the_queue`, `a_refused_enqueue_writes_one_abandoned_row`, `an_enqueue_after_the_stop_is_refused_and_leaves_a_row`; `crates/axiam-core/src/models/notification_rule.rs` `a_delivery_abandoned_row_is_no_notification_event`; `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `an_abandoned_delivery_row_mails_nobody`. Residuals: a `SIGKILL`, an out-of-memory kill and a stop that overruns its deadline lose the queue without a row; a lost mail has no such row; an attempt cancelled at the stop may or may not have reached its receiver. Open because the loss is real."
   },
   {
    "number": 161,

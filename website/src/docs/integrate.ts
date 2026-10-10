@@ -1007,7 +1007,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Per request:** 10 seconds from connect to last byte; a response body is read to 64 KiB (1 MiB for a list) and never logged.",
           "**Retry schedule:** up to five attempts with exponential backoff from five seconds to one hour. The three variables are `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS`; see [Webhooks → retry](#/docs/webhooks) for the table.",
           "**Ordering is not promised and is not needed**, because each attempt computes the desired state fresh.",
-          "**One attempt at a time per replica, for every tenant.** Each replica runs a single delivery at a time, so a downstream that is slow or never answers (up to 10 seconds an attempt, 20 when a token is fetched first), or a reconciliation that queues a large tenant, delays the SCIM pushes of every target on that replica. Webhooks, SSF events and sign-ins are not affected. A per-target circuit breaker is proposed and undecided; [issue #550](https://github.com/ilpanich/axiam/issues/550) tracks it. Until then, keep a target disabled while its service provider is unreachable.",
+          "**One attempt at a time per replica, for every tenant, with a per-target breaker.** Each replica runs a single delivery at a time, and an attempt can wait up to 10 seconds (20 when a token is fetched first). So that one downstream that never answers cannot hold every other target back, a target with five or more consecutive failures is not called again until its backoff has passed since the last failure: the attempt is a retry, reason `target is failing; backing off`, with no request. The window follows the retry schedule above, doubling with each further failure up to the ceiling; once it has passed, the next delivery is tried, and a success closes the breaker ([issue #550](https://github.com/ilpanich/axiam/issues/550)). Opening a breaker still costs five full timeouts, and one per window after; a downstream that answers slowly but succeeds now and then never opens it; references queued while the breaker is open use up their attempts and dead-letter, and reconciliation queues them again. Webhooks, SSF events and sign-ins are not affected. More than one delivery in flight per replica is planned for 1.0.x; meanwhile, disable a target whose service provider will be unreachable for long.",
           "**Rate limit:** the registry's four writes (create, replace, delete, reconcile now) each have a per-IP bucket under `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30 a minute); reads are not limited, and no rate-limit profile moves it.",
         ],
       },
@@ -1309,7 +1309,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           ],
           [
             "`saml_idp_enabled` is on for the tenant",
-            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Set it through the settings API (see [Settings](#/docs/settings)); the console explains the setting but has no control for it yet.",
+            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Switch it in the console (the organization's **Settings** tab turns it on; the tenant's **Settings** page, or the tenant's *Security Overrides*, turns it off for one tenant, and shows \"disabled by the organization\" where it cannot be turned on) or through the settings API (see [Settings](#/docs/settings)).",
           ],
         ],
       },
@@ -1527,7 +1527,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "enable", text: "Switch it on" },
       {
         type: "p",
-        text: "The transmitter is off until you turn it on. `ssf_enabled` is a layered setting with the shape of `saml_idp_enabled` (see [Settings](#/docs/settings)): **off by default**, turned on by the organization, and a tenant may only turn it *off* again. Set it through the settings API; the console explains the setting but has no control for it yet.",
+        text: "The transmitter is off until you turn it on. `ssf_enabled` is a layered setting with the shape of `saml_idp_enabled` (see [Settings](#/docs/settings)): **off by default**, turned on by the organization, and a tenant may only turn it *off* again. Switch it in the console (the organization's **Settings** tab turns it on; the tenant's **Settings** page turns it off for one tenant and shows \"disabled by the organization\" where it cannot be turned on) or through the settings API.",
       },
       {
         type: "p",
@@ -1552,7 +1552,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "register", text: "Register a receiver (administrator)" },
       {
         type: "p",
-        text: "A stream is created by a **tenant administrator**, never by the receiver: deciding which third party receives security events about the tenant's users is a human administrator's act. The registry is a REST API under `/api/v1/tenants/{tenant_id}/ssf/streams` (the `ssf` namespace of the SDKs' management surface). Reading needs `ssf_streams:read` and the three writes need `ssf_streams:write`, both seeded per tenant. A service-account token is refused with `401` and another tenant's id with `403`. The admin console has no page for it yet.",
+        text: "A stream is created by a **tenant administrator**, never by the receiver: deciding which third party receives security events about the tenant's users is a human administrator's act. The registry is a REST API under `/api/v1/tenants/{tenant_id}/ssf/streams` (the `ssf` namespace of the SDKs' management surface). Reading needs `ssf_streams:read` and the three writes need `ssf_streams:write`, both seeded per tenant. A service-account token is refused with `401` and another tenant's id with `403`. In the admin console, **Identity → SSF Streams** (`/ssf`, visible with `ssf_streams:read`) lists the streams with their receiver, audience, delivery method, endpoint, status and who set it, and `events_delivered` beside `events_allowed`; registering, editing and deleting need `ssf_streams:write`. It never shows the `authorization_header` (write-only) and asks for it again when an edit moves a push endpoint to another origin. An edit that loses a race (`409`: the receiver or another administrator wrote the stream first) reloads the list and says so.",
       },
       {
         type: "steps",
@@ -1779,7 +1779,6 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Per-tenant signing keys.** One deployment key signs every SET and is published at each tenant's JWKS. Rotating it is the deployment's key rotation, and every receiver reads it from the JWKS.",
           "**A SET that expires.** There is no `exp` and no `sub` claim, by specification and on purpose.",
           "**Certificate events.** `x509` credential changes are never sent today (see the table above).",
-          "**An `ssf` control in the console.** Registration is through the REST API and the SDKs' `ssf` management namespace.",
         ],
       },
       { type: "h", id: "sdks", text: "From the SDKs" },
@@ -1942,11 +1941,12 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "approval", text: "2. The user approves" },
       {
         type: "p",
-        text: "A request for a person who may sign in sends them **one e-mail** (the built-in `ciba_approval` template, customisable per organization or tenant) with the client's name, the binding message and a link to the console page. The link carries the request's record id, **never** the `auth_req_id` or any token. A signed-out user is taken to the sign-in page and brought back to the same page afterwards. Mail is sent only to an account that may sign in **and whose address something vouches for** (a verified address, or an account that is `Active`), and **at most three times a minute per user, whatever the clients asking**, so a flood of requests cannot become a flood of prompts: a request past that is stored and answered as usual and the user is simply not told again. **An account that has no vouched-for address gets no mail at all** — notably a federated account, which stays pending verification unless an address was verified: its request is stored and answered like any other, but the approval page is addressed by the request's id and nothing lists pending requests, so without the mail the request runs to its expiry unless the person is given the link another way.",
+        text: "A request for a person who may sign in sends them **one e-mail** (the built-in `ciba_approval` template, customisable per organization or tenant) with the client's name, the binding message and a link to the console page. The link carries the request's record id, **never** the `auth_req_id` or any token. A signed-out user is taken to the sign-in page and brought back to the same page afterwards. Mail is sent only to an account that may sign in **and whose address something vouches for** (a verified address, or an account that is `Active`), and **at most three times a minute per user, whatever the clients asking**, so a flood of requests cannot become a flood of prompts: a request past that is stored and answered as usual and the user is simply not told again. **An account that has no vouched-for address gets no mail at all** — notably a federated account, which stays pending verification unless an address was verified: its request is stored and answered like any other, and the person finds it in the console: **a badge on the user menu** counts the signed-in user's pending requests and lists them, each opening the approval page (the list is `GET /api/v1/ciba/requests?status=pending`, below).",
       },
       {
         type: "api",
         endpoints: [
+          { method: "GET", path: "/api/v1/ciba/requests?status=pending", summary: "The signed-in user's **own** pending requests, soonest expiry first (at most 50), each as the approval page shows it, with its `request_id` and `version`. For the account the mail never reaches; the console's user-menu badge reads it. Another user's, a decided and an expired request are simply absent. `status=pending` is the only filter (any other value is `400`)." },
           { method: "GET", path: "/api/v1/ciba/requests/{request_id}", summary: "What the approval page shows: client, scopes, binding message, requested authentication classes, expiry, and the `version` to send back. Never the `auth_req_id`." },
           { method: "POST", path: "/api/v1/ciba/requests/{request_id}/approve", summary: "Approve, conditional on the version read. `403 step_up_required` names the class the session must reach." },
           { method: "POST", path: "/api/v1/ciba/requests/{request_id}/deny", summary: "Refuse, conditional on the version read. Needs no step-up." },
@@ -1955,7 +1955,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**A human session and a CSRF token.** These are the signed-in user's own routes; a service-account token does not work, and neither does the client's credential.",
+          "**A human session and a CSRF token.** These are the signed-in user's own routes (the list included); a service-account token does not work, and neither does the client's credential. Each route has a rate-limit bucket of its own.",
           "**One answer for every reason.** An unknown id, **another user's** request, an expired one, one already decided and one changed since the page read it are all the same `404`. The id is a handle, not a secret: what protects a request is that only its own user, signed in, can open it.",
           "**Step-up.** A request that asks for a class the session has not reached (`acr_values`) is answered `403 step_up_required` naming it. The page sends the user through the existing sign-in hop, which ends the weaker session, asks for the factor and returns to the page. Approval is always conditional on the version the page read, so nothing is carried across the hop.",
           "**Both decisions are audited**: `ciba.approved` and `ciba.denied` record the user, the request, the client, the mode and (for an approval) the class achieved. The binding message is never written to the audit log.",
@@ -2049,7 +2049,6 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**`login_hint_token`, `user_code` and `request_uri`.** The first has no defined format here, a user code would have to be checked against something that is not the password (a client registering `backchannel_user_code_parameter`, or sending a `user_code`, is refused, and discovery says `false`), and AXIAM never fetches a request.",
           "**`unknown_user_id`.** Never sent, deliberately (above).",
           "**A push-notification channel to the user's phone.** The user is told by e-mail today; a push channel is later work.",
-          "**An approval e-mail for an account with no vouched-for address,** which includes a federated account unless an address was verified. The request is stored, but the approval page is reached by a link that only the mail carries, so the user has to be given it another way or the request expires.",
           "**Console fields for the CIBA metadata.** Register over the API for now.",
           "**An SDK `approve` call.** The approval API needs a human session and belongs to the console.",
         ],
@@ -2108,7 +2107,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. The shared secret is stored AES-256-GCM encrypted under `AXIAM__AUTH__PKI_ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
+        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. A delivery is **one hop**: a redirect is never followed, so the signed body cannot be forwarded to a host you did not register. A `3xx` answer is a failed attempt, retried like any other and dead-lettered if it persists — register the receiver at its final URL, not behind a redirect. The shared secret is stored AES-256-GCM encrypted under `AXIAM__AUTH__PKI_ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
       },
       { type: "h", id: "headers", text: "What arrives" },
       {

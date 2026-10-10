@@ -133,6 +133,14 @@ pub struct OidcDiscoveryDocument {
     pub id_token_signing_alg_values_supported: Vec<String>,
     pub scopes_supported: Vec<String>,
     pub token_endpoint_auth_methods_supported: Vec<String>,
+    /// RFC 8414 §2 — #526 (P23W2-06). The token endpoint's list: revocation
+    /// authenticates the client by the same code, public clients included
+    /// (RFC 7009 §2.1). Absent, RFC 8414 reads it as `client_secret_basic`
+    /// alone.
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
+    /// RFC 8414 §2 — #526 (P23W2-06). The token endpoint's list without
+    /// `none`: introspection refuses a public client (RFC 7662 §2.1).
+    pub introspection_endpoint_auth_methods_supported: Vec<String>,
     pub claims_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
     /// RFC 9207 §3 — X5.1. AXIAM emits `iss` on **every** authorization
@@ -207,6 +215,11 @@ pub struct OidcDiscoveryDocument {
     /// and `token_endpoint_auth_methods_supported` above advertises
     /// `private_key_jwt` unconditionally.
     pub token_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// RFC 8414 §2 — the `private_key_jwt` assertion algorithms at the
+    /// revocation endpoint; required because the method is listed there.
+    pub revocation_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// RFC 8414 §2 — as for revocation, at the introspection endpoint.
+    pub introspection_endpoint_auth_signing_alg_values_supported: Vec<String>,
     /// RFC 8705 §5 — the mTLS-specific endpoint URLs, when this deployment
     /// terminates mutual TLS somewhere other than the issuer's own host.
     /// Absent (not `null`) when it does not.
@@ -448,6 +461,54 @@ pub fn build_discovery_document_for(
     } = capabilities;
     let issuer = issuer.trim_end_matches('/');
     let mtls_endpoint_aliases = build_mtls_aliases(mtls_base_url, tenant_id)?;
+    // The order is the operator's recommendation, and the three endpoints that
+    // authenticate a client with it publish it (or, for introspection, all of
+    // it but `none`) below.
+    let token_endpoint_auth_methods: Vec<String> = vec![
+        "client_secret_post".into(),
+        // W8 / RFC 6749 §2.3.1. Advertised unconditionally, like the two
+        // mTLS methods and for a narrower version of the same reason:
+        // whether a *particular* client may use it is decided by its
+        // registration, and this document describes the deployment's
+        // capabilities rather than any one client's. A `fapi2` client
+        // reading this list still cannot register for the method —
+        // `validate_registration` refuses it — which is the intended
+        // shape: the server can speak Basic, and the FAPI profile will
+        // not let a client that must not, do so.
+        //
+        // Listed second rather than first: the order is the operator's
+        // recommendation, and `client_secret_post` remains it (the header
+        // channel is the one intermediaries log). SDKs are forbidden from
+        // sending Basic at all — `sdks/CONTRACT.md` §5 rule 3.
+        "client_secret_basic".into(),
+        // X5.1 / RFC 8705 §2. Advertised unconditionally: whether a mTLS
+        // handshake is actually available is a deployment's listener
+        // configuration (the p3 profile), and a client that cannot reach
+        // an mTLS listener discovers that at connect time rather than by
+        // reading a metadata field that would have to lie one way or the
+        // other on a multi-listener deployment.
+        "tls_client_auth".into(),
+        "self_signed_tls_client_auth".into(),
+        // X5.1 second half / RFC 7523 §2.2. Unlike the two mTLS methods
+        // this one needs nothing from the deployment's listeners at all,
+        // so advertising it carries no caveat: every AXIAM deployment can
+        // serve it.
+        "private_key_jwt".into(),
+        // T21.2 / RFC 6749 §2.1, OIDC Core §9. Listed LAST, because the
+        // order is the operator's recommendation and no deployment should
+        // reach for the method that authenticates nothing while one of the
+        // five above fits. It is advertised for the same reason as the
+        // others — this document states what the DEPLOYMENT can serve, not
+        // what any one client may use (I7) — and a client registered for a
+        // credential still cannot fall back to it: the registration
+        // decides, and `none` is only ever reached by a registration that
+        // named it (I4).
+        //
+        // MCP clients (Claude Code, VS Code, MCP Inspector) read this
+        // member to decide whether they can register at all; before T21.2
+        // the truthful answer was no.
+        "none".into(),
+    ];
     let mut doc = OidcDiscoveryDocument {
         issuer: issuer.to_string(),
         // `tenant_scoped` on everything that authenticates a client, and its
@@ -491,51 +552,22 @@ pub fn build_discovery_document_for(
             }
             scopes
         },
-        token_endpoint_auth_methods_supported: vec![
-            "client_secret_post".into(),
-            // W8 / RFC 6749 §2.3.1. Advertised unconditionally, like the two
-            // mTLS methods and for a narrower version of the same reason:
-            // whether a *particular* client may use it is decided by its
-            // registration, and this document describes the deployment's
-            // capabilities rather than any one client's. A `fapi2` client
-            // reading this list still cannot register for the method —
-            // `validate_registration` refuses it — which is the intended
-            // shape: the server can speak Basic, and the FAPI profile will
-            // not let a client that must not, do so.
-            //
-            // Listed second rather than first: the order is the operator's
-            // recommendation, and `client_secret_post` remains it (the header
-            // channel is the one intermediaries log). SDKs are forbidden from
-            // sending Basic at all — `sdks/CONTRACT.md` §5 rule 3.
-            "client_secret_basic".into(),
-            // X5.1 / RFC 8705 §2. Advertised unconditionally: whether a mTLS
-            // handshake is actually available is a deployment's listener
-            // configuration (the p3 profile), and a client that cannot reach
-            // an mTLS listener discovers that at connect time rather than by
-            // reading a metadata field that would have to lie one way or the
-            // other on a multi-listener deployment.
-            "tls_client_auth".into(),
-            "self_signed_tls_client_auth".into(),
-            // X5.1 second half / RFC 7523 §2.2. Unlike the two mTLS methods
-            // this one needs nothing from the deployment's listeners at all,
-            // so advertising it carries no caveat: every AXIAM deployment can
-            // serve it.
-            "private_key_jwt".into(),
-            // T21.2 / RFC 6749 §2.1, OIDC Core §9. Listed LAST, because the
-            // order is the operator's recommendation and no deployment should
-            // reach for the method that authenticates nothing while one of the
-            // five above fits. It is advertised for the same reason as the
-            // others — this document states what the DEPLOYMENT can serve, not
-            // what any one client may use (I7) — and a client registered for a
-            // credential still cannot fall back to it: the registration
-            // decides, and `none` is only ever reached by a registration that
-            // named it (I4).
-            //
-            // MCP clients (Claude Code, VS Code, MCP Inspector) read this
-            // member to decide whether they can register at all; before T21.2
-            // the truthful answer was no.
-            "none".into(),
-        ],
+        token_endpoint_auth_methods_supported: token_endpoint_auth_methods.clone(),
+        // #526 (P23W2-06) / RFC 8414 §2. Revocation and introspection
+        // authenticate the caller through the token endpoint's own
+        // `TokenService::authenticate_client`, so they accept the same
+        // methods; RFC 8414 defaults both members to `client_secret_basic`
+        // alone when absent, which told a literal reader not to use the other
+        // five. Derived rather than restated so the lists cannot drift.
+        // Introspection drops `none`: `introspect_token` refuses a public
+        // client (RFC 7662 §2.1 wants an authenticated caller), while
+        // revocation serves one (RFC 7009 §2.1).
+        revocation_endpoint_auth_methods_supported: token_endpoint_auth_methods.clone(),
+        introspection_endpoint_auth_methods_supported: token_endpoint_auth_methods
+            .iter()
+            .filter(|method| method.as_str() != "none")
+            .cloned()
+            .collect(),
         claims_supported: vec![
             "sub".into(),
             "iss".into(),
@@ -617,6 +649,12 @@ pub fn build_discovery_document_for(
         dpop_signing_alg_values_supported: vec!["PS256".into(), "ES256".into(), "EdDSA".into()],
         code_challenge_methods_supported: vec!["S256".into()],
         token_endpoint_auth_signing_alg_values_supported: crate::jose::permitted_algorithm_names(),
+        // RFC 8414 §2 requires these once `private_key_jwt` is listed for the
+        // endpoint, and the assertion is verified by the same code.
+        revocation_endpoint_auth_signing_alg_values_supported:
+            crate::jose::permitted_algorithm_names(),
+        introspection_endpoint_auth_signing_alg_values_supported:
+            crate::jose::permitted_algorithm_names(),
         mtls_endpoint_aliases,
         // T21.4. `tenant_scoped` like every other endpoint that needs to know
         // which tenant it is acting for: the registration endpoint takes

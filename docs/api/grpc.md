@@ -1,6 +1,6 @@
 # AXIAM gRPC API
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-06
 
 Low-latency gRPC surface for service-mesh authorization checks, JWT
@@ -17,7 +17,7 @@ rather than hand-editing generated code.
 | Proto file | Service | RPCs |
 |---|---|---|
 | [`proto/axiam/v1/authorization.proto`](../../proto/axiam/v1/authorization.proto) | `AuthorizationService` | `CheckAccess` (single access check), `BatchCheckAccess` (multiple checks in one round-trip) |
-| [`proto/axiam/v1/token.proto`](../../proto/axiam/v1/token.proto) | `TokenService` | `ValidateToken` (signature + expiry), `IntrospectToken` (RFC 7662-style full claims) |
+| [`proto/axiam/v1/token.proto`](../../proto/axiam/v1/token.proto) | `TokenService` | `ValidateToken` (signature + expiry), `IntrospectToken` (RFC 7662-style full claims; inactive once the user account it names may no longer sign in, #520) |
 | [`proto/axiam/v1/user.proto`](../../proto/axiam/v1/user.proto) | `UserService` | `GetUser` (lookup by ID), `ValidateCredentials` (username/email + password check, no token issued) |
 
 All request/response messages are tenant-scoped (`tenant_id` on every

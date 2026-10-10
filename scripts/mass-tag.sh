@@ -65,7 +65,9 @@
 #                      mirrors both of those fields; docs/api/openapi.json is a
 #                      symlink to the spec and follows; the frontend Sidebar
 #                      version string and its test; the two k8s deployment image
-#                      tags; and crates/axiam-opaque-wasm/Cargo.toml, which is
+#                      tags; website/src/apiIndex.ts API_VERSION (the website
+#                      mirror of info.version); and
+#                      crates/axiam-opaque-wasm/Cargo.toml, which is
 #                      outside the workspace and so inherits nothing.
 #   axiam-opaque       NOT a repo — the shared OPAQUE client core inside the
 #                      platform clone, released on its own `axiam-opaque-v*`
@@ -396,6 +398,13 @@ esac
 # Set by bump_versions and read by the action loop; declared here for clarity.
 BUMP_FILES=()
 
+# Set in a DRY run once the platform target has been through it, with the
+# version its spec carried before the (simulated) bump. A dry run writes
+# nothing, so without these the SDKs that follow would find the platform's spec
+# still at the old version and refuse to re-vendor (see revendor_spec_artifacts).
+PLATFORM_DRY_BUMPED=false
+PLATFORM_DRY_FROM=""
+
 # Resolve a repo's vcpkg manifest path, run from inside the repo's dir. The C /
 # C++ SDKs ship it as an overlay port at ports/<repo>/vcpkg.json, but a repo may
 # instead keep it at the root; echo whichever exists (empty if neither).
@@ -455,22 +464,116 @@ current_version() {
   esac ; } || true
 }
 
-# Replace every literal occurrence of $2 with $3 in file $1, recording the file
+# Run the perl substitution program $2 over the whole of file $1 (slurped, so
+# a pattern may span lines; it reads its operands from the environment) and
+# report the change under label $3. The file is recorded for staging only when
+# the program changed it. In a dry run the program runs on a scratch copy and
+# every line it would change is printed, before and after -- the release is a
+# few dozen lines across twelve repos, and those lines are what a dry run is
+# read for.
+rewrite_file() {
+  local file="$1" prog="$2" label="$3" tmp
+  tmp="$(mktemp)"
+  perl -0pe "$prog" -- "$file" >"$tmp" || { rm -f "$tmp"; die "rewriting $file failed"; }
+  if cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if $DRY_RUN; then
+    printf '      [dry-run] %s: %s\n' "$file" "$label"
+    { diff -- "$file" "$tmp" || true; } | grep '^[<>]' | cut -c1-150 | sed 's/^/          /'
+    rm -f "$tmp"
+  else
+    cat "$tmp" >"$file"   # in place: keeps the file's mode
+    rm -f "$tmp"
+    printf '      %s: %s\n' "$file" "$label"
+  fi
+  BUMP_FILES+=("$file")
+}
+
+# The boundaries a version literal must have to count as the version, as perl
+# regex fragments around \Q$ENV{OLD}\E. Without them a literal is a substring
+# match, which is harmless while the old version carries a pre-release suffix
+# and corrupts files as soon as it does not: bumping 1.0.0 to 1.0.1 would also
+# have turned `^11.0.0` into `^11.0.1` and `^1.0.0-alpha31` into
+# `^1.0.1-alpha31` in the TypeScript SDK's package.json. Not after a digit or a
+# dot; not before an identifier character, `+`, `-`, or a dot that continues
+# the number (a sentence-ending dot is fine). `v1.0.0` and `=1.0.0` still match.
+VERSION_LB='(?<![0-9.])'
+VERSION_LA='(?![0-9A-Za-z+-]|\.[0-9])'
+
+# Replace every occurrence of version $2 with $3 in file $1, recording the file
 # for staging. No-op (silently) when the file is absent, when old == new, or
-# when the old literal is not present. Honours --dry-run.
+# when the old version is not present. Honours --dry-run.
+#
+# Only for files where every standalone occurrence of the version IS the
+# version: manifests, headers, the k8s image tags. JSON manifests, whose
+# dependency tree holds other packages' versions, go through set_json_version;
+# READMEs, whose prose says "since 1.0.0", through sub_readme.
 sub_literal() {
   local file="$1" old="$2" new="$3"
   [[ -n "$old" ]] || return 0            # empty old would match everywhere — refuse
   [[ -f "$file" ]] || return 0
   [[ "$old" == "$new" ]] && return 0
-  grep -qF -- "$old" "$file" || return 0
-  if $DRY_RUN; then
-    printf '      [dry-run] %s: "%s" -> "%s"\n' "$file" "$old" "$new"
-  else
-    OLD="$old" NEW="$new" perl -pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$file"
-    printf '      %s: "%s" -> "%s"\n' "$file" "$old" "$new"
-  fi
-  BUMP_FILES+=("$file")
+  OLD="$old" NEW="$new" rewrite_file "$file" \
+    "s/${VERSION_LB}\\Q\$ENV{OLD}\\E${VERSION_LA}/\$ENV{NEW}/g" "\"$old\" -> \"$new\""
+}
+
+# Replace version $2 with $3 in the Markdown file $1, but only where it is an
+# install coordinate rather than history: inside fenced code blocks (with the
+# boundaries above), and outside them only as an inline code span holding the
+# version alone (the C++ README's "Version: `1.0.0-beta17`"). Prose stays as
+# written: from 1.0.1 on, "From 1.0.0 this SDK is stable", "new in 1.0.0" and
+# "a server older than 1.0.0" are statements about 1.0.0 that a substitution
+# would have made false -- and they are in four SDK READMEs today.
+sub_readme() {
+  local file="$1" old="$2" new="$3"
+  [[ -n "$old" ]] || return 0
+  [[ -f "$file" ]] || return 0
+  [[ "$old" == "$new" ]] && return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  OLD="$old" NEW="$new" rewrite_file "$file" '
+    my @l = split /^/m;
+    my $fenced = 0;
+    for (@l) {
+      if (/^[ \t]*(?:```|~~~)/) { $fenced = !$fenced; next }
+      if ($fenced) { s/'"${VERSION_LB}"'\Q$ENV{OLD}\E'"${VERSION_LA}"'/$ENV{NEW}/g }
+      else         { s/`\Q$ENV{OLD}\E`/`$ENV{NEW}`/g }
+    }
+    $_ = join "", @l;
+  ' "\"$old\" -> \"$new\" (install snippets only, not prose)"
+}
+
+# Set the package's own version in the JSON file $1 to $2: the first
+# `"version"` member (the document's own, at the top of a package.json,
+# package-lock.json or OpenAPI document's info) and, in a package-lock.json, the
+# root package's entry under `packages[""]`. Never a dependency's: a lockfile
+# holds dozens of other packages, several of them at plain `1.0.0`, which a
+# substitution of a plain old version would rewrite. Targeted rather than
+# re-serialized, so the file's formatting is untouched.
+set_json_version() {
+  local file="$1" new="$2" old="$3"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$new" rewrite_file "$file" '
+    s/("version"[ \t]*:[ \t]*)"[^"]*"/$1"$ENV{VAL}"/;
+    s/("packages"[ \t]*:[ \t]*\{\s*""[ \t]*:[ \t]*\{[^{}]*?"version"[ \t]*:[ \t]*)"[^"]*"/$1"$ENV{VAL}"/s;
+  ' "\"$old\" -> \"$new\""
+}
+
+# Set CMake's project(... VERSION x.y.z) in file $1 to the MAJOR.MINOR.PATCH of
+# version $2. CMake rejects a pre-release suffix, so the C and C++ SDKs keep the
+# plain triple there and the full spelling elsewhere. A substitution got this
+# right only by accident: from 1.0.0 to 1.0.1 it moved the triple, but from
+# 1.0.1 to 1.1.0-rc1 it would have written `VERSION 1.1.0-rc1` and broken the
+# build. Run after sub_literal, so whatever that did here is corrected.
+set_cmake_project_version() {
+  local file="$1" triple="${2%%[-+]*}"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$triple" rewrite_file "$file" \
+    's/(\bproject[ \t]*\([^)]*?\bVERSION[ \t]+)[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/$1$ENV{VAL}/s' \
+    "project() VERSION -> $triple"
 }
 
 # Set the first `<prefix>"<value>"` occurrence in file $1 to $3, where $2 is a
@@ -599,8 +702,19 @@ restamp_openapi_digest() {
 
   # --write is idempotent (the digest is taken over the document with the
   # digest field absent), so the dry-run path can ask the same question by
-  # checking instead of writing.
+  # checking instead of writing -- except that a dry run has NOT rewritten
+  # info.version, so the file it checks still carries the old version and its
+  # matching digest. When the version rewrite above was recorded for this file,
+  # the digest moves with it, and saying "already current" would be a lie about
+  # exactly the step this function exists for.
   if $DRY_RUN; then
+    local f
+    for f in "${BUMP_FILES[@]}"; do
+      if [[ "$f" == "$file" ]]; then
+        printf '      [dry-run] %s: spec digest would be re-stamped (info.version moves)\n' "$file"
+        return 0
+      fi
+    done
     if python3 "$gate" >/dev/null 2>&1; then
       printf '      [dry-run] %s: spec digest already current\n' "$file"
       return 0
@@ -671,7 +785,21 @@ revendor_spec_artifacts() {
   local spec_version
   spec_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["version"])' \
     "$src/openapi.json" 2>/dev/null)" || die "cannot read $src/openapi.json"
-  if [[ "$spec_version" != "$1" ]]; then
+
+  # A dry run bumps nothing, so in a dry run of the whole fleet the platform's
+  # spec still carries the version the platform is being bumped FROM, and the
+  # guard below would refuse every SDK -- the one run whose job is to show what
+  # the SDKs will get would show nothing at all. When the platform was dry-run
+  # earlier in this same run, its spec is known to be the version the real run
+  # will have re-stamped by now; the copies are then compared with the platform's
+  # pre-bump files, and openapi.json and management-registry.json are reported as
+  # re-vendored regardless, because the re-stamp alone moves both.
+  local simulated=false
+  if $DRY_RUN && $PLATFORM_DRY_BUMPED && [[ "$spec_version" == "$PLATFORM_DRY_FROM" ]]; then
+    simulated=true
+    printf '      [dry-run] (the platform spec says %s; this run bumps it to %s first)\n' \
+      "$spec_version" "$1"
+  elif [[ "$spec_version" != "$1" ]]; then
     die "refusing to re-vendor: $PLATFORM_REPO's spec says $spec_version, but this is the $1 release.
      Tag the platform repo first (it re-stamps sdks/openapi.json), then the SDKs."
   fi
@@ -683,6 +811,18 @@ revendor_spec_artifacts() {
     # axiam-cplusplus-sdk vendor no protos but do vendor these three; a repo
     # that has never carried one is not given one by a release.
     [[ -f "$to" ]] || continue
+    if $simulated && [[ "$f" != CONTRACT.md ]]; then
+      if cmp -s "$from" "$to"; then
+        printf '      [dry-run] %s: re-vendor from %s/sdks/ (the version re-stamp only; otherwise current)\n' \
+          "$f" "$PLATFORM_REPO"
+      else
+        printf '      [dry-run] %s: re-vendor from %s/sdks/ (the re-stamp, AND the copy differs from the platform'"'"'s)\n' \
+          "$f" "$PLATFORM_REPO"
+      fi
+      BUMP_FILES+=("$f")
+      changed=1
+      continue
+    fi
     if cmp -s "$from" "$to"; then
       continue
     fi
@@ -846,11 +986,19 @@ bump_versions() {
       # then put on it — so they must rewrite the same files, or releasing one
       # would leave the tree half-bumped for the other.
       sub_literal Cargo.toml                                       "$old" "$version"
-      sub_literal sdks/openapi.json                                "$old" "$version"
+      set_json_version sdks/openapi.json                           "$version" "$old"
       # MUST follow the line above and precede the registry: the digest covers
       # info.version, and the registry mirrors both.
       restamp_openapi_digest
       regen_management_registry
+      # The website's API reference is generated from the spec (npm run
+      # gen:api-index) and says which version it was generated from; nothing
+      # gates it, and the website deploys on every push to main, so without this
+      # the release commit publishes the new spec's index under the old version.
+      # Only info.version moves on a bump, so this one field is the whole
+      # regeneration. Set outright, like the other generated mirrors.
+      set_quoted_field website/src/apiIndex.ts 'export const API_VERSION[[:space:]]*=[[:space:]]*' \
+                       "$version" 'API_VERSION'
       sub_literal frontend/src/components/layout/Sidebar.tsx       "$old" "$version"
       sub_literal frontend/src/components/layout/Sidebar.test.tsx  "$old" "$version"
       sub_literal k8s/server/deployment.yml                        "$old" "$version"
@@ -877,8 +1025,8 @@ bump_versions() {
       sub_literal axiam-sdk-wasm/Cargo.toml     "$old" "$version"
       ;;
     axiam-typescript-sdk)
-      sub_literal package.json       "$old" "$version"
-      sub_literal package-lock.json  "$old" "$version"
+      set_json_version package.json       "$version" "$old"
+      set_json_version package-lock.json  "$version" "$old"
       ;;
     axiam-java-sdk)
       # Every occurrence of the project version literal across the poms is the
@@ -888,7 +1036,7 @@ bump_versions() {
       sub_literal pom.xml                              "$old" "$version"
       sub_literal bom/pom.xml                          "$old" "$version"
       sub_literal examples/spring-boot-app/pom.xml     "$old" "$version"
-      sub_literal README.md                            "$old" "$version"
+      sub_readme  README.md                            "$old" "$version"
       ;;
     axiam-csharp-sdk)
       sub_literal Axiam.Sdk/Axiam.Sdk.csproj                        "$old" "$version"
@@ -906,26 +1054,35 @@ bump_versions() {
     axiam-kotlin-sdk)
       # Gradle project version lives in gradle.properties; README shows install coords.
       sub_literal gradle.properties  "$old" "$version"
-      sub_literal README.md          "$old" "$version"
+      sub_readme  README.md          "$old" "$version"
       ;;
     axiam-swift-sdk)
       # SwiftPM is tag-derived; the CocoaPods podspec carries the only in-repo version.
       sub_literal AxiamSDK.podspec   "$old" "$version"
-      sub_literal README.md          "$old" "$version"
+      sub_readme  README.md          "$old" "$version"
       ;;
     axiam-c-sdk|axiam-cplusplus-sdk)
       # C/C++ declare the release version in the vcpkg manifest (an overlay port
       # under ports/<repo>/, or the repo root), the Conan recipe, the AXIAM_VERSION
       # macro header, the CPack version in CMakeLists, and the README install
       # coords — kept in lockstep. (project() carries the plain MAJOR.MINOR.PATCH
-      # triple by design, since CMake rejects pre-release suffixes, so a
-      # prerelease bump only rewrites the full-version literals below.)
-      local mf; mf="$(vcpkg_manifest_path "$repo")"
-      [[ -n "$mf" ]] && sub_literal "$mf"  "$old" "$version"
+      # triple by design, since CMake rejects pre-release suffixes; it is set
+      # from the new version's triple by set_cmake_project_version.)
+      # Every vcpkg manifest is bumped, not only the one vcpkg_manifest_path
+      # resolves: the C++ SDK keeps BOTH a root vcpkg.json and an overlay port
+      # whose directory is not named after the repo (ports/axiam-cpp-sdk/), and
+      # that port sat at 1.0.0-alpha8 for nine releases because only the root
+      # manifest was rewritten. sub_literal is a no-op on a missing file, so an
+      # unmatched glob costs nothing.
+      local mf
+      for mf in vcpkg.json ports/*/vcpkg.json; do
+        sub_literal "$mf"                  "$old" "$version"
+      done
       sub_literal include/axiam/axiam.h    "$old" "$version"
       sub_literal CMakeLists.txt           "$old" "$version"
+      set_cmake_project_version CMakeLists.txt "$version"
       sub_literal conanfile.py             "$old" "$version"
-      sub_literal README.md                "$old" "$version"
+      sub_readme  README.md                "$old" "$version"
       ;;
   esac
 }
@@ -951,10 +1108,19 @@ previous_release_tag() {
   printf '%s' "$t"
 }
 
-# Uppercase the first character of $1, leaving the rest untouched.
+# Uppercase the first character of $1, leaving the rest untouched -- unless its
+# first word is not a plain lowercase word. Commit subjects often open with an
+# identifier, and the changelog must spell it as the code does: capitalizing
+# printed "Tls_client_auth accepts only ...", "Rl-prod-check lists ..." and
+# "Claims.id_token.sub is honoured ..." into the 1.0.0 section.
 capitalize() {
   local s="$1"
   [[ -n "$s" ]] || return 0
+  local plain='^[a-z]+[,:;]?$'
+  if [[ ! "${s%% *}" =~ $plain ]]; then
+    printf '%s' "$s"
+    return 0
+  fi
   printf '%s%s' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')" "${s:1}"
 }
 
@@ -1050,7 +1216,10 @@ sub canon_idx {
 }
 
 # Split a section body into `### Name` subsections, keeping anything before the
-# first one as a preamble.
+# first one as a preamble -- VERBATIM, blank lines included. It is hand-written
+# prose (the 1.0.0 block opens with four `####` chapters of it), and dropping its
+# blank lines, as an earlier revision did, ran its paragraphs together and turned
+# its loose lists tight.
 sub subsections {
     my @lines = split /\n/, shift, -1;
     my (@pre, @subs, $cur);
@@ -1060,24 +1229,33 @@ sub subsections {
             push @subs, $cur;
         } elsif ($cur) {
             push @{ $cur->{body} }, $line;
-        } elsif ($line =~ /\S/) {
+        } else {
             push @pre, $line;
         }
     }
+    shift @pre while @pre && $pre[0]  !~ /\S/;
+    pop   @pre while @pre && $pre[-1] !~ /\S/;
     return (\@pre, \@subs);
 }
 
 # Split a subsection body into bullet blocks: a `- ` line plus the lines that
-# continue it, so a wrapped multi-paragraph entry moves as one unit.
+# continue it, so a wrapped multi-paragraph entry moves as one unit. A block is
+# `tight` when the next bullet followed it with no blank line, which is how the
+# author wrote a tight list; rendering keeps it that way.
 sub blocks {
     my @lines = @{ +shift };
-    my (@out, $cur);
+    my (@out, $cur, $prev);
     for my $line (@lines) {
-        if    ($line =~ /^[-*][ \t]/) { $cur = [$line]; push @out, $cur }
-        elsif ($cur)                  { push @$cur, $line }
-        elsif ($line =~ /\S/)         { $cur = [$line]; push @out, $cur }
+        if ($line =~ /^[-*][ \t]/) {
+            $cur->{tight} = 1 if $cur && defined $prev && $prev =~ /\S/;
+            $cur = { lines => [$line], tight => 0 };
+            push @out, $cur;
+        }
+        elsif ($cur)          { push @{ $cur->{lines} }, $line }
+        elsif ($line =~ /\S/) { $cur = { lines => [$line], tight => 0 }; push @out, $cur }
+        $prev = $line;
     }
-    for my $b (@out) { pop @$b while @$b && $b->[-1] !~ /\S/ }
+    for my $b (@out) { pop @{ $b->{lines} } while @{ $b->{lines} } && $b->{lines}[-1] !~ /\S/ }
     return @out;
 }
 
@@ -1089,33 +1267,70 @@ sub fingerprint {
 }
 
 # Merge the pending body into the entry body; render the result as lines.
+#
+# The pending block is hand-written and the entry is mechanical, so the pending
+# block leads on both axes:
+#
+#   * ORDER OF SUBSECTIONS is the author's. A subsection only the generated
+#     entry has (always one of Added / Changed / Fixed) is slotted in at its
+#     Keep-a-Changelog position among the author's canonical ones. Sorting
+#     everything, as an earlier revision did, sent the subsections Keep a
+#     Changelog does not name to the end in alphabetical order -- every SDK's
+#     `### Breaking changes` below `### Security`, and the platform's
+#     `### Deferred to 1.0.x` above its `### Documentation`.
+#   * WITHIN A SUBSECTION the hand-written blocks come first and the commit
+#     one-liners after them. When the author structured the subsection with
+#     `####` headings, the one-liners get a `#### Commit summaries` heading of
+#     their own; appended bare they would read as part of the last chapter.
 sub merge_bodies {
     my ($entry_body, $pending_body) = @_;
     my ($e_pre, $e_subs) = subsections($entry_body);
     my ($p_pre, $p_subs) = subsections($pending_body);
 
-    my (%by, @order);
-    for my $s (@$e_subs, @$p_subs) {
-        my $k = lc $s->{name};
-        unless (exists $by{$k}) {
-            $by{$k} = { name => $s->{name}, blocks => [], seen => {} };
-            push @order, $k;
-        }
-        for my $b (blocks($s->{body})) {
-            my $f = fingerprint($b);
-            next if !length $f || $by{$k}{seen}{$f}++;
-            push @{ $by{$k}{blocks} }, $b;
+    my (%by, @order, @generated_only);
+    for my $src ([$p_subs, 'hand'], [$e_subs, 'gen']) {
+        my ($subs, $kind) = @$src;
+        for my $s (@$subs) {
+            my $k = lc $s->{name};
+            unless (exists $by{$k}) {
+                $by{$k} = { name => $s->{name}, hand => [], gen => [], seen => {} };
+                if ($kind eq 'hand') { push @order, $k } else { push @generated_only, $k }
+            }
+            for my $b (blocks($s->{body})) {
+                my $f = fingerprint($b->{lines});
+                next if !length $f || $by{$k}{seen}{$f}++;
+                push @{ $by{$k}{$kind} }, $b;
+            }
         }
     }
-    @order = sort {
-        canon_idx($by{$a}{name}) <=> canon_idx($by{$b}{name}) or $a cmp $b
-    } @order;
+    for my $k (sort { canon_idx($a) <=> canon_idx($b) } @generated_only) {
+        my $i  = canon_idx($k);
+        my $at = scalar @order;
+        my $after_last_canon;
+        for my $j (0 .. $#order) {
+            my $c = canon_idx($order[$j]);
+            next if $c >= @CANON;
+            if ($c > $i) { $at = $j; undef $after_last_canon; last }
+            $after_last_canon = $j + 1;
+        }
+        $at = $after_last_canon if defined $after_last_canon;
+        splice @order, $at, 0, $k;
+    }
 
-    my @out = (@$e_pre, @$p_pre);
+    my @out;
+    push @out, '', @$p_pre if @$p_pre;
+    push @out, '', @$e_pre if @$e_pre;
     for my $k (@order) {
-        next unless @{ $by{$k}{blocks} };
-        push @out, '', "### $by{$k}{name}", '';
-        push @out, @$_, '' for @{ $by{$k}{blocks} };
+        my $s = $by{$k};
+        next unless @{ $s->{hand} } || @{ $s->{gen} };
+        push @out, '', "### $s->{name}", '';
+        push @out, @{ $_->{lines} }, ($_->{tight} ? () : '') for @{ $s->{hand} };
+        if (@{ $s->{hand} } && @{ $s->{gen} }) {
+            push @out, '' if $out[-1] =~ /\S/;
+            push @out, '#### Commit summaries', ''
+                if grep { /^####[ \t]/ } map { @{ $_->{lines} } } @{ $s->{hand} };
+        }
+        push @out, @{ $_->{lines} }, '' for @{ $s->{gen} };
         pop @out while @out && $out[-1] !~ /\S/;
     }
     return @out;
@@ -1144,7 +1359,8 @@ if (@sections && $sections[0] =~ /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i) {
 # inserted new sections ABOVE the pending block instead of folding it in. Say
 # so; do not silently build on top of it, and do not fail the release for it.
 my $strays = grep { /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i } @sections;
-warn "mass-tag: WARNING: $file has $strays stray [Unreleased] section(s) below "
+my $label  = $ENV{CHANGELOG_LABEL} // $file;   # a dry run folds a scratch copy
+warn "mass-tag: WARNING: $label has $strays stray [Unreleased] section(s) below "
    . "the newest release; merge each into the release above it by hand\n" if $strays;
 
 my ($entry_head, @entry_rest) = split /\n/, $entry, -1;
@@ -1160,6 +1376,40 @@ print {$fh} join("\n", @out), "\n";
 close $fh;
 PERL
 )"
+
+# Print the outline of a folded CHANGELOG $1: every heading of the
+# `[Unreleased]` block and of the new section, each with the number of bullets
+# directly under it, then the invariant the fold must hold -- exactly one
+# `## [Unreleased]`, the first `## ` heading, and empty.
+changelog_outline() {
+  perl -e '
+    my ($file) = @ARGV;
+    open my $in, "<", $file or die "cannot read $file: $!\n";
+    my ($sec, $head, $n, @rows) = (0, undef, 0);
+    my ($unrel, $first_is_unrel, $unrel_body) = (0, 0, 0);
+    while (my $l = <$in>) {
+      chomp $l;
+      if ($l =~ /^##[ \t]/ && $l !~ /^###/) {
+        $sec++;
+        if ($l =~ /^##[ \t]+\[?[ \t]*unreleased/i) { $unrel++; $first_is_unrel = 1 if $sec == 1 }
+      }
+      next if $sec < 1;
+      $unrel_body++ if $sec == 1 && $l =~ /\S/ && $l !~ /^##[ \t]/;
+      last if $sec > 2;
+      if ($l =~ /^#{2,4}[ \t]/) { push @rows, [$head, $n] if defined $head; ($head, $n) = ($l, 0) }
+      elsif ($l =~ /^[-*][ \t]/) { $n++ }
+    }
+    while (my $l = <$in>) {
+      $unrel++ if $l =~ /^##[ \t]+\[?[ \t]*unreleased/i;
+    }
+    push @rows, [$head, $n] if defined $head;
+    for my $r (@rows) { printf "%s%s\n", $r->[0], $r->[1] ? "  ($r->[1])" : "" }
+    my $ok = $unrel == 1 && $first_is_unrel && !$unrel_body;
+    printf "invariant: %d [Unreleased] heading(s), %s, %s -> %s\n", $unrel,
+      ($first_is_unrel ? "first" : "NOT first"), ($unrel_body ? "NOT empty" : "empty"),
+      ($ok ? "ok" : "BROKEN");
+  ' -- "$1"
+}
 
 # Write a new section for version $1 into CHANGELOG.md (creating the file with a
 # standard header if absent), folding any pending [Unreleased] block into it and
@@ -1178,9 +1428,19 @@ write_changelog() {
     return 0
   fi
 
+  # A dry run folds on a scratch copy and shows the RESULT, not the generated
+  # entry alone: the fold is the part that has gone wrong before (the orphaned
+  # [Unreleased] blocks, the reordered subsections), and the stray-[Unreleased]
+  # warning is raised by the rewriter itself, so a dry run that never ran it
+  # could not show it.
   if $DRY_RUN; then
-    printf '      [dry-run] new CHANGELOG.md section (any pending [Unreleased] block folded in):\n'
-    printf '%s\n' "$CHANGELOG_ENTRY" | sed 's/^/        | /'
+    local tmp
+    tmp="$(mktemp)"
+    if [[ -f "$file" ]]; then cp "$file" "$tmp"; else printf '%s\n' "$CHANGELOG_HEADER" > "$tmp"; fi
+    printf '      [dry-run] CHANGELOG.md, folded on a scratch copy (headings, with the bullets under each):\n'
+    ENTRY="$CHANGELOG_ENTRY" CHANGELOG_LABEL="$file" perl -e "$CHANGELOG_REWRITE_PL" -- "$tmp" 2>&1 | sed 's/^/        ! /'
+    changelog_outline "$tmp" | sed 's/^/        | /'
+    rm -f "$tmp"
     return 0
   fi
 
@@ -1334,6 +1594,11 @@ for repo in "${REPOS[@]}"; do
     run git push origin "refs/tags/$TAG_FOR_REPO"
   ) || { echo "    [FAILED] $repo"; FAIL_COUNT=$((FAIL_COUNT + 1)); FAILED_REPOS="$FAILED_REPOS $repo"; continue; }
   echo "    [done] $repo"
+  if $DRY_RUN && $BUMP && [[ "$repo" == "$PLATFORM_REPO" || "$repo" == "$OPAQUE_TARGET" ]] \
+     && ! $PLATFORM_DRY_BUMPED; then
+    PLATFORM_DRY_BUMPED=true
+    PLATFORM_DRY_FROM="$(cd "$dir" && current_version "$repo")"
+  fi
 done
 echo ""
 
@@ -1344,4 +1609,8 @@ if [[ $FAIL_COUNT -gt 0 ]]; then
   echo "==> Completed with failures:$FAILED_REPOS"
   exit 1
 fi
-echo "==> All ${#REPOS[@]} target(s) released at version $RELEASE_VERSION and pushed."
+if $DRY_RUN; then
+  echo "==> Dry run: all ${#REPOS[@]} target(s) would be released at version $RELEASE_VERSION; nothing was changed."
+else
+  echo "==> All ${#REPOS[@]} target(s) released at version $RELEASE_VERSION and pushed."
+fi

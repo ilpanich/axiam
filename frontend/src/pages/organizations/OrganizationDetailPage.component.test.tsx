@@ -677,6 +677,30 @@ describe("OrganizationDetailPage — settings tab", () => {
     );
   });
 
+  // P23W4-07. The org baseline is the only place either surface can be turned
+  // ON (both are disable-only for a tenant), and a save must carry the one it
+  // did not touch.
+  it("switches the SAML IdP and SSF surfaces on at the organization", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    apiMock.put.mockResolvedValue(res(settingsWithOidc));
+    await goToSettings();
+    const ssf = await screen.findByLabelText(/Shared Signals Framework transmitter/, {
+      exact: false,
+    });
+    expect(ssf).not.toBeChecked();
+    expect(
+      screen.getByLabelText(/SAML 2.0 identity provider/, { exact: false })
+    ).toBeChecked();
+    await userEvent.click(ssf);
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith(
+      URLS.settings,
+      expect.objectContaining({ saml_idp_enabled: true, ssf_enabled: true })
+    );
+  });
+
   // Finding C. The DCR card shipped only on the tenant settings page, where
   // `dynamic_registration` is tighten-only against a baseline that defaults to
   // `disabled` — so before this section existed, nothing in the console could
@@ -875,6 +899,45 @@ describe("OrganizationDetailPage — settings tab", () => {
     // Stayed on the settings tab.
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
     expect(screen.queryByText("Organizations list")).not.toBeInTheDocument();
+  });
+
+  it("asks the browser to confirm closing the tab while settings are dirty, and only then", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    await goToSettings();
+    const minLen = await screen.findByLabelText("Minimum length");
+
+    const clean = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+
+    fireEvent.change(minLen, { target: { value: "10" } });
+    await screen.findByText("Unsaved changes");
+    const dirty = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirty);
+    expect(dirty.defaultPrevented).toBe(true);
+  });
+
+  it("sends the pending-deletion window and the WebAuthn user-verification level that were edited", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockResolvedValue(res(settings));
+    await goToSettings();
+    fireEvent.change(await screen.findByLabelText("Pending-deletion window (days)"), {
+      target: { value: "45" },
+    });
+    await userEvent.selectOptions(
+      screen.getByLabelText("User verification"),
+      "required",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        URLS.settings,
+        expect.objectContaining({
+          deletion_grace_period_days: 45,
+          webauthn_user_verification: "required",
+        })
+      )
+    );
   });
 
   it("edits every settings field and submits the fully-updated payload", async () => {

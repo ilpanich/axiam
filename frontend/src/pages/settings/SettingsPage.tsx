@@ -18,11 +18,14 @@ import {
   UserPlus,
   Globe,
   Server as ServerIcon,
+  RadioTower,
 } from "lucide-react";
 import {
   settingsService,
   cleanAllowedNames,
+  readOidcPolicy,
   readServerCertAllowedNames,
+  surfaceLayer,
   validateCimdPolicy,
   validateDcrPolicy,
   DEFAULT_CIMD_POLICY,
@@ -30,6 +33,8 @@ import {
   DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
   type CimdPolicy,
   type SecuritySettings,
+  type SurfaceKey,
+  type SurfaceLayer,
   type TenantSettingsOverride,
   type WebauthnUserVerification,
   type DynamicRegistrationMode,
@@ -55,6 +60,8 @@ import { BooleanDisplay, NumberDisplay } from "./policyFields";
 import { DcrPolicyFields, DcrPolicySummary } from "./dcrPolicy";
 import { CimdPolicyFields, CimdPolicySummary } from "./cimdPolicy";
 import { ServerNamesFields, ServerNamesSummary } from "./serverNamesPolicy";
+import { SurfaceSwitches } from "./surfaceSwitches";
+import { useAuthStore } from "@/stores/auth";
 
 // ─── Flat editable view-model (minutes where presented as minutes) ────────────
 // The backend stores token/lockout/mfa durations in SECONDS. We present the
@@ -109,6 +116,12 @@ interface SettingsForm {
   // it as one object; splitting it here and rejoining it on save would be the
   // per-field merge the policy exists to refuse.
   cimd: CimdPolicy;
+  // P23W4-07 — disable-only switches, seeded from the *effective* value and
+  // always sent back. An omitted field means "inherit", so a form that left
+  // them out put a tenant that had switched a surface off back on the
+  // organization's value on its next save.
+  saml_idp_enabled: boolean;
+  ssf_enabled: boolean;
 }
 
 /**
@@ -176,6 +189,8 @@ function toForm(s: SecuritySettings): SettingsForm {
     // T21.5 — same fallback, same reason: a server older than the field sends
     // no `cimd`, and the shipped default is `enabled: false`.
     cimd: s.oidc?.cimd ?? DEFAULT_CIMD_POLICY,
+    saml_idp_enabled: readOidcPolicy(s).saml_idp_enabled,
+    ssf_enabled: readOidcPolicy(s).ssf_enabled,
   };
 }
 
@@ -210,6 +225,8 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     dcr_max_clients: f.dcr_max_clients,
     dcr_unused_client_ttl_days: f.dcr_unused_client_ttl_days,
     cimd: f.cimd,
+    saml_idp_enabled: f.saml_idp_enabled,
+    ssf_enabled: f.ssf_enabled,
   };
 }
 
@@ -277,6 +294,16 @@ export function SettingsPage() {
     queryFn: settingsService.getSettings,
   });
 
+  // The tenant's own sparse override, which is what tells "the organization
+  // turned this surface off" from "this tenant did": `GET /settings` returns
+  // only the merged value, and the organization baseline is not readable here.
+  const tenantId = useAuthStore((s) => s.user?.tenant_id);
+  const overrideQuery = useQuery({
+    queryKey: ["tenant-settings-override", tenantId],
+    queryFn: () => settingsService.getTenantOverride(tenantId ?? ""),
+    enabled: !!tenantId,
+  });
+
   // Derive form state from query data + local overrides (no useEffect needed).
   const form = useMemo<SettingsForm | null>(() => {
     if (!settings) return null;
@@ -290,6 +317,10 @@ export function SettingsPage() {
       void queryClient.invalidateQueries({
         queryKey: ["system-settings"],
       });
+      void queryClient.invalidateQueries({
+        queryKey: ["tenant-settings-override"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["ssf-streams"] });
       setFormOverrides({});
       setEditing(false);
       setFeedback({
@@ -400,6 +431,16 @@ export function SettingsPage() {
   // The advisory compares against the *loaded effective* policy, which is the
   // only thing this endpoint exposes — the org baseline is not readable here.
   const effectiveOpaque = readOpaquePolicy(settings);
+  const surfaceLayers = Object.fromEntries(
+    (["saml_idp_enabled", "ssf_enabled"] as const).map((key) => [
+      key,
+      surfaceLayer(
+        readOidcPolicy(settings!)[key],
+        overrideQuery.data?.[key],
+        overrideQuery.isSuccess
+      ),
+    ])
+  ) as Record<SurfaceKey, SurfaceLayer>;
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -1028,6 +1069,42 @@ export function SettingsPage() {
           ) : (
             <CimdPolicySummary value={data.cimd} />
           )}
+        </CardContent>
+      </Card>
+
+      {/* ── Identity and event surfaces (G-2, G-5; P23W4-07) ───────────── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <RadioTower size={18} className="text-primary" aria-hidden="true" />
+            <CardTitle className="text-base">
+              SAML Identity Provider &amp; Security Events
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <SurfaceSwitches
+            idPrefix="tenant"
+            scope="tenant"
+            editing={editing}
+            value={{
+              saml_idp_enabled: data.saml_idp_enabled,
+              ssf_enabled: data.ssf_enabled,
+            }}
+            onChange={(patch) =>
+              setFormOverrides((prev) => ({ ...prev, ...patch }))
+            }
+            layers={surfaceLayers}
+            ssfInactiveReason={settings?.oidc?.ssf_inactive_reason}
+          />
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            <Link to="/saml" className="text-primary hover:underline">
+              SAML service providers
+            </Link>
+            <Link to="/ssf" className="text-primary hover:underline">
+              SSF streams
+            </Link>
+          </div>
         </CardContent>
       </Card>
 

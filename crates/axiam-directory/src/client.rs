@@ -714,7 +714,7 @@ impl DirectoryClient {
                 } else {
                     DirectoryAuthError::Unavailable
                 },
-                refusal.reason(),
+                crate::address::operator_reason(&refusal),
             )
         })?;
         // 2. TCP to a vetted address, and nothing else.

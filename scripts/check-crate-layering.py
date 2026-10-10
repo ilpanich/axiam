@@ -113,9 +113,15 @@ LAYERS: dict[str, int] = {
     "axiam-auth": 1,
     "axiam-authz": 1,
     "axiam-pki": 1,
-    "axiam-email": 1,
     # 2 -- infrastructure adapters implementing layer 0's ports.
     "axiam-db": 2,
+    # The outbound mail transport (SMTP, provider HTTP APIs) is an adapter, not
+    # a domain service: since #529 every connection it opens is held to the
+    # outbound address policy -- the connector address guard and
+    # `guarded_fetch_no_redirect`, both in axiam-pki -- so it sits one layer out
+    # from the crate that owns them. Its consumers (axiam-amqp, axiam-api-rest)
+    # are higher still.
+    "axiam-email": 2,
     "axiam-audit": 2,
     # 3/4 -- federation protocol logic, then the OAuth2/OIDC authorization
     #        server that builds on it. Two layers rather than one because

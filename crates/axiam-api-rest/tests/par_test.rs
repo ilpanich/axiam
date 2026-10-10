@@ -211,6 +211,19 @@ fn user_token(f: &Fixture) -> String {
     .unwrap()
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! test_app {
     ($f:expr) => {
         test::init_service(
@@ -223,9 +236,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
-                .configure(|cfg| {
-                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
-                }),
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &permissive_rate_limits())),
         )
         .await
     };

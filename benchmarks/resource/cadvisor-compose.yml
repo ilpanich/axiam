@@ -19,7 +19,7 @@ services:
     container_name: bench-cadvisor
     privileged: true
     ports:
-      - "${CADVISOR_PORT:-8080}:8080"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${CADVISOR_PORT:-8080}:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro

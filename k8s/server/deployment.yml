@@ -18,6 +18,10 @@ spec:
         app: axiam
         component: server
     spec:
+      # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC and
+      # 5 s for the audit queue (#569). The default of 30 s leaves no margin, and
+      # a pod killed during the audit drain loses the rows it still holds.
+      terminationGracePeriodSeconds: 40
       # Pod-level restricted security context (KSV-0118). Container-level
       # contexts below remain authoritative; this satisfies the pod-scope check.
       securityContext:
@@ -116,6 +120,12 @@ spec:
             - name: server-tls
               mountPath: /etc/axiam/server-tls
               readOnly: true
+            # P23W5-A7: the audit dead-letter file (AXIAM__GDPR_AUDIT_DLQ_FILE in
+            # the ConfigMap). The root filesystem is read-only, so without this
+            # the key would name a path the server cannot create. Writable by the
+            # container user through the pod's `fsGroup`.
+            - name: audit-dlq
+              mountPath: /var/lib/axiam/audit-dlq
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532          # distroless/cc-debian12:nonroot UID (D-08)
@@ -158,3 +168,39 @@ spec:
           secret:
             secretName: axiam-server-tls
             defaultMode: 0440
+        # P23W5-A7: the audit dead-letter file. An `emptyDir`, deliberately, and
+        # the trade is worth stating: this is a Deployment of 2-10 replicas under
+        # an HPA, and the file is per replica. A PersistentVolumeClaim here would
+        # be one ReadWriteOnce volume shared by every replica (a second pod on
+        # another node fails to attach), and giving each replica its own would
+        # mean turning the server into a StatefulSet, which is a different
+        # workload with a different rollout and which no overlay of this base
+        # expects. The surrealdb and rabbitmq StatefulSets use PVCs because they
+        # are the stores; this is a spill file.
+        #
+        # What an `emptyDir` survives: a container crash or restart (OOMKill, a
+        # failed liveness probe) -- the pod stays on the node and the volume with
+        # it, which is the case where the file is most wanted. What it does not:
+        # the pod's own deletion (a rollout, a drain, an eviction, a node loss).
+        # So replay the file before rolling the Deployment while rows are in it
+        # (docs/deployment/README.md, "The audit dead-letter file"), and keep the
+        # `axiam.audit.dlq` log events: for the GDPR records they are the second
+        # copy, on the log pipeline rather than the pod. A deployment that needs
+        # the file to outlive its pod mounts a per-replica volume of its own here
+        # (a StatefulSet's volumeClaimTemplates, or a CSI ephemeral volume).
+        #
+        # `sizeLimit` is not what bounds the file, and must never be reached: the
+        # kubelet enforces it by EVICTING the pod, and an evicted pod's `emptyDir`
+        # is deleted -- the file with every unreplayed row in it, at the moment it
+        # is fullest, and during a datastore outage on every replica at about the
+        # same time. What bounds the file is the server's byte budget,
+        # AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES in the ConfigMap (192 MiB), which sits
+        # below this limit with room to spare: past nine tenths of the budget
+        # request-audit rows are refused and counted (`dead_letter_full` on
+        # /health/jobs), and the last tenth is kept for the GDPR records. A line
+        # is at most about a kilobyte (the request path and the forwarded address
+        # are cut to a bound), a few hundred bytes for an honest request. Raise the
+        # two together, the budget below the limit.
+        - name: audit-dlq
+          emptyDir:
+            sizeLimit: 256Mi

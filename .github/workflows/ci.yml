@@ -165,6 +165,12 @@ jobs:
       - name: Vault seeder never overwrites an existing secret
         run: python3 -m unittest discover -s scripts -p 'test_*.py' --verbose
 
+      # The conformance workflow's gate (P23W5-11) decides a run's verdict, and
+      # runs only when a human dispatches the workflow; its rules are pinned here
+      # so a change to them is seen on a pull request, not at the next dispatch.
+      - name: Conformance gate rules (fixtures)
+        run: python3 -m unittest discover -s conformance/scripts -p 'test_*.py' --verbose
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -387,10 +393,12 @@ jobs:
           scanners: vuln
           severity: HIGH,CRITICAL
           # trivy-action writes ALL severities into the SARIF by default
-          # ("Building SARIF report with all severities") — the `severity`
-          # input only gates the table/exit-code. This flag makes the SARIF
-          # honour the filter too, so the code-scanning dashboard isn't flooded
-          # with LOW/MEDIUM advisories that fail the Trivy check.
+          # ("Building SARIF report with all severities") by UNSETTING
+          # TRIVY_SEVERITY before its single `trivy` run — so without this flag
+          # the exit-code gate ALSO fires on LOW/MEDIUM/UNKNOWN findings, not
+          # just the SARIF. This flag makes both honour the `severity` filter.
+          # (release.yml's image scan lacked it, and that alone blocked the
+          # v1.0.0-beta17/beta18 server images.)
           limit-severities-for-sarif: true
           ignore-unfixed: true
           # benchmarks/ and conformance/ are local test harnesses. Neither is a
@@ -754,6 +762,12 @@ jobs:
       - name: rl=prod posture self-test
         working-directory: benchmarks
         run: bash runner/rl-prod-posture-selftest.sh
+      # P23W6-06 (#567): every port a benchmark stack publishes is bound to
+      # ${BENCH_BIND_ADDR:-127.0.0.1}. A bare "8090:8090" binds every interface, past
+      # ufw, on a host running identity servers with their limiters raised. Hermetic.
+      - name: Benchmark bind-address self-test
+        working-directory: benchmarks
+        run: bash runner/bind-addr-selftest.sh
       # T23.10.2(a): the AXIAM deployment-profile guard. A minimal-profile pass whose
       # overlay silently did not apply would file full-profile cells under a
       # "minimal" label; the runner reads the profile off the container and refuses

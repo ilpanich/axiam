@@ -29,6 +29,11 @@ pub mod saml_idp;
 /// The SAML identity provider's entity id and endpoint URLs. Not behind the
 /// `saml` feature: contract §29's `get_idp` answers them in every build (T23.2.5).
 pub mod saml_idp_urls;
+/// The SAML SP's view of an external IdP's metadata document: its signature,
+/// when the configuration names a certificate, and a per-process cache
+/// (#530).
+#[cfg(feature = "saml")]
+pub mod saml_metadata;
 /// Write-time rules for the SAML service-provider registry (G-2, T23.2.1):
 /// the ACS allow-list, SP certificates and attribute mappings. Plain data and
 /// URL/X.509 parsing, so it is not behind the `saml` feature.

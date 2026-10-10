@@ -684,13 +684,17 @@ impl<C: Connection> SurrealSettingsRepository<C> {
     }
 
     /// Look up the organization_id for a tenant from the tenant table.
+    ///
+    /// A tombstoned tenant (#523) is `NotFound`, as from the tenant repository:
+    /// its overrides can be neither read nor written while it waits for the
+    /// purge.
     async fn lookup_org_id(&self, tenant_id: Uuid) -> Result<Uuid, DbError> {
         let mut result = self
             .db
             .current()
             .query(
                 "SELECT organization_id FROM tenant \
-                 WHERE meta::id(id) = $tenant_id",
+                 WHERE meta::id(id) = $tenant_id AND deleted_at = NONE",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .await

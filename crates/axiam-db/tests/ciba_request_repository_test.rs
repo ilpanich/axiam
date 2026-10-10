@@ -220,6 +220,55 @@ async fn approval_is_conditional_on_version_user_status_and_expiry() {
     assert!(!repo.deny(tenant, decoy.id, 0, user).await.unwrap());
 }
 
+/// The pending list (#566) holds the user's own, unexpired, undecided requests
+/// of one tenant, soonest expiry first, and honours the limit.
+#[tokio::test]
+async fn the_pending_list_is_one_users_open_requests_soonest_first() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+
+    let later = repo
+        .create(input(tenant, Some(user), &digest(), 500))
+        .await
+        .unwrap();
+    let sooner = repo
+        .create(input(tenant, Some(user), &digest(), 100))
+        .await
+        .unwrap();
+    let decided = repo
+        .create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    assert!(repo.deny(tenant, decided.id, 0, user).await.unwrap());
+    repo.create(input(tenant, Some(user), &digest(), -1))
+        .await
+        .unwrap();
+    repo.create(input(tenant, Some(Uuid::new_v4()), &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(tenant, None, &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(Uuid::new_v4(), Some(user), &digest(), 300))
+        .await
+        .unwrap();
+
+    let listed = repo.list_pending_for_user(tenant, user, 50).await.unwrap();
+    let ids: Vec<Uuid> = listed.iter().map(|r| r.id).collect();
+    assert_eq!(ids, [sooner.id, later.id]);
+    let limited = repo.list_pending_for_user(tenant, user, 1).await.unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id, sooner.id);
+    assert!(
+        repo.list_pending_for_user(tenant, Uuid::new_v4(), 50)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn denial_is_conditional_and_final() {
     let db = setup().await;

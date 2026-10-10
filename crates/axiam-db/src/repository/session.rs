@@ -414,6 +414,72 @@ impl<C: Connection> SurrealSessionRepository<C> {
         }
     }
 
+    /// Revoke every session of a tenant — the first step of a tenant deletion
+    /// (#523, D-4), run by the handler before the tenant is tombstoned.
+    ///
+    /// The bulk counterpart of `invalidate_user_sessions`: the rows go, the
+    /// validity cache forgets the tenant (before the check, for the reason
+    /// `invalidate` gives), and the revocation feed, when it is on, names every
+    /// session it removed, so a resource server reading the feed refuses the
+    /// tenant's access tokens before they expire. The SSF sink is not told:
+    /// the tenant's streams are removed in the same request, so no receiver
+    /// is left to hear it.
+    ///
+    /// Returns the number of sessions removed.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure, including a statement-level one (OBS-3).
+    pub async fn invalidate_tenant_sessions(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        #[derive(Debug, SurrealValue)]
+        struct IdRow {
+            record_id: String,
+        }
+        // The ids are read only when the feed will publish them; the DELETE
+        // counts what it removed either way.
+        let to_publish: Vec<Uuid> = if self.revocation_feed_ttl.is_some() {
+            let mut result = self
+                .db
+                .current()
+                .query("SELECT meta::id(id) AS record_id FROM session WHERE tenant_id = $tenant_id")
+                .bind(("tenant_id", tenant_id.to_string()))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| DbError::Migration(e.to_string()))?;
+            let rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
+            rows.into_iter()
+                .filter_map(|r| Uuid::parse_str(&r.record_id).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM session WHERE tenant_id = $tenant_id GROUP ALL; \
+                 DELETE session WHERE tenant_id = $tenant_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        // I6, ORDERING as in `invalidate`: before the fallible check.
+        if let Some(cache) = &self.validation_cache {
+            cache.invalidate_tenant(tenant_id);
+        }
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let counted: Vec<crate::helpers::CountRow> = result.take(0).map_err(DbError::from)?;
+
+        self.publish_revocations(&to_publish).await;
+        Ok(counted.first().map_or(0, |r| r.total))
+    }
+
     /// Is the session behind an access token's `jti` still usable? (D-15 /
     /// REQ-7.)
     ///

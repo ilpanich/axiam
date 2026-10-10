@@ -7,7 +7,8 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { SettingsPage } from "./SettingsPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
-import type { SecuritySettings } from "@/services/settings";
+import type { SecuritySettings, TenantSettingsOverride } from "@/services/settings";
+import { useAuthStore } from "@/stores/auth";
 
 const settings: SecuritySettings = {
   id: "s1",
@@ -352,6 +353,19 @@ describe("SettingsPage", () => {
       mfa_enforced: true,
       email_verification_required: false,
       admin_notifications_enabled: false,
+    });
+  });
+
+  it("tightens the WebAuthn user-verification level and sends it, and shows it in view mode", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockResolvedValue(res(settings));
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("User verification"), "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      webauthn_user_verification: "required",
     });
   });
 
@@ -945,5 +959,107 @@ describe("SettingsPage — S-7b server certificate names", () => {
       ".plant.lakeside.internal",
       "10.1.0.0/16",
     ]);
+  });
+});
+
+// ─── P23W4-07 — the SAML IdP and SSF switches ────────────────────────────────
+
+describe("SettingsPage — SAML IdP and SSF switches", () => {
+  const SAML = /SAML 2.0 identity provider/;
+  const SSF = /Shared Signals Framework transmitter/;
+
+  function withSurfaces(
+    saml: boolean,
+    ssf: boolean,
+    override: TenantSettingsOverride | null
+  ) {
+    const effective: SecuritySettings = {
+      ...settings,
+      oidc: {
+        saml_idp_enabled: saml,
+        ssf_enabled: ssf,
+        dynamic_registration: "disabled",
+        dcr_allowed_scopes: [],
+        dcr_allowed_redirect_hosts: [],
+        external_client_allowed_resources: [],
+        dcr_max_clients: 20,
+        dcr_unused_client_ttl_days: 30,
+      },
+    };
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/settings") return Promise.resolve(res(effective));
+      if (url === "/api/v1/tenants/t1/settings") {
+        return override === null
+          ? Promise.reject({ response: { status: 404 } })
+          : Promise.resolve(res(override));
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    apiMock.put.mockResolvedValue(res(effective));
+  }
+
+  beforeEach(() => {
+    useAuthStore.setState({
+      user: {
+        id: "u1",
+        username: "admin",
+        email: "a@x.io",
+        permissions: ["*"],
+        tenant_id: "t1",
+      },
+    });
+  });
+
+  it("shows the effective state of both surfaces in view mode", async () => {
+    withSurfaces(true, false, null);
+    renderWithProviders(<SettingsPage />);
+    expect(await screen.findByText("SAML 2.0 identity provider")).toBeInTheDocument();
+    expect(screen.getByText("Shared Signals Framework transmitter")).toBeInTheDocument();
+    // The SSF row is off with no tenant override: the organization's value.
+    expect(await screen.findByText(/Disabled by the organization/)).toBeInTheDocument();
+  });
+
+  it("switching a surface off sends it, with the other carried through at its effective value", async () => {
+    withSurfaces(true, true, {});
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByLabelText(SSF, { exact: false }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const [url, body] = apiMock.put.mock.calls[0];
+    expect(url).toBe("/api/v1/settings");
+    expect(body).toMatchObject({ saml_idp_enabled: true, ssf_enabled: false });
+  });
+
+  it("a save that touches neither switch still carries a tenant's own 'off' through", async () => {
+    withSurfaces(false, true, { saml_idp_enabled: false });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    expect(await screen.findByText(/Turned off for this tenant/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    // Omitted, this would mean "inherit" and put the organization's `true` back.
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      saml_idp_enabled: false,
+      ssf_enabled: true,
+    });
+  });
+
+  it("cannot enable a surface the organization disabled", async () => {
+    withSurfaces(false, false, {});
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await screen.findAllByText(/Disabled by the organization/);
+    expect(screen.getByLabelText(SAML, { exact: false })).toBeDisabled();
+    expect(screen.getByLabelText(SSF, { exact: false })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
+      saml_idp_enabled: false,
+      ssf_enabled: false,
+    });
   });
 });

@@ -669,6 +669,15 @@ fn finished_with_code(resp: &Resp) -> bool {
 
 /// The whole round trip for one AuthnRequest binding.
 async fn round_trip(post_binding: bool) {
+    // AXIAM logs why it refuses a SAML request (`request_refused` and the other
+    // refusal pages) and answers only a fixed page, so a failing leg says no more
+    // than its status. Route the server's log into the test's captured output: a
+    // failure then prints the refusal reason with the panic.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+        .with_test_writer()
+        .with_ansi(false)
+        .try_init();
     let realm = if post_binding {
         "axiam-saml-e2e-post"
     } else {

@@ -150,7 +150,7 @@ def read_doc(doc_id: str,
     examplesUrl: "https://github.com/ilpanich/axiam-java-sdk/tree/main/examples",
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-java-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk",
-    install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0-beta07")',
+    install: 'implementation("io.github.ilpanich:axiam-sdk:1.0.0")',
     blurb:
       "Fluent builder client for the JVM, with servlet and Spring-friendly guards.",
     highlights: [
@@ -309,7 +309,7 @@ mux.Handle("GET /docs/{id}",
     examplesUrl: "https://github.com/ilpanich/axiam-kotlin-sdk/tree/main/examples",
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-kotlin-sdk?branch=main",
     pkg: "io.github.ilpanich:axiam-sdk-kotlin",
-    install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0-beta07")',
+    install: 'implementation("io.github.ilpanich:axiam-sdk-kotlin:1.0.0")',
     blurb:
       "Coroutine-native REST client for the JVM, with Ktor route guards and declarative helpers.",
     highlights: [
@@ -358,7 +358,7 @@ routing {
     coverageUrl: "https://coveralls.io/github/ilpanich/axiam-swift-sdk?branch=main",
     pkg: "AxiamSDK",
     install:
-      '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0-beta07")',
+      '.package(url: "https://github.com/ilpanich/axiam-swift-sdk.git", from: "1.0.0")',
     blurb:
       "Cross-platform REST client on SwiftNIO — client-cert mTLS works on Linux and Apple platforms alike.",
     highlights: [
@@ -491,6 +491,65 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-0-0",
+    date: "2026-MM-DD",
+    dateShort: "2026-MM",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.0.0",
+    excerpt:
+      "AXIAM 1.0.0 is the first stable release: REST, gRPC, AMQP and the SDK contract are under semantic versioning from here, and security fixes ship in `1.0.x`. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "First stable release. REST, gRPC, AMQP and the SDK contract are under semantic versioning from here; security fixes ship in 1.0.x. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.0.0 means" },
+      {
+        type: "p",
+        text: "It is a compatibility promise. The REST API, the gRPC services, the AMQP messages and the SDK behavioural contract follow [semantic versioning](https://semver.org/) from this release: within `1.x`, an addition arrives in a minor release and a change that breaks an integration waits for `2.0`. Security fixes ship as `1.0.x` patch releases, and only the latest `1.0.x` patch is supported ([SECURITY.md](https://github.com/ilpanich/axiam/blob/main/SECURITY.md)). It is not an audit, and it is not a claim that AXIAM suits every deployment: the shared-responsibility checklist in the Security section is still what makes a deployment safe, and part of it is yours.",
+      },
+      {
+        type: "p",
+        text: "1.0.0 closes the beta line. It opened with `1.0.0-beta01` on 26 August 2026 and ran through `1.0.0-beta18`, tagged on 6 October, hardening what an end-to-end suite, the first OpenID Foundation conformance runs, an external integration and three competitor comparisons found. `1.0.0-beta19`'s changes merged on 7 October but were never tagged; 1.0.0 supersedes it. The release itself was four waves, each ending in a security review of its own diff.",
+      },
+      { type: "h", text: "W1 — the security findings that must not ship in a 1.0" },
+      {
+        type: "p",
+        text: "Fifteen issues. A relying party's access token can no longer approve a device authorization in its user's name: the approval routes take a console sign-in only and answer `403` otherwise ([#549](https://github.com/ilpanich/axiam/issues/549)). A locked account costs the same password verify an unknown name costs, on REST and on gRPC, so timing no longer tells them apart ([#564](https://github.com/ilpanich/axiam/issues/564)). Each issuing CA publishes a **certificate revocation list**, and AXIAM's own `tls_client_auth` refuses a certificate it revoked ([#565](https://github.com/ilpanich/axiam/issues/565)). Deleting an OAuth2 client revokes what it was granted ([#517](https://github.com/ilpanich/axiam/issues/517)); deleting a tenant now erases it — tombstone, revoke, purge ([#523](https://github.com/ilpanich/axiam/issues/523)). A token exchange's `actor_token` must belong to the exchanging client ([#518](https://github.com/ilpanich/axiam/issues/518)). Federated sessions keep refreshing ([#519](https://github.com/ilpanich/axiam/issues/519)); UserInfo and introspection stop answering for a suspended account, and narrowing a client's scopes narrows its refresh tokens ([#520](https://github.com/ilpanich/axiam/issues/520)). A tenant's email provider is held to an outbound address policy ([#529](https://github.com/ilpanich/axiam/issues/529)), and its stored secret follows only the same server ([#525](https://github.com/ilpanich/axiam/issues/525)). `/oauth2/authorize` is rate-limited ([#532](https://github.com/ilpanich/axiam/issues/532)), and a `require_par` client's unpushed request is refused before anyone is asked to sign in ([#524](https://github.com/ilpanich/axiam/issues/524)). The SAML service provider refuses SHA-1 signatures and DTDs ([#531](https://github.com/ilpanich/axiam/issues/531)) and can check and cache an identity provider's signed metadata ([#530](https://github.com/ilpanich/axiam/issues/530)); discovery publishes how the revocation and introspection endpoints authenticate, and a changed telephone number loses its verification ([#526](https://github.com/ilpanich/axiam/issues/526)). The wave's review found two more, both fixed before the release: a tenant purge that took revoked certificates off the CRL, and `tls_client_auth` accepting a certificate chained to another organization's trust anchor.",
+      },
+      { type: "h", text: "W2 — durability, operations and the CIBA gap" },
+      {
+        type: "p",
+        text: "Ten items. A per-target breaker stops one unresponsive SCIM downstream stalling every tenant's provisioning ([#550](https://github.com/ilpanich/axiam/issues/550)). A notification rule mails once per event type and window, the next mail counting what it held back ([#551](https://github.com/ilpanich/axiam/issues/551)). Lost request-audit rows are counted on `/health/jobs`, signalled and dead-lettered ([#553](https://github.com/ilpanich/axiam/issues/553)), and the dead-letter file is provisioned in the production Compose file and the Kubernetes manifest ([#552](https://github.com/ilpanich/axiam/issues/552)). A dying consumer or gRPC server goes through the orderly stop instead of ending the process mid-flight, and the stop grace period covers the shutdown and the audit drain ([#554](https://github.com/ilpanich/axiam/issues/554), [#569](https://github.com/ilpanich/axiam/issues/569)). A signed-in user can list their pending CIBA requests, so an account with no vouched address can approve one ([#566](https://github.com/ilpanich/axiam/issues/566)), and the console shows and switches the SAML identity provider and the SSF transmitter ([#536](https://github.com/ilpanich/axiam/issues/536)). The webhook deliverer no longer follows redirects, five cleanup sweeps are listed on `/health/jobs`, and the rate-limit check and the benchmark stacks were tightened ([#555](https://github.com/ilpanich/axiam/issues/555), [#535](https://github.com/ilpanich/axiam/issues/535), [#568](https://github.com/ilpanich/axiam/issues/568), [#567](https://github.com/ilpanich/axiam/issues/567)). The wave's review found two more, both fixed before the release: the notification window serialized the audit worker, and the dead-letter file had no size bound.",
+      },
+      { type: "h", text: "W3 — contract 1.60 in all eleven SDKs" },
+      {
+        type: "p",
+        text: "Contract 1.60 is the 1.0.0 release's contract. It answers, one testable sentence each, the questions the contract 1.59 ports raised ([#588](https://github.com/ilpanich/axiam/issues/588)); makes the SSF receiver's replay store fallible — a store that cannot answer gives no verdict — which is a breaking change to Rust's `ReplayStore` and Go's store interface, taken now because a 1.0 is the last cheap moment; and carries the release's few additions, all optional to an SDK. All eleven SDKs port it and are tagged `v1.0.0` in the same run as the platform; check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.0.0]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The behaviour changes it calls out: SAML responses signed with SHA-1 are refused unless a federation sets `allow_sha1_signatures`, which is audited; deleting a tenant erases it, and deleting a client revokes its tokens; a token minted for an OAuth2 client is answered `403` on the device approval routes; webhook receivers behind a redirect must be registered at their final URL; an SMTP relay on a private address needs `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`; a Vault token used for PKI custody needs `update` on the revoke path; an explicit `null` now clears a federation configuration's nullable fields; and the stop grace period is longer, so an orchestrator that sets its own must match it.",
+      },
+      { type: "h", text: "What is not in 1.0.0" },
+      {
+        type: "p",
+        text: "Deferred to `1.0.x`, and said so on each issue: certificates bound to users, which needs a schema migration and a contract field ([#533](https://github.com/ilpanich/axiam/issues/533)); SAML single logout tested against a real service provider ([#538](https://github.com/ilpanich/axiam/issues/538)); and benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) — the Benchmarks page's numbers are run 5, against the versions it names. The OpenID Foundation submissions for Basic OP and FAPI 2.0 ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open past the tag: AXIAM is not certified, and every conformance figure on this site is a self-run. RADIUS stays on request, unscheduled ([#563](https://github.com/ilpanich/axiam/issues/563)). Carried into `1.0.x` from items that ship: the SCIM per-target concurrency budget, CRLs in the rustls verifiers and OCSP, and `may_act` for token exchange.",
+      },
+      {
+        type: "p",
+        text: "The two wave reviews filed their findings below Medium, and the waves three follow-ups, as [#590](https://github.com/ilpanich/axiam/issues/590) … [#614](https://github.com/ilpanich/axiam/issues/614), all on `1.0.x`. By area: the CRL route's lock, its consistency across replicas and the distribution point it names (#607 – #609); edges of tenant deletion — a tombstoned tenant's clients, audit rows no export covers, sweeps across replicas (#601, #602, #610); Vault custody — a revocation sweep that can starve, redirects, a tenant CA's revocation not forwarded to its parent (#603, #611, #612); the SAML service provider — the SHA-1 escape hatch admitting every algorithm, a byte-order mark, an unaudited certificate replacement, the AuthnRequest route's missing limiter (#605, #606, #611, #614); the device grant not asking whether the account may act (#604); the audit dead-letter path (#594 – #596); the stop budget and the CIBA pending list's bounds (#598, #599); the console's SSF streams page and tenant settings (#590, #600); federation credentials through a redirect-following guard (#591); the conformance workflow (#592, #593); dynamic-registration scope narrowing (#613); and the open-register prose (#597).",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.0.0 is the first stable release: REST, gRPC, AMQP and the SDK contract are under semantic versioning from here, and security fixes ship in `1.0.x`. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "competitor-gap-closure-and-the-open-register",
     date: "October 9, 2026",
     dateShort: "Oct 2026",
@@ -502,7 +561,7 @@ export const POSTS: Post[] = [
     body: [
       {
         type: "p",
-        text: "This post covers two releases. `1.0.0-beta18`, tagged on 6 October, is Phase 23, the competitor-gap closure, and shipped without a post of its own; `1.0.0-beta19` followed on 7 October. Between them the threat model went from 2.17.0 to **2.37.0: 469 threats, 426 mitigated, 22 open and 21 not applicable**. The open register grew from 13 to 22, and this post says why rather than rounding it off.",
+        text: "This post covers two releases. `1.0.0-beta18`, tagged on 6 October, is Phase 23, the competitor-gap closure, and shipped without a post of its own; `1.0.0-beta19` merged on 7 October, but its tag was never pushed, so no beta19 image, GitHub Release or package was published — 1.0.0 supersedes it. Between them the threat model went from 2.17.0 to **2.37.0: 469 threats, 426 mitigated, 22 open and 21 not applicable**. The open register grew from 13 to 22, and this post says why rather than rounding it off.",
       },
       { type: "h", text: "1.0.0-beta18 — eight gaps closed" },
       {
@@ -527,7 +586,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "**Outbound SCIM provisioning.** Register downstream SCIM 2.0 service providers and AXIAM pushes the tenant's user and group lifecycle to them, reconciles nightly and on demand, notifies on a dead letter and propagates GDPR erasure (contract §31). The credential is sealed and bound to the URL it is sent to. Deleting a target deprovisions nothing downstream, and delivery is one attempt at a time per replica, so an unresponsive downstream holds the others back until [ilpanich/axiam#550](https://github.com/ilpanich/axiam/issues/550) is decided.",
+        text: "**Outbound SCIM provisioning.** Register downstream SCIM 2.0 service providers and AXIAM pushes the tenant's user and group lifecycle to them, reconciles nightly and on demand, notifies on a dead letter and propagates GDPR erasure (contract §31). The credential is sealed and bound to the URL it is sent to. Deleting a target deprovisions nothing downstream. Delivery is one attempt at a time per replica, and a per-target breaker stops calling a downstream after five consecutive failures until its backoff has passed, so an unresponsive one no longer holds the others back for every queued reference ([ilpanich/axiam#550](https://github.com/ilpanich/axiam/issues/550)).",
       },
       {
         type: "p",
@@ -577,7 +636,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -702,7 +761,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -772,7 +831,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -841,7 +900,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "The caution has not changed and is not about to. AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and running somebody else's conformance suite is not either of those things — it is evidence that a protocol surface behaves as specified, which is a narrower claim and a useful one. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic; the beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post). The rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and running somebody else's conformance suite is not either of those things — it is evidence that a protocol surface behaves as specified, which is a narrower claim and a useful one.",
       },
     ],
   },
@@ -958,7 +1017,7 @@ export const POSTS: Post[] = [
       { type: "h", text: 'What "done" means' },
       {
         type: "p",
-        text: "Every phase shipped with tests and passed review. That said, AXIAM remains a work in progress and should not be used in production until it reaches a stable release; the core is complete, hardening continues.",
+        text: "Every phase shipped with tests and passed review. That said, AXIAM was then a work in progress, not to be used in production before a stable release; the core was complete and the hardening continued, through the alpha and beta lines, to 1.0.0, the first stable release.",
       },
       {
         type: "quote",
@@ -1032,7 +1091,9 @@ export const POSTS: Post[] = [
  * a close date) and commit history; phases are sequential and do not overlap.
  * Phases 0–18 are the delivered 64-task roadmap; phase 19 is the hardening
  * effort that began after the platform reached feature-complete and closed
- * when it reached beta; phase 20 is the open-ended beta line.
+ * when it reached beta; phase 20 is the beta line, which closed with
+ * `1.0.0-beta19` on Oct 9, 2026; phase 21 is the 1.0.0 release (Phase 24 of
+ * `claude_dev/roadmap.md`), "ongoing" until the maintainer tags it.
  */
 export const PHASES: Phase[] = [
   {
@@ -1199,8 +1260,17 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API — then Phase 23, the competitor-gap closure: a SAML 2.0 identity provider, LDAP and Active Directory as an identity source, RFC 7592 client configuration, a Shared Signals Framework transmitter, outbound SCIM provisioning, CIBA, a minimal profile without the broker and the groundwork for the OpenID certification submissions, carried into all eleven SDKs at contract 1.58",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API — then Phase 23, the competitor-gap closure: a SAML 2.0 identity provider, LDAP and Active Directory as an identity source, RFC 7592 client configuration, a Shared Signals Framework transmitter, outbound SCIM provisioning, CIBA, a minimal profile without the broker and the groundwork for the OpenID certification submissions, carried into all eleven SDKs at contract 1.58, and then the cross-SDK review of those ports (contract 1.59) that handed the 1.0.0 release its list",
     start: "Aug 26, 2026",
+    end: "Oct 9, 2026",
+    status: "done",
+  },
+  {
+    n: 21,
+    title: "1.0.0 — the first stable release",
+    focus:
+      "Phase 24 of the development roadmap: the security findings that must not ship in a 1.0 (device approval, account-lockout timing, a certificate revocation list, actor-token binding, tenant deletion, the SAML verifier's SHA-1 and DTD refusal), durability and operations (the SCIM breaker, the audit dead-letter file, orderly shutdown, the pending CIBA list), contract 1.60 in all eleven SDKs and the release pipelines read for the first stable tag — after which the REST, gRPC and AMQP surfaces and the SDK contract are under semantic versioning, and security fixes ship in 1.0.x. No independent third-party audit has been performed",
+    start: "Oct 9, 2026",
     end: "Ongoing",
     status: "ongoing",
   },

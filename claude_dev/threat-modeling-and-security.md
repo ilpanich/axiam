@@ -15,8 +15,8 @@
 > ## Handoff — this document and the website section
 >
 > **Status: source current as of 2026-10-09 (`main` at `1.0.0-beta19`, model
-> 2.37.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, and the
-> contract 1.58 SDK fan-out).** The Phase 23 paragraphs below record the waves;
+> 2.39.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, the
+> contract 1.58 SDK fan-out, and the 1.0.0 release wave's fixes, both halves).** The Phase 23 paragraphs below record the waves;
 > this plan
 > ([`phase23-closeout-threat-model-and-docs-plan-2026-10-09.md`](phase23-closeout-threat-model-and-docs-plan-2026-10-09.md))
 > records the close-out. The website's Security section mirrors this text and
@@ -24,6 +24,217 @@
 > the Phase 21 MCP wave of `1.0.0-beta16` and the Phase 22 dogfooding wave of
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
+>
+> **The 1.0.0 release wave (model 2.39.0 — T-447, T-469, T-102 and T-470 closed; T-470, T-471, T-472, T-473 and T-474 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67, T-69 and T-474 amended. Written at 2.38.0 for the wave's security half; 2.39.0 merges it with the durability and operations half below, which closed T-108 and T-117 and amended T-414, T-444, T-445, T-416, T-112, T-129, T-406, T-431, T-446 and T-447).** The W5 F4 review
+> had closed T-447 for CIBA and reported the device grant, where it was true
+> since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
+> minted for an OAuth2 client, so a relying party holding one of its user's
+> tokens could approve, in the user's name, a device authorization it started
+> itself. Both routes now refuse such a token with `403`, by the check the CIBA
+> approval routes call, so every approval surface takes a console sign-in only
+> (#549); the test redeems an authorization-code token and fails to read,
+> approve or refuse a device grant with it, while the user's console sign-in
+> approves it. The same wave closes **T-469** (#564), and T-30's residual with
+> it: the temporary-lockout branch of the password login now runs the equalising
+> dummy verify under the same hash permit before it refuses — still before the
+> directory is contacted, and never against the account's own hash — and gRPC
+> `ValidateCredentials` runs it on every refusal, so with no permit to be had a
+> locked account answers the `503` an unknown name answers, and every gRPC
+> refusal the `UNAVAILABLE` a wrong password answers. It closes **T-102** too
+> (#565): every issuing CA whose key AXIAM holds publishes a signed RFC 5280
+> certificate revocation list at the unauthenticated, rate-limited
+> `GET /pki/v1/{org_id}/ca/{ca_id}/crl` — `nextUpdate` a configured interval
+> ahead, a CRL number, the CA's key identifier, an entry for every revoked and
+> unexpired leaf and subordinate CA it signed, caching headers to `nextUpdate` —
+> and every certificate AXIAM signs from then on names that list in a CRL
+> distribution point; OAuth2 `tls_client_auth` and `self_signed_tls_client_auth`
+> look the presented certificate up by fingerprint, as device sign-in does, and
+> refuse one AXIAM issued and revoked. The tests parse the list, verify it under
+> the CA's key for an Ed25519 and an RSA-4096 CA, check `nextUpdate`, the limiter
+> and the distribution point, and refuse a revoked leaf at the token endpoint
+> that the same endpoint accepted before the revocation. By decision D-6 the
+> listeners' TLS handshakes still consult no list and there is no OCSP
+> responder; both are `1.0.x` and stand in T-102 as residuals. The pass enters
+> **T-470**, Open: a CA whose key Vault's PKI engine holds publishes no list
+> AXIAM can sign, and AXIAM's revocations did not reach Vault's own — closed
+> later in the wave, below. It amends
+> **T-289** and **T-275** (#517): neither an administrator's client deletion
+> nor the unused-client sweep revoked anything, so a `managed_by: cimd` client
+> — whose `client_id` is its metadata URL, written back by its next request —
+> came back with every refresh token, authorization code and pushed request
+> issued before its row went. All three removal paths now revoke them through
+> one function (refresh tokens marked revoked, codes and pushed requests
+> deleted), the administrator's and the sweep's before the row goes; the tests
+> delete or sweep a CIMD client, let it re-materialise, and are refused the
+> pre-delete refresh token and code. It enters **T-471**, Mitigated (#518): token exchange took any valid
+> same-tenant access token as the `actor_token` and wrote its `sub` into `act`,
+> so a client holding somebody else's token — an MCP server holds its callers'
+> by design — could attribute a delegation to that party. The actor token must
+> now have been issued to the exchanging client (its `client_id` claim, or the
+> `sub` of its client-credentials token); the tests accept the client's own
+> tokens and refuse another client's, a console sign-in and a service account's
+> with `invalid_request`. `may_act` stays `1.0.x`. It amends **T-160**
+> (#519): the AXIAM session refresh applied the password login's
+> email-verification grace, so a federated account — pending for life — had
+> its session refused a day after it was provisioned; the refresh now asks
+> `account_may_act`, which refuses a locked, inactive, anonymized or deleted
+> account and never a pending one, and the test refreshes a pending account
+> created two days earlier. It enters **T-472**, Mitigated (#523): deleting a
+> tenant removed its row and little else, so the tenant's users, sessions,
+> OAuth2 clients and refresh tokens, its credentials for other systems, its
+> roles, groups, consents and audit entries stayed in the datastore — GDPR
+> Art. 17 defeated for every data subject of the tenant — and its last session
+> kept refreshing. Per decision D-4 the deletion now tombstones the tenant
+> (it leaves every read, sign-in, token issuance and refresh at once) and
+> revokes its sessions and refresh tokens in the request; the cleanup job's
+> `tenant_purge` sweep then removes every tenant-scoped table's rows in the
+> order the user erasure uses, the tenant's exported audit trail included,
+> and the tenant row last, keeping the system-log `tenants.deleted` record
+> and adding `tenants.purged`. A schema-scan test fails when a tenant-scoped
+> table is missing from the purge; the slug stays claimed until the purge;
+> and the sweep also purges, at start-up and daily, the rows earlier
+> deletions left behind, their audit entries excepted. The test deletes a
+> populated tenant, is refused its last session's refresh at once, runs the
+> purge and finds every tenant-scoped table empty for it and another tenant
+> untouched. It amends **T-118**, whose text said the tenant's audit entries
+> went with it: they did not, and now the purge removes them. It enters
+> **T-473**, Mitigated (#529, P23W3-11): the email provider an organization or
+> tenant administrator configures — an SMTP host and port, or an HTTP
+> provider's `api_url` — was dialled as written, outside every outbound address
+> policy, so a saved configuration, or one press of the delivery self-test,
+> made AXIAM connect to loopback, the metadata service or the pod network and
+> send an SMTP greeting or a `POST` carrying the API key there: T-300's class,
+> for email. The SMTP host is now held to the directory's connector address
+> guard — moved to `axiam_pki::address` so both share one implementation,
+> which amends **T-300** — resolved once, the connection pinned to the vetted
+> address with the configured host as the TLS name, private ranges admitted
+> only inside `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`; an `api_url` goes
+> through `guarded_fetch_no_redirect`; both are checked when a configuration is
+> saved, at either scope, and at every send; a host name's refusal and an
+> unreachable provider each get one generic answer; and the test routes carry
+> a limiter of their own. The tests refuse each class at save and at send with
+> nothing dialled, admit a private relay inside the allow-list, and send to a
+> name that answers a public address at the save and loopback at the send
+> without reaching the loopback listener. It amends **T-239** (#520,
+> P23W1-11): a `claims` parameter asking for `id_token.sub` with a value was
+> dropped on every lane, where OIDC Core §5.5.1 forbids a token for any other
+> user. The honour lane now answers it as it answers a mismatched
+> `id_token_hint` — sign in again, then `login_required`, and at once under
+> `prompt=none` — and a `fapi2` client, which that lane never serves, is
+> refused it with `invalid_request`; the tests cover both lanes and the
+> ignore-lane twin. It amends **T-39** (#520, P23W1-12): introspection
+> reported a suspended user's refresh token active although the refresh grant
+> refused it, and UserInfo answered the user's access token until `exp`. Both
+> — over REST and gRPC — now ask `account_may_act` on every call, one indexed
+> read: a locked, inactive, anonymized, deleted or removed account's token is
+> `active: false` at introspection and `401` (`UNAUTHENTICATED`) at UserInfo,
+> a pending account is answered, and the tests suspend an account behind live
+> tokens and reactivate it. It amends **T-55** and **T-289** again (#520,
+> P23W1-13): a registration narrowed by an RFC 7592 `PUT` or an
+> administrator's update left every refresh token issued earlier with the
+> wider scope list, copied forward at each rotation; the refresh grant now
+> keeps only the scopes the client is still registered for and rotates to
+> that set, and the test narrows a live grant, refreshes twice and finds the
+> narrowing permanent. It amends **T-69** and **T-67** (#531, P23W3-08,
+> D-3): the SAML SP verifier accepted `rsa-sha1` signatures and handed a
+> DTD-bearing response to both its parsers, where the IdP's own request
+> receiver refused both. The verifier now takes the receiver's SHA-2 list, with
+> a per-federation `allow_sha1_signatures` escape hatch — off by default,
+> audited when turned on — and refuses a markup declaration, or a document that
+> is not plainly UTF-8, before parsing; the tests refuse a valid SHA-1-signed
+> response by default and accept it with the flag, and refuse each declaration
+> in front of a valid response and of a document no parser would read. It enters
+> **T-474**, Low and Mitigated (#530, P23W3-07): the SAML SP read an IdP's
+> sign-in URL from a metadata document it never signature-checked, and fetched
+> it again at every SP-initiated sign-in, so whoever could serve the metadata
+> URL chose where users were sent with their `AuthnRequest`, and every sign-in
+> waited on the metadata host. A configuration may now name the certificate
+> the IdP signs its metadata with; the document must then carry one SHA-2
+> signature, on its `EntityDescriptor` root (D-23's placement rule), and is
+> read only through it. Parsed metadata is cached per configuration, within
+> `validUntil` and `cacheDuration` under a 24-hour cap, invalidated by any edit,
+> and a refetch that moves the sign-in host writes an audit row. The tests read
+> a signed document, refuse an unsigned one, an altered one, one signed by
+> another key or with SHA-1 and every misplaced signature, sign in twice on one
+> fetch, and find the moved host in the audit log; a later item amends it so
+> that an update clearing the metadata certificate, or replacing it with
+> another, writes an audit row too
+> (`federation.metadata_signing_cert_cleared` / `…_changed`), as turning SHA-1
+> on does. It closes **T-470**:
+> revoking a leaf of a CA whose key Vault's PKI engine holds now also revokes
+> it in Vault (`pki/revoke` by serial, through the token issuance uses), so
+> Vault's own list — the one the relying parties of such a CA read — names it.
+> AXIAM's revocation is written first and stands whatever Vault answers; a
+> refusal or an unreachable Vault is audited
+> (`certificate.vault_revocation_pending`) and retried by the cleanup job's
+> `vault_revocation` sweep, which also forwards the revocations no request
+> made (a directory deprovisioning revokes in bulk), until Vault accepts and
+> the row records it (schema v94). The tests revoke against a stand-in Vault
+> and find the serial there, leave a refused revocation standing and pending,
+> forward it with the sweep once Vault accepts, forward one the repository
+> alone wrote, and find the audit row the route writes. AXIAM's CRL route still
+> answers `404` for such a CA; the PKI guide says where Vault publishes the
+> list. A `vault_pki` tenant signing CA's own revocation is not forwarded to
+> its parent's list in Vault, which the entry records as a residual. This half
+> alone left **474 threats, 434 mitigated / 19 open**; merged with the
+> durability and operations half below (T-108 and T-117 closed), model 2.39.0
+> is **474 threats, 436 mitigated / 17 open / 21 not applicable**.
+>
+> **The wave's F4 review (model 2.39.0 — T-475 enters, Mitigated; T-102, T-472 and T-263 amended).** The
+> review of the first half
+> ([`security-review-release-1.0.0-w1-2026-10-10.md`](security-review-release-1.0.0-w1-2026-10-10.md))
+> found that the two halves of the wave met badly at one point (R1W1-01):
+> deleting a tenant revoked none of its certificates or signing CAs, and the
+> tenant purge deleted their rows — so a leaf revoked before the deletion
+> dropped off its organization CA's new revocation list once the tenant was
+> purged, and the tenant's live certificates stayed valid outside AXIAM until
+> they expired. The deletion now revokes every unexpired certificate and signing
+> CA of the tenant (a `vault_pki` leaf forwarded to Vault, a CA's key released),
+> and the purge keeps each revoked, unexpired row — without its metadata or a
+> CA's key — until it expires, the one exemption the purge-completeness test
+> allows, with its reason. The test deletes and purges a tenant and finds its
+> leaf revoked beforehand, its live leaf, a leaf under its signing CA, the CA
+> itself and a leaf issued during the deletion on the organization CA's list
+> throughout, another tenant's leaf untouched, and an expired entry gone.
+> The same review found an older hole on the path #565 had just changed
+> (R1W1-02), entered as **T-475**, High, Mitigated: the deployment's one mTLS
+> listener trusts every organization's flagged anchors at once, any
+> organization administrator can flag a CA whose key they hold, and OAuth2
+> `tls_client_auth` asked only that a certificate chained to *some* anchor and
+> carried the client's registered DN — so one organization could take another's
+> client's tokens. The listener now reports the chain it verified, as
+> fingerprints, and `tls_client_auth` accepts a certificate AXIAM issued only in
+> the client's own tenant, and any other only when its chain ends at a CA the
+> client's organization holds and passes through no CA another organization or
+> tenant holds; `self_signed_tls_client_auth` is unchanged. An anchor an
+> operator placed in a bundle by hand must now be imported into each
+> organization whose clients use it. The tests mint the victim's DN under
+> another organization's CA and under a sibling tenant, and are refused; the
+> same under the client's own CA authenticates. The model is **475 threats,
+> 437 mitigated / 17 open / 21 not applicable**.
+>
+> **The 1.0.0 release pass (model 2.40.0 — no status changes; T-102, T-108,
+> T-118, T-470, T-472 and T-474 corrected).** One pass over the entries the
+> wave closed or entered, against the tests their text names (every one exists)
+> and against the two F4 reviews' verdicts on the model's text. Six entries said
+> more than the code does, and each now records a correction rather than a new
+> sentence in place: until the purge a tombstoned tenant's OAuth2 client still
+> authenticates — issuance refuses, but a CIBA request, an introspection and a
+> PAR row are answered (T-472, #601); the purge deletes audit rows written after
+> the export the deletion required (T-472, T-118, #602); the Vault revocation
+> sweep re-reads the same oldest hundred rows, so revocations Vault refuses for
+> good can hold later ones off its list (T-470, #603); a byte-order mark skips
+> the "plainly UTF-8" check on federation metadata (T-474, #605); the CRL route
+> is signed per replica and read per request (T-102, #607 … #609); and the GDPR
+> request records dead-letter synchronously on the request path, in lines that
+> carry no time (T-108, #594, #595). Each is a Low or Informational finding
+> filed for `1.0.x`; none reopens its entry. The pass also corrects two counts
+> this document carried a revision behind the model — Spoofing 105 and High 197
+> since T-475 entered — and the ASVS row of the compliance table (106 controls,
+> V2.1.7 Pass since F-03 was fixed). The model is **475 threats, 437 mitigated /
+> 17 open / 21 not applicable**; the ten open at High or Critical are T-148 and
+> T-306 (Critical) and T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216
+> (High), none of them a defect awaiting a fix in AXIAM's code.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -37,6 +248,201 @@
 > written without the helper is still exposed, which is why the duty stays
 > written on every receiver. Nothing else in the model changed. The model is
 > **469 threats, 426 mitigated / 22 open / 21 not applicable**.
+>
+> **The SCIM per-target breaker (`1.0.0`, #550, P23W5-07 — T-414 amended, still
+> Mitigated).** A downstream that accepts connections and never answers held
+> each replica's one `scim_push` consumer for ten seconds per queued reference,
+> for every tenant. The deliverer now reads a target's delivery state before it
+> calls it, and a target with five or more consecutive failures whose last
+> failure is inside its window — the consumer's own backoff, doubling with each
+> further failure up to the ceiling — is answered with a retry, `target is
+> failing; backing off`, without a request. The loopback tarpit test (ten
+> references ahead of one for a healthy target, the healthy delivery inside one
+> request timeout) and the 10 001-member dead-letter test the issue asked for
+> are cited in the entry. What stays is named there: the five attempts that open
+> a breaker and one per window still wait a full timeout, a slow downstream that
+> succeeds now and then never opens it, and the per-target concurrency budget is
+> deferred to `1.0.x`. Status and totals are unchanged.
+>
+> **Notification windows (`1.0.0`, #551, P23W5-13 — T-117 closed).** A
+> notification rule mailed each recipient once per matching audit row, so a
+> request-path event an attacker can produce in volume — failed sign-ins spread
+> over addresses and accounts — mailed them once per attempt; the batching this
+> entry recorded until model 2.35.0 never existed. Each rule now has a window,
+> `window_minutes` (1 to 1440, 15 by default): of the events of one type that
+> match one rule, the first in a window mails each recipient, the rest are
+> counted, and the next mail says how many were not sent. The window of
+> (tenant, rule, event) is claimed in the datastore with a conditional write,
+> as T-418's gate is (schema v85), so two replicas still mail once; that gate
+> keeps `scim_delivery_failed` at one notification per target per hour and the
+> window does not apply to it again. The entry cites the issue's test — a
+> hundred `LoginFailure` rows mail each recipient once and the next window's
+> mail carries the count — and the two-replica, per-rule and per-event tests.
+> What stays is named there: a second incident of the same event type inside a
+> window reaches the recipients only as a count. The model is **469 threats,
+> 427 mitigated / 21 open / 21 not applicable**; its version is unchanged until
+> the wave's last item.
+> *Amended after the wave's F4 review (R1W2-01, T-117 still Mitigated).* The
+> claim first ran inline on the audit middleware's one worker per replica, and
+> every replica wrote every event of a burst into the same window record, so a
+> failed-sign-in flood on one tenant slowed every replica's worker until
+> request-audit rows of every tenant were dropped. A replica now writes a window
+> once when it learns it is open and counts the rest in memory, adding the count
+> with one write at its next claim and every ten seconds; a claim that keeps
+> losing a write conflict gives up after four attempts and is counted the same
+> way; and the rules run on a queue and task of their own, so a slow
+> notification drops notifications (counted and logged), never audit rows. The
+> entry cites the burst test (a hundred rows through a 50 ms step, no audit row
+> lost) and the eight-replica test (eight writes for a thousand events). Status
+> and totals are unchanged.
+>
+> **Request-audit loss (`1.0.0`, #553, P23W5-A10 — T-108 closed).** The audit
+> middleware drops a request's row when its queue is full and loses one when the
+> append is refused; each left one log line and nothing to alert on, and the
+> transactional write and compliance notification the entry once described never
+> existed. Both are now counted since process start and reported as
+> `request_audit` on `GET /health/jobs`, which reads `degraded` for fifteen
+> minutes after a loss; the totals are logged at `ERROR` on `axiam.audit.loss`,
+> at most once a minute; and when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set each lost
+> row is appended to it, off the request path, in the form the GDPR records use.
+> The GDPR request records (`gdpr.data_export_requested`,
+> `gdpr.erasure_requested`), which only logged a refused append, now take the
+> same dead-letter route (#552, P23W5-A7/A8), and the file is provisioned in every
+> shipped deployment: a named volume in both Compose files, an `emptyDir` in the
+> Kubernetes manifests (it survives a container restart, not the pod's
+> deletion, so it is replayed before a rollout), with one boot warning when it is
+> unset.
+> The tenant notification rules were not used: they are per tenant and per
+> enumerated event, and run on the datastore whose failure is the news. The
+> entry cites the tests and names what stays: rows in memory at a kill, no file
+> configured (counted, not recoverable), and on Kubernetes a file that does not
+> outlive its pod.
+> The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
+> version is unchanged until the wave's last item.
+> *Amended after the wave's F4 review (R1W2-02, T-108 still Mitigated).* The
+> file had no bound, a client sized its lines (the request path, the forwarded
+> address), and on Kubernetes the volume's `sizeLimit` is enforced by evicting
+> the pod, which deletes the file at the moment it is fullest. The writer now
+> has a byte budget, `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` (192 MiB by default, set
+> below the 256 MiB limit in the ConfigMap): request rows fill nine tenths of
+> it and are then refused, counted as not recoverable and reported as
+> `dead_letter_full` on `/health/jobs`; the last tenth is kept for the GDPR
+> records; and a row's path and address are cut to 512 and 64 bytes. The
+> manifest and the deployment guide now say what eviction does. The entry
+> cites the budget, reserve, truncation and health tests. Status and totals
+> are unchanged.
+>
+> **Every fatal exit stops in order (`1.0.0`, #554, P23W5-A11/A12 — T-444
+> amended, still Mitigated).** The full profile ended the process with
+> `std::process::exit(1)` when the authz, audit-ingestion or mail consumer or the
+> gRPC server stopped — the audit rows still queued, the requests in flight and
+> a purge between its erasure and its audit row lost, the hazard the lost lease
+> had until T23.8.2. Each now raises the lost lease's stop: the REST listener
+> stops accepting, the gRPC server is told to stop and awaited (bounded at five
+> seconds) before the audit queue is drained, and `serve` returns an error naming
+> the component, so `main` exits non-zero; its backstop (35 s, the whole stop and
+> a margin) is its own, since the lease's 15 s is shorter than the REST
+> shutdown. The entry cites the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
+> AMQP consumer's death needs a broker to provoke and is covered at the
+> coordinator. The stop's budget is now set and written down (#569): the REST
+> listener waits at most 20 s for requests in flight, gRPC 5 s and the audit
+> drain 5 s, and the shipped Compose files and Kubernetes manifest allow 40 s,
+> since the platforms' defaults (10 s, 30 s) can kill the process during the
+> drain. Status and totals are unchanged.
+>
+> **The CIBA pending-request list (`1.0.0`, #566, P23W6-07 — T-446, T-431 and
+> T-447 amended, statuses unchanged).** D-74 mails the approval prompt only to an
+> address something vouches for, and the approval page was reached only by the
+> mail's link, so a federated account (`PendingVerification` for life, T-160)
+> never learned its request's id and the client saw `expired_token`. The decision
+> stands and the missing half is built: `GET /api/v1/ciba/requests?status=pending`
+> lists the signed-in user's own pending requests, each with the page's
+> `request_id` and `version` and never the `auth_req_id`, and the console's user
+> menu carries a badge that opens the existing page. It is an approval surface
+> under that surface's rules from its first commit: a console sign-in only (a
+> client-minted token is `403`), a rate-limit bucket of its own in
+> `ciba_approval_per_min`, and no oracle — another user's, a decided and an
+> expired request are absent. The entries cite the three tests the issue asked
+> for and the limiter test. T-160 is unchanged (it is the exchange path, and a
+> federated account is still pending for life); T-446's residual is closed. The
+> model is unchanged: **469 threats, 428 mitigated / 20 open / 21 not
+> applicable**, version 2.37.0.
+>
+> **Every recorded sweep is registered (`1.0.0`, #535, P23W4-06 — T-129
+> amended, still Mitigated).** Five sweeps the cleanup loop records — the SSO
+> hand-off codes, the dynamic-client, CIMD-client and registration-token
+> sweeps and the revocation-feed prune — were missing from the registered
+> list, so until their first run `GET /health/jobs` showed them as absent,
+> which reads as "not deployed". The first four are now registered on every
+> start (DCR and CIMD are tenant settings, not a process switch); the
+> revocation-feed prune is registered, and recorded, only when the feed is on.
+> The rule is pinned by a source scan over every name `cleanup.rs` records and
+> a snapshot test of the five before their first run; the entry cites both.
+> Status and totals are unchanged.
+>
+> **The console shows and switches the SAML IdP and SSF surfaces (`1.0.0`,
+> #536, P23W4-07 — T-406 amended, still Mitigated).** The SSF Streams page
+> lists the tenant's streams and edits them; the `409` the administrators'
+> `PUT` answers when a stream changed under the form (T-406) now has its
+> consumer — the page closes the stale form, reloads the list and says the
+> stream changed — and the page never shows the write-only push header and asks
+> for it again when an edit moves the endpoint to another origin. The two
+> disable-only switches (`saml_idp_enabled`, `ssf_enabled`) are controls on the
+> organization's Settings tab and the tenant's Settings page, with the layered
+> state shown, so an administrator can see which third parties receive security
+> events and turn either surface off during an incident without the API. Status
+> and totals are unchanged.
+>
+> **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
+> T-416 amended, still Mitigated).** The administrators' `PUT` was conditional
+> on the version the server read during the request, so two administrators who
+> opened the edit form at the same version both saved and the second silently
+> replaced the first's scope, mapping or deprovision policy. `ScimTargetInput`
+> now takes an optional `expected_updated_at`: when present the replacement
+> lands only if the target still has that version, else `409`, and the console
+> sends the `updated_at` it read. A body without it behaves as before — last
+> writer wins — which is the residual the entry now names for SDKs and scripts
+> until contract 1.60 gives them the field. Status and totals are unchanged.
+>
+> **The webhook deliverer follows no redirect (`1.0.0`, #555, P23W5-10 — T-112
+> amended, still Mitigated).** `WebhookDelivery` sent through `guarded_fetch`,
+> which follows a redirect (every hop SSRF-checked) and re-sends the signed
+> request and its body to the `Location`, so a receiver's operator could forward
+> deliveries — personal data in event bodies — to a host the tenant never
+> registered. It now sends through `guarded_fetch_no_redirect` and a `3xx` is a
+> retry, as for the SSF, SCIM and CIBA ping deliverers; a loopback receiver
+> answering `307` is shown never followed and retried, and a source scan pins the
+> single call. A receiver behind a redirect must be registered with its final
+> URL (CHANGELOG). Status and totals are unchanged.
+>
+> **The boot log names the pepper variable an operator sets (`1.0.0`, #555).**
+> The secret-provider branch of the boot sequence reported `AXIAM__AUTH__PEPPER
+> not set` on a deployment that had set it, because only the provider's
+> spelling (`AXIAM__AUTH__AUTH_PEPPER`) was consulted; it now says whether the
+> provider or the configuration supplied the pepper, and names both spellings
+> when neither did. No threat entry changes, and no variable is renamed.
+>
+> **A delivery the in-process dispatcher loses leaves a terminal row (`1.0.0`,
+> #555, P23W5-A4 — T-445 amended, still Open).** In the minimal profile a
+> webhook, SSF push, outbound SCIM or CIBA-ping delivery lost at stop, or
+> refused at enqueue, left at most a `<kind>.delivery_attempt` row. At an
+> orderly stop each kind's consumer now writes one `<kind>.delivery_abandoned`
+> row (fixed reason, outcome `Failure`) per message still queued and per retry
+> still waiting, before the audit drain and within a 2 s bound, and an enqueue
+> the queue refuses writes one too. The action is deliberately not
+> `delivery_failed`, which the `scim_delivery_failed` notification event
+> matches: a restart mails nobody. A kill, an out-of-memory kill and a stop that
+> overruns still lose the queue without a row, and mail has none, so the entry
+> stays Open. Status and totals are unchanged.
+>
+> **The conformance workflow gates on a regression (`1.0.0`, #555, P23W5-11).**
+> `fapi-conformance.yml` ended red on every unattended run (interactive modules
+> wait for a browser), so its gate signalled nothing; it now runs
+> `conformance/scripts/gate.py` against the suite's result files and
+> `conformance/baseline.json`, failing on a `FAILED` module, one below its
+> baseline or a missing plan, and tolerating `WAITING`/`SKIPPED`. The workflow's
+> dispatch inputs reach its scripts through `env:`. CI-only; no threat entry
+> changes.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
@@ -1137,7 +1543,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 469 threats** and a
+The system is verified against a **STRIDE threat model of 475 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1160,8 +1566,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 469 |
-| Mitigated / Open | 426 / 22 |
+| Threats identified | 475 |
+| Mitigated / Open | 437 / 17 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1178,13 +1584,13 @@ each becomes mitigated or open in the commit that builds what it describes.
 
 | Area | Threats | Open | Not built |
 |---|---|---|---|
-| System context | 33 | 2 | 0 |
-| Authentication & session management | 36 | 1 | 0 |
-| OAuth2 / OIDC authorization server | 85 | 1 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
+| System context | 34 | 2 | 0 |
+| Authentication & session management | 36 | 0 | 0 |
+| OAuth2 / OIDC authorization server | 86 | 0 | 0 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 126 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
-| PKI, certificates & IoT device identity | 30 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 4 | 0 |
+| PKI, certificates & IoT device identity | 32 | 1 | 0 |
+| Audit, webhooks, email & notifications | 56 | 2 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1193,15 +1599,18 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **seven** open items at model 2.36.1. Four are
+authorization, PKI — carry **four** open items at model 2.40.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
 providers pinned (T-306) and a service provider's own session outliving the
-AXIAM session (T-380). Three are not, and each has a fix drafted or filed: a
-relying party's access token approving a device authorization (T-447, issue
-#549), no published certificate revocation list (T-102) and a locked account
-told apart from an unknown name (T-469). The directory identity source carries none:
+AXIAM session (T-380). Four more closed at model 2.38.0: a relying party's
+access token approving a device authorization (T-447, #549), a locked account
+told apart from an unknown name (T-469, #564), no published certificate
+revocation list (T-102, #565) — each issuing CA whose key AXIAM holds now
+publishes one, and the OAuth2 mTLS client methods read a certificate's status
+as device sign-in does — and a revocation that never reached Vault's own list
+for a CA whose key Vault's PKI engine holds (T-470), now forwarded there. The directory identity source carries none:
 its last open item — with just-in-time provisioning on, a sign-in for a name
 AXIAM holds no account for reached the directory with no AXIAM counter in front
 of it (T-332) — closed with a failure counter per tenant and login name, as the
@@ -1270,7 +1679,8 @@ two open items — T-117, reopened because the batched notifications it describe
 do not exist, so a request-path event an attacker can produce in volume mails
 each recipient of a rule once per event; and T-447, an access token minted for
 an OAuth2 client that can approve a device authorization in its user's name,
-which the review closed for CIBA — and one mitigated entry, T-446. Model 2.36.0
+which the review closed for CIBA, and the 1.0.0 release wave for the device
+grant (model 2.38.0) — and one mitigated entry, T-446. Model 2.36.0
 adds a tenth diagram of a different kind: the RADIUS front end the G-11 spike
 declined, drawn so that a future build starts from its twenty-one entries
 (T-448 … T-468) — among them the limiter and lockout it must carry from its
@@ -1282,10 +1692,21 @@ mitigated. The same pass re-judged T-102 and reopened it: AXIAM publishes no
 certificate revocation list, so a relying party that validates AXIAM-issued
 certificates itself cannot learn of a revocation, and inside AXIAM only device
 authentication by certificate reads a certificate's status (not the TLS
-handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
+handshake, nor OAuth2 `tls_client_auth`) — closed at model 2.38.0, when each
+issuing CA began publishing a list and `tls_client_auth` began reading status
+(#565). The W6 F4 review (model 2.36.1)
 corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
-from an unknown name.
+from an unknown name — closed at model 2.38.0, when that branch and every gRPC
+`ValidateCredentials` refusal began costing one verify under the same permit
+(#564).
+The 1.0.0 release wave also closes T-117 (#551): each rule
+mails one event type at most once per window and counts the rest, the next mail
+carrying the count, off the audit worker's path and with one datastore write per
+replica and window rather than one per event (R1W2-01); and T-108 (#553): a request-audit row that is dropped or
+fails to append is counted, shown on `/health/jobs` and, where a dead-letter
+file is configured, kept in it, within a byte budget that keeps a reserve for
+the GDPR records (R1W2-02).
 
 ### Coverage by STRIDE category
 
@@ -1297,25 +1718,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open | Not built |
 |---|---|---|---|
-| Spoofing | 101 | 5 | 3 |
+| Spoofing | 105 | 4 | 3 |
 | Tampering | 93 | 1 | 5 |
-| Repudiation | 16 | 2 | 1 |
-| Information disclosure | 110 | 7 | 4 |
-| Denial of service | 59 | 4 | 4 |
-| Elevation of privilege | 90 | 3 | 4 |
+| Repudiation | 16 | 1 | 1 |
+| Information disclosure | 112 | 6 | 4 |
+| Denial of service | 59 | 3 | 4 |
+| Elevation of privilege | 90 | 2 | 4 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 196 | 10 | 9 |
-| Medium | 195 | 9 | 9 |
-| Low | 35 | 1 | 1 |
+| High | 197 | 8 | 9 |
+| Medium | 199 | 6 | 9 |
+| Low | 36 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 22 still-open items are listed one by one in
+the weight the control carries. The 17 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1370,10 +1791,13 @@ have to be re-established — nothing is assumed across a boundary.
 - **Passwords** are hashed with **Argon2id** at OWASP-recommended parameters
   (~19 MiB memory cost, per-user salt, server-side pepper). Plaintext passwords are
   never stored or logged.
-- **Login is enumeration-safe and brute-force-resistant**: unknown-user and
-  bad-password return the same uniform failure, password verification runs on a
-  dummy hash when the user does not exist so timing does not distinguish the two,
-  and failed attempts drive an atomic, exponential-backoff lockout that is shared
+- **Login is enumeration-safe and brute-force-resistant**: an unknown user, a
+  bad password and an account serving a lockout return the same uniform failure,
+  and each costs one Argon2id verify under the same bounded hash permit — against
+  a dummy hash when there is no real one to check, never the locked account's own
+  — so neither timing nor, under load, the `503` status distinguishes them, and
+  gRPC `ValidateCredentials` equalises every refusal the same way; failed
+  attempts drive an atomic, exponential-backoff lockout that is shared
   by every credential-checking path — REST, OPAQUE and gRPC alike — and metered
   against the organization's own effective threshold (org baseline, tenant
   override), with the deployment default only as a fail-safe floor when settings
@@ -2214,19 +2638,25 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the
   unbound case had been a `403`, reached by matching the text of an error
   message, and the bodies stay distinct.
-- **Revocation is enforced where AXIAM authenticates a device by its
-  certificate, and nowhere else.** Device sign-in reads the certificate's status
-  on every authentication; neither listener's TLS handshake does, and OAuth2
-  `tls_client_auth` matches the client's registered name, so a revoked
-  AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the
-  registration changes. AXIAM publishes no certificate revocation list and runs no OCSP
-  responder — its CAs carry the `cRLSign` key-usage bit, and nothing serves a
-  list. A relying party that validates AXIAM-issued certificates itself — a
-  FreeRADIUS server doing 802.1X, a VPN gateway, a peer service terminating its
-  own mTLS — has no way to learn of a revocation and accepts a revoked
-  certificate until it expires (T-102, open). Earlier revisions of the threat
-  model and the design document described a CRL; there has never been one.
-  Publishing one per issuing CA is tracked by ilpanich/axiam#565.
+- **A revocation reaches every place AXIAM authenticates by a certificate, and
+  every relying party that fetches the list.** Device sign-in and both OAuth2
+  mTLS client methods (`tls_client_auth`, `self_signed_tls_client_auth`) look
+  the presented certificate up by fingerprint and refuse one AXIAM issued that
+  is revoked or expired, or whose issuing CA is (#565); a certificate AXIAM did
+  not issue is decided as before. Each issuing CA whose key AXIAM holds
+  publishes a signed RFC 5280 certificate revocation list at the
+  unauthenticated, rate-limited `GET /pki/v1/{org_id}/ca/{ca_id}/crl`, with
+  `nextUpdate` a configured interval ahead (a day by default) and caching
+  headers to it, and every certificate AXIAM signs from then on names that
+  list in a CRL distribution point — so a FreeRADIUS server, a VPN gateway or a
+  peer service learns of a revocation at its next fetch (T-102, mitigated).
+  Two things are deferred to `1.0.x`: neither listener's TLS handshake consults
+  the list (the handshake alone authenticates nothing, but a token bound to the
+  certificate before the revocation lives out its fifteen minutes), and there
+  is no OCSP responder. A CA whose key Vault's PKI engine holds publishes no
+  list AXIAM signs: Vault publishes it, and a revocation in AXIAM is forwarded
+  there, retried by the cleanup job until Vault accepts (T-470, mitigated).
+  Earlier revisions of the threat model described a CRL before one existed.
 - **A device's token is as strong as its handshake.** A device authenticates by
   a TLS handshake with a client certificate — the strongest thing it can prove —
   and until `1.0.0-beta17` got back a plain bearer token, so a token read off
@@ -2585,7 +3015,7 @@ Resilience Act conformity assessment, and it says so plainly.
 
 | Framework | Scope | Status | Evidence |
 |---|---|---|---|
-| **OWASP ASVS v4.0.3 Level 2** | 103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
+| **OWASP ASVS v4.0.3 Level 2** | 106 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 101 Pass, 5 N/A, 0 Deferred — **no control is Deferred** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
 | **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
 | **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
 | **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
@@ -2624,7 +3054,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 22 of 469. The 21
+Every threat the model records as open, most severe first — 17 of 475. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2638,8 +3068,6 @@ each.
 | T-306 — A leaked signing key keeps forging assertions after the credential is retired | Critical | SAML service provider (registered per tenant) · *Federation — SAML SP & OIDC relying party* |
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
-| T-102 — A revoked certificate stays valid to every relying party that does not terminate at AXIAM | High | Revocation (status in AXIAM's store; no CRL published) · *PKI, certificates & IoT device identity* |
-| T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
@@ -2647,25 +3075,19 @@ each.
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
-| T-117 — Alert flooding buries a real incident | Medium | Notification rules (admin alerts) · *Audit, webhooks, email & notifications* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
-| T-447 — A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name | Medium | /oauth2/authorize (+ consent) · *OAuth2 / OIDC authorization server* |
-| T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
-With three exceptions — T-108, request audit that drops a row with only a log
-line to say so; T-117, notification mail that is not coalesced on the request
-path; and T-447, a relying party's access token that can approve a device
-authorization in its user's name, each with an issue body in the W5 F4 review —
-none of these is an unhandled defect in AXIAM's own request path: they are
+None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-and gaps on the SDK and distribution side — and one on the PKI's publication
-side: T-102, a revoked certificate that a relying party outside AXIAM cannot
-learn about, because no revocation list is published yet. The rest of this
+and gaps on the SDK and distribution side. That holds for the ten open at High
+or Critical severity — T-148 and T-306 (Critical), T-18, T-94, T-124, T-133,
+T-135, T-146, T-180 and T-216 (High) — with no exception: T-102 and T-108, the
+two High entries open when the 1.0.0 work began, are mitigated. The rest of this
 section is the same list read as a checklist — what to do about each, grouped
 by who does it.
 
@@ -2773,15 +3195,16 @@ by who does it.
   nobody polls narrows nothing. Attaching it cannot admit anything local
   verification would have refused — it only ever rejects — and a guard that
   cannot reach it behaves exactly as one without it.
-- **Keep certificates short-lived wherever a relying party other than AXIAM
-  validates them.** AXIAM publishes no revocation list, so a FreeRADIUS server, a
-  VPN gateway or a peer service that checks an AXIAM-issued certificate itself
-  accepts a revoked one until it expires (T-102). Cap leaf validity per tenant
-  (`max_cert_validity_days`) to the window you can accept, or let the device
-  authenticate at AXIAM and present the certificate-bound token it receives, so
-  the check happens at AXIAM's device sign-in. For an OAuth2 client
-  authenticating with `tls_client_auth`, revoke by changing the client's
-  registration, since that path does not read the certificate's status.
+- **Point every relying party that validates AXIAM-issued certificates at the
+  revocation list.** A FreeRADIUS server, a VPN gateway or a peer service learns
+  of a revocation only by fetching its issuer's CRL — the URL is in every
+  certificate AXIAM signs once `AXIAM__PKI__CRL_BASE_URL` or the issuer URL is
+  set — and only as often as it fetches, at most `nextUpdate` apart (T-102).
+  Leaves of a CA whose key Vault's PKI engine holds are on Vault's list, not
+  AXIAM's (T-470): point their relying parties at Vault's per-issuer CRL,
+  configure the distribution point on the mount (`config/urls`), and watch the
+  `vault_revocation` job in `GET /health/jobs`, which fails while a revocation
+  has not yet reached Vault.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.

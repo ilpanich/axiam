@@ -188,16 +188,23 @@ export interface OidcPolicy {
   default_locale?: string | null;
   /**
    * G-2 / D-20 — whether the tenant may act as a SAML 2.0 identity provider.
-   * Off unless an organization turns it on; carried through unedited until the
-   * SAML service-provider console page gives it a control.
+   * Off unless an organization turns it on. Disable-only: a tenant may switch
+   * its organization's `true` off and never its `false` on
+   * (`SurfaceSwitches`).
    */
   saml_idp_enabled?: boolean;
   /**
    * G-5 / D-45 — whether the tenant is a Shared Signals Framework transmitter.
-   * Off unless an organization turns it on; carried through unedited (no
-   * console control yet), so a settings save never switches it off.
+   * Off unless an organization turns it on; disable-only like
+   * `saml_idp_enabled`.
    */
   ssf_enabled?: boolean;
+  /**
+   * **Read-only**, D-55: set on a response when `ssf_enabled` is on but the
+   * transmitter is inactive anyway, saying why. Never sent: it is not part of
+   * {@link readOidcPolicy}, so it cannot reach a write body.
+   */
+  ssf_inactive_reason?: string | null;
   dynamic_registration: DynamicRegistrationMode;
   /** May not contain `address` or `phone` — see `validateDcrPolicy`. */
   dcr_allowed_scopes: string[];
@@ -228,7 +235,7 @@ export const DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS = 30;
  */
 export function readOidcPolicy(s: {
   oidc?: OidcPolicy;
-}): Required<OidcPolicy> {
+}): Required<Omit<OidcPolicy, "ssf_inactive_reason">> {
   const o = s.oidc;
   return {
     sensitive_scopes_enabled: o?.sensitive_scopes_enabled ?? false,
@@ -245,6 +252,40 @@ export function readOidcPolicy(s: {
       o?.dcr_unused_client_ttl_days ?? DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
     cimd: o?.cimd ?? DEFAULT_CIMD_POLICY,
   };
+}
+
+/** The disable-only switches of the identity and event surfaces. */
+export const SURFACE_KEYS = ["saml_idp_enabled", "ssf_enabled"] as const;
+export type SurfaceKey = (typeof SURFACE_KEYS)[number];
+
+/**
+ * Where a tenant's effective `saml_idp_enabled` / `ssf_enabled` comes from.
+ *
+ * Both are disable-only layered settings (D-20, D-45): a tenant may turn its
+ * organization's `true` off and never its `false` on. `GET /api/v1/settings`
+ * returns the merged value and the organization baseline is not readable from
+ * a tenant, so the layer is derived from the tenant's own sparse override:
+ *
+ * - `on` — effective `true`;
+ * - `tenant` — effective `false` because this tenant's override says so (it may
+ *   try to turn it back on; the server refuses if the organization has it off);
+ * - `organization` — effective `false` and no tenant override says `false`, so
+ *   the value is the organization's. A tenant cannot enable it.
+ *
+ * `override` is `undefined` while the override is unknown (not loaded, or not
+ * readable), in which case an effective `false` is `unknown`: the page cannot
+ * say who turned it off and must not claim the tenant can turn it on.
+ */
+export type SurfaceLayer = "on" | "tenant" | "organization" | "unknown";
+
+export function surfaceLayer(
+  effective: boolean,
+  override: boolean | null | undefined,
+  overrideKnown: boolean
+): SurfaceLayer {
+  if (effective) return "on";
+  if (!overrideKnown) return "unknown";
+  return override === false ? "tenant" : "organization";
 }
 
 /** Fully-resolved security settings (nested) — GET /api/v1/settings. */
@@ -355,6 +396,12 @@ export interface TenantSettingsOverride {
   // ordered against the org baseline; the other seven name this tenant's own
   // publishers, callbacks and bounds and are neither ordered nor clamped.
   cimd?: CimdPolicy;
+  // G-2 / G-5 — disable-only, like `cimd.enabled`: `false` switches the surface
+  // off for this tenant; `true` is refused unless the organization has it on.
+  // Sent with the tenant's *effective* value by the settings page, because an
+  // omitted field means "inherit" and so would drop a tenant's `false`.
+  saml_idp_enabled?: boolean;
+  ssf_enabled?: boolean;
 }
 
 /**

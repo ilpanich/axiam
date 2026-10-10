@@ -3,17 +3,18 @@
 **Standard:** EU General Data Protection Regulation (GDPR) — Art. 15 (Right of
 Access), Art. 17 (Right to Erasure), Art. 7 (Conditions for Consent)
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Date:** 2026-07-06
 **Commit reviewed:** `1446151`
 **Last verified:** 2026-07-06
 
 **Scope:** This document describes AXIAM's implementation of data-subject
 export (Art. 15), account erasure/pseudonymization (Art. 17), and consent
-record-keeping (Art. 7) as of the v1.2 beta. It closes **CMPL-02** by citing
+record-keeping (Art. 7) as of the commit reviewed above. It closes **CMPL-02** by citing
 executable evidence (existing, re-run tests) rather than re-implementing
 already-proven behavior (D-04). This is a point-in-time, self-assessed
-description of the beta state — not a legal opinion or an external DPA audit.
+description as of that commit and the *Last verified* date — not a legal opinion
+or an external DPA audit.
 
 **Method (D-03 "trust but verify"):** every claim below is backed by (a) a
 named source-code location and (b) a named test in
@@ -257,6 +258,56 @@ no `erasure_proof` row. Both leave the account unable to authenticate and
 holding no personal data; only the Art. 17 pipeline produces durable evidence of
 it. A data subject's erasure request must therefore go through
 `POST /api/v1/account/delete`, not through an administrator pressing Delete.
+
+### Tenant deletion (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
+
+Deleting a tenant erases every data subject of it (#523, P23W2-04, threat
+T-472). Before 1.0.0 the deletion removed the tenant row and a handful of
+configuration tables, and left every account, session, credential, consent and
+audit entry of the tenant in the datastore. It is now **tombstone, then purge**
+(decision D-4):
+
+- **In the request** the tenant's sessions, OAuth2 refresh tokens, and
+  unexpired certificates and signing CAs are revoked (a leaf of a Vault-held CA
+  forwarded to Vault) and `tenant.deleted_at` is set; the tenant is gone from
+  every read of it, sign-in, token issuance and refresh from the `204` on. Until
+  the purge, the tenant's OAuth2 clients still authenticate on the endpoints that
+  issue nothing — a CIBA request, introspection, revocation, PAR (#601, filed for
+  `1.0.x`); the purge removes them.
+- **The cleanup job's `tenant_purge` sweep** then deletes every row of every
+  tenant-scoped table, in the order the purge pipeline above uses — grants and
+  sessions, federation links, credentials, the authorization graph, the
+  tenant's audit trail, GDPR records (consents, deletion requests, export jobs,
+  erasure proofs), the accounts, the configuration — and the tenant row last.
+  Unlike the per-user pipeline it **deletes** the accounts and the audit
+  entries rather than pseudonymizing them: nothing of the tenant is left for an
+  entry to resolve to, and the deletion is refused until the tenant's audit
+  trail has been exported (T-118), so the controller holds that copy under its
+  own retention obligations. The export may be up to six hours old, and rows
+  the tenant writes after it — until the purge — are deleted without being in
+  it (#602, filed for `1.0.x`).
+- **One retention, until expiry:** a revoked certificate or signing CA whose
+  validity has not ended is kept — the certificate as issued, its issuer, serial
+  and dates, with its free-form `metadata` and a CA's sealed key cleared —
+  because its issuer's published revocation list is computed from it, and
+  deleting it would make the certificate valid again to relying parties outside
+  AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
+  17(3)(b), Art. 32), bounded by the certificate's own `notAfter`; the cleanup
+  job deletes the row then.
+- The system audit log keeps `tenants.deleted` (who deleted it, and the export
+  receipt that authorised it) and gains `tenants.purged` when the sweep is done —
+  the tenant-level counterpart of an erasure proof.
+
+Completeness is a test, not a list someone maintains:
+`schema.rs::every_tenant_scoped_table_is_purged` fails when a table with a
+`tenant_id` field (or a tenant `scope_id`) is missing from the purge; the two
+certificate tables are its one named exemption, for the retention above. Rows left
+by deletions made before 1.0.0 are found and purged by the same sweep at
+start-up and daily, except their audit entries, which the retention window
+(§2a) governs. Proven by
+`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`
+and, for the certificate retention,
+`crl_test.rs::a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire`.
 
 ---
 
@@ -516,6 +567,6 @@ endpoint.
 - **No production code was modified by this verification pass** — all four
   evidence tests already existed and already passed prior to this plan; this
   document is the net-new artifact.
-- **Milestone:** v1.2 (Beta) — this document will be re-verified (re-run
+- **Milestone:** `1.0.0` — this document will be re-verified (re-run
   tests, re-check the repository cross-check) at the next milestone that
   touches GDPR export/erasure/consent behavior.

@@ -52,9 +52,10 @@ services:
       - /var/lib/axiam/audit-dlq:uid=65532,gid=65532,mode=0700
     depends_on: !override
       surrealdb: { condition: service_healthy }
-    # An orderly stop writes the audit rows the middleware still holds (up to 5 s)
-    # and releases the lease (docker/docker-compose.minimal.yml).
-    stop_grace_period: 30s
+    # An orderly stop finishes in-flight requests (up to 20 s), stops gRPC (5 s),
+    # writes the audit rows the middleware still holds (5 s) and releases the lease;
+    # 40 s is that plus a margin (docker/docker-compose.minimal.yml, #569).
+    stop_grace_period: 40s
 
   # Never started in this profile: it joins a Compose profile no run activates.
   rabbitmq:

@@ -286,6 +286,16 @@ export interface FederationConfig {
   pkce_required?: boolean;
   button_icon?: string | null;
   has_bundled_mark?: boolean;
+  /**
+   * SAML only: whether IdP responses signed with SHA-1 are accepted (#531).
+   * Absent on a pre-1.0.0 server, which accepted them unconditionally.
+   */
+  allow_sha1_signatures?: boolean;
+  /**
+   * SAML only: the certificate the IdP's metadata document must be signed
+   * with (#530). Absent or null: the metadata is not signature-checked.
+   */
+  idp_metadata_signing_cert_pem?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -313,6 +323,13 @@ export interface CreateFederationConfigRequest {
   apple_key_id?: string | null;
   require_pkce?: boolean;
   button_icon?: string | null;
+  /** SAML only: accept SHA-1-signed IdP responses (#531). Refused on other protocols. */
+  allow_sha1_signatures?: boolean;
+  /**
+   * SAML only: the IdP metadata signing certificate (#530); on an update, null
+   * clears it. Refused on other protocols.
+   */
+  idp_metadata_signing_cert_pem?: string | null;
 }
 
 /** Client → server payload for updating a federation config (all fields optional). */
@@ -346,6 +363,13 @@ export interface UpdateFederationConfigRequest {
   apple_key_id?: string | null;
   require_pkce?: boolean;
   button_icon?: string | null;
+  /** SAML only: accept SHA-1-signed IdP responses (#531). Refused on other protocols. */
+  allow_sha1_signatures?: boolean;
+  /**
+   * SAML only: the IdP metadata signing certificate (#530); on an update, null
+   * clears it. Refused on other protocols.
+   */
+  idp_metadata_signing_cert_pem?: string | null;
 }
 
 // ─── Federation links ─────────────────────────────────────────────────────────

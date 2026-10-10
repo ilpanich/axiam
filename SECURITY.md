@@ -11,19 +11,22 @@ checklist — is published in the **Security** section of the website:
 
 ## Supported versions
 
-AXIAM has not reached a stable release. Security fixes land on `main` and ship in
-the next `1.0.0-beta*` release; older pre-release tags are not patched.
+1.0.0 is the first stable release. REST, gRPC, AMQP and the SDK contract are
+under semantic versioning from here. Security fixes land on `main` and ship in
+`1.0.x`; only the latest `1.0.x` patch release is supported.
 
 | Version | Supported |
 |---|---|
-| `main` / latest `1.0.0-beta*` | ✅ |
-| Any earlier pre-release tag | ❌ |
+| Latest `1.0.x` patch release | ✅ |
+| Any earlier `1.0.x` patch release | ❌ |
+| Any `1.0.0-alpha*` or `1.0.0-beta*` pre-release | ❌ |
 
-> **This is beta software.** It has not undergone an independent third-party
-> penetration test or security certification — the OpenID Foundation
-> conformance runs the project publishes are self-runs, not certifications. Do
-> not use it to protect production systems until it reaches a stable, audited
-> release.
+> **No independent third-party audit has been performed.** AXIAM has not
+> undergone an independent third-party penetration test or security
+> certification — the OpenID Foundation conformance runs the project publishes
+> are self-runs, not certifications. The shared-responsibility checklist on the
+> website's Security section applies: weigh the self-assessment against what the
+> deployment protects.
 
 ## Reporting a vulnerability
 

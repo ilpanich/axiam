@@ -9,7 +9,8 @@ import { DOCS_VERIFIED_RELEASE } from "../version";
  *
  * Transcribed from the eleven `## Contract conformance` statements and scope
  * tables at `1.0.0-beta07` / contract 1.36, in `sdks/CONTRACT.md` section
- * order. It is a snapshot for orientation: each SDK's README is the source, and
+ * order, and re-read against the READMEs of the contract 1.60 ports (no cell
+ * changed: §28 – §33 were added to every SDK and are not columns here). It is a snapshot for orientation: each SDK's README is the source, and
  * the contract itself is what any of them is measured against.
  *
  * `"—"` means the SDK does not ship that section; anything else is shipped, with
@@ -214,8 +215,8 @@ export const REFERENCE_PAGES: DocPage[] = [
         rows: [
           [
             "OWASP ASVS 4.0.3 Level 2",
-            "Control-by-control checklist over V2, V3, V4, V6, V7, V8, V9, V10 and V14. Every in-scope control carries an explicit status — Pass, N/A or Deferred — with the deferrals tracked by finding id rather than left blank.",
-            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md), with the deferrals in the [findings register](${COMPLIANCE}/FINDINGS.md).`,
+            "Control-by-control checklist over V2, V3, V4, V6, V7, V8, V9, V10 and V14. Every in-scope control carries an explicit status — Pass, N/A or Deferred — with a deferral tracked by finding id rather than left blank; at 1.0.0 none is Deferred.",
+            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md), with every finding and its fix in the [findings register](${COMPLIANCE}/FINDINGS.md).`,
           ],
           [
             "GDPR",
@@ -331,16 +332,16 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "This table is transcribed from the eleven SDK READMEs at `1.0.0-beta07` and is a snapshot for orientation. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
+        text: "This table was transcribed from the eleven SDK READMEs at `1.0.0-beta07` and re-read against their contract 1.60 ports; it is a snapshot for orientation. The sections added since — §28 to §33 — are in all eleven, as the table below records. Each README's conformance statement is the SDK's own claim and the thing to check before you depend on a section.",
       },
       {
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.59" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.60" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been twenty amendments since 1.39. Of the thirteen up to 1.52, six changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of those are merged. The six Phase 23 contracts, 1.53 to 1.58, carried four management namespaces — the directory, SAML service providers, SSF streams and outbound SCIM targets, which bring the registry to 190 operations across 28 namespaces — the SSF receiver helper and the CIBA client helper into all eleven repositories on 2026-10-09, the four REST-only SDKs (Kotlin, Swift, C and C++) taking the receiver and CIBA helpers as well. They are merged on each default branch, not yet in a tagged SDK release. The drift check reports every repository at 1.58. 1.59 is the cross-SDK review of those ports: every section is implemented in all eleven, and every port has defects its required tests had let through, recorded with one follow-up per SDK; each SDK re-vendors 1.59 with its fixes.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been twenty-one amendments since 1.39. Of the thirteen up to 1.52, six changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of those are merged. The six Phase 23 contracts, 1.53 to 1.58, carried four management namespaces — the directory, SAML service providers, SSF streams and outbound SCIM targets, which bring the registry to 190 operations across 28 namespaces — the SSF receiver helper and the CIBA client helper into all eleven repositories on 2026-10-09, the four REST-only SDKs (Kotlin, Swift, C and C++) taking the receiver and CIBA helpers as well. They are merged on each default branch, not yet in a tagged SDK release. The drift check reports every repository at 1.58. 1.59 is the cross-SDK review of those ports: every section is implemented in all eleven, and every port has defects its required tests had let through, recorded with one follow-up per SDK; each SDK re-vendored 1.59 with its fixes. 1.60 is the 1.0.0 release's contract: it answers the questions those follow-ups raised and adds the release's few optional fields, and all eleven SDKs port it in one pull request each, to ship with their 1.0.0.`,
       },
       {
         type: "table",
@@ -446,6 +447,11 @@ export const REFERENCE_PAGES: DocPage[] = [
             "1.59",
             `[§34](${contractLink("34")}) — the cross-SDK review of the 1.53 – 1.58 ports: the posture tables filled from the merged code, twelve clarifications (among them: \`poll\` never keeps a \`jti\` it does not return; a \`5xx\` on \`ciba_poll\` is transient whatever its body; "never retried" includes an HTTP library's transparent re-send), and forty-two divergences with one follow-up per SDK. No wire change.`,
             "**yes** — the eleven follow-ups (ilpanich/axiam#576 … #586)",
+          ],
+          [
+            "1.60",
+            `The 1.0.0 release's contract: one testable answer to each question of ilpanich/axiam#588 and of the ports' first phase ([§34.4](${contractLink("34.4")})); the [§32.7](${contractLink("32.7")}) replay store made fallible — a store that cannot answer gives no verdict and raises \`NetworkError\`, a breaking change to Rust's \`ReplayStore\` and Go's store interface; optional \`expected_updated_at\` on [§31](${contractLink("31")})'s target input and \`window_minutes\` on the notification-rule models; [§15.2](${contractLink("15.2")}) rule 9, an \`actor_token\` must have been issued to the exchanging client; the federation configuration's optional \`allow_sha1_signatures\` and metadata signing certificate, with an explicit \`null\` clearing a nullable member; four optional discovery members for revocation and introspection; and [§35](${contractLink("35")}), certificate revocation lists, informative.`,
+            "**yes** — one pull request per SDK, shipping with its 1.0.0",
           ],
         ],
       },

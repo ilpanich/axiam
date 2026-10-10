@@ -802,7 +802,32 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     }
 
     // ---- No principal: refuse silently, hop, or stop ---------------------
+
+    // #524 (P23W2-03) — do not send a user to sign in for a request that
+    // `AuthorizeService::authorize` will refuse whoever signs in.
     //
+    // A client registered `require_par` (every `fapi2` client is) may not send
+    // its parameters through the browser, and whether it did is decidable from
+    // the registration and the query alone: no principal and no pushed
+    // request. Until #524 an anonymous browser was sent through the login hop
+    // first and the return leg was refused, so a person typed a password for
+    // nothing and a FAPI reviewer saw a sign-in page before the error page
+    // (`REVIEW-JUDGEMENTS.md`, open point 6).
+    //
+    // First among the no-principal arms rather than beside the `response_type`
+    // pre-check, because the `prompt=none` arm before that one would redirect
+    // on the query's `redirect_uri` — the channel this setting forbids — and the
+    // service checks PAR before `response_type` too. Not before the session
+    // lookup: a browser that holds a session still reaches the service, whose
+    // step 1b is the gate the return-leg tests pin. Same wording, same
+    // non-redirecting answer as the handler's `ParRequired` arm.
+    if client.require_par && q.request_uri.is_none() {
+        return Err(Box::new(authorize_error_response(
+            http_req,
+            &OAuth2Error::ParRequired(axiam_oauth2::authorize::PAR_REQUIRED_DESCRIPTION.into()),
+        )));
+    }
+
     // W4 (plan §4.2, T1.1/T1.7). `prompt=none` says: answer without showing
     // the end user anything. There is nothing to answer with — no session
     // resolved — so the answer is `login_required`, **redirected to the
@@ -1362,6 +1387,10 @@ async fn resolve_external_consent<C: Connection + Clone>(
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
         (status = 401, description = "No authenticated principal, and the \
                                       client did not opt into the login hop"),
+        (status = 429, description = "Rate limit exceeded \
+                                      (`AXIAM__RATE_LIMIT__END_SESSION_PER_MIN`, bucket \
+                                      `oauth2_authorize`, one allowance shared by this \
+                                      route and its `/t/{tenant_id}` mount)"),
     ),
     security(("bearer" = []))
 )]
@@ -2396,9 +2425,10 @@ pub(crate) fn token_request_context(
     // here: `authenticate_mtls_client` refuses a self-asserted certificate for
     // `tls_client_auth` (§2.1) and accepts one for `self_signed_tls_client_auth`
     // (§2.2), and this is the seam that lets it tell them apart.
-    let certificate = req
-        .conn_data::<VerifiedClientCert>()
-        .map(|verified| PresentedCertificate::from_der(&verified.der, verified.trust));
+    let certificate = req.conn_data::<VerifiedClientCert>().map(|verified| {
+        PresentedCertificate::from_der(&verified.der, verified.trust)
+            .with_issuer_path(verified.issuer_path.clone())
+    });
 
     Ok(TokenRequestContext {
         client_certificate: certificate,
@@ -2902,6 +2932,10 @@ pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
     ),
     responses(
         (status = 200, description = "Token revoked (or was already invalid)"),
+        (status = 400, description = "Malformed request, no client_id in the body, the \
+                                      Authorization header or the assertion, or a body \
+                                      client_id that disagrees with the header",
+         body = OAuth2ErrorResponse),
         (status = 401, description = "Client authentication failed",
          body = OAuth2ErrorResponse),
     ),
@@ -2965,6 +2999,10 @@ async fn revoke_inner<C: Connection + Clone>(
     responses(
         (status = 200, description = "Token introspection result",
          body = IntrospectionResponse),
+        (status = 400, description = "Malformed request, no client_id in the body, the \
+                                      Authorization header or the assertion, or a body \
+                                      client_id that disagrees with the header",
+         body = OAuth2ErrorResponse),
         (status = 401, description = "Client authentication failed",
          body = OAuth2ErrorResponse),
     ),
@@ -3514,8 +3552,8 @@ pub async fn jwks<C: Connection + Clone>(
 /// `GET /oauth2/userinfo` -- OIDC UserInfo endpoint.
 ///
 /// Returns claims about the authenticated user. Requires a valid
-/// Bearer access token. Email and username are included based on
-/// the scopes present in the access token.
+/// Bearer access token whose account may still sign in (#520). Email and
+/// username are included based on the scopes present in the access token.
 #[utoipa::path(
     get,
     path = "/oauth2/userinfo",
@@ -3523,7 +3561,8 @@ pub async fn jwks<C: Connection + Clone>(
     responses(
         (status = 200, description = "UserInfo response",
          body = UserInfoResponse),
-        (status = 401, description = "Invalid or missing access token"),
+        (status = 401, description = "Invalid, expired, revoked or missing access token, \
+                                      or one whose account may no longer sign in"),
     ),
     security(("bearer" = []))
 )]
@@ -3583,53 +3622,74 @@ async fn userinfo_claims_for<C: Connection + Clone>(
     // a filter on it — a client may use either.
     let release = |claim: &str, scope: &str| has_scope(scope) || asked_for(claim);
 
-    // Fetch user details for email/username when the relevant
-    // scopes are present.
-    // The user row is needed by every releasable claim, so it is read when any
-    // of them might be released rather than when a particular scope is present.
-    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
-        // UserInfo describes the SUBJECT of the token, and that account lives in
-        // the tenant the subject inhabits — never one it happens to be acting
-        // on. The two differ only for an organization-level principal whose
-        // request carried `X-Axiam-Tenant`; reading the acting tenant there
-        // found no account and answered with `sub` alone.
-        match state
-            .user_repo
-            .get_by_id(user.principal_tenant_id, user.user_id)
-            .await
-        {
-            Ok(u) => (
-                if release("email", "email") || asked_for("email_verified") {
-                    // Both members or neither: `email_verified` describes
-                    // `email`, so they are produced by one branch rather than
-                    // by two that could drift apart.
-                    Some((u.email, u.email_verified_at.is_some()))
-                } else {
-                    None
-                },
-                // Read whenever *any* profile claim might be released. Which
-                // ones actually appear is decided per claim below, because
-                // §5.5 lets a client ask for `nickname` without asking for
-                // `name`.
-                Some((
-                    u.username,
-                    axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
-                    u.updated_at,
-                )),
-            ),
-            Err(e) => {
-                tracing::error!(
-                    user_id = %user.user_id,
-                    tenant_id = %user.principal_tenant_id,
-                    error = %e,
-                    "userinfo: failed to fetch user for scoped claims"
-                );
-                return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
-                    error: "server_error".into(),
-                    error_description: "failed to retrieve user claims".into(),
-                });
-            }
+    // The account is read on every call (#520, P23W1-12), not only when a
+    // scope needs a claim from it. UserInfo used to answer a suspended user's
+    // access token until `exp`; it now applies the rule every grant and
+    // `/oauth2/authorize` apply (`account_may_act`) and answers a locked,
+    // inactive, anonymized, deleted or removed account with the same `401` an
+    // expired or revoked token gets — one shape, so the answer says nothing
+    // about which it was. One indexed read per call: UserInfo is a relying
+    // party's occasional question, not the authorization hot path.
+    //
+    // UserInfo describes the SUBJECT of the token, and that account lives in
+    // the tenant the subject inhabits — never one it happens to be acting on.
+    // The two differ only for an organization-level principal whose request
+    // carried `X-Axiam-Tenant`; reading the acting tenant there found no
+    // account and answered with `sub` alone.
+    let account = match state
+        .user_repo
+        .get_by_id(user.principal_tenant_id, user.user_id)
+        .await
+    {
+        Ok(u) => u,
+        Err(AxiamError::NotFound { .. }) => return userinfo_account_may_not_act(),
+        Err(e) => {
+            tracing::error!(
+                user_id = %user.user_id,
+                tenant_id = %user.principal_tenant_id,
+                error = %e,
+                "userinfo: failed to fetch user for scoped claims"
+            );
+            return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+                error: "server_error".into(),
+                error_description: "failed to retrieve user claims".into(),
+            });
         }
+    };
+    if let Err(reason) = axiam_auth::service::account_may_act(&account) {
+        tracing::info!(
+            user_id = %user.user_id,
+            tenant_id = %user.principal_tenant_id,
+            reason = %reason,
+            "userinfo: refusing a token whose account may no longer sign in"
+        );
+        return userinfo_account_may_not_act();
+    }
+
+    // The row is needed by every releasable claim, so its claims are taken
+    // when any of them might be released rather than when a particular scope
+    // is present.
+    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
+        let u = account;
+        (
+            if release("email", "email") || asked_for("email_verified") {
+                // Both members or neither: `email_verified` describes
+                // `email`, so they are produced by one branch rather than
+                // by two that could drift apart.
+                Some((u.email, u.email_verified_at.is_some()))
+            } else {
+                None
+            },
+            // Read whenever *any* profile claim might be released. Which
+            // ones actually appear is decided per claim below, because
+            // §5.5 lets a client ask for `nickname` without asking for
+            // `name`.
+            Some((
+                u.username,
+                axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
+                u.updated_at,
+            )),
+        )
     } else {
         (None, None)
     };
@@ -3716,6 +3776,18 @@ async fn userinfo_claims_for<C: Connection + Clone>(
         tenant_id: user.tenant_id.to_string(),
         org_id: user.org_id.to_string(),
     })
+}
+
+/// UserInfo's answer for a token whose account may no longer act (#520,
+/// P23W1-12): the `401` the authentication extractor gives an expired or
+/// revoked token, built from the same error, so a relying party cannot tell a
+/// suspended account from a dead token.
+fn userinfo_account_may_not_act() -> HttpResponse {
+    use actix_web::ResponseError as _;
+    crate::error::AxiamApiError::from(AxiamError::AuthenticationFailed {
+        reason: "session revoked or expired".into(),
+    })
+    .error_response()
 }
 
 /// What the sensitive-scope gates allowed this UserInfo call to say.
@@ -4046,7 +4118,8 @@ impl std::fmt::Debug for UserInfoPostForm {
          body = UserInfoResponse),
         (status = 400, description = "The access token was presented by more than \
                                       one method (RFC 6750 §2)"),
-        (status = 401, description = "Invalid or missing access token"),
+        (status = 401, description = "Invalid, expired, revoked or missing access token, \
+                                      or one whose account may no longer sign in"),
     ),
     security(("bearer" = []))
 )]

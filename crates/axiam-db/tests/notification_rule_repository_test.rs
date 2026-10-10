@@ -3,16 +3,20 @@
 //! SurrealDB.
 
 use axiam_core::models::notification_rule::{
-    CreateNotificationRule, NotificationEventType, UpdateNotificationRule,
+    CreateNotificationRule, DEFAULT_NOTIFICATION_WINDOW_MINUTES, NotificationEventType,
+    NotificationWindowClaim, UpdateNotificationRule,
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
-    NotificationRuleRepository, OrganizationRepository, Pagination, TenantRepository,
+    NotificationRuleRepository, NotificationWindowRepository, OrganizationRepository, Pagination,
+    TenantRepository,
 };
 use axiam_db::repository::{
-    SurrealNotificationRuleRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealNotificationRuleRepository, SurrealNotificationWindowRepository,
+    SurrealOrganizationRepository, SurrealTenantRepository,
 };
+use chrono::{Duration, Utc};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -57,6 +61,7 @@ fn create_input(
         description: "d".into(),
         events,
         recipient_emails: vec!["admin@example.com".into()],
+        window_minutes: None,
     }
 }
 
@@ -320,4 +325,277 @@ async fn get_by_events_matches_any_shared_event() {
         .await
         .unwrap();
     assert!(results.iter().any(|r| r.id == rule.id));
+}
+
+// ---------------------------------------------------------------------------
+// The notification window (#551, T-117)
+// ---------------------------------------------------------------------------
+
+/// A rule stores its window; one created without one has the default, and an
+/// update changes it. A rule written before schema v85 (no column) reads the
+/// default.
+#[tokio::test]
+async fn a_rule_stores_its_window_and_defaults_it() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealNotificationRuleRepository::new(db.clone());
+
+    let default = repo
+        .create(create_input(
+            tenant_id,
+            "default-window",
+            vec![NotificationEventType::LoginFailure],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(default.window_minutes, DEFAULT_NOTIFICATION_WINDOW_MINUTES);
+
+    let mut input = create_input(
+        tenant_id,
+        "hourly",
+        vec![NotificationEventType::LoginFailure],
+    );
+    input.window_minutes = Some(60);
+    let hourly = repo.create(input).await.unwrap();
+    assert_eq!(hourly.window_minutes, 60);
+    assert_eq!(
+        repo.get_by_id(tenant_id, hourly.id)
+            .await
+            .unwrap()
+            .window_minutes,
+        60
+    );
+
+    let updated = repo
+        .update(
+            tenant_id,
+            hourly.id,
+            UpdateNotificationRule {
+                window_minutes: Some(5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.window_minutes, 5);
+
+    // As a rule written before v85 is stored: no window at all.
+    db.query("UPDATE type::record('notification_rule', $id) SET window_minutes = NONE")
+        .bind(("id", default.id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rules = repo
+        .get_by_events(tenant_id, &["login_failure".to_string()])
+        .await
+        .unwrap();
+    let legacy = rules.iter().find(|r| r.id == default.id).unwrap();
+    assert_eq!(legacy.window_minutes, DEFAULT_NOTIFICATION_WINDOW_MINUTES);
+}
+
+/// The first claim opens the window; the claims inside it are counted; the
+/// first claim after it opens the next one and carries the count. Another
+/// rule, another event or another tenant is its own window.
+#[tokio::test]
+async fn a_window_is_claimed_once_and_carries_its_count_into_the_next() {
+    let (db, tenant_id) = setup().await;
+    let windows = SurrealNotificationWindowRepository::new(db);
+    let rule = Uuid::new_v4();
+    let now = Utc::now();
+    let window = 15 * 60;
+
+    assert_eq!(
+        windows
+            .claim(tenant_id, rule, "login_failure", now, window)
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 0 }
+    );
+    for later in [1, 60, window - 1] {
+        assert_eq!(
+            windows
+                .claim(
+                    tenant_id,
+                    rule,
+                    "login_failure",
+                    now + Duration::seconds(later),
+                    window,
+                )
+                .await
+                .unwrap(),
+            NotificationWindowClaim::Counted {
+                open_until: now + Duration::seconds(window)
+            },
+            "a counted claim says when the open window ends"
+        );
+    }
+
+    // Each of these is a window of its own.
+    for (tenant, rule, event) in [
+        (tenant_id, Uuid::new_v4(), "login_failure"),
+        (tenant_id, rule, "account_locked"),
+        (Uuid::new_v4(), rule, "login_failure"),
+    ] {
+        assert_eq!(
+            windows
+                .claim(tenant, rule, event, now, window)
+                .await
+                .unwrap(),
+            NotificationWindowClaim::Opened { suppressed: 0 }
+        );
+    }
+
+    // The window has run: the next event opens a new one with the count.
+    let next = now + Duration::seconds(window);
+    assert_eq!(
+        windows
+            .claim(tenant_id, rule, "login_failure", next, window)
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 3 }
+    );
+    // And that count was reported: a quiet window carries nothing.
+    assert_eq!(
+        windows
+            .claim(
+                tenant_id,
+                rule,
+                "login_failure",
+                next + Duration::seconds(window),
+                window,
+            )
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 0 }
+    );
+}
+
+/// Concurrent claimants on one datastore — replicas — open a window once,
+/// and every other claim is counted: in the datastore, or — a claim that kept
+/// losing a write conflict wrote nothing (R1W2-01) — by its claimant, which
+/// hands the count back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_claims_open_a_window_once() {
+    let (db, tenant_id) = setup().await;
+    let rule = Uuid::new_v4();
+    let now = Utc::now();
+    let mut claims = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let windows = SurrealNotificationWindowRepository::new(db.clone());
+        claims.spawn(async move {
+            let claim = windows
+                .claim(tenant_id, rule, "login_failure", now, 900)
+                .await
+                .unwrap();
+            if claim == NotificationWindowClaim::Contended {
+                windows
+                    .add_uncounted(tenant_id, rule, "login_failure", 1)
+                    .await
+                    .unwrap();
+            }
+            claim
+        });
+    }
+    let claims = claims.join_all().await;
+    let opened = claims
+        .iter()
+        .filter(|c| matches!(c, NotificationWindowClaim::Opened { .. }))
+        .count();
+    assert_eq!(opened, 1, "{claims:?}");
+
+    // The fifteen others were counted, and the next window reports them.
+    assert_eq!(
+        SurrealNotificationWindowRepository::new(db)
+            .claim(
+                tenant_id,
+                rule,
+                "login_failure",
+                now + Duration::seconds(900),
+                900,
+            )
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 15 }
+    );
+}
+
+/// R1W2-01: a count a replica kept in memory is added to the window as it
+/// stands and reported by the mail that opens the next one; a window that does
+/// not exist (its rule was deleted) takes nothing and is not created.
+#[tokio::test]
+async fn an_uncounted_count_reaches_the_next_window_and_creates_nothing() {
+    let (db, tenant_id) = setup().await;
+    let windows = SurrealNotificationWindowRepository::new(db.clone());
+    let rule = Uuid::new_v4();
+    let now = Utc::now();
+
+    windows
+        .add_uncounted(tenant_id, rule, "login_failure", 7)
+        .await
+        .unwrap();
+    let mut rows = db
+        .query("SELECT count() AS n FROM notification_window GROUP ALL")
+        .await
+        .unwrap();
+    let n: Option<i64> = rows.take("n").unwrap();
+    assert_eq!(n.unwrap_or(0), 0, "no window, no row");
+
+    windows
+        .claim(tenant_id, rule, "login_failure", now, 900)
+        .await
+        .unwrap();
+    windows
+        .add_uncounted(tenant_id, rule, "login_failure", 41)
+        .await
+        .unwrap();
+    windows
+        .claim(
+            tenant_id,
+            rule,
+            "login_failure",
+            now + Duration::seconds(1),
+            900,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        windows
+            .claim(
+                tenant_id,
+                rule,
+                "login_failure",
+                now + Duration::seconds(900),
+                900,
+            )
+            .await
+            .unwrap(),
+        NotificationWindowClaim::Opened { suppressed: 42 }
+    );
+}
+
+/// Deleting a rule deletes its windows.
+#[tokio::test]
+async fn deleting_a_rule_deletes_its_windows() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealNotificationRuleRepository::new(db.clone());
+    let windows = SurrealNotificationWindowRepository::new(db.clone());
+    let rule = repo
+        .create(create_input(
+            tenant_id,
+            "r",
+            vec![NotificationEventType::LoginFailure],
+        ))
+        .await
+        .unwrap();
+    windows
+        .claim(tenant_id, rule.id, "login_failure", Utc::now(), 900)
+        .await
+        .unwrap();
+    repo.delete(tenant_id, rule.id).await.unwrap();
+    let mut left = db
+        .query("SELECT count() AS n FROM notification_window GROUP ALL")
+        .await
+        .unwrap();
+    let n: Option<i64> = left.take("n").unwrap();
+    assert_eq!(n.unwrap_or(0), 0);
 }

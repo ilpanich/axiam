@@ -14,7 +14,9 @@ use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
-    certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    certificate::{
+        CaCertificate, Certificate, RevokedCertificate, StoreCaCertificate, StoreCertificate,
+    },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
@@ -30,7 +32,9 @@ use crate::models::{
     },
     group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup},
     mds::{MdsBlobMeta, MdsEntry},
-    notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
+    notification_rule::{
+        CreateNotificationRule, NotificationRule, NotificationWindowClaim, UpdateNotificationRule,
+    },
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
         CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient,
@@ -1853,6 +1857,16 @@ pub trait CibaRequestRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
 
+    /// The `pending`, unexpired requests addressed to `user_id`, soonest
+    /// expiry first, at most `limit`. A request for nobody (`user_id` unset) is
+    /// never listed, whoever asks.
+    fn list_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ciba::CibaRequest>>> + Send;
+
     /// `pending → approved`, conditional on `version = expected_version`, on
     /// the row's user being `user_id`, and on the request being unexpired.
     /// `false` when any precondition fails — the caller cannot tell which.
@@ -2072,6 +2086,16 @@ pub trait PushedAuthRequestRepository: Send + Sync {
 
     /// Remove expired requests. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every request pushed by `client_id` in `tenant_id`, spent or not
+    /// (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot spend a
+    /// `request_uri` pushed before the delete. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {
@@ -2133,6 +2157,22 @@ pub trait AuthorizationCodeRepository: Send + Sync {
 
     /// Delete expired and already-used codes (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every code issued to `client_id` in `tenant_id`, redeemed or
+    /// not (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot redeem a
+    /// code issued before the delete.
+    ///
+    /// **Deleted, never marked `used`.** A used code presented again is a
+    /// replay, and the token endpoint answers a replay by revoking the session
+    /// the code came from ([`Self::replayed_session`]); a code voided because
+    /// its client went away is no evidence of theft and must answer as an
+    /// unknown code does. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait RefreshTokenRepository: Send + Sync {
@@ -2795,6 +2835,29 @@ pub trait CaCertificateRepository: Send + Sync {
     fn list_mtls_trust_anchors(
         &self,
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
+
+    /// The revoked, not yet expired CAs `parent_ca_id` signed — the CA half of
+    /// that CA's certificate revocation list (#565, T-102).
+    ///
+    /// Not organization-scoped: the parent is already resolved inside its
+    /// organization by the caller, and a child always shares it.
+    fn list_revoked_children(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// Every CA record, in any organization and of any status, whose
+    /// certificate has one of these SHA-256 fingerprints (R1W1-02).
+    ///
+    /// Not organization-scoped: it answers "whose CA is this?" for the
+    /// certificates a client's TLS chain was verified through, so
+    /// `tls_client_auth` can refuse a chain that runs through another
+    /// organization's — or another tenant's — CA. One certificate may be
+    /// recorded by more than one organization (each imported it), hence a list.
+    fn list_by_fingerprints(
+        &self,
+        fingerprints: &[String],
+    ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {
@@ -2816,7 +2879,60 @@ pub trait CertificateRepository: Send + Sync {
         &self,
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
+    /// Mark a certificate revoked, recording when (#565): the first revocation
+    /// date stands, so revoking an already-revoked certificate changes nothing
+    /// its revocation list says.
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The revoked, not yet expired leaves `issuer_ca_id` signed, in every
+    /// tenant — the leaf half of that CA's certificate revocation list (#565,
+    /// T-102).
+    ///
+    /// Across tenants on purpose: a CRL belongs to its issuer, not to a tenant,
+    /// and an organization CA's leaves may be recorded under more than one.
+    fn list_revoked_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
+    /// revocation Vault has not yet been told of, oldest revocation first, at
+    /// most `limit` (T-470).
+    ///
+    /// Vault signs such a CA's list, not AXIAM, so a revocation reaches it only
+    /// by being forwarded; this is what the cleanup sweep reads to forward the
+    /// ones a revoke request could not, and the revocations that never went
+    /// through one (a directory deprovisioning revokes in bulk). Across tenants:
+    /// the sweep is deployment-wide. A revoked CA's leaves are left out, since
+    /// revoking the CA removed its issuer from Vault.
+    fn list_unforwarded_revocations(
+        &self,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// Revoke every certificate of `tenant_id` that is not revoked and not yet
+    /// expired, recording when, and return the certificates this revoked
+    /// (R1W1-01).
+    ///
+    /// What deleting a tenant does to its certificates: a deleted tenant's
+    /// leaves are disowned, so they go on their issuers' revocation lists
+    /// rather than staying valid to every relying party outside AXIAM until
+    /// they expire. Returned so the caller can forward the `vault_pki` ones to
+    /// Vault, as [`Self::revoke`]'s caller does; the cleanup job's sweep
+    /// forwards whatever it could not.
+    fn revoke_all_for_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// Record that the custodian that signed a revoked certificate has the
+    /// revocation too (`vault_revoked_at`, T-470), which takes it out of
+    /// [`Self::list_unforwarded_revocations`].
+    fn mark_revocation_forwarded(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Revoke every **active `User`-type certificate** that belongs to
     /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
@@ -3014,6 +3130,46 @@ pub trait NotificationRuleRepository: Send + Sync {
         tenant_id: Uuid,
         event_types: &[String],
     ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
+}
+
+/// The notification windows of the rules (#551, T-117): one row per
+/// `(tenant, rule, event)`, so that a rule mails each recipient once per
+/// window for an event an attacker can raise at will, on any replica.
+pub trait NotificationWindowRepository: Send + Sync {
+    /// Claim the window of `(tenant_id, rule_id, event)` at `now`, atomically.
+    ///
+    /// When no window is open — none yet, or the last was opened at least
+    /// `window_secs` before `now` — this event opens one:
+    /// [`NotificationWindowClaim::Opened`], carrying how many events the
+    /// previous window counted. Otherwise the event is counted in the open
+    /// window: [`NotificationWindowClaim::Counted`]. The window's start is the
+    /// precondition of the write (the `claim_failure_notification` pattern,
+    /// D-73), so of two concurrent claimants exactly one opens it.
+    ///
+    /// A claim that keeps losing a write conflict gives up after a few attempts
+    /// and writes nothing: [`NotificationWindowClaim::Contended`]. It runs on
+    /// the notification path of every replica, and waiting out a contended row
+    /// there is what let one tenant's burst slow every replica (R1W2-01).
+    fn claim(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        now: DateTime<Utc>,
+        window_secs: i64,
+    ) -> impl Future<Output = AxiamResult<NotificationWindowClaim>> + Send;
+
+    /// Add `count` events, counted by a replica in memory and not yet written,
+    /// to the window of `(tenant_id, rule_id, event)` as it stands: the next
+    /// claim that opens a window carries them in its `suppressed` count. A
+    /// window that no longer exists (its rule was deleted) takes nothing.
+    fn add_uncounted(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        count: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -3855,6 +4011,17 @@ pub trait ScimTargetStateRepository: Send + Sync {
         tenant_id: Uuid,
         target_id: Uuid,
         reason: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// A delivery for which **no request was made** was dead-lettered (the
+    /// target's breaker was open on the message's last attempt, #550): increment
+    /// `dead_lettered_total` only. `last_failure_at` and the reason stay those
+    /// of the last request that failed, so that deliveries the breaker refuses
+    /// cannot keep it open.
+    fn count_dead_letter(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Claim a reconciliation run at `now` **if** the last claim was at least

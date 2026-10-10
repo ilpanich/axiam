@@ -1,6 +1,6 @@
 # AXIAM Admin Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-06
 
 Task-oriented walkthroughs for the first-run admin bootstrap and the common
@@ -229,6 +229,51 @@ that authorised it. It cannot prove you kept the file. Streaming the export to
 
 The admin UI does this for you: confirming **Delete Tenant** downloads the
 trail to your browser and then deletes.
+
+### What the deletion does, and when the data is gone
+
+A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
+
+1. **In the request**, before the `204`: the tenant's sessions are revoked
+   (and published to the revocation feed when it is on) and its OAuth2 refresh
+   tokens are revoked, and so are its certificates and its signing CAs, which
+   go on their issuers' revocation lists (a `vault_pki` leaf is forwarded to
+   Vault); then the tenant is marked deleted. From that moment it
+   is gone from every read — `GET`, the organization's tenant list, sign-in,
+   token issuance, refresh — so its users' last sessions cannot refresh and
+   their access tokens fail the per-request session check. Its directory, SAML,
+   SSF, CIBA and SCIM configuration is removed in the same transaction, so no
+   background job works for it any more. The response is still `204`.
+2. **On the cleanup interval** (`cleanup_interval_secs`, 5 minutes by
+   default), the `tenant_purge` sweep removes every row of every
+   tenant-scoped table — users and their credentials, sessions and grants,
+   OAuth2 clients, federation and e-mail configuration, webhooks, expired
+   certificates and CA material, roles, groups, permissions, resources,
+   consents, and the tenant's own audit entries you exported above — in the
+   order the GDPR user erasure uses, and removes the tenant record last. A
+   revoked certificate or CA that has not yet expired is **kept** (its
+   `metadata` and a CA's sealed key cleared), because its issuer's revocation
+   list is read from it: removing it would make it valid again to every relying
+   party outside AXIAM. The same sweep removes it once it expires. It then writes a
+   `tenants.purged` entry to the system audit log, beside `tenants.deleted`;
+   neither is ever purged. The sweep is listed on `GET /health/jobs`: alert on
+   it there, as on the GDPR erasure sweep.
+
+Until the purge has run, the deleted tenant's **slug stays taken**: creating a
+tenant with the same slug answers `409`. Wait one cleanup interval and retry.
+
+A service account's access token carries no session, so it is not revoked by
+the deletion; it runs out within its lifetime (15 minutes by default), and the
+purge removes the account itself. The same holds for a user's access token on
+gRPC unless `AXIAM__GRPC__STRICT_REVOCATION=true`, since only then does gRPC
+re-check the session.
+
+**Upgrading from a version before #523.** Earlier versions removed only the
+tenant record and left the rest. On its first run after the upgrade, and once
+a day after that, the sweep also finds rows whose tenant no longer exists and
+purges them — except their audit entries, which no export receipt covers and
+which the audit retention window (`AXIAM__AUDIT_RETENTION_DAYS`) governs. Each
+such tenant gets a `tenants.purged` system entry with `metadata.orphan: true`.
 
 ## Creating users
 
@@ -644,22 +689,22 @@ guide holds what an operator sets.
 |---|---|---|---|---|
 | **Directory** | `/directory` | `directory:read` | [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/directory) | [What a tenant's directory needs](../deployment/README.md#what-a-tenants-directory-needs-ldap--active-directory) |
 | **SAML Service Providers** | `/saml` | `saml_sp:read` | [AXIAM as a SAML identity provider](https://ilpanich.github.io/axiam/#/docs/saml-idp) | `AXIAM__AUTH__SAML_PAIRWISE_KEY` in [Required secrets & environment](../deployment/README.md#required-secrets--environment) |
+| **SSF Streams** | `/ssf` | `ssf_streams:read` | [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf) | [Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant) |
 | **SCIM Targets** | `/scim-targets` | `scim_targets:read` | [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound) | — |
-| **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
+| **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail, or from the pending-request list under the user menu's badge (an account with no vouched address is sent no mail) | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
 
-Three things the console does not do yet, each said on the website page it
-belongs to:
+One thing the console does not do yet, said on the website page it belongs to:
 
-- **SSF streams have no console page.** A tenant administrator registers them
-  through `/api/v1/tenants/{tenant_id}/ssf/streams` or the SDKs' `ssf`
-  namespace; see [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf).
-  A deployment of more than one tenant must serve per-tenant issuers for SSF to
-  run ([Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant)).
-- **`saml_idp_enabled` and `ssf_enabled` have no control.** Both are layered
-  settings, off by default, set through the settings API; the console explains
-  them.
 - **The OAuth2 client form does not carry the CIBA fields.** A CIBA client is
   registered over the admin API, or by RFC 7591/7592 with an initial access
   token.
+
+The SAML identity provider and the SSF transmitter are switched in the console:
+`saml_idp_enabled` and `ssf_enabled` are controls on the organization's
+**Settings** tab (where a surface is turned on) and on the tenant's **Settings**
+page and **Security Overrides** (where a tenant turns it off for itself; one the
+organization disabled reads "Disabled by the organization" and cannot be turned
+on). A deployment of more than one tenant must serve per-tenant issuers for SSF
+to run ([Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant)).
 
 The routes behind each page are listed in [API docs](../api/README.md).

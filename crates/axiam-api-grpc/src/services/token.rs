@@ -3,7 +3,10 @@
 use axiam_auth::config::AuthConfig;
 use axiam_auth::error::AuthError;
 use axiam_auth::token::validate_access_token;
+use axiam_core::error::AxiamError;
+use axiam_core::repository::UserRepository;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use axiam_auth::token::ValidatedClaims;
 
@@ -37,18 +40,48 @@ fn wire_token_type(claims: &axiam_auth::token::AccessTokenClaims) -> String {
     }
 }
 
-pub struct TokenServiceImpl {
+pub struct TokenServiceImpl<U: UserRepository> {
     config: AuthConfig,
+    /// Read by `IntrospectToken` only (#520, P23W1-12): introspection reports
+    /// a token whose account may no longer act as inactive. `ValidateToken`
+    /// stays a local signature-and-claims check and reads nothing.
+    user_repo: U,
 }
 
-impl TokenServiceImpl {
-    pub fn new(config: AuthConfig) -> Self {
-        Self { config }
+impl<U: UserRepository> TokenServiceImpl<U> {
+    pub fn new(config: AuthConfig, user_repo: U) -> Self {
+        Self { config, user_repo }
+    }
+
+    /// Whether the account a user token names may still act (#520,
+    /// P23W1-12) — `axiam_auth::service::account_may_act`, the rule REST
+    /// introspection, UserInfo, every OAuth2 grant and `/oauth2/authorize`
+    /// apply. `Ok(true)` for a token that names no account (a service account
+    /// or an OAuth2 client, whose `sub` is not a user id). A subject that no
+    /// longer exists may not act; any other read failure is INTERNAL rather
+    /// than a guess in either direction.
+    async fn subject_may_act(
+        &self,
+        claims: &axiam_auth::token::AccessTokenClaims,
+    ) -> Result<bool, Status> {
+        if claims.sub_kind != axiam_auth::token::SubjectKind::User {
+            return Ok(true);
+        }
+        let (Ok(tenant_id), Ok(user_id)) =
+            (claims.tenant_id.parse::<Uuid>(), claims.sub.parse::<Uuid>())
+        else {
+            return Ok(true);
+        };
+        match self.user_repo.get_by_id(tenant_id, user_id).await {
+            Ok(user) => Ok(axiam_auth::service::account_may_act(&user).is_ok()),
+            Err(AxiamError::NotFound { .. }) => Ok(false),
+            Err(_) => Err(Status::internal("failed to read the token's subject")),
+        }
     }
 }
 
 #[tonic::async_trait]
-impl TokenService for TokenServiceImpl {
+impl<U: UserRepository + 'static> TokenService for TokenServiceImpl<U> {
     async fn validate_token(
         &self,
         request: Request<ValidateTokenRequest>,
@@ -130,7 +163,16 @@ impl TokenService for TokenServiceImpl {
             // SEC-068: only introspect a token from the caller's own tenant; a
             // cross-tenant token reports inactive (indistinguishable from an
             // invalid one) so its sub/org/jti claims are not disclosed.
-            Ok(validated) if validated.0.tenant_id == caller_tenant => {
+            //
+            // #520, P23W1-12: and only while the account it names may still
+            // act. Introspection is the documented answer for a caller that
+            // needs immediate revocation (T-39), so a suspended user's token is
+            // inactive here at once, not at `exp`. One indexed user read per
+            // call; `ValidateToken` stays the read-free local check.
+            Ok(validated)
+                if validated.0.tenant_id == caller_tenant
+                    && self.subject_may_act(&validated.0).await? =>
+            {
                 let claims = validated.0;
                 let cnf = wire_cnf(&claims);
                 let token_type = wire_token_type(&claims);

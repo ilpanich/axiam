@@ -82,7 +82,7 @@
 //! | Constraint | Registration | Request time |
 //! |---|---|---|
 //! | `fapi2` may not say `honour` | [`FapiRegistrationError::AuthnParamsOnFapiClient`] | refused + `error!`, as the row must have been edited in the database |
-//! | `fapi2` may not send the *security-bearing* parameters (`prompt`, `max_age`, `acr_values`, `id_token_hint`, a `claims` asking for `id_token.acr`, and a `claims` asking for `id_token.auth_time` as essential) | — (they are per-request) | `invalid_request`, naming each |
+//! | `fapi2` may not send the *security-bearing* parameters (`prompt`, `max_age`, `acr_values`, `id_token_hint`, a `claims` asking for `id_token.acr`, a `claims` asking for `id_token.auth_time` as essential, and a `claims` naming a subject in `id_token.sub`) | — (they are per-request) | `invalid_request`, naming each |
 //! | `fapi2` may not register `address`/`phone` | [`FapiRegistrationError::SensitiveScopesOnFapiClient`] | refused `invalid_scope` at the authorization endpoint whatever the row says, and never released at UserInfo (W7) |
 //!
 //! Two asymmetries in that table are deliberate. The four *cosmetic*
@@ -566,9 +566,12 @@ fn is_https_absolute(uri: &str) -> bool {
 ///    remaining gap is a confidential client omitting `code_challenge`.
 /// 2. **A `fapi2` client is refused the security-bearing authentication-request
 ///    parameters** (X7.1) — `prompt`, `max_age`, `acr_values`,
-///    `id_token_hint`, and a `claims` that asks for `id_token.acr` or for
-///    `id_token.auth_time` as **essential** (or cannot be read well enough to
-///    rule either out; T23.1.1, D-12). Refusing rather than
+///    `id_token_hint`, and a `claims` that asks for `id_token.acr`, for
+///    `id_token.auth_time` as **essential**, or names a subject in
+///    `id_token.sub` (or cannot be read well enough to rule any of them out;
+///    T23.1.1, D-12, P23W1-11). The last is `id_token_hint` in another
+///    spelling — "issue nothing unless the end user is this one" — and is
+///    honoured only on the honour lane, so here it would be dropped. Refusing rather than
 ///    ignoring is the point: ignoring `max_age` tells a relying party it got a
 ///    freshness guarantee it did not get, and *that* silent downgrade is what
 ///    this whole gate exists to prevent. A `claims` that asks only for
@@ -659,8 +662,8 @@ pub fn enforce_authorization_request(
         // reasonably stop sending the `userinfo` requests AXIAM does honour.
         let claims_note = if refused.contains(&"claims") {
             " (claims is accepted on this profile for its userinfo member only; an \
-             id_token.acr request, an essential id_token.auth_time request, or a claims \
-             value that cannot be read, is refused)"
+             id_token.acr request, an essential id_token.auth_time request, an id_token.sub \
+             request with a value, or a claims value that cannot be read, is refused)"
         } else {
             ""
         };
@@ -2143,6 +2146,56 @@ mod tests {
                 "a voluntary auth_time request must stay as it was: {value}"
             );
         }
+    }
+
+    /// P23W1-11 (#520) — a `claims.id_token.sub` carrying a value is refused
+    /// on `fapi2`, as `id_token_hint` is: it constrains which end user a token
+    /// may be issued for, and only the honour lane — which a `fapi2` client is
+    /// never on — reads it, so serving the request would drop the constraint.
+    /// A valueless `sub` constrains nothing and is served.
+    #[test]
+    fn p23w1_11_a_fapi2_client_is_refused_a_claims_id_token_sub_with_a_value() {
+        let c = fapi_client();
+        for value in [
+            r#"{"id_token":{"sub":{"value":"9d3c1f0e-0000-4000-8000-000000000001"}}}"#,
+            r#"{"id_token":{"sub":{"essential":true,"values":["a","b"]}}}"#,
+            r#"{"userinfo":{"name":null},"id_token":{"sub":{"value":"a"}}}"#,
+            // Unreadable member: cannot be shown to name nobody.
+            r#"{"id_token":{"sub":"a"}}"#,
+            r#"{"id_token":{"sub":{"value":7}}}"#,
+        ] {
+            let err =
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .expect_err("a fapi2 client must be refused a valued id_token.sub");
+            assert_eq!(err.error_code(), "invalid_request", "{value}");
+            assert!(
+                err.to_string().contains("id_token.sub"),
+                "the refusal must say which member is refused: {err}"
+            );
+        }
+        for value in [
+            r#"{"id_token":{"sub":null}}"#,
+            r#"{"id_token":{"sub":{"essential":true}}}"#,
+            r#"{"userinfo":{"sub":{"value":"a"}}}"#,
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .is_ok(),
+                "a valueless sub request constrains nothing and is served: {value}"
+            );
+        }
+    }
+
+    /// P23W1-11's invariant-1 twin: off the FAPI profile a valued `sub` is not
+    /// refused at this gate — the ignore lane drops it as before, the honour
+    /// lane honours it in `crate::honour`.
+    #[test]
+    fn p23w1_11_a_valued_id_token_sub_is_not_refused_off_the_fapi_profile() {
+        let params = one_param("claims", r#"{"id_token":{"sub":{"value":"a"}}}"#);
+        assert!(enforce_authorization_request(&base_client(), None, &params, &[]).is_ok());
+        let mut honour = base_client();
+        honour.authn_request_params = AuthnRequestParamsMode::Honour;
+        assert!(enforce_authorization_request(&honour, None, &params, &[]).is_ok());
     }
 
     /// D-12's invariant-1 twin at this layer: a `standard`/`ignore` client and

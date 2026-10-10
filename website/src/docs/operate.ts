@@ -107,16 +107,20 @@ export const OPERATE_PAGES: DocPage[] = [
           ["Cross-replica decision-cache invalidation", "There is no second replica to tell; boot refuses the decision-cache broadcast being switched on."],
         ],
       },
+      {
+        type: "p",
+        text: "A minimal-profile server **reads no AMQP queue**: whatever a broker holds on `axiam.authz.request` or `axiam.audit.events`, AXIAM never consumes it. A service that publishes there is confirmed by its broker while nothing reads the message, so **a broker confirm never means AXIAM recorded an event** (or decided a request) — it says only that the broker accepted it. Use REST or gRPC against a minimal-profile server; an AMQP client belongs to a full-profile deployment.",
+      },
       { type: "h", id: "minimal-restart", text: "What a restart costs" },
       {
         type: "p",
-        text: "There is no durable queue and no dead-letter queue. A webhook, SSF, outbound SCIM or CIBA-ping delivery that is queued or sleeping for a retry when the process stops is **lost**, and leaves at most a `<kind>.delivery_attempt` audit row — never a terminal one; a delivery that exhausts its attempts leaves a `<kind>.delivery_failed` row, which is the whole record, so alert on it. A queued GDPR export notice cannot be re-sent (the download token exists only in that mail), so the subject requests a new export. If a lost webhook is not acceptable, run the full profile.",
+        text: "There is no durable queue and no dead-letter queue. A webhook, SSF, outbound SCIM or CIBA-ping delivery that is queued or sleeping for a retry when the process stops is **lost**; at an orderly stop, and when a full queue refuses an enqueue, it leaves a terminal `<kind>.delivery_abandoned` audit row with a fixed reason (after a `SIGKILL` it leaves at most a `<kind>.delivery_attempt` row). `delivery_abandoned` is deliberately not `delivery_failed`, so a restart mails nobody through the `scim_delivery_failed` notification; a delivery that exhausts its attempts leaves a `<kind>.delivery_failed` row, which is the whole record, so alert on it. A queued GDPR export notice cannot be re-sent (the download token exists only in that mail), so the subject requests a new export. If a lost webhook is not acceptable, run the full profile.",
       },
       {
         type: "list",
         items: [
-          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period above 20 s — the compose file sets 30 s, Kubernetes' default is enough.",
-          "**GDPR dead-letter file.** A failed write of `gdpr.user_pseudonymized` or `tenants.deleted` is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`, which `docker-compose.minimal.yml` puts on a **named volume**; the `axiam.audit.dlq` log event is the second sink. An operator replays the file into the trail by hand.",
+          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period of at least 40 s (20 s for requests in flight, 5 s for gRPC, 2 s for the in-process outbound queues, 5 s for the audit queue, and a margin): the Compose files and the Kubernetes manifest set it, but both platforms' defaults (10 s, 30 s) are too short.",
+          "**Audit dead-letter file.** An audit row the datastore refuses (the GDPR export, erasure and erasure-request records, `tenants.deleted`, and request-audit rows that are dropped or fail to append) is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`. Both Compose files put it on a **named volume**; the Kubernetes manifests on an `emptyDir`, which a container restart keeps and a pod deletion does not. `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds it (192 MiB by default, at least 1 MiB; anything else fails the boot): past nine tenths of it request-audit rows are refused and counted as not recoverable, and the last tenth is kept for the GDPR records. Keep it below the volume's limit: Kubernetes enforces an `emptyDir` `sizeLimit` by evicting the pod, which deletes the file. The request path and forwarded address a line carries are cut to 512 and 64 bytes. The `axiam.audit.dlq` log event is the second sink for the GDPR records. An operator replays the file into the trail by hand: `docs/deployment/README.md` has the recipe.",
           "**External audit producers.** Stop or re-point every service that publishes to `axiam.audit.events` before switching: nothing consumes it and a broker left running confirms the publish anyway.",
         ],
       },
@@ -306,7 +310,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "AXIAM is pre-1.0. Treat these manifests as a solid starting point for a staging environment, and work through [Production hardening](#/docs/hardening) before anything real depends on them.",
+        text: "Treat these manifests as a solid starting point, not as your cluster's policy, and work through [Production hardening](#/docs/hardening) before anything real depends on them.",
       },
       {
         type: "cards",
@@ -619,7 +623,7 @@ export const OPERATE_PAGES: DocPage[] = [
         headers: ["Field", "Meaning"],
         rows: [
           ["email_verification_required", "Whether an unverified address blocks sign-in."],
-          ["email_verification_grace_period_hours", "How long an unverified account keeps working before it does."],
+          ["email_verification_grace_period_hours", "How long an unverified account can still sign in with a password before verification blocks it. It governs new password sign-ins only: a session already open keeps refreshing, and federated accounts, which stay unverified for life, are not held to it."],
           ["default_cert_validity_days", "Stored and returned by the settings API, but not read at issuance: every issuance request states its own `validity_days`."],
           ["max_cert_validity_days", "Stored and returned by the settings API, but not read at issuance. The ceiling issuance enforces is the tenant's `max_certificate_validity_days` metadata key — 365 days when unset, never more than 825."],
           ["webauthn_user_verification", "`discouraged` | `preferred` | `required` — whether a WebAuthn ceremony must prove user *verification* and not only presence. Default `preferred`, ordered `required` > `preferred` > `discouraged` for the tighten-only rule. See [Passkeys & WebAuthn](#/docs/passkeys#uv-policy)."],
@@ -795,7 +799,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: `**Revocation is checked at AXIAM's device sign-in, and nowhere else.** A revoked certificate is refused on its next certificate sign-in; an OAuth2 client authenticating with \`tls_client_auth\` is matched by its registered name and not by the certificate's status, so revoke it by changing the client's registration. AXIAM publishes no CRL and runs no OCSP responder yet (T-102), so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, cannot learn of a revocation; keep leaf lifetimes short there. AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL as the step that stands on its own ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
+        text: `**A revocation reaches every place AXIAM authenticates by a certificate, and every relying party that fetches the list.** Device sign-in and the OAuth2 mTLS client methods (\`tls_client_auth\`, \`self_signed_tls_client_auth\`) refuse a certificate AXIAM issued and revoked on its next use. Each issuing CA publishes a signed certificate revocation list at \`/pki/v1/{org_id}/ca/{ca_id}/crl\`, named in every certificate AXIAM signs, so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, learns of a revocation at its next fetch, within the list's \`nextUpdate\` (a day by default). Not yet: the listeners' own TLS handshakes do not consult the list, there is no OCSP responder (both planned for 1.0.x). A CA whose key Vault's PKI engine holds publishes no list AXIAM signs: Vault publishes it, AXIAM forwards each revocation of its leaves to Vault (\`pki/revoke\` by serial, retried by the cleanup job's \`vault_revocation\` sweep until Vault accepts), and their relying parties read Vault's per-issuer list (T-470). AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks; the revocation list was the step of that route that stands on its own, and it now exists ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
       },
       {
         type: "note",
@@ -1080,6 +1084,15 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "Changing `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
       },
+      { type: "h", id: "tenant-deletion", text: "Deleting a tenant" },
+      {
+        type: "p",
+        text: "Deleting a tenant erases it, in two steps. **In the request** — which still requires a fresh export of the tenant's audit trail and still answers `204` — the tenant's sessions, OAuth2 refresh tokens, certificates and signing CAs are revoked and the tenant is marked deleted, so from that moment it is gone from every read, sign-in, token issuance and refresh, and its users' access tokens fail the per-request session check. **On the cleanup interval** (5 minutes by default) the `tenant_purge` sweep removes every row of every tenant-scoped table — accounts and credentials, sessions and grants, clients, configuration and the secrets it holds for other systems, roles, groups, consents and the exported audit entries — in the order a GDPR user erasure uses, then the tenant record — keeping only a revoked certificate or CA that has not yet expired, which its issuer's revocation list must keep naming, until it does — and writes `tenants.purged` to the system audit log beside `tenants.deleted`, which stays.",
+      },
+      {
+        type: "note",
+        text: `A deleted tenant's slug stays taken (\`409\`) until the purge has run. After an upgrade from a version that removed only the tenant record, the sweep also purges the rows such deletions left behind — their audit entries excepted, which the retention window governs — on its first run and daily after. The step-by-step is in the [admin guide](${GH_BLOB}/docs/admin/README.md#what-the-deletion-does-and-when-the-data-is-gone).`,
+      },
       { type: "h", id: "retention", text: "Retention" },
       {
         type: "p",
@@ -1170,7 +1183,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Fourteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+        text: "Sixteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export`, `audit_retention`, `tenant_purge` and `vault_revocation` (which forwards to Vault the revocations of leaves of a `vault_pki` CA that Vault has not yet accepted, and fails while any remains). Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
       },
       {
         type: "table",
@@ -1181,6 +1194,10 @@ export const OPERATE_PAGES: DocPage[] = [
           ["`last_error`", "The last error text, for whoever is now looking at this wondering what broke."],
           ["`last_success_at`", "When it last completed cleanly. `null` means never."],
         ],
+      },
+      {
+        type: "p",
+        text: "The same response carries `request_audit`, the count of request-audit rows this process lost since it started: `dropped` (the worker's 4 096-row queue was full when the request ended) and `failed` (the datastore refused the append), with `dead_lettered`, `not_recoverable`, `dead_letter_configured`, `dead_letter_full`, `last_loss_at` and `recent_loss`. A loss in the last fifteen minutes turns `status` to `degraded`; it clears itself once rows are being recorded again. A dead-letter file at its budget (`dead_letter_full`) is `degraded` too, until it is replayed and moved with the server stopped. When `AXIAM__GDPR_AUDIT_DLQ_FILE` is set the lost rows are appended to that file, in the form used for the GDPR records, and replayed by hand; when it is not, they are counted and logged only. An orderly stop drains the queue; a killed process can still lose the rows it held. The server logs the totals on the `axiam.audit.loss` target, at most once a minute.",
       },
       {
         type: "note",
@@ -1562,7 +1579,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "One item this checklist cannot give you: AXIAM is pre-1.0 and its security posture is a self-assessment backed by tests and a threat model, not a certified third-party audit. Weigh that against what the deployment is protecting.",
+        text: "One item this checklist cannot give you: AXIAM's security posture is a self-assessment backed by tests and a threat model, not a certified third-party audit — no independent third-party audit has been performed. Weigh that against what the deployment is protecting.",
       },
       {
         type: "cards",

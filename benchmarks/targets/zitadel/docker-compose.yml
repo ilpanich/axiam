@@ -91,7 +91,7 @@ services:
     ports:
       # 8090 plaintext (p0) or the TLS port 8443 (https profiles) — same container
       # port 8080, whose scheme is decided by tlsMode.
-      - "${BENCH_PORT:-${BENCH_APP_PORT:-8090}}:8080"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_PORT:-${BENCH_APP_PORT:-8090}}:8080"
     depends_on:
       postgres: { condition: service_healthy }
       # A freshly-created named volume is root:root 0755, but the Zitadel image

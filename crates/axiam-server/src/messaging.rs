@@ -11,11 +11,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axiam_amqp::{
     AmqpManager, AmqpOutboundPublisher, InProcessMailPublisher, InProcessOutbound,
-    MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig, spawn_in_process_consumer,
-    spawn_outbound_consumer,
+    InProcessShutdown, MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig,
+    spawn_in_process_consumer, spawn_outbound_consumer,
 };
 use axiam_core::error::AxiamResult;
 use axiam_core::models::mail::OutboundMailMessage;
@@ -49,6 +50,15 @@ impl OutboundTransport {
     /// The broker-less transport.
     pub fn in_process() -> Self {
         Self::InProcess(InProcessOutbound::new())
+    }
+
+    /// The handle the teardown stops the consumers with. Call it once every
+    /// consumer has been spawned.
+    pub fn shutdown(&mut self) -> OutboundShutdown {
+        match self {
+            Self::Amqp { .. } => OutboundShutdown::Broker,
+            Self::InProcess(hub) => OutboundShutdown::InProcess(hub.shutdown()),
+        }
     }
 
     /// The publisher producers of `kind` hold. Call it once per kind, before
@@ -112,6 +122,27 @@ impl OutboundTransport {
                 spawn_in_process_consumer(end, &deliverers, audit_repo, cfg)
                     .unwrap_or_else(|e| panic!("cannot start the in-process {kind} consumer: {e}"));
             }
+        }
+    }
+}
+
+/// What the teardown calls to account for the outbound deliveries still held
+/// in memory (P23W5-A4).
+pub enum OutboundShutdown {
+    /// The broker holds the queues durably; nothing is in memory to account for.
+    Broker,
+    /// The minimal profile's in-process dispatcher.
+    InProcess(InProcessShutdown),
+}
+
+impl OutboundShutdown {
+    /// Stop taking outbound work and write a `delivery_abandoned` audit row for
+    /// every delivery still queued or waiting for a retry, waiting at most
+    /// `deadline`. Returns the kinds that had not finished by then.
+    pub async fn stop(self, deadline: Duration) -> Vec<OutboundKind> {
+        match self {
+            Self::Broker => Vec::new(),
+            Self::InProcess(shutdown) => shutdown.stop(deadline).await,
         }
     }
 }

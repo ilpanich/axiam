@@ -32,7 +32,8 @@ pub use consumer::{
     OutboundConsumerError, OutboundDeliverers, run_outbound_consumer, spawn_outbound_consumer,
 };
 pub use inprocess::{
-    InProcessConsumerEnd, InProcessOutbound, InProcessOutboundPublisher, spawn_in_process_consumer,
+    IN_FLIGHT_STOP_GRACE, InProcessConsumerEnd, InProcessOutbound, InProcessOutboundPublisher,
+    InProcessShutdown, STOPPED_REASON, spawn_in_process_consumer,
 };
 pub use publisher::AmqpOutboundPublisher;
 pub use retry::{OutboundRetryConfig, backoff_ttl_ms};

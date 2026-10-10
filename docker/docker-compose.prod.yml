@@ -271,6 +271,22 @@ services:
       # serve both the edge proxy (which presents none) and IoT devices reaching
       # the backend directly (which do). Leave `off` if you enrol no devices.
       AXIAM__SERVER__TLS__CLIENT_AUTH: "${AXIAM_TLS_CLIENT_AUTH:-off}"
+      # P23W5-A7: the audit dead-letter file. An audit row the datastore refuses
+      # — a request's, the GDPR export/erasure request records, the erasure sweep's
+      # and a tenant deletion's — is appended here as one JSON line, instead of
+      # being counted and forgotten. It is on a NAMED VOLUME (below) so it outlives
+      # the container; the distroless image has no directory the non-root user
+      # could write to. Replay it once the datastore is back:
+      # docs/deployment/README.md, "The audit dead-letter file". Unset, the server
+      # warns at boot and a lost row is not recoverable.
+      AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+      # R1W2-02: the file's byte budget (192 MiB by default). The named volume has
+      # no bound of its own and shares the Docker root with surrealdb-data, so this
+      # is what keeps a flood during a datastore outage off the datastore's disk:
+      # past nine tenths of it request-audit rows are refused (counted as
+      # not_recoverable, `dead_letter_full` on /health/jobs), and the last tenth is
+      # kept for the GDPR records.
+      AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES: "${AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES:-201326592}"
       RUST_LOG: "${RUST_LOG:-axiam=info}"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
@@ -284,7 +300,12 @@ services:
       # Trust anchor for Vault's listener — the server reads every secret over
       # this connection before it can serve anything, so it must be mounted.
       - ./.secrets/vault-tls:/etc/axiam/vault-tls:ro
+      # P23W5-A7: the audit dead-letter file's volume (see the variable above).
+      - gdpr-audit-dlq:/var/lib/axiam/audit-dlq
     depends_on:
+      # Hands the volume to the non-root user the distroless image runs as.
+      gdpr-audit-dlq-init:
+        condition: service_completed_successfully
       surrealdb:
         condition: service_healthy
       rabbitmq:
@@ -294,6 +315,11 @@ services:
       # fail closed — but with a less obvious message than "vault is unhealthy".
       vault:
         condition: service_healthy
+    # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC and 5 s
+    # for the audit queue (#569). Compose's default grace period is 10 s, which
+    # would kill a stop with a request still running before the audit rows are
+    # written, so allow those 30 s and a margin.
+    stop_grace_period: 40s
     healthcheck:
       # D-09: distroless has no shell; use the axiam-server healthcheck subcommand
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
@@ -357,6 +383,20 @@ services:
     command: ["sh", "-c", "chown -R 65532:65532 /data && chmod -R u+rwX /data"]
     volumes:
       - surrealdb-data:/data
+    restart: "no"
+
+  # One-shot init for the audit dead-letter volume, for the same reason as
+  # surrealdb-init: Docker creates the mount point owned by root, and the server
+  # (65532) could not append to it. Left alone, that fails on the one day the file
+  # is needed — the day the datastore is already failing. Idempotent.
+  gdpr-audit-dlq-init:
+    image: busybox
+    container_name: axiam-gdpr-audit-dlq-init
+    command: ["sh", "-c", "chown -R 65532:65532 /dlq && chmod -R u+rwX /dlq"]
+    volumes:
+      - gdpr-audit-dlq:/dlq
+    # Nothing to reach; a root container with no network.
+    network_mode: "none"
     restart: "no"
 
   # SurrealDB — document/graph database
@@ -438,6 +478,11 @@ volumes:
   # `vault operator raft snapshot save`, which is consistent and can be taken
   # while Vault is running; copying the directory under a live process is not.
   vault-raft-data:
+  # The audit dead-letter file (AXIAM__GDPR_AUDIT_DLQ_FILE). It holds audit rows
+  # the datastore refused, so it is the only copy of them: back it up with the
+  # datastore, and do not remove it (`docker compose down -v`) before replaying it.
+  # Its size is bounded by AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES, not by the volume.
+  gdpr-audit-dlq:
 
 networks:
   axiam-network:

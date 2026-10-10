@@ -171,6 +171,7 @@ The rules, all enforced by the server and summarised from
 | --- | --- |
 | **An exchange only ever narrows** | No parameter makes the issued token permit more than the subject token did. |
 | **`actor_token` selects delegation** | Present it and the token carries `act`; leave it out and you have asked for *impersonation*, which is refused unless the client holds `urn:axiam:params:oauth:grant-type:may-impersonate`. A client without it gets `unauthorized_client`, never a silent downgrade. |
+| **The actor token is the client's own** | It must have been issued to the exchanging client: its `client_credentials` token, or a user token from its own grants. A token issued to any other client, a console sign-in or a service account's token is `invalid_request`. |
 | **`act` chains are capped at depth 3** | Re-exchanging nests `act.act`; a subject token already naming three actors is `invalid_request`. |
 | **Scopes are an intersection** | `requested ∩ subject ∩ client-registered`. A scope the subject lacks is `invalid_scope`, not dropped. An empty intersection fails. |
 | **`audience` / `resource` must be registered** | The target must be in the exchanging client's `allowed_resources` or be one of AXIAM's own audiences, else `invalid_target`. |
@@ -179,9 +180,13 @@ The rules, all enforced by the server and summarised from
 | **Public clients cannot exchange** | See section 1. |
 
 `act.sub` is the `sub` of the `actor_token` the client presents, which AXIAM
-verifies as a valid access token of the same tenant. The usual choice is the
-agent's own `client_credentials` token. Every exchange, successful or not, is
-audited with the client, subject, actor, scopes, audience and outcome.
+verifies as a valid access token of the same tenant **issued to the exchanging
+client** (since 1.0.0, #518). The usual choice is the agent's own
+`client_credentials` token, whose `sub` is the agent's `client_id`. An agent
+cannot name another party as its actor by presenting that party's token — an
+MCP server holds its callers' tokens by design, and before 1.0.0 it could have
+written any of them into `act`. Every exchange, successful or not, is audited
+with the client, subject, actor, scopes, audience and outcome.
 
 Register the exchanging client with the grant and with the targets it may
 address:
@@ -466,12 +471,13 @@ request, which is why the feed exists.
 Stated so that nobody builds on an assumption:
 
 - **No `may_act` policy.** RFC 8693's `may_act` claim, which lets a subject token
-  say who may act for it, is not read anywhere. Who may exchange is decided by
-  which clients carry the exchange grant, by that client's registered scopes and
-  `allowed_resources`, and by the subject's own privileges. The actor token is
-  verified as a valid same-tenant AXIAM access token but is not required to
-  belong to the exchanging client, so hand the exchange grant out as you would
-  any capability that lets a client speak for your users.
+  say who may act for it, is not read anywhere; it is planned for `1.0.x`. Who
+  may exchange is decided by which clients carry the exchange grant, by that
+  client's registered scopes and `allowed_resources`, and by the subject's own
+  privileges. The actor can only be the exchanging client itself (or a user
+  signed in to it): the actor token must have been issued to that client, so a
+  client cannot attribute a delegation to another party. Hand the exchange grant
+  out as you would any capability that lets a client speak for your users.
 - **No cross-domain delegation.** `actor_token` is refused when the subject token
   comes from an external identity provider, and a token minted from a partner's
   token cannot be exchanged again.

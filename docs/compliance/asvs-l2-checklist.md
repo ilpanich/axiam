@@ -12,7 +12,7 @@ V13 (API), V15 (Build).
 **Status values:** Pass / N/A / Deferred (see FINDINGS.md #N)
 
 **Compliance assertion:** All in-scope controls below have an explicit status.
-**Every control is Pass, N/A, or Deferred — zero controls lack a status.** No High-severity Deferred row. Beta ships with no known High holes (D-04).
+**Every control is Pass, N/A, or Deferred — zero controls lack a status.** No row is Deferred (V2.1.7, the last, is Pass since F-03 was fixed). 1.0.0 ships with no known High holes in this checklist (D-04); the threat-model re-verification of 2026-10-10 against model 2.40.0, including the entries that remain `Open` at High or Critical severity as residual risk outside the application boundary, is recorded in [FINDINGS.md](FINDINGS.md).
 
 ---
 
@@ -24,7 +24,7 @@ V13 (API), V15 (Build).
 | V2.1.2 | Passwords ≤ 128 chars MUST be allowed | Pass | `crates/axiam-auth/src/policy.rs` — `max_length` enforcement | |
 | V2.1.4 | No complexity rules that limit password space (unless NIST-allowed) | Pass | `crates/axiam-auth/src/policy.rs` — NIST complexity options configurable, not forced | |
 | V2.1.6 | Forgot-password does not reveal whether email is registered | Pass | `crates/axiam-api-rest/src/handlers/password_reset.rs:122` — always returns 200 on reset request regardless of account existence | Timing-safe |
-| V2.1.7 | Breach-password check (HIBP or local list) | Deferred (see FINDINGS.md #F-03) | Policy hook in `policy.rs:289` comment notes HIBP is deferred | Low severity; breach check planned post-beta |
+| V2.1.7 | Breach-password check (HIBP or local list) | Pass (see FINDINGS.md #F-03) | `crates/axiam-auth/src/policy.rs` — `check_hibp` (k-anonymity range query: only a five-character SHA-1 prefix leaves the server) behind opt-in `hibp_*` policy configuration, with a circuit breaker (`crates/axiam-auth/src/hibp_breaker.rs`) so a HIBP outage never blocks sign-up or a password change; `parse_hibp_*` and `check_hibp_short_circuits_when_breaker_open` tests | Corrected 2026-10-10: this row read Deferred, with an evidence cell from the original verification pass, after F-03 was Fixed |
 | V2.1.9 | No password composition rules; only checks against policy + breach list | Pass | `crates/axiam-auth/src/policy.rs` — policy is configurable; default does not force composition | |
 | V2.1.12 | Users can change own password | Pass | `crates/axiam-api-rest/tests/password_change.rs` — `password_change_success` test |
 | V2.2.1 | Anti-automation controls on auth endpoint | Pass | `crates/axiam-api-rest/src/config/rate_limit.rs` — governor rate limiting on auth endpoints; `auth_test.rs::login_with_invalid_password_returns_401` (line 748). **Phase 23:** CIBA's `POST /oauth2/bc-authorize` has a bucket of its own, the CIBA grant is counted with every grant at the token endpoint, and each request carries an `interval` that `slow_down` lengthens (T-428: `ciba_test.rs::the_limiter_counts_bc_authorize`, `::the_limiter_counts_the_ciba_grant`; `ciba.rs::polling_inside_the_interval_slows_down_and_the_interval_grows_to_a_cap`); the SAML IdP's SSO and SLO routes are rate-limited (T-321, T-374: `saml_idp_sso_test.rs::the_sso_routes_are_rate_limited`, `saml_idp_slo_test.rs::the_slo_route_is_rate_limited`) |
@@ -192,20 +192,24 @@ V13 (API), V15 (Build).
 
 | Family | Total Controls | Pass | N/A | Deferred | Open |
 |--------|---------------|------|-----|----------|------|
-| V2 (Authentication) | 23 | 20 | 2 | 1 | 0 |
+| V2 (Authentication) | 24 | 22 | 2 | 0 | 0 |
 | V3 (Session Management) | 15 | 15 | 0 | 0 | 0 |
-| V4 (Access Control) | 9 | 8 | 1 | 0 | 0 |
-| V6 (Stored Cryptography) | 14 | 14 | 0 | 0 | 0 |
+| V4 (Access Control) | 9 | 7 | 2 | 0 | 0 |
+| V6 (Stored Cryptography) | 15 | 15 | 0 | 0 | 0 |
 | V7 (Error Handling / Logging) | 7 | 7 | 0 | 0 | 0 |
 | V8 (Data Protection) | 8 | 8 | 0 | 0 | 0 |
 | V9 (Communications) | 6 | 6 | 0 | 0 | 0 |
 | V10 (Malicious Code) | 8 | 7 | 1 | 0 | 0 |
 | V14 (Configuration) | 14 | 14 | 0 | 0 | 0 |
-| **Total** | **104** | **99** | **4** | **1** | **0** |
+| **Total** | **106** | **101** | **5** | **0** | **0** |
 
-**Deferred findings:** F-03 (V2.1.7 HIBP breach check — Low). F-04 (V9.1.2/V9.1.3
-TLS 1.3 minimum) and F-05 (V14.4.4 CSP header) are now resolved — see FINDINGS.md.
-**No Deferred row has High or Critical severity.** Beta compliance gate: SATISFIED.
+**Deferred findings:** none. F-03 (V2.1.7 HIBP breach check), F-04 (V9.1.2/V9.1.3
+TLS 1.3 minimum) and F-05 (V14.4.4 CSP header) are resolved — see FINDINGS.md.
+**No row is Deferred.** 1.0.0 compliance gate: SATISFIED.
+
+*Corrected 2026-10-10:* the table above read V2 23 / 20 / 2 / 1, V4 9 / 8 / 1, V6 14 and
+Total 104 / 99 / 4 / 1, which did not match the rows of this document, and V2.1.7 read
+Deferred after F-03 was Fixed. The figures now count the rows above.
 
 SBOM-01 (CRA SBOM theme, tracked in the V14 table above and in FINDINGS.md) is
 also now resolved. It is excluded from the `Total`/`Pass` column counts above

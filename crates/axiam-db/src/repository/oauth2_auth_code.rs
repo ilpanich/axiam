@@ -522,4 +522,22 @@ impl<C: Connection> AuthorizationCodeRepository for SurrealAuthorizationCodeRepo
 
         Ok(count)
     }
+
+    async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM (DELETE oauth2_auth_code \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 RETURN BEFORE) GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.total).unwrap_or(0))
+    }
 }

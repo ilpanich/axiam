@@ -27,6 +27,7 @@ import {
   ServerNamesSummary,
 } from "@/pages/settings/serverNamesPolicy";
 import { CimdPolicyFields } from "@/pages/settings/cimdPolicy";
+import { SurfaceSwitches } from "@/pages/settings/surfaceSwitches";
 import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
 import type { WebauthnUserVerification } from "@/services/organizations";
@@ -1653,6 +1654,28 @@ function SettingsTab({
             value={merged.cimd}
             externalResources={merged.external_client_allowed_resources}
             onChange={(cimd) => setField("cimd", cimd)}
+          />
+        </div>
+
+        {/* SAML identity provider and SSF transmitter (G-2, G-5; P23W4-07) —
+            the baseline, and the only surface where either can be turned ON:
+            both are disable-only for a tenant. */}
+        <div className="glass-card space-y-4">
+          <h3 className="text-base font-semibold text-foreground">
+            SAML Identity Provider &amp; Security Events
+          </h3>
+          <SurfaceSwitches
+            idPrefix="org"
+            scope="organization"
+            editing
+            value={{
+              saml_idp_enabled: merged.saml_idp_enabled,
+              ssf_enabled: merged.ssf_enabled ?? false,
+            }}
+            onChange={(patch) =>
+              setForm((prev) => (prev ? { ...prev, ...patch } : prev))
+            }
+            ssfInactiveReason={settings?.oidc?.ssf_inactive_reason}
           />
         </div>
 

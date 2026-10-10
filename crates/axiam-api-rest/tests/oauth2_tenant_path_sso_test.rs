@@ -158,6 +158,19 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     (db, org.id, tenant_id, user_id)
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 /// The app, with per-tenant issuer paths on and the tenant-scope resolver the
 /// production server registers — what makes `X-Axiam-Tenant` work for an
 /// organization-level principal. No session validator: the admin tokens these
@@ -165,7 +178,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
 /// `oauth2_login_hop_test.rs`.
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
-        test_app!($db, $auth, RateLimitConfig::default())
+        test_app!($db, $auth, permissive_rate_limits())
     };
     ($db:expr, $auth:expr, $limits:expr) => {{
         test::init_service(
@@ -1050,6 +1063,73 @@ async fn d11_m7_a_fapi2_return_leg_on_the_tenant_path_skips_no_gate() {
     );
 }
 
+/// **#524 (P23W2-03), on the tenant path.** An anonymous browser sending a
+/// `require_par` client's parameters inline to `/t/{tenant_id}/oauth2/authorize`
+/// is refused `ParRequired` before the login hop, in place: `400`, no
+/// `Location` and the PAR wording, as a page and as the JSON object. The
+/// control: the same client's pushed request still takes the hop.
+#[actix_rt::test]
+async fn p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop_on_the_tenant_path()
+ {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, fapi_browser_client()).await;
+    let inline = format!(
+        "{}&code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256",
+        tenant_query(&client_id)
+    );
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("{}?{inline}", tenant_path(tenant_id)))
+        .insert_header(("Accept", "text/html,application/xhtml+xml"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(
+        resp.headers().get("location").is_none(),
+        "refused in place, never sent to /login: {}",
+        location(&resp)
+    );
+    let page = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(
+        page.contains(
+            "this client must use pushed authorization requests (RFC 9126); \
+             send parameters to /oauth2/par first"
+        ),
+        "{page}"
+    );
+
+    let resp = tenant_authorize(&app, tenant_id, &inline, None).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.headers().get("location").is_none());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("must use pushed authorization requests (RFC 9126)"),
+        "{body}"
+    );
+
+    let pushed = push_handle(&db, tenant_id, &client_id, Some(PKCE_CHALLENGE)).await;
+    let resp = tenant_authorize(
+        &app,
+        tenant_id,
+        &format!(
+            "client_id={client_id}&request_uri={}",
+            urlencoding_encode(&pushed)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    assert!(is_login_hop(&location(&resp)), "{}", location(&resp));
+}
+
 /// **The account re-read, on the tenant path.** A locked, deactivated, deleted
 /// or anonymised account's tenant cookie buys nothing (stale: `reauth`, the
 /// tenant copy cleared, the return leg terminal); a `PendingVerification` one —
@@ -1903,6 +1983,74 @@ async fn p23w1_10_the_cookie_hop_is_get_only_public_and_rate_limited() {
             .as_u16(),
         429,
         "the tenant mount draws on the same allowance"
+    );
+}
+
+/// **#532 (P23W3-09): `/oauth2/authorize` is rate-limited on both mounts**
+/// (§7 rule 6). The browser-endpoint preset `end_session_per_min` — here one
+/// request a minute — bounds the bare and the tenant mount alike, so the second
+/// request on either is `429`. Both draw on one allowance (`oauth2_authorize`,
+/// registered by both scopes), and that allowance is the authorization
+/// endpoint's own: spending it leaves the logout hop's bucket untouched.
+#[actix_rt::test]
+async fn p23w3_09_authorize_is_rate_limited_on_both_mounts() {
+    let limits = || RateLimitConfig {
+        end_session_per_min: 1,
+        ..RateLimitConfig::default()
+    };
+    let call = |uri: &str| {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(uri)
+            .to_request()
+    };
+
+    // The bare mount first, then the tenant mount on the same allowance.
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let limited = test_app!(db, auth, limits());
+    let bare = format!(
+        "/oauth2/authorize?tenant_id={tenant_id}&{}",
+        tenant_query("c")
+    );
+    let tenant = format!("{}?{}", tenant_path(tenant_id), tenant_query("c"));
+    let status = |resp: actix_web::dev::ServiceResponse| resp.status().as_u16();
+    assert_ne!(status(test::call_service(&limited, call(&bare)).await), 429);
+    assert_eq!(
+        status(test::call_service(&limited, call(&bare)).await),
+        429,
+        "the bare mount must be bounded"
+    );
+    assert_eq!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429,
+        "the tenant mount draws on the same allowance"
+    );
+    // A bucket of its own: the logout hop under the same path still answers.
+    assert_eq!(
+        status(
+            test::call_service(
+                &limited,
+                call(&format!("/oauth2/authorize/logout?tenant_id={tenant_id}"))
+            )
+            .await
+        ),
+        200,
+        "the authorization endpoint's bucket is not the logout hop's"
+    );
+
+    // The tenant mount on a fresh deployment: bounded on its own.
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let limited = test_app!(db, auth, limits());
+    let tenant = format!("{}?{}", tenant_path(tenant_id), tenant_query("c"));
+    assert_ne!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429
+    );
+    assert_eq!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429,
+        "the tenant mount must be bounded"
     );
 }
 

@@ -40,6 +40,13 @@ name: FAPI 2.0 conformance
 # the full timeout, so dispatch with a small `module_timeout` (and mind
 # `timeout-minutes` below) unless you want the long run.
 #
+# The job's verdict is therefore NOT "every module PASSED" (unreachable here)
+# but conformance/scripts/gate.py over the suite's machine-readable results:
+# red on a FAILED non-interactive module, a module below its baseline
+# (conformance/baseline.json, the 2026-09-25 runs) or a missing plan; WAITING
+# and SKIPPED are tolerated and named. Green here is "no regression", still not
+# "certified". The runbook's "The CI gate" section has the rules.
+#
 # ## The topology, because it is not obvious from the steps
 #
 # AXIAM is brought up by the benchmark harness (`p3-mtls`), but it is the
@@ -173,6 +180,11 @@ jobs:
             echo "CONFORMANCE_MTLS_BASE_URL=${AXIAM_MTLS_BASE_URL}"
             echo "BENCH_COMPOSE_OVERLAYS=targets/axiam/docker-compose.conformance.yml"
             echo "BENCH_TLS_PORT=${AXIAM_MTLS_PORT}"
+            # The benchmark stacks publish on 127.0.0.1 unless told otherwise
+            # (P23W6-06), and the suite and the front door reach AXIAM at
+            # host.docker.internal:host-gateway, i.e. the Docker bridge, which a
+            # loopback binding cuts off. Throwaway runner; nothing else listens.
+            echo "BENCH_BIND_ADDR=0.0.0.0"
             # bench-up forwards this into the container as the OIDC issuer.
             echo "AXIAM__AUTH__OAUTH2_ISSUER_URL=${AXIAM_ISSUER}"
             # The conformance suite's admin-API calls go through the front door.
@@ -303,6 +315,12 @@ jobs:
 
       - name: Render the report
         if: always()
+        env:
+          # Through `env:`, never interpolated into the script below: a
+          # `workflow_dispatch` input is attacker-shaped text for anyone who may
+          # dispatch the workflow, and `${{ }}` inside `run:` is substituted
+          # BEFORE the shell parses it (P23W5-11).
+          AXIAM_IMAGE: ${{ inputs.axiam_image }}
         run: |
           set -uo pipefail
           # Deliberately not `set -e`: the reporter exits non-zero on a red
@@ -313,8 +331,8 @@ jobs:
           {
             echo "## FAPI 2.0 conformance"
             echo
-            if [ -n "${{ inputs.axiam_image }}" ]; then
-              echo "Target: \`${{ inputs.axiam_image }}\` (digest-pinned)"
+            if [ -n "${AXIAM_IMAGE}" ]; then
+              echo "Target: \`${AXIAM_IMAGE}\` (digest-pinned)"
             else
               echo "Target: **built from this checkout — smoke test, NOT submission evidence**"
             fi
@@ -377,12 +395,37 @@ jobs:
           just conformance-down || true
           cd benchmarks && just target=axiam bench-down || true
 
+      # The verdict of the job. `just conformance-run` exits non-zero for any
+      # module that is not PASSED/SKIPPED, and on an unattended run every
+      # interactive module is WAITING for a browser nobody drives, so that exit
+      # code is red on EVERY run and signals nothing (P23W5-11). This gates on
+      # the machine-readable results instead: no module FAILED (or COULD_NOT_START,
+      # INTERRUPTED, still running at the deadline), none below its baseline in
+      # conformance/baseline.json, every baselined module reported; WAITING and
+      # SKIPPED are tolerated and named. See the runbook's "The CI gate".
       - name: Gate on the plan result
         if: always()
+        env:
+          RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |
-          if [ "${{ steps.run.outcome }}" != "success" ]; then
-            echo "::error::at least one module did not pass — read the report artifact, \
-          failures are listed first"
+          set -uo pipefail
+          echo "conformance-run step outcome: ${RUN_OUTCOME} (non-zero is expected while interactive modules wait)"
+          python3 conformance/scripts/gate.py --results conformance/.run/results \
+            --plan fapi2-security-profile-final-mtls \
+            --plan fapi2-security-profile-final-self-signed \
+            --plan fapi2-security-profile-final-private-key-jwt \
+            2>&1 | tee gate.txt
+          rc=${PIPESTATUS[0]}
+          {
+            echo
+            echo "### Gate"
+            echo
+            echo '```'
+            cat gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::a conformance regression — a module FAILED, fell below its baseline, or a plan left no result; read the gate output above and the report artifact"
             exit 1
           fi
-          echo "All three plans passed every applicable module."
+          echo "No regression against conformance/baseline.json (interactive modules waiting are tolerated, not passed)."

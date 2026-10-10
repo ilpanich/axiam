@@ -291,6 +291,12 @@ struct ExistingSecretColumns {
     smtp_password_nonce: Option<String>,
     api_key_ciphertext: Option<String>,
     api_key_nonce: Option<String>,
+    // #525: where the stored secret was sent. An omitted secret is carried
+    // forward only to the same destination.
+    smtp_host: Option<String>,
+    smtp_port: Option<i64>,
+    smtp_starttls: Option<bool>,
+    api_url: Option<String>,
 }
 
 struct EncryptedProviderBinds {
@@ -463,7 +469,8 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
             .current()
             .query(
                 "SELECT provider_kind, smtp_password_ciphertext, \
-                        smtp_password_nonce, api_key_ciphertext, api_key_nonce \
+                        smtp_password_nonce, api_key_ciphertext, api_key_nonce, \
+                        smtp_host, smtp_port, smtp_starttls, api_url \
                  FROM email_config \
                  WHERE scope = $scope AND scope_id = $scope_id",
             )
@@ -490,6 +497,16 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
     /// life, so saving a tenant provider override without re-typing the API key
     /// stored the ciphertext of an empty string; every send then failed
     /// provider authentication while the panel reported the override saved.
+    ///
+    /// #525 (P23W2-05): and only to the **same destination**. A stored SMTP
+    /// password is kept when `host`, `port` and the TLS mode are unchanged, and
+    /// a stored API key when `api_url` is unchanged or returns to the kind's
+    /// own endpoint (`None`); otherwise the write is refused `400` — an
+    /// administrator who may edit the configuration but was never given the
+    /// secret could else point `host` (or `api_url`) at a server they run and
+    /// receive it in the next `AUTH` (or `Authorization` header). A stored
+    /// secret that is empty (an unauthenticated relay) protects nothing and
+    /// follows the destination as before.
     async fn preserve_omitted_secret(
         &self,
         scope: &str,
@@ -516,23 +533,67 @@ impl<C: Connection> SurrealEmailConfigRepository<C> {
         }
 
         match provider {
-            ProviderConfig::Smtp(_) => {
+            ProviderConfig::Smtp(smtp) => {
                 if existing.smtp_password_ciphertext.is_some() {
+                    let same_server = existing
+                        .smtp_host
+                        .as_deref()
+                        .is_some_and(|host| host.eq_ignore_ascii_case(&smtp.host))
+                        && existing.smtp_port == Some(i64::from(smtp.port))
+                        && existing.smtp_starttls == Some(smtp.starttls);
+                    if !same_server
+                        && !self.stored_secret_is_empty(
+                            existing.smtp_password_nonce.as_deref(),
+                            existing.smtp_password_ciphertext.as_deref(),
+                        )
+                    {
+                        return Err(AxiamError::Validation {
+                            message: "the SMTP host, port or TLS mode changed: enter the \
+                                      password again (a stored password is kept only for \
+                                      the same server)"
+                                .into(),
+                        });
+                    }
                     encrypted.smtp_password_ciphertext = existing.smtp_password_ciphertext;
                     encrypted.smtp_password_nonce = existing.smtp_password_nonce;
                 }
             }
-            ProviderConfig::SendGrid(_)
-            | ProviderConfig::Postmark(_)
-            | ProviderConfig::Resend(_)
-            | ProviderConfig::Brevo(_) => {
+            ProviderConfig::SendGrid(api)
+            | ProviderConfig::Postmark(api)
+            | ProviderConfig::Resend(api)
+            | ProviderConfig::Brevo(api) => {
                 if existing.api_key_ciphertext.is_some() {
+                    let same_endpoint = api.api_url.is_none() || api.api_url == existing.api_url;
+                    if !same_endpoint
+                        && !self.stored_secret_is_empty(
+                            existing.api_key_nonce.as_deref(),
+                            existing.api_key_ciphertext.as_deref(),
+                        )
+                    {
+                        return Err(AxiamError::Validation {
+                            message: "api_url changed: enter the API key again (a stored \
+                                      key is kept only for the same endpoint)"
+                                .into(),
+                        });
+                    }
                     encrypted.api_key_ciphertext = existing.api_key_ciphertext;
                     encrypted.api_key_nonce = existing.api_key_nonce;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether a stored secret decrypts to the empty string — the one stored
+    /// secret that may follow a changed destination (#525). One that cannot be
+    /// decrypted counts as a secret.
+    fn stored_secret_is_empty(&self, nonce: Option<&str>, ciphertext: Option<&str>) -> bool {
+        match (nonce, ciphertext) {
+            (Some(nonce), Some(ciphertext)) => {
+                decrypt_field(&self.key, nonce, ciphertext).is_ok_and(|s| s.is_empty())
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1545,12 +1606,16 @@ mod tests {
         let tenant_id = Uuid::new_v4();
         let secret = fixture_secret();
 
+        // The same `api_url` on both writes: since #525 an omitted key is kept
+        // only for the endpoint it was stored for (this test once changed it
+        // from `None` to an explicit URL, which is now refused — see
+        // `preserve_omitted_secret`).
         repo.set_tenant_override(
             tenant_id,
             SetTenantEmailOverride {
                 provider: Some(ProviderConfig::Resend(ApiProviderConfig {
                     api_key: secret.clone(),
-                    api_url: None,
+                    api_url: Some("https://api.resend.com/emails".into()),
                 })),
                 ..Default::default()
             },

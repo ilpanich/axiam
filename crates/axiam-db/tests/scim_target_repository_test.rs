@@ -935,6 +935,34 @@ async fn success_failure_and_dead_letter_write_their_own_columns() {
     );
 }
 
+/// #550: a dead letter the breaker made without a request is counted, and the
+/// failure stamp the breaker's window is measured from is left alone.
+#[tokio::test]
+async fn counting_a_dead_letter_leaves_the_failure_stamp_and_reason_alone() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let target = targets(&db).create(bearer_input(tenant)).await.unwrap();
+    let repo = states(&db);
+
+    repo.record_failure(tenant, target.id, "timeout")
+        .await
+        .unwrap();
+    let before = repo.get(tenant, target.id).await.unwrap();
+    repo.count_dead_letter(tenant, target.id).await.unwrap();
+    let after = repo.get(tenant, target.id).await.unwrap();
+    assert_eq!(after.dead_lettered_total, 1);
+    assert_eq!(after.consecutive_failures, 1);
+    assert_eq!(after.last_failure_at, before.last_failure_at);
+    assert_eq!(after.last_failure_reason.as_deref(), Some("timeout"));
+
+    // Another tenant's target is not found, like every other write.
+    assert!(
+        repo.count_dead_letter(Uuid::new_v4(), target.id)
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn an_overlong_failure_reason_is_truncated_not_refused() {
     let db = setup().await;

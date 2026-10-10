@@ -37,7 +37,7 @@
 //! | `prompt` | yes | that the OP did, or did not, interact with the user |
 //! | `max_age` | yes | an upper bound on the age of the authentication |
 //! | `acr_values` | yes | which authentication method was used |
-//! | `claims` | yes | (its `id_token.acr` member) the same; (its **essential** `id_token.auth_time` member, D-12) that the authentication instant was reported |
+//! | `claims` | yes | (its `id_token.acr` member) the same; (its **essential** `id_token.auth_time` member, D-12) that the authentication instant was reported; (its `id_token.sub` member with a value, P23W1-11) which subject the token may be for |
 //! | `id_token_hint` | yes | which subject the RP believes is present |
 //! | `login_hint` | no | a prefill for a form |
 //! | `display` | no | a layout request |
@@ -211,6 +211,21 @@ impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
 /// object, or an `essential` that is not a boolean) cannot be shown to be
 /// voluntary and is treated as essential, the rule an unreadable `acr` member
 /// already follows.
+///
+/// # …and the subject a token may be for (P23W1-11, #520)
+///
+/// OIDC Core §5.5.1: when `id_token.sub` is requested *with a value*, the
+/// server "MUST only send a positive response if the End-User identified by
+/// that sub value has an active session … or has been Authenticated as a
+/// result of the request", and "MUST NOT reply with an ID Token or Access
+/// Token for a different user". That is the claim-shaped twin of
+/// `id_token_hint`, and it used to be dropped on every lane. The honour lane
+/// now honours it (`crate::honour`, beside the hint); a `fapi2` client, which
+/// is never on that lane and is already refused `id_token_hint`, is refused a
+/// valued `sub` for the same reason. `"sub": null` or a `sub` member with no
+/// value constrains nothing (every ID token carries `sub`) and is not refused;
+/// a member that cannot be read is, and is a parse error on the honour lane,
+/// because a subject constraint nobody can read cannot be honoured either.
 const SECURITY_BEARING: [&str; 4] = ["prompt", "max_age", "acr_values", "id_token_hint"];
 
 /// The parsed bundle.
@@ -231,6 +246,10 @@ pub struct AuthnRequestParams {
     pub acr_values: Vec<String>,
     /// The `id_token.acr` member of `claims`, if any.
     pub claims_acr: Option<AcrRequest>,
+    /// The subjects `claims.id_token.sub` named in its `value` (or `values`),
+    /// in the order the RP wrote them. Empty when the member is absent, `null`
+    /// or carries no value: then it constrains nothing (P23W1-11).
+    pub claims_sub: Vec<String>,
     /// Opaque here; decoded only on the honour lane, where a signature check
     /// is affordable and meaningful.
     pub id_token_hint: Option<String>,
@@ -258,6 +277,11 @@ pub struct AuthnRequestParams {
     /// honoured (the lane emits it for every session), so an unreadable member
     /// must not start refusing honour-lane clients that work today.
     claims_auth_time_essential: bool,
+    /// Whether `claims` named a subject in `id_token.sub`, or carried a `sub`
+    /// member that cannot be read (P23W1-11). Separate from
+    /// [`Self::claims_sub`] because an unreadable member names nobody and must
+    /// still be refused on `fapi2`.
+    claims_sub_requested: bool,
 }
 
 impl AuthnRequestParams {
@@ -336,6 +360,16 @@ impl AuthnRequestParams {
             match serde_json::from_str::<serde_json::Value>(raw_claims) {
                 Ok(doc) => {
                     out.claims_auth_time_essential = auth_time_may_be_essential(&doc);
+                    match parse_claims_sub(&doc) {
+                        Ok(subjects) => {
+                            out.claims_sub_requested = !subjects.is_empty();
+                            out.claims_sub = subjects;
+                        }
+                        Err(e) => {
+                            out.claims_sub_requested = true;
+                            fail(&mut out, e);
+                        }
+                    }
                     match parse_claims_acr(&doc) {
                         Ok(acr) => {
                             out.claims_acr_requested = acr.is_some();
@@ -419,10 +453,11 @@ impl AuthnRequestParams {
     /// are not on this list.
     ///
     /// `claims` is on it only when it asked for `id_token.acr`, asked for
-    /// `id_token.auth_time` as essential (D-12), or could not be read well
-    /// enough to rule either out; a `claims` that asks only for `userinfo`
-    /// members, or for `auth_time` voluntarily, is honoured (or truthfully
-    /// omitted) on every lane and is not refusable. See [`SECURITY_BEARING`]'s
+    /// `id_token.auth_time` as essential (D-12), named a subject in
+    /// `id_token.sub` (P23W1-11), or could not be read well enough to rule
+    /// any of them out; a `claims` that asks only for `userinfo` members, or
+    /// for `auth_time` voluntarily, is honoured (or truthfully omitted) on
+    /// every lane and is not refusable. See [`SECURITY_BEARING`]'s
     /// docs for why.
     pub fn security_bearing_present(&self) -> Vec<&'static str> {
         self.present
@@ -431,7 +466,9 @@ impl AuthnRequestParams {
             .filter(|n| {
                 SECURITY_BEARING.contains(n)
                     || (*n == "claims"
-                        && (self.claims_acr_requested || self.claims_auth_time_essential))
+                        && (self.claims_acr_requested
+                            || self.claims_auth_time_essential
+                            || self.claims_sub_requested))
             })
             .collect()
     }
@@ -470,6 +507,50 @@ fn auth_time_may_be_essential(doc: &serde_json::Value) -> bool {
         Some(serde_json::Value::Bool(b)) => *b,
         Some(_) => true,
     }
+}
+
+/// Read the subjects `claims.id_token.sub` names (OIDC Core §5.5.1;
+/// P23W1-11, #520).
+///
+/// `Ok(vec![])` for no member, `null`, or an object with neither `value` nor
+/// `values` — a request for `sub` with no constraint, which every ID token
+/// satisfies. `value` contributes one subject and `values` several, read as
+/// `id_token.acr`'s are. Anything else is an error: a member that is not `null`
+/// or an object, or a `value`/`values` of the wrong type. A document that is
+/// not an object is `Ok(vec![])` here; `parse_claims_acr` reports it.
+fn parse_claims_sub(doc: &serde_json::Value) -> Result<Vec<String>, String> {
+    let Some(sub) = doc.get("id_token").and_then(|t| t.get("sub")) else {
+        return Ok(Vec::new());
+    };
+    if sub.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(obj) = sub.as_object() else {
+        return Err(
+            "claims.id_token.sub must be null or a JSON object (OIDC Core §5.5)".to_owned(),
+        );
+    };
+    let mut subjects = Vec::new();
+    if let Some(v) = obj.get("value") {
+        match v.as_str() {
+            Some(s) => subjects.push(s.to_owned()),
+            None => return Err("claims.id_token.sub.value must be a string".to_owned()),
+        }
+    }
+    if let Some(vs) = obj.get("values") {
+        let Some(arr) = vs.as_array() else {
+            return Err("claims.id_token.sub.values must be an array".to_owned());
+        };
+        for v in arr {
+            match v.as_str() {
+                Some(s) => subjects.push(s.to_owned()),
+                None => {
+                    return Err("claims.id_token.sub.values must be an array of strings".to_owned());
+                }
+            }
+        }
+    }
+    Ok(subjects)
 }
 
 /// Read `claims.id_token.acr` (OIDC Core §5.5.1) out of a parsed document.
@@ -905,6 +986,74 @@ mod tests {
                 ..Default::default()
             });
             assert!(p.parse_error().is_none(), "{doc}");
+        }
+    }
+
+    /// P23W1-11 (#520) — `claims.id_token.sub` with a value is read in both
+    /// spellings and is security-bearing, beside other members included; a
+    /// valueless `sub` constrains nothing and is not.
+    #[test]
+    fn p23w1_11_a_valued_id_token_sub_is_read_and_security_bearing() {
+        for (doc, want) in [
+            (r#"{"id_token":{"sub":{"value":"u-1"}}}"#, vec!["u-1"]),
+            (
+                r#"{"id_token":{"sub":{"essential":true,"value":"u-1"}}}"#,
+                vec!["u-1"],
+            ),
+            (
+                r#"{"id_token":{"sub":{"values":["u-1","u-2"]}}}"#,
+                vec!["u-1", "u-2"],
+            ),
+            (
+                r#"{"userinfo":{"name":null},"id_token":{"sub":{"value":"u-1"}}}"#,
+                vec!["u-1"],
+            ),
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert_eq!(p.claims_sub, want, "{doc}");
+            assert!(p.parse_error().is_none(), "{doc}");
+            assert_eq!(p.security_bearing_present(), ["claims"], "{doc}");
+        }
+        for doc in [
+            r#"{"id_token":{"sub":null}}"#,
+            r#"{"id_token":{"sub":{"essential":true}}}"#,
+            r#"{"id_token":{"sub":{}}}"#,
+            r#"{"userinfo":{"sub":{"value":"u-1"}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert!(p.claims_sub.is_empty(), "{doc}");
+            assert!(p.parse_error().is_none(), "{doc}");
+            assert!(p.security_bearing_present().is_empty(), "{doc}");
+        }
+    }
+
+    /// P23W1-11 — a `sub` member that cannot be read names nobody, so it can
+    /// be neither honoured nor shown harmless: a parse error (refused on the
+    /// honour lane) and security-bearing (refused on `fapi2`).
+    #[test]
+    fn p23w1_11_an_unreadable_id_token_sub_is_malformed_and_security_bearing() {
+        for bad in [
+            r#"{"id_token":{"sub":"u-1"}}"#,
+            r#"{"id_token":{"sub":{"value":42}}}"#,
+            r#"{"id_token":{"sub":{"values":"u-1"}}}"#,
+            r#"{"id_token":{"sub":{"values":[1]}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(bad),
+                ..Default::default()
+            });
+            assert!(p.claims_sub.is_empty(), "{bad}");
+            assert!(
+                p.parse_error().is_some_and(|e| e.contains("id_token.sub")),
+                "{bad}"
+            );
+            assert_eq!(p.security_bearing_present(), ["claims"], "{bad}");
         }
     }
 

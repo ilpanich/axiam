@@ -86,6 +86,9 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   // and groups are pushed to. Nav and route both gate on `scim_targets:read`;
   // the writes are gated inside the page.
   { path: "/scim-targets", label: "SCIM Targets", navPermission: "scim_targets:read", routePermission: "scim_targets:read" },
+  // G-5 (Phase 23): the receivers of the tenant's SSF security events. Nav and
+  // route both gate on `ssf_streams:read`; the writes are gated inside the page.
+  { path: "/ssf", label: "SSF Streams", navPermission: "ssf_streams:read", routePermission: "ssf_streams:read" },
   { path: "/reactors", label: "Reactors", navPermission: "reactors:list", routePermission: "reactors:list" },
   { path: "/oauth2-clients", label: "OAuth2 Clients", navPermission: "oauth2_clients:list", routePermission: "oauth2_clients:list" },
   // This one was the finding: the sidebar declared no permission while the route

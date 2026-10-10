@@ -1,6 +1,6 @@
 # AXIAM Deployment Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-07-28
 
 This guide gets an operator from zero to a running AXIAM stack, for both a
@@ -53,11 +53,14 @@ than built from the working tree. Pin a different release with
 uncomment the `build:` blocks on those two services in
 `docker-compose.prod.yml` and restore `--build` in the `prod-up` recipe.
 
-Note that the released images carry no moving `latest` tag: `release.yml`
-applies `latest` only to stable releases, and every AXIAM release so far is a
-pre-release, so `:latest` does not exist in the registry. `AXIAM_IMAGE_TAG` is
-consequently **required**, and `just prod-up` supplies it from the workspace
-version so there is only one place a release number lives.
+A stable release is published under three tags — `1.0.0`, `1.0` and `latest` —
+and a pre-release only under its exact version (`release.yml` applies the moving
+`1.0` and `latest` tags to stable releases alone). **Pin the exact version in
+production**: `latest` and `1.0` move with every release, and an upgrade should
+be a change you made on purpose and read the CHANGELOG for. `AXIAM_IMAGE_TAG` is
+**required** all the same — the compose file refuses to start without it — and
+`just prod-up` supplies it from the workspace version so there is only one place
+a release number lives.
 
 `docker-compose.prod.yml` refuses to start without `AXIAM_IMAGE_TAG`,
 `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD`, `RABBITMQ_DEFAULT_USER`,
@@ -77,6 +80,13 @@ Once up:
 
 Stop with `just prod-down` (keeps volumes) or `just prod-clean` (also removes
 volumes).
+
+The stack has one volume the server writes to besides the datastore's:
+`gdpr-audit-dlq`, the audit dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`). It
+holds audit rows the datastore refused, so `just prod-clean` deletes the only
+copy of any not yet replayed — see [the audit dead-letter
+file](#the-audit-dead-letter-file) before cleaning a stack that has had a
+datastore outage.
 
 For local development (not production-like), use `just dev-up` /
 `just dev-down` ([`docker/docker-compose.dev.yml`](../../docker/docker-compose.dev.yml))
@@ -131,6 +141,15 @@ Key manifests:
   same for all four consumers.
 - **On a single Raspberry Pi 5 with k3s**, all of this is scripted:
   [`docs/deployment/rpi5-k3s.md`](rpi5-k3s.md) and `infra/rpi5-k3s/`.
+
+The server pod mounts one volume it writes to: an `emptyDir` for the audit
+dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`, set in the ConfigMap). It is lost
+with the pod, so replay it before a rollout while it holds rows — see [the audit
+dead-letter file](#the-audit-dead-letter-file) for why it is not a claim and what
+to do if it must be. Its `sizeLimit` is enforced by evicting the pod, which
+deletes the file, so the server's budget for it
+(`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`, 192 MiB in the ConfigMap) stays below the
+limit.
 
 Before applying, an operator must:
 0. Install cert-manager and apply [`k8s/certs/`](../../k8s/certs/) (or create
@@ -595,9 +614,13 @@ Argon2id cost parameters themselves are never weakened to gain throughput.
 | `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. |
 
 The 503 path preserves the SEC-026 username-enumeration defence: the login
-"user not found" branch is subject to the same permit acquisition and timeout
-as the real password-verify branch, so the two remain timing- and
-status-indistinguishable under both normal and saturated load.
+"user not found" branch and the branch that refuses an account serving a
+temporary lockout each run one dummy verify under the same permit acquisition
+and timeout as the real password-verify branch, so all three remain timing- and
+status-indistinguishable under both normal and saturated load. gRPC
+`UserService/ValidateCredentials` does the same on every refusal (an unknown
+name, a locked, non-active or directory account), answering `UNAVAILABLE`
+where a wrong password would (T-469, #564).
 
 ## Memory allocator (jemalloc, H4)
 
@@ -836,6 +859,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | Max `POST /api/v1/auth/device` (device mTLS login) requests per minute per IP (default `60`). The route carried no limiter at all before 1.0.0-beta17, although a TLS handshake bearing a client certificate is the most expensive thing an unauthenticated caller can ask of the server. Sized from the honest traffic rather than from capacity: a device re-authenticates once per access-token lifetime (900 s by default), so 60/min holds a fleet of nine hundred devices on one address. Part of the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it — which is what a fleet behind a single NAT should reach for. |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | Max CIBA backchannel authentication requests (`POST /oauth2/bc-authorize`) per minute (default `60`), in a bucket of its own keyed like `/oauth2/token` (`AXIAM__RATE_LIMIT__KEY` applies), plus a per-client bucket of the same size after authentication. Scaled by `AXIAM__RATE_LIMIT__PROFILE` (`gateway` 600, `mesh` 6000). Each user is sent at most three CIBA notifications a minute whatever this is set to. |
+| `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` | The browser-endpoint preset, per IP (default `30`): `/oauth2/end_session`, the `/oauth2/authorize/logout` hop, `GET /oauth2/authorize` on both the bare and the per-tenant mount (bucket `oauth2_authorize`, #532) and the SAML identity provider's browser routes, each route in a bucket of its own. Never moved by a profile; raise it where many people start sign-ins from one address. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
 | `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
@@ -843,7 +867,9 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__SSF_PER_MIN` | Max requests per minute per IP to each route of the Shared Signals Framework receiver surface — `/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`, `/ssf/v1/poll/{stream_id}` (RFC 8936, whose long poll holds a request for up to 30 s) and both `/.well-known/ssf-configuration` forms (default `60`). One bucket per route, checked before the receiver's token. Each stream also enforces a 60-second `min_verification_interval` of its own (`429`). Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` | Max writes per minute per IP to the SSF stream registry's management API — create, update and delete under `/api/v1/tenants/{tenant_id}/ssf/streams` (default `30`). Each write can repoint where a tenant's security events and the push credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` | Max writes per minute per IP to the outbound SCIM target registry's management API — create, update, delete and reconcile now under `/api/v1/scim-targets` (default `30`). Each write can repoint where a tenant's user directory and the target's credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
-| `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | Max requests per minute per IP to each CIBA approval route — `GET /api/v1/ciba/requests/{id}`, `POST …/approve`, `POST …/deny` (default `30`). One bucket per route, so reads cannot starve decisions. Human-driven and behind a session and CSRF token; every request id that is not the caller's own answers `404`. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | Max requests per minute per IP to each CIBA approval route — `GET /api/v1/ciba/requests` (the pending list), `GET /api/v1/ciba/requests/{id}`, `POST …/approve`, `POST …/deny` (default `30`). One bucket per route, so reads cannot starve decisions. Human-driven and behind a session and CSRF token; every request id that is not the caller's own answers `404`. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__CRL_PER_MIN` | Max `GET /pki/v1/{org_id}/ca/{ca_id}/crl` (certificate revocation list) requests per minute per IP (default `60`). Unauthenticated, because a relying party fetches the list before it can validate anything; it does so once per `nextUpdate` and revalidates with `If-None-Match` between. The list is signed once and cached, so an admitted request costs a database read, not a signature. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Certificate revocation lists](../pki/README.md#certificate-revocation-lists). |
+| `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
@@ -1649,7 +1675,7 @@ The clocks of two instances sharing a datastore must agree to well within the
 just minimal-up      # SurrealDB + axiam-server, no broker
 curl -s http://localhost:8090/health
 just minimal-down    # stop; the data volumes are kept
-just minimal-clean   # stop and DELETE the datastore and the GDPR dead-letter file
+just minimal-clean   # stop and DELETE the datastore and the audit dead-letter file
 ```
 
 [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
@@ -1676,15 +1702,19 @@ its volumes can never be the dev or prod stack's.
 
 Both ports are published on the loopback interface only: put a TLS-terminating
 proxy in front of the REST port. The compose file also gives the server a
-**30 s stop grace period** and a named volume for the GDPR dead-letter file
+**40 s stop grace period** and a named volume for the audit dead-letter file
 (below).
 
 **On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
 `AXIAM__AMQP__*` URL, TLS or signing-key settings, no RabbitMQ, **`replicas: 1`**
-with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 30 (the
-default), and a small volume for `AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
+with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 40 (the
+default of 30 is too short; see
+[the grace period](#stopping-and-the-grace-period)), and a small volume for
+`AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
 manifest runs with `readOnlyRootFilesystem: true`, so without a mounted path the
-file sink cannot be written.
+file sink cannot be written. `k8s/server/deployment.yml` mounts one (an
+`emptyDir`; see [the audit dead-letter file](#the-audit-dead-letter-file) for
+what that survives).
 
 ### What it does not provide
 
@@ -1697,6 +1727,15 @@ file sink cannot be written.
 | **External audit ingestion over AMQP** (`amqp_audit_ingestion`) | The consumer that ingests audit events *published by other services* is not started. AXIAM's **own** audit events never touched AMQP — the audit middleware writes SurrealDB directly — and are unchanged. |
 | **Cross-replica decision-cache invalidation** (`decision_cache_broadcast`) | There is no second replica to tell. The decision cache itself (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED`) works, process-locally and exactly. |
 
+**A minimal-profile server reads no AMQP queue.** It does not consume
+`axiam.authz.request` or `axiam.audit.events`, whatever a broker holds, so a
+service that publishes to a broker left running next to it is confirmed by that
+broker while nothing reads the message. **A broker confirm never means AXIAM
+recorded an event** (nor decided an authorization): it says only that the broker
+accepted the message. A client that needs a decision uses REST or gRPC, which
+are unchanged; a service that needs its events in AXIAM's audit trail needs the
+full profile. The AMQP SDKs' READMEs say the same.
+
 Everything that rode a broker queue still works, on **in-process queues**:
 
 * **webhooks, SSF push, outbound SCIM and CIBA ping** run on one in-process
@@ -1704,7 +1743,8 @@ Everything that rode a broker queue still works, on **in-process queues**:
   (`AXIAM__WEBHOOK__*`, `AXIAM__SSF_PUSH__*`, `AXIAM__SCIM_PUSH__*`,
   `AXIAM__CIBA_PING__*`: attempts, base and ceiling of the exponential
   backoff) and the *same* audit rows (`<kind>.delivery_attempt`,
-  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path;
+  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path, plus one the
+  broker path has no use for, `<kind>.delivery_abandoned` (below);
 * **transactional mail** (verification, password reset, notification rules, GDPR
   export notices, CIBA approval) is sent by an in-process worker with the same
   retry count and the same PII-minimal `email.delivery_failed` audit row, and
@@ -1722,14 +1762,31 @@ already logs and swallows; a retry that finds no free retry slot (1 024 may be
 sleeping at once) is dead-lettered with the reason `in-process retry capacity
 exhausted`. If a lost webhook is not acceptable, run the full profile.
 
+What the dispatcher does record is that it lost a delivery. At an orderly stop,
+and when a queue refuses an enqueue, it writes one terminal
+**`<kind>.delivery_abandoned`** audit row (outcome `Failure`, the system actor,
+the target as the resource) per lost delivery, with a fixed `reason`:
+`in-process dispatcher stopped before the delivery completed`,
+`in-process queue full; the delivery was not accepted` or
+`in-process dispatcher not running; the delivery was not accepted`, and the
+delivery id and the number of attempts already made. It is a different action
+from `delivery_failed` on purpose: a restart is not a downstream outage, so the
+`scim_delivery_failed` notification event (which matches
+`scim_push.delivery_failed` only) does not mail anyone for it. Alert on
+`delivery_abandoned` separately if a lost delivery matters to you; it is
+written only when the process gets to stop in order (see below).
+
 In audit terms, a restart loses the following, and nothing else:
 
 * **A webhook, SSF, outbound SCIM or CIBA-ping delivery that was queued or
-  waiting for a retry** leaves at most a `<kind>.delivery_attempt` row and never
-  a terminal one (`.delivery_succeeded` or `.delivery_failed`). A delivery that
-  was refused because its queue was full leaves only a log line. Outbound SCIM
-  is repaired by the next reconciliation; webhooks, SSF events and CIBA pings
-  are not redelivered.
+  waiting for a retry** at an *orderly* stop leaves a terminal
+  `<kind>.delivery_abandoned` row (above). After a `SIGKILL`, an out-of-memory
+  kill or a stop that overran its backstop it leaves at most a
+  `<kind>.delivery_attempt` row and no terminal one. A delivery refused because
+  its queue was full leaves a `delivery_abandoned` row too (and the producer's log
+  line). Outbound SCIM is repaired by the next reconciliation; webhooks, SSF
+  events and CIBA pings are not redelivered. Queued mail is not covered by the
+  row: it has no per-message audit trail of this kind.
 * **A Security Event Token** that the SSF outbox had released to the push queue
   is lost with it. Receivers must already treat SSF signals as hints (the
   threat model's T-405); in the full profile a queued push is at-least-once, in
@@ -1746,14 +1803,29 @@ An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
 finishes the requests in flight, finishes the cleanup tick it is in (so a GDPR
 erasure and its audit row stay together) and then **writes the audit rows the
 audit middleware still holds, waiting up to 5 s for it**, before the process
-exits. A `SIGKILL` or an out-of-memory kill does none of that and loses what is
-queued.
+exits. Before that drain, in the minimal profile, each in-process outbound
+queue is closed and one `<kind>.delivery_abandoned` row is written for every
+delivery still queued or waiting for a retry. A `SIGKILL` or an out-of-memory
+kill does none of that and loses what is queued.
 
-**Give the container a termination grace period above 20 s.** Compose's default
-is 10 s, which is why `docker-compose.minimal.yml` sets `stop_grace_period: 30s`;
-Kubernetes' default of 30 s is enough. An instance that loses its lease stops
-accepting at once, finishes in-flight requests and exits non-zero within 15 s
-(a backstop then ends the process regardless).
+**Give the container a termination grace period of at least 40 s.** The stop
+has four bounded steps. The REST listener waits up to **20 s** for requests in
+flight (`shutdown_timeout`, set explicitly in `boot.rs`; actix's own default is
+30 s). The gRPC server then gets up to **5 s** to finish its calls, the
+in-process outbound queues up to **2 s** (`OUTBOUND_DRAIN_DEADLINE`) to account
+for what they hold, and the audit queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`)
+to be written. That is 32 s, and 40 s leaves a margin. A shorter grace period lets the orchestrator kill the process
+during the drain, which loses exactly the audit rows the orderly stop exists to
+keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
+`stop_grace_period: 40s` in `docker-compose.prod.yml` and
+`docker-compose.minimal.yml`, and `terminationGracePeriodSeconds: 40` in
+`k8s/server/deployment.yml`. If you change the shutdown timeout, move the grace
+period with it. An instance that loses its lease, or whose consumer or gRPC
+server dies, stops accepting at once, finishes in-flight requests and exits
+non-zero. A backstop ends the process regardless if the stop overruns: 15 s
+after it began for a lost lease (which must not run beside its successor for
+longer), 35 s — the four steps and a margin, inside the grace period — for a
+dead consumer or gRPC server.
 
 ### Audit durability
 
@@ -1763,51 +1835,183 @@ rows of deliveries lost on restart, external audit ingestion — is reviewed pat
 by path in
 [`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
 
-#### The GDPR dead-letter file
+#### The audit dead-letter file
 
-A failed datastore write of the two legally significant GDPR records —
-`gdpr.user_pseudonymized` (the erasure) and `tenants.deleted` — is never lost to
-a log line alone (T19.27). It goes to two sinks:
+An audit row the datastore refuses is never lost to a log line alone (T19.27,
+T-108). These go to a dead-letter file when `AXIAM__GDPR_AUDIT_DLQ_FILE` names
+one:
+
+* the two legally significant GDPR records written by the cleanup sweep and the
+  tenant API, `gdpr.user_pseudonymized` (the erasure) and `tenants.deleted`;
+* the two GDPR *request* records, `gdpr.data_export_requested` and
+  `gdpr.erasure_requested` (the request itself has succeeded by then; only the
+  record of it was refused);
+* request-audit rows that were dropped or failed to append (below).
+
+The records written by the sweep and by the GDPR handlers also go to a second
+sink, a structured log event on the target `axiam.audit.dlq`.
 
 1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
    per record, the fields of an audit entry (`tenant_id`, `actor_id`,
    `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
-   the server opens it for append and never rewrites or truncates it.
-   `docker-compose.minimal.yml` sets it to
-   `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl` on the **named volume**
-   `gdpr-audit-dlq`, so it outlives the container; back the volume up with the
-   datastore. The path must be writable by the server's user (65532 in the
-   shipped image) — the compose file's `volume-init` service sees to that.
-2. **A structured log event** on the target `axiam.audit.dlq`. It is the only
-   sink when the file variable is unset, so collect the container log as well.
+   the server opens it for append and never rewrites or truncates it. It is
+   configured in every shipped deployment, always at
+   `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`:
+
+   | Deployment | Volume | Survives |
+   |---|---|---|
+   | `docker-compose.minimal.yml` (project `axiam-minimal`) | named volume `gdpr-audit-dlq` | container removal and recreation; lost only by `just minimal-clean` |
+   | `docker-compose.prod.yml` (project `docker`) | named volume `gdpr-audit-dlq` | container removal and recreation; lost by `just prod-clean` (`down -v`) |
+   | `k8s/` | `emptyDir` named `audit-dlq`, `sizeLimit: 256Mi` | a container restart (OOMKill, failed probe); **not** the pod's deletion (rollout, drain, eviction, node loss) |
+
+   **The file's budget.** `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES` bounds it, in bytes:
+   192 MiB (`201326592`) when unset, at least 1 MiB; a value that is not a whole
+   number of bytes, or is below the minimum, fails the boot. Request-audit rows
+   fill at most nine tenths of the budget; past that each is refused, counted in
+   `not_recoverable`, and `/health/jobs` reports `dead_letter_full` (and
+   `degraded`) until the file is replayed and moved with the server stopped. The
+   last tenth is a reserve only the GDPR records write into, so a flood of
+   request rows cannot crowd out an erasure record; a GDPR record that would
+   cross the whole budget is refused too and kept on `axiam.audit.dlq` only. The
+   size is checked before each write, so the file can pass the budget by at most
+   one batch of rows. Each line's client-sized fields are cut with a
+   `...[truncated]` marker: `action` (the request's method and path) to 512
+   bytes and `ip_address` (the forwarded client address) to 64, which bounds a
+   request row's line to about a kilobyte; the audit row in the datastore is cut
+   the same way. Every shipped deployment states the budget: the ConfigMap key in
+   `k8s/server/configmap.yml`, `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` in both Compose
+   files.
+
+   Back the Compose volumes up with the datastore. A volume Compose creates is
+   root-owned, so each file has a one-shot init service (`volume-init`,
+   `gdpr-audit-dlq-init`) that hands it to the server's user (65532).
+
+   **Why the Kubernetes volume is an `emptyDir`.** `axiam-server` is a
+   Deployment of 2–10 replicas under an HPA, and the file is per replica. One
+   PersistentVolumeClaim would be a `ReadWriteOnce` volume shared by every
+   replica (a pod on another node cannot attach it), and one claim per replica
+   means a StatefulSet, a different workload with a different rollout. So the
+   manifests choose a spill volume that survives what is most likely, a
+   container restart, and **replay the file before you roll the Deployment**
+   while it holds rows. If the file must outlive the pod, replace the volume in
+   `k8s/server/deployment.yml` with a per-replica one (a StatefulSet's
+   `volumeClaimTemplates`, or a CSI ephemeral volume) and keep the path. The
+   `sizeLimit` is a backstop that must never be reached: the kubelet enforces
+   it by **evicting the pod, and eviction deletes the `emptyDir` and the file
+   with it** — every unreplayed row, at the moment the file is fullest, and in a
+   datastore outage on every replica at about the same time. The budget above is
+   what keeps the file from reaching it, so keep `AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`
+   below the `sizeLimit` and change the two together. On Compose the named
+   volume has no limit and shares the Docker root with the datastore's volume;
+   there the budget is what keeps a flood off the datastore's disk. The path is
+   the ConfigMap key `AXIAM__GDPR_AUDIT_DLQ_FILE` in
+   `k8s/server/configmap.yml`, so an overlay that replaces the container's
+   `env` (the Raspberry Pi overlay does) keeps it.
+2. **A structured log event** on the target `axiam.audit.dlq`, for the GDPR
+   records. It is the only sink for them when the file variable is unset, so
+   collect the container log as well.
+
+**With the variable unset** the server logs one `WARN` at start (naming the
+variable), a refused request-audit row is counted and logged only, and a refused
+GDPR record is logged on `axiam.audit.dlq` only. Neither is recoverable from the
+server afterwards.
 
 The server does not read the file back. An operator **replays it into the trail
-by hand**, once the datastore is healthy, and then keeps or archives the file.
-Each line maps one-to-one onto a `CREATE audit_log SET …` statement; a JSON
-`null` has to become `NONE` (SurrealDB refuses `NULL` for an optional field).
-With `jq` and the SurrealDB shell (the namespace and database are
-`AXIAM__DB__NAMESPACE` / `AXIAM__DB__DATABASE`, both `axiam` in the compose
-file):
+by hand**, once the datastore is healthy. There is no replay command; the file
+is the recipe's input and each line maps one-to-one onto a `CREATE audit_log
+SET …` statement. A JSON `null` has to become `NONE` (SurrealDB refuses `NULL`
+for an optional field). With `jq` and the SurrealDB shell (the namespace and
+database are `AXIAM__DB__NAMESPACE` / `AXIAM__DB__DATABASE`, both `axiam` in the
+shipped files). Minimal profile; for `docker-compose.prod.yml` use the volume
+`docker_gdpr-audit-dlq`, the container `axiam-surrealdb` and the credentials in
+`docker/.secrets/stack-credentials.env`:
 
 ```bash
 source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '"CREATE audit_log SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
+jq -r '"CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
 ```
 
-The statement was exercised against a SurrealDB 3.2 datastore migrated by the
-server. The replayed row's `timestamp` is the moment of replay — when the
-original write failed is in the `axiam.audit.dlq` log event, so keep the log
-with the file — and, like every audit row, it can neither be
-updated nor deleted afterwards, so replay each line once. An empty or missing
-file means no record has been dead-lettered. (The two *request* records,
-`gdpr.data_export_requested` and `gdpr.erasure_requested`, are not covered by
-this fallback.)
+On Kubernetes the pipeline is the same with two substitutions. Read the file from
+the pod with an ephemeral container that shares the server's process namespace
+(the image has no shell and no `tar`, so `kubectl cp` does not work):
+`kubectl -n axiam debug -it <axiam-server-pod> --image=busybox --target=axiam-server -- cat /proc/1/root/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl`
+(the namespace enforces Pod Security `restricted`, so add `--profile=restricted` where
+your `kubectl` has it). And pipe the statements into
+`kubectl -n axiam exec -i surrealdb-0 -- /surreal sql …` with the datastore's
+credentials. Do this for **each replica's** file. This path was not exercised against a cluster;
+the statements are the same ones the test below checks.
+
+The format and the statement are checked by `gdpr_audit_dlq_test.rs`
+(`the_replay_recipe_in_the_docs_restores_dead_lettered_rows`): it takes the
+`jq` filter out of this page, runs it over lines written by the dead-letter
+writer, applies the statements to a migrated datastore and reads the rows back
+and, because it reads the rows back through the audit repository, that each
+replayed row is one AXIAM can list. The statement gives the row a UUID record
+id (`rand::uuid::v7()`); an earlier form of this recipe let SurrealDB generate
+the id, and AXIAM's audit list fails for the whole tenant while such a row is in
+it (`invalid UUID`). Rows replayed with that form have to be removed with the
+datastore's root account, which the table's append-only permission does not bind,
+and replayed again with this one. The replayed row's `timestamp` is the moment of
+replay — when the original write failed is in the `axiam.audit.dlq` log event, so keep the log
+with the file — and, like every audit row, it can neither be updated nor
+deleted afterwards, so **replay each line once**. Note how many lines you
+replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
+(`tail -n +N`). Do not rename or delete the file while the server runs: the
+request-audit writer keeps its handle open and would keep appending to the
+renamed file. To start a fresh one, stop the server, move the file, start it.
+An empty or missing file means no record has been dead-lettered. The same file
+also receives request-audit rows that were dropped or failed to append, below.
+
+#### Lost request-audit rows (`/health/jobs`)
+
+The audit middleware records every request on a background worker, off the
+request path, through a queue of 4 096 rows. A row is lost in two ways: the queue
+is full when the request ends (**dropped**), or the datastore refuses the append
+(**failed**). The response has already gone out either way (T-108).
+
+`GET /health/jobs` (same exposure as before: server root, internal network only)
+reports both in a `request_audit` object beside `jobs`:
+
+| Field | Meaning |
+|---|---|
+| `dropped`, `failed` | Rows lost since this process started; they only go up. |
+| `dead_lettered` | Lost rows written to the dead-letter file. |
+| `not_recoverable` | Lost rows kept nowhere: no file is configured, or it could not take them. |
+| `dead_letter_configured` | Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a file. |
+| `dead_letter_full` | Whether the file has reached the request rows' share of its budget (`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`); further lost rows are refused by it and counted in `not_recoverable`. |
+| `last_loss_at`, `recent_loss` | When the last row was lost; whether that was in the last 15 minutes. |
+
+`status` is `degraded` while `recent_loss` is true and returns to `ok` by itself
+once rows are being recorded again, and is `degraded` while `dead_letter_full`
+is true, which only a replay and a restart clear; the endpoint stays HTTP 200, as for a
+stalled job. Alert on `status == "degraded"`, or on the rate of `dropped +
+failed`. The counters are per process: a restart resets them and each replica
+reports its own. The server also logs one `ERROR` line on the target
+`axiam.audit.loss` for the first lost row and then at most once a minute, naming
+the totals.
+
+**The dead-letter file takes these rows too.** When `AXIAM__GDPR_AUDIT_DLQ_FILE`
+is set, each dropped or failed row is appended to the same file as the GDPR
+records, in the same one-JSON-line form, and replayed with the same statement as
+above. The write is queued to a writer task (up to 1 024 rows), so the request
+path does no file I/O; a row the writer cannot keep — its queue is full, the
+file is at its budget, or the file cannot be written — is counted in
+`not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
+lines give the former, and the replayed row's `timestamp` is the replay's. With
+the variable unset the server logs one warning at start (it covers these rows
+and the GDPR records alike) and lost rows are counted and logged only. Both
+Compose files and the Kubernetes manifests set the variable; set it, on a
+volume the server's user can write, in any other deployment.
+
+Still lost: a row that was in the queue (or the writer's queue) when the process
+was killed rather than stopped — an orderly stop drains both — and a row refused
+when the file is not configured, not writable or full.
 
 #### External audit producers
 
@@ -1955,6 +2159,52 @@ allowlisted host. Every use is logged.
 
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
+
+## Email providers: where they may connect
+
+An organization or tenant administrator chooses the email provider — an SMTP
+host and port, or an HTTP provider's `api_url` — so AXIAM holds both to a rule
+**you** set (#529). The check runs when a configuration is saved and again at
+every send (the mail consumer's and the delivery self-test's), so a name
+re-pointed after the save is caught at the next message.
+
+- **SMTP** gets the directory's address guard: the host is resolved once and
+  every address must pass the table in
+  [Where a directory may be](#where-a-directory-may-be-the-address-guard-and-the-frame-cap)
+  — loopback, unspecified, link-local (the cloud metadata service), multicast
+  and special-purpose addresses are always refused, so is an address of this
+  host on AXIAM's REST or gRPC port, and a private address only inside a network
+  you list. The connection is then **pinned** to the address that was checked,
+  and the server's certificate is still verified against the configured host
+  name.
+- **HTTP providers** (SendGrid, Postmark, Resend, Brevo) with an explicit
+  `api_url` go through the outbound SSRF guard: `https` only, globally routable
+  addresses only, never a redirect (the API key is a credential), and the one
+  exception is a host named in
+  [`AXIAM__PKI__SSRF_ALLOWED_HOSTS`](#outbound-ssrf-guard--same-network-idps-axiam__pki__ssrf_allowed_hosts).
+  A provider's built-in URL is not affected.
+
+- **`AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`** — comma-separated CIDR blocks (or
+  single addresses) an SMTP provider may resolve into. Unset, no private address
+  is admitted. **A deployment whose mail relay is on a private network —
+  an in-cluster Postfix, a relay in the same VPC — must list that network**, or
+  every send to it fails (upgrading from a release before #529, this is the one
+  setting to check). A relay on `localhost` is refused whatever the list says:
+  run it as its own service and list its network. As for the directory list, do
+  not list the network AXIAM's own pods, services or load balancers are in, and
+  an entry that does not parse is ignored and logged at `error`. Separate from
+  `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` on purpose: where mail relays
+  live and where directories live are two decisions.
+
+What an administrator sees of a refusal: saving answers `400`, and the delivery
+self-test `400`, with one sentence for a host **name** whatever it resolved to
+("does not resolve to an address this deployment permits an email connection
+to") and the specific rule only for an address they typed. A connection that
+fails after the guard admitted the address — refused, reset, timed out, a
+failed TLS handshake — is one generic answer as well, and the
+`email.delivery_failed` audit row's `error_class` reads `connection_error` for
+all of them. The specific cause is in your log (`target: axiam::email`). The
+self-test routes are rate-limited (`AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN`).
 
 ## The issuer, and per-tenant path issuers (optional, T21.6)
 

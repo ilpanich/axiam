@@ -9,6 +9,11 @@ rust-version.workspace = true
 
 [dependencies]
 axiam-core = { workspace = true }
+# #529 — the outbound address policy: the connector address guard the
+# directory uses (`axiam_pki::address`) for SMTP, `guarded_fetch_no_redirect`
+# for the HTTP providers. Layer 1, which is why this crate sits at layer 2.
+axiam-pki = { workspace = true }
+url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

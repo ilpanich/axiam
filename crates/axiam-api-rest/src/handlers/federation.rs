@@ -3,15 +3,16 @@
 //! Provides CRUD for federation configurations, the OIDC authorization
 //! and callback flow, and federation link management.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
     SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::models::session::{Amr, AuthenticationEvidence};
 use axiam_core::repository::{
-    FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
-    UserRepository,
+    AuditLogRepository, FederationConfigRepository, FederationLinkRepository, PaginatedResult,
+    Pagination, UserRepository,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,26 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::client_info::client_ip;
 use crate::state::AppState;
+
+/// Audit action: a SAML federation config was set to accept SHA-1-signed IdP
+/// responses (#531, D-3) — at creation, or by an update that turned it on.
+pub const AUDIT_SHA1_SIGNATURES_ALLOWED: &str = "federation.sha1_signatures_allowed";
+
+/// Audit action: an update cleared a SAML federation config's metadata
+/// signing certificate, turning the metadata signature check off (#530
+/// follow-up, T-474).
+pub const AUDIT_METADATA_SIGNING_CERT_CLEARED: &str = "federation.metadata_signing_cert_cleared";
+
+/// Audit action: an update replaced a SAML federation config's metadata
+/// signing certificate with a different one, re-pointing the metadata
+/// signature check (#530 follow-up, T-474).
+pub const AUDIT_METADATA_SIGNING_CERT_CHANGED: &str = "federation.metadata_signing_cert_changed";
+
+/// Audit action: a refetch of a SAML IdP's metadata named an SSO URL on
+/// another host than the copy it replaced (#530, P23W3-07).
+pub const AUDIT_SAML_SSO_HOST_CHANGED: &str = "federation.saml_sso_host_changed";
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -188,18 +208,36 @@ pub struct CreateFederationConfigRequest {
     /// picture would produce a button that breaks the guidelines it exists to
     /// follow.
     pub button_icon: Option<String>,
+    /// SAML only: accept IdP responses signed with SHA-1 (`rsa-sha1`). Default
+    /// `false` — since 1.0.0 the SP verifier accepts only SHA-2 signatures.
+    /// The escape hatch for an IdP that cannot sign with SHA-2 yet; refused on
+    /// a non-SAML config, and audited (`federation.sha1_signatures_allowed`)
+    /// when set to `true`.
+    pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the PEM certificate the IdP signs its metadata document
+    /// with (#530). When set, the metadata must carry one SHA-2 signature on
+    /// its `EntityDescriptor` root that verifies against it, or no sign-in
+    /// starts. Omitted: the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateFederationConfigRequest {
     pub provider: Option<String>,
+    /// OIDC discovery or SAML metadata URL. Explicit `null` clears it;
+    /// omitted leaves it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub metadata_url: Option<Option<String>>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
     /// PEM-encoded X.509 certificate for verifying SAML assertions
-    /// (CQ-B40/REQ-14 AC-5).  `Some(None)` clears the stored cert.
+    /// (CQ-B40/REQ-14 AC-5). Explicit `null` clears the stored cert;
+    /// omitted leaves it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub idp_signing_cert_pem: Option<Option<String>>,
     /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
@@ -212,28 +250,54 @@ pub struct UpdateFederationConfigRequest {
     // `provider_kind` is deliberately absent: it selects the protocol and the
     // override key, and changing it on a live config would silently re-point
     // which inherited provider a tenant is shadowing. Delete and recreate.
-    /// Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it.
+    /// Operator-chosen identifier for a `generic_*` kind. Explicit `null`
+    /// clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub provider_slug: Option<Option<String>>,
     /// Whether tenants may inherit this organization-level provider.
     pub allow_tenant_inheritance: Option<bool>,
     /// Scopes to request. Replaced wholesale; empty restores the per-kind default.
     pub scopes: Option<Vec<String>>,
-    /// OAuth2-variant authorization endpoint. `Some(None)` clears it.
+    /// OAuth2-variant authorization endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub authorization_endpoint: Option<Option<String>>,
-    /// OAuth2-variant token endpoint. `Some(None)` clears it.
+    /// OAuth2-variant token endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub token_endpoint: Option<Option<String>>,
-    /// OAuth2-variant userinfo endpoint. `Some(None)` clears it.
+    /// OAuth2-variant userinfo endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub userinfo_endpoint: Option<Option<String>>,
     /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
     pub allowed_issuer_tenants: Option<Vec<String>>,
-    /// Apple Team ID. `Some(None)` clears it.
+    /// Apple Team ID. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub apple_team_id: Option<Option<String>>,
-    /// Apple Key ID. `Some(None)` clears it.
+    /// Apple Key ID. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub apple_key_id: Option<Option<String>>,
     /// Send PKCE on the authorization request.
     pub require_pkce: Option<bool>,
-    /// Sign-in-button icon for a generic provider. `Some(None)` clears it.
+    /// Sign-in-button icon for a generic provider. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub button_icon: Option<Option<String>>,
+    /// SAML only: accept IdP responses signed with SHA-1. Refused on a
+    /// non-SAML config; turning it on is audited
+    /// (`federation.sha1_signatures_allowed`).
+    pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the IdP metadata signing certificate (#530). Explicit
+    /// `null` clears it; omitted leaves it. Clearing it is audited
+    /// (`federation.metadata_signing_cert_cleared`), and so is replacing it
+    /// with a different certificate (`federation.metadata_signing_cert_changed`).
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub idp_metadata_signing_cert_pem: Option<Option<String>>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -292,6 +356,12 @@ pub struct FederationConfigResponse {
     /// it and `button_icon` is refused; when false the button reads
     /// "Sign in with <provider>" and may carry a custom icon.
     pub has_bundled_mark: bool,
+    /// SAML only: whether IdP responses signed with SHA-1 are accepted
+    /// (default `false`; #531).
+    pub allow_sha1_signatures: bool,
+    /// SAML only: the certificate the IdP's metadata must be signed with
+    /// (#530); `null` when the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -328,6 +398,8 @@ impl From<FederationConfig> for FederationConfigResponse {
             pkce_required,
             has_bundled_mark: c.provider_kind.has_bundled_mark(),
             button_icon: c.button_icon.clone(),
+            allow_sha1_signatures: c.allow_sha1_signatures,
+            idp_metadata_signing_cert_pem: c.idp_metadata_signing_cert_pem.clone(),
             token_exchange: c.token_exchange.into(),
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -614,6 +686,153 @@ fn require_https_endpoint(name: &str, url: &str) -> Result<(), AxiamApiError> {
     }
 }
 
+/// #531: `allow_sha1_signatures` means something only to the SAML verifier. On
+/// any other protocol `true` would claim a relaxation that nothing applies.
+fn validate_allow_sha1(
+    protocol: FederationProtocol,
+    allow_sha1_signatures: Option<bool>,
+) -> Result<(), AxiamApiError> {
+    if allow_sha1_signatures == Some(true) && protocol != FederationProtocol::Saml {
+        return Err(validation_err(
+            "allow_sha1_signatures is only supported for Saml providers",
+        ));
+    }
+    Ok(())
+}
+
+/// #531 (D-3): the audit row for a federation config that now accepts SHA-1
+/// signatures — which config, and who. Never fails the request: the write it
+/// describes has been done.
+async fn audit_sha1_allowed<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    user: &AuthenticatedUser,
+    config: &FederationConfig,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: AUDIT_SHA1_SIGNATURES_ALLOWED.to_string(),
+            resource_id: Some(config.id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config.id,
+                "provider": config.provider,
+                "provider_kind": config.provider_kind.as_str(),
+                "allow_sha1_signatures": true,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            tenant_id = %user.tenant_id,
+            config_id = %config.id,
+            %error,
+            "a federation SHA-1 audit row could not be written"
+        );
+    }
+}
+
+/// T-474: the audit row for a metadata signing certificate an update cleared
+/// or replaced — which config, which change, and who. Never fails the request:
+/// the write it describes has been done.
+async fn audit_metadata_cert_change<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    user: &AuthenticatedUser,
+    config: &FederationConfig,
+    action: &'static str,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: action.to_string(),
+            resource_id: Some(config.id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config.id,
+                "provider": config.provider,
+                "provider_kind": config.provider_kind.as_str(),
+                "metadata_signature_checked": config.idp_metadata_signing_cert_pem.is_some(),
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            tenant_id = %user.tenant_id,
+            config_id = %config.id,
+            action,
+            %error,
+            "a federation metadata-certificate audit row could not be written"
+        );
+    }
+}
+
+/// #530: the metadata signing certificate means something only to the SAML
+/// SP's metadata fetch, and must be a certificate.
+fn validate_metadata_signing_cert(
+    protocol: FederationProtocol,
+    pem: Option<&str>,
+) -> Result<(), AxiamApiError> {
+    let Some(pem) = pem else {
+        return Ok(());
+    };
+    if protocol != FederationProtocol::Saml {
+        return Err(validation_err(
+            "idp_metadata_signing_cert_pem is only supported for Saml providers",
+        ));
+    }
+    axiam_federation::cert::validate_pem_cert(pem)
+        .map_err(|e| validation_err(format!("idp_metadata_signing_cert_pem is invalid: {e}")))
+}
+
+/// #530 (P23W3-07): the audit row for a refetch of a SAML IdP's metadata that
+/// moved its SSO URL to another host. Written by the system (no administrator
+/// made the change; the metadata host did), in the configuration's tenant.
+/// Never fails the sign-in: the redirect it describes is already built.
+#[cfg(feature = "saml")]
+async fn audit_sso_host_change<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    tenant_id: Uuid,
+    config_id: Uuid,
+    change: &axiam_federation::saml_metadata::SsoHostChange,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: AUDIT_SAML_SSO_HOST_CHANGED.to_string(),
+            resource_id: Some(config_id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config_id,
+                "old_host": change.old_host,
+                "new_host": change.new_host,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            %tenant_id,
+            %config_id,
+            %error,
+            "a SAML SSO host change audit row could not be written"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Federation Config CRUD
 // ---------------------------------------------------------------------------
@@ -631,6 +850,7 @@ fn require_https_endpoint(name: &str, url: &str) -> Result<(), AxiamApiError> {
     security(("bearer" = []))
 )]
 pub async fn create<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
@@ -684,6 +904,8 @@ pub async fn create<C: Connection + Clone>(
         button_icon: req.button_icon.clone(),
     };
     validate_login_provider_fields(protocol, &login_fields)?;
+    validate_allow_sha1(protocol, req.allow_sha1_signatures)?;
+    validate_metadata_signing_cert(protocol, req.idp_metadata_signing_cert_pem.as_deref())?;
 
     // The attribute map is validated now that something reads it. Before this
     // change it was stored unchecked and consulted by nothing, so a typo was
@@ -757,6 +979,8 @@ pub async fn create<C: Connection + Clone>(
             apple_key_id: req.apple_key_id,
             require_pkce: req.require_pkce,
             button_icon: req.button_icon,
+            allow_sha1_signatures: req.allow_sha1_signatures,
+            idp_metadata_signing_cert_pem: req.idp_metadata_signing_cert_pem,
         })
         .await?;
 
@@ -779,6 +1003,10 @@ pub async fn create<C: Connection + Clone>(
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
+
+    if config.allow_sha1_signatures {
+        audit_sha1_allowed(&state, &http_req, &user, &config).await;
+    }
 
     Ok(HttpResponse::Created().json(FederationConfigResponse::from(config)))
 }
@@ -868,6 +1096,7 @@ pub async fn get<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn update<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
@@ -963,6 +1192,30 @@ pub async fn update<C: Connection + Clone>(
         button_icon: patched(&req.button_icon, &existing.button_icon),
     };
     validate_login_provider_fields(existing.protocol, &login_fields)?;
+    validate_allow_sha1(existing.protocol, req.allow_sha1_signatures)?;
+    validate_metadata_signing_cert(
+        existing.protocol,
+        req.idp_metadata_signing_cert_pem
+            .as_ref()
+            .and_then(Option::as_deref),
+    )?;
+    // Audited on the transition only: re-saving a form that already allows
+    // SHA-1 changes nothing and writes no row.
+    let sha1_turned_on = req.allow_sha1_signatures == Some(true) && !existing.allow_sha1_signatures;
+    // T-474: turning the metadata signature check off, or pointing it at
+    // another certificate, weakens or re-anchors what decides where users are
+    // sent to sign in. Setting one where there was none strengthens it and
+    // writes no row; re-saving the same certificate changes nothing.
+    let metadata_cert_change = match (
+        &req.idp_metadata_signing_cert_pem,
+        existing.idp_metadata_signing_cert_pem.as_deref(),
+    ) {
+        (Some(None), Some(_)) => Some(AUDIT_METADATA_SIGNING_CERT_CLEARED),
+        (Some(Some(new)), Some(old)) if new.trim() != old.trim() => {
+            Some(AUDIT_METADATA_SIGNING_CERT_CHANGED)
+        }
+        _ => None,
+    };
 
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
@@ -997,6 +1250,8 @@ pub async fn update<C: Connection + Clone>(
                 apple_key_id: req.apple_key_id,
                 require_pkce: req.require_pkce,
                 button_icon: req.button_icon,
+                allow_sha1_signatures: req.allow_sha1_signatures,
+                idp_metadata_signing_cert_pem: req.idp_metadata_signing_cert_pem,
             },
         )
         .await?;
@@ -1033,6 +1288,12 @@ pub async fn update<C: Connection + Clone>(
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
+    if sha1_turned_on {
+        audit_sha1_allowed(&state, &http_req, &user, &config).await;
+    }
+    if let Some(action) = metadata_cert_change {
+        audit_metadata_cert_change(&state, &http_req, &user, &config, action).await;
+    }
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 
@@ -1394,6 +1655,7 @@ pub struct SamlMetadataQuery {
     security(("bearer" = []))
 )]
 pub async fn saml_authn_request<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
     body: web::Json<SamlAuthnRequestRequest>,
@@ -1411,6 +1673,9 @@ pub async fn saml_authn_request<C: Connection + Clone>(
         .build_authn_request(user.tenant_id, req.config_id, &req.acs_url, req.relay_state)
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+    if let Some(change) = &result.sso_host_change {
+        audit_sso_host_change(&state, &http_req, user.tenant_id, req.config_id, change).await;
+    }
 
     Ok(HttpResponse::Ok().json(SamlAuthnRequestResponse {
         url: result.url,
@@ -2165,6 +2430,7 @@ pub async fn saml_login_public<C: Connection + Clone>(
     // Named `app_state` (not `state`) — this handler already has a local
     // `state` variable (the RelayState CSRF value).
     app_state: web::Data<AppState<C>>,
+    http_req: HttpRequest,
     body: web::Json<SamlLoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
@@ -2227,6 +2493,16 @@ pub async fn saml_login_public<C: Connection + Clone>(
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+    if let Some(change) = &result.sso_host_change {
+        audit_sso_host_change(
+            &app_state,
+            &http_req,
+            resolved.config.tenant_id,
+            b.federation_config_id,
+            change,
+        )
+        .await;
+    }
 
     // Persist state row (nonce = "" for SAML — unused but required by schema).
     // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).

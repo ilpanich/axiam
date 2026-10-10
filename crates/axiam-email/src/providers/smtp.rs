@@ -7,43 +7,71 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::SmtpConfig;
 use lettre::message::{Mailbox, MessageBuilder};
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
+use crate::egress::{EmailEgress, PROVIDER_UNREACHABLE};
 use crate::message::EmailMessage;
 use crate::provider::{EmailProvider, SendResult};
 
-/// SMTP email provider using `lettre` with STARTTLS or implicit TLS.
+/// SMTP email provider using `lettre` with STARTTLS or implicit TLS, held to
+/// the deployment's outbound address policy at every send (#529).
 pub struct SmtpProvider {
-    transport: AsyncSmtpTransport<Tokio1Executor>,
+    host: String,
+    port: u16,
+    credentials: Credentials,
+    starttls: bool,
+    /// Built once from the configured host: the name the server's certificate
+    /// must carry, whatever address the connection is pinned to.
+    tls: TlsParameters,
+    egress: EmailEgress,
 }
 
 impl SmtpProvider {
-    pub fn new(config: &SmtpConfig) -> Result<Self, AxiamError> {
-        let creds = Credentials::new(config.username.clone(), config.password.clone());
+    /// A provider for `config`. Nothing is resolved or dialled here; an
+    /// unusable host name for the TLS check is refused now.
+    pub fn new(config: &SmtpConfig, egress: EmailEgress) -> Result<Self, AxiamError> {
+        let host = config.host.trim().to_string();
+        let tls_name = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let tls = TlsParameters::new(tls_name)
+            .map_err(|e| AxiamError::EmailConfig(format!("SMTP TLS parameters error: {e}")))?;
+        Ok(Self {
+            host,
+            port: config.port,
+            credentials: Credentials::new(config.username.clone(), config.password.clone()),
+            starttls: config.starttls,
+            tls,
+            egress,
+        })
+    }
 
-        // lettre's `relay()` opens an implicit-TLS (SMTPS) connection —
-        // the TLS handshake happens immediately on connect (typically
-        // port 465). `starttls_relay()` connects in plaintext first, then
-        // upgrades via the STARTTLS command (typically port 587).
-        // Neither falls back to cleartext; both enforce TLS.
-        let transport = if config.starttls {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
-                .map_err(|e| AxiamError::EmailConfig(format!("SMTP STARTTLS relay error: {e}")))?
-                .port(config.port)
-                .credentials(creds)
-                .build()
+    /// The transport for one send: the host resolved once and vetted by the
+    /// address guard, the TCP connection opened to the vetted address — an IP
+    /// literal, so `lettre` resolves nothing — and TLS checked against the
+    /// configured host.
+    ///
+    /// What `relay()` / `starttls_relay()` did, minus their own resolution:
+    /// implicit TLS (SMTPS, typically port 465) wraps the connection from the
+    /// start; STARTTLS (typically port 587) connects in plaintext and upgrades.
+    /// Neither falls back to cleartext.
+    async fn pinned_transport(&self) -> AxiamResult<AsyncSmtpTransport<Tokio1Executor>> {
+        let target = self.egress.smtp_target(&self.host, self.port).await?;
+        let address = target.addresses[0];
+        let tls = if self.starttls {
+            Tls::Required(self.tls.clone())
         } else {
-            // Implicit TLS (SMTPS): TLS wrapper from the start.
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
-                .map_err(|e| {
-                    AxiamError::EmailConfig(format!("SMTP implicit-TLS relay error: {e}"))
-                })?
-                .port(config.port)
-                .credentials(creds)
-                .build()
+            Tls::Wrapper(self.tls.clone())
         };
-
-        Ok(Self { transport })
+        Ok(
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(address.ip().to_string())
+                .port(address.port())
+                .credentials(self.credentials.clone())
+                .tls(tls)
+                .build(),
+        )
     }
 }
 
@@ -111,11 +139,23 @@ impl EmailProvider for SmtpProvider {
                 (None, None) => return Err(AxiamError::EmailDelivery("email has no body".into())),
             };
 
-            let response = self
-                .transport
-                .send(email)
-                .await
-                .map_err(|e| AxiamError::EmailDelivery(format!("SMTP send failed: {e}")))?;
+            let transport = self.pinned_transport().await?;
+            let response = transport.send(email).await.map_err(|e| {
+                if e.is_permanent() || e.is_transient() {
+                    // The server's own answer to a command (a rejected sender,
+                    // failed authentication): it reached a vetted SMTP server.
+                    AxiamError::EmailDelivery(format!("SMTP send failed: {e}"))
+                } else {
+                    // Refused, reset, timed out or a failed handshake: one
+                    // answer, so the failure is no port scanner (#529).
+                    tracing::warn!(
+                        target: "axiam::email",
+                        error = %e,
+                        "the SMTP server could not be reached"
+                    );
+                    AxiamError::EmailDelivery(format!("smtp: {PROVIDER_UNREACHABLE}"))
+                }
+            })?;
 
             Ok(SendResult {
                 message_id: response.message().next().map(str::to_string),

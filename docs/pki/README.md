@@ -1,6 +1,6 @@
 # AXIAM PKI / Certificate Guide
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
+**Milestone:** `1.0.0` — first stable release
 **Last verified:** 2026-10-09
 
 Task-oriented walkthrough of the certificate lifecycle: issuing an
@@ -430,6 +430,7 @@ path "pki_int/intermediate/generate/internal" { capabilities = ["update"] }
 path "pki_int/intermediate/set-signed"        { capabilities = ["update"] }
 path "pki_int/issuers/import/bundle"          { capabilities = ["update"] }
 path "pki_int/issuer/+/sign-verbatim"         { capabilities = ["update"] }
+path "pki_int/revoke"                         { capabilities = ["update"] }
 path "pki_int/issuer/+"                       { capabilities = ["delete"] }
 path "pki_int/key/+"                          { capabilities = ["delete"] }
 ```
@@ -445,6 +446,50 @@ neither.
 
 Revocation deletes the issuer and then the key, at both tiers — in that order,
 because Vault refuses to delete a key an issuer still references.
+
+### Revoking a leaf, and the list relying parties read
+
+Vault, not AXIAM, signs a `vault_pki` CA's certificate revocation list: Vault
+signs on AXIAM's behalf only certificate requests, so AXIAM's own CRL route
+answers `404` for such a CA. Revoking one of its leaves
+(`POST /api/v1/certificates/{id}/revoke`) therefore also revokes it in Vault,
+with `POST <int_mount>/revoke` and the certificate's serial, through the same
+address and token issuance uses — hence `pki_int/revoke` in the policy above.
+Vault's list names the leaf from its next rebuild.
+
+AXIAM's revocation is written first and stands whatever Vault answers: device
+sign-in and the mTLS client methods refuse the certificate at once either way.
+The request tries Vault twice within ten seconds; if Vault refuses or cannot be
+reached, the route still answers `200`, an audit row
+`certificate.vault_revocation_pending` records why, and the cleanup job's
+`vault_revocation` sweep (`GET /health/jobs`) forwards it on a later tick,
+retrying until Vault accepts. The same sweep forwards revocations that come from
+no request — a directory deprovisioning revokes a user's certificates in bulk —
+and, on the first tick after an upgrade, the revocations of such leaves made
+before 1.0.0. Vault answers a second revocation of the same serial with
+success, so a retry is harmless. A leaf of a CA that has itself been revoked is
+not forwarded: revoking the CA deleted its issuer from Vault.
+
+**Where relying parties fetch the list.** Leaves of a `vault_pki` CA carry
+Vault's own profile, not an AXIAM distribution point. Configure the
+distribution point Vault writes into them on the issuing mount, and point
+relying parties at Vault's per-issuer list:
+
+```sh
+# Each issuer's list, DER — the issuer id is in the CA's key locator
+# (`issuing.issuer`), also shown by `vault list pki_int/issuers`:
+curl https://vault.internal:8200/v1/pki_int/issuer/<issuer_id>/crl/der
+
+# Have Vault name it in every certificate it signs from now on:
+vault write pki_int/config/urls enable_templating=true \
+    crl_distribution_points='{{cluster_aia_path}}/issuer/{{issuer_id}}/crl/der'
+vault write pki_int/config/cluster aia_path=https://vault.internal:8200/v1/pki_int
+```
+
+The list must be reachable by the relying parties, which an internal Vault
+listener may not be; publishing it elsewhere is Vault's configuration, not
+AXIAM's. Vault rebuilds its list on each revocation unless its CRL is
+configured for periodic or delta rebuilds (`pki_int/config/crl`).
 
 ### What `vault_pki` does not remove
 
@@ -881,6 +926,33 @@ you flag a CA — including yours. `optional` verifies a certificate when one is
 offered and leaves password and passkey logins working, which is what an IoT
 deployment actually wants: devices authenticate by certificate, people do not.
 
+### Whose anchor: `tls_client_auth`
+
+The listener's trust store is the union of every organization's flagged CAs,
+and any organization administrator with `ca_certificates:manage` can flag one —
+an imported CA whose key they hold offline included. Until 1.0.0 (R1W1-02) an
+OAuth2 `tls_client_auth` client was authenticated by a DN or SAN match under
+*any* of those anchors, so one organization could mint a certificate carrying
+another organization's client DN and obtain that client's tokens.
+
+The listener now records, for each client certificate, the chain the handshake
+verified it through (the fingerprints of each intermediate and of the anchor),
+and the token endpoint accepts a `tls_client_auth` certificate only when:
+
+- **AXIAM issued it in the client's own tenant** — a leaf issued in a sibling
+  tenant, even under the same organization CA, is refused; or
+- AXIAM did not issue it, and its chain **ends at a CA the client's organization
+  holds**, active and in date, with **every CA on the chain that AXIAM records**
+  held by the client's organization (a tenant signing CA: by the client's
+  tenant). An anchor no organization holds — one placed in an operator's own
+  `CLIENT_CA_PATH` bundle and never imported — is refused too: import it into
+  each organization whose clients use it (a keyless import; it needs no flag
+  when your bundle already carries it).
+
+Device sign-in is unaffected (it binds the certificate to a service account of
+one tenant), and so is `self_signed_tls_client_auth`, whose credential is the
+pinned thumbprint.
+
 ### Your own settings always win
 
 If you have set `CLIENT_AUTH` or `CLIENT_CA_PATH` yourself, AXIAM fills in only
@@ -999,31 +1071,98 @@ depending on it.
 
 ### Revocation reach
 
-Revoking sets the status on the certificate's row in AXIAM's store. Whether a
-revocation stops a certificate depends on who validates it, and today only one
-place reads that status:
+Revoking sets the status on the certificate's row in AXIAM's store, with the
+date of the first revocation. Where a revocation stops a certificate depends on
+who validates it:
 
 | Where the certificate is validated | Does a revocation reach it? |
 |---|---|
 | AXIAM's device sign-in by certificate (`POST /api/v1/auth/device`) | **Yes, at once.** `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf |
-| The TLS handshake, on either listener | **No.** Neither listener's TLS handshake checks a certificate's revocation status |
-| OAuth2 `tls_client_auth` | **No.** It matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Revoke such a client by changing its registration |
-| A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS | **No channel at all.** AXIAM publishes no CRL and runs no OCSP responder: its CAs carry the `cRLSign` key-usage bit, and nothing serves a list. The relying party honours a revoked certificate until it expires |
+| OAuth2 `tls_client_auth` and `self_signed_tls_client_auth` | **Yes, at once** (since #565). After the registered subject, SAN or thumbprint matches, the presented certificate is looked up by fingerprint, and one AXIAM issued that is revoked or expired — or whose issuing CA is — is refused with `invalid_client`. A certificate AXIAM did not issue (a self-signed one, or one from an external CA a listener anchors) is not in AXIAM's inventory; under `self_signed_tls_client_auth` it is decided by the thumbprint, and under `tls_client_auth` by its chain's anchor, which must be a CA of the client's organization (see [Whose anchor](#whose-anchor-tls_client_auth)) |
+| The TLS handshake, on either listener | **No, not yet.** Neither listener's handshake consults the revocation list, so a revoked leaf still completes one. It authenticates nothing by itself — every decision above reads the status — but an access token bound to the certificate (RFC 8705 §3) before the revocation stays usable until it expires. Loading the lists into the listeners' verifiers is planned for `1.0.x` |
+| A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS | **Yes, at its next fetch of the issuer's CRL** — see [Certificate revocation lists](#certificate-revocation-lists). AXIAM runs no OCSP responder, so the delay is the relying party's fetch interval, at most the list's `nextUpdate` |
 
-Outside AXIAM the only bound is the leaf's own validity, capped per tenant by
-`max_cert_validity_days`. A relying party that needs revocation today must
-either let the connection terminate at AXIAM — the device authenticates there
-and presents the certificate-bound token it receives (see
-[above](#the-token-a-device-gets-back-is-bound-to-its-certificate)) — or rely
-on short-lived leaves.
+### Deleting a tenant revokes its certificates
 
-This is threat **T-102**, Open, High, in
-[`threat-model-stride.md`](../../claude_dev/threat-model-stride.md). Publishing
-a CRL per issuing CA, and deciding on OCSP, is tracked by
-[ilpanich/axiam#565](https://github.com/ilpanich/axiam/issues/565); the entry
-closes with it, together with the listeners' verifiers loading that list or
-`tls_client_auth` reading the certificate's status. AXIAM does not speak RADIUS
-either: the G-11 spike declined a native front end for now and keeps a
-FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL
-as the step that stands on its own
-([decision record](../../claude_dev/radius-eap-tls-spike-2026-10-06.md)).
+Deleting a tenant (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
+revokes, before its `204`, every unexpired certificate of the tenant and every
+signing CA of the tenant — through the same paths a single revocation takes, so
+a `vault_pki` leaf is forwarded to Vault and a CA's key is released by its
+custodian — and the tenant purge then **keeps** each revoked, unexpired
+certificate and CA row (without the certificate's `metadata` and without the
+CA's sealed key) until its `notAfter`, when the cleanup job removes it. So a
+deleted tenant's certificates appear on their issuers' lists from the deletion
+until they expire, the ones revoked before the deletion included, and every
+AXIAM sign-in that reads a certificate's status refuses them. Before 1.0.0
+(R1W1-01) a deletion revoked none of them, and the purge deleted the rows, which
+took a leaf revoked before the deletion back off its organization CA's list.
+
+One difference: a CA whose key Vault's PKI engine holds (`vault_pki` custody)
+publishes no list AXIAM signs. Its list is Vault's, and a revocation in AXIAM is
+forwarded to Vault so that list names the leaf (threat **T-470**, mitigated in
+1.0.0) — see [Revoking a leaf, and the list relying parties
+read](#revoking-a-leaf-and-the-list-relying-parties-read). A relying party
+validating such a leaf fetches Vault's list, not AXIAM's.
+
+### Certificate revocation lists
+
+Each issuing CA whose key AXIAM holds publishes a certificate revocation list
+(RFC 5280 §5, version 2, DER) at
+
+```
+GET /pki/v1/{org_id}/ca/{ca_id}/crl
+```
+
+- **Unauthenticated**, because a relying party fetches it before it can validate
+  anything, and **rate-limited** per IP in a bucket of its own,
+  `AXIAM__RATE_LIMIT__CRL_PER_MIN` (default 60 a minute; never moved by a
+  profile preset).
+- **Signed with the CA's own key**, fetched from the custodian that holds it —
+  the database or Vault's KV engine — exactly as certificates are signed;
+  RSA-4096 and Ed25519 CAs alike.
+- **`nextUpdate`** is `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` after `thisUpdate`
+  (default `86400`, one day; accepted range 300 to 604800 seconds, anything
+  else stops startup), and never past the CA's own expiry. The list carries a
+  CRL number and an authority key identifier equal to the CA's subject key
+  identifier.
+- **Entries**: every certificate the CA signed and revoked that has not yet
+  expired — its leaves in every tenant, a deleted tenant's included, and the
+  subordinate CAs it signed, so an organization CA's list names a revoked tenant
+  signing CA. Each carries the
+  serial and the revocation date; a certificate revoked before 1.0.0, when the
+  date was not yet recorded, is listed from its own `notBefore`. No reason code
+  is recorded, so none is listed.
+- **Served as** `application/pkix-crl`, with `Cache-Control: public, max-age`
+  running to `nextUpdate`, an `ETag` and `Last-Modified`; a matching
+  `If-None-Match` answers `304`. The list is signed once and kept until the set
+  of revocations changes or half its validity has passed, so revalidating costs
+  no signature and a revocation is in the very next response.
+- **`404`** for a CA that does not exist in that organization and, alike, for a
+  CA that publishes no list: a revoked or expired CA (its own status is on its
+  parent's list), an imported trust anchor AXIAM holds no key for, and a
+  `vault_pki` CA, whose list Vault publishes (see [above](#revoking-a-leaf-and-the-list-relying-parties-read)).
+  The route does not say which, nor point at Vault: it is unauthenticated, and
+  which custodian holds a CA's key — or where that custodian listens — is not an
+  outsider's business.
+
+**The distribution point.** Every certificate AXIAM signs in-process from
+1.0.0 on — leaves issued by `POST /api/v1/certificates` and by
+`POST /api/v1/certificates/sign-csr`, and tenant signing CAs — carries a CRL
+distribution points extension naming its issuer's list as an absolute URL. The
+base is `AXIAM__PKI__CRL_BASE_URL` when set (an `http` or `https` URL; plain
+`http` is fine, the list is signed), else the issuer URL
+(`AXIAM__AUTH__OAUTH2_ISSUER_URL`). With neither an absolute URL, the extension
+is omitted and the server logs a warning at startup; point relying parties at
+the route by hand. Certificates issued earlier carry no distribution point:
+configure their relying parties with the URL, or re-issue them. Leaves of a
+`vault_pki` CA carry Vault's own profile and no AXIAM distribution point; their
+relying parties read Vault's list.
+
+**A relying party.** A FreeRADIUS server doing EAP-TLS reads CRLs from files
+(`check_crl = yes` with the lists in its `ca_path`), so fetch each issuing
+CA's list on a schedule shorter than `nextUpdate` and convert it with
+`openssl crl -inform DER -outform PEM`. AXIAM still does not speak RADIUS: the
+G-11 spike declined a native front end and keeps a FreeRADIUS-backend route for
+when a named adopter asks
+([decision record](../../claude_dev/radius-eap-tls-spike-2026-10-06.md)); the
+list was the step of that route that stands on its own, and it now exists.

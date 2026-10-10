@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.59";
+export const CONTRACT_VERSION = "1.60";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -44,6 +44,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "32": "#§32-ssf-stream-registration-and-the-receiver-helper-contract-156",
  "33": "#§33-ciba--client-initiated-backchannel-authentication-contract-158",
  "34": "#§34-cross-sdk-conformance-review-of-the-phase-23-ports-contract-159",
+ "35": "#§35-certificate-revocation-lists-informative",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
@@ -188,6 +189,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27.11": "#§2711-model-additions-contract-131",
  "27.13": "#§2713-model-and-status-changes-from-the-dogfooding-remediation-contract-151",
  "27.14": "#§2714-cross-sdk-conformance-review-contract-152",
+ "27.15": "#§2715-model-and-behaviour-notes-contract-160",
  "28.0": "#§280-the-division-of-labour",
  "28.1": "#§281-canonical-operation-set",
  "28.2": "#§282-the-document-and-its-validation-normative",
@@ -260,7 +262,8 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "33.10": "#§3310-per-sdk-posture",
  "34.1": "#§341-what-was-read",
  "34.2": "#§342-clarifications-normative-from-159",
- "34.3": "#§343-divergences"
+ "34.3": "#§343-divergences",
+ "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned"
 };
 
 /**

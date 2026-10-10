@@ -1029,6 +1029,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-pki",
  "axiam-test-support",
  "chrono",
  "futures-util",
@@ -1056,6 +1057,7 @@ name = "axiam-email"
 version = "1.0.0-beta19"
 dependencies = [
  "axiam-core",
+ "axiam-pki",
  "chrono",
  "lettre",
  "reqwest 0.12.28",
@@ -1065,6 +1067,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "url",
  "uuid",
  "wiremock",
 ]
@@ -1243,6 +1246,7 @@ dependencies = [
  "axiam-core",
  "axiam-db",
  "axiam-directory",
+ "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
  "axiam-pki",
@@ -1258,6 +1262,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rsa",
  "rustls",
+ "rustls-webpki",
  "secrecy",
  "serde",
  "serde_json",

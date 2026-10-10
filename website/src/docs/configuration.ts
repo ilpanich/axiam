@@ -214,6 +214,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "Password pepper (string) prepended before Argon2id hashing.",
             "<random string>",
           ],
+          [
+            "AXIAM__AUTH__AUTH_PEPPER",
+            "The same pepper, under the name the `env` secret provider reads (field `auth_pepper`). If both are set the provider's value wins; the boot log names which one supplied it. Prefer `AXIAM__AUTH__PEPPER`.",
+            "<random string>",
+          ],
         ],
       },
       { type: "h", id: "provider", text: "Where secrets come from" },
@@ -292,6 +297,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__AUTH__OAUTH2_ISSUER_URL",
             "Public issuer URL for OIDC discovery. Must be an origin, not a path (path-based issuers are rejected).",
             "https://iam.acme.dev",
+          ],
+          [
+            "AXIAM__AUTH__JWT_ISSUER",
+            "The `iss` claim AXIAM signs into its tokens when `AXIAM__AUTH__OAUTH2_ISSUER_URL` is unset — a bare identifier rather than a URL, which is enough to sign tokens and not enough to publish a conformant discovery document. Set the issuer URL on any deployment a third party talks to; the certificate revocation list distribution point falls back to it as well.",
+            "axiam",
           ],
           [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
@@ -453,8 +463,18 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__CRL_PER_MIN",
+            "Max requests per minute, per IP, to GET /pki/v1/{org_id}/ca/{ca_id}/crl, each issuing CA's certificate revocation list. Unauthenticated, because a relying party fetches the list before it can validate anything; it does so once per nextUpdate and revalidates with If-None-Match between. The list is signed once and cached, so an admitted request costs a database read, not a signature. Never moved by a profile preset.",
+            "60",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN",
+            "Max requests per minute, per IP, to each of POST /api/v1/organizations/{org_id}/email-config/test and POST /api/v1/tenants/{tenant_id}/email-config/test, the email delivery self-test. Each call connects to the effective email provider and mails the caller, so the bucket bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by a profile preset.",
+            "10",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
-            "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
+            "Max /oauth2/end_session per minute — and the same browser-endpoint preset for /oauth2/authorize (both the bare and the per-tenant mount) and the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Per IP; raise it where many people start sign-ins from one address. Never moved by a profile preset.",
             "30",
           ],
           [
@@ -632,7 +652,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "`AXIAM__DB__POOL_SIZE` is a connection-pool sizing knob only; do not raise it expecting a throughput win. A pre-1.0 benchmark pass reported a one-off +7% on token issuance at `pool_size=4`, but that comparison was never confirmed on a settled measurement, and follow-up testing (`claude_dev/db-pool-design.md` §11) found no throughput difference between `pool_size=1` and `pool_size=8` under load. Leave it at the default `1` unless you have your own measured evidence for your deployment; `pool_size>1` still gives you independent per-connection session renewal, which is a robustness property worth having on its own, just not a speed one.",
+        text: "`AXIAM__DB__POOL_SIZE` is a connection-pool sizing knob only; do not raise it expecting a throughput win. An early benchmark pass reported a one-off +7% on token issuance at `pool_size=4`, but that comparison was never confirmed on a settled measurement, and follow-up testing (`claude_dev/db-pool-design.md` §11) found no throughput difference between `pool_size=1` and `pool_size=8` under load. Leave it at the default `1` unless you have your own measured evidence for your deployment; `pool_size>1` still gives you independent per-connection session renewal, which is a robustness property worth having on its own, just not a speed one.",
       },
       {
         type: "warn",
@@ -686,6 +706,27 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       {
         type: "p",
         text: "The bound applies to attestation only. A ceremony that requests no attestation consults no metadata, so stale metadata cannot have misled it.",
+      },
+      { type: "h", id: "crl", text: "Certificate revocation lists" },
+      {
+        type: "p",
+        text: "Each issuing CA whose key AXIAM holds publishes a signed RFC 5280 certificate revocation list at `GET /pki/v1/{org_id}/ca/{ca_id}/crl`, unauthenticated and rate-limited (`AXIAM__RATE_LIMIT__CRL_PER_MIN`), and every certificate AXIAM signs names that list in a CRL distribution point. Two variables shape it; the PKI guide covers the rest.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__PKI__CRL_NEXT_UPDATE_SECS",
+            "Seconds from a list's `thisUpdate` to its `nextUpdate` — how long a relying party may keep a copy, and so how late it can learn of a revocation. Default `86400` (a day); 300 to 604800 accepted, anything else stops startup.",
+            "3600",
+          ],
+          [
+            "AXIAM__PKI__CRL_BASE_URL",
+            "The absolute `http` or `https` base written into the CRL distribution point of every certificate AXIAM signs. Defaults to the issuer URL; with neither an absolute URL the extension is omitted and the server warns at startup. A value that is not one stops startup.",
+            "http://crl.iam.example.com",
+          ],
+        ],
       },
       { type: "h", id: "ca-key-custody", text: "CA signing key custody" },
       {
@@ -764,6 +805,10 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         text: "Both ways in are supported. Generating a CA has Vault create the root and the intermediate, and the response carries **no** `private_key_pem` because there is none — keep the `chain_pem` it returns instead, since Vault hands over a generated root's certificate exactly once and nothing outside Vault can validate a chain without it. Importing a CA with a `private_key_pem` sends the key and certificate to Vault as one bundle; the key passes through AXIAM's memory on the way, because AXIAM is what received the request, but it is never stored here.",
       },
       {
+        type: "p",
+        text: "Revoking a leaf of a `vault_pki` CA revokes it in Vault too (`POST <int_mount>/revoke` with its serial, so the token's policy needs `update` on `pki_int/revoke`), because Vault, not AXIAM, signs that CA's revocation list — AXIAM's CRL route answers `404` for it. AXIAM's revocation stands whatever Vault answers; a refusal or an unreachable Vault is audited as `certificate.vault_revocation_pending` and retried by the cleanup job's `vault_revocation` sweep until Vault accepts. Relying parties fetch Vault's per-issuer list, `/v1/pki_int/issuer/<issuer_id>/crl/der`, which Vault names in its leaves once `pki_int/config/urls` sets the distribution point.",
+      },
+      {
         type: "note",
         text: "Tune the mounts. A PKI mount's `max_lease_ttl` defaults to 30 days and Vault silently caps a longer request to it rather than failing, so an untuned mount turns a ten-year root into a month-long one. AXIAM records the certificate that came back rather than the one it asked for, and logs Vault's warning — neither is a substitute for `vault secrets tune -max-lease-ttl=87600h pki`.",
       },
@@ -785,6 +830,22 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__DIRECTORY__MAX_MESSAGE_BYTES",
             "Largest LDAP message accepted from a directory, in bytes; clamped to 64 KiB … 16 MiB, default 2 MiB. A longer declared length — or a malformed or too deeply nested message — ends the connection before anything is buffered, so a hostile directory cannot make the shared connector hold unbounded memory or crash its parser. Raise it only if an ordinary answer is refused (the log line says so); one entry of an Active Directory `memberOf` read is a few hundred kilobytes.",
             "2097152",
+          ],
+        ],
+      },
+      { type: "h", id: "email-provider-addresses", text: "Email provider addresses" },
+      {
+        type: "p",
+        text: "An organization or tenant administrator chooses the email provider, so AXIAM holds it to a deployment rule when a configuration is saved and again at every send. An SMTP host gets the directory connector's address guard: resolved once, loopback, link-local (the cloud metadata service), unspecified, multicast and special-purpose addresses and AXIAM's own ports on its own host always refused, a private address only inside a network listed below, and the connection pinned to the vetted address with the relay's certificate still checked against the configured host name. A provider's `api_url` (SendGrid, Postmark, Resend, Brevo) goes through the outbound SSRF guard: `https`, public addresses only unless the host is named in `AXIAM__PKI__SSRF_ALLOWED_HOSTS`, and never a redirect, since the API key is a credential.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS",
+            "Comma-separated CIDR blocks (or single addresses) an SMTP provider may resolve into. Unset — the default — admits no private address, so only a relay on a public address works. A deployment whose relay is on a private network (an in-cluster Postfix, a relay in the same VPC) must list that network, or every send to it fails; a relay on `localhost` is refused whatever the list says. List the relay's network and **not** the one AXIAM's own pods or services are in. Separate from the directory's list on purpose. A metadata endpoint inside a private range stays refused whatever the list says, and an entry that is not a valid block is ignored and logged at error.",
+            "10.30.0.0/24",
           ],
         ],
       },

@@ -2246,3 +2246,138 @@ async fn t23_1_5_scim_writes_the_sensitive_columns_and_only_as_told() {
         "a PUT that omits them is a replace, and clears both"
     );
 }
+
+/// #526 (P23W2-07). A SCIM `PATCH` or `PUT` that changes `phoneNumbers` clears
+/// `phone_number_verified_at`: the verification vouched for the old number,
+/// not the new one. One that leaves the number as it was — an unrelated
+/// `PATCH`, or a `PUT` restating the same number — keeps it. The rule lives in
+/// `UserRepository::update`; this is it reached over HTTP.
+#[actix_rt::test]
+async fn p23w2_07_a_scim_phone_change_clears_its_verification() {
+    const PHONE: &str = "+390212345678";
+    const OTHER: &str = "+390298765432";
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+    let users = SurrealUserRepository::new(db.clone());
+
+    let put_body = |phone: &str| {
+        json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "renumbered",
+            "emails": [{ "value": "renumbered@example.com", "primary": true }],
+            "phoneNumbers": [{ "value": phone, "type": "mobile", "primary": true }],
+        })
+    };
+    let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(&token))
+        .set_json(put_body(PHONE))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "create");
+    let created: Value = test::read_body_json(resp).await;
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+    // An administrator asserts an out-of-band check (the only writer today).
+    let verify = || async {
+        users
+            .update(
+                tenant_id,
+                id,
+                UpdateUser {
+                    phone_number_verified_at: Some(Some(chrono::Utc::now())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    };
+    let verified = || async {
+        users
+            .get_by_id(tenant_id, id)
+            .await
+            .unwrap()
+            .phone_number_verified_at
+            .is_some()
+    };
+    verify().await;
+
+    let patch = |ops: Value| {
+        test::TestRequest::patch()
+            .peer_addr(bench_peer())
+            .uri(&format!("/scim/v2/Users/{id}"))
+            .insert_header(bearer(&token))
+            .set_json(json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": ops,
+            }))
+            .to_request()
+    };
+    let put = |phone: &str| {
+        test::TestRequest::put()
+            .peer_addr(bench_peer())
+            .uri(&format!("/scim/v2/Users/{id}"))
+            .insert_header(bearer(&token))
+            .set_json(put_body(phone))
+            .to_request()
+    };
+
+    // Unchanged number: verification kept.
+    let resp = test::call_service(
+        &app,
+        patch(json!([{ "op": "replace", "path": "name.givenName", "value": "Ada" }])),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "unrelated patch");
+    assert!(
+        verified().await,
+        "an unrelated PATCH keeps the verification"
+    );
+    let resp = test::call_service(&app, put(PHONE)).await;
+    assert_eq!(resp.status().as_u16(), 200, "put, same number");
+    assert!(verified().await, "a PUT restating the number keeps it");
+
+    // PATCH replacing the number: verification cleared.
+    let resp = test::call_service(
+        &app,
+        patch(json!([{
+            "op": "replace",
+            "path": "phoneNumbers",
+            "value": [{ "value": OTHER, "type": "mobile", "primary": true }],
+        }])),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "patch phoneNumbers");
+    let after = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(
+        after.phone_number.as_deref() == Some(OTHER),
+        "patch: new number"
+    );
+    assert!(
+        after.phone_number_verified_at.is_none(),
+        "a PATCH changing the number clears its verification"
+    );
+
+    // PUT with a different number: cleared as well.
+    verify().await;
+    let resp = test::call_service(&app, put(PHONE)).await;
+    assert_eq!(resp.status().as_u16(), 200, "put, new number");
+    let after = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(
+        after.phone_number.as_deref() == Some(PHONE),
+        "put: new number"
+    );
+    assert!(
+        after.phone_number_verified_at.is_none(),
+        "a PUT changing the number clears its verification"
+    );
+}

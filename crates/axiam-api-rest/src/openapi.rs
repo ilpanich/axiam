@@ -157,6 +157,8 @@ use crate::handlers;
         handlers::ca_certificates::generate_intermediate,
         handlers::ca_certificates::sign_intermediate_csr,
         handlers::ca_certificates::list_intermediates,
+        // #565 — each issuing CA's certificate revocation list (public)
+        handlers::crl::get_crl,
         // Certificates
         handlers::certificates::generate,
         handlers::certificates::sign_csr,
@@ -242,6 +244,7 @@ use crate::handlers;
         handlers::oauth2::end_session_at_cookie_path,
         handlers::device::verify,
         handlers::device::decide,
+        handlers::ciba_approval::list_requests,
         handlers::ciba_approval::get_request,
         handlers::ciba_approval::approve,
         handlers::ciba_approval::deny,
@@ -408,6 +411,7 @@ use crate::handlers;
         // envelope because it is the element type of `JobsHealthResponse::jobs`
         // and utoipa does not pull nested schemas in transitively from `paths`.
         crate::health::JobsHealthResponse,
+        crate::health::RequestAuditHealth,
         crate::health::JobStatus,
         // Auth
         handlers::auth::LoginRequest,
@@ -490,6 +494,7 @@ use crate::handlers;
         crate::handlers::ca_certificates::SetMtlsTrustAnchor,
         crate::handlers::ca_certificates::MtlsTrustAnchorResponse,
         crate::handlers::ca_certificates::MigrateCustodyResponse,
+        crate::handlers::crl::DerCrl,
         crate::handlers::permissions::GrantedScope,
         handlers::permissions::CreatePermissionRequest,
         handlers::permissions::GrantPermissionRequest,
@@ -615,6 +620,7 @@ use crate::handlers;
         handlers::device::DecideRequest,
         handlers::device::DecideResponse,
         handlers::ciba_approval::CibaApprovalPage,
+        handlers::ciba_approval::CibaPendingList,
         handlers::ciba_approval::CibaDecisionBody,
         handlers::ciba_approval::CibaDecisionResponse,
         handlers::ciba_approval::CibaStepUpRequired,
@@ -780,6 +786,7 @@ use crate::handlers;
         (name = "scopes", description = "Scope management (sub-resource permissions)"),
         (name = "ca-certificates", description = "CA certificate management"),
         (name = "certificates", description = "Tenant certificate lifecycle"),
+        (name = "pki", description = "Public PKI distribution — each issuing CA's certificate revocation list, unauthenticated (RFC 5280 §5)"),
         (name = "pgp-keys", description = "OpenPGP key management and audit signing"),
         (name = "audit", description = "Audit log queries"),
         (name = "webhooks", description = "Webhook registration and management"),

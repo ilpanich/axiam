@@ -52,8 +52,8 @@ services:
     # `!override` replaces the base ports list (compose would otherwise append,
     # leaving the plaintext 8090 mapping pointed at a port that now speaks TLS).
     ports: !override
-      - "${BENCH_TLS_PORT:-8443}:8090"
-      - "${BENCH_GRPC_PORT:-50051}:50051"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_TLS_PORT:-8443}:8090"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_GRPC_PORT:-50051}:50051"
     # The container healthcheck self-probes /health with reqwest, which verifies
     # certs and would reject the throwaway self-signed cert over https. Disable it
     # here; `just bench-up` gates real readiness host-side (curl -k …/health).

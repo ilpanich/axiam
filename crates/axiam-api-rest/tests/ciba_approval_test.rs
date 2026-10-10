@@ -442,6 +442,29 @@ async fn get_page(
     )
 }
 
+async fn get_list(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    query: &str,
+    jwt: &str,
+) -> (u16, Value) {
+    let req = test::TestRequest::get()
+        .peer_addr(peer())
+        .uri(&format!("/api/v1/ciba/requests{query}"))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 async fn decide(
     app: &impl actix_web::dev::Service<
         actix_http::Request,
@@ -903,6 +926,165 @@ async fn each_route_has_a_rate_limit_bucket_of_its_own() {
         }
         assert_eq!(seen, [404, 404, 429, 429], "{verb} has its own bucket");
     }
+}
+
+// ---------------------------------------------------------------------------
+// #566 (P23W6-07, D-74): the pending-request list
+// ---------------------------------------------------------------------------
+
+/// A federated account is `PendingVerification` for life (T-160) and has no
+/// vouched address, so D-74 mails it nothing and no link ever reaches it. The
+/// list is how it finds its request: it sees it, opens it by the id the list
+/// carries, and approves.
+#[actix_web::test]
+async fn a_federated_user_with_no_verified_address_sees_and_approves_their_request() {
+    let mut w = world().await;
+    let mail = RecordingMail::default();
+    w.state = mailing_state(&w.db, &w.auth, mail.clone());
+    // Left as `create` writes it: `PendingVerification`, no `email_verified_at`.
+    let fed = SurrealUserRepository::new(w.db.clone())
+        .create(CreateUser {
+            tenant_id: w.tenant_id,
+            username: "fed".into(),
+            email: "fed@example.com".into(),
+            password: axiam_test_support::test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(fed.status, UserStatus::PendingVerification);
+    assert!(fed.email_verified_at.is_none());
+    let app = app!(w, limits());
+    let (auth_req_id, id) = start(&app, &w, "fed", "").await;
+    let jwt = session_token(&w, fed.id, vec![Amr::Pwd]).await;
+    assert!(
+        settled(&mail).await.is_empty(),
+        "D-74: nothing vouches for the address, so no mail went out"
+    );
+
+    let (status, list) = get_list(&app, "?status=pending", &jwt).await;
+    assert_eq!(status, 200, "{list}");
+    let entries = list["requests"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{list}");
+    let entry = &entries[0];
+    assert_eq!(entry["request_id"], id.to_string());
+    assert_eq!(entry["client_name"], "Call Centre");
+    assert_eq!(entry["binding_message"], BINDING);
+    assert_eq!(entry["scopes"], serde_json::json!(["openid", "profile"]));
+    assert!(entry["expires_at"].is_string());
+    assert!(
+        !list.to_string().contains(&auth_req_id) && !list.to_string().contains("auth_req_id"),
+        "the list never carries the auth_req_id"
+    );
+
+    // The list's id opens the existing page, which agrees with the list on the
+    // version it must send back.
+    let (status, page) = get_page(&app, id, &jwt).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["version"], entry["version"]);
+    let (status, done) = decide(&app, id, "approve", page["version"].as_u64().unwrap(), &jwt).await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(row(&w, id).await.status, CibaRequestStatus::Approved);
+    assert_eq!(audit_rows(&w, "ciba.approved").await.len(), 1);
+
+    // Decided: gone from the list.
+    assert_eq!(
+        get_list(&app, "?status=pending", &jwt).await.1["requests"],
+        serde_json::json!([])
+    );
+}
+
+/// The list holds the caller's own requests and nobody's else, and a decided or
+/// expired request is simply absent — the same absence as an unknown id, so the
+/// list is no oracle either (T-430).
+#[actix_web::test]
+async fn another_users_request_is_not_listed() {
+    let w = world().await;
+    let app = app!(w, limits());
+    let (_, alices) = start(&app, &w, "alice", "").await;
+    let (_, bobs) = start(&app, &w, "bob", "").await;
+    let (_, decided) = start(&app, &w, "alice", "").await;
+    let (_, expired) = start(&app, &w, "alice", "").await;
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let bob = session_token(&w, w.bob, vec![Amr::Pwd]).await;
+
+    let version = row(&w, decided).await.version;
+    assert_eq!(decide(&app, decided, "deny", version, &alice).await.0, 200);
+    w.db.query(format!(
+        "UPDATE ciba_request SET expires_at = time::now() - 1m \
+         WHERE meta::id(id) = '{expired}'"
+    ))
+    .await
+    .unwrap();
+
+    let ids = |list: &Value| -> Vec<String> {
+        list["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["request_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (status, list) = get_list(&app, "?status=pending", &alice).await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(&list), vec![alices.to_string()], "{list}");
+    let (status, list) = get_list(&app, "", &bob).await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(&list), vec![bobs.to_string()], "{list}");
+
+    // Only `pending` is a status.
+    assert_eq!(get_list(&app, "?status=approved", &alice).await.0, 400);
+}
+
+/// W5 F4 review, T-447, for the list: the CIBA client's own token names the
+/// user and a live session but is not a console sign-in, so it lists nothing.
+#[actix_web::test]
+async fn a_token_minted_for_a_client_cannot_list_requests() {
+    let w = world().await;
+    let app = app!(w, limits());
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let (first_auth_req_id, first) = start(&app, &w, "alice", "").await;
+    let version = row(&w, first).await.version;
+    assert_eq!(decide(&app, first, "approve", version, &jwt).await.0, 200);
+    let (status, issued) = poll(&app, &w, &first_auth_req_id).await;
+    assert_eq!(status, 200);
+    let client_held = issued["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        decode_unverified(&client_held)["client_id"],
+        w.client.client_id
+    );
+
+    let _ = start(&app, &w, "alice", "").await;
+    let (status, body) = get_list(&app, "?status=pending", &client_held).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.get("requests").is_none());
+    // A token with no session row is refused alike, and no credential is 401.
+    let sessionless = sessionless_token(&w, w.alice);
+    assert_eq!(get_list(&app, "", &sessionless).await.0, 403);
+    let req = test::TestRequest::get()
+        .peer_addr(peer())
+        .uri("/api/v1/ciba/requests")
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 401);
+}
+
+/// The list has a bucket of its own in `ciba_approval_per_min`: spending it
+/// moves neither the page's nor the decisions'.
+#[actix_web::test]
+async fn the_pending_list_has_a_rate_limit_bucket_of_its_own() {
+    let w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    let app = app!(w, tight);
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        seen.push(get_list(&app, "?status=pending", &jwt).await.0);
+    }
+    assert_eq!(seen, [200, 200, 429, 429], "the list route is counted");
+    assert_eq!(get_page(&app, Uuid::new_v4(), &jwt).await.0, 404);
 }
 
 #[actix_web::test]

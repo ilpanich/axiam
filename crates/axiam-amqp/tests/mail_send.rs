@@ -24,6 +24,7 @@ use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, EmailConfigRepository, EmailTemplateRepository,
     OrganizationRepository, PaginatedResult, Pagination, TenantRepository, UserRepository,
 };
+use axiam_email::EmailEgress;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -377,6 +378,7 @@ async fn no_email_config_returns_send_error() {
     let audit = MockAuditRepo::new();
     let err = send_with_retry_and_audit(
         &msg(0),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: true },
@@ -399,6 +401,7 @@ async fn disabled_email_config_returns_send_error() {
     let audit = MockAuditRepo::new();
     let err = send_with_retry_and_audit(
         &msg(0),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: true },
@@ -420,6 +423,7 @@ async fn transient_failure_with_retries_remaining_signals_retry() {
     // attempt_count 0 -> 0+1 < MAX_RETRIES(3) so RetryNeeded.
     let outcome = send_with_retry_and_audit(
         &msg(0),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: true },
@@ -448,6 +452,7 @@ async fn exhausted_retries_writes_pii_minimal_audit() {
     // attempt_count MAX_RETRIES-1 -> +1 == MAX_RETRIES so Exhausted.
     let outcome = send_with_retry_and_audit(
         &msg(MAX_RETRIES - 1),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: true },
@@ -480,6 +485,7 @@ async fn template_fetch_failure_falls_back_and_still_processes() {
     let audit = MockAuditRepo::new();
     let outcome = send_with_retry_and_audit(
         &msg(0),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: true },
@@ -501,6 +507,7 @@ async fn user_lookup_failure_falls_back_to_advisory_address() {
     let audit = MockAuditRepo::new();
     let outcome = send_with_retry_and_audit(
         &msg(0),
+        &EmailEgress::default(),
         &cfg,
         &audit,
         &MockUserRepo { found: false },

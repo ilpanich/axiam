@@ -802,7 +802,32 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     }
 
     // ---- No principal: refuse silently, hop, or stop ---------------------
+
+    // #524 (P23W2-03) — do not send a user to sign in for a request that
+    // `AuthorizeService::authorize` will refuse whoever signs in.
     //
+    // A client registered `require_par` (every `fapi2` client is) may not send
+    // its parameters through the browser, and whether it did is decidable from
+    // the registration and the query alone: no principal and no pushed
+    // request. Until #524 an anonymous browser was sent through the login hop
+    // first and the return leg was refused, so a person typed a password for
+    // nothing and a FAPI reviewer saw a sign-in page before the error page
+    // (`REVIEW-JUDGEMENTS.md`, open point 6).
+    //
+    // First among the no-principal arms rather than beside the `response_type`
+    // pre-check, because the `prompt=none` arm before that one would redirect
+    // on the query's `redirect_uri` — the channel this setting forbids — and the
+    // service checks PAR before `response_type` too. Not before the session
+    // lookup: a browser that holds a session still reaches the service, whose
+    // step 1b is the gate the return-leg tests pin. Same wording, same
+    // non-redirecting answer as the handler's `ParRequired` arm.
+    if client.require_par && q.request_uri.is_none() {
+        return Err(Box::new(authorize_error_response(
+            http_req,
+            &OAuth2Error::ParRequired(axiam_oauth2::authorize::PAR_REQUIRED_DESCRIPTION.into()),
+        )));
+    }
+
     // W4 (plan §4.2, T1.1/T1.7). `prompt=none` says: answer without showing
     // the end user anything. There is nothing to answer with — no session
     // resolved — so the answer is `login_required`, **redirected to the

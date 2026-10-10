@@ -371,6 +371,31 @@ async fn hop(
     .await
 }
 
+/// Store a pushed request for `client_id` directly (see
+/// `oauth2_login_hop_test.rs`), returning its `request_uri`.
+async fn push_handle(db: &Surreal<TestDb>, tenant_id: Uuid, client_id: &str) -> String {
+    use axiam_core::models::oauth2_client::{CreatePushedAuthRequest, PushedAuthParams};
+    use axiam_core::repository::PushedAuthRequestRepository;
+
+    let request_uri = axiam_oauth2::par::generate_request_uri();
+    axiam_db::repository::SurrealPushedAuthRequestRepository::new(db.clone())
+        .create(CreatePushedAuthRequest {
+            tenant_id,
+            client_id: client_id.to_owned(),
+            request_uri_hash: axiam_oauth2::par::hash_request_uri(&request_uri),
+            params: PushedAuthParams {
+                response_type: "code".into(),
+                redirect_uri: REDIRECT_URI.into(),
+                scope: Some("openid".into()),
+                ..Default::default()
+            },
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        })
+        .await
+        .expect("the pushed request must store");
+    request_uri
+}
+
 /// A `fapi2` client that a browser may reach — M7 permits `browser_sso` on
 /// every profile — and that is registered honestly, i.e. `ignore`.
 fn fapi_browser_client() -> serde_json::Value {
@@ -768,11 +793,19 @@ async fn m5_m6_an_honest_fapi2_client_is_refused_nothing_and_offered_no_mechanis
     let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
     let (client_id, _) = create_client(&app, &jwt, fapi_browser_client()).await;
 
-    let resp = hop(
+    // Pushed, because a `fapi2` client is a `require_par` one: its inline
+    // parameters are refused before the hop (#524), whatever they are. The
+    // four ride on the query beside the handle, as a relying-party library
+    // adds them.
+    let request_uri = push_handle(&db, tenant_id, &client_id).await;
+    let resp = anonymous_authorize(
         &app,
-        tenant_id,
-        &client_id,
-        "&login_hint=alice%40example.com&display=popup&ui_locales=it&claims_locales=it",
+        &format!(
+            "client_id={client_id}&request_uri={}&tenant_id={tenant_id}\
+             &login_hint=alice%40example.com&display=popup&ui_locales=it&claims_locales=it",
+            url::form_urlencoded::byte_serialize(request_uri.as_bytes()).collect::<String>()
+        ),
+        None,
     )
     .await;
 

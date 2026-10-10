@@ -1050,6 +1050,73 @@ async fn d11_m7_a_fapi2_return_leg_on_the_tenant_path_skips_no_gate() {
     );
 }
 
+/// **#524 (P23W2-03), on the tenant path.** An anonymous browser sending a
+/// `require_par` client's parameters inline to `/t/{tenant_id}/oauth2/authorize`
+/// is refused `ParRequired` before the login hop, in place: `400`, no
+/// `Location` and the PAR wording, as a page and as the JSON object. The
+/// control: the same client's pushed request still takes the hop.
+#[actix_rt::test]
+async fn p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop_on_the_tenant_path()
+ {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, fapi_browser_client()).await;
+    let inline = format!(
+        "{}&code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256",
+        tenant_query(&client_id)
+    );
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("{}?{inline}", tenant_path(tenant_id)))
+        .insert_header(("Accept", "text/html,application/xhtml+xml"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(
+        resp.headers().get("location").is_none(),
+        "refused in place, never sent to /login: {}",
+        location(&resp)
+    );
+    let page = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(
+        page.contains(
+            "this client must use pushed authorization requests (RFC 9126); \
+             send parameters to /oauth2/par first"
+        ),
+        "{page}"
+    );
+
+    let resp = tenant_authorize(&app, tenant_id, &inline, None).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.headers().get("location").is_none());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("must use pushed authorization requests (RFC 9126)"),
+        "{body}"
+    );
+
+    let pushed = push_handle(&db, tenant_id, &client_id, Some(PKCE_CHALLENGE)).await;
+    let resp = tenant_authorize(
+        &app,
+        tenant_id,
+        &format!(
+            "client_id={client_id}&request_uri={}",
+            urlencoding_encode(&pushed)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    assert!(is_login_hop(&location(&resp)), "{}", location(&resp));
+}
+
 /// **The account re-read, on the tenant path.** A locked, deactivated, deleted
 /// or anonymised account's tenant cookie buys nothing (stale: `reauth`, the
 /// tenant copy cleared, the return leg terminal); a `PendingVerification` one —

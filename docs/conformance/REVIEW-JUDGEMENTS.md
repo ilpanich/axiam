@@ -54,7 +54,7 @@ was re-read against that commit.
 | Basic OP | `oidcc-max-age-1` | `RSzk3w8Kxro3IYC` | [`oidcc-basic-static__max-age-1__f77ce8cb67.jpg`](evidence/2026-09-25/oidcc-basic-static__max-age-1__f77ce8cb67.jpg) | Conformant; same shape as `prompt-login` |
 | Basic OP | `oidcc-ensure-registered-redirect-uri` | `szkbM07X3ihnZoY` | [`oidcc-basic-static__ensure-registered-redirect-uri__f39dea4139.jpg`](evidence/2026-09-25/oidcc-basic-static__ensure-registered-redirect-uri__f39dea4139.jpg) | Conformant; the page is the one RFC 6749 §3.1.2.4 asks for |
 | Basic OP | `oidcc-ensure-request-object-with-redirect-uri` | `d93KQKPrWLutU8W` | [`oidcc-basic-static__ensure-request-object-with-redirect-uri__f39dea4139.jpg`](evidence/2026-09-25/oidcc-basic-static__ensure-request-object-with-redirect-uri__f39dea4139.jpg) | Conformant on the evidence, with one point the live log must confirm |
-| FAPI 2.0 | `ensure-unsigned-authorization-request-without-using-par-fails` | `hubHxFIqq4NIObo` (`mtls`), `73MqxLgoSS6V38N` (`self-signed`), `c0Rb6Ejn7RpJoRQ` (`private-key-jwt`) | [`…__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg), the same bytes for all three | Conformant on the evidence: an error page carrying `invalid_request`; two points the log must settle (wording; whether a sign-in came first) |
+| FAPI 2.0 | `ensure-unsigned-authorization-request-without-using-par-fails` | `hubHxFIqq4NIObo` (`mtls`), `73MqxLgoSS6V38N` (`self-signed`), `c0Rb6Ejn7RpJoRQ` (`private-key-jwt`) | [`…__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg), the same bytes for all three | Conformant on the evidence: an error page carrying `invalid_request`; two points the log must settle (wording; whether a sign-in came first — none can since #524) |
 | FAPI 2.0 | `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` | `H2OiSzJ5MolJxvg`, `yhcCDPi0oikE4FC`, `xHPfInpD8AbPbaU` | [`…__3bfc90363d.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg) (`mtls`, `self-signed`), [`…__736d1520ee.jpg`](evidence/2026-09-25/fapi2-security-profile-final-private-key-jwt__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__736d1520ee.jpg) (`private-key-jwt`) | Conformant; the image is the login page, the log must show which visit it is |
 | FAPI 2.0 | `test-claims-parameter-identity-claims` (`WARNING`) | `E3LMGPfxxRnrBff`, `Ifh31qq9b0lDMpw`, `v440VDWfwxP7kKo` | none (a `WARNING` uploads nothing) | **Open.** Not the "claims not supported" deviation (discovery says `true`); the reason is in the log only |
 
@@ -469,16 +469,26 @@ earned it or whether a sign-in page came first (below).
   not `302`), `oauth2_login_hop_test.rs::t0_4_the_return_leg_still_refuses_a_require_par_client_sending_inline_parameters`
   and `::m7_a_fapi2_return_leg_with_inline_parameters_is_par_required` (`400`, no
   `Location`, `invalid_request`, the wording above).
-- **What those tests do not pin, from reading the code.** They drive a request
-  that already holds an OP session. For an *anonymous* browser,
-  `resolve_authorize_principal` in `handlers/oauth2.rs` has no `require_par`
-  check, and the `browser_sso` conformance clients take the login hop first, so
-  the refusal is rendered on the return leg, after a sign-in. `drive-browser.mjs`
-  can capture an error page on either path (its `visit()` records an `error`
-  shot both when no sign-in form appears and when sign-in is followed by neither
-  consent nor the suite's callback). **Which one produced the 2026-09-25 image
-  is in the module's log and is to be confirmed by the maintainer's run.** The
-  tests above cover the second leg and nothing covers the first.
+- **The anonymous browser (#524, P23W2-03).** Those tests drive a request that
+  already holds an OP session. Until #524 an *anonymous* browser — which the
+  suite is when it arrives — was sent through the login hop first, because
+  `resolve_authorize_principal` in `handlers/oauth2.rs` had no `require_par`
+  check, and the refusal was rendered on the return leg, after a sign-in. It now
+  has one: a `require_par` client's request with no `request_uri` and no
+  principal is refused `ParRequired` there, in place, with the same wording,
+  before the `prompt=none`, loop-guard and `response_type` arms and before the
+  login hop (commit `fix(oauth2): a require_par client's unpushed request is
+  refused before the login hop (#524)`). Pinned by
+  `oauth2_login_hop_test.rs::p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop`
+  and, on `/t/{tenant_id}/oauth2/authorize`,
+  `oauth2_tenant_path_sso_test.rs::p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop_on_the_tenant_path`:
+  `400`, no `Location` (to `/login` or anywhere else), the PAR sentence as a
+  page for a browser and as the JSON object otherwise, and the same client's
+  pushed request still taking the hop. `drive-browser.mjs` can capture an error
+  page on either path (its `visit()` records an `error` shot both when no
+  sign-in form appears and when sign-in is followed by neither consent nor the
+  suite's callback), so **which one produced the 2026-09-25 image is in the
+  module's log**; against a build carrying #524 only the first path exists.
 
 **Why that is conformant.** FAPI 2.0 Security Profile §5.3.1.2, as
 `fapi.rs` cites it, requires the authorization server to require pushed
@@ -502,12 +512,17 @@ was asked for first, or if it was, that the reviewer is shown that; and, for the
 final run, that the image still says `invalid_request` (T23.1.1 changed the
 `fapi2` gate after the baseline, though not this refusal).
 
-**Open, for the maintainer.** (1) The wording divergence above. (2) Whether an
-anonymous request from a `require_par` client should be refused before the login
-hop, as `response_type` and a dead `request_uri` already are, rather than after
-sign-in. It is decidable without a principal. This entry does not propose it and
-no code was changed; the 2026-09-25 verdict does not depend on it, but a reviewer
-who reads the log and sees a sign-in precede the refusal may ask.
+**Open, for the maintainer.** (1) The wording divergence above. (2) *Fixed by
+#524 (P23W2-03).* An anonymous request from a `require_par` client is now refused
+before the login hop, as `response_type` and a dead `request_uri` already were,
+rather than after sign-in: commit `fix(oauth2): a require_par client's unpushed
+request is refused before the login hop (#524)`, tests
+`oauth2_login_hop_test.rs::p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop`
+(bare path) and
+`oauth2_tenant_path_sso_test.rs::p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop_on_the_tenant_path`
+(tenant path). The 2026-09-25 verdict did not depend on it. The sign-off run
+should confirm the screenshot: the same error page, reached with no sign-in page
+before it in the module's log.
 
 ---
 
@@ -763,10 +778,12 @@ something the repository cannot decide. Items 1 to 3 are the Basic OP entries'
    is honoured on the `fapi2` lane (or the honour lane only), or the warning is
    published as accepted with its entry as the account. A product and security
    decision; nothing in the repository takes it, and no code implements it.
-6. **Refuse an unpushed request before the login hop?** A `require_par` client's
-   request with no `request_uri` is refused only after sign-in today (return
-   leg). Whether to refuse it earlier is the maintainer's; nothing here proposes
-   it.
+6. **Refuse an unpushed request before the login hop?** *Fixed by #524
+   (P23W2-03).* A `require_par` client's request with no `request_uri` used to
+   be refused only after sign-in (return leg); it is now refused in place, before
+   the login hop, on both mounts (see the entry). The sign-off run should confirm
+   the screenshot of `ensure-unsigned-authorization-request-without-using-par-fails`
+   with no sign-in before it; the 2026-09-25 verdict did not depend on it.
 7. **The stale `false`.** The 2026-09-18 and 2026-09-25 evidence READMEs say
    discovery publishes `claims_parameter_supported: false`, though the code and
    its test say `true`. They are dated receipts and are not rewritten; the

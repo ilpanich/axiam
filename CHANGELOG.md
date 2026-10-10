@@ -307,6 +307,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Behaviour change:** moving a configuration to another SMTP server, port
   or TLS mode, or to another `api_url`, now requires entering the password or
   API key in the same request.
+- **A `require_par` client's unpushed authorization request is refused before
+  the sign-in page** (#524, P23W2-03). A browser with no session that reached
+  `/oauth2/authorize` (or `/t/{tenant_id}/oauth2/authorize`) for a
+  `browser_sso` client registered `require_par` — every `fapi2` client is —
+  with its parameters inline rather than a `request_uri` was sent through the
+  login hop, and the request was refused only on the return leg: a person
+  signed in for nothing, and a FAPI conformance reviewer saw a sign-in page
+  before the error page. The refusal no longer needs a principal: it is
+  answered at once, in place (`400`, never a redirect, an error page for a
+  browser and the JSON error object otherwise), with the same
+  `invalid_request` and wording a signed-in caller gets. A pushed request is
+  unaffected. `docs/conformance/REVIEW-JUDGEMENTS.md` open point 6 is closed;
+  the certification sign-off run confirms the screenshot.
 
 ### Documentation
 

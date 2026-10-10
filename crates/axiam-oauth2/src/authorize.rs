@@ -265,6 +265,13 @@ pub struct AuthorizeResponse {
     pub redirect_uri: String,
 }
 
+/// The `error_description` of a `require_par` client's request that did not
+/// come through PAR (B5, RFC 9126 §5). One string for both places that refuse
+/// it: [`AuthorizeService::authorize`], and the REST handler's anonymous path,
+/// which refuses it before the login hop (#524).
+pub const PAR_REQUIRED_DESCRIPTION: &str = "this client must use pushed authorization requests (RFC 9126); send parameters to \
+     /oauth2/par first";
+
 /// OAuth2 authorization service -- handles the authorization code grant.
 #[derive(Clone)]
 pub struct AuthorizeService<OC, AC> {
@@ -316,11 +323,7 @@ where
         //     bouncing the user agent to a redirect_uri that arrived by the
         //     very channel the client forbade would defeat the setting.
         if client.require_par && !req.via_par {
-            return Err(OAuth2Error::ParRequired(
-                "this client must use pushed authorization requests \
-                 (RFC 9126); send parameters to /oauth2/par first"
-                    .into(),
-            ));
+            return Err(OAuth2Error::ParRequired(PAR_REQUIRED_DESCRIPTION.into()));
         }
 
         // 2. Validate redirect_uri — also before any redirectable

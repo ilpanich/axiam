@@ -1032,7 +1032,9 @@ export const POSTS: Post[] = [
  * a close date) and commit history; phases are sequential and do not overlap.
  * Phases 0–18 are the delivered 64-task roadmap; phase 19 is the hardening
  * effort that began after the platform reached feature-complete and closed
- * when it reached beta; phase 20 is the open-ended beta line.
+ * when it reached beta; phase 20 is the beta line, which closed with
+ * `1.0.0-beta19` on Oct 9, 2026; phase 21 is the 1.0.0 release (Phase 24 of
+ * `claude_dev/roadmap.md`), "ongoing" until the maintainer tags it.
  */
 export const PHASES: Phase[] = [
   {
@@ -1199,8 +1201,17 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API — then Phase 23, the competitor-gap closure: a SAML 2.0 identity provider, LDAP and Active Directory as an identity source, RFC 7592 client configuration, a Shared Signals Framework transmitter, outbound SCIM provisioning, CIBA, a minimal profile without the broker and the groundwork for the OpenID certification submissions, carried into all eleven SDKs at contract 1.58",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API — then Phase 23, the competitor-gap closure: a SAML 2.0 identity provider, LDAP and Active Directory as an identity source, RFC 7592 client configuration, a Shared Signals Framework transmitter, outbound SCIM provisioning, CIBA, a minimal profile without the broker and the groundwork for the OpenID certification submissions, carried into all eleven SDKs at contract 1.58, and then the cross-SDK review of those ports (contract 1.59) that handed the 1.0.0 release its list",
     start: "Aug 26, 2026",
+    end: "Oct 9, 2026",
+    status: "done",
+  },
+  {
+    n: 21,
+    title: "1.0.0 — the first stable release",
+    focus:
+      "Phase 24 of the development roadmap: the security findings that must not ship in a 1.0 (device approval, account-lockout timing, a certificate revocation list, actor-token binding, tenant deletion, the SAML verifier's SHA-1 and DTD refusal), durability and operations (the SCIM breaker, the audit dead-letter file, orderly shutdown, the pending CIBA list), contract 1.60 in all eleven SDKs and the release pipelines read for the first stable tag — after which the REST, gRPC and AMQP surfaces and the SDK contract are under semantic versioning, and security fixes ship in 1.0.x. No independent third-party audit has been performed",
+    start: "Oct 9, 2026",
     end: "Ongoing",
     status: "ongoing",
   },

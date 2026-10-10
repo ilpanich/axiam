@@ -1126,6 +1126,73 @@ open, with issue numbers — closes §5 of the plan.
 
 ---
 
+## Phase 24: 1.0.0 release — IN PROGRESS (W1 and W2 landed on their branches 2026-10-09 … 10; W1.13 … W1.F4, W3 and W4 open)
+
+Bring the platform and the eleven SDKs to the state in which the maintainer tags
+`v1.0.0`, in the waves, with the decisions, of
+[`release-1.0.0-plan.md`](release-1.0.0-plan.md) (decisions D-1 … D-9 accepted
+as recommended on 2026-10-09; D-10 superseded by the maintainer's request for a
+single pull request, #589, which closes every issue the waves close; D-11,
+creating the milestones `1.0.0` and `1.0.x`, is the maintainer's). 1.0.0 is the
+first stable release: REST, gRPC, AMQP and the SDK contract are under semantic
+versioning from there, security fixes ship in `1.0.x`, and no independent
+third-party audit has been performed. W1 (security findings) and W2 (durability,
+operations, the CIBA gap) are independent; W3 (contract 1.60 and the eleven SDK
+ports) needs the fields they add; W4 (release readiness) needs everything. The
+agent writes the code and the pull requests; it does not tag, does not run the
+conformance suites and does not merge. Task ids are `T24.W<wave>.<item>`, the
+plan's item numbers; each wave ends with an F4 security review of its diff
+against [`threat-model-stride.md`](threat-model-stride.md).
+
+| Task | Scope | Model | Wave | Status |
+|---|---|---|---|---|
+| T24.W1.1 | #549: the device-approval routes refuse a token carrying `client_id` with `403`; T-447 → Mitigated | Opus 5.5 | W1 | ✓ |
+| T24.W1.2 | #564: the lockout branch of `login` and every gRPC `ValidateCredentials` refusal run the equalising dummy verify under the same permit; T-469 → Mitigated | Opus 5.5 | W1 | ✓ |
+| T24.W1.3 | #565: a CRL per issuing CA at an unauthenticated, rate-limited `GET`; `tls_client_auth` refuses a non-`Active` leaf; T-102 → Mitigated (CRLs in the rustls verifiers and OCSP are `1.0.x`, D-6) | Opus 5.5 | W1 | ✓ |
+| T24.W1.4 | #517: client deletion revokes the client's refresh tokens first; codes and pushed requests voided; T-289 amended | Opus 5.5 | W1 | ✓ |
+| T24.W1.5 | #518: `actor_token` bound to the exchanging client (D-5); `identity-for-agents.md` | Opus 5.5 | W1 | ✓ |
+| T24.W1.6 | #519: `AuthService::refresh` asks `account_may_act`; T-160 amended | Opus 5.5 | W1 | ✓ |
+| T24.W1.7 | #523: tenant deletion tombstones, revokes and purges every tenant-scoped table (D-4) | Opus 5.5 | W1 | ✓ |
+| T24.W1.8 | #529: the tenant email provider behind the directory connector's address guard; `api_url` through `guarded_fetch` | Opus 5.5 | W1 | ✓ |
+| T24.W1.9 | #520: `claims.id_token.sub` on the honour lane, refused on `fapi2`; `account_may_act` in UserInfo and introspection; stored ∩ client scopes at refresh | Opus 5.5 | W1 | ✓ |
+| T24.W1.10 | #532: `/oauth2/authorize`, both mounts, under the browser-endpoint preset | Opus 5.5 | W1 | ✓ |
+| T24.W1.11 | #531: the SAML SP verifier refuses SHA-1 (per-federation `allow_sha1_signatures`, D-3) and markup declarations | Opus 5.5 | W1 | ✓ |
+| T24.W1.12 | #525: an omitted SMTP password kept only when host, port and TLS mode are unchanged | Opus 5.5 | W1 | ✓ |
+| T24.W1.13 | #524: a `require_par` client's unpushed request refused before the login hop | Opus 5.5 | W1 | |
+| T24.W1.14 | #526: revocation and introspection endpoint auth methods published; `phone_number_verified_at` cleared when the number changes | Opus 5.5 | W1 | |
+| T24.W1.15 | #530: optional SAML metadata signing certificate; metadata cache honouring `validUntil`/`cacheDuration`; SSO-host-change audit | Opus 5.5 | W1 | |
+| T24.W1.F4 | F4 security review of the wave diff; findings filed on `1.0.x` unless Medium or higher | Opus 5.5 | W1 | |
+| T24.W2.1 | #550: a per-target breaker in the SCIM deliverer; loopback tarpit and 10 001-member dead-letter tests | Opus 5.5 | W2 | ✓ |
+| T24.W2.2 | #551: a per-(tenant, rule, event) notification window claimed in the datastore; T-117 closed | Opus 5.5 | W2 | ✓ |
+| T24.W2.3 | #553: dropped and failed request-audit entries counted in `/health/jobs` and dead-lettered; T-108 re-closed | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.4 | #552: the audit dead-letter file provisioned in the prod compose and k8s manifests; a boot warning; GDPR records through the writer | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.5 | #554, #569: the `process::exit(1)` calls through the orderly stop; tonic shutdown; `stop_grace_period` above shutdown plus drain; `genhex` under `umask 077` | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.6 | #566: `GET /api/v1/ciba/requests?status=pending` for the signed-in user and the console badge | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.7 | #535: the five cleanup jobs registered in `SWEEP_JOBS`; the source-scan pin | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.8 | #555: `expected_updated_at` on `ScimTargetInput`; the webhook deliverer follows no redirect; the FAPI gate on a machine-readable summary; `delivery_abandoned` audit rows; the CONTRACT §8 note | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.9 | #568, #567: a row per missing limiter family and the self-test; benchmark ports on loopback unless told otherwise | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.10 | #536: the `saml_idp_enabled` / `ssf_enabled` settings controls and the SSF streams page (D-8: in 1.0.0) | Sonnet 5.5 | W2 | ✓ |
+| T24.W2.F4 | F4 security review of the wave diff ([`security-review-release-1.0.0-w2-2026-10-10.md`](security-review-release-1.0.0-w2-2026-10-10.md)) | Opus 5.5 | W2 | ✓ |
+| T24.W3.1 | Contract 1.60: the answers to every question in #588 (A1 … A7, B1 … B9), the 1.0.0 additions (§31, §14, §15, §8, §34.4, the CRL section), `openapi.json` and `management-registry.json` regenerated | Sonnet 5.5 | W3 | |
+| T24.W3.2 | The eleven SDK ports of contract 1.60, one pull request per `axiam-<lang>-sdk` repository, each vendoring the `axiam` W3 head; the rows 1.60 assigns fixed per SDK (D-7, D-9) | Sonnet 5.5 | W3 | |
+| T24.W4.1 | The beta wording rewritten to what 1.0.0 claims (D-1): README, SECURITY, `docs/`, the website; the "no known High holes" lines re-verified | Sonnet 5.5 | W4 | |
+| T24.W4.2 | The CHANGELOG `## [Unreleased]` as the `[1.0.0]` narrative | Sonnet 5.5 | W4 | |
+| T24.W4.3 | This phase in `roadmap.md`; the website roadmap's phase 20 `focus` and a 1.0.0 row | Sonnet 5.5 | W4 | |
+| T24.W4.4 | The website: the "AXIAM 1.0.0" post, the SDK reference page at contract 1.60, the verified-release stamps moved in the final pass | Sonnet 5.5 | W4 | |
+| T24.W4.5 | The threat model, one pass after W1 and W2: every flipped entry, the JSON, the STRIDE document, the generated files | Sonnet 5.5 | W4 | |
+| T24.W4.6 | The release pipelines read for the first stable tag (`release.yml`, `release-opaque.yml`, each SDK's publish job) | Sonnet 5.5 | W4 | |
+| T24.W4.7 | `mass-tag.sh` dry run across the twelve clones; the planted-orphan check; the script fixed for a non-prerelease version | Sonnet 5.5 | W4 | |
+| T24.W4.8 | The regression gate, each exit code from the tool | Sonnet 5.5 | W4 | |
+| T24.W4.9 | The hand-off: what the maintainer runs, in order (conformance suites, `mass-tag.sh`, the twelve pipelines) | Sonnet 5.5 | W4 | |
+
+Deferred and said so in public: #513 (the certification submissions; the
+maintainer's), #561 (benchmark run 6), #533 and #538 (`1.0.x`), #563 (open,
+unscheduled), and, carried into `1.0.x` from items that ship, the SCIM per-target
+concurrency budget (#550), CRLs in the rustls verifiers and OCSP (#565) and
+`may_act` (#518).
+
+---
+
 ## Summary
 
 | Phase | Tasks | Focus |
@@ -1154,7 +1221,8 @@ open, with issue numbers — closes §5 of the plan.
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
 | Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **complete** with W6a; T23.10.2(b) (run 6, seventh benchmark draft) rides W6b, #561 |
+| Phase 24 | 38 | 1.0.0 release (the security findings that must not ship in a 1.0, durability and operations, contract 1.60 and the eleven SDK ports, release readiness) — **in progress**: W1.1 … W1.12 and all of W2 done, W1.13 … W1.F4, W3 and W4 open |
 
-**Total: 179 tasks across 24 complete phases** (Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
+**Total: 217 tasks across 25 phases** (24 complete; Phase 24, the 1.0.0 release, has 23 of its 38 tasks done; Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

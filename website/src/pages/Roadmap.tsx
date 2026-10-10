@@ -34,7 +34,7 @@ export default function Roadmap() {
           letterSpacing: "-.02em",
         }}
       >
-        64 tasks. 20 phases. On to 1.0.0.
+        64 tasks. 21 phases. On to 1.0.0.
       </h1>
       <p style={{ margin: "0 0 14px", fontSize: 17, color: "#94a3b8", maxWidth: 640 }}>
         A structured path from project foundation to a security-audited,

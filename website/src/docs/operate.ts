@@ -619,7 +619,7 @@ export const OPERATE_PAGES: DocPage[] = [
         headers: ["Field", "Meaning"],
         rows: [
           ["email_verification_required", "Whether an unverified address blocks sign-in."],
-          ["email_verification_grace_period_hours", "How long an unverified account keeps working before it does."],
+          ["email_verification_grace_period_hours", "How long an unverified account can still sign in with a password before verification blocks it. It governs new password sign-ins only: a session already open keeps refreshing, and federated accounts, which stay unverified for life, are not held to it."],
           ["default_cert_validity_days", "Stored and returned by the settings API, but not read at issuance: every issuance request states its own `validity_days`."],
           ["max_cert_validity_days", "Stored and returned by the settings API, but not read at issuance. The ceiling issuance enforces is the tenant's `max_certificate_validity_days` metadata key — 365 days when unset, never more than 825."],
           ["webauthn_user_verification", "`discouraged` | `preferred` | `required` — whether a WebAuthn ceremony must prove user *verification* and not only presence. Default `preferred`, ordered `required` > `preferred` > `discouraged` for the tighten-only rule. See [Passkeys & WebAuthn](#/docs/passkeys#uv-policy)."],

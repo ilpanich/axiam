@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid `AXIAM__PKI__CRL_BASE_URL` or `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` stops
   startup. The OpenAPI document gains the route under a new `pki` tag.
 
+### Fixed
+
+- **Federated users' sessions keep refreshing after the email-verification
+  grace period** (#519, P23W1-07). The AXIAM session refresh
+  (`POST /api/v1/auth/refresh`, which keeps the admin console signed in)
+  applied the password sign-in's status rule, email-verification grace
+  included. Federated accounts stay pending verification for life, so their
+  sessions were refused a refresh once the grace period (24 hours by default)
+  had passed since the account was provisioned. The refresh now applies the
+  rule every other credential-to-principal path uses: a locked, inactive,
+  anonymized or deleted account is refused, a pending one never. Password
+  sign-in keeps the grace period. Threat model 2.38.0: T-160 amended.
+
 ### Security
 
 - **Device grant: only a console sign-in reads or decides a device

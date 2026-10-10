@@ -612,6 +612,112 @@ async fn refresh_locked_user_fails() {
     }
 }
 
+/// #519 (P23W1-07) — a session refresh asks whether the account may act, not
+/// whether a password sign-in would pass. A `PendingVerification` account
+/// older than the email-verification grace window (24 h here) is every
+/// federated account a day after it was provisioned; its session must keep
+/// refreshing. Before the fix this was refused `AccountPendingVerification`.
+#[tokio::test]
+async fn refresh_of_a_pending_account_past_the_grace_window_succeeds() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let raw_repo = SurrealUserRepository::new(db.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let login_out = login_alice(&svc, tenant_id, org_id).await;
+
+    // The account is pending verification and was created before the window.
+    raw_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::PendingVerification),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    db.query("UPDATE type::record('user', $id) SET created_at = time::now() - 48h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let user = raw_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(user.status, UserStatus::PendingVerification);
+    assert!(
+        user.created_at < Utc::now() - Duration::hours(24),
+        "the account must predate the grace window"
+    );
+
+    let refreshed = svc
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: login_out.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .expect("a pending account's session keeps refreshing past the grace window");
+    assert!(!refreshed.access_token.is_empty());
+    assert_ne!(refreshed.session_id, login_out.session_id);
+}
+
+/// #519's other half: `account_may_act` still refuses an inactive account, as
+/// `refresh_locked_user_fails` pins for a locked one.
+#[tokio::test]
+async fn refresh_inactive_user_fails() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let raw_repo = SurrealUserRepository::new(db);
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let login_out = login_alice(&svc, tenant_id, org_id).await;
+
+    raw_repo
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::Inactive),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = svc
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: login_out.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap_err();
+    match &err {
+        AxiamError::AuthenticationFailed { reason } => {
+            assert!(reason.contains("inactive"), "expected 'inactive': {reason}");
+        }
+        other => panic!("expected AuthenticationFailed, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn validate_access_token_works() {
     let config = test_config();

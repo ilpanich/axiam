@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 and T-471 enter; T-289 and T-275 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 and T-471 enter; T-289, T-275 and T-160 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -71,7 +71,13 @@
 > now have been issued to the exchanging client (its `client_id` claim, or the
 > `sub` of its client-credentials token); the tests accept the client's own
 > tokens and refuse another client's, a console sign-in and a service account's
-> with `invalid_request`. `may_act` stays `1.0.x`. The model is
+> with `invalid_request`. `may_act` stays `1.0.x`. It amends **T-160**
+> (#519): the AXIAM session refresh applied the password login's
+> email-verification grace, so a federated account — pending for life — had
+> its session refused a day after it was provisioned; the refresh now asks
+> `account_may_act`, which refuses a locked, inactive, anonymized or deleted
+> account and never a pending one, and the test refreshes a pending account
+> created two days earlier. The model is
 > **471 threats, 430 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

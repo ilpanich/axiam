@@ -1714,6 +1714,15 @@ what that survives).
 | **External audit ingestion over AMQP** (`amqp_audit_ingestion`) | The consumer that ingests audit events *published by other services* is not started. AXIAM's **own** audit events never touched AMQP — the audit middleware writes SurrealDB directly — and are unchanged. |
 | **Cross-replica decision-cache invalidation** (`decision_cache_broadcast`) | There is no second replica to tell. The decision cache itself (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED`) works, process-locally and exactly. |
 
+**A minimal-profile server reads no AMQP queue.** It does not consume
+`axiam.authz.request` or `axiam.audit.events`, whatever a broker holds, so a
+service that publishes to a broker left running next to it is confirmed by that
+broker while nothing reads the message. **A broker confirm never means AXIAM
+recorded an event** (nor decided an authorization): it says only that the broker
+accepted the message. A client that needs a decision uses REST or gRPC, which
+are unchanged; a service that needs its events in AXIAM's audit trail needs the
+full profile. The AMQP SDKs' READMEs say the same.
+
 Everything that rode a broker queue still works, on **in-process queues**:
 
 * **webhooks, SSF push, outbound SCIM and CIBA ping** run on one in-process

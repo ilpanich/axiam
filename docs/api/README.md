@@ -366,6 +366,15 @@ every AMQP queue and message type AXIAM publishes/consumes (authz
 request/response, audit events, notifications, outbound mail, webhook
 delivery + its DLQ/retry chain).
 
+**A server in the minimal profile (`AXIAM__AMQP__ENABLED=false`) reads no AMQP
+queue.** The authorization-request and audit-ingestion consumers are not started
+(`GET /health` lists `amqp_authz` and `amqp_audit_ingestion` under
+`unavailable`), so a message published to a broker is never read by AXIAM, and a
+broker confirm never means AXIAM recorded an event or decided a request: it says
+only that the broker accepted the message. Use REST or gRPC against such a
+server; an AMQP client is for a full-profile deployment. See
+[the deployment guide](../deployment/README.md#what-it-does-not-provide).
+
 **Important — this is a hand-authored snapshot, not a generated artifact.**
 Unlike the REST OpenAPI spec, there is no codegen link between
 `asyncapi.yml` and `crates/axiam-amqp/src/messages.rs` (D-07 chose

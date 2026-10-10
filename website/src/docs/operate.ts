@@ -107,6 +107,10 @@ export const OPERATE_PAGES: DocPage[] = [
           ["Cross-replica decision-cache invalidation", "There is no second replica to tell; boot refuses the decision-cache broadcast being switched on."],
         ],
       },
+      {
+        type: "p",
+        text: "A minimal-profile server **reads no AMQP queue**: whatever a broker holds on `axiam.authz.request` or `axiam.audit.events`, AXIAM never consumes it. A service that publishes there is confirmed by its broker while nothing reads the message, so **a broker confirm never means AXIAM recorded an event** (or decided a request) — it says only that the broker accepted it. Use REST or gRPC against a minimal-profile server; an AMQP client belongs to a full-profile deployment.",
+      },
       { type: "h", id: "minimal-restart", text: "What a restart costs" },
       {
         type: "p",

@@ -21,6 +21,11 @@ info:
     `hmac_signature` (see the `AuthzRequest` message description for the
     exact convention); webhook delivery uses a nack-no-requeue dead-letter
     chain with no silent message loss.
+
+    **Minimal profile.** A server running with `AXIAM__AMQP__ENABLED=false`
+    reads none of these queues. A broker confirm for a message published to
+    `axiam.authz.request` or `axiam.audit.events` never means AXIAM decided the
+    request or recorded the event; it means only that the broker accepted it.
   license:
     name: Apache-2.0
   x-milestone: v1.2 Beta

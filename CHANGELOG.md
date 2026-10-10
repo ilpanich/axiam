@@ -301,6 +301,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - §32.8 helper test 8 and §33.8 test 8 are tightened so that the two most common
     defects fail a required test. No wire change; `CONTRACT.md` is the only artefact
     to re-sync, from the merge commit.
+- **A minimal-profile server reads no AMQP queue, and a broker confirm never means
+  AXIAM recorded an event (#555, P23W5-A6).** With `AXIAM__AMQP__ENABLED=false` the
+  authorization-request and audit-ingestion consumers are not started, so a service
+  that publishes to a broker left running next to the server is confirmed by that
+  broker while nothing reads the message. The deployment guide's minimal-profile
+  section, the AMQP section of the API guide, the AsyncAPI description and the
+  website's minimal-profile page now say so. The matching informative note for
+  `sdks/CONTRACT.md` §8, to be fanned out to the seven AMQP SDKs' READMEs, ships
+  with contract 1.60.
 
 ## [1.0.0-beta19] - 2026-10-07
 

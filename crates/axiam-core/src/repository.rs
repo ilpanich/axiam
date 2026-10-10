@@ -2074,6 +2074,16 @@ pub trait PushedAuthRequestRepository: Send + Sync {
 
     /// Remove expired requests. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every request pushed by `client_id` in `tenant_id`, spent or not
+    /// (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot spend a
+    /// `request_uri` pushed before the delete. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {
@@ -2135,6 +2145,22 @@ pub trait AuthorizationCodeRepository: Send + Sync {
 
     /// Delete expired and already-used codes (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every code issued to `client_id` in `tenant_id`, redeemed or
+    /// not (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot redeem a
+    /// code issued before the delete.
+    ///
+    /// **Deleted, never marked `used`.** A used code presented again is a
+    /// replay, and the token endpoint answers a replay by revoking the session
+    /// the code came from ([`Self::replayed_session`]); a code voided because
+    /// its client went away is no evidence of theft and must answer as an
+    /// unknown code does. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait RefreshTokenRepository: Send + Sync {

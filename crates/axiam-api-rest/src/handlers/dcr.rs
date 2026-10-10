@@ -921,7 +921,7 @@ async fn update_inner<C: Connection + Clone>(
         TenantQuery,
     ),
     responses(
-        (status = 204, description = "Client deregistered; its refresh tokens are revoked"),
+        (status = 204, description = "Client deregistered; its refresh tokens, authorization codes and pushed requests are revoked"),
         (status = 400, description = "The token was sent in the query string",
          body = DcrErrorResponse),
         (status = 401, description = "No token, a token that does not belong to this client \
@@ -1000,14 +1000,15 @@ async fn delete_inner<C: Connection + Clone>(
         crate::handlers::oauth2_clients::revoke_client_grants(state, tenant_id, &deleted.client_id)
             .await
     {
-        // The client is gone, so its refresh tokens are already unusable at
-        // the token endpoint; this is logged rather than turned into an error
-        // that would tell the client its deletion failed when it did not.
+        // The client is gone and a `dcr` identifier is never reissued, so its
+        // grants are already unusable at the token endpoint; this is logged
+        // rather than turned into an error that would tell the client its
+        // deletion failed when it did not.
         tracing::error!(
             error = %e,
             %tenant_id,
             client_id = %deleted.client_id,
-            "a deregistered client's refresh tokens could not be marked revoked"
+            "a deregistered client's grants could not be revoked"
         );
     }
     Ok(())

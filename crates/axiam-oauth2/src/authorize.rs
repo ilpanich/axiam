@@ -1046,6 +1046,9 @@ mod tests {
         async fn delete_expired(&self) -> AxiamResult<u64> {
             Ok(0)
         }
+        async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
+            Ok(0)
+        }
     }
 
     /// A client repo that always reports the client as genuinely unknown
@@ -1210,6 +1213,9 @@ mod tests {
             unimplemented!()
         }
         async fn delete_expired(&self) -> AxiamResult<u64> {
+            Ok(0)
+        }
+        async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
             Ok(0)
         }
     }

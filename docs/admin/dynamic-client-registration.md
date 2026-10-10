@@ -323,9 +323,9 @@ token, one succeeds and the other gets `401`. A refused update rotates nothing.
 A client that loses the `PUT` response has lost its token; it cannot recover
 it, and an administrator deletes the client through the admin API.
 
-**Deletion.** `DELETE` removes the client, revokes its refresh tokens, and
-frees its place under `dcr_max_clients`. Authorization codes and pushed
-requests for it can no longer be redeemed. Access tokens already issued keep
+**Deletion.** `DELETE` removes the client, revokes its refresh tokens, deletes
+its outstanding authorization codes and pushed requests, and frees its place
+under `dcr_max_clients`. Access tokens already issued keep
 working until they expire (the access-token lifetime, 15 minutes by default),
 exactly as when an administrator deletes a client. The end user's own sessions
 are not touched, and the consent records users gave the client stay theirs to
@@ -477,7 +477,11 @@ A background sweep, registered with the job runner behind
 clients that have not been authorized within their tenant's
 `dcr_unused_client_ttl_days`. A sibling sweep does the same for
 `managed_by: cimd` rows on its own counter, and a third drops expired initial
-access tokens.
+access tokens. Before it removes a client, the sweep revokes the client's
+refresh tokens and deletes its outstanding authorization codes and pushed
+requests, as an administrator's `DELETE` does (#517): a `cimd` row comes back
+on its client's next request, and nothing granted to the old row may come back
+with it. A client whose grants cannot be revoked is kept for the next sweep.
 
 ```bash
 curl https://id.example.com/health/jobs | jq '.jobs.dcr_unused_clients'

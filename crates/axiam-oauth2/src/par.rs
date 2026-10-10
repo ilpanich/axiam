@@ -635,6 +635,9 @@ mod tests {
             async fn cleanup_expired(&self, _: Uuid) -> AxiamResult<u64> {
                 unreachable!("peek does not clean up")
             }
+            async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
+                unreachable!("peek deletes nothing")
+            }
         }
     }
 

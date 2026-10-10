@@ -23,6 +23,7 @@ use axiam_db::{
     SurrealAssertionReplayRepository, SurrealAuditLogRepository, SurrealErasureProofRepository,
     SurrealFederationLoginStateRepository, SurrealUserRepository, run_migrations,
 };
+use axiam_server::cleanup::SweptClientGrants;
 use axiam_server::cleanup::run_erasure_pipeline;
 use chrono::Utc;
 use surrealdb::Surreal;
@@ -807,6 +808,17 @@ async fn backdate_updated_at(
         .expect("backdate updated_at check");
 }
 
+/// #517 — the grant stores the sweep revokes a client's grants from.
+fn grants(
+    db: &Surreal<surrealdb::engine::local::Db>,
+) -> SweptClientGrants<surrealdb::engine::local::Db> {
+    SweptClientGrants::new(
+        axiam_db::SurrealRefreshTokenRepository::new(db.clone()),
+        axiam_db::SurrealAuthorizationCodeRepository::new(db.clone()),
+        axiam_db::SurrealPushedAuthRequestRepository::new(db.clone()),
+    )
+}
+
 /// Create one client with the given provenance and return its `client_id`.
 async fn seed_client(
     db: &Surreal<surrealdb::engine::local::Db>,
@@ -971,6 +983,7 @@ async fn dcr_sweep_removes_an_unused_client_and_leaves_an_admin_one() {
         &client_repo,
         &tenant_repo,
         &settings_repo,
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1037,6 +1050,7 @@ async fn cimd_sweep_removes_an_unpresented_row_and_keeps_a_fresh_one() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1077,6 +1091,7 @@ async fn cimd_sweep_removes_an_unpresented_row_and_keeps_a_fresh_one() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1087,6 +1102,163 @@ async fn cimd_sweep_removes_an_unpresented_row_and_keeps_a_fresh_one() {
             .get_by_client_id(tenant_id, &lonely)
             .await
             .is_ok()
+    );
+}
+
+/// **#517.** A swept `cimd` row comes back on the client's next request —
+/// `materialise_if_cimd` upserts it under the same `client_id`, its document's
+/// URL — and nothing it was granted before the sweep may come back with it:
+/// the refresh token the refresh grant would look up is revoked, and the
+/// authorization code and pushed request are gone. Before #517 the sweep only
+/// deleted the row, and all three worked again against the re-materialised
+/// one.
+#[tokio::test]
+async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
+    use axiam_core::models::oauth2_client::{
+        CreateAuthorizationCode, CreateOAuth2Client, CreatePushedAuthRequest, CreateRefreshToken,
+        ManagedBy, PushedAuthParams,
+    };
+    use axiam_core::repository::{
+        AuthorizationCodeRepository as _, OAuth2ClientRepository as _,
+        PushedAuthRequestRepository as _, RefreshTokenRepository as _,
+    };
+
+    let db = setup_db().await;
+    let tenant_id = seed_tenant_with_ttl(&db, "cimd-revive", 30).await;
+    let client_id = "https://tool.example.com/client.json";
+    let document = || CreateOAuth2Client {
+        tenant_id,
+        name: "Example Tool".into(),
+        redirect_uris: vec!["http://127.0.0.1/cb".into()],
+        grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+        scopes: vec!["openid".into()],
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
+        profile: Default::default(),
+        token_endpoint_auth_method: Default::default(),
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: Vec::new(),
+        tls_client_certificate_bound_access_tokens: false,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: Default::default(),
+        browser_sso: false,
+        allowed_resources: Vec::new(),
+        managed_by: ManagedBy::Cimd,
+        ciba: Default::default(),
+    };
+    let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
+    let before = client_repo
+        .upsert_cimd_client(client_id, document())
+        .await
+        .expect("materialised");
+
+    // What the client was granted while it was in use.
+    let refresh_repo = axiam_db::SurrealRefreshTokenRepository::new(db.clone());
+    refresh_repo
+        .create(CreateRefreshToken {
+            tenant_id,
+            token_hash: "rt-before-sweep".into(),
+            client_id: client_id.into(),
+            user_id: Some(Uuid::new_v4()),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: Vec::new(),
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+            expires_at: Utc::now() + chrono::Duration::days(90),
+        })
+        .await
+        .expect("refresh token");
+    let code_repo = axiam_db::SurrealAuthorizationCodeRepository::new(db.clone());
+    code_repo
+        .create(CreateAuthorizationCode {
+            tenant_id,
+            client_id: client_id.into(),
+            user_id: Uuid::new_v4(),
+            code_hash: "code-before-sweep".into(),
+            redirect_uri: "http://127.0.0.1/cb".into(),
+            scopes: vec!["openid".into()],
+            code_challenge: None,
+            code_challenge_method: None,
+            nonce: None,
+            session_id: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+            dpop_jkt: None,
+            requested_userinfo_claims: Vec::new(),
+            resource: None,
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+        })
+        .await
+        .expect("code");
+    let par_repo = axiam_db::SurrealPushedAuthRequestRepository::new(db.clone());
+    par_repo
+        .create(CreatePushedAuthRequest {
+            tenant_id,
+            client_id: client_id.into(),
+            request_uri_hash: "par-before-sweep".into(),
+            params: PushedAuthParams::default(),
+            expires_at: Utc::now() + chrono::Duration::seconds(60),
+        })
+        .await
+        .expect("pushed request");
+
+    // Unseen past the tenant's TTL, so the sweep evicts it.
+    backdate_client(&db, client_id, 60, false).await;
+    backdate_updated_at(&db, client_id, 60).await;
+    let removed = axiam_server::cleanup::sweep_unused_cimd_clients(
+        &client_repo,
+        &axiam_db::SurrealTenantRepository::new(db.clone()),
+        &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
+        Utc::now(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(removed, 1);
+
+    // The client presents its document again.
+    let after = client_repo
+        .upsert_cimd_client(client_id, document())
+        .await
+        .expect("re-materialised");
+    assert_ne!(after.id, before.id, "a new row under the same client_id");
+
+    assert!(
+        refresh_repo
+            .get_by_token_hash(tenant_id, "rt-before-sweep")
+            .await
+            .is_err(),
+        "the refresh grant's lookup must not find a pre-sweep refresh token"
+    );
+    assert!(
+        code_repo
+            .get_by_hash(
+                tenant_id,
+                "code-before-sweep",
+                client_id,
+                "http://127.0.0.1/cb"
+            )
+            .await
+            .is_err(),
+        "a pre-sweep authorization code must not be redeemable"
+    );
+    assert!(
+        par_repo
+            .find_unconsumed(tenant_id, "par-before-sweep")
+            .await
+            .expect("read")
+            .is_none(),
+        "a pre-sweep request_uri must not be spendable"
     );
 }
 
@@ -1109,6 +1281,7 @@ async fn a_zero_ttl_sweeps_no_cimd_rows_either() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1221,6 +1394,7 @@ async fn a_zero_ttl_sweeps_nothing() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1256,6 +1430,7 @@ async fn the_ttl_is_resolved_per_tenant() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1523,6 +1698,7 @@ async fn the_second_clock_reclaims_a_quota_filled_by_a_stranger() {
         &client_repo,
         &tenant_repo,
         &settings_repo,
+        &grants(&db),
         Utc::now(),
     )
     .await
@@ -1539,6 +1715,7 @@ async fn the_second_clock_reclaims_a_quota_filled_by_a_stranger() {
         &client_repo,
         &tenant_repo,
         &settings_repo,
+        &grants(&db),
         later,
     )
     .await
@@ -1604,6 +1781,7 @@ async fn the_second_clock_does_not_touch_an_initial_access_token_tenant() {
         &client_repo,
         &axiam_db::SurrealTenantRepository::new(db.clone()),
         &axiam_db::SurrealSettingsRepository::new(db.clone()),
+        &grants(&db),
         later,
     )
     .await

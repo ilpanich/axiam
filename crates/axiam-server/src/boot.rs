@@ -2618,6 +2618,12 @@ where
         Arc::new(oauth2_client_repo.clone()),
         Arc::new(oauth2_registration_token_repo.clone()),
         Arc::new(settings_repo.clone()),
+        // #517 — a swept client's refresh tokens, codes and pushed requests.
+        Arc::new(cleanup::SweptClientGrants::new(
+            axiam_db::SurrealRefreshTokenRepository::new(db_handle.clone()),
+            axiam_db::SurrealAuthorizationCodeRepository::new(db_handle.clone()),
+            axiam_db::SurrealPushedAuthRequestRepository::new(db_handle.clone()),
+        )),
         job_health.clone(),
         cleanup_shutdown_rx,
     )

@@ -57,14 +57,15 @@
 > responder; both are `1.0.x` and stand in T-102 as residuals. The pass enters
 > **T-470**, Open: a CA whose key Vault's PKI engine holds publishes no list
 > AXIAM can sign, and AXIAM's revocations do not reach Vault's own. It amends
-> **T-289** and **T-275** (#517): an administrator's client deletion revoked
-> nothing, so a `managed_by: cimd` client — whose `client_id` is its metadata
-> URL, written back by its next request — came back with every refresh token
-> issued before the delete. Both deletion paths now revoke the client's refresh
-> tokens through one function, the administrator's before the row goes; the
-> test deletes a CIMD client, lets it re-materialise, and is refused the
-> pre-delete refresh token. The sweep still revokes nothing, and T-275 says
-> why. It enters **T-471**, Mitigated (#518): token exchange took any valid
+> **T-289** and **T-275** (#517): neither an administrator's client deletion
+> nor the unused-client sweep revoked anything, so a `managed_by: cimd` client
+> — whose `client_id` is its metadata URL, written back by its next request —
+> came back with every refresh token, authorization code and pushed request
+> issued before its row went. All three removal paths now revoke them through
+> one function (refresh tokens marked revoked, codes and pushed requests
+> deleted), the administrator's and the sweep's before the row goes; the tests
+> delete or sweep a CIMD client, let it re-materialise, and are refused the
+> pre-delete refresh token and code. It enters **T-471**, Mitigated (#518): token exchange took any valid
 > same-tenant access token as the `actor_token` and wrote its `sub` into `act`,
 > so a client holding somebody else's token — an MCP server holds its callers'
 > by design — could attribute a delegation to that party. The actor token must

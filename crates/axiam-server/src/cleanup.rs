@@ -40,6 +40,7 @@ use axiam_db::{
     SurrealSessionRepository, SurrealSsoHandoffCodeRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
+use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::Utc;
 use surrealdb::Connection;
 use tokio::sync::watch;
@@ -60,6 +61,14 @@ pub type DirectorySyncJob<C> = axiam_directory::DirectorySync<
     SurrealSessionRepository<C>,
     SurrealRefreshTokenRepository<C>,
     axiam_db::SurrealDirectorySyncStateRepository<C>,
+>;
+
+/// The grant stores the unused-client sweep revokes a client's grants from
+/// before it removes the row (#517).
+pub type SweptClientGrants<C> = ClientGrantStores<
+    SurrealRefreshTokenRepository<C>,
+    axiam_db::SurrealAuthorizationCodeRepository<C>,
+    axiam_db::SurrealPushedAuthRequestRepository<C>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -128,6 +137,8 @@ pub struct CleanupTask<C: Connection> {
     oauth2_client_repo: Arc<axiam_db::SurrealOAuth2ClientRepository<C>>,
     oauth2_registration_token_repo: Arc<axiam_db::SurrealOAuth2RegistrationTokenRepository<C>>,
     settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
+    /// #517 — what a swept client was granted, revoked before its row goes.
+    client_grants: Arc<SweptClientGrants<C>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
     /// G-3 (T23.3.5): the directory sync job. `None` — the default — runs no
@@ -396,21 +407,26 @@ pub fn cimd_client_is_due_for_sweep(
 
 /// The `dcr` arm of [`sweep_unused_external_clients`], kept as a named entry
 /// point because T21.4's tests and the task method both call it that.
-pub async fn sweep_unused_dcr_clients<CR, TR, SR>(
+pub async fn sweep_unused_dcr_clients<CR, TR, SR, RT, AC, PR>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
+    grants: &ClientGrantStores<RT, AC, PR>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
     CR: axiam_core::repository::OAuth2ClientRepository,
     TR: TenantRepository,
     SR: axiam_core::repository::SettingsRepository,
+    RT: axiam_core::repository::RefreshTokenRepository,
+    AC: axiam_core::repository::AuthorizationCodeRepository,
+    PR: axiam_core::repository::PushedAuthRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
         tenant_repo,
         settings_repo,
+        grants,
         axiam_core::models::oauth2_client::ManagedBy::Dcr,
         now,
     )
@@ -418,21 +434,26 @@ where
 }
 
 /// The `cimd` arm of [`sweep_unused_external_clients`] (T21.8 / MCP-04).
-pub async fn sweep_unused_cimd_clients<CR, TR, SR>(
+pub async fn sweep_unused_cimd_clients<CR, TR, SR, RT, AC, PR>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
+    grants: &ClientGrantStores<RT, AC, PR>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
     CR: axiam_core::repository::OAuth2ClientRepository,
     TR: TenantRepository,
     SR: axiam_core::repository::SettingsRepository,
+    RT: axiam_core::repository::RefreshTokenRepository,
+    AC: axiam_core::repository::AuthorizationCodeRepository,
+    PR: axiam_core::repository::PushedAuthRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
         tenant_repo,
         settings_repo,
+        grants,
         axiam_core::models::oauth2_client::ManagedBy::Cimd,
         now,
     )
@@ -488,10 +509,11 @@ where
 ///
 /// A tenant whose settings cannot be read is skipped: the fail-closed
 /// direction for a sweep that **deletes** is to delete nothing.
-pub async fn sweep_unused_external_clients<CR, TR, SR>(
+pub async fn sweep_unused_external_clients<CR, TR, SR, RT, AC, PR>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
+    grants: &ClientGrantStores<RT, AC, PR>,
     managed_by: axiam_core::models::oauth2_client::ManagedBy,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
@@ -499,6 +521,9 @@ where
     CR: axiam_core::repository::OAuth2ClientRepository,
     TR: TenantRepository,
     SR: axiam_core::repository::SettingsRepository,
+    RT: axiam_core::repository::RefreshTokenRepository,
+    AC: axiam_core::repository::AuthorizationCodeRepository,
+    PR: axiam_core::repository::PushedAuthRequestRepository,
 {
     use axiam_core::models::oauth2_client::ManagedBy;
     use axiam_core::repository::SettingsRepository;
@@ -556,6 +581,22 @@ where
             continue;
         }
 
+        // #517 — the client's grants go before the row, as on an
+        // administrator's delete: a `cimd` row re-materialises under the same
+        // `client_id`, and a refresh token, code or pushed request left behind
+        // would work again against it. A revocation that fails keeps the row
+        // for the next sweep rather than leave a row-less client with live
+        // grants.
+        if let Err(e) = grants.revoke(client.tenant_id, &client.client_id).await {
+            tracing::warn!(
+                job,
+                error = %e,
+                client_id = %client.client_id,
+                "could not revoke an unused externally registered client's grants; not \
+                 deleting it this sweep"
+            );
+            continue;
+        }
         if let Err(e) = client_repo.delete(client.tenant_id, client.id).await {
             // One failure must not stop the sweep: the next row may be a
             // different tenant entirely.
@@ -566,6 +607,16 @@ where
                 "could not delete an unused externally registered client"
             );
             continue;
+        }
+        // A request that read the row before the delete may have written a
+        // grant between the two writes above; one more pass leaves none.
+        if let Err(e) = grants.revoke(client.tenant_id, &client.client_id).await {
+            tracing::warn!(
+                job,
+                error = %e,
+                client_id = %client.client_id,
+                "a swept client's grants could not be revoked a second time"
+            );
         }
         removed += 1;
         tracing::info!(
@@ -823,6 +874,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         oauth2_client_repo: Arc<axiam_db::SurrealOAuth2ClientRepository<C>>,
         oauth2_registration_token_repo: Arc<axiam_db::SurrealOAuth2RegistrationTokenRepository<C>>,
         settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
+        // #517 — revoked for every client the sweep removes.
+        client_grants: Arc<SweptClientGrants<C>>,
         // T-129: passed in rather than constructed here so `main` can hand
         // the same handle to `AppState`, which is what lets the HTTP layer
         // read what this loop writes.
@@ -860,6 +913,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             oauth2_client_repo,
             oauth2_registration_token_repo,
             settings_repo,
+            client_grants,
             job_health,
             directory_sync: None,
             ssf_buffer_repo: None,
@@ -1303,6 +1357,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             self.oauth2_client_repo.as_ref(),
             self.tenant_repo.as_ref(),
             self.settings_repo.as_ref(),
+            self.client_grants.as_ref(),
             Utc::now(),
         )
         .await
@@ -1315,6 +1370,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             self.oauth2_client_repo.as_ref(),
             self.tenant_repo.as_ref(),
             self.settings_repo.as_ref(),
+            self.client_grants.as_ref(),
             Utc::now(),
         )
         .await

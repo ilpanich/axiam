@@ -396,6 +396,9 @@ impl AuthorizationCodeRepository for MockCodeRepo {
     async fn delete_expired(&self) -> AxiamResult<u64> {
         Ok(0)
     }
+    async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
+        Ok(0)
+    }
 }
 
 // ---------------------------------------------------------------------------

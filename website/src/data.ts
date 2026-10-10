@@ -577,7 +577,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -702,7 +702,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -772,7 +772,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "The caution, unchanged" },
       {
         type: "p",
-        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic. The beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post); the rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit.",
       },
     ],
   },
@@ -841,7 +841,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "The caution has not changed and is not about to. AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and running somebody else's conformance suite is not either of those things — it is evidence that a protocol surface behaves as specified, which is a narrower claim and a useful one. Do not put it in front of production identity traffic yet.",
+        text: "This post was written during the beta line, when the advice was not to put AXIAM in front of production identity traffic; the beta line ended with 1.0.0, the first stable release (see the AXIAM 1.0.0 post). The rest of the caution still holds: AXIAM has had no independent third-party penetration test and no security certification, and running somebody else's conformance suite is not either of those things — it is evidence that a protocol surface behaves as specified, which is a narrower claim and a useful one.",
       },
     ],
   },
@@ -958,7 +958,7 @@ export const POSTS: Post[] = [
       { type: "h", text: 'What "done" means' },
       {
         type: "p",
-        text: "Every phase shipped with tests and passed review. That said, AXIAM remains a work in progress and should not be used in production until it reaches a stable release; the core is complete, hardening continues.",
+        text: "Every phase shipped with tests and passed review. That said, AXIAM was then a work in progress, not to be used in production before a stable release; the core was complete and the hardening continued, through the alpha and beta lines, to 1.0.0, the first stable release.",
       },
       {
         type: "quote",

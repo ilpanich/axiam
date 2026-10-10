@@ -8,7 +8,7 @@ info:
 
     **Hand-authored, not generated.** Derived by field-for-field transcription
     from `crates/axiam-amqp/src/messages.rs` and
-    `crates/axiam-amqp/src/connection.rs` (`pub mod queues`) as of v1.2 beta.
+    `crates/axiam-amqp/src/connection.rs` (`pub mod queues`) as of the `x-last-verified` date below.
     Unlike the REST OpenAPI spec (generated from `utoipa` annotations and
     drift-gated in CI), this document has no codegen link to the Rust source
     — it is a point-in-time snapshot that must be manually re-verified
@@ -28,7 +28,7 @@ info:
     request or recorded the event; it means only that the broker accepted it.
   license:
     name: Apache-2.0
-  x-milestone: v1.2 Beta
+  x-milestone: "1.0.0"
   x-last-verified: "2026-07-06"
 servers:
   rabbitmq:

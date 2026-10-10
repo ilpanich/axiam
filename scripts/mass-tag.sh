@@ -1245,7 +1245,8 @@ if (@sections && $sections[0] =~ /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i) {
 # inserted new sections ABOVE the pending block instead of folding it in. Say
 # so; do not silently build on top of it, and do not fail the release for it.
 my $strays = grep { /^##[ \t]+\[?[ \t]*unreleased[ \t]*\]?/i } @sections;
-warn "mass-tag: WARNING: $file has $strays stray [Unreleased] section(s) below "
+my $label  = $ENV{CHANGELOG_LABEL} // $file;   # a dry run folds a scratch copy
+warn "mass-tag: WARNING: $label has $strays stray [Unreleased] section(s) below "
    . "the newest release; merge each into the release above it by hand\n" if $strays;
 
 my ($entry_head, @entry_rest) = split /\n/, $entry, -1;
@@ -1323,7 +1324,7 @@ write_changelog() {
     tmp="$(mktemp)"
     if [[ -f "$file" ]]; then cp "$file" "$tmp"; else printf '%s\n' "$CHANGELOG_HEADER" > "$tmp"; fi
     printf '      [dry-run] CHANGELOG.md, folded on a scratch copy (headings, with the bullets under each):\n'
-    ENTRY="$CHANGELOG_ENTRY" perl -e "$CHANGELOG_REWRITE_PL" -- "$tmp" 2>&1 | sed 's/^/        ! /'
+    ENTRY="$CHANGELOG_ENTRY" CHANGELOG_LABEL="$file" perl -e "$CHANGELOG_REWRITE_PL" -- "$tmp" 2>&1 | sed 's/^/        ! /'
     changelog_outline "$tmp" | sed 's/^/        | /'
     rm -f "$tmp"
     return 0

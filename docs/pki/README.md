@@ -1144,6 +1144,13 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   The route does not say which, nor point at Vault: it is unauthenticated, and
   which custodian holds a CA's key — or where that custodian listens — is not an
   outsider's business.
+- **`503`** when the list has to be re-signed and no permit of the crypto gate
+  that issuance and password hashing share comes free within five seconds. A
+  list that has not changed is served from the cache and needs no permit, and
+  each CA is re-signed on its own, so a slow custodian (a Vault round trip)
+  holds up only its own CA's changed list. Whether a list changed is decided
+  from each revoked certificate's fingerprint and revocation date; the
+  certificates are read only when the list is signed.
 
 **The distribution point.** Every certificate AXIAM signs in-process from
 1.0.0 on — leaves issued by `POST /api/v1/certificates` and by

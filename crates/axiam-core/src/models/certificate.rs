@@ -615,6 +615,26 @@ pub struct RevokedCertificate {
     pub not_before: DateTime<Utc>,
 }
 
+/// What decides whether an issuing CA's revocation list has changed: one
+/// revoked certificate's identity and the date its entry states, without the
+/// certificate itself (#607, T-102).
+///
+/// The light half of [`RevokedCertificate`]. The revocation list route is
+/// unauthenticated and reads the set on every request so that a revocation is
+/// in the very next response; reading every revoked certificate's PEM to find
+/// out that nothing changed made each anonymous request cost a read of the
+/// whole list. The PEMs are read only when the list is signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationStamp {
+    /// SHA-256 fingerprint of the certificate, hex.
+    pub fingerprint: String,
+    /// When AXIAM recorded the revocation; `None` before schema v90.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// The certificate's validity start, the date stated when `revoked_at` is
+    /// `None`.
+    pub not_before: DateTime<Utc>,
+}
+
 /// Fields required to generate a new tenant certificate (user-facing DTO).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {

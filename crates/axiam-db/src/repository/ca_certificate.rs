@@ -3,7 +3,8 @@
 use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::certificate::{
-    CaCertificate, CertificateStatus, KeyAlgorithm, RevokedCertificate, StoreCaCertificate,
+    CaCertificate, CertificateStatus, KeyAlgorithm, RevocationStamp, RevokedCertificate,
+    StoreCaCertificate,
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -601,6 +602,32 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 not_before: row.not_before,
             })
             .collect())
+    }
+
+    async fn list_revoked_children_stamps(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> AxiamResult<Vec<RevocationStamp>> {
+        // The same rows as `list_revoked_children`, without the PEMs (#607).
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT fingerprint, revoked_at, not_before FROM ca_certificate \
+                 WHERE parent_ca_id = $parent_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > time::now() \
+                 ORDER BY fingerprint",
+            )
+            .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<super::certificate::RevocationStampRow> =
+            result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     async fn list_mtls_trust_anchors(&self) -> AxiamResult<Vec<CaCertificate>> {

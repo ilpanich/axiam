@@ -269,6 +269,62 @@ async fn the_crl_route_is_rate_limited_per_ip() {
     assert_eq!(resp.status(), StatusCode::OK, "the bucket is per address");
 }
 
+/// #607: past the permit wait a re-sign answers `503` in the API's error
+/// shape, and a list the cache holds is still served — it needs no permit.
+/// Deterministic: the test holds every permit of the crypto gate throughout.
+#[actix_web::test]
+async fn the_crl_route_answers_503_when_the_crypto_gate_is_saturated() {
+    let mut f = Fixture::new().await;
+    let cached = f.ca().await;
+    let unsigned = f.ca().await;
+    f.state.pki.crl_service = f
+        .state
+        .pki
+        .crl_service
+        .clone()
+        .with_permit_wait(std::time::Duration::from_millis(50));
+    let app = build_app!(f.state, RateLimitConfig::default());
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, cached, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let gate = f.state.crypto_semaphore.clone();
+    let permits = u32::try_from(gate.available_permits()).unwrap();
+    let held = gate.acquire_many_owned(permits).await.unwrap();
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, unsigned, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "service_unavailable");
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, cached, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a cached list is served while the gate is saturated"
+    );
+
+    drop(held);
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, unsigned, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 /// The issue's first test: a leaf AXIAM issued authenticates its
 /// `tls_client_auth` client at the token endpoint, and once revoked it does
 /// not — although its chain is exactly as valid as it was.

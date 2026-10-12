@@ -15,7 +15,8 @@ use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{
-        CaCertificate, Certificate, RevokedCertificate, StoreCaCertificate, StoreCertificate,
+        CaCertificate, Certificate, RevocationStamp, RevokedCertificate, StoreCaCertificate,
+        StoreCertificate,
     },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
@@ -2846,6 +2847,13 @@ pub trait CaCertificateRepository: Send + Sync {
         parent_ca_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
+    /// The same set as [`Self::list_revoked_children`], without the
+    /// certificates: what decides whether the parent's list changed (#607).
+    fn list_revoked_children_stamps(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
+
     /// Every CA record, in any organization and of any status, whose
     /// certificate has one of these SHA-256 fingerprints (R1W1-02).
     ///
@@ -2894,6 +2902,13 @@ pub trait CertificateRepository: Send + Sync {
         &self,
         issuer_ca_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// The same set as [`Self::list_revoked_by_issuer`], without the
+    /// certificates: what decides whether the issuer's list changed (#607).
+    fn list_revocation_stamps_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
 
     /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
     /// revocation Vault has not yet been told of, oldest revocation first, at

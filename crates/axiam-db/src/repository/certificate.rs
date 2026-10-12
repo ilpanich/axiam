@@ -3,8 +3,8 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::certificate::{
-    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, RevokedCertificate,
-    StoreCertificate,
+    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, RevocationStamp,
+    RevokedCertificate, StoreCertificate,
 };
 use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -74,6 +74,24 @@ impl From<RevokedEntryRow> for RevokedCertificate {
     fn from(row: RevokedEntryRow) -> Self {
         Self {
             public_cert_pem: row.public_cert_pem,
+            fingerprint: row.fingerprint,
+            revoked_at: row.revoked_at,
+            not_before: row.not_before,
+        }
+    }
+}
+
+/// What decides whether a revocation list changed (#607): no PEM.
+#[derive(Debug, SurrealValue)]
+pub(crate) struct RevocationStampRow {
+    pub(crate) fingerprint: String,
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
+    pub(crate) not_before: DateTime<Utc>,
+}
+
+impl From<RevocationStampRow> for RevocationStamp {
+    fn from(row: RevocationStampRow) -> Self {
+        Self {
             fingerprint: row.fingerprint,
             revoked_at: row.revoked_at,
             not_before: row.not_before,
@@ -394,6 +412,31 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<RevokedEntryRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_revocation_stamps_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> AxiamResult<Vec<RevocationStamp>> {
+        // The same rows as `list_revoked_by_issuer`, without the PEMs (#607).
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT fingerprint, revoked_at, not_before FROM certificate \
+                 WHERE issuer_ca_id = $issuer_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > time::now() \
+                 ORDER BY fingerprint",
+            )
+            .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevocationStampRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 

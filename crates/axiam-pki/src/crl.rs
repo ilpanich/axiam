@@ -59,6 +59,19 @@
 //! signature, which matters on an unauthenticated route whose custodian may be
 //! a Vault round trip away.
 //!
+//! That read is light (#607): each revoked certificate's fingerprint and the
+//! date its entry states, never the certificate. The PEMs — what an entry's
+//! serial is read from — are read only when the list is actually signed.
+//!
+//! Each CA is re-signed on its own (#607). One request at a time re-signs a
+//! given CA's list, through the custodian `load`, the crypto permit and the
+//! signature; requests for the same CA's changed list wait for it, and nothing
+//! else does. A cached list is answered without waiting on any re-sign, this
+//! CA's or another's. The permit comes from the semaphore issuance and password
+//! hashing share, and a re-sign waits for one at most
+//! [`DEFAULT_CRL_PERMIT_WAIT`]; past that the route answers `503` rather than
+//! queueing an unauthenticated caller without bound.
+//!
 //! The CRL number is the signing time in milliseconds since the Unix epoch,
 //! and strictly greater than the last number this process issued for the CA.
 //! Monotonic across replicas and restarts for as long as the clocks are, which
@@ -76,7 +89,7 @@
 //! says so at boot.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::{AxiamError, AxiamResult};
@@ -255,6 +268,63 @@ struct CachedCrl {
     refresh_at: DateTime<Utc>,
 }
 
+/// One CA's place in the cache: its last list, and the right to re-sign it
+/// (#607).
+///
+/// Two locks, so that reading never waits on signing. `published` is held only
+/// to look at or replace the cached list — never across an `await` — and
+/// `signing` is held by the one request re-signing this CA's list, through the
+/// custodian `load`, the crypto permit and the signature. A request for an
+/// unchanged list takes only the first; a request for a changed list queues on
+/// the second behind the re-sign already in flight for the same CA, and on
+/// nothing any other CA is doing.
+#[derive(Default)]
+struct CaSlot {
+    published: StdMutex<Option<CachedCrl>>,
+    signing: Mutex<()>,
+}
+
+impl CaSlot {
+    /// The cached list, if it was signed over exactly `digest` and is not yet
+    /// due for its refresh.
+    fn fresh(&self, digest: &[u8; 32], now: DateTime<Utc>) -> Option<PublishedCrl> {
+        let published = self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        published
+            .as_ref()
+            .filter(|cached| cached.entries_digest == *digest && now < cached.refresh_at)
+            .map(|cached| cached.crl.clone())
+    }
+
+    /// The CRL number of the last list signed, if any.
+    fn last_number(&self) -> Option<u64> {
+        let published = self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        published.as_ref().map(|cached| cached.crl.crl_number)
+    }
+
+    fn store(&self, cached: CachedCrl) {
+        *self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(cached);
+    }
+}
+
+/// How long a re-sign waits for a permit of the shared crypto semaphore before
+/// the route answers `503` (#607): five seconds, the default wait of the
+/// password-hash gate the semaphore also serves.
+///
+/// The semaphore is shared with issuance and with every Argon2id hash and
+/// verify. Without a bound a saturated gate would queue unauthenticated CRL
+/// requests without limit; with it, a caller is told to come back, and a cached
+/// list — which needs no permit — is served throughout.
+pub const DEFAULT_CRL_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Signs and caches each issuing CA's certificate revocation list.
 #[derive(Clone)]
 pub struct CrlService<CA, CR> {
@@ -262,10 +332,17 @@ pub struct CrlService<CA, CR> {
     cert_repo: CR,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
+    /// How long a re-sign waits for a crypto permit ([`DEFAULT_CRL_PERMIT_WAIT`]).
+    permit_wait: std::time::Duration,
     /// Who holds the CA signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
     next_update: Duration,
-    cache: Arc<Mutex<HashMap<Uuid, CachedCrl>>>,
+    /// One slot per CA that publishes a list. The map's lock is held only to
+    /// find or insert a slot, and a slot is inserted only for a CA that exists
+    /// and publishes one, so requests for made-up CA ids — the route is
+    /// unauthenticated — add nothing to it; a CA found to publish no list
+    /// (revoked or expired since) has its slot removed.
+    slots: Arc<StdMutex<HashMap<Uuid, Arc<CaSlot>>>>,
 }
 
 impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> {
@@ -282,10 +359,18 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
             ca_repo,
             cert_repo,
             crypto_semaphore,
+            permit_wait: DEFAULT_CRL_PERMIT_WAIT,
             custodians,
             next_update: Duration::seconds(i64::try_from(next_update_secs).unwrap_or(i64::MAX)),
-            cache: Arc::default(),
+            slots: Arc::default(),
         }
+    }
+
+    /// Replace [`DEFAULT_CRL_PERMIT_WAIT`].
+    #[must_use]
+    pub fn with_permit_wait(mut self, wait: std::time::Duration) -> Self {
+        self.permit_wait = wait;
+        self
     }
 
     /// The current list of CA `ca_id` of organization `organization_id`.
@@ -294,6 +379,9 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
     /// one that publishes no list (see the module docs): the route is
     /// unauthenticated, and which of the two it is — or which custodian holds a
     /// key — is not an outsider's business. The reason is logged.
+    ///
+    /// `ServiceUnavailable` when the list has to be signed and no crypto permit
+    /// came free within the permit wait ([`Self::with_permit_wait`]).
     pub async fn current(&self, organization_id: Uuid, ca_id: Uuid) -> AxiamResult<PublishedCrl> {
         let not_published = || AxiamError::NotFound {
             entity: "certificate revocation list".into(),
@@ -310,6 +398,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         let now = Utc::now();
         if let Some(reason) = Self::why_unpublished(&ca, now) {
             tracing::debug!(%organization_id, %ca_id, reason, "no CRL is published for this CA");
+            self.forget(ca.id);
             return Err(not_published());
         }
         let store = self.custodians.store_for(ca.key_custody)?;
@@ -320,24 +409,52 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                 "no CRL is published for this CA: its key is held by a custodian that signs \
                  certificate requests only (vault_pki), and publishes the CA's list itself"
             );
+            self.forget(ca.id);
             return Err(not_published());
         }
 
-        // Read on every request, outside the lock: a revocation is in the very
-        // next response, and a slow read does not hold up other CAs' lists.
+        // Read on every request, and before any lock: a revocation is in the
+        // very next response. Only fingerprints and dates (#607) — whether the
+        // list changed is decided without reading a single certificate.
+        let mut stamps = self
+            .cert_repo
+            .list_revocation_stamps_by_issuer(ca.id)
+            .await?;
+        stamps.extend(self.ca_repo.list_revoked_children_stamps(ca.id).await?);
+        stamps.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+        let digest = entries_digest(stamps.iter().map(|s| {
+            (
+                s.fingerprint.as_str(),
+                revocation_time(s.revoked_at, s.not_before),
+            )
+        }));
+
+        let slot = self.slot(ca.id);
+        if let Some(crl) = slot.fresh(&digest, now) {
+            return Ok(crl);
+        }
+
+        // One re-sign per CA at a time. A request that waited here finds the
+        // list the one ahead of it signed, when that list is of the state this
+        // request read.
+        let _flight = slot.signing.lock().await;
+        let now = Utc::now();
+        if let Some(crl) = slot.fresh(&digest, now) {
+            return Ok(crl);
+        }
+
+        // The certificates, read only to sign — and read again rather than
+        // trusted from the stamps, so the list is of the state as it is now.
         let mut entries = self.cert_repo.list_revoked_by_issuer(ca.id).await?;
         entries.extend(self.ca_repo.list_revoked_children(ca.id).await?);
         entries.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
-        let digest = entries_digest(&entries);
-
-        let mut cache = self.cache.lock().await;
-        let last_number = match cache.get(&ca.id) {
-            Some(cached) if cached.entries_digest == digest && now < cached.refresh_at => {
-                return Ok(cached.crl.clone());
-            }
-            Some(cached) => Some(cached.crl.crl_number),
-            None => None,
-        };
+        let digest = entries_digest(entries.iter().map(|e| {
+            (
+                e.fingerprint.as_str(),
+                revocation_time(e.revoked_at, e.not_before),
+            )
+        }));
+        let last_number = slot.last_number();
 
         // Whole seconds: a CRL's times are encoded to the second, and the
         // `Last-Modified` header and the list must say the same thing.
@@ -356,11 +473,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
             .load(&key_ref, ca.encrypted_private_key.as_deref())
             .await?
             .to_string();
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit = self.crypto_permit(organization_id, ca_id).await?;
         let ca_cert_pem = ca.public_cert_pem.clone();
         let der = tokio::task::spawn_blocking(move || {
             sign_crl(
@@ -383,15 +496,60 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
             crl_number,
             etag,
         };
-        cache.insert(
-            ca.id,
-            CachedCrl {
-                crl: crl.clone(),
-                entries_digest: digest,
-                refresh_at: this_update + (next_update - this_update) / 2,
-            },
-        );
+        slot.store(CachedCrl {
+            crl: crl.clone(),
+            entries_digest: digest,
+            refresh_at: this_update + (next_update - this_update) / 2,
+        });
         Ok(crl)
+    }
+
+    /// A permit of the shared crypto semaphore, or `ServiceUnavailable` once
+    /// the permit wait has passed (#607).
+    async fn crypto_permit(
+        &self,
+        organization_id: Uuid,
+        ca_id: Uuid,
+    ) -> AxiamResult<tokio::sync::SemaphorePermit<'_>> {
+        match tokio::time::timeout(self.permit_wait, self.crypto_semaphore.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_closed)) => Err(AxiamError::Internal("crypto semaphore closed".into())),
+            Err(_elapsed) => {
+                tracing::warn!(
+                    %organization_id,
+                    %ca_id,
+                    wait_ms = u64::try_from(self.permit_wait.as_millis()).unwrap_or(u64::MAX),
+                    "the CRL could not be re-signed: no crypto permit came free in time"
+                );
+                Err(AxiamError::ServiceUnavailable(
+                    "the certificate revocation list cannot be signed right now; retry shortly"
+                        .into(),
+                ))
+            }
+        }
+    }
+
+    /// The slot of a CA that publishes a list, inserted on first use.
+    fn slot(&self, ca_id: Uuid) -> Arc<CaSlot> {
+        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(slots.entry(ca_id).or_default())
+    }
+
+    /// Drop the slot of a CA that no longer publishes a list.
+    fn forget(&self, ca_id: Uuid) {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ca_id);
+    }
+
+    /// How many CAs the cache holds a slot for.
+    #[doc(hidden)]
+    pub fn cached_ca_count(&self) -> usize {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Why `ca` publishes no list, if it does not — the reasons that need no
@@ -410,13 +568,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
     }
 }
 
-/// A digest that changes exactly when the list's entries would.
-fn entries_digest(entries: &[RevokedCertificate]) -> [u8; 32] {
+/// A digest that changes exactly when the list's entries would: over each
+/// entry's fingerprint and stated date, in fingerprint order.
+fn entries_digest<'a>(entries: impl Iterator<Item = (&'a str, DateTime<Utc>)>) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    for entry in entries {
-        hasher.update(entry.fingerprint.as_bytes());
+    for (fingerprint, revoked) in entries {
+        hasher.update(fingerprint.as_bytes());
         hasher.update(b":");
-        hasher.update(revocation_time(entry).timestamp().to_be_bytes());
+        hasher.update(revoked.timestamp().to_be_bytes());
         hasher.update(b"\n");
     }
     hasher.finalize().into()
@@ -425,8 +584,8 @@ fn entries_digest(entries: &[RevokedCertificate]) -> [u8; 32] {
 /// The date an entry states: when AXIAM recorded the revocation, or — for a
 /// certificate revoked before the date was kept — its own `notBefore`, the
 /// earliest moment anyone could have relied on it.
-fn revocation_time(entry: &RevokedCertificate) -> DateTime<Utc> {
-    entry.revoked_at.unwrap_or(entry.not_before)
+fn revocation_time(revoked_at: Option<DateTime<Utc>>, not_before: DateTime<Utc>) -> DateTime<Utc> {
+    revoked_at.unwrap_or(not_before)
 }
 
 fn to_offset(t: DateTime<Utc>) -> AxiamResult<time::OffsetDateTime> {
@@ -492,7 +651,7 @@ pub(crate) fn sign_crl(
             })?;
             Ok(RevokedCertParams {
                 serial_number: SerialNumber::from_slice(&cert.serial.to_bytes_be()),
-                revocation_time: to_offset(revocation_time(entry))?,
+                revocation_time: to_offset(revocation_time(entry.revoked_at, entry.not_before))?,
                 reason_code: None,
                 invalidity_date: None,
             })

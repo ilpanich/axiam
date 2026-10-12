@@ -247,6 +247,16 @@
 > second host sees no request. The model is **476 threats, 438 mitigated / 17
 > open / 21 not applicable**; Information disclosure is 113 and Medium 200.
 >
+> **The 1.0.1 release (model 2.40.0 — T-102 amended, 2026-10-12).** The CRL
+> route's availability correction no longer holds (#607): each CA's list is
+> re-signed under a lock of its own, so a slow custodian or a saturated crypto
+> gate holds up only that CA's changed list and never a cached answer; whether
+> a list changed is read from fingerprints and revocation dates, the
+> certificates only to sign; and a re-sign waits at most five seconds for a
+> crypto permit, then answers `503`. A fake Vault that answers only when the
+> test says so holds one CA's re-sign inside its key read while another CA's
+> cached list and a third CA's first list are served. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

@@ -236,6 +236,17 @@
 > T-306 (Critical) and T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216
 > (High), none of them a defect awaiting a fix in AXIAM's code.
 >
+> **The 1.0.1 release (model 2.40.0 — T-476 enters, Mitigated).** The Vault
+> clients put the operator's token in an `X-Vault-Token` header, and reqwest
+> strips only the standard credential headers on a cross-host redirect, so a
+> Vault address that answered `3xx` would have been followed, token included
+> (#611). All four clients (the startup secret provider's bootstrap and
+> private-CA clients, the Vault KV CA key store and the Vault PKI client) now
+> refuse redirects, and a `3xx` is an error naming the host. Entered as
+> **T-476**, Medium, Mitigated, with a wiremock test per client in which the
+> second host sees no request. The model is **476 threats, 438 mitigated / 17
+> open / 21 not applicable**; Information disclosure is 113 and Medium 200.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1543,7 +1554,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 475 threats** and a
+The system is verified against a **STRIDE threat model of 476 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1566,8 +1577,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 475 |
-| Mitigated / Open | 437 / 17 |
+| Threats identified | 476 |
+| Mitigated / Open | 438 / 17 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -3054,7 +3065,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 17 of 475. The 21
+Every threat the model records as open, most severe first — 17 of 476. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

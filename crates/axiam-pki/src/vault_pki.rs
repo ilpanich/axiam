@@ -207,6 +207,28 @@ impl std::fmt::Debug for VaultPkiCaKeyStore {
     }
 }
 
+/// The error text for a `3xx` from Vault, or `None` for any other status.
+///
+/// The Vault clients are built with `redirect(Policy::none())`, so a redirect
+/// arrives as an ordinary response and would otherwise be reported as a bare
+/// "answered 307" with no hint that the operator's address is the cause. A
+/// redirect is never followed because the request carries `X-Vault-Token`
+/// (T-476); the message names the host that answered and does not repeat the
+/// `Location` target, which is attacker-influenced text.
+pub(crate) fn redirect_refusal(status: reqwest::StatusCode, url: &str) -> Option<String> {
+    if !status.is_redirection() {
+        return None;
+    }
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "<unparseable>".into());
+    Some(format!(
+        "vault: host {host} answered {status} with a redirect; redirects are not followed \
+         because the request carries the Vault token — set the Vault address to the final URL"
+    ))
+}
+
 impl VaultPkiCaKeyStore {
     /// Build a store, including the TLS trust anchor if one is configured.
     ///
@@ -215,7 +237,12 @@ impl VaultPkiCaKeyStore {
     /// operator asked for is how a misconfiguration becomes a connection to
     /// something that is not their Vault.
     pub fn new(config: VaultPkiConfig) -> AxiamResult<Self> {
-        let mut builder = Client::builder().timeout(VAULT_PKI_TIMEOUT);
+        // Never follow a redirect: every request here carries `X-Vault-Token`,
+        // which reqwest does not strip on a cross-host hop (it removes only the
+        // standard credential headers). T-476.
+        let mut builder = Client::builder()
+            .timeout(VAULT_PKI_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none());
 
         if let Some(ref path) = config.ca_cert_path {
             let pem = std::fs::read(path).map_err(|e| {
@@ -293,6 +320,9 @@ impl VaultPkiCaKeyStore {
             .map_err(|e| AxiamError::Internal(format!("vault pki: {url} could not be reached: {e}")))?;
 
         let status = response.status();
+        if let Some(refusal) = redirect_refusal(status, url) {
+            return Err(AxiamError::Certificate(refusal));
+        }
         let payload: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
 
         if !status.is_success() {
@@ -316,6 +346,9 @@ impl VaultPkiCaKeyStore {
             .await
             .map_err(|e| AxiamError::Internal(format!("vault pki: deleting {url} failed: {e}")))?;
 
+        if let Some(refusal) = redirect_refusal(response.status(), url) {
+            return Err(AxiamError::Internal(refusal));
+        }
         // Already gone is success: this runs on revocation, and a second
         // revocation must not fail because the first one worked.
         if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {

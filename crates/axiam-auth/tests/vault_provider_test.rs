@@ -263,3 +263,91 @@ async fn from_values_serves_without_any_network() {
     );
     assert_eq!(provider.describe(), "vault");
 }
+
+/// T-476: a `307` from Vault is an error naming the host, and the host it
+/// points at sees nothing. reqwest strips only the standard credential headers
+/// on a cross-host redirect, so `X-Vault-Token` would otherwise have followed.
+///
+/// Two paths build the client that reaches Vault: the composition root's
+/// bootstrap client, and the one `build` makes when a private CA is named.
+/// Both are exercised.
+async fn assert_redirect_refused(vault: &MockServer, elsewhere: &MockServer, err: String) {
+    let host = reqwest::Url::parse(&vault.uri()).unwrap();
+    assert!(
+        err.contains("redirect") && err.contains(host.host_str().unwrap()),
+        "the refusal names the host that redirected: {err}"
+    );
+    assert!(!err.contains("test-token"), "{err}");
+    assert_eq!(vault.received_requests().await.unwrap().len(), 1);
+    assert!(
+        elsewhere.received_requests().await.unwrap().is_empty(),
+        "the second host must see no request, and so no X-Vault-Token"
+    );
+}
+
+async fn redirecting_vault() -> (MockServer, MockServer) {
+    let vault = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "location",
+            format!("{}/v1/secret/data/axiam", elsewhere.uri()).as_str(),
+        ))
+        .mount(&vault)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "data": {} } })))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    (vault, elsewhere)
+}
+
+#[tokio::test]
+async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
+    let (vault, elsewhere) = redirecting_vault().await;
+    // The client the composition root hands the provider.
+    let bootstrap = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let err = VaultSecretProvider::fetch(&bootstrap, &config(&vault), KEYS, SECRETS)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_redirect_refused(&vault, &elsewhere, err).await;
+}
+
+#[tokio::test]
+async fn a_redirect_from_vault_is_refused_on_the_private_ca_client_too() {
+    use axiam_auth::secrets::SecretProviderKind;
+
+    let (vault, elsewhere) = redirecting_vault().await;
+
+    // Any parseable PEM certificate: the mock speaks plain HTTP, so the anchor
+    // only has to make `build` take the branch that constructs its own client.
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["vault.test".into()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("axiam-vault-redirect-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let anchor = dir.join("ca.pem");
+    std::fs::write(&anchor, cert.pem()).unwrap();
+
+    let mut cfg = config(&vault);
+    cfg.ca_cert_path = Some(anchor);
+    let kind = SecretProviderKind::Vault(Box::new(cfg));
+    // The client passed in is deliberately one that WOULD follow redirects: the
+    // private-CA branch must not use it.
+    let err = kind
+        .build(&reqwest::Client::new(), KEYS, SECRETS)
+        .await
+        .err()
+        .expect("a redirect is refused")
+        .to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_redirect_refused(&vault, &elsewhere, err).await;
+}

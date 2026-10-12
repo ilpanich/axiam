@@ -284,6 +284,46 @@ async fn a_refused_call_names_what_vault_said_rather_than_the_status_alone() {
     assert!(err.to_string().contains("permission denied"), "{err}");
 }
 
+/// T-476: a Vault that answers `307` to a second host must not get the token
+/// carried there. reqwest strips only the standard credential headers on a
+/// cross-host hop, so `X-Vault-Token` would have followed.
+#[tokio::test]
+async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
+    let vault = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "location",
+            format!("{}/v1/pki/root/generate/internal", elsewhere.uri()).as_str(),
+        ))
+        .mount(&vault)
+        .await;
+    // Any request at all, with or without the token, is the failure.
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+
+    let err = ca_service(setup_db().await, &vault)
+        .generate(create_ca("Acme Root", Uuid::new_v4()))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    let host = reqwest::Url::parse(&vault.uri()).unwrap();
+    assert!(
+        err.contains("redirect") && err.contains(host.host_str().unwrap()),
+        "the refusal names the host that redirected: {err}"
+    );
+    assert!(!err.contains(TOKEN), "{err}");
+    assert_eq!(vault.received_requests().await.unwrap().len(), 1);
+    assert!(
+        elsewhere.received_requests().await.unwrap().is_empty(),
+        "the second host must see no request, and so no X-Vault-Token"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // custody
 // ---------------------------------------------------------------------------

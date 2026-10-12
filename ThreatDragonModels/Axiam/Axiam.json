@@ -19603,6 +19603,17 @@
                   "mitigation": "c38879a: refused at the bundle, naming the file. Two tests under `tests/` so no fixture is instrumented \u2014 an unreadable path and a bundle that parses to nothing \u2014 and the empty-bundle case asserts the message is *not* a downstream \"error sending request\", because failing later, against Vault, was the original symptom. Found while writing tests for `SecretProviderKind::build`, the one place in that change where the code did not do what its comment said. The neighbouring invariant is now asserted too: `SettingsLockoutPolicy` falls back to the deployment default when a tenant is unresolvable or the settings store is unreachable, so brute force is still metered while the store is down \u2014 failure must not mean \"no lockout\" (T-178's rule).",
                   "modelType": "STRIDE",
                   "number": 264
+                },
+                {
+                  "id": "24775b58-fbce-485b-93ba-e9bfcd0c621f",
+                  "title": "A Vault redirect carries `X-Vault-Token` off-host",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "Four HTTP clients talk to Vault with the operator's token in an `X-Vault-Token` header: the startup secret provider (the bootstrap client in `axiam-server`'s `main.rs` and the private-CA client `SecretProviderKind::build` makes), the Vault KV CA key store (`ca_key_store.rs`), and the Vault PKI engine client (`vault_pki.rs`, which also carries `revoke`). None set a redirect policy, and reqwest's default follows up to ten redirects. On a cross-host hop reqwest strips only the *standard* credential headers (`Authorization`, `Cookie`, `Proxy-Authorization`, `WWW-Authenticate`), so a custom header like `X-Vault-Token` is re-sent verbatim to wherever the `Location` points. Whatever answers at the configured Vault address \u2014 a Vault behind a misconfigured load balancer or a compromised proxy, a stale DNS name now owned by someone else, a Vault front end that redirects to a host the operator did not choose \u2014 could therefore bounce the request to a host of its choosing and receive a token that reads every startup secret or signs and revokes certificates. The address is operator-configured, so this is not a request-path SSRF, but it is an exception to the rule that a credential-bearing outbound request never follows a redirect, and an unstated one (#611, R1W1-13).",
+                  "mitigation": "Mitigated at model 2.40.0 (release 1.0.1, W1.2). All four clients are built with `redirect(Policy::none())`: `VaultPkiCaKeyStore::new`, `VaultCaKeyStore::new`, the bootstrap client `axiam-server` hands to the secret provider, and the private-CA client in `SecretProviderKind::build`. A `3xx` therefore arrives as an ordinary response and is an error that names the host which answered (`vault: host <host> answered 307 Temporary Redirect with a redirect; redirects are not followed because the request carries the Vault token \u2014 set the Vault address to the final URL`); it does not repeat the `Location` target, which is not the operator's text, and carries no token. The error also tells the operator the real fix, which is to configure the final address, rather than reading as a policy problem. This is the same posture as the OAuth2 and federation fetch paths (`guarded_fetch_no_redirect`) and the email providers, now stated for the operator-configured Vault clients too. Tests: `a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing` in `crates/axiam-pki/tests/vault_pki_test.rs` (generate, through `CaService`), in `crates/axiam-pki/tests/vault_ca_key_store_test.rs` (store, load and delete) and in `crates/axiam-auth/tests/vault_provider_test.rs`, plus `a_redirect_from_vault_is_refused_on_the_private_ca_client_too` for the second secret-provider client. Each mounts a `307` on one wiremock host pointing at a second, asserts the error names the first host and not the token, and asserts the second host received no request at all. The composition root's own client is a one-line builder with no seam of its own, so the test builds the same client the provider is handed; the line itself is reviewed.",
+                  "modelType": "STRIDE",
+                  "number": 476
                 }
               ]
             }
@@ -23111,6 +23122,6 @@
     ],
     "diagramTop": 10,
     "reviewer": "",
-    "threatTop": 475
+    "threatTop": 476
   }
 }

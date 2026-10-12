@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.40.0",
  "diagramCount": 10,
- "total": 475,
+ "total": 476,
  "open": 17,
- "mitigated": 437,
+ "mitigated": 438,
  "notApplicable": 21,
  "areas": [
   {
@@ -120,7 +120,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 29,
+   "total": 30,
    "open": 6,
    "notApplicable": 0
   },
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 112,
+   "total": 113,
    "open": 6,
    "notApplicable": 4
   },
@@ -192,7 +192,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 199,
+   "total": 200,
    "open": 6,
    "notApplicable": 9
   },

@@ -400,6 +400,26 @@ async fn a_ca_that_cannot_sign_a_list_publishes_none() {
     ));
 }
 
+/// The distribution point written into a certificate is the parsed form of the
+/// configured URL, not the operator's text: a tab or newline the parser removes,
+/// an upper-case host and a trailing slash do not reach the certificate.
+#[tokio::test]
+async fn the_issued_distribution_point_is_the_normalised_url() {
+    let mut f = Fixture::new().await;
+    let messy = CrlDistribution::new(" HTTPS://ID.Example.TEST/pk\ti/\n").unwrap();
+    f.cas = f.cas.with_crl_distribution(Some(messy.clone()));
+    f.certs = f.certs.with_crl_distribution(Some(messy));
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let leaf = f.leaf(root.certificate.id, "device-normalised").await;
+    assert_eq!(
+        distribution_uris(&leaf.public_cert_pem),
+        vec![format!(
+            "https://id.example.test/pki/pki/v1/{}/ca/{}/crl",
+            f.org, root.certificate.id
+        )]
+    );
+}
+
 /// Every certificate AXIAM signs in-process from now on names its issuer's
 /// list: a generated leaf, a CSR-signed leaf and a subordinate CA.
 #[tokio::test]

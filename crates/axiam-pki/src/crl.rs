@@ -147,8 +147,14 @@ pub struct CrlDistribution {
 }
 
 impl CrlDistribution {
-    /// Validate a public base URL: absolute, `http` or `https`, with a host and
-    /// no query or fragment.
+    /// Validate a public base URL: absolute, `http` or `https`, with a host,
+    /// no userinfo and no query or fragment.
+    ///
+    /// What is stored is the parser's own serialisation of what was validated
+    /// (without the trailing slash), not the operator's text: the parser drops
+    /// tabs and newlines, lowercases the host and percent-encodes what needs
+    /// it, so the URI written into certificates is exactly the URL that passed
+    /// these checks.
     ///
     /// `http` is accepted on purpose. A CRL is signed, so the transport adds no
     /// integrity, and RFC 5280 §4.2.1.13 expects distribution points that a
@@ -170,8 +176,11 @@ impl CrlDistribution {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err("the CRL base URL must carry no query or fragment".into());
         }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err("the CRL base URL must carry no credentials (userinfo)".into());
+        }
         Ok(Self {
-            base: trimmed.trim_end_matches('/').to_owned(),
+            base: parsed.as_str().trim_end_matches('/').to_owned(),
         })
     }
 
@@ -535,6 +544,61 @@ mod tests {
             );
         }
         assert!(CrlDistribution::new("http://crl.internal:8080/axiam").is_ok());
+    }
+
+    #[test]
+    fn the_stored_base_is_the_parsed_url_without_a_trailing_slash() {
+        let org = Uuid::new_v4();
+        let ca = Uuid::new_v4();
+        for (given, base) in [
+            ("https://id.example.com/", "https://id.example.com"),
+            (
+                "https://id.example.com/axiam/",
+                "https://id.example.com/axiam",
+            ),
+            // The parser removes tabs and newlines anywhere in the input...
+            (
+                "https://id.exa\tmple.com/ax\niam",
+                "https://id.example.com/axiam",
+            ),
+            (
+                "  https://id.example.com/a\r\nb/  ",
+                "https://id.example.com/ab",
+            ),
+            // ...lowercases the host and drops a default port...
+            (
+                "HTTPS://ID.Example.COM:443/axiam",
+                "https://id.example.com/axiam",
+            ),
+            // ...and percent-encodes what a path may not carry verbatim.
+            ("https://id.example.com/a b", "https://id.example.com/a%20b"),
+            (
+                "https://id.example.com/caf\u{e9}",
+                "https://id.example.com/caf%C3%A9",
+            ),
+        ] {
+            let distribution = CrlDistribution::new(given).unwrap();
+            assert_eq!(distribution.base, base, "{given:?}");
+            assert_eq!(
+                distribution.uri_for(org, ca),
+                format!("{base}/pki/v1/{org}/ca/{ca}/crl"),
+                "{given:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_url_with_userinfo_is_refused() {
+        for bad in [
+            "https://user:pw@id.example.com/axiam",
+            "https://user@id.example.com/axiam",
+            "http://:pw@id.example.com",
+        ] {
+            assert!(
+                CrlDistribution::new(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]

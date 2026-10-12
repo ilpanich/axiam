@@ -29,6 +29,8 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
 use uuid::Uuid;
 
+mod common;
+
 async fn setup() -> (Surreal<Db>, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -347,4 +349,74 @@ async fn an_orphaned_tenants_rows_are_found_and_purged_but_its_audit_trail_is_ke
     assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
     assert_eq!(rows(&db, "user", live).await, 1);
     assert_eq!(rows(&db, "user", tombstoned).await, 1);
+}
+
+/// #610: one replica purges a tombstoned tenant. Of eight concurrent claims
+/// exactly one wins; a live tenant cannot be claimed; a claim holds for its
+/// lease and is taken over after it, or at once when released; and a purge
+/// that finds the tenant row already removed answers `NotFound`, so the caller
+/// records the purge once.
+#[tokio::test]
+async fn one_replica_claims_a_tombstoned_tenants_purge_and_a_second_purge_is_not_found() {
+    // The engine production runs: `kv-mem` may admit two winners (common/).
+    let db = common::serialising_db().await;
+    let org = SurrealOrganizationRepository::new(db.handle())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "purge-claim".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenants = SurrealTenantRepository::new(db.handle());
+    let doomed = tenant(&db, org, "doomed").await;
+    populate(&db, doomed).await;
+    let lease = Duration::hours(1);
+    let now = Utc::now();
+
+    assert!(
+        !tenants.claim_purge(doomed, now, lease).await.unwrap(),
+        "a live tenant is never claimed"
+    );
+    tenants.delete(doomed).await.unwrap();
+
+    // Eight replicas that see the same tombstone: one claim wins.
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let tenants = tenants.clone();
+        tasks.push(tokio::spawn(async move {
+            tenants.claim_purge(doomed, now, lease).await.unwrap()
+        }));
+    }
+    let mut won = 0;
+    for task in tasks {
+        won += usize::from(task.await.unwrap());
+    }
+    assert_eq!(won, 1, "exactly one concurrent claim wins");
+
+    // The claim holds for its lease, and is taken over once it has run out.
+    let later = now + Duration::minutes(59);
+    assert!(!tenants.claim_purge(doomed, later, lease).await.unwrap());
+    let lapsed = now + Duration::minutes(61);
+    assert!(tenants.claim_purge(doomed, lapsed, lease).await.unwrap());
+    // A release with another replica's stamp leaves the claim alone; with its
+    // own, the tenant is claimable at once.
+    tenants.release_purge_claim(doomed, now).await.unwrap();
+    assert!(!tenants.claim_purge(doomed, lapsed, lease).await.unwrap());
+    tenants.release_purge_claim(doomed, lapsed).await.unwrap();
+    assert!(tenants.claim_purge(doomed, lapsed, lease).await.unwrap());
+
+    // The first purge removes the row; one that comes after it, or overlaps
+    // it and loses the final delete, is `NotFound` — never a second success.
+    tenants.purge_tombstoned(doomed).await.unwrap();
+    assert!(matches!(
+        tenants.purge_tombstoned(doomed).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    assert!(
+        !tenants.claim_purge(doomed, lapsed, lease).await.unwrap(),
+        "a purged tenant is never claimed"
+    );
+    assert_eq!(rows(&db, "user", doomed).await, 0);
 }

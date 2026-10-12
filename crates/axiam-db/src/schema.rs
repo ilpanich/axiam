@@ -502,6 +502,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ca_certificate_vault_revocation",
         sql: SCHEMA_V96,
     },
+    Migration {
+        version: 97,
+        name: "tenant_purge_claim",
+        sql: SCHEMA_V97,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4748,6 +4753,24 @@ DEFINE INDEX IF NOT EXISTS idx_ca_certificate_vault_forward ON TABLE ca_certific
     FIELDS vault_revoked_at, vault_next_attempt_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v97 — one replica purges a tombstoned tenant (#610)
+// -----------------------------------------------------------------------
+//
+// The cleanup job runs on every replica, and so did the `tenant_purge` sweep:
+// two replicas purging one tenant wrote two `tenants.purged` records, or the
+// second found the tenant row gone and marked the job failed. A replica now
+// claims a tombstoned tenant before it purges it, by a conditional write of
+// `purge_claimed_at` that matches only while the field is NONE or older than
+// the claim's lease (`SurrealTenantRepository::claim_purge`); the other
+// replicas skip the tenant. No index: the claim writes one record by id.
+// Additive: one optional column, absent on every existing row, which therefore
+// reads as "unclaimed" — so a tenant tombstoned before the upgrade is claimed
+// and purged by the first sweep; no row is rewritten (D-6).
+const SCHEMA_V97: &str = "\
+DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE tenant TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4856,6 +4879,27 @@ mod tests {
             assert!(
                 !SCHEMA_V96.contains(forbidden),
                 "v96 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #610 — v97 gives `tenant` the purge claim's one column, and rewrites no
+    /// row.
+    #[test]
+    fn v97_adds_only_the_tenant_purge_claim() {
+        let statements: Vec<&str> = SCHEMA_V97
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE tenant TYPE option<datetime>"]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V97.contains(forbidden),
+                "v97 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6326,8 +6370,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&96),
-            "v96 is the newest migration (#612 — `ca_certificate.vault_revoked_at` and the \
+            Some(&97),
+            "v97 is the newest migration (#610 — `tenant.purge_claimed_at`, the claim one \
+             replica writes before it purges a tombstoned tenant, so two replicas never purge \
+             one tenant twice; v96 was #612 — `ca_certificate.vault_revoked_at` and the \
              leaf table's three backoff columns and index, so a revoked subordinate CA is \
              forwarded to its parent's list in Vault and retried by the sweep; v95 was #603 — \
              the Vault revocation sweep's backoff \

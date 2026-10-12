@@ -2176,3 +2176,89 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
     assert_eq!(of(orphan).unwrap().metadata["orphan"], true);
     assert!(of(live).is_none());
 }
+
+/// #610: the cleanup job runs on every replica. Two replicas' sweeps over one
+/// store, run at once, purge a tombstoned tenant once between them: one
+/// `tenants.purged` record, and both sweeps `Ok` — `CleanupTask::record` marks
+/// the job failed only on `Err`, so neither replica reports it failed. A
+/// replica holding a live claim keeps the others off the tenant; one that died
+/// holding it does so for the lease only.
+#[tokio::test]
+async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "purge-race".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    // Two replicas: each its own repositories over the one datastore.
+    let (tenants_a, audit_a) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let (tenants_b, audit_b) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let records_of = |records: &[AuditLogEntry], id: Uuid| {
+        records.iter().filter(|e| e.resource_id == Some(id)).count()
+    };
+
+    let doomed = tenant_with_a_user(&db, org, "doomed").await;
+    tenants_a.delete(doomed).await.unwrap();
+    let (a, b) = tokio::join!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false),
+        sweep_tenant_purge(&tenants_b, &audit_b, false)
+    );
+    let (a, b) = (a.expect("replica A's sweep"), b.expect("replica B's sweep"));
+    assert_eq!(a + b, 1, "one replica purged the tenant");
+    assert_eq!(users_in(&db, doomed).await, 0);
+    assert!(tenants_a.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(
+        records_of(&purged_records(&db).await, doomed),
+        1,
+        "one tenants.purged record"
+    );
+
+    // Replica B holds a live claim on another tenant: A's sweep leaves it,
+    // and is still `Ok`.
+    let lease = chrono::TimeDelta::from_std(axiam_server::cleanup::TENANT_PURGE_LEASE).unwrap();
+    let held = tenant_with_a_user(&db, org, "held").await;
+    tenants_a.delete(held).await.unwrap();
+    assert!(
+        tenants_b
+            .claim_purge(held, Utc::now(), lease)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(users_in(&db, held).await, 1);
+
+    // B died holding it: once the lease has run out (the claim is dated back
+    // past it), A takes the purge over.
+    let crashed_at = Utc::now() - lease - chrono::TimeDelta::minutes(1);
+    db.query("UPDATE type::record('tenant', $id) SET purge_claimed_at = $at")
+        .bind(("id", held.to_string()))
+        .bind(("at", crashed_at))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(users_in(&db, held).await, 0);
+    assert_eq!(records_of(&purged_records(&db).await, held), 1);
+}

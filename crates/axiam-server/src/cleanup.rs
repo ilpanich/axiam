@@ -195,6 +195,24 @@ pub struct CleanupTask<C: Connection> {
 /// code, and once a day after that.
 pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long a replica's claim on a tombstoned tenant's purge keeps the other
+/// replicas off it (#610); a claim older than this is taken over.
+///
+/// The purge is not batched: it is one `DELETE … WHERE tenant_id = $id` per
+/// tenant-scoped table, about seventy statements in sequence, each removing
+/// all of the tenant's rows of its table at once (the certificate tables three
+/// statements each), so even a large tenant's purge is expected to take
+/// minutes; an hour leaves an order of magnitude of headroom before a purge
+/// still running could be overlapped — and an overlap is safe in any case: the
+/// steps are idempotent and only one purge's final `DELETE` finds the tenant
+/// row, so the purge is recorded once. What the lease costs is the delay
+/// after a replica dies holding a claim: the tenant waits at most an hour for
+/// another replica, an erasure of data already out of every read path. Clock
+/// skew between replicas, which the stamp is written by, is seconds against an
+/// hour. A purge that fails releases its claim, so a failure is retried at the
+/// next tick as before.
+pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
+
 /// One pass of the `tenant_purge` job: purge every tombstoned tenant and, when
 /// `scan_orphans`, every orphaned tenant id.
 ///
@@ -208,10 +226,18 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// as `tenants.purged`, beside the `tenants.deleted` record the deletion wrote;
 /// neither is ever purged.
 ///
-/// * `Ok(n)` is the number of tenants (and orphaned ids) purged.
+/// Every replica runs this sweep (#610). A tombstoned tenant is purged only by
+/// the replica whose [`SurrealTenantRepository::claim_purge`] wins it; the
+/// others skip it for [`TENANT_PURGE_LEASE`]. A tenant the purge finds already
+/// purged — gone before the claim, or removed by an overlapping purge after a
+/// lease ran out — is success, not a failure, and is not recorded again: only
+/// the purge that removed the tenant row writes `tenants.purged`.
+///
+/// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
 ///   fail, naming how many failed and never a tenant's data. The failed tenant
-///   stays tombstoned and the next pass resumes it (every step is idempotent).
+///   stays tombstoned, its claim is released, and the next pass resumes it
+///   (every step is idempotent).
 ///
 /// # Errors
 ///
@@ -243,12 +269,40 @@ where
         }
     }
 
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE)
+        .map_err(|e| AxiamError::Internal(format!("tenant purge lease: {e}")))?;
     let (mut purged, mut failed) = (0u64, 0u64);
     for (tenant_id, orphan) in due {
         let outcome = if orphan {
             tenant_repo.purge_orphan(tenant_id).await
         } else {
-            tenant_repo.purge_tombstoned(tenant_id).await
+            let claimed_at = Utc::now();
+            match tenant_repo.claim_purge(tenant_id, claimed_at, lease).await {
+                // Another replica holds it, or it is already gone.
+                Ok(false) => continue,
+                Ok(true) => match tenant_repo.purge_tombstoned(tenant_id).await {
+                    // Purged by an overlapping replica: done, and recorded
+                    // by the purge that removed the row.
+                    Err(AxiamError::NotFound { .. }) => continue,
+                    Err(e) => {
+                        // Let the next tick (any replica's) retry it now
+                        // rather than after the lease; a failed release
+                        // leaves the lease to expire.
+                        if let Err(release) =
+                            tenant_repo.release_purge_claim(tenant_id, claimed_at).await
+                        {
+                            tracing::warn!(
+                                error = %release,
+                                %tenant_id,
+                                "could not release the tenant purge claim; it lapses with its lease"
+                            );
+                        }
+                        Err(e)
+                    }
+                    Ok(()) => Ok(()),
+                },
+                Err(e) => Err(e),
+            }
         };
         if let Err(e) = outcome {
             failed += 1;

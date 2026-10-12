@@ -300,6 +300,20 @@
 > alone, one of eight concurrent claims winning, and the refusal audited by the
 > REST route. No status changes.
 >
+> **The 1.0.1 release (model 2.40.0 — T-472 amended, 2026-10-12).** One replica
+> purges a deleted tenant (#610). The cleanup job runs on every replica, so two
+> replicas purging one tombstoned tenant at once wrote two `tenants.purged`
+> records, or the second found the tenant row gone and marked `tenant_purge`
+> failed. A replica now claims the tenant first, by a conditional write of
+> `tenant.purge_claimed_at` (schema v97) under a one-hour lease, and the others
+> skip it; a lapsed claim is taken over and a failed purge releases its own. A
+> purge that overlaps another after a lease ran out repeats idempotent steps,
+> and only the one whose final delete removes the tenant row records the purge;
+> the other's "already purged" is success. The tests show two replicas' sweeps
+> run at once over one store writing one record with both `Ok`, and one of eight
+> concurrent claims winning. The `vault_revocation` sweep's half of the issue was
+> closed by its own claim (#603). No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

@@ -156,8 +156,18 @@ so the workflow's final step used to fail every run: a gate that is red by desig
 signals nothing. D-60 counts the baseline green when every non-interactive module
 matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
 `conformance/scripts/gate.py` reads the suite's `*.results.json` (the files
-`run-plan.sh` writes, the same ones `report.py` renders) and the committed
-`conformance/baseline.json`, and exits non-zero on a regression only:
+`run-plan.sh` writes, the same ones `report.py` renders) and two committed
+baselines, and exits non-zero on a regression only:
+
+- `conformance/baseline.json`, the browser-driven 2026-09-25 runs: the best
+  verdict each module may reach.
+- `conformance/baseline-unattended.json`, per plan, the modules that park
+  (`WAITING`) on the runner because they need a browser. Without it the gate
+  could not tell a module that always needs a browser from one that used to
+  finish on its own and now parks: every browser module is `PASSED` in the first
+  file and `WAITING` on the runner, so a regression that made a module wait
+  instead of fail read green (R1W2-06, #593).
+
 
 | Result | Gate |
 |---|---|
@@ -166,24 +176,65 @@ matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
 | `PASSED` in the baseline, `REVIEW` or `WARNING` now | red: below its baseline |
 | named by the baseline, absent from the run | red |
 | a plan with no result file, or a plan in which no module `PASSED` | red: the run did not happen, or evaluated nothing |
-| `WAITING` (parked on a browser) | tolerated and named; not a pass |
+| `WAITING` (parked on a browser), module listed for its plan in the unattended baseline | tolerated and named; not a pass |
+| `WAITING`, module **not** listed there | red: it completed unattended before and parks now, or it is new and nobody has said it needs a browser |
+| `WAITING` in a plan the unattended baseline does not name | red for every module in it |
 | `SKIPPED` | tolerated and named |
-| a module the baseline has never heard of | red only if it failed outright |
+| a module the baseline has never heard of | red if it failed outright or parked; otherwise tolerated |
+| an unreadable or malformed baseline of either kind, or an unreadable result file | red: the gate fails closed, it never falls back to tolerating |
 
 The workflow's last step runs it over the three FAPI plans and appends its output
-to the job summary. **Green means "no regression against the baseline", not "every
-module passed"** and not "certified": the `WAITING` modules (the `REVIEW` and
-`WARNING` ones among them) are exactly what the maintainer's browser-driven run
-decides. The baseline names only `PASSED`, `REVIEW` and `WARNING` modules; the two
-`SKIPPED` modules of 2026-09-25 (one in the Basic plan, one in `private_key_jwt`)
-are not named by those reports, so any `SKIPPED` is tolerated.
+to the job summary. **Green means "no regression among the modules that complete
+unattended"**: every one of them is at its baseline verdict, none that finished
+before has started to park, and every baselined module was reported. It is not
+"every module passed" and not "certified". The modules the unattended baseline
+lists were not evaluated by that run at all (no assertion ran while they waited
+for a browser), so their `PASSED`, `REVIEW` and `WARNING` verdicts, and the
+`REVIEW` and `WARNING` ones among them above all, are exactly what the
+maintainer's browser-driven run decides. The baseline names only `PASSED`,
+`REVIEW` and `WARNING` modules; the two `SKIPPED` modules of 2026-09-25 (one in the
+Basic plan, one in `private_key_jwt`) are not named by those reports, so any
+`SKIPPED` is tolerated. `oidcc-basic-static` is not run by the workflow and has
+no entry in the unattended baseline, so gating it would treat every `WAITING` as
+a regression until one is recorded.
+
+**Fail-closed.** The gate already treated an unreadable result file, a missing
+plan and a run that evaluated nothing as regressions; the unattended baseline
+follows the same rule. A missing, unparsable or wrongly shaped
+`baseline-unattended.json` ends the step red (exit 1, "cannot read the unattended
+baseline"), as does an unreadable `baseline.json`. There is no flag that makes a
+missing file mean "tolerate every `WAITING`": that reading is the bug R1W2-06
+named. A plan the file does not list therefore tolerates no `WAITING` at all.
 
 To re-record the baseline after the maintainer's final run (alongside, not over:
 keep the dated reports), point the script at that run's results:
 `python3 conformance/scripts/gate.py --results <dir> --write-baseline > conformance/baseline.json`.
 Run it on a browser-driven run: an unattended one has no verdict for its
-interactive modules, and they would drop out of the baseline. The gate's rules are
-unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
+interactive modules, and they would drop out of the baseline.
+
+**Recording the unattended baseline.** Dispatch the workflow once unattended
+(the default), download the artifact `fapi-conformance-<run id>`, and point the
+script at the raw results it carries (`conformance/.run/results/` inside it, the
+`*.results.json` files):
+`python3 conformance/scripts/gate.py --results <dir> --record-unattended > conformance/baseline-unattended.json`.
+Read the run before recording it: the recorder refuses a plan in which no module
+`PASSED`, but it cannot tell a module that waits by design from one that waits
+because of a defect, so check that nothing `FAILED` and that the modules which
+should finish did (the gate's own output over the same results, run against the
+old file, names every difference). Then review the diff against the committed
+file: a module that moves out of the list began to finish on the runner, and one
+that moves in is exactly the regression this file exists to catch, to be
+explained before it is accepted, not recorded away.
+
+**The committed file is currently a seed**, built from the 2026-09-08 reports
+(the only runs without a browser) and the plan definitions, and its `source` field
+says so; the first unattended run replaces it. The seed errs towards listing a
+module as parked when the tree could not confirm that it finishes, so its likely
+error is a tolerated park, not a false red; but it is a reading of the tree, not a
+run, and the first gate run against it may name modules the seed got wrong in
+either direction.
+
+The gate's rules are unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
 CI's docs job); the workflow also passes every `workflow_dispatch` input through
 `env:` rather than interpolating it into a `run:` script.
 

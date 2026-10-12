@@ -45,9 +45,12 @@ name: FAPI 2.0 conformance
 # The job's verdict is therefore NOT "every module PASSED" (unreachable here)
 # but conformance/scripts/gate.py over the suite's machine-readable results:
 # red on a FAILED non-interactive module, a module below its baseline
-# (conformance/baseline.json, the 2026-09-25 runs) or a missing plan; WAITING
-# and SKIPPED are tolerated and named. Green here is "no regression", still not
-# "certified". The runbook's "The CI gate" section has the rules.
+# (conformance/baseline.json, the 2026-09-25 runs), a module that parks
+# (WAITING) without being listed in conformance/baseline-unattended.json, or a
+# missing plan; SKIPPED, and WAITING for a listed module, are tolerated and
+# named. Green here is "no regression" over the modules that complete
+# unattended, still not "certified". The runbook's "The CI gate" section has
+# the rules.
 #
 # ## The topology, because it is not obvious from the steps
 #
@@ -434,8 +437,11 @@ jobs:
       # code is red on EVERY run and signals nothing (P23W5-11). This gates on
       # the machine-readable results instead: no module FAILED (or COULD_NOT_START,
       # INTERRUPTED, still running at the deadline), none below its baseline in
-      # conformance/baseline.json, every baselined module reported; WAITING and
-      # SKIPPED are tolerated and named. See the runbook's "The CI gate".
+      # conformance/baseline.json, every baselined module reported, none parked
+      # that conformance/baseline-unattended.json does not list (a module that
+      # completed unattended and now needs a browser is a regression, R1W2-06);
+      # SKIPPED and a listed WAITING are tolerated and named. An unreadable
+      # baseline of either kind fails the step. See the runbook's "The CI gate".
       - name: Gate on the plan result
         if: always()
         env:
@@ -444,6 +450,8 @@ jobs:
           set -uo pipefail
           echo "conformance-run step outcome: ${RUN_OUTCOME} (non-zero is expected while interactive modules wait)"
           python3 conformance/scripts/gate.py --results conformance/.run/results \
+            --baseline conformance/baseline.json \
+            --baseline-unattended conformance/baseline-unattended.json \
             --plan fapi2-security-profile-final-mtls \
             --plan fapi2-security-profile-final-self-signed \
             --plan fapi2-security-profile-final-private-key-jwt \
@@ -458,7 +466,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${rc}" -ne 0 ]; then
-            echo "::error::a conformance regression — a module FAILED, fell below its baseline, or a plan left no result; read the gate output above and the report artifact"
+            echo "::error::a conformance regression — a module FAILED, fell below its baseline, parked on a browser unexpectedly, or a plan left no result; read the gate output above and the report artifact"
             exit 1
           fi
-          echo "No regression against conformance/baseline.json (interactive modules waiting are tolerated, not passed)."
+          echo "No regression against conformance/baseline.json and baseline-unattended.json (the modules the latter lists may wait on a browser; that is tolerated, not passed)."

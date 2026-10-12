@@ -448,6 +448,14 @@
 > "(digest-pinned)" for any value. The select step now fails the job unless the
 > value is `repo[:tag]@sha256:<64 hex>`, and the summary reads the validated
 > verdict, not the raw input. Still CI-only; no threat entry changes.
+> *Correction, 2026-10-12 (`1.0.1`, #593, R1W2-06):* the gate tolerated `WAITING` whatever
+> the baseline said, so a regression that made a module park on a browser instead of failing read green (the baseline is the
+> browser-driven run, where all of them are `PASSED`). It now also reads
+> `conformance/baseline-unattended.json` and tolerates `WAITING` only for the modules
+> that file lists per plan; any other module that parks is a regression, and an
+> unreadable or malformed file ends the step red. The committed list is a seed from the
+> 2026-09-08 reports and the plan definitions until the first unattended run is
+> recorded. Still CI-only; no threat entry changes.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on

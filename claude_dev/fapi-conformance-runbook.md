@@ -187,6 +187,19 @@ unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run b
 CI's docs job); the workflow also passes every `workflow_dispatch` input through
 `env:` rather than interpolating it into a `run:` script.
 
+**The `axiam_image` dispatch input is validated, not trusted (R1W2-05, #592).**
+Anyone who may dispatch the workflow chooses that text, and the "Select the AXIAM
+image" step appends it to `$GITHUB_ENV`, where a newline would set any variable
+(`BASH_ENV`, `NODE_OPTIONS`, ...) for every later step. The step therefore fails
+the job, before any use, unless the value matches
+`^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$`: a repository, an optional
+tag, and a full sha256 digest. A tag-only value (`...server:1.0.0`) is refused,
+because a tag is mutable and a run against it is not evidence. Empty stays valid
+and means "build from this checkout" (smoke test). The report step prints
+"(digest-pinned)" only when that step accepted a value; it reads the verdict the
+select step recorded (`AXIAM_TARGET`), never the raw input, and says "not selected"
+if the select step failed. A rejected value is echoed back escaped on one line.
+
 ---
 
 ## Reading a result
@@ -512,7 +525,7 @@ necessarily a regression.
       image. Note that `fapi-conformance.yml` cannot drive a browser, so the
       interactive modules (both FAPI `REVIEW` modules among them) are finished on the
       local rig above; the workflow's artifact is a smoke test unless `axiam_image`
-      is a digest. Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
+      is a digest (the workflow refuses any other non-empty value). Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
       `target/debug/axiam-server`), and `fapi-conformance.yml` runs only the FAPI
       plans. Whether the Basic run must be against the digest-pinned release
       image, and how to serve it, is not documented anywhere in the repository.

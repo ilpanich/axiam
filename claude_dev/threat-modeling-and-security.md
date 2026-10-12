@@ -442,7 +442,12 @@
 > `conformance/baseline.json`, failing on a `FAILED` module, one below its
 > baseline or a missing plan, and tolerating `WAITING`/`SKIPPED`. The workflow's
 > dispatch inputs reach its scripts through `env:`. CI-only; no threat entry
-> changes.
+> changes. *Correction, 2026-10-12 (`1.0.1`, #592, R1W2-05):* `env:` alone did not
+> make the `axiam_image` input safe: it was still appended to `$GITHUB_ENV`
+> unchecked (a newline set any variable for later steps) and the summary printed
+> "(digest-pinned)" for any value. The select step now fails the job unless the
+> value is `repo[:tag]@sha256:<64 hex>`, and the summary reads the validated
+> verdict, not the raw input. Still CI-only; no threat entry changes.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on

@@ -23,7 +23,9 @@ name: FAPI 2.0 conformance
 # to target a **digest-pinned release image**, and this workflow builds from the
 # checked-out tree by default. Point `axiam_image` at a release digest for a run
 # whose artifacts are evidence rather than a smoke test; the report records
-# which was used, so the two can never be confused after the fact.
+# which was used, so the two can never be confused after the fact. A non-empty
+# `axiam_image` that is not `repo[:tag]@sha256:<64 hex>` fails the run at the
+# "Select the AXIAM image" step, before it can reach `$GITHUB_ENV` (R1W2-05).
 #
 # Read `claude_dev/fapi-conformance-runbook.md` before interpreting any output,
 # and its "Known gaps" section before treating green as submission-ready.
@@ -63,9 +65,10 @@ on:
     inputs:
       axiam_image:
         description: >-
-          Digest-pinned AXIAM server image to test (e.g.
-          ghcr.io/ilpanich/axiam/server@sha256:...). Empty builds from this
-          checkout, which is a smoke test and NOT submission evidence.
+          Digest-pinned AXIAM server image to test, repo[:tag]@sha256:<64 hex>
+          (e.g. ghcr.io/ilpanich/axiam/server@sha256:...). Any other non-empty
+          value fails the run. Empty builds from this checkout, which is a
+          smoke test and NOT submission evidence.
         required: false
         default: ""
       plan_name:
@@ -205,13 +208,37 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${AXIAM_IMAGE}" ]; then
+            # The input is attacker-shaped text for anyone who may dispatch, and
+            # it is about to be appended to $GITHUB_ENV, where a newline would
+            # set ANY variable for every later step (BASH_ENV, NODE_OPTIONS, ...)
+            # and a leading `::` line would be read as a workflow command. So it
+            # is validated BEFORE any use, and never echoed raw (R1W2-05).
+            #
+            # The pattern is in a variable so bash treats it as a regex and not
+            # as a quoted literal. A POSIX ERE `$` matches only at the end of the
+            # whole string (no REG_NEWLINE), so `good@sha256:<hex>\nBASH_ENV=x`
+            # does not match: the `[0-9a-f]{64}$` tail is not the end of it.
+            digest_ref='^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$'
+            if ! [[ "${AXIAM_IMAGE}" =~ ${digest_ref} ]]; then
+              # %q renders control characters escaped, on one line.
+              printf '::error::axiam_image must be a digest-pinned reference (repo[:tag]@sha256:<64 hex>), e.g. ghcr.io/ilpanich/axiam/server@sha256:...; a tag alone is mutable and is not submission evidence (see §X5.3). Got: %q\n' "${AXIAM_IMAGE}"
+              exit 1
+            fi
             echo "::notice::testing digest-pinned image ${AXIAM_IMAGE}"
-            echo "BENCH_AXIAM_IMAGE=${AXIAM_IMAGE}" >> "$GITHUB_ENV"
-            echo "BUILD_FROM_SOURCE=0" >> "$GITHUB_ENV"
+            {
+              echo "BENCH_AXIAM_IMAGE=${AXIAM_IMAGE}"
+              echo "BUILD_FROM_SOURCE=0"
+              # What the report step prints is decided HERE, from the value that
+              # passed, not from the raw input it would otherwise re-read.
+              echo "AXIAM_TARGET=pinned"
+            } >> "$GITHUB_ENV"
           else
             echo "::warning::no axiam_image supplied — building from this checkout. \
           This run is a smoke test and is NOT valid submission evidence (see §X5.3)."
-            echo "BUILD_FROM_SOURCE=1" >> "$GITHUB_ENV"
+            {
+              echo "BUILD_FROM_SOURCE=1"
+              echo "AXIAM_TARGET=source"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Bring up AXIAM with an mTLS listener
@@ -315,14 +342,14 @@ jobs:
 
       - name: Render the report
         if: always()
-        env:
-          # Through `env:`, never interpolated into the script below: a
-          # `workflow_dispatch` input is attacker-shaped text for anyone who may
-          # dispatch the workflow, and `${{ }}` inside `run:` is substituted
-          # BEFORE the shell parses it (P23W5-11).
-          AXIAM_IMAGE: ${{ inputs.axiam_image }}
         run: |
           set -uo pipefail
+          # No `${{ inputs.axiam_image }}` here, neither interpolated nor via
+          # `env:` (P23W5-11, R1W2-05): the image and the claim made about it
+          # come from the "Select the AXIAM image" step, which validated the
+          # value before exporting it. If that step failed, or never ran,
+          # AXIAM_TARGET is unset and the summary says so instead of guessing.
+          #
           # Deliberately not `set -e`: the reporter exits non-zero on a red
           # plan, which is information, not a reason to skip the upload.
           CONFORMANCE_DATE="$(date -u +%Y-%m-%d)"
@@ -331,11 +358,17 @@ jobs:
           {
             echo "## FAPI 2.0 conformance"
             echo
-            if [ -n "${AXIAM_IMAGE}" ]; then
-              echo "Target: \`${AXIAM_IMAGE}\` (digest-pinned)"
-            else
-              echo "Target: **built from this checkout — smoke test, NOT submission evidence**"
-            fi
+            case "${AXIAM_TARGET:-}" in
+              pinned)
+                echo "Target: \`${BENCH_AXIAM_IMAGE}\` (digest-pinned)"
+                ;;
+              source)
+                echo "Target: **built from this checkout — smoke test, NOT submission evidence**"
+                ;;
+              *)
+                echo "Target: **not selected — the image step failed or did not run (an invalid \`axiam_image\` is rejected there)**"
+                ;;
+            esac
             echo
             # This run's reports only. docs/conformance/ also holds every earlier
             # dated report, which a glob over *.md would paste in as well.

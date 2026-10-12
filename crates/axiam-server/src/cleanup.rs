@@ -1258,8 +1258,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     // T-470: a `vault_pki` leaf revoked in AXIAM whose
                     // revocation Vault does not have yet — a revoke request
                     // could not reach it, or the revocation came from a bulk
-                    // path. WARN on failure (`record`), since until it runs
-                    // Vault's list omits a revoked certificate.
+                    // path — and (#612) a revoked tenant signing CA its
+                    // parent's list in Vault does not name yet. WARN on failure
+                    // (`record`), since until it runs Vault's list omits a
+                    // revoked certificate.
                     if let Some(certs) = &self.vault_revocations {
                         Self::record(
                             &self.job_health,
@@ -1269,7 +1271,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         );
 
                         // #603: a revocation Vault has refused twelve times
-                        // (about a day of backoff) is retried every six hours
+                        // (about a day of backoff; a CA's counted with the
+                        // leaves', #612) is retried every six hours
                         // and the pass above no longer fails for it. A distinct
                         // job, so a stuck revocation is not hidden by a green
                         // `vault_revocation` and a flapping Vault is not

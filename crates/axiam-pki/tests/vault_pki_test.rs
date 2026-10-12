@@ -385,9 +385,13 @@ async fn revoking_removes_the_issuer_before_the_key_it_uses() {
     let org = Uuid::new_v4();
     let svc = ca_service(setup_db().await, &server);
     let generated = svc.generate(create_ca("Acme Root", org)).await.unwrap();
-    svc.revoke(org, generated.certificate.id)
+    let outcome = svc
+        .revoke(org, generated.certificate.id)
         .await
         .expect("revocation must succeed");
+    // An organization CA has no parent whose list could name it (#612): no
+    // `revoke` call is mounted, and none is made.
+    assert_eq!(outcome, CustodianRevocation::NotNeeded);
     // Both tiers go: a root whose only intermediate is revoked signs nothing
     // anyone should accept. The `.expect(1)` on all four deletes is the
     // assertion.
@@ -1480,10 +1484,21 @@ async fn revocation_fixture_with(leaf_count: u64) -> RevocationFixture {
     }
 }
 
-/// Vault's `revoke`, answering `status` and recording the serial each call
-/// named. `expect` is how many calls the test allows.
+/// Vault's `revoke` on the issuing mount, answering `status` and recording the
+/// serial each call named. `expect` is how many calls the test allows.
 async fn mount_revoke(
     server: &MockServer,
+    status: u16,
+    expect: u64,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    mount_revoke_on(server, "pki_int", status, expect).await
+}
+
+/// [`mount_revoke`] on any mount: `pki` is where a tenant signing CA's
+/// revocation goes (#612), since the organization's root signed it.
+async fn mount_revoke_on(
+    server: &MockServer,
+    mount: &str,
     status: u16,
     expect: u64,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -1512,7 +1527,7 @@ async fn mount_revoke(
     }
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     Mock::given(method("POST"))
-        .and(path("/v1/pki_int/revoke"))
+        .and(path(format!("/v1/{mount}/revoke")))
         .and(header("X-Vault-Token", TOKEN))
         .respond_with(Revoke {
             status,
@@ -1771,5 +1786,246 @@ async fn two_replicas_never_attempt_the_same_row() {
     );
     assert_eq!(a.unwrap() + b.unwrap(), 1, "one replica forwarded it");
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
+    f.server.verify().await;
+}
+
+// ---------------------------------------------------------------------------
+// a revoked tenant signing CA, on its parent's list in Vault (#612)
+// ---------------------------------------------------------------------------
+
+/// A `vault_pki` organization CA (root in `pki`, issuing intermediate in
+/// `pki_int`) with one tenant signing CA the root signed, and the services
+/// that revoke it and sweep.
+struct TenantCaFixture {
+    cas: CaService<SurrealCaCertificateRepository<TestDb>>,
+    certs:
+        CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>,
+    ca_repo: SurrealCaCertificateRepository<TestDb>,
+    org: Uuid,
+    tenant: Uuid,
+    tenant_ca: Uuid,
+    /// The tenant CA's serial as Vault spells it.
+    serial: String,
+    server: MockServer,
+}
+
+async fn tenant_ca_fixture() -> TenantCaFixture {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    let tenant_int = ca_pair("Acme R&D Signing CA", Some(&root));
+    mount_org_ca(&server, &root, &int).await;
+
+    let db = setup_db().await;
+    let cas = ca_service(db.clone(), &server);
+    let org = Uuid::new_v4();
+    let tenant = Uuid::new_v4();
+    let parent = cas
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap()
+        .certificate;
+
+    mount_intermediate_generate(&server, "tenant-key-id").await;
+    mount_tenant_signature(&server, "Acme R&D Signing CA", &root, &tenant_int).await;
+    mount_intermediate_set_signed(&server, "tenant-issuer-id").await;
+    let tenant_ca = cas
+        .generate_intermediate(axiam_core::models::certificate::CreateIntermediateCa {
+            organization_id: org,
+            tenant_id: tenant,
+            parent_ca_id: parent.id,
+            subject: "Acme R&D Signing CA".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            validity_days: 365,
+        })
+        .await
+        .expect("tenant signing CA")
+        .certificate;
+
+    // Revoking the tenant CA releases its issuer and key from `pki_int`; the
+    // organization's root and intermediate are not touched.
+    for (kind, id) in [("issuer", "tenant-issuer-id"), ("key", "tenant-key-id")] {
+        Mock::given(method("DELETE"))
+            .and(path(format!("/v1/pki_int/{kind}/{id}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let certs = CertService::new(
+        ca_repo.clone(),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    );
+    TenantCaFixture {
+        cas,
+        certs,
+        ca_repo,
+        org,
+        tenant,
+        serial: vault_serial(&tenant_ca.public_cert_pem),
+        tenant_ca: tenant_ca.id,
+        server,
+    }
+}
+
+/// The CA rows the sweep still has to forward, whether due or backed off.
+async fn pending_ca_forwards(f: &TenantCaFixture) -> Vec<Uuid> {
+    use axiam_core::repository::CaCertificateRepository;
+    f.ca_repo
+        .list_due_vault_forwards(Utc::now() + Duration::days(2), 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|candidate| candidate.ca.id)
+        .collect()
+}
+
+/// #612: revoking a tenant signing CA POSTs its serial to the `revoke` of the
+/// mount its parent signed it from — the organization's root in `pki`, not the
+/// leaf-issuing `pki_int` — after its own issuer is released, and leaves
+/// nothing for the sweep.
+#[tokio::test]
+async fn revoking_a_tenant_ca_revokes_it_on_its_parents_mount_by_serial() {
+    let f = tenant_ca_fixture().await;
+    let seen = mount_revoke_on(&f.server, "pki", 200, 1).await;
+    // The leaf-issuing mount holds the tenant CA's issuer, not its record.
+    mount_revoke_on(&f.server, "pki_int", 200, 0).await;
+
+    let outcome = f.cas.revoke(f.org, f.tenant_ca).await.unwrap();
+
+    assert_eq!(outcome, CustodianRevocation::Forwarded);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        std::slice::from_ref(&f.serial),
+        "the parent's mount must be told the serial of the CA AXIAM revoked"
+    );
+    // Released first, forwarded second: Vault refuses to put a serial that is
+    // still an issuer of the same mount on that mount's list.
+    let requests = f.server.received_requests().await.unwrap();
+    let position = |m: &str, p: &str| {
+        requests
+            .iter()
+            .position(|r| r.method.as_str() == m && r.url.path() == p)
+            .unwrap_or_else(|| panic!("{m} {p} was not requested"))
+    };
+    assert!(
+        position("DELETE", "/v1/pki_int/issuer/tenant-issuer-id")
+            < position("POST", "/v1/pki/revoke")
+    );
+    assert_eq!(
+        f.cas.get(f.org, f.tenant_ca).await.unwrap().status,
+        CertificateStatus::Revoked
+    );
+    assert!(pending_ca_forwards(&f).await.is_empty(), "nothing pending");
+    // Nothing for the sweep: the `.expect(1)` above fails on a second call.
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    f.server.verify().await;
+}
+
+/// #612: a forward Vault refuses leaves the CA revoked and pending; the sweep
+/// retries it from the row alone — the CA's key and issuer are gone by then —
+/// backs it off on a refusal like a leaf, and forwards it once Vault accepts.
+#[tokio::test]
+async fn a_refused_ca_forward_is_retried_by_the_sweep() {
+    let f = tenant_ca_fixture().await;
+    // The request's attempts, then one sweep while Vault still refuses.
+    let refused = mount_revoke_on(
+        &f.server,
+        "pki",
+        503,
+        u64::from(CUSTODIAN_REVOKE_ATTEMPTS) + 1,
+    )
+    .await;
+
+    let outcome = f
+        .cas
+        .revoke(f.org, f.tenant_ca)
+        .await
+        .expect("Vault's refusal must not fail the revocation");
+    assert!(
+        matches!(&outcome, CustodianRevocation::Pending { reason } if reason.contains("storage unavailable")),
+        "a refused forward is pending, naming Vault's reason: {outcome:?}"
+    );
+    assert_eq!(
+        f.cas.get(f.org, f.tenant_ca).await.unwrap().status,
+        CertificateStatus::Revoked,
+        "AXIAM's revocation stands whatever Vault answered"
+    );
+    assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);
+
+    // A sweep while Vault still refuses reports it and backs the row off; the
+    // next tick does not ask Vault again.
+    assert!(f.certs.forward_pending_revocations().await.is_err());
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    assert_eq!(refused.lock().unwrap().len(), 3);
+    assert_eq!(f.certs.failing_revocations().await.unwrap(), 0);
+    f.server.verify().await;
+    // Vault forgets every mock, the issuer and key deletions included: the
+    // retry has nothing but the row to go on.
+    f.server.reset().await;
+
+    // The backoff runs out, and Vault accepts.
+    {
+        use axiam_core::repository::CaCertificateRepository;
+        f.ca_repo
+            .record_vault_forward_failure(
+                f.org,
+                f.tenant_ca,
+                1,
+                Utc::now() - Duration::seconds(1),
+                "",
+            )
+            .await
+            .unwrap();
+    }
+    let seen = mount_revoke_on(&f.server, "pki", 200, 1).await;
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+    assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
+    assert!(pending_ca_forwards(&f).await.is_empty());
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    f.server.verify().await;
+}
+
+/// #612: deleting a tenant forwards its signing CA's revocation with one
+/// attempt and counts one Vault did not take; a CA forward refused past the
+/// threshold stops failing the pass and is counted with the failing leaves.
+#[tokio::test]
+async fn a_tenant_deletion_counts_a_pending_ca_forward_and_a_stuck_one_is_failing() {
+    let f = tenant_ca_fixture().await;
+    let refused = mount_revoke_on(&f.server, "pki", 503, 2).await;
+
+    let revoked = f.cas.revoke_tenant_cas(f.org, f.tenant).await.unwrap();
+    assert_eq!(revoked.revoked, 1);
+    assert_eq!(revoked.vault_pending, 1, "one attempt, refused, pending");
+    assert_eq!(refused.lock().unwrap().len(), 1, "one attempt per CA");
+
+    // One refusal short of the threshold, and due: the next refusal crosses it.
+    {
+        use axiam_core::repository::CaCertificateRepository;
+        f.ca_repo
+            .record_vault_forward_failure(
+                f.org,
+                f.tenant_ca,
+                vault_forward::FAILING_AFTER_ATTEMPTS - 1,
+                Utc::now() - Duration::seconds(1),
+                "refused",
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(f.certs.failing_revocations().await.unwrap(), 0);
+    assert_eq!(
+        f.certs.forward_pending_revocations().await.unwrap(),
+        0,
+        "a row past the threshold does not fail the pass"
+    );
+    assert_eq!(refused.lock().unwrap().len(), 2);
+    assert_eq!(f.certs.failing_revocations().await.unwrap(), 1);
+    assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);
     f.server.verify().await;
 }

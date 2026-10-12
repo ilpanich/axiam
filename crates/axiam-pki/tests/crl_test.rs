@@ -542,7 +542,14 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
         "the live leaf and the one under the tenant CA"
     );
     assert_eq!(revoked.vault_pending, 0);
-    assert_eq!(f.cas.revoke_tenant_cas(f.org, doomed).await.unwrap(), 1);
+    assert_eq!(
+        f.cas
+            .revoke_tenant_cas(f.org, doomed)
+            .await
+            .unwrap()
+            .revoked,
+        1
+    );
     // A leaf issued while the deletion ran: the tombstone transaction revokes it.
     let raced = f.leaf(root.certificate.id, "raced").await;
     tenants.delete(doomed).await.unwrap();

@@ -23,6 +23,8 @@
 //! 5. `POST <int_mount>/issuer/<int>/sign-verbatim` — every leaf, thereafter.
 //! 6. `POST <int_mount>/revoke` — every leaf AXIAM revokes, so that Vault's own
 //!    revocation list names it (T-470).
+//! 7. `POST <root_mount>/revoke` — every tenant signing CA AXIAM revokes, so
+//!    that the list of the root that signed it names it (#612).
 //!
 //! The two-tier structure is not ceremony. A root that signs exactly one
 //! intermediate and nothing else can have that intermediate revoked and
@@ -873,6 +875,29 @@ impl CaKeyStore for VaultPkiCaKeyStore {
         Box::pin(async move {
             let locator = VaultPkiLocator::parse(&key_ref.locator)?;
             let url = self.url(&locator.issuing.mount, "revoke");
+            self.post_checked(&url, serde_json::json!({ "serial_number": serial_hex }))
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// `POST <parent's signing mount>/revoke` with a subordinate CA's serial
+    /// (#612).
+    ///
+    /// The mount is the one [`Self::generate_intermediate_ca`] and
+    /// [`Self::sign_intermediate_csr`] signed the CA from — the parent's root
+    /// when its locator records one, else its issuing mount
+    /// ([`VaultPkiLocator::signing_issuer`]) — because `sign-intermediate`
+    /// stores what it signs in that mount, and that mount's issuer's list is
+    /// the one a relying party walking the chain consults for this CA.
+    fn revoke_signed_ca<'a>(
+        &'a self,
+        parent: &'a CaKeyRef,
+        serial_hex: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let locator = VaultPkiLocator::parse(&parent.locator)?;
+            let url = self.url(&locator.signing_issuer().mount, "revoke");
             self.post_checked(&url, serde_json::json!({ "serial_number": serial_hex }))
                 .await?;
             Ok(())

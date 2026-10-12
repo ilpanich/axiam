@@ -286,6 +286,20 @@
 > forwarded, two replicas making one call, and exactly one of eight concurrent
 > claims winning. No status changes.
 >
+> **The 1.0.1 release (model 2.40.0 — T-470 amended again, 2026-10-12).** A
+> revoked tenant signing CA now reaches its parent's list in Vault (#612): the
+> entry's last residual no longer holds. Revoking a CA whose parent's key Vault's
+> PKI engine holds releases the CA's own issuer and key, then revokes the CA's
+> serial on the mount the parent signed it from (the root's), twice at most
+> within ten seconds; a refusal is audited as
+> `ca_certificate.vault_revocation_pending` and retried by the
+> `vault_revocation` sweep from the CA's row (schema v96: `vault_revoked_at`
+> and the leaves' three backoff columns on `ca_certificate`), with the same
+> backoff, claim and failing threshold. The tests show the serial reaching the
+> root mount after the issuer's deletion, a refused forward retried from the row
+> alone, one of eight concurrent claims winning, and the refusal audited by the
+> REST route. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

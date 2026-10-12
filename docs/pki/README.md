@@ -423,6 +423,7 @@ A minimal policy:
 ```hcl
 path "pki/root/generate/internal"        { capabilities = ["update"] }
 path "pki/issuer/+/sign-intermediate"    { capabilities = ["update"] }
+path "pki/revoke"                        { capabilities = ["update"] }
 path "pki/issuer/+"                      { capabilities = ["delete"] }
 path "pki/key/+"                         { capabilities = ["delete"] }
 
@@ -445,7 +446,9 @@ well can add a role against the same issuer; what they cannot do is have
 neither.
 
 Revocation deletes the issuer and then the key, at both tiers — in that order,
-because Vault refuses to delete a key an issuer still references.
+because Vault refuses to delete a key an issuer still references. A tenant
+signing CA has one tier of its own to delete (the root above it is the
+organization's) and is then revoked on the root's mount; see below.
 
 ### Revoking a leaf, and the list relying parties read
 
@@ -468,7 +471,8 @@ no request — a directory deprovisioning revokes a user's certificates in bulk 
 and, on the first tick after an upgrade, the revocations of such leaves made
 before 1.0.0. Vault answers a second revocation of the same serial with
 success, so a retry is harmless. A leaf of a CA that has itself been revoked is
-not forwarded: revoking the CA deleted its issuer from Vault.
+not forwarded: revoking the CA deleted its issuer from Vault, and the CA's own
+revocation goes on its parent's list instead (below).
 
 **A revocation Vault keeps refusing.** The sweep does not ask again at every
 tick. Each refusal is recorded on the certificate row (schema v95:
@@ -492,6 +496,34 @@ revoke call succeeds, and the next retry forwards it. A revocation Vault cannot
 ever accept (a serial it never recorded) stays in that count until the
 certificate expires, since a `no_store` role has nothing for Vault to revoke and
 the leaf is bounded by its validity.
+
+**Revoking a tenant signing CA.** A tenant signing CA under a `vault_pki`
+organization CA was signed by that CA's root in Vault (`pki/issuer/<root>/sign-intermediate`),
+so the list relying parties check for it is the root's, which Vault signs.
+Revoking it (`POST /api/v1/organizations/{org_id}/ca-certificates/{id}/revoke`,
+or deleting its tenant) releases its issuer and key from `pki_int` and then
+revokes its certificate with `POST <root_mount>/revoke` and its serial — hence
+`pki/revoke` in the policy above. (For an organization CA whose key locator
+records no root, imported or created with `issue_from_root`, it is that CA's
+own mount.) The order is deliberate: Vault refuses to revoke a serial that is
+still an issuer in the same mount, and once the tenant CA's issuer is deleted
+its serial is a stored certificate like any leaf's. A CA signed from a caller's
+CSR (`external` custody) is forwarded the same way; one signed in AXIAM before
+its parent's key moved into Vault is not, since Vault never recorded it, and
+AXIAM's own list for the parent names it either way.
+
+Everything that applies to a leaf applies here: AXIAM's revocation stands
+whatever Vault answers, the request tries twice within ten seconds (a tenant
+deletion once per CA, within one ten-second budget for all of them), a refusal
+is recorded as `ca_certificate.vault_revocation_pending` in the organization's
+audit log (and as `signing_ca_vault_revocations_pending` on the tenant
+deletion's record), and the `vault_revocation` sweep retries it with the same
+backoff and claim, from the CA's row (schema v96: `vault_revoked_at` and the
+three backoff columns on `ca_certificate`), which keeps the certificate and its
+parent after the key is gone and until eight days after it expires. A CA
+refused twelve times counts in `vault_revocation_failing` with the leaves. On
+the first tick after an upgrade, the sweep forwards the subordinate CAs revoked
+before 1.0.1.
 
 **Where relying parties fetch the list.** Leaves of a `vault_pki` CA carry
 Vault's own profile, not an AXIAM distribution point. Configure the

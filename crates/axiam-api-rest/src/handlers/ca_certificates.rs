@@ -1,11 +1,12 @@
 //! CA certificate management endpoints.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::certificate::{
     CaCertificate, CreateCaCertificate, CreateIntermediateCa, GeneratedCaCertificate,
     ImportCaCertificate, KeyAlgorithm, SignIntermediateCsr,
 };
-use axiam_core::repository::{PaginatedResult, Pagination};
+use axiam_core::repository::{AuditLogRepository, PaginatedResult, Pagination};
 use serde::Deserialize;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -13,7 +14,9 @@ use uuid::Uuid;
 use crate::AuthenticatedUser;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
+use crate::extractors::client_info::client_ip;
 use crate::state::AppState;
+use axiam_pki::CustodianRevocation;
 
 // -----------------------------------------------------------------------
 // Request types (CQ-B25)
@@ -319,7 +322,19 @@ pub async fn get<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(result))
 }
 
+/// Audit action: a CA certificate was revoked in AXIAM, but the parent whose
+/// key Vault's PKI engine holds could not be told, so Vault's list for the
+/// parent does not name it yet; the cleanup job retries (#612). The CA's
+/// counterpart of `certificate.vault_revocation_pending`.
+pub const AUDIT_CA_VAULT_REVOCATION_PENDING: &str = "ca_certificate.vault_revocation_pending";
+
 /// `POST /api/v1/organizations/{org_id}/ca-certificates/{id}/revoke`
+///
+/// A subordinate CA its parent signed through Vault's PKI engine is revoked on
+/// the parent's list in Vault as well (#612). A Vault that refuses or cannot be
+/// reached does not undo or fail the revocation: it is recorded
+/// (`ca_certificate.vault_revocation_pending`, in the organization's own audit
+/// log) and retried by the cleanup job.
 #[utoipa::path(
     post,
     path = "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
@@ -337,6 +352,7 @@ pub async fn revoke<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<(Uuid, Uuid)>,
+    http_req: HttpRequest,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("ca_certificates:revoke", Uuid::nil())
@@ -359,7 +375,36 @@ pub async fn revoke<C: Connection + Clone>(
         ));
     }
 
-    state.pki.ca_service.revoke(org_id, id).await?;
+    let custodian = state.pki.ca_service.revoke(org_id, id).await?;
+    // The organization's own tenant, where the caller's record lives, rather
+    // than the CA's: a tenant signing CA's tenant may be deleted and purged
+    // while the forward is still pending.
+    if let CustodianRevocation::Pending { reason } = custodian
+        && let Err(error) = state
+            .audit_repo
+            .append(CreateAuditLogEntry {
+                tenant_id: user.principal_tenant_id,
+                actor_id: user.user_id,
+                actor_type: ActorType::User,
+                action: AUDIT_CA_VAULT_REVOCATION_PENDING.to_string(),
+                resource_id: Some(id),
+                outcome: AuditOutcome::Failure,
+                ip_address: client_ip(&http_req),
+                metadata: Some(serde_json::json!({
+                    "organization_id": org_id,
+                    "ca_certificate_id": id,
+                    "reason": reason,
+                })),
+            })
+            .await
+    {
+        tracing::error!(
+            organization_id = %org_id,
+            ca_certificate_id = %id,
+            %error,
+            "a pending Vault revocation of a CA could not be audited"
+        );
+    }
     Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 

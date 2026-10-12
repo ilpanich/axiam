@@ -29,6 +29,10 @@ use x509_parser::time::ASN1Time;
 use zeroize::Zeroize;
 
 use crate::ca_key_store::CaKeyCustodians;
+use crate::cert::{
+    CUSTODIAN_REVOKE_ATTEMPTS, CUSTODIAN_REVOKE_BUDGET, CustodianRevocation, attempt_custodian,
+    serial_hex,
+};
 use crate::crl::CrlDistribution;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 use crate::subject::subject_common_name;
@@ -915,7 +919,48 @@ impl<R: CaCertificateRepository> CaService<R> {
         Ok(updated)
     }
 
-    pub async fn revoke(&self, organization_id: Uuid, id: Uuid) -> AxiamResult<()> {
+    /// Revoke a CA: the row first, then its key at its custodian, then — for a
+    /// subordinate CA its parent signed through Vault's PKI engine — the CA's
+    /// serial on the parent's list in Vault (#612).
+    ///
+    /// AXIAM's revocation stands whatever the custodians answer: the row is
+    /// what AXIAM signs with and what its own list for the parent reads (#565).
+    /// The forward is the leaf path's (T-470): within
+    /// [`CUSTODIAN_REVOKE_ATTEMPTS`] attempts and [`CUSTODIAN_REVOKE_BUDGET`],
+    /// and a refusal or an unreachable Vault is answered as
+    /// [`CustodianRevocation::Pending`], for the caller to record, and retried by
+    /// the cleanup job's `vault_revocation` sweep from the row — which keeps the
+    /// certificate and `parent_ca_id`, everything the retry needs, after the
+    /// key is gone.
+    ///
+    /// The forward comes **after** the key is released, not before. Vault
+    /// refuses `revoke` for a serial that is still an issuer in the same mount
+    /// ("adding issuer to its own CRL is not allowed"), and a parent whose
+    /// locator records no root (imported, or created with `issue_from_root`
+    /// and imported into the issuing mount) signs its subordinates from the
+    /// very mount that holds their issuers. Once the subordinate's issuer is
+    /// deleted, its serial is a stored certificate like a leaf's, and the
+    /// parent's mount accepts it; where the mounts differ (the usual two-tier
+    /// organization CA) the order changes nothing.
+    pub async fn revoke(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+    ) -> AxiamResult<CustodianRevocation> {
+        self.revoke_within(organization_id, id, CUSTODIAN_REVOKE_ATTEMPTS, None)
+            .await
+    }
+
+    /// [`Self::revoke`], forwarding within `attempts` and before `deadline` —
+    /// `None` for [`CUSTODIAN_REVOKE_BUDGET`] from the moment the key is
+    /// released, so a slow release does not eat the forward's budget.
+    async fn revoke_within(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        deadline: Option<tokio::time::Instant>,
+    ) -> AxiamResult<CustodianRevocation> {
         let certificate = self.repo.get_by_id(organization_id, id).await?;
         self.repo.revoke(organization_id, id).await?;
 
@@ -936,7 +981,20 @@ impl<R: CaCertificateRepository> CaService<R> {
                 );
             }
         }
-        Ok(())
+
+        // The row as read before the revocation: neither the revocation nor
+        // the release changes what the forward reads (the certificate, the
+        // custody, the parent).
+        let deadline =
+            deadline.unwrap_or_else(|| tokio::time::Instant::now() + CUSTODIAN_REVOKE_BUDGET);
+        Ok(forward_ca_revocation(
+            &self.repo,
+            &self.custodians,
+            &certificate,
+            attempts,
+            deadline,
+        )
+        .await)
     }
 
     /// Revoke every active signing CA of a tenant that is being deleted, each
@@ -948,11 +1006,17 @@ impl<R: CaCertificateRepository> CaService<R> {
     /// parties outside AXIAM, instead of staying valid until it expires. Its row
     /// outlives the tenant until it expires (`tenant_purge` keeps a revoked,
     /// unexpired CA, without its key), so the parent's list keeps naming it.
+    ///
+    /// Each subordinate CA's forward to its parent's list in Vault (#612) takes
+    /// one attempt, inside one [`CUSTODIAN_REVOKE_BUDGET`] for all of them, as
+    /// the tenant's leaves do (`CertService::revoke_tenant`); one Vault did not
+    /// take is counted in [`TenantCasRevoked::vault_pending`] and retried by
+    /// the cleanup job's sweep.
     pub async fn revoke_tenant_cas(
         &self,
         organization_id: Uuid,
         tenant_id: Uuid,
-    ) -> AxiamResult<usize> {
+    ) -> AxiamResult<TenantCasRevoked> {
         const PAGE: u64 = 100;
         let mut active = Vec::new();
         let mut offset = 0;
@@ -981,10 +1045,20 @@ impl<R: CaCertificateRepository> CaService<R> {
                 break;
             }
         }
+        let deadline = tokio::time::Instant::now() + CUSTODIAN_REVOKE_BUDGET;
+        let mut vault_pending = 0usize;
         for id in &active {
-            self.revoke(organization_id, *id).await?;
+            if let CustodianRevocation::Pending { .. } = self
+                .revoke_within(organization_id, *id, 1, Some(deadline))
+                .await?
+            {
+                vault_pending += 1;
+            }
         }
-        Ok(active.len())
+        Ok(TenantCasRevoked {
+            revoked: active.len(),
+            vault_pending,
+        })
     }
 
     pub async fn list(
@@ -996,6 +1070,102 @@ impl<R: CaCertificateRepository> CaService<R> {
             .list_by_organization(organization_id, pagination)
             .await
     }
+}
+
+/// What [`CaService::revoke_tenant_cas`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenantCasRevoked {
+    /// Signing CAs this revoked.
+    pub revoked: usize,
+    /// Of those, CAs whose revocation the parent's list in Vault does not have
+    /// yet (#612); the cleanup job's sweep forwards them.
+    pub vault_pending: usize,
+}
+
+/// Tell Vault that `revoked`, a revoked subordinate CA, is revoked — on the
+/// list of the parent that signed it, when that parent's key Vault's PKI engine
+/// holds (#612). Never fails: the outcome is the answer.
+///
+/// [`CustodianRevocation::NotNeeded`] for a CA with no parent, a parent that is
+/// gone, not `vault_pki` (its list is AXIAM's, which reads the row) or itself
+/// revoked (revoking it deleted its issuers from Vault, so there is no list
+/// there left to name the child), and for a CA Vault never signed: one in
+/// `database` or `vault` custody under a `vault_pki` parent was signed in
+/// AXIAM before the parent's key moved into Vault. On success the row records
+/// `vault_revoked_at` (schema v96).
+///
+/// Shared by [`CaService::revoke`] and the cleanup job's sweep
+/// (`CertService::forward_pending_revocations`), which reads only the row: the
+/// certificate (its serial) and `parent_ca_id`, both kept by a revoked CA's row
+/// after its key is released and until eight days after it expires
+/// (`tenant_purge`), past the sweep's own window (`not_after`).
+pub(crate) async fn forward_ca_revocation<R: CaCertificateRepository>(
+    repo: &R,
+    custodians: &CaKeyCustodians,
+    revoked: &CaCertificate,
+    attempts: u32,
+    deadline: tokio::time::Instant,
+) -> CustodianRevocation {
+    let pending = |reason: String| {
+        tracing::error!(
+            ca_id = %revoked.id,
+            organization_id = %revoked.organization_id,
+            parent_ca_id = ?revoked.parent_ca_id,
+            reason = %reason,
+            "CA revoked in AXIAM but not yet on its parent's revocation list in Vault, which \
+             therefore does not name it; the cleanup job retries"
+        );
+        CustodianRevocation::Pending { reason }
+    };
+
+    let Some(parent_id) = revoked.parent_ca_id else {
+        return CustodianRevocation::NotNeeded;
+    };
+    if !matches!(
+        revoked.key_custody,
+        CaKeyCustody::VaultPki | CaKeyCustody::External
+    ) {
+        return CustodianRevocation::NotNeeded;
+    }
+    let parent = match repo.get_by_issuer_id(parent_id).await {
+        Ok(parent) => parent,
+        Err(AxiamError::NotFound { .. }) => return CustodianRevocation::NotNeeded,
+        Err(e) => return pending(format!("the parent CA could not be read: {e}")),
+    };
+    if parent.key_custody != CaKeyCustody::VaultPki || parent.status != CertificateStatus::Active {
+        return CustodianRevocation::NotNeeded;
+    }
+    let store = match custodians.store_for(parent.key_custody) {
+        Ok(store) if store.signs_remotely() => store,
+        Ok(_) => return CustodianRevocation::NotNeeded,
+        Err(e) => return pending(e.to_string()),
+    };
+    let serial = match serial_hex(&revoked.public_cert_pem) {
+        Ok(serial) => serial,
+        Err(e) => return pending(e.to_string()),
+    };
+
+    let parent_ref = CaService::<R>::key_ref(&parent);
+    if let Err(reason) = attempt_custodian(attempts, deadline, || {
+        store.revoke_signed_ca(&parent_ref, &serial)
+    })
+    .await
+    {
+        return pending(reason);
+    }
+    if let Err(e) = repo
+        .mark_revocation_forwarded(revoked.organization_id, revoked.id)
+        .await
+    {
+        // Vault has it; the next sweep forwards it again, which Vault answers
+        // with success.
+        tracing::warn!(
+            ca_id = %revoked.id,
+            error = %e,
+            "Vault accepted the CA's revocation, but recording that failed"
+        );
+    }
+    CustodianRevocation::Forwarded
 }
 
 // ---------------------------------------------------------------------------

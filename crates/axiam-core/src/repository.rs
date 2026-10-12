@@ -15,8 +15,8 @@ use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{
-        CaCertificate, Certificate, RevocationStamp, RevokedCertificate, StoreCaCertificate,
-        StoreCertificate, VaultForwardCandidate,
+        CaCertificate, CaVaultForwardCandidate, Certificate, RevocationStamp, RevokedCertificate,
+        StoreCaCertificate, StoreCertificate, VaultForwardCandidate,
     },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
@@ -2874,6 +2874,64 @@ pub trait CaCertificateRepository: Send + Sync {
         &self,
         fingerprints: &[String],
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
+
+    /// Revoked, not yet expired subordinate CAs whose revocation the parent's
+    /// list in Vault does not have yet, whose turn has come at `now` (never
+    /// attempted, or `vault_next_attempt_at` not after it), in the order the
+    /// sweep takes them, at most `limit` (#612) — the CA rows'
+    /// counterpart of [`CertificateRepository::list_due_vault_forwards`].
+    ///
+    /// A row qualifies when its **parent** is an active `vault_pki` CA (Vault
+    /// signed it, so Vault's list for the parent must name it) and the row
+    /// itself was signed there: custody `vault_pki` (generated through the
+    /// parent) or `external` (a caller's CSR the parent signed). A `database`
+    /// or `vault` CA under a `vault_pki` parent was signed in AXIAM before the
+    /// parent's key moved into Vault, which therefore never recorded it.
+    /// Across organizations: the sweep is deployment-wide.
+    fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<CaVaultForwardCandidate>>> + Send;
+
+    /// Claim a pending CA revocation for one attempt (#612), on the terms of
+    /// [`CertificateRepository::claim_vault_forward`]: `true` for the one
+    /// caller whose conditional write of `vault_next_attempt_at` matched.
+    fn claim_vault_forward(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record that Vault refused a claimed CA row (#612), on the terms of
+    /// [`CertificateRepository::record_vault_forward_failure`].
+    fn record_vault_forward_failure(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many pending CA revocations have failed at least `min_attempts`
+    /// times (#612): counted with the leaves' in `vault_revocation_failing`.
+    fn count_vault_forwards_failing(
+        &self,
+        min_attempts: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Record that Vault has accepted a revoked CA's revocation onto its
+    /// parent's list (`vault_revoked_at`, schema v96; #612). The first
+    /// forwarding's time stands. `NotFound` for a CA that is not revoked or
+    /// not the organization's.
+    fn mark_revocation_forwarded(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {

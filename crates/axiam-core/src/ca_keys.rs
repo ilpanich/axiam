@@ -476,6 +476,31 @@ pub trait CaKeyStore: Send + Sync {
         })
     }
 
+    /// Revoke, in the custodian's own records, a **CA** certificate the CA at
+    /// `parent` signed (#612): a subordinate CA AXIAM has revoked, which the
+    /// parent's list must name.
+    ///
+    /// Not [`Self::revoke_signed`] with the parent's reference: a parent signs
+    /// a subordinate CA with a different issuer than the one that signs its
+    /// leaves (under `vault_pki`, the root above its leaf-signing
+    /// intermediate), and the revocation belongs on the list of the issuer that
+    /// signed. Only called when [`Self::signs_remotely`] is true; the same
+    /// contract on `serial_hex` and on a repeated revocation.
+    fn revoke_signed_ca<'a>(
+        &'a self,
+        parent: &'a CaKeyRef,
+        serial_hex: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        let _ = (parent, serial_hex);
+        Box::pin(async {
+            Err(AxiamError::Internal(
+                "this CA key custodian does not sign, so it keeps no revocations: AXIAM's \
+                 own list names them"
+                    .into(),
+            ))
+        })
+    }
+
     /// Which custodian this is. Recorded on the CA row at creation.
     fn custody(&self) -> CaKeyCustody;
 

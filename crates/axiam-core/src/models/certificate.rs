@@ -654,6 +654,22 @@ pub struct VaultForwardCandidate {
     pub last_error: Option<String>,
 }
 
+/// A revoked subordinate CA whose parent's list Vault keeps and has not been
+/// told of, with the same bookkeeping as a [`VaultForwardCandidate`] (#612).
+#[derive(Debug, Clone)]
+pub struct CaVaultForwardCandidate {
+    /// The revoked CA. Its row keeps the certificate (and so the serial) and
+    /// `parent_ca_id`, which is all a forward needs, after its key is gone.
+    pub ca: CaCertificate,
+    /// Failed forwarding attempts so far; `0` for a row never attempted.
+    pub attempts: u32,
+    /// When the row is next due; `None` for a row never attempted. Also the
+    /// value a claim must still find.
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    /// The sanitised reason the last attempt failed, if one did.
+    pub last_error: Option<String>,
+}
+
 /// Fields required to generate a new tenant certificate (user-facing DTO).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {

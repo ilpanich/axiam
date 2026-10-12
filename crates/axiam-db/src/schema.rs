@@ -497,6 +497,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_vault_forward_backoff",
         sql: SCHEMA_V95,
     },
+    Migration {
+        version: 96,
+        name: "ca_certificate_vault_revocation",
+        sql: SCHEMA_V96,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4718,6 +4723,31 @@ DEFINE INDEX IF NOT EXISTS idx_certificate_vault_forward ON TABLE certificate \
     FIELDS vault_revoked_at, vault_next_attempt_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v96 — a revoked subordinate CA forwarded to its parent's list in Vault (#612)
+// -----------------------------------------------------------------------
+//
+// Revoking a tenant signing CA whose parent's key Vault's PKI engine holds
+// deleted the CA's issuer from Vault but left its certificate off the list
+// Vault signs for the parent; only AXIAM's own list (#565) named it. The CA's
+// serial is now forwarded to the parent's signing mount, as a leaf's is to its
+// issuer's (v94), and the row records when Vault accepted it
+// (`vault_revoked_at`). A forward that did not complete is retried by the
+// cleanup job's `vault_revocation` sweep with the leaves' backoff (v95): the
+// same three columns and the same index, on this table.
+// Additive: four optional columns and an index, absent on every existing row,
+// which therefore reads as "not forwarded, none attempted, due now" — so a
+// subordinate CA revoked before the upgrade is forwarded by the first sweep;
+// no row is rewritten (D-6).
+const SCHEMA_V96: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE ca_certificate TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE ca_certificate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_ca_certificate_vault_forward ON TABLE ca_certificate \
+    FIELDS vault_revoked_at, vault_next_attempt_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4794,6 +4824,38 @@ mod tests {
             assert!(
                 !SCHEMA_V95.contains(forbidden),
                 "v95 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #612 — v96 gives `ca_certificate` the leaf table's Vault forwarding
+    /// columns and index (v94, v95), and rewrites no row.
+    #[test]
+    fn v96_adds_only_the_ca_vault_forward_columns() {
+        let statements: Vec<&str> = SCHEMA_V96
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE ca_certificate \
+                 TYPE option<datetime>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE ca_certificate \
+                 TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE ca_certificate \
+                 TYPE option<string>",
+                "DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE ca_certificate \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_ca_certificate_vault_forward ON TABLE \
+                 ca_certificate FIELDS vault_revoked_at, vault_next_attempt_at",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V96.contains(forbidden),
+                "v96 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6264,8 +6326,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&95),
-            "v95 is the newest migration (#603 — the Vault revocation sweep's backoff \
+            Some(&96),
+            "v96 is the newest migration (#612 — `ca_certificate.vault_revoked_at` and the \
+             leaf table's three backoff columns and index, so a revoked subordinate CA is \
+             forwarded to its parent's list in Vault and retried by the sweep; v95 was #603 — \
+             the Vault revocation sweep's backoff \
              columns `certificate.vault_forward_attempts`, `vault_forward_last_error` and \
              `vault_next_attempt_at` and the index on `(vault_revoked_at, vault_next_attempt_at)`; \
              v94 was T-470 — `certificate.vault_revoked_at`, set once \

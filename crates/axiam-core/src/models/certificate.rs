@@ -593,10 +593,10 @@ pub struct Certificate {
 /// and for subordinate CAs
 /// ([`crate::repository::CaCertificateRepository::list_revoked_children`]) alike:
 /// a CA's list names every certificate it signed and then disowned, whatever
-/// that certificate is for. Only certificates still inside their validity
-/// window are returned — RFC 5280 §3.3 lets an entry leave the list once the
-/// certificate has expired, and an expired certificate fails validation on its
-/// own.
+/// that certificate is for. Only certificates whose `notAfter` is later than a
+/// cut-off the caller names are returned: RFC 5280 §3.3 lets an entry leave the
+/// list once it has appeared on one list issued after the certificate expired,
+/// and the CRL service keeps it that long and no longer (#608).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokedCertificate {
     /// The certificate as issued. The serial number a CRL entry carries is read

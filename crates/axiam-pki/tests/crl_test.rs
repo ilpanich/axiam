@@ -285,8 +285,10 @@ async fn next_update_is_honoured() {
     assert_eq!(next_update - this_update, 3_600);
     assert_eq!(crl.this_update.timestamp(), this_update);
     assert_eq!(crl.next_update.timestamp(), next_update);
-    assert!(crl.max_age_secs(Utc::now()) <= 3_600);
-    assert!(crl.max_age_secs(Utc::now()) > 3_500);
+    // #608: a cache keeps it until the next scheduled re-sign — at most half
+    // the interval — and never until nextUpdate.
+    assert!(crl.max_age_secs(Utc::now()) <= 1_800);
+    assert_eq!(crl.max_age_secs(crl.refresh_at), 0);
     assert_eq!(crl.max_age_secs(crl.next_update + Duration::seconds(5)), 0);
 
     // A CA with a day left is not listed as current for a week.
@@ -614,8 +616,11 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
         .unwrap();
     assert_eq!(row.status, CertificateStatus::Active);
 
-    // Kept rows are not orphans until they expire; then the orphan purge
-    // removes them, and only them.
+    // Kept rows are not orphans until eight days after they expire (#608): an
+    // entry that has just expired is still on the list — RFC 5280 §3.3 keeps
+    // it until a list issued after its expiry names it — and the purge must
+    // not take it off mid-epoch. Then the orphan purge removes them, and only
+    // them.
     assert!(
         !tenants
             .orphaned_tenant_ids()
@@ -623,12 +628,37 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
             .unwrap()
             .contains(&doomed)
     );
-    f.db.query("UPDATE certificate SET not_after = time::now() - 1s WHERE fingerprint = $fp")
-        .bind(("fp", revoked_before.fingerprint.clone()))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+    let expire = |ago: &'static str| {
+        let db = f.db.clone();
+        let fp = revoked_before.fingerprint.clone();
+        async move {
+            db.query(format!(
+                "UPDATE certificate SET not_after = time::now() - {ago} WHERE fingerprint = $fp"
+            ))
+            .bind(("fp", fp))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        }
+    };
+    expire("1s").await;
+    assert!(
+        !tenants
+            .orphaned_tenant_ids()
+            .await
+            .unwrap()
+            .contains(&doomed),
+        "a row that has just expired is kept"
+    );
+    tenants.purge_orphan(doomed).await.unwrap();
+    let crl = crls.current(f.org, root.certificate.id).await.unwrap();
+    assert_eq!(
+        listed(&crl),
+        expected,
+        "a just-expired entry stays on the list"
+    );
+    expire("9d").await;
     assert_eq!(tenants.orphaned_tenant_ids().await.unwrap(), vec![doomed]);
     tenants.purge_orphan(doomed).await.unwrap();
     assert!(matches!(
@@ -878,6 +908,7 @@ async fn the_light_read_names_exactly_what_the_list_is_signed_over() {
     let certs = SurrealCertificateRepository::new(f.db.clone());
     let cas = SurrealCaCertificateRepository::new(f.db.clone());
     let issuer = root.certificate.id;
+    let now = Utc::now();
     let light = |stamps: Vec<axiam_core::models::certificate::RevocationStamp>| {
         stamps
             .into_iter()
@@ -892,7 +923,7 @@ async fn the_light_read_names_exactly_what_the_list_is_signed_over() {
     };
     let leaves = light(
         certs
-            .list_revocation_stamps_by_issuer(issuer)
+            .list_revocation_stamps_by_issuer(issuer, now)
             .await
             .unwrap(),
     );
@@ -901,13 +932,174 @@ async fn the_light_read_names_exactly_what_the_list_is_signed_over() {
     assert!(leaves[0].1.is_some(), "the revocation date is read");
     assert_eq!(
         leaves,
-        full(certs.list_revoked_by_issuer(issuer).await.unwrap())
+        full(certs.list_revoked_by_issuer(issuer, now).await.unwrap())
     );
-    let children = light(cas.list_revoked_children_stamps(issuer).await.unwrap());
+    let children = light(cas.list_revoked_children_stamps(issuer, now).await.unwrap());
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].0, tenant_ca.certificate.fingerprint);
     assert_eq!(
         children,
-        full(cas.list_revoked_children(issuer).await.unwrap())
+        full(cas.list_revoked_children(issuer, now).await.unwrap())
     );
+
+    // #608: the caller's cut-off decides which expired entries are named — a
+    // cut-off past every notAfter names none, in either read.
+    let later = now + Duration::days(400);
+    assert!(
+        certs
+            .list_revocation_stamps_by_issuer(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        certs
+            .list_revoked_by_issuer(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas.list_revoked_children_stamps(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas.list_revoked_children(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #608: the same list from every replica, and a number that only grows
+// ---------------------------------------------------------------------------
+
+/// The start of the refresh epoch after the current one, for lists valid
+/// `next_update_secs`: an instant every revocation the test makes precedes.
+fn next_epoch_start(next_update_secs: i64) -> chrono::DateTime<Utc> {
+    let half = next_update_secs / 2;
+    let now = Utc::now().timestamp();
+    chrono::DateTime::from_timestamp((now.div_euclid(half) + 1) * half, 0).unwrap()
+}
+
+/// The issue's test: two `CrlService`s over one store — two replicas, each
+/// with its own cache — sign the same state to the same bytes, CRL number and
+/// `ETag`, at different instants of one refresh epoch, for both key types a CA
+/// can have. Before the fix each signed its own list with its own clock's
+/// `thisUpdate` and number, so a relying party behind a balancer got `200`s
+/// instead of `304`s.
+#[tokio::test]
+async fn two_replicas_sign_the_same_state_to_the_same_bytes() {
+    for key_algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
+        let f = Fixture::new().await;
+        let ca = f.root(key_algorithm.clone(), 365).await;
+        let revoked = f.leaf(ca.certificate.id, "device-replicated").await;
+        f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+
+        let (one, two) = (
+            f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS),
+            f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS),
+        );
+        let half = i64::try_from(DEFAULT_CRL_NEXT_UPDATE_SECS / 2).unwrap();
+        let epoch = next_epoch_start(i64::try_from(DEFAULT_CRL_NEXT_UPDATE_SECS).unwrap());
+        let early = epoch + Duration::seconds(5);
+        let late = epoch + Duration::seconds(half - 5);
+
+        let a = one
+            .current_at(f.org, ca.certificate.id, early)
+            .await
+            .unwrap();
+        let b = two
+            .current_at(f.org, ca.certificate.id, late)
+            .await
+            .unwrap();
+        assert_eq!(a.der, b.der, "{key_algorithm:?}: the same bytes");
+        assert_eq!(a.etag, b.etag);
+        assert_eq!(a.crl_number, b.crl_number);
+        assert_eq!(a.this_update, epoch, "thisUpdate is the epoch's start");
+        assert_eq!(a.refresh_at, epoch + Duration::seconds(half));
+        assert_eq!(
+            verified_serials(&b, &ca.certificate.public_cert_pem),
+            vec![serial_of(&revoked.public_cert_pem)]
+        );
+
+        // A revocation reaches both at once, and both again agree.
+        let second = f.leaf(ca.certificate.id, "device-replicated-2").await;
+        f.certs.revoke(f.tenant, second.id).await.unwrap();
+        let c = two
+            .current_at(f.org, ca.certificate.id, early)
+            .await
+            .unwrap();
+        let d = one
+            .current_at(f.org, ca.certificate.id, late)
+            .await
+            .unwrap();
+        assert_eq!(c.der, d.der, "{key_algorithm:?}: the same bytes again");
+        assert!(c.crl_number > a.crl_number);
+    }
+}
+
+/// RFC 5280 §5.2.3: a CA's CRL number grows with every change of its list —
+/// a revocation, the next epoch, and an entry that expires and leaves, which
+/// takes an epoch boundary — and a just-expired entry stays until a list issued
+/// after its expiry has named it (§3.3).
+#[tokio::test]
+async fn the_crl_number_grows_across_revocations_epochs_and_an_expiry() {
+    const SECS: u64 = 3_600;
+    let half = Duration::seconds(1_800);
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let expiring = f.leaf(ca.certificate.id, "device-expiring").await;
+    let staying = f.leaf(ca.certificate.id, "device-staying").await;
+    let crls = f.crl_service(SECS);
+    let at = next_epoch_start(i64::try_from(SECS).unwrap()) + Duration::seconds(10);
+
+    f.certs.revoke(f.tenant, expiring.id).await.unwrap();
+    let first = crls.current_at(f.org, ca.certificate.id, at).await.unwrap();
+    f.certs.revoke(f.tenant, staying.id).await.unwrap();
+    let second = crls.current_at(f.org, ca.certificate.id, at).await.unwrap();
+    assert!(second.crl_number > first.crl_number, "a revocation");
+
+    // The first leaf expires ten seconds into the epoch `at` is in.
+    f.db.query("UPDATE certificate SET not_after = $t WHERE fingerprint = $fp")
+        .bind(("t", at + Duration::seconds(10)))
+        .bind(("fp", expiring.fingerprint.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    // The next epoch: expired during the previous one, it is still listed.
+    let third = crls
+        .current_at(f.org, ca.certificate.id, at + half)
+        .await
+        .unwrap();
+    assert!(third.crl_number > second.crl_number, "the next epoch");
+    assert_eq!(
+        verified_serials(&third, &ca.certificate.public_cert_pem).len(),
+        2
+    );
+
+    // The epoch after: it has left, and the number is greater still.
+    let fourth = crls
+        .current_at(f.org, ca.certificate.id, at + half + half)
+        .await
+        .unwrap();
+    assert!(fourth.crl_number > third.crl_number, "an entry left");
+    assert!(fourth.this_update > third.this_update);
+    assert_eq!(
+        verified_serials(&fourth, &ca.certificate.public_cert_pem),
+        vec![serial_of(&staying.public_cert_pem)]
+    );
+
+    // And another replica, asked at the same instant, says the same.
+    let other = f
+        .crl_service(SECS)
+        .current_at(f.org, ca.certificate.id, at + half + half)
+        .await
+        .unwrap();
+    assert_eq!(other.der, fourth.der);
 }

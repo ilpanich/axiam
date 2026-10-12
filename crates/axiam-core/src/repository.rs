@@ -2837,14 +2837,21 @@ pub trait CaCertificateRepository: Send + Sync {
         &self,
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
 
-    /// The revoked, not yet expired CAs `parent_ca_id` signed — the CA half of
-    /// that CA's certificate revocation list (#565, T-102).
+    /// The revoked CAs `parent_ca_id` signed whose `notAfter` is later than
+    /// `expiring_after` — the CA half of that CA's certificate revocation list
+    /// (#565, T-102).
+    ///
+    /// The caller names the cut-off rather than the datastore's clock (#608):
+    /// a list keeps an expired entry until a refresh epoch boundary, so that
+    /// two replicas list the same entries and an entry leaves only when the
+    /// list's `thisUpdate` moves forward (see `axiam_pki::crl`).
     ///
     /// Not organization-scoped: the parent is already resolved inside its
     /// organization by the caller, and a child always shares it.
     fn list_revoked_children(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
     /// The same set as [`Self::list_revoked_children`], without the
@@ -2852,6 +2859,7 @@ pub trait CaCertificateRepository: Send + Sync {
     fn list_revoked_children_stamps(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
 
     /// Every CA record, in any organization and of any status, whose
@@ -2892,15 +2900,17 @@ pub trait CertificateRepository: Send + Sync {
     /// its revocation list says.
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// The revoked, not yet expired leaves `issuer_ca_id` signed, in every
-    /// tenant — the leaf half of that CA's certificate revocation list (#565,
-    /// T-102).
+    /// The revoked leaves `issuer_ca_id` signed whose `notAfter` is later than
+    /// `expiring_after`, in every tenant — the leaf half of that CA's
+    /// certificate revocation list (#565, T-102). The caller names the cut-off
+    /// (#608), as for [`CaCertificateRepository::list_revoked_children`].
     ///
     /// Across tenants on purpose: a CRL belongs to its issuer, not to a tenant,
     /// and an organization CA's leaves may be recorded under more than one.
     fn list_revoked_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
     /// The same set as [`Self::list_revoked_by_issuer`], without the
@@ -2908,6 +2918,7 @@ pub trait CertificateRepository: Send + Sync {
     fn list_revocation_stamps_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
 
     /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose

@@ -494,8 +494,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         //   `vault_pki` leaf to Vault and release a CA's key; this pass catches
         //   one issued while it ran, atomically with the stamp. A deleted
         //   tenant's certificates are disowned, so they go on their issuers'
-        //   revocation lists — and the purge keeps each revoked, unexpired row
-        //   until it expires, so they stay there (`tenant_purge`).
+        //   revocation lists — and the purge keeps each revoked row until
+        //   eight days after it expires, so they stay there (`tenant_purge`).
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from

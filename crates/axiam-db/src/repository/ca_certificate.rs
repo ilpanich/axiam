@@ -575,6 +575,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn list_revoked_children(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevokedCertificate>> {
         let result = self
             .db
@@ -583,10 +584,11 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM ca_certificate \
                  WHERE parent_ca_id = $parent_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result
@@ -607,6 +609,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn list_revoked_children_stamps(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevocationStamp>> {
         // The same rows as `list_revoked_children`, without the PEMs (#607).
         let result = self
@@ -616,10 +619,11 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 "SELECT fingerprint, revoked_at, not_before FROM ca_certificate \
                  WHERE parent_ca_id = $parent_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result

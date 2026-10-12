@@ -394,6 +394,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn list_revoked_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevokedCertificate>> {
         let result = self
             .db
@@ -402,10 +403,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                 "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM certificate \
                  WHERE issuer_ca_id = $issuer_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result
@@ -418,6 +420,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn list_revocation_stamps_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevocationStamp>> {
         // The same rows as `list_revoked_by_issuer`, without the PEMs (#607).
         let result = self
@@ -427,10 +430,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                 "SELECT fingerprint, revoked_at, not_before FROM certificate \
                  WHERE issuer_ca_id = $issuer_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result

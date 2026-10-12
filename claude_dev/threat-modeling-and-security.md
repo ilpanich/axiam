@@ -257,6 +257,22 @@
 > test says so holds one CA's re-sign inside its key read while another CA's
 > cached list and a third CA's first list are served. No status changes.
 >
+> **The 1.0.1 release (model 2.40.0 — T-102 amended again and T-472
+> corrected, 2026-10-12).** The CRL route's consistency correction no longer
+> holds either (#608). A list's `thisUpdate` and CRL number are derived from
+> the newest revocation on it and a refresh epoch (half the `nextUpdate`
+> interval, aligned to the Unix epoch), and both CA key types sign
+> deterministically, so every replica signs the same state to the same bytes
+> and `ETag`, and a relying party behind a balancer revalidates to `304`. The
+> number still grows with every change: an expired entry now stays until a
+> list issued after its expiry has named it (RFC 5280 §3.3) and leaves only at
+> an epoch boundary, and the tenant purge keeps a revoked row eight days past
+> its `notAfter` so it cannot take a listed entry off mid-epoch (T-472's
+> retention, corrected). `Cache-Control: max-age` runs to the next scheduled
+> re-sign, at most half the interval, not to `nextUpdate`. Two services over
+> one store produce identical lists for an Ed25519 and an RSA-4096 CA. No
+> status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

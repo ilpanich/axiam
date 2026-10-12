@@ -1088,11 +1088,12 @@ Deleting a tenant (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
 revokes, before its `204`, every unexpired certificate of the tenant and every
 signing CA of the tenant — through the same paths a single revocation takes, so
 a `vault_pki` leaf is forwarded to Vault and a CA's key is released by its
-custodian — and the tenant purge then **keeps** each revoked, unexpired
-certificate and CA row (without the certificate's `metadata` and without the
-CA's sealed key) until its `notAfter`, when the cleanup job removes it. So a
-deleted tenant's certificates appear on their issuers' lists from the deletion
-until they expire, the ones revoked before the deletion included, and every
+custodian — and the tenant purge then **keeps** each revoked certificate and
+CA row (without the certificate's `metadata` and without the CA's sealed key)
+until eight days after its `notAfter`, when the cleanup job removes it — the
+longest a list keeps an expired entry (below), plus a day. So a deleted
+tenant's certificates appear on their issuers' lists from the deletion until
+they expire, the ones revoked before the deletion included, and every
 AXIAM sign-in that reads a certificate's status refuses them. Before 1.0.0
 (R1W1-01) a deletion revoked none of them, and the purge deleted the rows, which
 took a leaf revoked before the deletion back off its organization CA's list.
@@ -1125,18 +1126,36 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   else stops startup), and never past the CA's own expiry. The list carries a
   CRL number and an authority key identifier equal to the CA's subject key
   identifier.
+- **The same list from every replica.** Time is cut into *refresh epochs*,
+  half the `nextUpdate` interval long and aligned to the Unix epoch, so every
+  replica cuts at the same instants. `thisUpdate` is the start of the epoch the
+  list was signed in, or the newest revocation on the list if that is later
+  (never before the CA's own `notBefore`); the CRL number is that `thisUpdate`
+  in seconds, shifted left 24 bits, plus the number of entries. Both are
+  functions of the revocations and the epoch alone, and both CA key types sign
+  deterministically, so every replica signs the same state in the same epoch
+  to the same bytes, CRL number and `ETag`: a relying party behind a load
+  balancer revalidates to `304` wherever its request lands. The number grows
+  with every change of the list, an entry leaving included (RFC 5280 §5.2.3).
 - **Entries**: every certificate the CA signed and revoked that has not yet
-  expired — its leaves in every tenant, a deleted tenant's included, and the
+  expired, or expired during the current or the previous refresh epoch — so an
+  entry appears on a list issued after its expiry, as RFC 5280 §3.3 requires,
+  and leaves only at an epoch boundary — its leaves in every tenant, a deleted tenant's included, and the
   subordinate CAs it signed, so an organization CA's list names a revoked tenant
   signing CA. Each carries the
   serial and the revocation date; a certificate revoked before 1.0.0, when the
   date was not yet recorded, is listed from its own `notBefore`. No reason code
   is recorded, so none is listed.
-- **Served as** `application/pkix-crl`, with `Cache-Control: public, max-age`
-  running to `nextUpdate`, an `ETag` and `Last-Modified`; a matching
-  `If-None-Match` answers `304`. The list is signed once and kept until the set
-  of revocations changes or half its validity has passed, so revalidating costs
-  no signature and a revocation is in the very next response.
+- **Served as** `application/pkix-crl`, with an `ETag` and `Last-Modified`; a
+  matching `If-None-Match` answers `304`. `Cache-Control: public, max-age` runs
+  to the end of the refresh epoch — at most half the `nextUpdate` interval —
+  and not to `nextUpdate`: a shared cache revalidates at least that often
+  rather than serving a list from before a revocation for the whole interval,
+  and revalidating an unchanged list is a `304`. The list is signed once and
+  kept until the set of revocations changes or its epoch ends, so revalidating
+  costs no signature and a revocation is in the very next response from the
+  origin. A relying party may still trust a list it holds until its
+  `nextUpdate`.
 - **`404`** for a CA that does not exist in that organization and, alike, for a
   CA that publishes no list: a revoked or expired CA (its own status is on its
   parent's list), an imported trust anchor AXIAM holds no key for, and a

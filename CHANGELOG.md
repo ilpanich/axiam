@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The console's tenant Settings page no longer writes the organization's
+  inherited `false` for the SAML IdP and SSF switches into a tenant's own
+  override on an unrelated save: it sends a switch only when the administrator
+  changed it or the tenant's override already carries it, and switching a
+  surface back on removes the tenant's `false` so it follows the organization
+  again. This supersedes the 1.0.0 note that the page sends both switches at
+  their effective values on every save (#600).
+
 ## [1.0.0] - 2026-10-10
 
 #### What 1.0.0 means

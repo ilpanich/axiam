@@ -116,10 +116,13 @@ interface SettingsForm {
   // it as one object; splitting it here and rejoining it on save would be the
   // per-field merge the policy exists to refuse.
   cimd: CimdPolicy;
-  // P23W4-07 — disable-only switches, seeded from the *effective* value and
-  // always sent back. An omitted field means "inherit", so a form that left
-  // them out put a tenant that had switched a surface off back on the
-  // organization's value on its next save.
+  // P23W4-07 — disable-only switches, seeded from the *effective* value. The
+  // form value is not what gets sent: `PUT /settings` replaces the tenant's
+  // override and an omitted field means "inherit", so `toOverride` sends a
+  // switch only when the administrator changed it or the tenant's own override
+  // already carries it (#600). Sending the effective value unconditionally
+  // pinned an inherited `false` into the override of every tenant saved while
+  // the organization had the surface off.
   saml_idp_enabled: boolean;
   ssf_enabled: boolean;
 }
@@ -194,8 +197,63 @@ function toForm(s: SecuritySettings): SettingsForm {
   };
 }
 
+/** What `toOverride` needs to know about the two disable-only switches. */
+interface SurfaceContext {
+  /** The merged value `GET /settings` returned when the form was seeded. */
+  effective: Pick<SettingsForm, SurfaceKey>;
+  /**
+   * The tenant's own stored override: `null` when it has none (404), and
+   * `undefined` while it has not loaded or failed to load.
+   */
+  override: TenantSettingsOverride | null | undefined;
+}
+
+/**
+ * The value to send for one disable-only switch, or `undefined` to omit it
+ * (= inherit the organization's value).
+ *
+ * `PUT /settings` replaces the tenant's override, so omitting a field the
+ * override already carries drops it; sending one it does not carry writes a new
+ * one. Hence:
+ *
+ * - **Switched off** (form `false`): sent when the administrator changed it, or
+ *   when the override already carries the field. A `false` that is merely the
+ *   organization's, on a tenant with no override of its own, is not sent.
+ * - **Switched on** (form `true`): omitted when the administrator changed it. A
+ *   tenant can only enable what the organization has on, so `true` *is* the
+ *   inherited value; omitting it drops the tenant's `false` and the surface
+ *   then follows the organization, rather than being pinned `true` and refused
+ *   or clamped should the organization turn it off. An unchanged `true` is sent
+ *   only if the override already carries it.
+ * - **Override unknown** (still loading, or the read failed): the one thing that
+ *   must not happen is dropping a tenant's own `false`, so an effective `false`
+ *   is sent as before and an effective `true` (which no `false` override can
+ *   sit under) is omitted.
+ */
+function surfaceOverride(
+  key: SurfaceKey,
+  value: boolean,
+  { effective, override }: SurfaceContext
+): boolean | undefined {
+  const changed = value !== effective[key];
+  const carried =
+    override === undefined ? !effective[key] : override?.[key] !== undefined;
+  if (!value) return changed || carried ? false : undefined;
+  if (changed) return undefined;
+  return override?.[key] === true ? true : undefined;
+}
+
 /** Convert the full form into a flat TenantSettingsOverride (seconds). */
-function toOverride(f: SettingsForm): TenantSettingsOverride {
+function toOverride(
+  f: SettingsForm,
+  surfaces: SurfaceContext
+): TenantSettingsOverride {
+  const saml = surfaceOverride(
+    "saml_idp_enabled",
+    f.saml_idp_enabled,
+    surfaces
+  );
+  const ssf = surfaceOverride("ssf_enabled", f.ssf_enabled, surfaces);
   return {
     min_length: f.min_length,
     require_uppercase: f.require_uppercase,
@@ -225,8 +283,8 @@ function toOverride(f: SettingsForm): TenantSettingsOverride {
     dcr_max_clients: f.dcr_max_clients,
     dcr_unused_client_ttl_days: f.dcr_unused_client_ttl_days,
     cimd: f.cimd,
-    saml_idp_enabled: f.saml_idp_enabled,
-    ssf_enabled: f.ssf_enabled,
+    ...(saml === undefined ? {} : { saml_idp_enabled: saml }),
+    ...(ssf === undefined ? {} : { ssf_enabled: ssf }),
   };
 }
 
@@ -374,7 +432,12 @@ export function SettingsPage() {
       setFeedback({ type: "error", message: cimdErrors[0].message });
       return;
     }
-    updateMutation.mutate(toOverride(form));
+    updateMutation.mutate(
+      toOverride(form, {
+        effective: readOidcPolicy(settings!),
+        override: overrideQuery.isSuccess ? overrideQuery.data : undefined,
+      })
+    );
   }
 
   function handleCancel() {

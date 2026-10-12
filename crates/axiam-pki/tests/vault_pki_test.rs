@@ -18,10 +18,12 @@ use axiam_core::repository::CertificateRepository;
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::ca::{CaService, PkiConfig};
 use axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS;
+use axiam_pki::vault_forward;
 use axiam_pki::{
     CaKeyCustodians, CertService, CustodianRevocation, IssuingScope, VaultPkiCaKeyStore,
     VaultPkiConfig, VaultPkiLocator,
 };
+use chrono::{Duration, Utc};
 use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use serde_json::json;
 use std::sync::Arc;
@@ -1377,10 +1379,35 @@ struct RevocationFixture {
     leaf: Uuid,
     /// The leaf's serial as Vault spells it.
     serial: String,
+    /// Every leaf issued, in issuing order, with its serial; the first is
+    /// [`Self::leaf`].
+    leaves: Vec<(Uuid, String)>,
+    /// A second service over the same store and Vault: another replica.
+    other_replica:
+        CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>,
     server: MockServer,
 }
 
 async fn revocation_fixture() -> RevocationFixture {
+    revocation_fixture_with(1).await
+}
+
+/// A leaf's serial as Vault spells it: colon-separated lowercase hex bytes.
+fn vault_serial(public_cert_pem: &str) -> String {
+    let (_, block) = x509_parser::pem::parse_x509_pem(public_cert_pem.as_bytes()).unwrap();
+    let (_, x509) = <x509_parser::certificate::X509Certificate as x509_parser::prelude::FromDer<
+        _,
+    >>::from_der(&block.contents)
+    .unwrap();
+    x509.serial
+        .to_bytes_be()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+async fn revocation_fixture_with(leaf_count: u64) -> RevocationFixture {
     let server = MockServer::start().await;
     let root = ca_pair("Acme Root", None);
     let int = ca_pair("Acme Intermediate", Some(&root));
@@ -1391,7 +1418,7 @@ async fn revocation_fixture() -> RevocationFixture {
             issuer_key_pem: int.0.clone(),
             issuer_cert_pem: int.1.clone(),
         })
-        .expect(1)
+        .expect(leaf_count)
         .mount(&server)
         .await;
 
@@ -1402,54 +1429,53 @@ async fn revocation_fixture() -> RevocationFixture {
         .await
         .unwrap();
     let cert_repo = SurrealCertificateRepository::new(db.clone());
-    let certs = CertService::new(
-        SurrealCaCertificateRepository::new(db),
-        cert_repo.clone(),
-        PkiConfig::default(),
-        Arc::new(tokio::sync::Semaphore::new(4)),
-        custodians(&server),
-    );
-    let tenant = Uuid::new_v4();
-    let issued = certs
-        .generate(
-            org,
-            IssuingScope::Organization,
-            CreateCertificate {
-                tenant_id: tenant,
-                issuer_ca_id: ca.certificate.id,
-                subject: "device-revoked".into(),
-                cert_type: CertificateType::Device,
-                key_algorithm: KeyAlgorithm::Ed25519,
-                validity_days: 30,
-                metadata: None,
-                subject_alt_names: vec![],
-            },
-            Some(90),
-            &[],
+    let service = |db: Surreal<TestDb>| {
+        CertService::new(
+            SurrealCaCertificateRepository::new(db),
+            cert_repo.clone(),
+            PkiConfig::default(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            custodians(&server),
         )
-        .await
-        .unwrap();
-
-    let (_, block) =
-        x509_parser::pem::parse_x509_pem(issued.certificate.public_cert_pem.as_bytes()).unwrap();
-    let (_, x509) = <x509_parser::certificate::X509Certificate as x509_parser::prelude::FromDer<
-        _,
-    >>::from_der(&block.contents)
-    .unwrap();
-    let serial = x509
-        .serial
-        .to_bytes_be()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(":");
+    };
+    let certs = service(db.clone());
+    let other_replica = service(db);
+    let tenant = Uuid::new_v4();
+    let mut leaves = Vec::new();
+    for n in 0..leaf_count {
+        let issued = certs
+            .generate(
+                org,
+                IssuingScope::Organization,
+                CreateCertificate {
+                    tenant_id: tenant,
+                    issuer_ca_id: ca.certificate.id,
+                    subject: format!("device-revoked-{n}"),
+                    cert_type: CertificateType::Device,
+                    key_algorithm: KeyAlgorithm::Ed25519,
+                    validity_days: 30,
+                    metadata: None,
+                    subject_alt_names: vec![],
+                },
+                Some(90),
+                &[],
+            )
+            .await
+            .unwrap();
+        leaves.push((
+            issued.certificate.id,
+            vault_serial(&issued.certificate.public_cert_pem),
+        ));
+    }
 
     RevocationFixture {
         certs,
         cert_repo,
         tenant,
-        leaf: issued.certificate.id,
-        serial,
+        leaf: leaves[0].0,
+        serial: leaves[0].1.clone(),
+        leaves,
+        other_replica,
         server,
     }
 }
@@ -1548,9 +1574,17 @@ async fn a_vault_that_refuses_leaves_the_leaf_revoked_and_the_sweep_forwards_it_
 
     // A sweep while Vault still refuses reports it, and keeps the row pending.
     assert!(f.certs.forward_pending_revocations().await.is_err());
+    // The refusal backs the row off: the next tick does not ask Vault again
+    // (the mock allows exactly the three calls made so far).
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
     f.server.verify().await;
     f.server.reset().await;
 
+    // The backoff runs out.
+    f.cert_repo
+        .record_vault_forward_failure(f.tenant, f.leaf, 1, Utc::now() - Duration::seconds(1), "")
+        .await
+        .unwrap();
     let seen = mount_revoke(&f.server, 200, 1).await;
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
@@ -1577,4 +1611,165 @@ async fn the_sweep_forwards_a_revocation_no_request_forwarded() {
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+}
+
+/// Vault's `revoke`, refusing `refused` for good (a serial a `no_store` role
+/// never recorded) and accepting every other serial. Returns the serials asked
+/// for, in order.
+async fn mount_revoke_refusing(
+    server: &MockServer,
+    refused: &str,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    struct Revoke {
+        refused: String,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Respond for Revoke {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let serial = body["serial_number"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            self.seen.lock().unwrap().push(serial.clone());
+            if serial == self.refused {
+                // A hostile or careless Vault echoing a credential, at length.
+                ResponseTemplate::new(400).set_body_json(json!({
+                    "errors": [format!(
+                        "certificate not found; token {TOKEN} hvs.CAESIAbcdefghijklmnop0123 {}",
+                        "padding ".repeat(500)
+                    )]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "revocation_time": 1_700_000_000, "state": "revoked" }
+                }))
+            }
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/revoke"))
+        .and(header("X-Vault-Token", TOKEN))
+        .respond_with(Revoke {
+            refused: refused.to_owned(),
+            seen: Arc::clone(&seen),
+        })
+        .mount(server)
+        .await;
+    seen
+}
+
+/// #603: a serial Vault refuses for good is backed off, so the next tick does
+/// not ask for it again and a later revocation is forwarded; the reason it keeps
+/// is bounded and carries no token; and past the threshold the pass goes green
+/// while the row is reported on its own.
+#[tokio::test]
+async fn a_permanently_refused_serial_does_not_block_a_later_one() {
+    let f = revocation_fixture_with(2).await;
+    let (refused_id, refused_serial) = f.leaves[0].clone();
+    let (later_id, later_serial) = f.leaves[1].clone();
+    let seen = mount_revoke_refusing(&f.server, &refused_serial).await;
+    // The bulk path: only the repository's write, so no request attempted.
+    f.cert_repo.revoke(f.tenant, refused_id).await.unwrap();
+    f.cert_repo.revoke(f.tenant, later_id).await.unwrap();
+
+    // Tick 1: the refused serial is tried first and fails; the later one is
+    // still forwarded in the same pass.
+    assert!(f.certs.forward_pending_revocations().await.is_err());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [refused_serial.clone(), later_serial.clone()]
+    );
+    let pending = f.cert_repo.list_unforwarded_revocations(10).await.unwrap();
+    assert_eq!(
+        pending.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [refused_id]
+    );
+
+    // Tick 2: nothing is due. Vault is not asked for the refused serial again.
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    assert_eq!(seen.lock().unwrap().len(), 2, "no call while backed off");
+
+    // What the row kept: one attempt, a bounded reason without the token.
+    let later = Utc::now() + Duration::days(1);
+    let row = f
+        .cert_repo
+        .list_due_vault_forwards(later, 10)
+        .await
+        .unwrap()
+        .pop()
+        .expect("the refused row is due once its backoff has run out");
+    assert_eq!(row.certificate.id, refused_id);
+    assert_eq!(row.attempts, 1);
+    let reason = row.last_error.expect("the reason is kept");
+    assert!(
+        reason.chars().count() <= vault_forward::MAX_REASON_CHARS,
+        "{reason}"
+    );
+    assert!(reason.contains("certificate not found"), "{reason}");
+    assert!(
+        !reason.contains(TOKEN) && !reason.contains("hvs."),
+        "{reason}"
+    );
+    assert!(!reason.contains('\n'));
+    let wait = row.next_attempt_at.unwrap() - Utc::now();
+    assert!(
+        wait > Duration::seconds(30) && wait <= Duration::minutes(1),
+        "the first refusal backs off a minute: {wait}"
+    );
+
+    // Not yet past the threshold: nothing is reported as failing.
+    assert_eq!(f.certs.failing_revocations().await.unwrap(), 0);
+
+    // Brought to one refusal short of the threshold and due, the next failed
+    // attempt crosses it: the pass no longer fails for the row, which is
+    // reported on its own instead.
+    f.cert_repo
+        .record_vault_forward_failure(
+            f.tenant,
+            refused_id,
+            vault_forward::FAILING_AFTER_ATTEMPTS - 1,
+            Utc::now() - Duration::seconds(1),
+            "refused",
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "one more attempt, as it was due"
+    );
+    assert_eq!(f.certs.failing_revocations().await.unwrap(), 1);
+    // The wait is now the cap: 6 hours.
+    let capped = f
+        .cert_repo
+        .list_due_vault_forwards(Utc::now() + Duration::days(1), 10)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(capped.attempts, vault_forward::FAILING_AFTER_ATTEMPTS);
+    let wait = capped.next_attempt_at.unwrap() - Utc::now();
+    assert!(
+        wait > Duration::hours(5) && wait <= Duration::hours(6),
+        "the wait is capped at six hours: {wait}"
+    );
+}
+
+/// #603: two replicas sweeping at once attempt a row once between them.
+#[tokio::test]
+async fn two_replicas_never_attempt_the_same_row() {
+    let f = revocation_fixture().await;
+    let seen = mount_revoke(&f.server, 200, 1).await;
+    f.cert_repo.revoke(f.tenant, f.leaf).await.unwrap();
+
+    let (a, b) = tokio::join!(
+        f.certs.forward_pending_revocations(),
+        f.other_replica.forward_pending_revocations()
+    );
+    assert_eq!(a.unwrap() + b.unwrap(), 1, "one replica forwarded it");
+    assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
+    f.server.verify().await;
 }

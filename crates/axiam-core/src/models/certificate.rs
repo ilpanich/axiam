@@ -635,6 +635,25 @@ pub struct RevocationStamp {
     pub not_before: DateTime<Utc>,
 }
 
+/// A revoked `vault_pki` leaf Vault has not been told of, with the bookkeeping
+/// the cleanup sweep keeps about forwarding it (T-470, #603).
+///
+/// What the sweep reads, rather than a bare [`Certificate`], because the claim
+/// on the row is conditional on the very `next_attempt_at` that was read.
+#[derive(Debug, Clone)]
+pub struct VaultForwardCandidate {
+    /// The revoked certificate.
+    pub certificate: Certificate,
+    /// Failed forwarding attempts so far; `0` for a row never attempted
+    /// (`vault_forward_attempts` absent).
+    pub attempts: u32,
+    /// When the row is next due; `None` for a row never attempted, which is due
+    /// at once. Also the value a claim must still find.
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    /// The sanitised reason the last attempt failed, if one did.
+    pub last_error: Option<String>,
+}
+
 /// Fields required to generate a new tenant certificate (user-facing DTO).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {

@@ -273,6 +273,19 @@
 > one store produce identical lists for an Ed25519 and an RSA-4096 CA. No
 > status changes.
 >
+> **The 1.0.1 release (model 2.40.0 — T-470 amended, 2026-10-12).** The Vault
+> revocation sweep's retry correction no longer holds (#603). A refusal backs a
+> row off (schema v95: attempts, a sanitised reason, a next-attempt date; one
+> minute, doubling, to six hours), so a serial Vault refuses for good leaves the
+> front of the queue and no longer keeps later revocations off Vault's list.
+> A replica claims a row by a conditional write of its next-attempt date before
+> it asks Vault, so replicas sweeping at once make one call per due row between
+> them. A row refused twelve times no longer fails the `vault_revocation` job;
+> the separate job `vault_revocation_failing` in `/health/jobs` counts such
+> rows. The tests show a refused serial asked for once while a later one is
+> forwarded, two replicas making one call, and exactly one of eight concurrent
+> claims winning. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

@@ -29,6 +29,7 @@ use crate::ca_key_store::CaKeyCustodians;
 use crate::crl::CrlDistribution;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 use crate::subject::subject_common_name;
+use crate::vault_forward;
 
 /// Who is asking for a leaf, as far as the issuing CA is concerned.
 ///
@@ -1009,27 +1010,91 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     /// could not forward, and one made without a request (a directory
     /// deprovisioning revokes in bulk) — returning how many it accepted.
     ///
+    /// Reads the rows whose turn has come (never attempted, or past their
+    /// backoff), soonest due first, and **claims** each before attempting it: a
+    /// conditional write of the row's next-attempt date, so of the replicas
+    /// that read one row only the one whose write matched talks to Vault
+    /// (#603). A refusal records the attempt count, a sanitised reason and the
+    /// next date ([`vault_forward::backoff`]); a permanently refused row thus
+    /// leaves the front of the queue instead of starving the rows behind it.
+    ///
     /// One attempt per row, inside one [`SWEEP_BUDGET`] for the pass, so an
     /// unreachable Vault costs one timeout per tick rather than one per row.
-    /// Any row left pending makes the pass an error, which `/health/jobs`
-    /// shows; the next tick resumes.
+    /// A row left pending makes the pass an error, which `/health/jobs` shows
+    /// — except a row that has failed [`vault_forward::FAILING_AFTER_ATTEMPTS`]
+    /// times, which [`Self::failing_revocations`] reports instead; the next tick
+    /// resumes.
     pub async fn forward_pending_revocations(&self) -> AxiamResult<u64> {
         let deadline = tokio::time::Instant::now() + SWEEP_BUDGET;
         let pending = self
             .cert_repo
-            .list_unforwarded_revocations(SWEEP_BATCH)
+            .list_due_vault_forwards(Utc::now(), SWEEP_BATCH)
             .await?;
         let mut forwarded = 0u64;
         let mut failed = 0usize;
-        for certificate in &pending {
+        for candidate in &pending {
+            let certificate = &candidate.certificate;
             if tokio::time::Instant::now() >= deadline {
                 failed += 1;
                 continue;
             }
+            let lease_until = Utc::now() + vault_forward::CLAIM_LEASE;
+            match self
+                .cert_repo
+                .claim_vault_forward(
+                    certificate.tenant_id,
+                    certificate.id,
+                    candidate.next_attempt_at,
+                    lease_until,
+                )
+                .await
+            {
+                // Another replica has it, or it was forwarded since the read.
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        certificate_id = %certificate.id,
+                        error = %e,
+                        "a Vault revocation could not be claimed"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            }
             match self.forward_revocation(certificate, 1, deadline).await {
                 CustodianRevocation::Forwarded => forwarded += 1,
                 CustodianRevocation::NotNeeded => {}
-                CustodianRevocation::Pending { .. } => failed += 1,
+                CustodianRevocation::Pending { reason } => {
+                    let attempts = candidate.attempts.saturating_add(1);
+                    let wait = chrono::Duration::from_std(vault_forward::backoff(attempts))
+                        .unwrap_or_else(|_| chrono::Duration::hours(6));
+                    if let Err(e) = self
+                        .cert_repo
+                        .record_vault_forward_failure(
+                            certificate.tenant_id,
+                            certificate.id,
+                            attempts,
+                            Utc::now() + wait,
+                            &vault_forward::sanitise_reason(&reason),
+                        )
+                        .await
+                    {
+                        // The claim's lease still holds the row back; it is
+                        // attempted again when that runs out.
+                        tracing::warn!(
+                            certificate_id = %certificate.id,
+                            error = %e,
+                            "the failed Vault forward could not be recorded"
+                        );
+                    }
+                    // A row past the threshold is `failing_revocations`' to
+                    // report; failing the pass for it too would keep this job
+                    // red for as long as Vault refuses it.
+                    if attempts < vault_forward::FAILING_AFTER_ATTEMPTS {
+                        failed += 1;
+                    }
+                }
             }
         }
         if failed > 0 {
@@ -1039,6 +1104,19 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             )));
         }
         Ok(forwarded)
+    }
+
+    /// How many revocations Vault has refused
+    /// [`vault_forward::FAILING_AFTER_ATTEMPTS`] times or more (#603): the rows
+    /// the sweep keeps retrying every [`vault_forward::BACKOFF_CAP`] and has
+    /// little hope of forwarding without an operator (a serial a `no_store`
+    /// role never recorded, a mount since reconfigured). The cleanup job
+    /// records a non-zero count as the distinct `vault_revocation_failing` job
+    /// error.
+    pub async fn failing_revocations(&self) -> AxiamResult<u64> {
+        self.cert_repo
+            .count_vault_forwards_failing(vault_forward::FAILING_AFTER_ATTEMPTS)
+            .await
     }
 
     /// Tell the custodian that signed `certificate` it is revoked, if that

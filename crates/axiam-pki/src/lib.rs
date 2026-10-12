@@ -19,6 +19,7 @@ pub mod pgp;
 pub mod saml_signing;
 pub mod ssrf;
 pub mod subject;
+pub mod vault_forward;
 pub mod vault_pki;
 
 pub use ca::{CaService, MAX_CA_VALIDITY_DAYS};

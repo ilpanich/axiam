@@ -1267,6 +1267,30 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                             certs.forward_pending_revocations().await,
                             tracing::Level::INFO,
                         );
+
+                        // #603: a revocation Vault has refused twelve times
+                        // (about a day of backoff) is retried every six hours
+                        // and the pass above no longer fails for it. A distinct
+                        // job, so a stuck revocation is not hidden by a green
+                        // `vault_revocation` and a flapping Vault is not
+                        // mistaken for one.
+                        Self::record(
+                            &self.job_health,
+                            "vault_revocation_failing",
+                            certs.failing_revocations().await.and_then(|failing| {
+                                if failing == 0 {
+                                    return Ok(0);
+                                }
+                                Err(AxiamError::Internal(format!(
+                                    "{failing} certificate revocation(s) Vault has refused {} \
+                                     times or more; each is retried every {} hours and needs an \
+                                     operator (see the PKI guide)",
+                                    axiam_pki::vault_forward::FAILING_AFTER_ATTEMPTS,
+                                    axiam_pki::vault_forward::BACKOFF_CAP.as_secs() / 3600,
+                                )))
+                            }),
+                            tracing::Level::INFO,
+                        );
                     }
 
                     // T21.4 — delete self-registered clients nobody has used.

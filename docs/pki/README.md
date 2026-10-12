@@ -470,6 +470,29 @@ before 1.0.0. Vault answers a second revocation of the same serial with
 success, so a retry is harmless. A leaf of a CA that has itself been revoked is
 not forwarded: revoking the CA deleted its issuer from Vault.
 
+**A revocation Vault keeps refusing.** The sweep does not ask again at every
+tick. Each refusal is recorded on the certificate row (schema v95:
+`vault_forward_attempts`, `vault_forward_last_error`, `vault_next_attempt_at`)
+and pushes its next attempt out: one minute, doubling, to a ceiling of six
+hours. A row is read soonest-due first, so a serial Vault refuses for good (one
+a `no_store` role never recorded, a mount since reconfigured) does not hold back
+the revocations behind it. A replica claims a row by writing its next-attempt
+date before it asks Vault, and only the replica whose write matched asks, so
+several replicas sweeping at once cost one call per row, not one each. The
+recorded reason is a status and a short message, cut to 256 characters; it
+never holds a token or a response body.
+
+While a row has failed fewer than twelve times, a refusal fails the
+`vault_revocation` job in `/health/jobs`, as before. From the twelfth failure —
+about a day of attempts — the job stops failing for that row and the count of
+such rows is reported as a separate job, `vault_revocation_failing`, which is
+unhealthy while any row has reached it. The row is still retried every six
+hours; clearing it is the operator's: fix the Vault mount or policy so the
+revoke call succeeds, and the next retry forwards it. A revocation Vault cannot
+ever accept (a serial it never recorded) stays in that count until the
+certificate expires, since a `no_store` role has nothing for Vault to revoke and
+the leaf is bounded by its validity.
+
 **Where relying parties fetch the list.** Leaves of a `vault_pki` CA carry
 Vault's own profile, not an AXIAM distribution point. Configure the
 distribution point Vault writes into them on the issuing mount, and point

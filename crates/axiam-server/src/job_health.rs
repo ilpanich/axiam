@@ -65,6 +65,10 @@ pub const SWEEP_JOBS: &[&str] = &[
     "tenant_purge",
     // T-470: `vault_pki` revocations Vault does not have yet.
     "vault_revocation",
+    // #603: revocations Vault has refused for about a day. Its own job, so the
+    // pass above can go green while a row stays stuck, and the stuck row stays
+    // visible.
+    "vault_revocation_failing",
 ];
 
 /// The revocation-feed prune (T-39/T-143, P23W4-06). The one sweep in the loop
@@ -247,8 +251,10 @@ mod tests {
             "ciba_request",
             // #523 (D-4): the deleted tenants' purge.
             "tenant_purge",
-            // T-470: revocations forwarded to Vault.
+            // T-470: revocations forwarded to Vault, and (#603) the ones it
+            // keeps refusing, reported apart from the pass.
             "vault_revocation",
+            "vault_revocation_failing",
         ] {
             assert!(recorded.contains(&job), "{job} is swept by the loop");
             assert!(SWEEP_JOBS.contains(&job), "{job} is registered");

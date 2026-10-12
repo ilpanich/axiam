@@ -492,6 +492,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_vault_revocation",
         sql: SCHEMA_V94,
     },
+    Migration {
+        version: 95,
+        name: "certificate_vault_forward_backoff",
+        sql: SCHEMA_V95,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4692,6 +4697,27 @@ const SCHEMA_V94: &str = "\
 DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v95 — the Vault revocation sweep's backoff (#603)
+// -----------------------------------------------------------------------
+//
+// A revocation Vault refuses for good used to be retried at every tick, and a
+// hundred of them kept every later one off Vault's list. The sweep now keeps,
+// per pending row, how many times Vault refused it (`vault_forward_attempts`),
+// the sanitised reason (`vault_forward_last_error`, never a token or a response
+// body) and when it is next due (`vault_next_attempt_at`) — the date a replica
+// claims a row by writing before it attempts it, so two replicas never attempt
+// one row. The index serves the sweep's read: unforwarded rows by due date.
+// Additive: three optional columns and an index, absent on every existing row,
+// which therefore reads as "none attempted, due now"; no row is rewritten (D-6).
+const SCHEMA_V95: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE certificate TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE certificate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_vault_forward ON TABLE certificate \
+    FIELDS vault_revoked_at, vault_next_attempt_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4738,6 +4764,36 @@ mod tests {
             assert!(
                 !SCHEMA_V94.contains(forbidden),
                 "v94 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #603 — v95 adds the Vault forward backoff columns and the index that
+    /// serves the sweep, and rewrites no row.
+    #[test]
+    fn v95_adds_only_the_vault_forward_backoff() {
+        let statements: Vec<&str> = SCHEMA_V95
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE certificate \
+                 TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE certificate \
+                 TYPE option<string>",
+                "DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE certificate \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_vault_forward ON TABLE certificate \
+                 FIELDS vault_revoked_at, vault_next_attempt_at",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V95.contains(forbidden),
+                "v95 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6208,8 +6264,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&94),
-            "v94 is the newest migration (T-470 — `certificate.vault_revoked_at`, set once \
+            Some(&95),
+            "v95 is the newest migration (#603 — the Vault revocation sweep's backoff \
+             columns `certificate.vault_forward_attempts`, `vault_forward_last_error` and \
+             `vault_next_attempt_at` and the index on `(vault_revoked_at, vault_next_attempt_at)`; \
+             v94 was T-470 — `certificate.vault_revoked_at`, set once \
              Vault has accepted the revocation of a `vault_pki` CA's leaf; v93 was #530, \
              P23W3-07 — \
              `federation_config.idp_metadata_signing_cert_pem`, the certificate a SAML IdP's \

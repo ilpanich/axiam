@@ -16,7 +16,7 @@ use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{
         CaCertificate, Certificate, RevocationStamp, RevokedCertificate, StoreCaCertificate,
-        StoreCertificate,
+        StoreCertificate, VaultForwardCandidate,
     },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
@@ -2922,19 +2922,75 @@ pub trait CertificateRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
 
     /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
-    /// revocation Vault has not yet been told of, oldest revocation first, at
-    /// most `limit` (T-470).
+    /// revocation Vault has not yet been told of, in the order the sweep takes
+    /// them (a row never attempted first, then by `vault_next_attempt_at`, then
+    /// oldest revocation), at most `limit` (T-470) — *whether or not* a row's
+    /// backoff has run out: this is "what is pending", and
+    /// [`Self::list_due_vault_forwards`] is "what is due".
     ///
     /// Vault signs such a CA's list, not AXIAM, so a revocation reaches it only
-    /// by being forwarded; this is what the cleanup sweep reads to forward the
-    /// ones a revoke request could not, and the revocations that never went
-    /// through one (a directory deprovisioning revokes in bulk). Across tenants:
-    /// the sweep is deployment-wide. A revoked CA's leaves are left out, since
-    /// revoking the CA removed its issuer from Vault.
+    /// by being forwarded; the cleanup sweep forwards the ones a revoke request
+    /// could not, and the revocations that never went through one (a directory
+    /// deprovisioning revokes in bulk). Across tenants: the sweep is
+    /// deployment-wide. A revoked CA's leaves are left out, since revoking the
+    /// CA removed its issuer from Vault.
     fn list_unforwarded_revocations(
         &self,
         limit: u32,
     ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// The rows [`Self::list_unforwarded_revocations`] names whose turn has
+    /// come at `now` — never attempted, or `vault_next_attempt_at` not after
+    /// `now` — in the order the sweep takes them, at most `limit` (#603).
+    ///
+    /// A row Vault refused is out of this list until its backoff runs out, so
+    /// a hundred permanently refused rows no longer hold every later one back,
+    /// and a row another replica claimed is out of it for the length of the
+    /// lease.
+    fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<VaultForwardCandidate>>> + Send;
+
+    /// Claim a pending revocation for one attempt (#603): a conditional write
+    /// that sets `vault_next_attempt_at` to `lease_until` **only if** it still
+    /// holds `seen_next_attempt_at` (the value [`Self::list_due_vault_forwards`]
+    /// read, `None` for a row never attempted) and the row is still unforwarded.
+    /// `true` for the one caller whose write matched; of two concurrent claims
+    /// of one row exactly one gets `true`.
+    ///
+    /// A claimant that dies leaves the lease to run out, after which the row is
+    /// due again; nothing is counted against the row for that.
+    fn claim_vault_forward(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record that Vault refused a claimed row: its failed-attempt count
+    /// (`attempts`, including this one), the sanitised `error` (stored
+    /// truncated — a status and a short message, never a token or a response
+    /// body) and when it is next due (#603). A row already forwarded is left
+    /// alone.
+    fn record_vault_forward_failure(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many unforwarded revocations of an active `vault_pki` CA have
+    /// failed at least `min_attempts` times (#603): the rows the sweep has all
+    /// but given up on, which `/health/jobs` reports as its own job.
+    fn count_vault_forwards_failing(
+        &self,
+        min_attempts: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Revoke every certificate of `tenant_id` that is not revoked and not yet
     /// expired, recording when, and return the certificates this revoked

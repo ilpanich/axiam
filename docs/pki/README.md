@@ -582,6 +582,39 @@ the signer returned. A tenant may cap `validity_days` via its
 `max_certificate_validity_days` metadata setting; requests exceeding that cap
 are rejected.
 
+### A user certificate names its account (`user_id`, 1.0.1)
+
+A `User` certificate can say which account it was issued for: send `user_id`
+(the user's id) on `POST /api/v1/certificates` or `POST
+/api/v1/certificates/sign-csr`, and every read of the certificate returns it.
+It is optional, accepted only with `cert_type: User`, must name a user of the
+tenant being acted on that has not been deleted or erased, and, when the
+request also carries `metadata.user_id`, the two must agree — each refusal is a
+`400` naming the problem. It does not change what the certificate
+authenticates as: that is still the service account it is bound to.
+
+What it changes is which certificates are revoked when an account loses its
+credentials — **linking it to a directory entry, an administrator deleting it,
+and the Art. 17 erasure purge** all revoke the account's still-active `User`
+certificates:
+
+- a certificate whose `user_id` is the account is revoked;
+- a certificate whose `user_id` names **another** account is never revoked on
+  this account's behalf, whatever its common name or metadata says;
+- a certificate with no `user_id` — every certificate issued before 1.0.1
+  (schema v98 copies nothing into the new column), and a `User` certificate
+  issued without one — falls back to the 1.0.0 convention: revoked when its
+  `metadata.user_id` names the account, or its subject common name equals the
+  account's username or email, ignoring case. The convention errs towards
+  revoking, so it can revoke another person's unbound certificate whose common
+  name happens to match; issuing with `user_id` is how to avoid that.
+
+The revocations are dated, so they are on the issuer's
+[revocation list](#certificate-revocation-lists) at once, and under a
+`vault_pki` CA the cleanup job's `vault_revocation` sweep forwards them to
+Vault. Revoked rows are kept, not deleted, until they expire, as every revoked
+certificate is.
+
 ### Which CA a caller may issue under
 
 A signing CA row carries the tenant it signs for, and both leaf paths read it.

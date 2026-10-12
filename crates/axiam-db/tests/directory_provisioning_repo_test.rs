@@ -6,7 +6,8 @@
 //! - `find_identity_collision` folds case, compares both columns with every
 //!   name, and counts every status;
 //! - `revoke_user_certificates` revokes active `User` certificates that belong
-//!   to the account by the two conventions the model has, and nothing else.
+//!   to the account — by the binding (`certificate.user_id`, #533), and, for a
+//!   row without one, by the two older conventions — and nothing else.
 //!
 //! No assertion message formats a password, a hash or an identifier.
 
@@ -320,6 +321,7 @@ fn certificate(
         not_before: Utc::now() - Duration::minutes(1),
         not_after: Utc::now() + Duration::days(30),
         metadata,
+        user_id: None,
     }
 }
 
@@ -437,5 +439,105 @@ async fn only_the_accounts_active_user_certificates_are_revoked() {
             .await
             .unwrap(),
         0
+    );
+}
+
+/// #533 — linking (and deletion, and erasure, which call the same method)
+/// revokes the account's certificates by their binding, and leaves alone a
+/// certificate bound to another account even when its common name is the
+/// account's username or email, or its `metadata.user_id` names the account:
+/// the convention is consulted only for a row with no binding (D-6: rows from
+/// before v98 are not backfilled).
+#[tokio::test]
+async fn linking_revokes_by_user_id_and_leaves_another_users_same_cn_certificate_alone() {
+    let db = setup().await;
+    let certs = SurrealCertificateRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    let bound = |fingerprint: &str, subject: &str, owner: Uuid, metadata: serde_json::Value| {
+        StoreCertificate {
+            user_id: Some(owner),
+            ..certificate(
+                tenant,
+                fingerprint,
+                subject,
+                CertificateType::User,
+                metadata,
+            )
+        }
+    };
+
+    // Alice's by the binding, under a name no convention would match.
+    let alices = certs
+        .create(bound("fp-alice", "laptop-17", alice, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(alices.user_id, Some(alice), "the binding is stored");
+    // Bob's, whose common name is Alice's username — and one whose CN is her
+    // email and whose metadata even names her: the binding decides.
+    let bobs_same_cn = certs
+        .create(bound("fp-bob-cn", "alice", bob, serde_json::json!({})))
+        .await
+        .unwrap();
+    let bobs_same_mail = certs
+        .create(bound(
+            "fp-bob-mail",
+            "ALICE@example.com",
+            bob,
+            serde_json::json!({ "user_id": alice.to_string() }),
+        ))
+        .await
+        .unwrap();
+    // A row from before the binding (NONE): still matched by the convention.
+    let legacy = certs
+        .create(certificate(
+            tenant,
+            "fp-legacy",
+            "Alice",
+            CertificateType::User,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legacy.user_id, None);
+
+    let revoked = certs
+        .revoke_user_certificates(tenant, alice, "alice", "alice@example.com")
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked, 2,
+        "her bound certificate and the unbound legacy one"
+    );
+
+    for (cert, expected) in [
+        (&alices, CertificateStatus::Revoked),
+        (&legacy, CertificateStatus::Revoked),
+        (&bobs_same_cn, CertificateStatus::Active),
+        (&bobs_same_mail, CertificateStatus::Active),
+    ] {
+        let read = certs.get_by_id(tenant, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+        assert_eq!(read.user_id, cert.user_id, "the binding reads back");
+    }
+
+    // Each revocation is dated, so it is on its issuer's list.
+    for cert in [&alices, &legacy] {
+        let entries = certs
+            .list_revoked_by_issuer(cert.issuer_ca_id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].revoked_at.is_some());
+    }
+
+    // Bob's own revocation finds both of his by the binding.
+    assert_eq!(
+        certs
+            .revoke_user_certificates(tenant, bob, "bob", "bob@example.com")
+            .await
+            .unwrap(),
+        2
     );
 }

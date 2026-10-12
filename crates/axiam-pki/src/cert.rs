@@ -83,6 +83,53 @@ pub const MAX_LEAF_CERT_VALIDITY_DAYS: u32 = 825;
 /// Default leaf certificate validity when no tenant override is set: 365 days.
 pub const DEFAULT_LEAF_CERT_VALIDITY_DAYS: u32 = 365;
 
+/// The service-layer half of a leaf's user binding (#533): what can be decided
+/// without reading the tenant's users.
+///
+/// - A `user_id` is accepted on a `User` certificate only. A service, device or
+///   server certificate is not issued *for* a person, and a binding on one
+///   would make deleting that person revoke a host's or a device's credential.
+/// - When the request also carries `metadata.user_id`, the two must agree: the
+///   revocation of a user's certificates still reads `metadata.user_id` for a
+///   row without a binding, so a row whose two fields named different accounts
+///   would say two things about whose certificate it is. A `metadata.user_id`
+///   without a `user_id` is left as it was before the binding existed.
+///
+/// That the account exists, in this tenant, is checked by the caller that can
+/// read users — the REST handler — before it calls [`CertService::generate`]
+/// or [`CertService::sign_csr`].
+pub fn check_user_binding(
+    cert_type: &CertificateType,
+    user_id: Option<Uuid>,
+    metadata: Option<&serde_json::Value>,
+) -> AxiamResult<()> {
+    let Some(user_id) = user_id else {
+        return Ok(());
+    };
+    if *cert_type != CertificateType::User {
+        return Err(AxiamError::Validation {
+            message: format!(
+                "user_id is accepted only on a User certificate, not on a {cert_type:?} \
+                 certificate"
+            ),
+        });
+    }
+    if let Some(stated) = metadata.and_then(|m| m.get("user_id")) {
+        let agrees = stated
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s.trim()).ok())
+            .is_some_and(|stated| stated == user_id);
+        if !agrees {
+            return Err(AxiamError::Validation {
+                message: "metadata.user_id names a different account than user_id; omit \
+                          metadata.user_id or make it agree"
+                    .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The longest validity, in whole days, an issuer expiring at `issuer_not_after`
 /// can still grant to something issued at `now`.
 ///
@@ -364,6 +411,9 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             });
         }
 
+        // #533 — before any key is made, as the type refusal above is.
+        check_user_binding(&input.cert_type, input.user_id, input.metadata.as_ref())?;
+
         // DF-023. Normalised before anything reads it, so the locally signed
         // path, the remote-custodian path and the stored row all carry the
         // same common name. See [`crate::subject_common_name`].
@@ -384,6 +434,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             not_before: material.not_before,
             not_after: material.not_after,
             metadata: input.metadata.unwrap_or(serde_json::json!({})),
+            user_id: input.user_id,
         };
 
         let certificate = self.cert_repo.create(store).await?;
@@ -703,6 +754,9 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             });
         }
 
+        // #533: see `generate`.
+        check_user_binding(&input.cert_type, input.user_id, input.metadata.as_ref())?;
+
         // Parsed before the CA is even looked up, and outside the blocking
         // task: a malformed or unsigned request is by far the likeliest failure
         // on an endpoint whose input is pasted by hand, and it must be a 400
@@ -896,6 +950,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 not_before: row_not_before,
                 not_after: row_not_after,
                 metadata: input.metadata.unwrap_or(serde_json::json!({})),
+                user_id: input.user_id,
             })
             .await?;
 

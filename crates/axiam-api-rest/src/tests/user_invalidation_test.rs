@@ -148,9 +148,15 @@ async fn deleting_a_user_invalidates_that_subject() {
     let authz: AuthzData = web::Data::new(checker.clone() as Arc<dyn AuthzChecker>);
     let admin = make_admin(tenant_id);
 
-    delete(admin, authz, state, web::Path::from(target))
-        .await
-        .expect("delete succeeds");
+    delete(
+        admin,
+        authz,
+        state,
+        web::Path::from(target),
+        actix_web::test::TestRequest::default().to_http_request(),
+    )
+    .await
+    .expect("delete succeeds");
 
     assert_eq!(
         checker.subjects(),
@@ -213,9 +219,15 @@ async fn the_invalidated_subject_is_the_target_not_the_caller() {
     let admin = make_admin(tenant_id);
     let caller_id = admin.user_id;
 
-    delete(admin, authz, state, web::Path::from(target))
-        .await
-        .expect("delete succeeds");
+    delete(
+        admin,
+        authz,
+        state,
+        web::Path::from(target),
+        actix_web::test::TestRequest::default().to_http_request(),
+    )
+    .await
+    .expect("delete succeeds");
 
     let recorded = checker.subjects();
     assert!(

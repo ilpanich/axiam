@@ -314,6 +314,22 @@
 > concurrent claims winning. The `vault_revocation` sweep's half of the issue was
 > closed by its own claim (#603). No status changes.
 >
+> **The 1.0.1 release (model 2.40.0 — T-336 and T-187 amended, 2026-10-12).** A
+> `User` certificate now names the account it was issued for (#533): schema v98
+> adds `certificate.user_id`, which both issuance routes store from an optional
+> field — only for a `User` certificate, only naming a live account of the
+> tenant, and only agreeing with any `metadata.user_id` — and every read
+> returns. Revoking an account's certificates matches the binding first and
+> falls back to the 1.0.0 convention (`metadata.user_id`, or a common name equal
+> to the username or email) only for a row with no binding, so another
+> account's certificate with the same common name is left alone; rows from
+> before v98 are not backfilled. Directory linking (T-336) uses it, and so now
+> do an administrator's deletion and the Art. 17 purge, which before revoked no
+> certificate (T-187); each revocation is dated, so it is on the issuer's list,
+> and the Vault sweep forwards it under a `vault_pki` CA. The rows are kept,
+> revoked; what they still hold about the person (the certificate's subject, the
+> free-form metadata) is a recorded residual of T-187. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

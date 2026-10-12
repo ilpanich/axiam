@@ -494,14 +494,28 @@ pub async fn update<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(UserResponse::from(updated)))
 }
 
+/// Audit action: deleting a user revoked the `User` certificates issued for
+/// them (#533). One summary row per deletion, with the count, as directory
+/// linking records its own (`directory.account_linked`); written only when
+/// something was revoked.
+pub const AUDIT_USER_CERTIFICATES_REVOKED: &str = "user.certificates_revoked";
+
 /// `DELETE /api/v1/users/{user_id}`
+///
+/// Revokes the account's sessions and its still-active `User` certificates —
+/// those issued for it (`user_id`), and, for a certificate issued without that
+/// binding, those its `metadata.user_id` or subject common name ties to it —
+/// before the account is tombstoned. A revoked certificate goes on its
+/// issuer's revocation list, and on Vault's for a `vault_pki` issuer through
+/// the cleanup job's sweep (#533).
 #[utoipa::path(
     delete,
     path = "/api/v1/users/{user_id}",
     tag = "users",
     params(("user_id" = Uuid, Path, description = "User ID")),
     responses(
-        (status = 204, description = "User deleted"),
+        (status = 204, description = "User deleted; their sessions and `User` certificates \
+                                      revoked"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -511,6 +525,7 @@ pub async fn delete<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("users:delete", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
@@ -531,17 +546,41 @@ pub async fn delete<C: Connection + Clone>(
     // G-5 (D-52): the subject of an `account-purged` is captured **before** the
     // write — afterwards the row is a tombstone with no address — and the
     // revocations and the purge are one cause.
-    let purged_subject = state
-        .user_repo
-        .get_by_id(user.tenant_id, target_id)
-        .await
-        .ok()
-        .map(|u| SsfSubject::from_user(&u));
-    with_cause(Some(InitiatingEntity::Admin), async {
+    //
+    // #533: the account is also what the certificate revocation below matches
+    // the 1.0.0 name convention against, so a read that failed for any reason
+    // but "no such user" fails the delete rather than revoking by id alone.
+    let target = match state.user_repo.get_by_id(user.tenant_id, target_id).await {
+        Ok(target) => Some(target),
+        Err(AxiamError::NotFound { .. }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let purged_subject = target.as_ref().map(SsfSubject::from_user);
+    let certificates_revoked = with_cause(Some(InitiatingEntity::Admin), async {
         state
             .auth_service
             .revoke_all_sessions(user.tenant_id, target_id)
             .await?;
+
+        // #533: the account's `User` certificates, by their binding and — for
+        // a certificate issued without one — by the older convention, which
+        // reads the account's username and email. So this runs before the
+        // tombstone overwrites them, and a failure aborts the delete as the
+        // session revocation's does: retried after the tombstone, the
+        // convention would have nothing left to match. An account that does
+        // not exist (the delete below then answers 404) is matched by its id
+        // alone.
+        let (username, email) = target
+            .as_ref()
+            .map_or(("", ""), |t| (t.username.as_str(), t.email.as_str()));
+        let certificates_revoked = {
+            use axiam_core::repository::CertificateRepository as _;
+            state
+                .pki
+                .cert_repo
+                .revoke_user_certificates(user.tenant_id, target_id, username, email)
+                .await?
+        };
 
         state.user_repo.delete(user.tenant_id, target_id).await?;
 
@@ -552,9 +591,43 @@ pub async fn delete<C: Connection + Clone>(
                 .account_purged(user.tenant_id, subject)
                 .await;
         }
-        Ok::<(), AxiamApiError>(())
+        Ok::<u64, AxiamApiError>(certificates_revoked)
     })
     .await?;
+
+    // One row for the certificates the deletion revoked (#533). They are on
+    // their issuers' lists already; a `vault_pki` issuer's list in Vault is
+    // the cleanup job's `vault_revocation` sweep's to update, as it is for
+    // directory linking's bulk revocation.
+    if certificates_revoked > 0 {
+        use axiam_core::models::audit::{AuditOutcome, CreateAuditLogEntry};
+        use axiam_core::repository::AuditLogRepository as _;
+        if let Err(error) = state
+            .audit_repo
+            .append(CreateAuditLogEntry {
+                tenant_id: user.tenant_id,
+                actor_id: user.user_id,
+                actor_type: axiam_core::models::audit::ActorType::User,
+                action: AUDIT_USER_CERTIFICATES_REVOKED.to_string(),
+                resource_id: Some(target_id),
+                outcome: AuditOutcome::Success,
+                ip_address: client_ip(&http_req),
+                metadata: Some(serde_json::json!({
+                    "user_id": target_id,
+                    "certificates_revoked": certificates_revoked,
+                    "cause": "user_deleted",
+                })),
+            })
+            .await
+        {
+            tracing::error!(
+                tenant_id = %user.tenant_id,
+                user_id = %target_id,
+                %error,
+                "the certificates a user deletion revoked could not be audited"
+            );
+        }
+    }
 
     // Erase the personal data held OUTSIDE the user row.
     //

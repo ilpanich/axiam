@@ -178,6 +178,7 @@ where
                     metadata: None,
                     // A SAML signing leaf names no host.
                     subject_alt_names: Vec::new(),
+                    user_id: None,
                 },
                 Some(MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS),
                 &[],

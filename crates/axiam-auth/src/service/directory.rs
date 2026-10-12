@@ -409,7 +409,10 @@ impl<
     ///   the directory deciding** is retired: its WebAuthn credentials are
     ///   deleted, its federation links deleted (an upstream OIDC or SAML
     ///   identity signs in through the link without the directory deciding,
-    ///   F4 P23W3-01), its `User`-type certificates revoked, and every session
+    ///   F4 P23W3-01), its `User`-type certificates revoked (those issued for
+    ///   it, `certificate.user_id`; for a certificate without that binding,
+    ///   the `metadata.user_id` / common-name convention, #533 — see
+    ///   [`CertificateRepository::revoke_user_certificates`]), and every session
     ///   and OAuth2 refresh token revoked. TOTP is kept: it is a second factor
     ///   *behind* the directory password.
     ///

@@ -133,6 +133,7 @@ impl Fixture {
                     validity_days: 30,
                     metadata: None,
                     subject_alt_names: vec![],
+                    user_id: None,
                 },
                 None,
                 &[],

@@ -118,6 +118,9 @@ pub struct CleanupTask<C: Connection> {
     group_repo: Arc<SurrealGroupRepository<C>>,
     webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
     password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
+    // #533: the erased account's `User` certificates are revoked (never
+    // deleted: their issuers' revocation lists are computed from the rows).
+    cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
     // GDPR export sweep (D-12).
     export_job_repo: Arc<SurrealExportJobRepository<C>>,
     consent_repo: Arc<SurrealConsentRepository<C>>,
@@ -817,6 +820,36 @@ where
 // Erasure pipeline (test-seam extraction — RESEARCH.md Pattern 3, SECHRD-06)
 // ---------------------------------------------------------------------------
 
+/// Revoke the still-active `User` certificates of an account the Art. 17 purge
+/// is erasing, returning how many (#533) — the purge's step (b4).
+///
+/// Revoked, not deleted: each row carries `revoked_at`, so it stays on its
+/// issuer's revocation list until it expires, and a `vault_pki` issuer's list
+/// in Vault gets it from the cleanup job's `vault_revocation` sweep. Deleting
+/// the row would make the certificate valid again to every relying party
+/// outside AXIAM — the retention `docs/compliance/gdpr-compliance.md` records
+/// for a deleted tenant's certificates, here for one account's.
+///
+/// Matches the binding (`certificate.user_id`, schema v98) and, for a row
+/// without one, the older convention on the account's username and email — so
+/// it must run **before** `anonymize_user` overwrites them, which the purge
+/// does by calling it ahead of [`run_erasure_pipeline_reporting`]. Fatal there
+/// (`?`), like the credential deletions beside it: the account stays due and
+/// the next sweep retries, with its names still in place.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is.
+pub async fn revoke_erased_users_certificates<CR>(
+    cert_repo: &CR,
+    user: &axiam_core::models::user::User,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::CertificateRepository,
+{
+    cert_repo
+        .revoke_user_certificates(user.tenant_id, user.id, &user.username, &user.email)
+        .await
+}
+
 /// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
 /// references, anonymize the user row, then write the erasure proof
 /// STRICTLY LAST.
@@ -1032,6 +1065,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         group_repo: Arc<SurrealGroupRepository<C>>,
         webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
         password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
+        // #533 — required, not a builder step, for the reason
+        // `audit_retention` is: an erasure that silently skipped the account's
+        // certificates is the omission this exists to make impossible.
+        cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
         export_job_repo: Arc<SurrealExportJobRepository<C>>,
         consent_repo: Arc<SurrealConsentRepository<C>>,
         tenant_repo: Arc<SurrealTenantRepository<C>>,
@@ -1079,6 +1116,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             group_repo,
             webauthn_repo,
             password_history_repo,
+            cert_repo,
             export_job_repo,
             consent_repo,
             tenant_repo,
@@ -1656,6 +1694,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// (b) Hard-delete federation links.
     /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
     /// (b3) Prune `member_of` and `has_role` graph edges (isolated tombstone).
+    /// (b4) Revoke the account's `User` certificates (#533) — kept, on their
+    ///     issuers' revocation lists, never deleted.
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
     /// (d)/(e)/(g) Run [`run_erasure_pipeline`]: pseudonymize all audit
     ///     entries for this user (now FATAL, D-01/D-03/D-04) -> anonymize the
@@ -1681,10 +1721,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let mut purged: u64 = 0;
 
         for user in due {
-            if let Err(e) = self
-                .purge_single_user(user.id, user.tenant_id, pepper)
-                .await
-            {
+            if let Err(e) = self.purge_single_user(&user, pepper).await {
                 tracing::warn!(
                     error = ?e,
                     user_id = %user.id,
@@ -1705,23 +1742,22 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// one cause, and the platform's own (`system`).
     async fn purge_single_user(
         &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
+        user: &axiam_core::models::user::User,
         pepper: [u8; 32],
     ) -> Result<(), AxiamError> {
         with_cause(
             Some(InitiatingEntity::System),
-            self.purge_single_user_inner(user_id, tenant_id, pepper),
+            self.purge_single_user_inner(user, pepper),
         )
         .await
     }
 
     async fn purge_single_user_inner(
         &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
+        user: &axiam_core::models::user::User,
         pepper: [u8; 32],
     ) -> Result<(), AxiamError> {
+        let (user_id, tenant_id) = (user.id, user.tenant_id);
         // (a) Revoke all sessions and OAuth2 refresh tokens.
         self.auth_svc
             .revoke_all_sessions(tenant_id, user_id)
@@ -1785,6 +1821,13 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
                 .await?;
         }
+
+        // (b4) Revoke the account's `User` certificates (#533), while its
+        // username and email — which the convention for a certificate issued
+        // without a `user_id` reads — are still on the row. Fail-closed, like
+        // the steps above; idempotent (an already revoked row is not matched).
+        let certificates_revoked =
+            revoke_erased_users_certificates(self.cert_repo.as_ref(), user).await?;
 
         // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
         let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);
@@ -1868,6 +1911,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 ip_address: None,
                 metadata: Some(serde_json::json!({
                     "pseudonym": pseudonym,
+                    // #533: the account's certificates this purge revoked; a
+                    // count, as directory linking records its own.
+                    "certificates_revoked": certificates_revoked,
                 })),
             },
         )

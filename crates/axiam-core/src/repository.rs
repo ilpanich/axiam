@@ -3075,18 +3075,28 @@ pub trait CertificateRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Revoke every **active `User`-type certificate** that belongs to
-    /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
+    /// `user_id`, recording when, and return how many were revoked (G-3,
+    /// T23.3.3, D-28; #533).
     ///
-    /// **The model has no user-to-certificate relation**: a certificate
-    /// authenticates as the service account it is bound to, and nothing
-    /// records that a `User` certificate was issued *for* an account. "Belongs
-    /// to" is therefore the only convention that exists — a certificate's
-    /// `metadata.user_id` naming the account (the example
-    /// [`Certificate::metadata`] has always given), or its subject common name
-    /// equal, ignoring case, to the account's `username` or `email`. Both are
-    /// matched, and only among `User`-type, still-active certificates of the
-    /// tenant; over-matching revokes a certificate, which is the safe side of
-    /// the error.
+    /// "Belongs to" is, first, the binding: a certificate whose
+    /// [`Certificate::user_id`] is `user_id` (set at issuance since schema
+    /// v98). A row whose `user_id` is NONE — every certificate issued before
+    /// v98, and a `User` certificate issued without one — falls back to the
+    /// convention that was all there was before: its `metadata.user_id` naming
+    /// the account, or its subject common name equal, ignoring case, to the
+    /// account's `username` or `email`; over-matching there revokes a
+    /// certificate, which is the safe side of the error. A row bound to
+    /// **another** account is never matched by the convention, whatever its
+    /// common name says. Only `User`-type, still-active certificates of the
+    /// tenant are considered.
+    ///
+    /// What linking an account to its directory entry, an administrator's
+    /// deletion and the Art. 17 erasure call. Each revoked row carries
+    /// `revoked_at`, so it is on its issuer's revocation list, and
+    /// `vault_revoked_at` NONE, so the cleanup job's `vault_revocation` sweep
+    /// forwards it when its issuer's key is held by `vault_pki` (T-470). The
+    /// caller passes the account's names as they are **before** any erasure
+    /// overwrites them.
     ///
     /// Required, with no default, for the reason
     /// [`WebauthnCredentialRepository::delete_by_user`] gives: a default of

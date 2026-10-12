@@ -574,6 +574,7 @@ async fn issuing_a_leaf_sends_a_csr_and_records_the_certificate_that_came_back()
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             Some(90),
             &[],
@@ -963,6 +964,7 @@ async fn signing_a_caller_csr_sends_the_csr_verbatim_and_states_the_usages() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             Some(90),
             &[],
@@ -1058,6 +1060,7 @@ async fn a_generated_leaf_states_the_same_profile_as_a_caller_csr() {
             validity_days: 30,
             metadata: None,
             subject_alt_names: vec![],
+            user_id: None,
         },
         Some(90),
         &[],
@@ -1124,6 +1127,7 @@ async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
             validity_days: 30,
             metadata: None,
             subject_alt_names: vec![],
+            user_id: None,
         },
         Some(90),
         &[],
@@ -1203,6 +1207,7 @@ fn server_request(ca_id: Uuid, subject: &str, sans: Vec<SubjectAltName>) -> Crea
         validity_days: 30,
         metadata: None,
         subject_alt_names: sans,
+        user_id: None,
     }
 }
 
@@ -1299,6 +1304,7 @@ async fn a_server_csr_is_refused_under_vault_and_the_fence_answers_first() {
         validity_days: 30,
         metadata: None,
         subject_alt_names: sans,
+        user_id: None,
     };
 
     let off_list = certs
@@ -1460,6 +1466,7 @@ async fn revocation_fixture_with(leaf_count: u64) -> RevocationFixture {
                     validity_days: 30,
                     metadata: None,
                     subject_alt_names: vec![],
+                    user_id: None,
                 },
                 Some(90),
                 &[],

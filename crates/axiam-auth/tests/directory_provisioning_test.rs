@@ -938,6 +938,7 @@ async fn give_bob_everything(h: &Harness) -> Held {
             not_before: Utc::now() - ChronoDuration::minutes(1),
             not_after: Utc::now() + ChronoDuration::days(30),
             metadata,
+            user_id: None,
         }
     };
     let by_metadata = h

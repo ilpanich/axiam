@@ -43,6 +43,53 @@ pub struct CreateCertificateRequest {
     /// request — until an organization administrator lists names.
     #[serde(default)]
     pub subject_alt_names: Option<Vec<SubjectAltName>>,
+    /// The user account a `User` certificate is issued for (#533), returned as
+    /// the certificate's `user_id`. Optional; accepted only for
+    /// `cert_type: User`, and it must name a user of this tenant that has not
+    /// been deleted or erased. A `metadata.user_id` in the same request must
+    /// agree with it. Revoking the account's certificates — directory linking,
+    /// deletion, erasure — matches on it.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+}
+
+/// #533 — the half of a leaf's user binding that needs the tenant's users:
+/// `user_id`, when given, names an account of the tenant being acted on that
+/// still exists. Refused as a validation error (`400`) rather than `404`, which
+/// on these routes already means "no such issuing CA within reach".
+///
+/// Run after [`axiam_pki::cert::check_user_binding`] has had its say, so a
+/// `user_id` on the wrong type is refused for that reason without a read.
+async fn check_bound_user<C: Connection + Clone>(
+    cert_type: &CertificateType,
+    user_id: Option<Uuid>,
+    metadata: Option<&serde_json::Value>,
+    principal: &AuthenticatedPrincipal,
+    state: &AppState<C>,
+) -> Result<(), AxiamApiError> {
+    axiam_pki::cert::check_user_binding(cert_type, user_id, metadata)?;
+    let Some(user_id) = user_id else {
+        return Ok(());
+    };
+    use axiam_core::models::user::UserStatus;
+    use axiam_core::repository::UserRepository as _;
+    let refused = || {
+        AxiamApiError(AxiamError::Validation {
+            message: "user_id does not name a user of this tenant".into(),
+        })
+    };
+    match state
+        .user_repo
+        .get_by_id(principal.tenant_id, user_id)
+        .await
+    {
+        Ok(user) if matches!(user.status, UserStatus::Deleted | UserStatus::Anonymized) => {
+            Err(refused())
+        }
+        Ok(_) => Ok(()),
+        Err(AxiamError::NotFound { .. }) => Err(refused()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The acting tenant's effective `server_cert_allowed_names` — read only for a
@@ -101,7 +148,10 @@ async fn issuing_scope<C: Connection + Clone>(
                                       `subject_alt_names` on a type other than `Server`, a \
                                       `Server` request with none, or a SAN or common name not \
                                       admitted by the tenant's `server_cert_allowed_names` \
-                                      (empty by default, which refuses every `Server` request)"),
+                                      (empty by default, which refuses every `Server` request), \
+                                      or `user_id` is refused — on a type other than `User`, \
+                                      naming no user of this tenant (or a deleted one), or \
+                                      disagreeing with `metadata.user_id`"),
         (status = 404, description = "No such issuing CA within this caller's reach: it \
                                       belongs to another organization, to another tenant, \
                                       or is the organization CA and the caller is not an \
@@ -128,7 +178,16 @@ pub async fn generate<C: Connection + Clone>(
         validity_days: req.validity_days,
         metadata: req.metadata,
         subject_alt_names: req.subject_alt_names.unwrap_or_default(),
+        user_id: req.user_id,
     };
+    check_bound_user(
+        &input.cert_type,
+        input.user_id,
+        input.metadata.as_ref(),
+        &principal,
+        state.get_ref(),
+    )
+    .await?;
     let server_names = server_names_for(&input.cert_type, &principal, state.get_ref()).await?;
 
     // Read tenant-level max_certificate_validity_days from metadata
@@ -175,6 +234,9 @@ pub struct SignCertificateCsrRequest {
     /// request on this path is refused; use `POST /api/v1/certificates`.
     #[serde(default)]
     pub subject_alt_names: Option<Vec<SubjectAltName>>,
+    /// See [`CreateCertificateRequest::user_id`].
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
 }
 
 /// `POST /api/v1/certificates/sign-csr`
@@ -209,7 +271,9 @@ pub struct SignCertificateCsrRequest {
                                       extension, the validity exceeds the tenant cap, the \
                                       825-day hard cap, or the issuer's own expiry, or the \
                                       names are refused (see `POST /api/v1/certificates`; a \
-                                      `Server` request is also refused under a `vault_pki` CA)"),
+                                      `Server` request is also refused under a `vault_pki` CA), \
+                                      or `user_id` is refused (as on \
+                                      `POST /api/v1/certificates`)"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden — `certificates:generate` required"),
         (status = 404, description = "No such issuing CA within this caller's reach: it \
@@ -238,7 +302,16 @@ pub async fn sign_csr<C: Connection + Clone>(
         validity_days: req.validity_days,
         metadata: req.metadata,
         subject_alt_names: req.subject_alt_names.unwrap_or_default(),
+        user_id: req.user_id,
     };
+    check_bound_user(
+        &input.cert_type,
+        input.user_id,
+        input.metadata.as_ref(),
+        &principal,
+        state.get_ref(),
+    )
+    .await?;
     let server_names = server_names_for(&input.cert_type, &principal, state.get_ref()).await?;
 
     // The same tenant cap `generate` reads, from the same place.

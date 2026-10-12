@@ -62,6 +62,7 @@ fn sample_cert(tenant_id: Uuid, issuer_ca_id: Uuid, fingerprint: &str) -> StoreC
         not_before: Utc::now() - Duration::minutes(1),
         not_after: Utc::now() + Duration::days(365),
         metadata: serde_json::json!({}),
+        user_id: None,
     }
 }
 
@@ -590,4 +591,91 @@ async fn the_stored_reason_is_bounded_and_failing_rows_are_counted() {
         .await
         .unwrap();
     assert_eq!(repo.count_vault_forwards_failing(12).await.unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The user binding (#533, schema v98)
+// ---------------------------------------------------------------------------
+
+/// `user_id` is stored and every read returns it; a row without one reads
+/// `None`. A user's certificates revoked through `revoke_user_certificates`
+/// are dated, so on their issuer's list, and — under a `vault_pki` CA — due to
+/// the Vault sweep (T-470): the bulk path sets exactly what the sweep reads.
+#[tokio::test]
+async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_sweep() {
+    let (db, org, tenant_id) = setup().await;
+    let vault_ca = Uuid::new_v4();
+    SurrealCaCertificateRepository::new(db.clone())
+        .create(StoreCaCertificate {
+            id: vault_ca,
+            organization_id: org,
+            tenant_id: None,
+            parent_ca_id: None,
+            subject: "CN=Vault CA".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            chain_pem: None,
+            fingerprint: "sha256:vault-ca-533".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - Duration::minutes(1),
+            not_after: Utc::now() + Duration::days(3650),
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::VaultPki,
+            key_locator: Some("{}".into()),
+        })
+        .await
+        .unwrap();
+    let repo = SurrealCertificateRepository::new(db.clone());
+    let user = Uuid::new_v4();
+
+    let bound = repo
+        .create(StoreCertificate {
+            user_id: Some(user),
+            ..sample_cert(tenant_id, vault_ca, "fp-bound")
+        })
+        .await
+        .unwrap();
+    let unbound = repo
+        .create(sample_cert(tenant_id, vault_ca, "fp-unbound"))
+        .await
+        .unwrap();
+    assert_eq!(bound.user_id, Some(user));
+    assert_eq!(unbound.user_id, None);
+    assert_eq!(
+        repo.get_by_id(tenant_id, bound.id).await.unwrap().user_id,
+        Some(user)
+    );
+    assert_eq!(
+        repo.get_by_fingerprint(tenant_id, "fp-bound")
+            .await
+            .unwrap()
+            .user_id,
+        Some(user)
+    );
+    let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    for cert in &page.items {
+        let expected = if cert.id == bound.id {
+            Some(user)
+        } else {
+            None
+        };
+        assert_eq!(cert.user_id, expected, "{}", cert.fingerprint);
+    }
+
+    // The sample's CN matches no name passed here: only the binding matches.
+    let revoked = repo
+        .revoke_user_certificates(tenant_id, user, "nobody", "nobody@example.com")
+        .await
+        .unwrap();
+    assert_eq!(revoked, 1);
+
+    let due = repo.list_due_vault_forwards(Utc::now(), 100).await.unwrap();
+    assert_eq!(due.len(), 1, "the revoked leaf is the sweep's to forward");
+    assert_eq!(due[0].certificate.id, bound.id);
+    assert_eq!(due[0].certificate.user_id, Some(user));
+    let listed = repo
+        .list_revoked_by_issuer(vault_ca, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].revoked_at.is_some());
 }

@@ -507,6 +507,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_purge_claim",
         sql: SCHEMA_V97,
     },
+    Migration {
+        version: 98,
+        name: "certificate_user_binding",
+        sql: SCHEMA_V98,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4771,6 +4776,29 @@ const SCHEMA_V97: &str = "\
 DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE tenant TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v98 — a `User` certificate names the account it was issued for (#533)
+// -----------------------------------------------------------------------
+//
+// No certificate row recorded which user it belonged to, so directory linking
+// (D-28) found a user's `User` certificates by convention — `metadata.user_id`,
+// or a subject common name equal to the username or email, ignoring case —
+// which can revoke another user's certificate whose CN happens to match.
+// Issuance and CSR signing now store the account a `User` certificate is for
+// (`user_id`, validated against the tenant's users), and revoking a user's
+// certificates — linking, administrator deletion, Art. 17 erasure — matches on
+// it; the convention is kept only for rows whose `user_id` is NONE. The index
+// serves that revocation's `tenant_id, user_id` lookup.
+// Additive: one optional column and an index, absent on every existing row,
+// which therefore reads as "issued before the binding" and stays under the
+// convention; no row is rewritten — in particular, `metadata.user_id` is not
+// copied into the column (D-6).
+const SCHEMA_V98: &str = "\
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
+    FIELDS tenant_id, user_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4900,6 +4928,31 @@ mod tests {
             assert!(
                 !SCHEMA_V97.contains(forbidden),
                 "v97 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #533 — v98 gives `certificate` the user binding and its index, and
+    /// rewrites no row (D-6: no backfill from `metadata.user_id`).
+    #[test]
+    fn v98_adds_only_the_certificate_user_binding() {
+        let statements: Vec<&str> = SCHEMA_V98
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS user_id ON TABLE certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
+                 FIELDS tenant_id, user_id",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V98.contains(forbidden),
+                "v98 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6370,10 +6423,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&97),
-            "v97 is the newest migration (#610 — `tenant.purge_claimed_at`, the claim one \
-             replica writes before it purges a tombstoned tenant, so two replicas never purge \
-             one tenant twice; v96 was #612 — `ca_certificate.vault_revoked_at` and the \
+            Some(&98),
+            "v98 is the newest migration (#533 — `certificate.user_id` and its index, the \
+             account a `User` certificate was issued for, so revoking a user's certificates \
+             matches the binding rather than a name; v97 was #610 — `tenant.purge_claimed_at`, \
+             the claim one replica writes before it purges a tombstoned tenant, so two replicas \
+             never purge one tenant twice; v96 was #612 — `ca_certificate.vault_revoked_at` and the \
              leaf table's three backoff columns and index, so a revoked subordinate CA is \
              forwarded to its parent's list in Vault and retried by the sweep; v95 was #603 — \
              the Vault revocation sweep's backoff \

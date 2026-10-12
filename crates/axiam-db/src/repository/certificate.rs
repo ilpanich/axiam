@@ -36,6 +36,8 @@ struct CertificateRow {
     not_after: DateTime<Utc>,
     status: String,
     metadata: serde_json::Value,
+    /// #533 (schema v98); NONE on every row issued before it.
+    user_id: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -53,6 +55,8 @@ struct CertificateRowWithId {
     not_after: DateTime<Utc>,
     status: String,
     metadata: serde_json::Value,
+    /// #533 (schema v98); NONE on every row issued before it.
+    user_id: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -71,6 +75,7 @@ struct VaultForwardRow {
     not_after: DateTime<Utc>,
     status: String,
     metadata: serde_json::Value,
+    user_id: Option<String>,
     created_at: DateTime<Utc>,
     vault_forward_attempts: Option<i64>,
     vault_forward_last_error: Option<String>,
@@ -95,6 +100,7 @@ impl VaultForwardRow {
             not_after: self.not_after,
             status: self.status,
             metadata: self.metadata,
+            user_id: self.user_id,
             created_at: self.created_at,
         }
         .try_into_entry()?;
@@ -241,6 +247,12 @@ fn cert_type_str(t: &CertificateType) -> &'static str {
     }
 }
 
+/// The stored user binding (#533): NONE for a row without one.
+fn parse_user_id(s: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    s.map(|s| Uuid::parse_str(s).map_err(|e| DbError::Migration(format!("invalid user UUID: {e}"))))
+        .transpose()
+}
+
 // ---------------------------------------------------------------------------
 // Row → domain conversion
 // ---------------------------------------------------------------------------
@@ -264,6 +276,7 @@ impl CertificateRow {
             not_after: self.not_after,
             status: parse_status(&self.status)?,
             metadata: self.metadata,
+            user_id: parse_user_id(self.user_id.as_deref())?,
             created_at: self.created_at,
         })
     }
@@ -290,6 +303,7 @@ impl CertificateRowWithId {
             not_after: self.not_after,
             status: parse_status(&self.status)?,
             metadata: self.metadata,
+            user_id: parse_user_id(self.user_id.as_deref())?,
             created_at: self.created_at,
         })
     }
@@ -331,7 +345,8 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                  not_before = $not_before, \
                  not_after = $not_after, \
                  status = $status, \
-                 metadata = $metadata",
+                 metadata = $metadata, \
+                 user_id = $user_id",
             )
             .bind(("id", id_str))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -345,6 +360,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .bind(("not_after", input.not_after))
             .bind(("status", status_str(&CertificateStatus::Active)))
             .bind(("metadata", input.metadata))
+            .bind(("user_id", input.user_id.map(|id| id.to_string())))
             .await
             .map_err(DbError::from)?;
 
@@ -723,10 +739,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         username: &str,
         email: &str,
     ) -> AxiamResult<u64> {
-        // See the trait for why "belongs to" is a convention here. A
-        // certificate matches on `metadata.user_id`, or on its subject common
-        // name equalling the account's username or email, ignoring case — and
-        // only `User`-type certificates that are still active.
+        // See the trait: the binding first (#533), and the convention —
+        // `metadata.user_id`, or the subject common name equalling the
+        // account's username or email, ignoring case — only for a row with no
+        // binding, so another account's certificate is never matched by name.
+        // Only `User`-type certificates that are still active.
         let names: Vec<String> = [username, email]
             .into_iter()
             .map(|name| name.trim().to_lowercase())
@@ -741,8 +758,10 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                   WHERE tenant_id = $tenant_id \
                     AND cert_type = 'User' \
                     AND status = 'Active' \
-                    AND (metadata.user_id = $user_id \
-                         OR string::lowercase(subject) IN $names))",
+                    AND (user_id = $user_id \
+                         OR (user_id = NONE \
+                             AND (metadata.user_id = $user_id \
+                                  OR string::lowercase(subject) IN $names))))",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))

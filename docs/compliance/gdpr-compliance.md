@@ -188,6 +188,33 @@ or its dead-letter queue. Deleting a *target* removes its links and delivery
 state and does **not** deprovision the downstream. Proved end to end by
 [`crates/axiam-server/tests/scim_erasure_propagation_test.rs`](../../crates/axiam-server/tests/scim_erasure_propagation_test.rs).
 
+**What the erasure keeps: the account's certificates, revoked (#533, 1.0.1).**
+Before `anonymize_user` runs, the purge revokes the account's still-active
+`User` certificates (`cleanup.rs::revoke_erased_users_certificates`, step (b4)):
+those issued for it — `certificate.user_id`, set at issuance since schema v98 —
+and, for a certificate issued without that binding (every certificate from
+before 1.0.1), those whose `metadata.user_id` names the account or whose
+subject common name equals its username or email, ignoring case. It runs first
+because that convention reads the names the anonymization overwrites; it is
+fail-closed, so a failure leaves the account due and the next sweep retries.
+The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
+its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
+from the `vault_revocation` sweep — under the same legal-obligation and security
+retention (Art. 17(3)(b), Art. 32) the tenant deletion below records: deleting
+a revoked, unexpired certificate's row would make the certificate valid again to
+every relying party outside AXIAM. What such a row still holds about the person:
+the certificate as issued (its subject DN, which may be a name or an address),
+the `subject` column (the common name), the free-form `metadata`, and `user_id`,
+which names the anonymized account by its internal id. **Residual, not closed
+by 1.0.1:** the per-user erasure does not clear the row's `subject` or `metadata`
+(the tenant purge clears `metadata`), and in a live tenant no job deletes an
+expired certificate row, so that retention is bounded by the tenant's lifetime
+rather than by the certificate's `notAfter`. Recorded in threat T-187. The
+`gdpr.user_pseudonymized` audit row carries `certificates_revoked`. Proved by
+[`cleanup_task.rs::the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes`](../../crates/axiam-server/tests/cleanup_task.rs)
+and
+[`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs).
+
 **Executable proof:** `deletion_pseudonymization` — seeds a user with audit
 entries, runs the full purge pipeline (pseudonymize → anonymize → pseudonymize
 audit → write erasure proof), then asserts: pseudonym format, `Anonymized`
@@ -233,9 +260,13 @@ that keeps a new column from escaping both — and what this path adds to it is
 its own: the `Deleted` status, and the reset of `totp_last_used_step`,
 `failed_login_attempts` and `email_verified_at`, none of which the Art. 17
 pipeline performs. The
-handler additionally revokes all sessions **before** the row is touched, then
-deletes the user's WebAuthn credentials, federation identity links and password
-history, and strips their group memberships and role assignments.
+handler additionally revokes all sessions and the user's still-active `User`
+certificates **before** the row is touched (the certificates by the same rule
+as the purge above, #533, and kept revoked on their issuers' lists; one
+`user.certificates_revoked` audit row carries the count — proved by
+`user_test.rs::deleting_a_user_revokes_their_user_certificates_and_no_one_elses`),
+then deletes the user's WebAuthn credentials, federation identity links and
+password history, and strips their group memberships and role assignments.
 
 The row itself survives, holding its id and nothing identifying. Audit entries
 are append-only and reference their actor by id; dropping the row would leave

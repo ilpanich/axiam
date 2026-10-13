@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **SAML single logout is tested against a real service provider (#538,
+  P23W4-09).** The Keycloak round trip (`saml_idp_keycloak_roundtrip_test`)
+  gains four tests that end a brokered session from each side on both bindings
+  Keycloak supports: a logout started at Keycloak, whose own signed
+  `LogoutRequest` (its `NameID`, the `SessionIndex` AXIAM gave it) AXIAM's
+  `/slo` verifies and answers with a signed `LogoutResponse` that Keycloak
+  verifies; and a logout started at AXIAM's `/sso/logout`, whose signed
+  `LogoutRequest` Keycloak's `SingleLogoutService` verifies and answers with a
+  signed `Success` that AXIAM counts as confirmed. Each checks the AXIAM session
+  in `/oauth2/revocations` and Keycloak's session gone through its admin API.
+  They run in the existing compose step of the `e2e` job; no code changed.
+
 - **Federation no longer sends a credential through a redirect (#591,
   R1W2-04).** The OIDC and OAuth2 token exchanges (client secret, authorization
   code, PKCE verifier) and the OAuth2 userinfo and GitHub verified-email calls

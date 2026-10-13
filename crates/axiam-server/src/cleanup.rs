@@ -71,6 +71,8 @@ pub type SweptClientGrants<C> = ClientGrantStores<
     SurrealRefreshTokenRepository<C>,
     axiam_db::SurrealAuthorizationCodeRepository<C>,
     axiam_db::SurrealPushedAuthRequestRepository<C>,
+    axiam_db::SurrealDeviceGrantRepository<C>,
+    axiam_db::SurrealCibaRequestRepository<C>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -532,11 +534,11 @@ pub fn cimd_client_is_due_for_sweep(
 
 /// The `dcr` arm of [`sweep_unused_external_clients`], kept as a named entry
 /// point because T21.4's tests and the task method both call it that.
-pub async fn sweep_unused_dcr_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_dcr_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
@@ -546,6 +548,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
@@ -559,11 +563,11 @@ where
 }
 
 /// The `cimd` arm of [`sweep_unused_external_clients`] (T21.8 / MCP-04).
-pub async fn sweep_unused_cimd_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_cimd_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
@@ -573,6 +577,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
@@ -634,11 +640,11 @@ where
 ///
 /// A tenant whose settings cannot be read is skipped: the fail-closed
 /// direction for a sweep that **deletes** is to delete nothing.
-pub async fn sweep_unused_external_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_external_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     managed_by: axiam_core::models::oauth2_client::ManagedBy,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
@@ -649,6 +655,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     use axiam_core::models::oauth2_client::ManagedBy;
     use axiam_core::repository::SettingsRepository;

@@ -298,3 +298,86 @@ async fn user_codes_are_unique_within_a_tenant() {
         "the unique index must reject a duplicate user code"
     );
 }
+
+/// #517 / #610 (d) — deleting a client's grants voids every status, and
+/// touches neither another client's grants nor the same client id in another
+/// tenant. An approved grant that survived would redeem against a CIMD client
+/// re-materialised under the same `client_id`.
+#[tokio::test]
+async fn deleting_a_clients_grants_voids_every_status_and_nobody_elses() {
+    let repo = repo().await;
+    let tenant = Uuid::new_v4();
+    let other_tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+
+    // The client's grants: pending, approved, denied, and redeemed.
+    repo.create(grant(tenant, "PENDINGX", "x-pending", 600))
+        .await
+        .unwrap();
+    repo.create(grant(tenant, "APPROVEX", "x-approved", 600))
+        .await
+        .unwrap();
+    repo.create(grant(tenant, "DENIEDXX", "x-denied", 600))
+        .await
+        .unwrap();
+    repo.create(grant(tenant, "REDEEMXX", "x-redeemed", 600))
+        .await
+        .unwrap();
+    assert!(repo.decide(tenant, "APPROVEX", true, user).await.unwrap());
+    assert!(repo.decide(tenant, "DENIEDXX", false, user).await.unwrap());
+    assert!(repo.decide(tenant, "REDEEMXX", true, user).await.unwrap());
+    assert!(repo.redeem(tenant, "x-redeemed").await.unwrap().is_some());
+
+    // Not the client's: another client in the tenant, and the same client id
+    // in another tenant.
+    let mut other_client = grant(tenant, "OTHERCLI", "y-approved", 600);
+    other_client.client_id = "radio-app".into();
+    repo.create(other_client).await.unwrap();
+    repo.create(grant(other_tenant, "ELSEWHER", "x-elsewhere", 600))
+        .await
+        .unwrap();
+    assert!(repo.decide(tenant, "OTHERCLI", true, user).await.unwrap());
+    assert!(
+        repo.decide(other_tenant, "ELSEWHER", true, user)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        repo.delete_all_for_client(tenant, "tv-app").await.unwrap(),
+        4
+    );
+
+    assert!(
+        repo.redeem(tenant, "x-approved").await.unwrap().is_none(),
+        "a voided approved grant cannot be redeemed"
+    );
+    assert!(
+        repo.get_by_device_code_hash(tenant, "x-pending")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.get_by_user_code(tenant, "DENIEDXX")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.redeem(tenant, "y-approved").await.unwrap().is_some(),
+        "another client's grant is untouched"
+    );
+    assert!(
+        repo.redeem(other_tenant, "x-elsewhere")
+            .await
+            .unwrap()
+            .is_some(),
+        "the same client_id in another tenant is another client"
+    );
+    assert_eq!(
+        repo.delete_all_for_client(tenant, "tv-app").await.unwrap(),
+        0,
+        "idempotent"
+    );
+}

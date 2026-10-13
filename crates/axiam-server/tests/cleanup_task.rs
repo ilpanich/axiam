@@ -816,6 +816,8 @@ fn grants(
         axiam_db::SurrealRefreshTokenRepository::new(db.clone()),
         axiam_db::SurrealAuthorizationCodeRepository::new(db.clone()),
         axiam_db::SurrealPushedAuthRequestRepository::new(db.clone()),
+        axiam_db::SurrealDeviceGrantRepository::new(db.clone()),
+        axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
     )
 }
 

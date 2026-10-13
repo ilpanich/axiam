@@ -646,4 +646,30 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
         let removed: Vec<IdRow> = result.take(2).map_err(DbError::from)?;
         Ok(removed.len() as u64)
     }
+
+    async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        // Every status, expired or not: an approved request is the one that
+        // redeems against a re-materialised client, a pending one is listed
+        // on the approval surface for a client that no longer exists. Tenant
+        // AND client id, as `client_id` is unique only within its tenant.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS c FROM (DELETE ciba_request \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 RETURN BEFORE) GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        #[derive(Debug, SurrealValue)]
+        struct CountRow {
+            c: i64,
+        }
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.c.max(0) as u64).unwrap_or(0))
+    }
 }

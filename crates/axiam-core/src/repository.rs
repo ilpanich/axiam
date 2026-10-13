@@ -1824,6 +1824,25 @@ pub trait DeviceGrantRepository: Send + Sync {
 
     /// Remove expired grants. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every grant issued to `client_id` in `tenant_id`, whatever its
+    /// status — pending, approved, denied or redeemed (#517, #610). Returns
+    /// the number deleted.
+    ///
+    /// Called when the client is removed: a `managed_by: cimd` client is
+    /// re-materialised under the same `client_id`, and an approved grant left
+    /// behind would redeem against the new row. Scoped by tenant **and**
+    /// client id, never by client id alone — the id is unique only within its
+    /// tenant. Idempotent.
+    ///
+    /// Against a poll in flight: [`Self::redeem`]'s guarded write needs the
+    /// row to exist, so a redeem that wrote before this delete committed has already
+    /// minted for the old client, and one that writes after matches nothing.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for CIBA backchannel authentication requests (G-7).
@@ -1937,6 +1956,21 @@ pub trait CibaRequestRepository: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         retention: chrono::Duration,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every request started by `client_id` in `tenant_id`, whatever
+    /// its status (#517, #610). Returns the number deleted.
+    ///
+    /// Called when the client is removed: a pending request would otherwise
+    /// stay listed on the approval surface for a client that no longer exists,
+    /// and an approved one could be redeemed once a `managed_by: cimd` client
+    /// is re-materialised under the same `client_id`. Scoped by tenant **and**
+    /// client id. Idempotent. A [`Self::redeem`] racing this delete either
+    /// wrote first (and minted for the old client) or matches nothing.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

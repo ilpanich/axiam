@@ -2725,12 +2725,15 @@ where
         Arc::new(oauth2_client_repo.clone()),
         Arc::new(oauth2_registration_token_repo.clone()),
         Arc::new(settings_repo.clone()),
-        // #517 — a swept client's refresh tokens, codes and pushed requests.
+        // #517, #610 (d) — a swept client's refresh tokens, codes, pushed requests,
+        // device grants and CIBA requests.
         Arc::new(cleanup::SweptClientGrants::new(
             axiam_db::SurrealRefreshTokenRepository::new(db_handle.clone()),
             axiam_db::SurrealAuthorizationCodeRepository::new(db_handle.clone()),
             axiam_db::SurrealPushedAuthRequestRepository::new(db_handle.clone()),
-        )),
+            axiam_db::SurrealDeviceGrantRepository::new(db_handle.clone()),
+            axiam_db::SurrealCibaRequestRepository::new(db_handle.clone(), None),
+)),
         job_health.clone(),
         cleanup_shutdown_rx,
     )

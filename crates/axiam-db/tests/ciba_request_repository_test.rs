@@ -600,3 +600,104 @@ async fn erasure_and_tenant_deletion_remove_the_requests() {
         .unwrap();
     assert!(repo.get_by_id(tenant, req.id).await.unwrap().is_none());
 }
+
+/// #517 / #610 (d) — deleting a client's requests voids every status, and
+/// touches neither another client's requests nor the same client id in
+/// another tenant. A pending request that survived would stay listed for its
+/// user naming a client that no longer exists; an approved one would redeem
+/// against a CIMD client re-materialised under the same `client_id`.
+#[tokio::test]
+async fn deleting_a_clients_requests_voids_every_status_and_nobody_elses() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let other_tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+
+    let pending = repo
+        .create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    let approved_hash = digest();
+    let approved = repo
+        .create(input(tenant, Some(user), &approved_hash, 300))
+        .await
+        .unwrap();
+    assert!(
+        repo.approve(tenant, approved.id, approved.version, user, evidence())
+            .await
+            .unwrap()
+    );
+    let denied = repo
+        .create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    assert!(
+        repo.deny(tenant, denied.id, denied.version, user)
+            .await
+            .unwrap()
+    );
+
+    let mut other_client = input(tenant, Some(user), &digest(), 300);
+    other_client.client_id = "oa_other_client".into();
+    let other_client = repo.create(other_client).await.unwrap();
+    let elsewhere_hash = digest();
+    let elsewhere = repo
+        .create(input(other_tenant, Some(user), &elsewhere_hash, 300))
+        .await
+        .unwrap();
+    assert!(
+        repo.approve(
+            other_tenant,
+            elsewhere.id,
+            elsewhere.version,
+            user,
+            evidence()
+        )
+        .await
+        .unwrap()
+    );
+
+    assert_eq!(
+        repo.delete_all_for_client(tenant, "oa_ciba_client")
+            .await
+            .unwrap(),
+        3
+    );
+
+    assert!(repo.get_by_id(tenant, pending.id).await.unwrap().is_none());
+    assert!(repo.get_by_id(tenant, denied.id).await.unwrap().is_none());
+    assert!(
+        repo.redeem(tenant, &approved_hash, "oa_ciba_client")
+            .await
+            .unwrap()
+            .is_none(),
+        "a voided approved request cannot be redeemed"
+    );
+    let listed = repo.list_pending_for_user(tenant, user, 10).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![other_client.id],
+        "the approval surface lists only the other client's request"
+    );
+    assert!(
+        repo.get_by_id(tenant, other_client.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.redeem(other_tenant, &elsewhere_hash, "oa_ciba_client")
+            .await
+            .unwrap()
+            .is_some(),
+        "the same client_id in another tenant is another client"
+    );
+    assert_eq!(
+        repo.delete_all_for_client(tenant, "oa_ciba_client")
+            .await
+            .unwrap(),
+        0,
+        "idempotent"
+    );
+}

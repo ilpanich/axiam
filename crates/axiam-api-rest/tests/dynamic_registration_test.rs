@@ -1827,6 +1827,138 @@ async fn rfc7592_deletion_revokes_an_issued_refresh_token() {
     }
 }
 
+/// **#610 (d).** RFC 7592's `DELETE` voids the client's device grants and CIBA
+/// requests, in every status, and only that client's.
+///
+/// The device poll authenticates nothing but the device code, so without this
+/// an approved grant outlives the client that started it. The rows are seeded
+/// through the repositories — what is under test is what the deletion path
+/// removes, not how a DCR client came to hold them.
+#[actix_rt::test]
+async fn rfc7592_deletion_voids_device_grants_and_ciba_requests() {
+    use axiam_core::models::ciba::{CibaDeliveryMode, CreateCibaRequest};
+    use axiam_core::models::oauth2_client::CreateDeviceGrant;
+    use axiam_core::repository::{CibaRequestRepository, DeviceGrantRepository};
+    use axiam_db::repository::{SurrealCibaRequestRepository, SurrealDeviceGrantRepository};
+    use axiam_oauth2::device::{generate_user_code, hash_device_code, normalize_user_code};
+
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let user = Uuid::new_v4();
+
+    let device = SurrealDeviceGrantRepository::new(f.db.clone());
+    let ciba = SurrealCibaRequestRepository::new(f.db.clone(), None);
+    let seed_device = |client: String, approve: bool| {
+        let device = device.clone();
+        let tenant_id = f.tenant_id;
+        async move {
+            let hash = hash_device_code(&format!("dc-{}", Uuid::new_v4().simple()));
+            let user_code = normalize_user_code(&generate_user_code());
+            device
+                .create(CreateDeviceGrant {
+                    tenant_id,
+                    client_id: client,
+                    device_code_hash: hash.clone(),
+                    user_code: user_code.clone(),
+                    scopes: vec!["openid".into()],
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+                    interval_secs: 0,
+                    resource: None,
+                })
+                .await
+                .unwrap();
+            if approve {
+                assert!(
+                    device
+                        .decide(tenant_id, &user_code, true, user)
+                        .await
+                        .unwrap()
+                );
+            }
+            hash
+        }
+    };
+    let seed_ciba = |client: String| {
+        let ciba = ciba.clone();
+        let tenant_id = f.tenant_id;
+        async move {
+            ciba.create(CreateCibaRequest {
+                tenant_id,
+                client_id: client,
+                auth_req_id_hash: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+                user_id: Some(user),
+                scopes: vec!["openid".into()],
+                binding_message: None,
+                acr_values: Vec::new(),
+                resource: None,
+                delivery_mode: CibaDeliveryMode::Poll,
+                ping: None,
+                interval_secs: 5,
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            })
+            .await
+            .unwrap()
+            .id
+        }
+    };
+
+    let approved = seed_device(client_id.clone(), true).await;
+    let pending = seed_device(client_id.clone(), false).await;
+    let ciba_pending = seed_ciba(client_id.clone()).await;
+    let other_approved = seed_device("another-client".into(), true).await;
+    let other_ciba = seed_ciba("another-client".into()).await;
+
+    let (status, _, _) = manage!(
+        app,
+        delete,
+        &config_path(&registered),
+        bearer(&rat(&registered))
+    );
+    assert_eq!(status, 204);
+
+    assert!(
+        device
+            .redeem(f.tenant_id, &approved)
+            .await
+            .unwrap()
+            .is_none(),
+        "an approved device grant cannot be redeemed once its client is deregistered"
+    );
+    assert!(
+        device
+            .get_by_device_code_hash(f.tenant_id, &pending)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ciba.get_by_id(f.tenant_id, ciba_pending)
+            .await
+            .unwrap()
+            .is_none(),
+        "a deregistered client's CIBA request is gone"
+    );
+    assert!(
+        ciba.list_pending_for_user(f.tenant_id, user, 10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.id == other_ciba),
+        "the approval surface lists only the other client's request"
+    );
+    assert!(
+        device
+            .redeem(f.tenant_id, &other_approved)
+            .await
+            .unwrap()
+            .is_some(),
+        "another client's grant is untouched"
+    );
+}
+
 /// Deletion releases the `dcr_max_clients` slot (#471): at a quota of one, a
 /// second registration succeeds once the first client deleted itself.
 #[actix_rt::test]

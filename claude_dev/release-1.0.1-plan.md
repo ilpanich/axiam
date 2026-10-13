@@ -445,6 +445,31 @@ which bears on tagging those SDKs 1.0.1; Q6 the three meanings at the
 orchestrator's: §33.3 rule 13 says the per-client CIBA bucket answers
 `rate_limit_exceeded`, while the code answers `slow_down` since 1.0.0.
 
+
+### 11.6 W6 — RADIUS option B (D-2 "yes": D3 and D5 in 1.0.1)
+
+On `claude/release-1.0.1-w6`, cut from the plan branch at `55c3e30`; merged
+into the plan branch as `236822c` (clean). Every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W6.1 (D5) | `9b8b4dc` | Opus 5.5 | the eleven RFC claims re-read from the FreeRADIUS repository's RFC copies; two corrections: T-449 (a `Proxy-State` is echoed, not refused) and T-453 (RFC 5080's duplicate-detection key). Residual: the `roles:assign` delegation gap |
+| W6.2 (D3) | `3f9f820`, `b8fa66f` | Sonnet 5.5 | the e2e is a Rust integration test gated by `AXIAM_E2E_RADIUS=1` (the `directory_e2e.rs` pattern, no `#[ignore]`), and it brings the compose stack up itself because the trust material exists only once AXIAM has issued it. RadSec documented, not exercised (`eapol_test` speaks UDP only). The spike's short `crl_next_update_secs` was not needed: AXIAM serves a revocation at once, and the lag is FreeRADIUS's `ca_path_reload_interval` (≥ 300 s; measured: refused 284 s after revocation). Ed25519 leaf keys come as PKCS#8 v2, which OpenSSL 3.0 cannot read; the guide re-encodes them (#651). Second commit: T-449, T-454, T-456, T-459 Not applicable → Mitigated with the e2e as their test; the other seventeen RADIUS entries stay Not applicable and say why |
+| W6.3 | `085cfc6` | Opus 5.5 | [`security-review-release-1.0.1-w6-2026-10-13.md`](security-review-release-1.0.1-w6-2026-10-13.md): three Medium, nine Low, five Informational |
+| R101W6-03 | `ba79a20` | Sonnet 5.5 | the note's §5.3 bounds certificate binding as well as role assignment. Plan vs tree: `certificates:generate` binds nothing; only the bind route writes the edge, so the rule attaches there |
+| R101W6-02 | `f3c6a68` | Opus 5.5 | confirmed on the live stack first (a bound `DEFAULT` certificate admitted an unbound one). The placement table is keyed on `TLS-Client-Cert-Serial`; the e2e binds `DEFAULT` and `lamp-04\nDEFAULT` subjects and asserts the unbound device is still refused. T-461 amended, dated |
+| R101W6-01 | `1213719` | Opus 5.5 | both tenants' signing CAs now chain to one organization root; the other-tenant device is refused with its leaf alone, with its signing CA, and with the shared root; the positive control with a full chain is admitted. The shipped configuration needed no change. T-459 correction, dated |
+
+Filed on `1.0.x`: #643 (R101W6-04), #644 (-05), #645 (-06), #646 (-07), #647
+(-08), #648 (-11), #649 (-12), #650 (-13), #651 (-15), #652 (-17), and #653
+(serials derived from the public key: two certificates on one key share a
+serial, found while fixing -02). Carried to W7.3: -09 (the four Mitigated
+entries sit on elements still flagged out of scope; T-450 and T-462), -10
+(T-453's correction to be dated in its own text), -16 (stale `security.ts`
+lines and `FINDINGS.md:37`). -14 (the workflow has never run): D-7 —
+`radius-e2e.yml` runs on a pull request to `main` that touches
+`radius_e2e.rs`, so the release pull request is its first CI run.
+
 ---
 
 ## 12. Kickoff prompts

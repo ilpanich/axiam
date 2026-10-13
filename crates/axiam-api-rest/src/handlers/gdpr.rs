@@ -8,7 +8,6 @@
 //! - `GET  /api/v1/auth/account/delete/cancel?token=<opaque>` — public cancel (D-09)
 
 use std::future::Future;
-use std::path::Path;
 
 use actix_web::{HttpResponse, web};
 use axiam_auth::crypto::decrypt_separate;
@@ -190,24 +189,29 @@ pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: Cr
             "gdpr: audit DB-write failed — dead-lettering to append-only file + \
              structured event (legally significant, SECHRD-12)"
         );
-        dead_letter_audit(&dlq_entry, &e);
+        dead_letter_audit(&dlq_entry, &e).await;
     }
 }
 
 /// Dead-letter a failed GDPR audit record to the two durable sinks (D-02).
-fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
+///
+/// The file append runs on the runtime's blocking pool and is synced to the
+/// device before it returns (#594): the handler awaits it, so a record that was
+/// reported as dead-lettered is on disk, and no actix worker blocks on the file.
+async fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
     // Sink 1: append-only local file on a mounted volume (T-24-62). Opened
     // with `.append(true)` — an existing file is never truncated/rewritten,
     // matching AXIAM's append-only audit posture. The line is the one the
     // request-audit worker's dead letters use (`axiam_audit::dead_letter`).
-    match std::env::var(GDPR_AUDIT_DLQ_FILE_ENV) {
-        Ok(path) => {
-            // The whole budget, the reserve above the request rows' share
-            // included (R1W2-02). An invalid value failed the boot already.
-            let max_bytes = axiam_audit::dead_letter::max_bytes_from_env()
-                .unwrap_or(axiam_audit::dead_letter::DEFAULT_MAX_BYTES);
-            if let Err(e) =
-                axiam_audit::dead_letter::append_blocking(Path::new(&path), entry, max_bytes)
+    // The path and the budget (the whole of it, the reserve above the request
+    // rows' share included, R1W2-02) are read once, here; an invalid budget
+    // failed the boot already.
+    match axiam_audit::dead_letter::DeadLetterTarget::from_env() {
+        Some(target) => {
+            let path = target.path.display().to_string();
+            // A join error (the write task panicked) is an I/O error like any
+            // other: logged, and the structured event below still fires.
+            if let Err(e) = axiam_audit::dead_letter::append_off_thread(target, entry.clone()).await
             {
                 tracing::error!(
                     error = %e,
@@ -216,7 +220,7 @@ fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
                 );
             }
         }
-        Err(_) => {
+        None => {
             tracing::warn!(
                 env_var = GDPR_AUDIT_DLQ_FILE_ENV,
                 "gdpr: audit dead-letter FILE sink skipped (env var not set); \

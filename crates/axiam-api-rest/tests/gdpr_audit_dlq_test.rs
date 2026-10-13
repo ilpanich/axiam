@@ -143,6 +143,14 @@ fn gdpr_audit_dlq_on_db_failure() {
     }
 
     // --- Sink 1: append-only dead-letter file --------------------------
+    // The seed file was created under the process umask; opening it for the
+    // record restricts it to its owner (#594).
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&dlq_path),
+        0o600,
+        "an existing dead-letter file is tightened to owner-only"
+    );
     let contents = std::fs::read_to_string(&dlq_path).expect("read dead-letter file");
     let lines: Vec<&str> = contents.lines().collect();
     let _ = std::fs::remove_file(&dlq_path);
@@ -269,6 +277,12 @@ async fn refuse_audit_appends(db: &Surreal<TestDb>) {
     .unwrap();
 }
 
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 fn dead_letter_file(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "axiam-gdpr-request-dlq-{tag}-{}-{}.jsonl",
@@ -334,6 +348,13 @@ async fn post_with_failing_audit(uri: &str, tag: &str) -> (Fixture, Vec<Value>) 
         "the request itself must succeed"
     );
 
+    // The handler created the file: owner-only, not the process umask's mode.
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&path),
+        0o600,
+        "a dead-letter file the handler created is owner-only"
+    );
     let contents = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     let lines = contents

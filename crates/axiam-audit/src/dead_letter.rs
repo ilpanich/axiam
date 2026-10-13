@@ -11,13 +11,28 @@
 //!
 //! Two ways in:
 //!
-//! - [`append_blocking`] writes the line before it returns. For a caller that is
-//!   already off the request path and wants the guarantee, such as the cleanup
-//!   sweep's erasure record.
+//! - [`append_blocking`] and [`append_off_thread`] write the line, and sync it
+//!   to the device, before they return. For a caller that wants the guarantee:
+//!   the cleanup sweep's erasure record and the GDPR request records. The
+//!   first blocks its thread on file I/O; a request handler uses the second,
+//!   which runs the same write on the runtime's blocking pool (#594).
 //! - [`DeadLetterWriter`] queues the row and returns at once; a writer task owns
 //!   the file. For a caller that must not wait on file I/O — the request-audit
 //!   middleware, whose only reason to dead-letter is that the system is under
-//!   pressure.
+//!   pressure. The task syncs the file's data after each batch it writes.
+//!
+//! # Durability and mode (#594)
+//!
+//! Each line is one `write_all` of the line and its newline, so two records
+//! never share a line. A write that has returned has also been through
+//! `sync_data`: a host crash does not take it back. (The file's directory entry
+//! is not synced separately, so a crash right after the file was first created
+//! can still lose the file itself.) Both openers create the file with mode
+//! `0600` on Unix rather than the process umask's, and tighten an existing
+//! file that is readable by group or others to `0600` when they open it (a
+//! failure to do so is logged, not fatal: the record is still written). The
+//! lines carry user and tenant identifiers and, for a request row, a client
+//! address.
 //!
 //! # The budget (R1W2-02)
 //!
@@ -158,10 +173,98 @@ pub fn encode_line(entry: &CreateAuditLogEntry) -> serde_json::Result<String> {
     }
 }
 
-/// Append `entry` to the file at `path` and return when it has been written.
+/// The mode a dead-letter file is created with, and tightened to: owner only.
+#[cfg(unix)]
+const FILE_MODE: u32 = 0o600;
+
+/// The options both openers use: create, append, and owner-only on Unix.
+fn open_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(FILE_MODE);
+    }
+    options
+}
+
+/// Whether `meta` says the file is readable or writable by group or others.
+/// `mode(0o600)` applies only when the file is created, so a file an earlier
+/// version (or an operator) made under a 0644 umask is found this way.
+#[cfg(unix)]
+fn is_exposed(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode() & 0o077 != 0
+}
+
+/// The permissions an exposed file is tightened to.
+#[cfg(unix)]
+fn owner_only() -> std::fs::Permissions {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::Permissions::from_mode(FILE_MODE)
+}
+
+#[cfg(unix)]
+fn tighten_failed(path: &Path, error: &std::io::Error) {
+    tracing::warn!(
+        error = %error,
+        path = %path.display(),
+        "audit dead-letter file is readable by group or others and could not be \
+         restricted to its owner"
+    );
+}
+
+/// The dead-letter file a GDPR record goes to, and its budget, as the
+/// environment names them: read once, when this is built, so one record is
+/// judged against one path and one budget. A deployment without
+/// [`DEAD_LETTER_FILE_ENV`] has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetterTarget {
+    /// The file.
+    pub path: PathBuf,
+    /// The whole of the budget, the GDPR records' reserve included.
+    pub max_bytes: u64,
+}
+
+impl DeadLetterTarget {
+    /// The target [`DEAD_LETTER_FILE_ENV`] and [`MAX_BYTES_ENV`] name, or
+    /// `None` when the file is unset or empty. An invalid budget falls back to
+    /// [`DEFAULT_MAX_BYTES`]: the boot refuses one ([`DeadLetterWriter::from_env`]),
+    /// so a running server has none, and a record is not dropped over it.
+    pub fn from_env() -> Option<Self> {
+        let path = std::env::var_os(DEAD_LETTER_FILE_ENV).filter(|p| !p.is_empty())?;
+        Some(Self {
+            path: PathBuf::from(path),
+            max_bytes: max_bytes_from_env().unwrap_or(DEFAULT_MAX_BYTES),
+        })
+    }
+}
+
+/// [`append_blocking`] on the runtime's blocking pool, for a caller on an async
+/// task (a request handler): the file I/O, including the sync, does not hold the
+/// worker. Returns when the line is written and synced.
+///
+/// The write runs to completion even if the caller is dropped meanwhile, and a
+/// task that panicked or was cancelled is reported as an I/O error, the same as
+/// a write that failed. Needs a Tokio runtime.
+pub async fn append_off_thread(
+    target: DeadLetterTarget,
+    entry: CreateAuditLogEntry,
+) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || append_blocking(&target.path, &entry, target.max_bytes))
+        .await
+        .map_err(|e| std::io::Error::other(format!("dead-letter write task failed: {e}")))?
+}
+
+/// Append `entry` to the file at `path` and return when it has been written and
+/// synced (`sync_data`).
 ///
 /// Opens with `append(true)`: an existing file is never truncated or rewritten.
-/// Blocks on file I/O, so not for the request path — see [`DeadLetterWriter`].
+/// A new file is created `0600`, and an existing one that group or others can
+/// read is tightened to it (see the module docs). Blocks on file I/O, so not
+/// for the request path: use [`append_off_thread`] there, or
+/// [`DeadLetterWriter`] for a row that does not need the guarantee.
 ///
 /// For the GDPR records: it may write into the reserve above the request rows'
 /// share, up to the whole of `max_bytes`, and refuses a line that would cross
@@ -175,11 +278,15 @@ pub fn append_blocking(
 ) -> std::io::Result<()> {
     let mut line = encode_line(entry).map_err(std::io::Error::other)?;
     line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let size = file.metadata()?.len();
+    let mut file = open_options().open(path)?;
+    let meta = file.metadata()?;
+    #[cfg(unix)]
+    if is_exposed(&meta)
+        && let Err(e) = file.set_permissions(owner_only())
+    {
+        tighten_failed(path, &e);
+    }
+    let size = meta.len();
     if size + line.len() as u64 > max_bytes {
         return Err(std::io::Error::new(
             std::io::ErrorKind::StorageFull,
@@ -189,7 +296,9 @@ pub fn append_blocking(
             ),
         ));
     }
-    file.write_all(line.as_bytes())
+    // One call, so the newline cannot be separated from its line.
+    file.write_all(line.as_bytes())?;
+    file.sync_data()
 }
 
 /// What [`DeadLetterWriter::submit`] did with a row.
@@ -447,13 +556,16 @@ async fn append(
     lines: &[String],
 ) -> std::io::Result<Appended> {
     if file.is_none() {
-        *file = Some(
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await?,
-        );
+        let opened = tokio::fs::OpenOptions::from(open_options())
+            .open(path)
+            .await?;
+        #[cfg(unix)]
+        if is_exposed(&opened.metadata().await?)
+            && let Err(e) = opened.set_permissions(owner_only()).await
+        {
+            tighten_failed(path, &e);
+        }
+        *file = Some(opened);
     }
     let f = file.as_mut().expect("opened above");
     let mut size = f.metadata().await?.len();
@@ -471,6 +583,8 @@ async fn append(
     if written > 0 {
         f.write_all(bytes.as_bytes()).await?;
         f.flush().await?;
+        // The batch is on the device before it is counted as written.
+        f.sync_data().await?;
     }
     Ok(Appended {
         written,

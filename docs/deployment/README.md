@@ -1854,7 +1854,18 @@ sink, a structured log event on the target `axiam.audit.dlq`.
 1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
    per record, the fields of an audit entry (`tenant_id`, `actor_id`,
    `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
-   the server opens it for append and never rewrites or truncates it. It is
+   the server opens it for append and never rewrites or truncates it. Each
+   record is one write of the line and its newline, and the server syncs the
+   file's data to the device before it counts the record as written (the GDPR
+   records, per record; the request-audit rows, per batch), so a host crash does
+   not take back a record the server reported. The directory entry is not synced
+   separately: a crash moments after the file was first created can lose the
+   file. The file is created with mode `0600`, and an existing file that group or
+   others can read is restricted to `0600` when the server opens it (a server
+   that cannot, because the file belongs to another user, logs a warning and
+   writes anyway); the lines carry user and tenant identifiers, so keep a copy
+   you make owner-only too. The GDPR request records are written on the
+   runtime's blocking pool, not on a request worker. It is
    configured in every shipped deployment, always at
    `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`:
 

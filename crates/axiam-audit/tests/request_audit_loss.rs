@@ -488,3 +488,136 @@ async fn a_long_path_and_address_are_truncated_in_the_line() {
     assert!(ip.len() <= MAX_ADDRESS_BYTES && ip.ends_with("...[truncated]"));
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// The file's mode and its writes (#594)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn mode_of(path: &PathBuf) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// A file the process creates is owner-only whatever the umask is, by either
+/// opener: the GDPR records' (`append_blocking`, and the off-thread form a
+/// handler awaits) and the request-audit writer's task.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_created_dead_letter_file_is_owner_only() {
+    use axiam_audit::dead_letter::{DeadLetterTarget, append_blocking, append_off_thread};
+
+    // Under the usual 022 umask the process's own default would be 0644, the
+    // mode the issue describes; the openers set 0600 whatever it is.
+    let blocking = dlq_path();
+    append_blocking(&blocking, &request_row("gdpr.erasure_requested"), BUDGET).unwrap();
+    assert_eq!(mode_of(&blocking), 0o600, "append_blocking");
+
+    let off_thread = dlq_path();
+    append_off_thread(
+        DeadLetterTarget {
+            path: off_thread.clone(),
+            max_bytes: BUDGET,
+        },
+        request_row("gdpr.data_export_requested"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mode_of(&off_thread), 0o600, "append_off_thread");
+    assert_eq!(rows(&off_thread).len(), 1);
+
+    let writer_file = dlq_path();
+    let writer = DeadLetterWriter::spawn_with_budget(&writer_file, BUDGET);
+    writer.submit(request_row("GET /api/thing"));
+    assert!(writer.flush(Duration::from_secs(10)).await);
+    assert_eq!(mode_of(&writer_file), 0o600, "the writer task");
+    assert_eq!(rows(&writer_file).len(), 1);
+
+    for p in [blocking, off_thread, writer_file] {
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
+/// `mode(0o600)` applies only at creation, so a file an earlier run made
+/// readable by group and others is restricted when either opener meets it —
+/// and its existing lines are kept.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_existing_world_readable_file_is_restricted_when_opened() {
+    use axiam_audit::dead_letter::append_blocking;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let open_wide = |path: &PathBuf| {
+        std::fs::write(path, "").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode_of(path), 0o644);
+    };
+
+    let blocking = dlq_path();
+    open_wide(&blocking);
+    append_blocking(&blocking, &request_row("gdpr.erasure_requested"), BUDGET).unwrap();
+    assert_eq!(mode_of(&blocking), 0o600, "append_blocking");
+    assert_eq!(rows(&blocking).len(), 1);
+
+    let writer_file = dlq_path();
+    open_wide(&writer_file);
+    let writer = DeadLetterWriter::spawn_with_budget(&writer_file, BUDGET);
+    writer.submit(request_row("GET /api/thing"));
+    assert!(writer.flush(Duration::from_secs(10)).await);
+    assert_eq!(mode_of(&writer_file), 0o600, "the writer task");
+    assert_eq!(rows(&writer_file).len(), 1);
+
+    for p in [blocking, writer_file] {
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
+/// Each record is one line: GDPR appends and the writer task's batches, run
+/// at once against one file, never leave two records on a line or a line
+/// without its newline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_never_share_a_line() {
+    use axiam_audit::dead_letter::{DeadLetterTarget, append_off_thread};
+
+    let path = dlq_path();
+    let writer = DeadLetterWriter::spawn_with_budget(&path, 64 * 1024 * 1024);
+    let target = DeadLetterTarget {
+        path: path.clone(),
+        max_bytes: 64 * 1024 * 1024,
+    };
+    let gdpr = tokio::spawn({
+        let target = target.clone();
+        async move {
+            for _ in 0..200 {
+                append_off_thread(target.clone(), request_row("gdpr.erasure_requested"))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    for _ in 0..400 {
+        writer.submit(request_row("GET /api/thing"));
+        tokio::task::yield_now().await;
+    }
+    gdpr.await.unwrap();
+    assert!(writer.flush(Duration::from_secs(30)).await);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.ends_with('\n'));
+    let lines: Vec<&str> = text.lines().collect();
+    let parsed = rows(&path);
+    assert_eq!(
+        lines.len(),
+        parsed.len(),
+        "every line is exactly one record"
+    );
+    assert_eq!(
+        parsed
+            .iter()
+            .filter(|r| r.action == "gdpr.erasure_requested")
+            .count(),
+        200
+    );
+    assert_eq!(lines.len() as u64, 200 + writer.written());
+    let _ = std::fs::remove_file(&path);
+}

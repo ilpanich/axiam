@@ -831,8 +831,10 @@ where
 /// for a deleted tenant's certificates, here for one account's.
 ///
 /// Matches the binding (`certificate.user_id`, schema v98) and, for a row
-/// without one, the older convention on the account's username and email — so
-/// it must run **before** `anonymize_user` overwrites them, which the purge
+/// without one, the older convention on the account's username and email —
+/// limited to certificates created since the account was and to names no other
+/// account of the tenant holds (R101W1-01), so a holder erasing their own
+/// account cannot revoke a namesake's certificate — so it must run **before** `anonymize_user` overwrites them, which the purge
 /// does by calling it ahead of [`run_erasure_pipeline_reporting`]. Fatal there
 /// (`?`), like the credential deletions beside it: the account stays due and
 /// the next sweep retries, with its names still in place.
@@ -846,7 +848,13 @@ where
     CR: axiam_core::repository::CertificateRepository,
 {
     cert_repo
-        .revoke_user_certificates(user.tenant_id, user.id, &user.username, &user.email)
+        .revoke_user_certificates(
+            user.tenant_id,
+            user.id,
+            &user.username,
+            &user.email,
+            user.created_at,
+        )
         .await
 }
 

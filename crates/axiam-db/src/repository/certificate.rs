@@ -738,12 +738,22 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         user_id: Uuid,
         username: &str,
         email: &str,
+        user_created_at: DateTime<Utc>,
     ) -> AxiamResult<u64> {
         // See the trait: the binding first (#533), and the convention —
         // `metadata.user_id`, or the subject common name equalling the
         // account's username or email, ignoring case — only for a row with no
         // binding, so another account's certificate is never matched by name.
         // Only `User`-type certificates that are still active.
+        //
+        // R101W1-01: the name match is further limited to rows created at or
+        // after the account, and to names no other account of the tenant
+        // holds. `$taken` is the collision rule of
+        // `SurrealUserRepository::identity_collision` — both columns, folded,
+        // every status, the account itself left out — computed in the same
+        // query as the revocation, so no caller can skip it. The binding and
+        // the `metadata.user_id` match (a random id nobody can be named
+        // after) are not bounded.
         let names: Vec<String> = [username, email]
             .into_iter()
             .map(|name| name.trim().to_lowercase())
@@ -753,7 +763,15 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .db
             .current()
             .query(
-                "SELECT meta::id(id) AS record_id FROM \
+                "LET $taken = array::flatten( \
+                     SELECT VALUE [string::lowercase(username), string::lowercase(email)] \
+                     FROM user \
+                     WHERE tenant_id = $tenant_id \
+                       AND meta::id(id) != $user_id \
+                       AND (string::lowercase(username) IN $names \
+                            OR string::lowercase(email) IN $names)); \
+                 LET $unambiguous = array::complement($names, $taken); \
+                 SELECT meta::id(id) AS record_id FROM \
                  (UPDATE certificate SET status = 'Revoked', revoked_at = time::now() \
                   WHERE tenant_id = $tenant_id \
                     AND cert_type = 'User' \
@@ -761,17 +779,20 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                     AND (user_id = $user_id \
                          OR (user_id = NONE \
                              AND (metadata.user_id = $user_id \
-                                  OR string::lowercase(subject) IN $names))))",
+                                  OR (created_at >= $user_created_at \
+                                      AND string::lowercase(subject) IN $unambiguous)))))",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .bind(("names", names))
+            .bind(("user_created_at", user_created_at))
             .await
             .map_err(DbError::from)?;
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<RevokedCertificateRow> = result.take(0).map_err(DbError::from)?;
+        // LET, LET, SELECT.
+        let rows: Vec<RevokedCertificateRow> = result.take(2).map_err(DbError::from)?;
         Ok(rows.len() as u64)
     }
 

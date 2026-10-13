@@ -604,10 +604,24 @@ certificates:
 - a certificate with no `user_id` — every certificate issued before 1.0.1
   (schema v98 copies nothing into the new column), and a `User` certificate
   issued without one — falls back to the 1.0.0 convention: revoked when its
-  `metadata.user_id` names the account, or its subject common name equals the
-  account's username or email, ignoring case. The convention errs towards
-  revoking, so it can revoke another person's unbound certificate whose common
-  name happens to match; issuing with `user_id` is how to avoid that.
+  `metadata.user_id` names the account, or when its subject common name equals
+  the account's username or email, ignoring case — the name match bounded
+  twice:
+  - only a certificate **issued since the account was created** matches by
+    name: one older than the account was not issued for it;
+  - a name **another account of the tenant also holds**, ignoring case, as its
+    username or email and in any status, matches nothing: usernames and
+    emails are unique only case-sensitively, so `alice` and `Alice` can both
+    exist, and deleting or erasing one must not revoke the other's
+    certificate.
+
+  Within those bounds the name match still errs towards revoking — an unbound
+  certificate issued after the account, under its unambiguous name, is revoked
+  with it even if it was meant for someone else — and an unbound certificate
+  of the account that falls outside them (older than the account, or under a
+  shared name) stays active: revoke it by id
+  (`POST /api/v1/certificates/{id}/revoke`). Issuing with `user_id` is how to
+  avoid both.
 
 The revocations are dated, so they are on the issuer's
 [revocation list](#certificate-revocation-lists) at once, and under a

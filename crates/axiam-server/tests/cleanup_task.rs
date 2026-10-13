@@ -2396,3 +2396,87 @@ async fn the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes
         CertificateStatus::Active
     );
 }
+
+/// R101W1-01 — the Art. 17 purge is started by the data subject, so an account
+/// named after an existing certificate's CN must not be able to revoke it by
+/// erasing itself: `Alice`, created after `alice`'s unbound CN-`alice`
+/// certificate, is erased and the certificate stays active.
+#[tokio::test]
+async fn erasing_an_account_leaves_an_older_namesakes_certificate_alone() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::CertificateRepository;
+    use axiam_db::SurrealCertificateRepository;
+    use axiam_server::cleanup::revoke_erased_users_certificates;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db.clone());
+
+    user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("create alice");
+    let alices = certs
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "alice".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: "fp-alice".into(),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::minutes(1),
+            not_after: Utc::now() + chrono::Duration::days(30),
+            metadata: serde_json::json!({}),
+            user_id: None,
+        })
+        .await
+        .unwrap();
+    let erased = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "Alice".into(),
+            email: "ALICE@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("case variants coexist");
+    user_repo
+        .mark_deletion_pending(
+            tenant_id,
+            erased.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("mark deletion pending");
+
+    let due = user_repo
+        .find_due_for_purge(Utc::now())
+        .await
+        .expect("find due");
+    let account = due
+        .iter()
+        .find(|u| u.id == erased.id)
+        .expect("the account is due");
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, account)
+            .await
+            .expect("step (b4)"),
+        0
+    );
+    assert_eq!(
+        certs.get_by_id(tenant_id, alices.id).await.unwrap().status,
+        CertificateStatus::Active,
+        "alice's certificate is not Alice's"
+    );
+}

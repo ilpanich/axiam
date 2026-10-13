@@ -330,6 +330,20 @@
 > revoked; what they still hold about the person (the certificate's subject, the
 > free-form metadata) is a recorded residual of T-187. No status changes.
 >
+> **The 1.0.1 W1 security review (model 2.40.0 — T-336 and T-187 corrected,
+> 2026-10-13, R101W1-01).** The paragraph above left the 1.0.0 convention's
+> common-name match unbounded, and with deletion and the self-service Art. 17
+> erasure now running it, the over-matching it accepted was in new hands:
+> usernames and emails are unique only case-sensitively, so erasing `Alice`
+> revoked `alice`'s unbound certificate, and an account created after a
+> certificate could be named after its common name and revoke it by erasing
+> itself. The name match now reaches only an unbound certificate created at or
+> after the account, and only a name no other account of the tenant holds,
+> ignoring case, in any status; the binding and the `metadata.user_id` match are
+> unchanged, and directory linking — which marks an account that already
+> exists — takes the same bounds. An unbound certificate outside them stays
+> active and is revoked by id. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

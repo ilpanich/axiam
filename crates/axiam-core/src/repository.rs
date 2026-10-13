@@ -3084,11 +3084,25 @@ pub trait CertificateRepository: Send + Sync {
     /// v98, and a `User` certificate issued without one — falls back to the
     /// convention that was all there was before: its `metadata.user_id` naming
     /// the account, or its subject common name equal, ignoring case, to the
-    /// account's `username` or `email`; over-matching there revokes a
-    /// certificate, which is the safe side of the error. A row bound to
-    /// **another** account is never matched by the convention, whatever its
-    /// common name says. Only `User`-type, still-active certificates of the
-    /// tenant are considered.
+    /// account's `username` or `email`. A row bound to **another** account is
+    /// never matched by the convention, whatever its common name says. Only
+    /// `User`-type, still-active certificates of the tenant are considered.
+    ///
+    /// The common-name match is bounded twice (R101W1-01), because a folded
+    /// name is evidence only when nobody else could own it — deletion and the
+    /// self-service erasure revoke irreversibly, and usernames and emails are
+    /// unique only case-sensitively:
+    ///
+    /// * only a row **created at or after** `user_created_at` (the account's
+    ///   own `created_at`) matches by name: a certificate issued before the
+    ///   account existed was not issued for it;
+    /// * a name that **another account** of the tenant also holds, ignoring
+    ///   case, in either column and in any status (the rule of
+    ///   [`UserRepository::find_identity_collision`]), is dropped: an
+    ///   ambiguous name matches nothing.
+    ///
+    /// The binding and the `metadata.user_id` match (a random id the issuer
+    /// wrote, which nobody can be named after) are not bounded.
     ///
     /// What linking an account to its directory entry, an administrator's
     /// deletion and the Art. 17 erasure call. Each revoked row carries
@@ -3096,7 +3110,7 @@ pub trait CertificateRepository: Send + Sync {
     /// `vault_revoked_at` NONE, so the cleanup job's `vault_revocation` sweep
     /// forwards it when its issuer's key is held by `vault_pki` (T-470). The
     /// caller passes the account's names as they are **before** any erasure
-    /// overwrites them.
+    /// overwrites them, and its `created_at`.
     ///
     /// Required, with no default, for the reason
     /// [`WebauthnCredentialRepository::delete_by_user`] gives: a default of
@@ -3107,6 +3121,7 @@ pub trait CertificateRepository: Send + Sync {
         user_id: Uuid,
         username: &str,
         email: &str,
+        user_created_at: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,

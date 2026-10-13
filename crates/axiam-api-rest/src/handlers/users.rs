@@ -569,16 +569,19 @@ pub async fn delete<C: Connection + Clone>(
         // session revocation's does: retried after the tombstone, the
         // convention would have nothing left to match. An account that does
         // not exist (the delete below then answers 404) is matched by its id
-        // alone.
-        let (username, email) = target
-            .as_ref()
-            .map_or(("", ""), |t| (t.username.as_str(), t.email.as_str()));
+        // alone. R101W1-01: the convention matches only certificates issued
+        // since the account's `created_at`, under a name no other account
+        // holds — so deleting `Alice` leaves `alice`'s certificate alone.
+        let (username, email, created_at) = target.as_ref().map_or_else(
+            || ("", "", chrono::Utc::now()),
+            |t| (t.username.as_str(), t.email.as_str(), t.created_at),
+        );
         let certificates_revoked = {
             use axiam_core::repository::CertificateRepository as _;
             state
                 .pki
                 .cert_repo
-                .revoke_user_certificates(user.tenant_id, target_id, username, email)
+                .revoke_user_certificates(user.tenant_id, target_id, username, email, created_at)
                 .await?
         };
 

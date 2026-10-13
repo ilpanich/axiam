@@ -194,7 +194,14 @@ Before `anonymize_user` runs, the purge revokes the account's still-active
 those issued for it — `certificate.user_id`, set at issuance since schema v98 —
 and, for a certificate issued without that binding (every certificate from
 before 1.0.1), those whose `metadata.user_id` names the account or whose
-subject common name equals its username or email, ignoring case. It runs first
+subject common name equals its username or email, ignoring case. The name
+match is bounded (R101W1-01): it reaches only certificates issued since the
+account was created, and no name another account of the tenant also holds,
+ignoring case — the erasure is the data subject's to start, and without the
+bounds an account named after a case variant of another's username, or after
+an older certificate's common name, would revoke that certificate by erasing
+itself. An unbound certificate of the account outside the bounds stays active
+and is an administrator's to revoke by id. It runs first
 because that convention reads the names the anonymization overwrites; it is
 fail-closed, so a failure leaves the account due and the next sweep retries.
 The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
@@ -213,7 +220,11 @@ rather than by the certificate's `notAfter`. Recorded in threat T-187. The
 `gdpr.user_pseudonymized` audit row carries `certificates_revoked`. Proved by
 [`cleanup_task.rs::the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes`](../../crates/axiam-server/tests/cleanup_task.rs)
 and
-[`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs).
+[`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs);
+the bounds by
+[`cleanup_task.rs::erasing_an_account_leaves_an_older_namesakes_certificate_alone`](../../crates/axiam-server/tests/cleanup_task.rs)
+and the repository tests in
+[`directory_provisioning_repo_test.rs`](../../crates/axiam-db/tests/directory_provisioning_repo_test.rs).
 
 **Executable proof:** `deletion_pseudonymization` — seeds a user with audit
 entries, runs the full purge pipeline (pseudonymize → anonymize → pseudonymize
@@ -264,7 +275,9 @@ handler additionally revokes all sessions and the user's still-active `User`
 certificates **before** the row is touched (the certificates by the same rule
 as the purge above, #533, and kept revoked on their issuers' lists; one
 `user.certificates_revoked` audit row carries the count — proved by
-`user_test.rs::deleting_a_user_revokes_their_user_certificates_and_no_one_elses`),
+`user_test.rs::deleting_a_user_revokes_their_user_certificates_and_no_one_elses`,
+and the name match's bounds by
+`user_test.rs::deleting_an_account_leaves_an_older_namesakes_certificate_alone`),
 then deletes the user's WebAuthn credentials, federation identity links and
 password history, and strips their group memberships and role assignments.
 

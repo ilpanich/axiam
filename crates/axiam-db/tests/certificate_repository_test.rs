@@ -663,7 +663,13 @@ async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_
 
     // The sample's CN matches no name passed here: only the binding matches.
     let revoked = repo
-        .revoke_user_certificates(tenant_id, user, "nobody", "nobody@example.com")
+        .revoke_user_certificates(
+            tenant_id,
+            user,
+            "nobody",
+            "nobody@example.com",
+            Utc::now() - Duration::hours(1),
+        )
         .await
         .unwrap();
     assert_eq!(revoked, 1);

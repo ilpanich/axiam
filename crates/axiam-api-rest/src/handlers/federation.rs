@@ -45,6 +45,17 @@ pub const AUDIT_METADATA_SIGNING_CERT_CLEARED: &str = "federation.metadata_signi
 /// signature check (#530 follow-up, T-474).
 pub const AUDIT_METADATA_SIGNING_CERT_CHANGED: &str = "federation.metadata_signing_cert_changed";
 
+/// Audit action: an update cleared a SAML federation config's assertion
+/// signing certificate (`idp_signing_cert_pem`), the anchor of every federated
+/// sign-in (#611). The config then fails closed (`ConfigIncomplete`) at
+/// assertion verification, so this row marks an outage as much as a weakening.
+pub const AUDIT_IDP_SIGNING_CERT_CLEARED: &str = "federation.idp_signing_cert_cleared";
+
+/// Audit action: an update replaced a SAML federation config's assertion
+/// signing certificate with a different one, re-anchoring which key every
+/// federated sign-in is verified against (#611).
+pub const AUDIT_IDP_SIGNING_CERT_CHANGED: &str = "federation.idp_signing_cert_changed";
+
 /// Audit action: a refetch of a SAML IdP's metadata named an SSO URL on
 /// another host than the copy it replaced (#530, P23W3-07).
 pub const AUDIT_SAML_SSO_HOST_CHANGED: &str = "federation.saml_sso_host_changed";
@@ -737,16 +748,40 @@ async fn audit_sha1_allowed<C: Connection + Clone>(
     }
 }
 
-/// T-474: the audit row for a metadata signing certificate an update cleared
-/// or replaced — which config, which change, and who. Never fails the request:
-/// the write it describes has been done.
-async fn audit_metadata_cert_change<C: Connection + Clone>(
+/// Which of a SAML config's two signing certificates an audit row is about.
+#[derive(Clone, Copy)]
+enum SigningCertKind {
+    /// `idp_metadata_signing_cert_pem` — checks the IdP metadata document (T-474).
+    Metadata,
+    /// `idp_signing_cert_pem` — verifies every assertion (#611).
+    Assertion,
+}
+
+/// T-474 / #611: the audit row for a signing certificate an update cleared or
+/// replaced — which config, which change, and who. Never fails the request:
+/// the write it describes has been done. The PEM itself is never recorded.
+async fn audit_signing_cert_change<C: Connection + Clone>(
     state: &AppState<C>,
     http_req: &HttpRequest,
     user: &AuthenticatedUser,
     config: &FederationConfig,
+    kind: SigningCertKind,
     action: &'static str,
 ) {
+    let mut metadata = serde_json::json!({
+        "federation_config_id": config.id,
+        "provider": config.provider,
+        "provider_kind": config.provider_kind.as_str(),
+    });
+    // Only the metadata certificate has a "signature checked" state to report;
+    // the assertion certificate row carries no such key.
+    let metadata_signature_checked: Option<bool> = match kind {
+        SigningCertKind::Metadata => Some(config.idp_metadata_signing_cert_pem.is_some()),
+        SigningCertKind::Assertion => None,
+    };
+    if let Some(checked) = metadata_signature_checked {
+        metadata["metadata_signature_checked"] = serde_json::json!(checked);
+    }
     if let Err(error) = state
         .audit_repo
         .append(CreateAuditLogEntry {
@@ -757,12 +792,7 @@ async fn audit_metadata_cert_change<C: Connection + Clone>(
             resource_id: Some(config.id),
             outcome: AuditOutcome::Success,
             ip_address: client_ip(http_req),
-            metadata: Some(serde_json::json!({
-                "federation_config_id": config.id,
-                "provider": config.provider,
-                "provider_kind": config.provider_kind.as_str(),
-                "metadata_signature_checked": config.idp_metadata_signing_cert_pem.is_some(),
-            })),
+            metadata: Some(metadata),
         })
         .await
     {
@@ -771,7 +801,7 @@ async fn audit_metadata_cert_change<C: Connection + Clone>(
             config_id = %config.id,
             action,
             %error,
-            "a federation metadata-certificate audit row could not be written"
+            "a federation signing-certificate audit row could not be written"
         );
     }
 }
@@ -1216,6 +1246,20 @@ pub async fn update<C: Connection + Clone>(
         }
         _ => None,
     };
+    // #611: the assertion certificate (`idp_signing_cert_pem`) gets the same
+    // pair, on the same rule: cleared and replaced are audited; setting one
+    // where there was none, re-saving the same PEM and clearing an absent one
+    // are not.
+    let idp_cert_change = match (
+        &req.idp_signing_cert_pem,
+        existing.idp_signing_cert_pem.as_deref(),
+    ) {
+        (Some(None), Some(_)) => Some(AUDIT_IDP_SIGNING_CERT_CLEARED),
+        (Some(Some(new)), Some(old)) if new.trim() != old.trim() => {
+            Some(AUDIT_IDP_SIGNING_CERT_CHANGED)
+        }
+        _ => None,
+    };
 
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
@@ -1292,7 +1336,26 @@ pub async fn update<C: Connection + Clone>(
         audit_sha1_allowed(&state, &http_req, &user, &config).await;
     }
     if let Some(action) = metadata_cert_change {
-        audit_metadata_cert_change(&state, &http_req, &user, &config, action).await;
+        audit_signing_cert_change(
+            &state,
+            &http_req,
+            &user,
+            &config,
+            SigningCertKind::Metadata,
+            action,
+        )
+        .await;
+    }
+    if let Some(action) = idp_cert_change {
+        audit_signing_cert_change(
+            &state,
+            &http_req,
+            &user,
+            &config,
+            SigningCertKind::Assertion,
+            action,
+        )
+        .await;
     }
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }

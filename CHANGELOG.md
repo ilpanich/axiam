@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Replacing or clearing a SAML configuration's assertion certificate is
+  audited (#611).** `idp_signing_cert_pem` is the anchor of every federated
+  sign-in, yet changing it wrote no specific audit row while the metadata
+  certificate did. An update that replaces it with a different certificate now
+  writes `federation.idp_signing_cert_changed`, and one that clears it
+  `federation.idp_signing_cert_cleared` (the configuration then fails closed),
+  each naming the configuration, its provider and the administrator and never the
+  certificate, as the metadata pair does. Setting one where there was none,
+  re-saving the same one and clearing an absent one write nothing. Threat model:
+  T-474 carries a dated extension; totals unchanged.
 - **A byte-order mark no longer hides an XML declaration from the SAML "plainly
   UTF-8" refusal (#605, R1W1-07).** The refusal read the declaration only when
   the text began with `<?xml`, so a document beginning with U+FEFF skipped it

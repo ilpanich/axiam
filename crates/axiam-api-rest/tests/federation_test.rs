@@ -3024,3 +3024,105 @@ async fn p23w3_07_clearing_or_replacing_the_metadata_signing_certificate_is_audi
     assert_eq!(rows(db.clone(), CLEARED).await.len(), 1);
     assert_eq!(rows(db.clone(), CHANGED).await.len(), 1);
 }
+
+/// #611 (b): replacing or clearing a SAML config's assertion certificate
+/// (`idp_signing_cert_pem`) — the anchor of every federated sign-in — is
+/// audited as `federation.idp_signing_cert_changed` and
+/// `federation.idp_signing_cert_cleared`, naming the config and the
+/// administrator and never the PEM, while setting one where there was none,
+/// re-saving the same one and clearing an absent one write nothing. The
+/// metadata-certificate pair does not fire for it.
+#[actix_rt::test]
+async fn r1_611_clearing_or_replacing_the_assertion_signing_certificate_is_audited() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let rows = |db: Surreal<TestDb>, action: &'static str| async move {
+        db.query("SELECT * FROM audit_log WHERE action = $action")
+            .bind(("action", action))
+            .await
+            .expect("query")
+            .take::<Vec<serde_json::Value>>(0)
+            .expect("rows")
+    };
+    const CLEARED: &str = "federation.idp_signing_cert_cleared";
+    const CHANGED: &str = "federation.idp_signing_cert_changed";
+
+    let saml = create_saml_config(&app, &token).await;
+    let id = saml["id"].as_str().unwrap();
+    let first = generated_cert_pem();
+    let second = generated_cert_pem();
+
+    // Set where there was none, then re-saved: no row.
+    for body in [
+        serde_json::json!({ "idp_signing_cert_pem": first }),
+        serde_json::json!({ "idp_signing_cert_pem": first }),
+    ] {
+        let (status, body) = put_config(&app, &token, id, body).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert!(rows(db.clone(), CHANGED).await.is_empty());
+    assert!(rows(db.clone(), CLEARED).await.is_empty());
+
+    // Replaced by another certificate.
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "idp_signing_cert_pem": second }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let changed = rows(db.clone(), CHANGED).await;
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed[0]["resource_id"], id);
+    assert_eq!(changed[0]["actor_id"], user_id.to_string());
+    assert_eq!(changed[0]["metadata"]["federation_config_id"], id);
+    assert!(
+        changed[0]["metadata"]
+            .get("metadata_signature_checked")
+            .is_none(),
+        "the assertion-certificate row carries no metadata-check state: {changed:?}"
+    );
+    let dump = changed[0].to_string();
+    assert!(
+        !dump.contains("BEGIN CERTIFICATE"),
+        "the PEM is never recorded: {dump}"
+    );
+
+    // Cleared.
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "idp_signing_cert_pem": null }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let cleared = rows(db.clone(), CLEARED).await;
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0]["resource_id"], id);
+    assert_eq!(cleared[0]["actor_id"], user_id.to_string());
+
+    // Clearing what is already absent changes nothing.
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "idp_signing_cert_pem": null }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(rows(db.clone(), CLEARED).await.len(), 1);
+    assert_eq!(rows(db.clone(), CHANGED).await.len(), 1);
+
+    // The metadata-certificate pair is untouched by any of it.
+    for action in [
+        "federation.metadata_signing_cert_cleared",
+        "federation.metadata_signing_cert_changed",
+    ] {
+        assert!(rows(db.clone(), action).await.is_empty(), "{action}");
+    }
+}

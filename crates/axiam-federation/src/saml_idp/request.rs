@@ -403,16 +403,30 @@ pub fn parse_authn_request(
 
 /// The libxml options every document AXIAM receives is parsed with — an
 /// `AuthnRequest` or logout message here, imported SP metadata, a `SAMLResponse`
-/// at the ACS, IdP metadata: no recovery (a document that is not well-formed is
-/// refused, not repaired), no network access, no default DTD, and UTF-8 forced
-/// whatever the document declares (#605). [`refuse_other_encodings`] has already
-/// refused any other declaration, so forcing UTF-8 changes no document that
-/// reaches the parser; it removes the parser's freedom to read one differently.
-pub(crate) fn receiver_parser_options() -> libxml::parser::ParserOptions<'static> {
+/// at the ACS, IdP metadata: no recovery (`XML_PARSE_RECOVER` off: a document
+/// that is not well-formed is refused, not repaired), no network access
+/// (`XML_PARSE_NONET`), no entity substitution and no DTD loading, defaulting or
+/// validation (`XML_PARSE_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID` all off), and
+/// UTF-8 forced whatever the document declares (`XML_PARSE_IGNORE_ENC` plus the
+/// explicit encoding, #605). [`refuse_other_encodings`] has already refused any
+/// other declaration, so forcing UTF-8 changes no document that reaches the
+/// parser; it removes the parser's freedom to read one differently.
+///
+/// `no_def_dtd` stays **off**. libxml-rs 0.3 maps it to the value 4 for both
+/// parsers, which is `HTML_PARSE_NODEFDTD` for the HTML parser but
+/// `XML_PARSE_DTDLOAD` — *load the external DTD subset* — for the XML parser.
+/// Until 2026-10-13 it was set here, asking libxml for the opposite of what the
+/// comment said; [`refuse_markup_declarations`] refusing every `<!DOCTYPE` on
+/// the bytes, and `no_net`, kept that from being reachable — as does, once
+/// xmlsec is initialised, the process-wide external-entity loader xmlsec
+/// installs, which refuses every input but the document itself. Public so the
+/// `receiver_parser_options` integration test can parse with it in a process
+/// where xmlsec never runs.
+pub fn receiver_parser_options() -> libxml::parser::ParserOptions<'static> {
     libxml::parser::ParserOptions {
         recover: false,
         no_net: true,
-        no_def_dtd: true,
+        no_def_dtd: false,
         ignore_enc: true,
         encoding: Some("UTF-8"),
         ..Default::default()

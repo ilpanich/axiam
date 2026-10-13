@@ -108,6 +108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change:** an IdP or SP whose signatures name any other transform or a
   `#WithComments` canonicalisation is refused. Threat model: T-477 enters
   (High, Mitigated); T-69 carries a dated correction.
+- **The SAML receiver's parser no longer asks libxml to load an external DTD.**
+  `receiver_parser_options()`, the libxml options for every received SAML
+  document (the assertion consumer, IdP and SP metadata, the IdP's SSO and SLO
+  receiver), set libxml-rs's `no_def_dtd` meaning "no default DTD"; for the XML
+  parser that value is `XML_PARSE_DTDLOAD`, *load the external DTD subset*. It
+  was not reachable — every `<!DOCTYPE` is refused on the bytes before libxml,
+  and network access was off — and it is now off. Threat model: T-474 carries a
+  dated correction, T-67 and T-69 a short one.
 
 ## [1.0.0] - 2026-10-10
 

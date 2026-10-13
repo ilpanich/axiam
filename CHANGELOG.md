@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface back on removes the tenant's `false` so it follows the organization
   again. This supersedes the 1.0.0 note that the page sends both switches at
   their effective values on every save (#600).
+- A line in the audit dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`) is now
+  `{"occurred_at", "reason", "entry"}` rather than the bare audit entry, so the
+  file records when the event happened and why the row is there
+  (`channel_full`, `channel_closed` or `datastore_error`); anything of yours that
+  reads the file sees the new shape, and the replay recipe in the deployment
+  guide reads both forms and carries the two fields into the replayed row's
+  `metadata` as `occurred_at` and `dead_lettered_reason` (#595).
 
 ## [1.0.0] - 2026-10-10
 

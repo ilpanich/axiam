@@ -1852,9 +1852,18 @@ The records written by the sweep and by the GDPR handlers also go to a second
 sink, a structured log event on the target `axiam.audit.dlq`.
 
 1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
-   per record, the fields of an audit entry (`tenant_id`, `actor_id`,
-   `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
-   the server opens it for append and never rewrites or truncates it. Each
+   per record, `{"occurred_at", "reason", "entry"}`: `entry` holds the fields of
+   an audit entry (`tenant_id`, `actor_id`, `actor_type`, `action`,
+   `resource_id`, `outcome`, `ip_address`, `metadata`); `occurred_at` is when
+   the event happened (RFC 3339, UTC) and `reason` is why the row is here
+   (`channel_full`, `channel_closed` or `datastore_error`, never an error's
+   text). For a request-audit row `occurred_at` is the moment the response
+   finished, whatever the writer's queue or the datastore then took; for a GDPR
+   record it is the moment the record was handed to the audit path, right after
+   the action it records and before the datastore write that was refused. Files
+   written before 1.0.1 hold the bare entry on each line, with neither field;
+   the recipe below reads both. The server opens the file for append and never
+   rewrites or truncates it. Each
    record is one write of the line and its newline, and the server syncs the
    file's data to the device before it counts the record as written (the GDPR
    records, per record; the request-audit rows, per batch), so a host crash does
@@ -1888,7 +1897,8 @@ sink, a structured log event on the target `axiam.audit.dlq`.
    one batch of rows. Each line's client-sized fields are cut with a
    `...[truncated]` marker: `action` (the request's method and path) to 512
    bytes and `ip_address` (the forwarded client address) to 64, which bounds a
-   request row's line to about a kilobyte; the audit row in the datastore is cut
+   request row's line, envelope included, to about a kilobyte (the budget counts
+   each line's bytes as written); the audit row in the datastore is cut
    the same way. Every shipped deployment states the budget: the ConfigMap key in
    `k8s/server/configmap.yml`, `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` in both Compose
    files.
@@ -1942,7 +1952,7 @@ source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '"CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
+jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
@@ -1968,10 +1978,14 @@ id (`rand::uuid::v7()`); an earlier form of this recipe let SurrealDB generate
 the id, and AXIAM's audit list fails for the whole tenant while such a row is in
 it (`invalid UUID`). Rows replayed with that form have to be removed with the
 datastore's root account, which the table's append-only permission does not bind,
-and replayed again with this one. The replayed row's `timestamp` is the moment of
-replay — when the original write failed is in the `axiam.audit.dlq` log event, so keep the log
-with the file — and, like every audit row, it can neither be updated nor
-deleted afterwards, so **replay each line once**. Note how many lines you
+and replayed again with this one. The replayed row's `timestamp` is still the
+moment of replay — the statement does not set it — but the event's own time is
+recoverable: the recipe carries the line's `occurred_at` and `reason` into the
+row's `metadata` as `occurred_at` and `dead_lettered_reason`, so the trail can
+be read in the order things happened (a line from before 1.0.1 has neither, and
+its replayed row carries neither; the `axiam.audit.dlq` log event then dates a
+GDPR record, so keep the log with the file). Like every audit row, it can
+neither be updated nor deleted afterwards, so **replay each line once**. Note how many lines you
 replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
 (`tail -n +N`). Do not rename or delete the file while the server runs: the
 request-audit writer keeps its handle open and would keep appending to the
@@ -2013,8 +2027,9 @@ records, in the same one-JSON-line form, and replayed with the same statement as
 above. The write is queued to a writer task (up to 1 024 rows), so the request
 path does no file I/O; a row the writer cannot keep — its queue is full, the
 file is at its budget, or the file cannot be written — is counted in
-`not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
-lines give the former, and the replayed row's `timestamp` is the replay's. With
+`not_recoverable`. Each line carries the time the request finished and the
+reason (`channel_full`, `channel_closed` or `datastore_error`); the
+`axiam.audit.loss` log lines name the error itself. With
 the variable unset the server logs one warning at start (it covers these rows
 and the GDPR records alike) and lost rows are counted and logged only. Both
 Compose files and the Kubernetes manifests set the variable; set it, on a

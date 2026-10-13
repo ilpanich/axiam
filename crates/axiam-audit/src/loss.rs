@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use axiam_core::models::audit::CreateAuditLogEntry;
 use chrono::{DateTime, Utc};
 
-use crate::dead_letter::DeadLetterWriter;
+use crate::dead_letter::{DeadLetterReason, DeadLetterRecord, DeadLetterWriter};
 
 /// The least time between two ERROR lines about lost rows.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(60);
@@ -106,31 +106,48 @@ impl RequestAuditLoss {
     }
 
     /// A row could not be queued: the channel was full or closed. Called on the
-    /// request path, so nothing here waits.
-    pub fn record_dropped(&self, entry: CreateAuditLogEntry, reason: &'static str) {
+    /// request path, so nothing here waits. `occurred_at` is when the request
+    /// finished, which the dead-letter line keeps (#595).
+    pub fn record_dropped(
+        &self,
+        entry: CreateAuditLogEntry,
+        occurred_at: DateTime<Utc>,
+        reason: DeadLetterReason,
+    ) {
         self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-        self.lose(entry, reason, &reason);
+        self.lose(entry, occurred_at, reason, &reason);
     }
 
-    /// The worker took a row off the channel and the append failed.
-    pub fn record_failed(&self, entry: CreateAuditLogEntry, error: &dyn std::fmt::Display) {
+    /// The worker took a row off the channel and the append failed. `occurred_at`
+    /// is when the request finished, not when the append failed: the worker may
+    /// have waited on the datastore for a long time first. `error` is logged,
+    /// never written to the dead-letter line.
+    pub fn record_failed(
+        &self,
+        entry: CreateAuditLogEntry,
+        occurred_at: DateTime<Utc>,
+        error: &dyn std::fmt::Display,
+    ) {
         self.inner.failed.fetch_add(1, Ordering::Relaxed);
-        self.lose(entry, "append failed", error);
+        self.lose(entry, occurred_at, DeadLetterReason::DatastoreError, error);
     }
 
     fn lose(
         &self,
         entry: CreateAuditLogEntry,
-        reason: &'static str,
+        occurred_at: DateTime<Utc>,
+        reason: DeadLetterReason,
         detail: &dyn std::fmt::Display,
     ) {
         self.inner
             .last_loss_ms
             .store(Utc::now().timestamp_millis(), Ordering::Relaxed);
-        self.inner.dead_letter.submit(entry);
+        self.inner
+            .dead_letter
+            .submit(DeadLetterRecord::new(entry, occurred_at, reason));
         let now_ms = self.inner.base.elapsed().as_millis() as u64;
         if self.should_report(now_ms) {
-            self.report(reason, detail);
+            self.report(reason.as_str(), detail);
         }
     }
 

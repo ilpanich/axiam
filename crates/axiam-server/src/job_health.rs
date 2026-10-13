@@ -329,9 +329,14 @@ mod tests {
             ip_address: None,
             metadata: None,
         };
-        loss.record_dropped(entry(), "audit channel full");
-        loss.record_failed(entry(), &"datastore down");
-        loss.record_failed(entry(), &"datastore down");
+        let at = chrono::Utc::now();
+        loss.record_dropped(
+            entry(),
+            at,
+            axiam_audit::dead_letter::DeadLetterReason::ChannelFull,
+        );
+        loss.record_failed(entry(), at, &"datastore down");
+        loss.record_failed(entry(), at, &"datastore down");
 
         let after = h.request_audit().expect("counted");
         assert_eq!((after.dropped, after.failed), (1, 2));

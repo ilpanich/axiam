@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use actix_web::{App, HttpResponse, test, web};
+use axiam_audit::dead_letter::{
+    DeadLetterLine, DeadLetterReason, DeadLetterRecord, decode_line, encode_line,
+};
 use axiam_audit::middleware::AuditMiddleware;
 use axiam_audit::{AuditEvent, AuditEventSink, DeadLetterWriter, RequestAuditLoss};
 use axiam_core::error::{AxiamError, AxiamResult};
@@ -33,6 +36,15 @@ impl Datastore {
         Self {
             fail: true,
             delay: Duration::ZERO,
+            appended: Arc::default(),
+        }
+    }
+
+    /// Refuses every append, after `delay`.
+    fn failing_after(delay: Duration) -> Self {
+        Self {
+            fail: true,
+            delay,
             appended: Arc::default(),
         }
     }
@@ -136,12 +148,27 @@ async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-fn rows(path: &PathBuf) -> Vec<CreateAuditLogEntry> {
+/// The file's lines, each read by the decoder — which takes the envelope and
+/// the bare entry earlier versions wrote alike.
+fn lines_of(path: &PathBuf) -> Vec<DeadLetterLine> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .map(|l| serde_json::from_str(l).expect("a dead-letter line is a CreateAuditLogEntry"))
+        .map(|l| decode_line(l).expect("a dead-letter line is a dead-letter record"))
         .collect()
+}
+
+fn rows(path: &PathBuf) -> Vec<CreateAuditLogEntry> {
+    lines_of(path).into_iter().map(|l| l.entry).collect()
+}
+
+/// A record of `request_row(action)` that happened now, for the file's writers.
+fn record(action: &str) -> DeadLetterRecord {
+    DeadLetterRecord::new(
+        request_row(action),
+        Utc::now(),
+        DeadLetterReason::DatastoreError,
+    )
 }
 
 /// A channel of 2 behind a worker stuck in its first append: of 10 requests at
@@ -190,8 +217,11 @@ async fn a_failed_append_counts_the_row() {
 #[actix_web::test]
 async fn a_dropped_row_lands_in_the_dead_letter_file_in_the_replayable_form() {
     let path = dlq_path();
-    // The file already holds a line: the writer appends, it does not truncate.
-    std::fs::write(&path, "{\"earlier\":\"line\"}\n").unwrap();
+    let before = Utc::now();
+    // The file already holds a line, a bare one as earlier versions wrote it: the
+    // writer appends, it does not truncate, and the decoder reads both forms.
+    let bare = serde_json::to_string(&request_row("GET /earlier")).unwrap();
+    std::fs::write(&path, format!("{bare}\n")).unwrap();
     let mw = AuditMiddleware::spawn_configured(
         Datastore::stuck(),
         None,
@@ -209,12 +239,18 @@ async fn a_dropped_row_lands_in_the_dead_letter_file_in_the_replayable_form() {
     assert!(s.dead_letter_configured);
 
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.starts_with("{\"earlier\":\"line\"}\n"), "appended");
-    let lines: Vec<&str> = text.lines().skip(1).collect();
+    assert!(text.starts_with(&format!("{bare}\n")), "appended");
+    let lines: Vec<DeadLetterLine> = lines_of(&path).into_iter().skip(1).collect();
     assert_eq!(lines.len() as u64, s.dropped);
     for line in lines {
-        let row: CreateAuditLogEntry = serde_json::from_str(line).unwrap();
-        assert_eq!(row.action, "GET /api/thing");
+        assert_eq!(line.entry.action, "GET /api/thing");
+        let at = line.occurred_at.expect("a new line carries its time");
+        assert!(at >= before && at <= Utc::now(), "{at} outside the test");
+        let reason = line.reason.as_deref().unwrap();
+        assert!(
+            reason == "channel_full" || reason == "channel_closed",
+            "{reason}"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -233,9 +269,14 @@ async fn a_failed_row_lands_in_the_dead_letter_file() {
     wait_until("three failed appends", || loss.snapshot().failed == 3).await;
     assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
 
-    let written = rows(&path);
+    let written = lines_of(&path);
     assert_eq!(written.len(), 3);
-    assert!(written.iter().all(|r| r.action == "GET /api/thing"));
+    assert!(written.iter().all(|l| l.entry.action == "GET /api/thing"));
+    assert!(
+        written
+            .iter()
+            .all(|l| l.reason.as_deref() == Some("datastore_error") && l.occurred_at.is_some())
+    );
     assert_eq!(loss.snapshot().dead_lettered, 3);
     let _ = std::fs::remove_file(&path);
 }
@@ -290,6 +331,7 @@ async fn an_unwritable_file_makes_the_rows_unrecoverable() {
             ip_address: None,
             metadata: None,
         },
+        Utc::now(),
         &"datastore down",
     );
     assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
@@ -397,7 +439,7 @@ async fn past_the_budget_request_rows_are_refused_and_counted() {
     let writer = DeadLetterWriter::spawn_with_budget(&path, BUDGET);
     let loss = RequestAuditLoss::new(writer.clone());
     for _ in 0..40 {
-        loss.record_failed(request_row("GET /api/thing"), &"datastore down");
+        loss.record_failed(request_row("GET /api/thing"), Utc::now(), &"datastore down");
     }
     assert!(writer.flush(Duration::from_secs(10)).await);
 
@@ -412,7 +454,7 @@ async fn past_the_budget_request_rows_are_refused_and_counted() {
 
     // Once full, a row is refused at submission.
     assert_eq!(
-        writer.submit(request_row("GET /api/thing")),
+        writer.submit(record("GET /api/thing")),
         axiam_audit::dead_letter::Submitted::Full
     );
     assert_eq!(writer.refused_full(), s.not_recoverable + 1);
@@ -428,13 +470,13 @@ async fn a_gdpr_record_still_fits_in_the_reserve() {
     let path = dlq_path();
     let writer = DeadLetterWriter::spawn_with_budget(&path, BUDGET);
     while writer.refused_full() == 0 {
-        writer.submit(request_row("GET /api/thing"));
+        writer.submit(record("GET /api/thing"));
         assert!(writer.flush(Duration::from_secs(10)).await);
     }
     assert!(writer.is_full());
 
-    let mut erasure = request_row("gdpr.erasure_requested");
-    erasure.ip_address = None;
+    let mut erasure = record("gdpr.erasure_requested");
+    erasure.entry.ip_address = None;
     append_blocking(&path, &erasure, BUDGET).expect("the reserve takes a GDPR record");
     assert_eq!(rows(&path).last().unwrap().action, "gdpr.erasure_requested");
 
@@ -481,7 +523,7 @@ async fn a_long_path_and_address_are_truncated_in_the_line() {
 
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.len() < 1024, "a {} byte line", text.len());
-    let row: CreateAuditLogEntry = serde_json::from_str(text.trim_end()).unwrap();
+    let row = decode_line(text.trim_end()).unwrap().entry;
     assert!(row.action.len() <= MAX_ACTION_BYTES);
     assert!(row.action.starts_with("GET /aaaa") && row.action.ends_with("...[truncated]"));
     let ip = row.ip_address.expect("the forwarded address is kept, cut");
@@ -510,7 +552,7 @@ async fn a_created_dead_letter_file_is_owner_only() {
     // Under the usual 022 umask the process's own default would be 0644, the
     // mode the issue describes; the openers set 0600 whatever it is.
     let blocking = dlq_path();
-    append_blocking(&blocking, &request_row("gdpr.erasure_requested"), BUDGET).unwrap();
+    append_blocking(&blocking, &record("gdpr.erasure_requested"), BUDGET).unwrap();
     assert_eq!(mode_of(&blocking), 0o600, "append_blocking");
 
     let off_thread = dlq_path();
@@ -519,7 +561,7 @@ async fn a_created_dead_letter_file_is_owner_only() {
             path: off_thread.clone(),
             max_bytes: BUDGET,
         },
-        request_row("gdpr.data_export_requested"),
+        record("gdpr.data_export_requested"),
     )
     .await
     .unwrap();
@@ -528,7 +570,7 @@ async fn a_created_dead_letter_file_is_owner_only() {
 
     let writer_file = dlq_path();
     let writer = DeadLetterWriter::spawn_with_budget(&writer_file, BUDGET);
-    writer.submit(request_row("GET /api/thing"));
+    writer.submit(record("GET /api/thing"));
     assert!(writer.flush(Duration::from_secs(10)).await);
     assert_eq!(mode_of(&writer_file), 0o600, "the writer task");
     assert_eq!(rows(&writer_file).len(), 1);
@@ -555,14 +597,14 @@ async fn an_existing_world_readable_file_is_restricted_when_opened() {
 
     let blocking = dlq_path();
     open_wide(&blocking);
-    append_blocking(&blocking, &request_row("gdpr.erasure_requested"), BUDGET).unwrap();
+    append_blocking(&blocking, &record("gdpr.erasure_requested"), BUDGET).unwrap();
     assert_eq!(mode_of(&blocking), 0o600, "append_blocking");
     assert_eq!(rows(&blocking).len(), 1);
 
     let writer_file = dlq_path();
     open_wide(&writer_file);
     let writer = DeadLetterWriter::spawn_with_budget(&writer_file, BUDGET);
-    writer.submit(request_row("GET /api/thing"));
+    writer.submit(record("GET /api/thing"));
     assert!(writer.flush(Duration::from_secs(10)).await);
     assert_eq!(mode_of(&writer_file), 0o600, "the writer task");
     assert_eq!(rows(&writer_file).len(), 1);
@@ -589,14 +631,14 @@ async fn concurrent_writers_never_share_a_line() {
         let target = target.clone();
         async move {
             for _ in 0..200 {
-                append_off_thread(target.clone(), request_row("gdpr.erasure_requested"))
+                append_off_thread(target.clone(), record("gdpr.erasure_requested"))
                     .await
                     .unwrap();
             }
         }
     });
     for _ in 0..400 {
-        writer.submit(request_row("GET /api/thing"));
+        writer.submit(record("GET /api/thing"));
         tokio::task::yield_now().await;
     }
     gdpr.await.unwrap();
@@ -619,5 +661,127 @@ async fn concurrent_writers_never_share_a_line() {
         200
     );
     assert_eq!(lines.len() as u64, 200 + writer.written());
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// The envelope: when, and why (#595)
+// ---------------------------------------------------------------------------
+
+/// A failed row's `occurred_at` is when the request finished, not when the
+/// worker gave up on the append: the datastore here takes 400 ms to refuse it.
+#[actix_web::test]
+async fn a_failed_rows_time_is_the_requests_not_the_flushs() {
+    let path = dlq_path();
+    let delay = Duration::from_millis(400);
+    let mw = AuditMiddleware::spawn_configured(
+        Datastore::failing_after(delay),
+        None,
+        DeadLetterWriter::spawn(&path),
+        4096,
+    );
+    let before = Utc::now();
+    requests(&mw, 1).await;
+    let after_request = Utc::now();
+    let loss = mw.loss();
+    wait_until("the failed append", || loss.snapshot().failed == 1).await;
+    assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+    let after_flush = Utc::now();
+
+    let lines = lines_of(&path);
+    assert_eq!(lines.len(), 1);
+    let at = lines[0].occurred_at.expect("a time");
+    assert!(before <= at && at <= after_request, "{at} is the request's");
+    assert!(
+        after_flush - at >= chrono::Duration::from_std(delay).unwrap(),
+        "the line was written at least {delay:?} after the event it dates"
+    );
+    assert_eq!(lines[0].reason.as_deref(), Some("datastore_error"));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Each reason is a short fixed name, and the line carries nothing of the
+/// error that caused it.
+#[actix_web::test]
+async fn the_reason_is_a_short_name_and_never_the_errors_text() {
+    let path = dlq_path();
+    let loss = RequestAuditLoss::new(DeadLetterWriter::spawn(&path));
+    let secret = "password=hunter2 at 10.0.0.5: connection refused".repeat(100);
+    loss.record_failed(request_row("GET /a"), Utc::now(), &secret);
+    loss.record_dropped(
+        request_row("GET /b"),
+        Utc::now(),
+        DeadLetterReason::ChannelFull,
+    );
+    loss.record_dropped(
+        request_row("GET /c"),
+        Utc::now(),
+        DeadLetterReason::ChannelClosed,
+    );
+    assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("hunter2") && !text.contains("refused"));
+    let reasons: Vec<_> = lines_of(&path)
+        .into_iter()
+        .map(|l| l.reason.unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["datastore_error", "channel_full", "channel_closed"]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The wire shape operators' tooling reads, and the bare form it replaces.
+#[tokio::test]
+async fn a_line_is_the_envelope_and_the_decoder_reads_the_bare_form_too() {
+    let at: chrono::DateTime<Utc> = "2026-10-13T08:30:00.123Z".parse().unwrap();
+    let line = encode_line(&DeadLetterRecord::new(
+        request_row("GET /x"),
+        at,
+        DeadLetterReason::ChannelFull,
+    ))
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["occurred_at"], "2026-10-13T08:30:00.123Z");
+    assert_eq!(v["reason"], "channel_full");
+    assert_eq!(v["entry"]["action"], "GET /x");
+    assert_eq!(v.as_object().unwrap().len(), 3);
+
+    let decoded = decode_line(&line).unwrap();
+    assert_eq!(decoded.occurred_at, Some(at));
+    assert_eq!(decoded.reason.as_deref(), Some("channel_full"));
+    assert_eq!(decoded.entry.action, "GET /x");
+
+    // A line an earlier version wrote: the entry alone.
+    let bare = serde_json::to_string(&request_row("GET /old")).unwrap();
+    let decoded = decode_line(&bare).unwrap();
+    assert_eq!(decoded.occurred_at, None);
+    assert_eq!(decoded.reason, None);
+    assert_eq!(decoded.entry.action, "GET /old");
+
+    assert!(decode_line("{\"earlier\":\"line\"}").is_err());
+}
+
+/// The budget counts the line as written, envelope included.
+#[tokio::test]
+async fn the_budget_counts_the_enveloped_line() {
+    use axiam_audit::dead_letter::append_blocking;
+
+    let path = dlq_path();
+    let rec = record("gdpr.erasure_requested");
+    let line = encode_line(&rec).unwrap();
+    let bare = serde_json::to_string(&rec.entry).unwrap();
+    assert!(line.len() > bare.len(), "the envelope adds bytes");
+
+    // A budget one byte short of the line (and its newline) refuses it; one
+    // that fits takes it, and the file is exactly the line's length.
+    let tight = line.len() as u64;
+    let refused = append_blocking(&path, &rec, tight).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::StorageFull);
+    assert_eq!(file_len(&path), 0);
+    append_blocking(&path, &rec, tight + 1).unwrap();
+    assert_eq!(file_len(&path), tight + 1);
     let _ = std::fs::remove_file(&path);
 }

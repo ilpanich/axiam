@@ -20,7 +20,7 @@ use axiam_core::repository::{
     UserRepository,
 };
 use axiam_db::SurrealAuditLogRepository;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use surrealdb::Connection;
@@ -180,6 +180,10 @@ impl<C: Connection> AuditWriteSink for SurrealAuditLogRepository<C> {
 /// panic or abort on this failure path; the two dead-letter sinks ARE the
 /// durability guarantee for this branch.
 pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: CreateAuditLogEntry) {
+    // When the event happened, for the dead-letter line (#595): the moment the
+    // record was handed here, right after the action it records and before the
+    // datastore write that may be refused — not when the file is appended.
+    let occurred_at = Utc::now();
     let dlq_entry = entry.clone();
     if let Err(e) = sink.write(entry).await {
         tracing::error!(
@@ -189,7 +193,7 @@ pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: Cr
             "gdpr: audit DB-write failed — dead-lettering to append-only file + \
              structured event (legally significant, SECHRD-12)"
         );
-        dead_letter_audit(&dlq_entry, &e).await;
+        dead_letter_audit(dlq_entry, occurred_at, &e).await;
     }
 }
 
@@ -198,7 +202,11 @@ pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: Cr
 /// The file append runs on the runtime's blocking pool and is synced to the
 /// device before it returns (#594): the handler awaits it, so a record that was
 /// reported as dead-lettered is on disk, and no actix worker blocks on the file.
-async fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
+async fn dead_letter_audit(
+    entry: CreateAuditLogEntry,
+    occurred_at: DateTime<Utc>,
+    db_error: &AxiamError,
+) {
     // Sink 1: append-only local file on a mounted volume (T-24-62). Opened
     // with `.append(true)` — an existing file is never truncated/rewritten,
     // matching AXIAM's append-only audit posture. The line is the one the
@@ -211,8 +219,14 @@ async fn dead_letter_audit(entry: &CreateAuditLogEntry, db_error: &AxiamError) {
             let path = target.path.display().to_string();
             // A join error (the write task panicked) is an I/O error like any
             // other: logged, and the structured event below still fires.
-            if let Err(e) = axiam_audit::dead_letter::append_off_thread(target, entry.clone()).await
-            {
+            // The reason is the datastore refusing the write; its error text is
+            // logged below and on the event, never written to the file.
+            let record = axiam_audit::dead_letter::DeadLetterRecord::new(
+                entry.clone(),
+                occurred_at,
+                axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
+            );
+            if let Err(e) = axiam_audit::dead_letter::append_off_thread(target, record).await {
                 tracing::error!(
                     error = %e,
                     path = %path,

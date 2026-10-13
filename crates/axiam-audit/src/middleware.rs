@@ -16,13 +16,14 @@ use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
+use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::dead_letter::DeadLetterWriter;
+use crate::dead_letter::{DeadLetterReason, DeadLetterWriter};
 use crate::loss::RequestAuditLoss;
 
 /// Paths that should not generate audit entries.
@@ -133,7 +134,13 @@ const NOTIFICATION_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// What travels on the worker's channel: an entry, or [`AuditMiddleware::drain`]'s
 /// barrier, acknowledged once every entry queued before it has been written.
 enum Queued {
-    Event(AuditEvent),
+    /// An entry and the moment the request finished — carried beside it, as the
+    /// organization is, so a dead-letter line can say when the event happened
+    /// however long the append then waited (#595).
+    Event {
+        event: AuditEvent,
+        occurred_at: DateTime<Utc>,
+    },
     Barrier(oneshot::Sender<()>),
 }
 
@@ -312,8 +319,8 @@ async fn audit_worker<A: AuditLogRepository>(
     let mut written: u64 = 0;
     let mut last_drop_report: Option<Instant> = None;
     while let Some(queued) = rx.recv().await {
-        let event = match queued {
-            Queued::Event(event) => event,
+        let (event, occurred_at) = match queued {
+            Queued::Event { event, occurred_at } => (event, occurred_at),
             Queued::Barrier(reached) => {
                 // Everything queued before the barrier has been appended (or
                 // failed and been logged). The caller may have given up.
@@ -327,7 +334,7 @@ async fn audit_worker<A: AuditLogRepository>(
         if let Err(e) = repo.append(event.entry.clone()).await {
             // Counted, logged (rate-limited) and sent to the dead-letter file
             // when there is one — see `RequestAuditLoss`.
-            loss.record_failed(event.entry.clone(), &e);
+            loss.record_failed(event.entry.clone(), occurred_at, &e);
         }
 
         written += 1;
@@ -490,6 +497,9 @@ where
                 },
             };
 
+            // When the event happened: the response is complete. Carried to the
+            // worker, so the dead-letter line keeps it (#595).
+            let occurred_at = Utc::now();
             let mut entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
@@ -511,13 +521,17 @@ where
             // `try_send`, never `send`: a full channel must not hold the
             // response. The row it refuses comes back in the error and is
             // counted and offered to the dead-letter queue — also non-blocking.
-            if let Err(refused) = tx.try_send(Queued::Event(AuditEvent { entry, org_id })) {
+            let queued = Queued::Event {
+                event: AuditEvent { entry, org_id },
+                occurred_at,
+            };
+            if let Err(refused) = tx.try_send(queued) {
                 let (reason, queued) = match refused {
-                    TrySendError::Full(q) => ("audit channel full", q),
-                    TrySendError::Closed(q) => ("audit channel closed", q),
+                    TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
+                    TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
                 };
-                if let Queued::Event(event) = queued {
-                    loss.record_dropped(event.entry, reason);
+                if let Queued::Event { event, occurred_at } = queued {
+                    loss.record_dropped(event.entry, occurred_at, reason);
                 }
             }
 

@@ -37,8 +37,11 @@
 //!    re-read it, the device is refused and the others are not;
 //!
 //! and the settings the guide stands behind: a valid certificate that is not in
-//! the placement table is refused, TLS 1.2 is refused, EAP-MD5 is refused, and
-//! an Access-Request without a `Message-Authenticator` is discarded.
+//! the placement table is refused — also when the table holds a bound
+//! certificate whose subject is `DEFAULT`, because the table is keyed on the
+//! certificate serial and never on a subject (R101W6-02) — TLS 1.2 is refused,
+//! EAP-MD5 is refused, and an Access-Request without a `Message-Authenticator`
+//! is discarded.
 //!
 //! # Gating
 //!
@@ -725,6 +728,8 @@ fn supplicant_readable_key(pem: &str) -> String {
 
 /// A device certificate and its key, written where `eapol_test` reads them.
 struct Device {
+    /// The subject with everything but `[A-Za-z0-9-]` replaced, for file and
+    /// service-account names.
     name: String,
     id: String,
     cert: PathBuf,
@@ -737,23 +742,49 @@ async fn issue_device(
     org: &Org,
     tenant: usize,
     ca: &SigningCa,
-    name: &str,
+    subject: &str,
     dir: &Path,
 ) -> Device {
-    let (status, leaf) = api
-        .post(
-            "/api/v1/certificates",
-            &org.tenants[tenant].1,
-            json!({
-                "issuer_ca_id": ca.id,
-                "subject": name,
-                "cert_type": "Device",
-                "key_algorithm": "Ed25519",
-                "validity_days": 30,
-            }),
-        )
-        .await;
-    assert_eq!(status, 201, "issue: the device certificate {name}: {leaf}");
+    let (status, leaf) = try_issue_device(api, org, tenant, ca, subject).await;
+    assert_eq!(
+        status, 201,
+        "issue: the device certificate {subject:?}: {leaf}"
+    );
+    write_device(&leaf, subject, dir)
+}
+
+async fn try_issue_device(
+    api: &Api,
+    org: &Org,
+    tenant: usize,
+    ca: &SigningCa,
+    subject: &str,
+) -> (u16, Value) {
+    api.post(
+        "/api/v1/certificates",
+        &org.tenants[tenant].1,
+        json!({
+            "issuer_ca_id": ca.id,
+            "subject": subject,
+            "cert_type": "Device",
+            "key_algorithm": "Ed25519",
+            "validity_days": 30,
+        }),
+    )
+    .await
+}
+
+fn write_device(leaf: &Value, subject: &str, dir: &Path) -> Device {
+    let name: String = subject
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let pem = leaf["public_cert_pem"]
         .as_str()
         .expect("the certificate")
@@ -768,7 +799,7 @@ async fn issue_device(
     std::fs::write(&cert_path, &pem).expect("the certificate can be written");
     std::fs::write(&key_path, key).expect("the key can be written");
     Device {
-        name: name.into(),
+        name,
         id: leaf["id"].as_str().expect("the certificate id").to_string(),
         cert: cert_path,
         key: key_path,
@@ -802,9 +833,31 @@ async fn bind(api: &Api, org: &Org, tenant: usize, device: &Device) -> String {
     sa_id
 }
 
-/// What an operator's script would do: the placement table is the tenant's
-/// active `Device` certificates that are bound to a service account.
-async fn placement_from_axiam(api: &Api, org: &Org, tenant: usize) -> (String, Vec<String>) {
+/// Whether `key` is a placement-table key the generator may write: the
+/// certificate serial as FreeRADIUS spells `TLS-Client-Cert-Serial` (lowercase
+/// hex, two digits per byte, at most the 20 bytes RFC 5280 allows). Nothing else
+/// is ever written as a key — in particular not `DEFAULT`, which `rlm_files`
+/// matches for every key, nor `NONE`, which it looks a missing key up as, and
+/// neither can be spelt in hex.
+fn is_placement_key(key: &str) -> bool {
+    (2..=40).contains(&key.len())
+        && key.len().is_multiple_of(2)
+        && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// What an operator's script would do (docs/pki/freeradius.md, "the placement
+/// table"): the placement table is the tenant's active `Device` certificates
+/// that are bound to a service account, each keyed on its **serial**, which
+/// AXIAM assigns, and never on its subject, which whoever requests the
+/// certificate chooses (R101W6-02). A key that is not a serial stops the
+/// generator before anything is written. Returns the table, the subjects it
+/// placed (for the assertion that exactly the bound devices are in it) and the
+/// keys it wrote.
+async fn placement_from_axiam(
+    api: &Api,
+    org: &Org,
+    tenant: usize,
+) -> (String, Vec<String>, Vec<String>) {
     let (status, list) = api
         .get(
             "/api/v1/certificates?offset=0&limit=200",
@@ -812,21 +865,40 @@ async fn placement_from_axiam(api: &Api, org: &Org, tenant: usize) -> (String, V
         )
         .await;
     assert_eq!(status, 200, "bind: the certificate list: {list}");
+    let items = list["items"].as_array().expect("an item list");
+    assert_eq!(
+        list["total"].as_u64(),
+        Some(items.len() as u64),
+        "the generator reads the whole list, not its first page"
+    );
     let mut table = String::new();
     let mut placed = Vec::new();
-    for item in list["items"].as_array().expect("an item list") {
+    let mut keys = Vec::new();
+    for item in items {
         let bound = !item["bound_service_account_id"].is_null();
         if item["cert_type"] == "Device" && item["status"] == "Active" && bound {
-            let cn = item["subject"].as_str().expect("a subject");
+            let id: Uuid = item["id"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .expect("a certificate id");
+            let serial = certificate_serial(item["public_cert_pem"].as_str().expect("a PEM"));
+            assert!(
+                is_placement_key(&serial),
+                "the generator refuses certificate {id}: its serial {serial:?} is not a placement \
+                 key, and nothing is written"
+            );
+            // The comment names the certificate by AXIAM's id, never by its
+            // subject: a subject may hold a newline, which would end the comment.
             table.push_str(&format!(
-                "{cn}\n\tTunnel-Type = VLAN,\n\tTunnel-Medium-Type = IEEE-802,\n\
-                 \tTunnel-Private-Group-Id = \"{VLAN}\",\n\tSession-Timeout = 3600,\n\
-                 \tTermination-Action = RADIUS-Request\n\n"
+                "# certificate {id}\n{serial}\n\tTunnel-Type = VLAN,\n\
+                 \tTunnel-Medium-Type = IEEE-802,\n\tTunnel-Private-Group-Id = \"{VLAN}\",\n\
+                 \tSession-Timeout = 3600,\n\tTermination-Action = RADIUS-Request\n\n"
             ));
-            placed.push(cn.to_string());
+            placed.push(item["subject"].as_str().expect("a subject").to_string());
+            keys.push(serial);
         }
     }
-    (table, placed)
+    (table, placed, keys)
 }
 
 /// Fetch the signing CA's list from AXIAM and put it where FreeRADIUS reads it:
@@ -996,6 +1068,22 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     let press09 = issue_device(&api, &plant_a, 0, &line1, "press-09", &work).await;
     let gate03 = issue_device(&api, &plant_a, 1, &line2, "gate-03", &work).await;
     let crane01 = issue_device(&api, &plant_b, 0, &other_org, "crane-01", &work).await;
+    // Two subjects a tenant certificate administrator may choose, and that a
+    // table keyed on the subject would read as something else (R101W6-02):
+    // `DEFAULT`, which `rlm_files` matches for every key, and a subject that
+    // carries a newline and a second entry. AXIAM issues the first. The second
+    // it issues today (R101W6-12); if a later release refuses it, there is
+    // nothing to inject and the case still holds.
+    let default_named = issue_device(&api, &plant_a, 0, &line1, "DEFAULT", &work).await;
+    let injected_subject = "lamp-04\nDEFAULT";
+    let (status, injected) = try_issue_device(&api, &plant_a, 0, &line1, injected_subject).await;
+    let injected = match status {
+        201 => Some(write_device(&injected, injected_subject, &work)),
+        400 => None,
+        other => {
+            panic!("issue: a subject with a newline is issued or refused, not {other}: {injected}")
+        }
+    };
 
     let text = certificate_text(&press07.pem);
     assert!(
@@ -1008,7 +1096,15 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     );
     say(
         "issue",
-        "organization CA, tenant signing CA, five Device certificates",
+        &format!(
+            "organization CA, tenant signing CA, {} Device certificates (one named DEFAULT{})",
+            6 + usize::from(injected.is_some()),
+            if injected.is_some() {
+                ", one with a newline in its subject"
+            } else {
+                "; a subject with a newline is refused"
+            }
+        ),
     );
 
     // ---- 2. bind ----------------------------------------------------------
@@ -1016,16 +1112,46 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     bind(&api, &plant_a, 0, &press09).await;
     bind(&api, &plant_a, 1, &gate03).await;
     bind(&api, &plant_b, 0, &crane01).await;
+    bind(&api, &plant_a, 0, &default_named).await;
+    if let Some(injected) = &injected {
+        bind(&api, &plant_a, 0, injected).await;
+    }
     // press-08 is issued and valid, and bound to nothing.
-    let (table, placed) = placement_from_axiam(&api, &plant_a, 0).await;
+    let (table, placed, keys) = placement_from_axiam(&api, &plant_a, 0).await;
     let mut placed = placed;
     placed.sort();
+    let mut expected = vec!["DEFAULT", "press-07", "press-09"];
+    if injected.is_some() {
+        expected.push(injected_subject);
+    }
+    expected.sort();
     assert_eq!(
-        placed,
-        ["press-07", "press-09"],
+        placed, expected,
         "bind: exactly the bound devices of the tenant are listed as bound"
     );
-    say("bind", "press-07, press-09 bound; press-08 left unbound");
+    // The table's keys are the bound certificates' serials and nothing else:
+    // no entry is named after a subject, so none is `DEFAULT` or `NONE`, and no
+    // subject's newline has started an entry of its own.
+    let entry_names: Vec<&str> = table
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('\t'))
+        .collect();
+    assert_eq!(
+        entry_names, keys,
+        "placement: every entry is keyed on a bound certificate's serial:\n{table}"
+    );
+    assert!(
+        entry_names.iter().all(|k| is_placement_key(k)),
+        "placement: no entry is keyed on anything but a serial:\n{table}"
+    );
+    assert!(
+        !keys.contains(&certificate_serial(&press08.pem)),
+        "placement: the unbound press-08 has no entry"
+    );
+    say(
+        "bind",
+        "press-07, press-09 and DEFAULT bound; press-08 left unbound; the table is keyed on serials",
+    );
 
     // ---- the trust material, and the stack -------------------------------
     std::fs::write(trust.join("ca.pem"), &line1.pem).expect("the CA can be written");
@@ -1124,6 +1250,20 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     );
 
     // ---- placement: a valid certificate that is not in the table ----------
+    // The table holds a bound certificate whose subject is `DEFAULT`. Keyed on
+    // the subject, that entry would match every certificate this CA issued;
+    // keyed on the serial it places that one certificate and nothing else.
+    let default_device = radius.eap_tls(
+        &default_named.name,
+        path_str(&default_named.cert),
+        path_str(&default_named.key),
+        true,
+    );
+    assert!(
+        default_device.accepted,
+        "placement: the bound certificate named DEFAULT is placed as itself:\n{}",
+        default_device.report()
+    );
     let unplaced = radius.eap_tls(
         "press-08",
         path_str(&press08.cert),
@@ -1135,10 +1275,14 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
             && unplaced
                 .log
                 .contains("Certificate rejected by the virtual server"),
-        "unplaced: a valid but unbound device is refused, not admitted onto a default:\n{}",
+        "unplaced: a valid but unbound device is refused, not admitted onto a default, although \
+         a bound certificate named DEFAULT is in the table:\n{}",
         unplaced.log
     );
-    say("unplaced", "press-08 (valid, unbound) refused");
+    say(
+        "unplaced",
+        "press-08 (valid, unbound) refused; the certificate named DEFAULT places only itself",
+    );
 
     // ---- the settings the guide stands behind -----------------------------
     let tls12 = radius.eap_tls(

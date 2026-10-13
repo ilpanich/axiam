@@ -1,6 +1,8 @@
-# The placement table: certificate common name -> the VLAN the device is put on
-# (RFC 3580 section 3.31). The file is generated for each run by the end-to-end
-# test; in production it is yours.
+# The placement table: certificate serial -> the VLAN the device is put on
+# (RFC 3580 section 3.31). The key is TLS-Client-Cert-Serial as FreeRADIUS
+# spells it (lowercase hex), set in sites-enabled/check-eap-tls; never a
+# certificate subject (docs/pki/freeradius.md). The file is generated for each
+# run by the end-to-end test; in production it is yours.
 files axiam_placement {
 	filename = /etc/freeradius/axiam/placement
 	key = "%{control:Tmp-String-0}"

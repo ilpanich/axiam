@@ -396,6 +396,19 @@
 > counts T-477 and reads 443 / 17 / 17 of 477; the copies are reconciled once,
 > at the end of the release).
 >
+> **The W6 F4 review's fixes (2026-10-13; T-461 amended).** The wave's review
+> ([`security-review-release-1.0.1-w6-2026-10-13.md`](security-review-release-1.0.1-w6-2026-10-13.md),
+> R101W6-02) found that the recipe's placement table — the third of its
+> pillars, "a valid certificate is not enough" — was keyed on the certificate's
+> subject, written into FreeRADIUS's `files` entry unescaped. AXIAM accepts
+> `DEFAULT` as a subject, and `rlm_files` matches a `DEFAULT` entry for every
+> key, so one bound certificate named `DEFAULT` placed every certificate the
+> tenant signing CA had issued, unbound ones included. The guide and the shipped
+> `check-eap-tls` now key the table on `TLS-Client-Cert-Serial`, which AXIAM
+> assigns and which is hex, and the end-to-end binds a certificate named
+> `DEFAULT` and asserts that an unbound one stays refused. **T-461** carries the
+> dated amendment and stays Not applicable; no count moves.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

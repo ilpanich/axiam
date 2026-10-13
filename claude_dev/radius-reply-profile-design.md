@@ -567,7 +567,12 @@ re-reads it on a timer (a pull and a `HUP`, the same shape as its CRL refresh).
   presented certificate's serial and issuer to `post-auth` as
   `TLS-Client-Cert-Serial` / `TLS-Client-Cert-Issuer`, and that the `files` module
   can key on such an expansion. The D3 end-to-end, or whichever task builds this,
-  settles it first.
+  settles it first. **Settled 2026-10-13 for the serial (R101W6-02):** the D3
+  recipe now keys its own placement table on `TLS-Client-Cert-Serial`, read in
+  the EAP-TLS `virtual_server` (`check-eap-tls`) rather than `post-auth`, and
+  the end-to-end admits a placed device through a `files` module keyed on it.
+  The issuer is not needed while a server trusts one tenant signing CA; an
+  export for several CAs would still need it.
 
 ### 6.3 When D4 ships: a decision per authentication
 

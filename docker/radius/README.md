@@ -54,7 +54,7 @@ which FreeRADIUS does at `ca_path_reload_interval`, 300 seconds at the smallest
 | `docker/radius/raddb/clients.conf` | the NAS clients; `require_message_authenticator = yes`; the secret from the environment |
 | `docker/radius/raddb/eap` | EAP-TLS only, TLS 1.3 only, the tenant signing CA, `check_crl`, `ca_path_reload_interval` |
 | `docker/radius/raddb/default` | the one virtual server: EAP, and nothing else |
-| `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified |
+| `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified, keyed on the certificate serial |
 | `docker/radius/raddb/axiam_placement` | the `files` module that reads the placement table |
 | `docker/.secrets/radius/` | per run: `env`, `server-ca.pem`, the supplicants' files, and `trust/` (`server.pem`, `server.key`, `ca.pem`, `capath/<hash>.r0`, `placement`), mounted at `/etc/freeradius/axiam` |
 | `.github/workflows/radius-e2e.yml` | the same, in CI |

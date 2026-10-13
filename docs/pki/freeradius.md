@@ -92,7 +92,8 @@ What each choice does for this recipe:
 - **`cert_type: Device`** gives the leaf `clientAuth` and `digitalSignature`
   ([what every leaf may be used for](README.md#what-every-leaf-may-be-used-for)),
   which is what an EAP-TLS peer certificate needs. Its subject is the common
-  name FreeRADIUS reads: choose one that is unique in the tenant (`press-07`).
+  name; choose one that is unique in the tenant (`press-07`). The placement
+  table does **not** key on it ([below](#the-key-is-the-serial)).
 - **A short `validity_days`** is the only bound that does not depend on a list
   being fresh. A device that is replaced every month cannot be admitted for
   longer than a month by a missed revocation.
@@ -247,18 +248,21 @@ request could be checked against.
 ```
 server check-eap-tls {
 	authorize {
-		update control { Tmp-String-0 := &TLS-Client-Cert-Common-Name }
-		axiam_placement            # the table below, keyed on the common name
+		update control { Tmp-String-0 := &TLS-Client-Cert-Serial }
+		axiam_placement            # the table below, keyed on the serial
 		if (!ok) { reject }        # fail closed: no entry, or a module failure
 		update control { Auth-Type := Accept }
 	}
 }
 ```
 
-The table is a `files` module over a plain text file:
+The table is a `files` module over a plain text file, one entry per placed
+certificate, named by the certificate's serial as FreeRADIUS spells
+`TLS-Client-Cert-Serial` (lowercase hex):
 
 ```
-press-07
+# certificate 6f1c2a90-3d4e-4b7a-9c1d-2e5f8a7b6c01
+1b5e0c9a47d2f3086e4a1c7b9d0e2f5a6c8b3d41
 	Tunnel-Type = VLAN,
 	Tunnel-Medium-Type = IEEE-802,
 	Tunnel-Private-Group-Id = "20",
@@ -271,10 +275,11 @@ press-07
   checks that it is refused.
 - **Build the table from AXIAM's own list of bound devices**: the tenant's
   active `Device` certificates whose `bound_service_account_id` is set
-  (`GET /api/v1/certificates`). The test generates it exactly that way. A
-  certificate that is revoked, expired or unbound then has no entry the next
-  time you regenerate it. (The `files` module re-reads its file on `HUP`; the
-  EAP module's lists need the interval in section 4.)
+  (`GET /api/v1/certificates`), each keyed on its serial
+  ([the generator below](#generate-the-table)). The test generates it exactly
+  that way. A certificate that is revoked, expired or unbound then has no entry
+  the next time you regenerate it. (The `files` module re-reads its file on
+  `HUP`; the EAP module's lists need the interval in section 4.)
 - **The VLAN is the three attributes RFC 3580 §3.31 prescribes**: `Tunnel-Type =
   VLAN`, `Tunnel-Medium-Type = IEEE-802`, `Tunnel-Private-Group-Id` a decimal
   string between `1` and `4094` with tag `0`. Use these and no other attributes
@@ -289,11 +294,84 @@ press-07
   It is the bound on how long a revoked or de-listed device keeps a port it
   already has ([below](#the-revocation-lag)). The value is yours; an hour is a
   starting point, not a recommendation.
-- **The key is the common name.** Whoever can obtain a certificate from the
-  tenant signing CA with `press-07` as its subject gets `press-07`'s VLAN. That is
-  the authority the tenant signing CA already represents; if you want the
-  table to bind to one certificate instead, key it on `TLS-Client-Cert-Serial`
-  and regenerate it on every re-issue.
+
+#### The key is the serial
+
+The table is keyed on the certificate's **serial**, not its common name, and the
+shipped `check-eap-tls` sets the key from `TLS-Client-Cert-Serial`. Three reasons,
+the first of which is the one that matters:
+
+- **A subject is chosen by whoever requests the certificate, and the `files`
+  module reads some names as something else.** An entry named `DEFAULT` matches
+  **every** key, and a certificate whose name is missing is looked up as `NONE`.
+  AXIAM accepts `DEFAULT` as a subject, and a subject with spaces or a newline.
+  A table keyed on the subject therefore lets one bound certificate named
+  `DEFAULT` place every certificate the tenant signing CA ever issued — bound or
+  not, listed or not — and, if that entry comes first, move every device onto
+  its VLAN; a subject with a newline breaks the file or writes an entry of its
+  own. A serial is hex: it cannot spell `DEFAULT` or `NONE`, and holds no space.
+- **AXIAM assigns the serial; the requester does not choose it.** AXIAM derives
+  it from the certificate's public key, so an entry places whoever holds the key
+  of the certificate AXIAM listed as bound, and nobody else (a second certificate
+  over the same key, from a CSR signed again, carries the same serial). Keyed on
+  a name, whoever can obtain a certificate from the tenant signing CA with
+  `press-07` as its subject gets `press-07`'s VLAN.
+- **This server trusts one issuing CA** (section 2), so the serial needs no
+  issuer beside it.
+
+The cost: the entry changes when the device is re-issued with a new key, so
+regenerate the table on every re-issue — which regenerating it from AXIAM's list
+on a schedule does.
+
+**If you must key on the common name** (a table you write by hand, say), set
+`Tmp-String-0` from `TLS-Client-Cert-Common-Name` and make whatever writes the
+table refuse every name outside `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, and
+`DEFAULT` and `NONE` in any letter case; on a name that fails, write nothing,
+keep the table you have and alert. Whoever can obtain a certificate with a
+listed name then gets that name's VLAN; that is the authority the tenant signing
+CA represents.
+
+#### Generate the table
+
+```sh
+#!/bin/sh
+# Run after every issue, bind, unbind, revoke or re-issue, or on a timer.
+set -eu
+DIR=/etc/freeradius/axiam
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+curl -fsS --max-time 20 -o "$tmp/list.json" \
+  -H "Authorization: Bearer $TENANT_ADMIN_TOKEN" \
+  "https://axiam.example.com/api/v1/certificates?offset=0&limit=200"
+# One page; page on, or refuse, when there are more.
+[ "$(jq '.total == (.items | length)' "$tmp/list.json")" = true ]
+
+jq -r '.items[] | select(.cert_type == "Device" and .status == "Active"
+                         and .bound_service_account_id != null) | .id' \
+  "$tmp/list.json" > "$tmp/ids"
+while read -r id; do
+  case "$id" in *[!0-9a-f-]*|'') echo "unexpected id: $id" >&2; exit 1 ;; esac
+  jq -r --arg id "$id" '.items[] | select(.id == $id) | .public_cert_pem' \
+    "$tmp/list.json" > "$tmp/cert.pem"
+  serial=$(openssl x509 -in "$tmp/cert.pem" -noout -serial | sed 's/^serial=//' \
+    | tr 'A-F' 'a-f')
+  # A serial is lowercase hex and nothing else; anything else stops the run.
+  case "$serial" in *[!0-9a-f]*|'') echo "certificate $id: bad serial" >&2; exit 1 ;; esac
+  printf '# certificate %s\n%s\n' "$id" "$serial"
+  printf '\tTunnel-Type = VLAN,\n\tTunnel-Medium-Type = IEEE-802,\n'
+  printf '\tTunnel-Private-Group-Id = "20",\n\tSession-Timeout = 3600,\n'
+  printf '\tTermination-Action = RADIUS-Request\n\n'
+done < "$tmp/ids" > "$tmp/placement"
+
+install -m 0644 "$tmp/placement" "$DIR/.placement"
+mv "$DIR/.placement" "$DIR/placement"      # atomic: never a half-written table
+pkill -HUP -x freeradius                     # the files module re-reads on HUP
+```
+
+The comment line names the certificate by AXIAM's id, never by its subject: a
+subject may hold a newline, which would end the comment. Every device here goes
+on one VLAN; if yours differ, map the certificate id (or the service account it
+is bound to) to a VLAN in your own inventory, not the subject.
 
 ## 4. Keep the revocation list fresh
 
@@ -432,11 +510,11 @@ they produce into the shipped FreeRADIUS configuration, and authenticates with
 | Case | What it asserts |
 |---|---|
 | **issue** | an organization CA, a tenant signing CA and a `Device` certificate are issued; the leaf carries `clientAuth` and its issuer's CRL distribution point; the CA is exported |
-| **bind** | the certificate is bound to a service account and listed as bound |
+| **bind** | the certificate is bound to a service account and listed as bound; the placement table generated from that list is keyed on the bound certificates' serials, and no entry on anything else |
 | **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept |
 | **wrong CA** | a device of another tenant of the same organization, and a device of another organization, are refused with `unable to get local issuer certificate` |
 | **revoked after the CRL refresh** | a revoked device is still admitted while FreeRADIUS holds the old list; once AXIAM's list is in `ca_path` and FreeRADIUS has read it, the device is refused with `certificate revoked` and another device is not |
-| unplaced | a valid, unrevoked, unbound device is refused |
+| unplaced | a valid, unrevoked, unbound device is refused, although the table also holds a bound certificate whose subject is `DEFAULT` (which is admitted, as itself) |
 | TLS 1.2 | a supplicant offering only TLS 1.2 is refused |
 | EAP-MD5 | a supplicant that asks for EAP-MD5 gets an EAP-Failure |
 | `Message-Authenticator` | an `Access-Request` without one is discarded and unanswered |

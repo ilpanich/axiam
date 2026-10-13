@@ -515,9 +515,11 @@ and v90 – v94 run at startup like every earlier one.
   guide — issue and bind a `Device` certificate, export the tenant signing CA,
   a FreeRADIUS configuration that trusts that CA only, EAP-TLS over TLS 1.3 only,
   `require_message_authenticator = yes`, a placement table that rejects a valid
-  certificate nobody listed, RadSec where the NAS allows, and the revocation lag
-  stated as the fetch interval plus `ca_path_reload_interval` (300 s at the
-  smallest) plus the session's `Session-Timeout`.
+  certificate nobody listed and is keyed on the certificate serial, never on a
+  subject (a subject of `DEFAULT` would match every key, R101W6-02), RadSec
+  where the NAS allows, and the revocation lag stated as the fetch interval plus
+  `ca_path_reload_interval` (300 s at the smallest) plus the session's
+  `Session-Timeout`.
   `docker/docker-compose.radius.yml` references the upstream FreeRADIUS image by
   digest and ships configuration only (`docker/radius/raddb/`); nothing of
   FreeRADIUS (GPLv2) is in the tree. `radius_e2e.rs`, run by `radius-e2e.yml`

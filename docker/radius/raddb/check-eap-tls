@@ -3,13 +3,18 @@
 # listed is REJECTED, not dropped onto some default network (the
 # reply-profile design note, "An unplaced device is rejected").
 #
+# The table is keyed on the certificate's SERIAL, which AXIAM assigns, and not
+# on its common name, which whoever requests the certificate chooses: AXIAM
+# accepts `DEFAULT` as a subject, and the files module matches an entry named
+# DEFAULT for every key (docs/pki/freeradius.md, "The key is the serial").
+#
 # The attributes of the client certificate (TLS-Client-Cert-*) exist while this
 # server runs, which is why the decision is made here and not in `post-auth`.
 
 server check-eap-tls {
 	authorize {
 		update control {
-			Tmp-String-0 := &TLS-Client-Cert-Common-Name
+			Tmp-String-0 := &TLS-Client-Cert-Serial
 		}
 
 		axiam_placement

@@ -19,6 +19,12 @@ use crate::middleware::rate_limit_shared::RateLimitShared;
 use crate::middleware::tenant_path::TenantPathScope;
 use crate::openapi::api_doc;
 
+/// R101W3-04: how many times the per-user allowance of the CIBA pending list
+/// (`ciba_approval_per_min`) its per-address backstop admits. The backstop only
+/// has to stop an unauthenticated flood, so it is sized for an office behind
+/// one NAT.
+const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -819,12 +825,29 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // D-4 (#599): that bucket is the signed-in user's, not the
             // address's, and an IP-keyed layer would put thirty tabs behind one
             // egress address back into one bucket — so the route carries no
-            // `build_governor` / `RateLimitShared`: the principal exists only
-            // once the handler's extractor has authenticated it, and the
-            // handler spends `ciba_approval_list:{tenant}:{user}` from the
-            // shared counter before anything is read.
+            // `RateLimitShared` and no per-address governor at the route's own
+            // size: the principal exists only once the handler's extractor has
+            // authenticated it, and the handler spends
+            // `ciba_approval_list:{tenant}:{user}` from the shared counter
+            // (or, with `AXIAM__RATE_LIMIT__SHARED=off`, which admits
+            // everything, from an in-process keyed limiter in `AppState`)
+            // before anything is read.
+            // R101W3-04: the per-user check is unreachable for a request whose
+            // token fails authentication, and the route must carry a limiter
+            // from its first commit, so a per-address governor ten times the
+            // per-user allowance stays as the backstop — NAT-sized, so thirty
+            // tabs (and an office of them) behind one address never meet it,
+            // while a burst of calls with a token that does not authenticate
+            // does. (A call with no credential at all never gets this far:
+            // the scope's `AuthzMiddleware` answers it `401` for the price of a
+            // header lookup.)
             .service(
                 web::resource("/ciba/requests")
+                    .wrap(build_governor(
+                        rate_limit_cfg
+                            .ciba_approval_per_min
+                            .saturating_mul(CIBA_LIST_BACKSTOP_FACTOR),
+                    ))
                     .route(web::get().to(handlers::ciba_approval::list_requests::<C>)),
             )
             .service(

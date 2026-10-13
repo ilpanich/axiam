@@ -42,7 +42,9 @@
 //! carries. It is the same surface under the same rules: a console sign-in only,
 //! a bucket of its own in `ciba_approval_per_min` that is the signed-in user's
 //! (D-4, #599 — not the address's, which thirty tabs behind one egress address
-//! would share), and no oracle — the list holds
+//! would share; on the shared counter, or on an in-process keyed limiter when
+//! `AXIAM__RATE_LIMIT__SHARED=off` — R101W3-04 — and a per-address backstop
+//! sized for NAT on the route), and no oracle — the list holds
 //! only the caller's rows, so another user's, a decided and an expired request
 //! are simply absent. `status=pending` is the one filter; any other value is a
 //! `400`, and an absent one means the same. The `auth_req_id` is not stored in
@@ -304,11 +306,24 @@ pub async fn list_requests<C: Connection + Clone>(
     if user.minted_for_client() {
         return session_required();
     }
-    if !state.shared_rate_limit.check_at_human(
-        &list_bucket_key(tenant_id, user.user_id),
-        Utc::now(),
-        state.rate_limit_cfg.ciba_approval_per_min,
-    ) {
+    // R101W3-04: the shared counter admits everything when it is switched off
+    // (`AXIAM__RATE_LIMIT__SHARED=off`), and the route carries no per-address
+    // governor of the old kind, so the same allowance is spent from an
+    // in-process per-(tenant, user) limiter instead. The route's own per-address
+    // backstop (`server.rs`) covers what never reaches this line.
+    let per_min = state.rate_limit_cfg.ciba_approval_per_min;
+    let admitted = if state.shared_rate_limit.is_enabled() {
+        state.shared_rate_limit.check_at_human(
+            &list_bucket_key(tenant_id, user.user_id),
+            Utc::now(),
+            per_min,
+        )
+    } else {
+        state
+            .ciba_list_limiter
+            .check(tenant_id, user.user_id, per_min)
+    };
+    if !admitted {
         return too_many_requests();
     }
     let Ok(evidence) = session_evidence(&state, &user).await else {

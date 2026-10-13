@@ -3,6 +3,7 @@
 
 pub mod authz;
 pub mod backchannel_logout;
+pub mod ciba_list_limiter;
 pub mod cimd;
 pub mod client_managed_by_cache;
 pub mod config;

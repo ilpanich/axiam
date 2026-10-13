@@ -43,6 +43,7 @@ use axiam_db::repository::{
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
+use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use axiam_oauth2::ciba::hash_auth_req_id;
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -1455,5 +1456,127 @@ async fn the_list_bucket_is_the_signed_in_users_not_the_address() {
     let client_held = issued["access_token"].as_str().unwrap().to_owned();
     for _ in 0..4 {
         assert_eq!(get_list_from(&app, &client_held, home).await, 403);
+    }
+}
+
+/// R101W3-04: with the shared counter switched off
+/// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything, the list still
+/// carries the signed-in user's allowance — an in-process limiter in the state
+/// — and the user is still the key, not the address.
+#[actix_web::test]
+async fn the_list_keeps_its_per_user_limit_when_the_shared_counter_is_off() {
+    let mut w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    with_limits(&mut w, tight.clone());
+    let mut state = AppState::for_test(w.db.clone(), w.auth.clone());
+    state.rate_limit_cfg = tight.clone();
+    state.shared_rate_limit = SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+    assert!(!state.shared_rate_limit.is_enabled());
+    w.state = web::Data::new(state);
+    let app = app!(w, tight);
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let bob = session_token(&w, w.bob, vec![Amr::Pwd]).await;
+    let office = "203.0.113.7:40000";
+    let home = "198.51.100.9:40000";
+
+    // Alice spends her two and is refused a third, in the limiter's shape.
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    let req = test::TestRequest::get()
+        .peer_addr(office.parse().unwrap())
+        .uri("/api/v1/ciba/requests")
+        .insert_header(("Authorization", format!("Bearer {alice}")))
+        .to_request();
+    let refused = test::call_service(&app, req).await;
+    assert_eq!(refused.status().as_u16(), 429);
+    assert_eq!(
+        refused.headers().get("retry-after").map(|v| v.as_bytes()),
+        Some(&b"60"[..])
+    );
+    let body = test::read_body(refused).await;
+    assert_eq!(&body[..], br#"{"error":"rate_limit_exceeded"}"#);
+    // Bob, behind the same address, is not refused.
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 429);
+    // Alice from another address is the same bucket.
+    assert_eq!(get_list_from(&app, &alice, home).await, 429);
+    // The in-process map holds the two users it has seen, nothing else.
+    assert_eq!(w.state.ciba_list_limiter.len(), 2);
+}
+
+/// With the shared counter on, the in-process limiter is not consulted: the
+/// shared bucket decides, as before.
+#[actix_web::test]
+async fn the_in_process_list_limiter_is_not_spent_while_the_shared_counter_is_on() {
+    let mut w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    with_limits(&mut w, tight.clone());
+    assert!(w.state.shared_rate_limit.is_enabled());
+    let app = app!(w, tight);
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    for expected in [200, 200, 429] {
+        assert_eq!(
+            get_list_from(&app, &alice, "203.0.113.7:40000").await,
+            expected
+        );
+    }
+    assert!(w.state.ciba_list_limiter.is_empty());
+}
+
+/// R101W3-04: the route's per-address backstop. A request that never reaches
+/// the handler's per-user check (a token that does not authenticate) is counted
+/// by address: ten times `ciba_approval_per_min`, so an office behind one NAT
+/// never meets it, while a burst without a valid token is refused past it — in
+/// both modes of the shared counter — and another address is not. (A request
+/// with no credential at all is `401`ed by the scope's middleware before any
+/// resource layer, at the cost of a header lookup.)
+#[actix_web::test]
+async fn the_list_route_has_a_nat_sized_per_address_backstop() {
+    for shared_on in [true, false] {
+        let mut w = world().await;
+        let tight = RateLimitConfig {
+            ciba_approval_per_min: 2,
+            ..limits()
+        };
+        let mut state = AppState::for_test(w.db.clone(), w.auth.clone());
+        state.rate_limit_cfg = tight.clone();
+        if !shared_on {
+            state.shared_rate_limit =
+                SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+        }
+        w.state = web::Data::new(state);
+        let app = app!(w, tight);
+        let attacker = "192.0.2.50:40000";
+        let mut seen = Vec::new();
+        for _ in 0..25 {
+            // A credential that does not authenticate: the scope's middleware
+            // lets it through (it only checks that one is present), and the
+            // handler's extractor refuses it, so only the route's own
+            // per-address layer can count it.
+            let req = test::TestRequest::get()
+                .peer_addr(attacker.parse().unwrap())
+                .uri("/api/v1/ciba/requests")
+                .insert_header(("Authorization", "Bearer not-a-jwt"))
+                .to_request();
+            seen.push(test::call_service(&app, req).await.status().as_u16());
+        }
+        assert!(
+            seen[..20].iter().all(|s| *s == 401),
+            "shared={shared_on}: ten times the per-user allowance is admitted to the handler: {seen:?}"
+        );
+        assert!(
+            seen[20..].iter().all(|s| *s == 429),
+            "shared={shared_on}: past the backstop the address is refused: {seen:?}"
+        );
+        // Another address is not refused, and a signed-in user behind it works.
+        let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+        assert_eq!(get_list_from(&app, &alice, "203.0.113.7:40000").await, 200);
     }
 }

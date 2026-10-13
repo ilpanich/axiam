@@ -29,7 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /api/v1/ciba/requests` is ordered by creation, reads each client's name
   once per call, and gains two additive fields, `total_pending` and
   `truncated`; its rate-limit bucket is the signed-in user's, not the
-  address's. The console badge counts `total_pending`.
+  address's, on the shared counter, or on an in-process per-user limiter when
+  `AXIAM__RATE_LIMIT__SHARED=off` (which admits everything on the shared
+  counter), and the route keeps a per-address governor at ten times
+  `ciba_approval_per_min` as the backstop for calls whose token does not
+  authenticate (R101W3-04). The console badge counts `total_pending`.
 
 - **The tenant purge deletes only the audit rows the export holds (#602,
   T-118, T-472; Low).** The deletion accepts an export receipt up to six hours

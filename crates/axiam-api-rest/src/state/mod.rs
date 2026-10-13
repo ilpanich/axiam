@@ -388,6 +388,11 @@ pub struct AppState<C: Connection + Clone> {
     /// Absence of the whole `AppState` (a misconfigured harness) makes the
     /// middleware fail open, exactly as a missing DB handle did before.
     pub shared_rate_limit: SharedRateLimitCounter,
+    /// R101W3-04: the in-process per-(tenant, user) limiter the CIBA pending
+    /// list spends when the shared counter is switched off
+    /// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything. One per
+    /// process, like the counter. See [`crate::ciba_list_limiter`].
+    pub ciba_list_limiter: Arc<crate::ciba_list_limiter::CibaListLimiter>,
     /// B3: the token endpoint serves every grant behind one route, so a
     /// per-grant limit cannot be route middleware — the grant is not knowable
     /// until the body has been read. The exchange arm reads its ceiling from
@@ -878,6 +883,7 @@ impl<C: Connection + Clone> AppState<C> {
             // `SharedRateLimitCounter::without_flusher(..)` and drive
             // `flush_once()` itself.
             rate_limit_cfg: crate::config::rate_limit::RateLimitConfig::default(),
+            ciba_list_limiter: Arc::new(Default::default()),
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),

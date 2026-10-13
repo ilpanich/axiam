@@ -2889,6 +2889,8 @@ where
         jwks_cache: jwks_cache.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
         shared_rate_limit: shared_rate_limit_counter.clone(),
+        // R101W3-04: one per process; sized from `rate_limit_cfg` on first use.
+        ciba_list_limiter: Arc::new(Default::default()),
         pki: bundles::PkiState {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),

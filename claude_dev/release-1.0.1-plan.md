@@ -1,6 +1,6 @@
 # Release 1.0.1 plan — closing the open issues after the 1.0.0 tag
 
-> **Status: IN PROGRESS — W1 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
+> **Status: IN PROGRESS — W1 and W4 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
 > `0a90de0` (`chore(release): prepare axiam 1.0.0`). It covers **28 of the 30
 > open issues** on `ilpanich/axiam`: the twenty-five Low and Informational
 > findings of the 1.0.0 F4 review (#590 … #614), the two deferred non-local
@@ -325,7 +325,7 @@ code. W6.2's guide ends with the paragraph that says so.
 | W1 | `claude/release-1.0.1-w1` @ `08c4c38` — cut from the tag `v1.0.0` (`0a90de0`), see §11.0 | [`security-review-release-1.0.1-w1-2026-10-13.md`](security-review-release-1.0.1-w1-2026-10-13.md) (`37582a3`): 1 Medium (R101W1-01, fixed in-wave `08c4c38`), 4 Low, 4 Informational | #603, #607, #608, #609, #612, #533; the (a) half of #611 and the (c) half of #610 | Low/Informational filed on `1.0.x`: #615 … #622 (R101W1-02 … -09). To W5: §27.11 `user_id` (W5.1), CRL §35 rule 4 (W5.7), CA-revoke pending outcome and audit names (W5.8). To W7.3: T-472 dated corrections (W1.4, W1.7), T-102, T-470, T-336, T-187, new T-476 |
 | W2 | | | | |
 | W3 | | | | |
-| W4 | | | | |
+| W4 | `claude/release-1.0.1-w4` @ `a234f32` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w4-2026-10-13.md`](security-review-release-1.0.1-w4-2026-10-13.md) (`a3f917c`): 1 Medium (R101W4-01, fixed in-wave `a234f32` with R101W4-06), 5 Low, 5 Informational | #590, #592, #593, #594, #595, #596, #597 (no commit, W4.1), #598, #600 | Low/Informational filed on `1.0.x`: #623 … #631 (R101W4-02 … -05, -07 … -11). To W5: §32 `expected_updated_at` and the `PUT` semantics of `events_requested` (absent = all allowed, `[]` = none; #631: SDK update helpers send what they read); `request_audit.outbound_abandoned_dropped` on `/health/jobs`. To W7: `sdks/openapi.json` is regenerated on W1 and on W4 — the merge conflict is resolved by regenerating. To W7.3: T-406, T-108, T-445, T-444 amendments; R101W4-09's stale stop arithmetic |
 | W5 | | | | |
 | W6 | | | | |
 | W7 | | | | |
@@ -359,15 +359,23 @@ Residual recorded, not fixed: an erased account's revoked certificate rows keep
 the PEM, subject and `metadata` for the tenant's lifetime (T-187; R101W1-05,
 #618).
 
-### 11.4 W4 — in progress
+### 11.4 W4 — what landed, and where the tree overruled the plan
 
-W4.1 (#597): no commit; the tree was verified again and the comment posted
-(issuecomment-6131477654). D-7: the orchestrator dispatched `fapi-conformance.yml`
-itself — run 38300274398 (tag-only image) failed at "Select the AXIAM image" as
-W4.2 requires; run 38300842144 (default `module_timeout` 180) was cancelled at
-the job's 150-minute cap; run 38317560409 (`module_timeout` 30) completed and
-is the recording behind W4.3's `baseline-unattended.json` (`b34a0d0`),
-transcribed from the gate log because the session cannot fetch artifacts.
+Twelve commits on `v1.0.0`, every one signed; no item was re-sized.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W4.1 #597 | — | orchestrator | the tree verified again; comment issuecomment-6131477654; on the `Closes` line |
+| W4.2 #592 | `4156b80` | Sonnet 5.5 | the report step's `env:` block removed rather than edited. D-7: run 38300274398 (tag-only image) failed at "Select the AXIAM image", later steps skipped — the oracle holds |
+| W4.3 #593 | `ba562d8`, `b34a0d0` | Sonnet 5.5 | first commit seeded `baseline-unattended.json` from the tree; the second records it from run 38317560409 (`module_timeout` 30; run 38300842144 at the default 180 s hit the job's 150-minute cap), transcribed from the gate log because the session cannot fetch artifacts (R101W4-10, #630). The seed's one error (`…nbf-8-seconds-in-the-future-is-accepted` parks: a success path) is corrected. Confirmation run 38327426158: **green** |
+| W4.4 #600 | `31ca687` | Sonnet 5.5 | two existing assertions pinned the always-send and changed. Turning a surface on under an organization `false` now saves silently (R101W4-07, #627) |
+| W4.5 #590 | `11de0b3` | Sonnet 5.5 | **accepted deviation:** the page sends `[]` only when the receiver's stored narrowing already is `[]` (sending it back does not widen; refusing would block pausing such a stream). OpenAPI regenerated |
+| W4.6 #594 | `7bbdfa5` | Sonnet 5.5 | the interleave sub-item dropped, as §0.1 said (one `write_all` per record, now pinned by a test); an existing 0644 file is tightened to 0600 at open |
+| W4.7 #595 | `94c2747` | Sonnet 5.5 | `crates/axiam-audit/src/loss.rs` and `axiam-server/src/job_health.rs` changed for the new signatures |
+| W4.8 #596 | `82e580e` | Sonnet 5.5 | only the producer's refusal goes through the non-blocking path; the consumer's stop paths still await. Introduced R101W4-01 |
+| W4.9 #598 | `334943a` | Opus 5.5 | **the lease-loss REST cut is 5 s, not 6:** the cleanup join (2 s) is on that path too, 5 + 2 + 1 + 3 + 2 = 13 < 15; `ORDERLY_STOP` 37, backstop 38, grace 40. The REST cut drops the actix `Server` (actix reads one stop command only). A cut can leave an erasure without its audit row (R101W4-03, #624) |
+| W4.10 | `a3f917c` | Opus 5.5 | the F4 review (a first attempt was lost to a container restart before it committed anything) |
+| R101W4-01 | `a234f32` | Opus 5.5 | bulk SCIM producers stop at the first refusal and the publisher writes one summary row (`OutboundPublisher::record_not_offered`, since `axiam-scim` has no audit sink) — so a run meeting a full queue leaves at most two rows; `try_record` keeps a quarter of the audit channel for request rows and counts what it sheds in `request_audit.outbound_abandoned_dropped` (closes R101W4-06). OpenAPI regenerated |
 
 ---
 

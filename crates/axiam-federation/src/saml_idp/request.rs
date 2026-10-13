@@ -282,9 +282,17 @@ pub fn refuse_markup_declarations(document: &str) -> Result<(), RequestError> {
 
 /// Refuse a document that is not plainly UTF-8: one containing a NUL (which is
 /// how UTF-16 and UTF-32 spell ASCII, and would hide a `<!DOCTYPE` from
-/// [`refuse_markup_declarations`]), or one whose XML declaration names another
-/// encoding. The parse here forces UTF-8, and xmlsec's honours the declaration;
-/// refusing every other declaration keeps the two reading the same characters.
+/// [`refuse_markup_declarations`]), one whose first character after XML
+/// whitespace is not `<`, or one whose XML declaration names another encoding.
+/// AXIAM's own parses force UTF-8 ([`receiver_parser_options`]), and xmlsec's
+/// honours the declaration; refusing every other declaration keeps the two
+/// reading the same characters.
+///
+/// #605 (R1W1-07): the declaration is read only where the parser reads it — at
+/// the start of the document — so the start must be markup. A byte-order mark
+/// (U+FEFF, which `str::trim_start` does not remove, and which libxml2 skips
+/// before honouring the declaration that follows) is refused, never skipped,
+/// as is any other leading text.
 ///
 /// # Errors
 ///
@@ -293,7 +301,11 @@ pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
     if document.contains('\0') {
         return Err(RequestError::Malformed);
     }
-    let trimmed = document.trim_start();
+    // XML's whitespace (`S`): space, tab, CR, LF — and nothing else.
+    let trimmed = document.trim_start_matches([' ', '\t', '\r', '\n']);
+    if !trimmed.starts_with('<') {
+        return Err(RequestError::Malformed);
+    }
     if let Some(rest) = trimmed.strip_prefix("<?xml") {
         let declaration = rest.split("?>").next().unwrap_or_default();
         if let Some(at) = declaration.find("encoding") {
@@ -376,9 +388,27 @@ pub fn parse_authn_request(
     })
 }
 
+/// The libxml options every document AXIAM receives is parsed with — an
+/// `AuthnRequest` or logout message here, imported SP metadata, a `SAMLResponse`
+/// at the ACS, IdP metadata: no recovery (a document that is not well-formed is
+/// refused, not repaired), no network access, no default DTD, and UTF-8 forced
+/// whatever the document declares (#605). [`refuse_other_encodings`] has already
+/// refused any other declaration, so forcing UTF-8 changes no document that
+/// reaches the parser; it removes the parser's freedom to read one differently.
+pub(crate) fn receiver_parser_options() -> libxml::parser::ParserOptions<'static> {
+    libxml::parser::ParserOptions {
+        recover: false,
+        no_net: true,
+        no_def_dtd: true,
+        ignore_enc: true,
+        encoding: Some("UTF-8"),
+        ..Default::default()
+    }
+}
+
 /// Parse a document the way every message this IdP receives is parsed: size
 /// bound, no markup declaration, no other encoding — all on the bytes, before
-/// libxml — then libxml without recovery and without network access.
+/// libxml — then libxml with [`receiver_parser_options`].
 pub(super) fn parse_xml(document: &str) -> Result<libxml::tree::Document, RequestError> {
     if document.len() > MAX_REQUEST_XML_BYTES {
         return Err(RequestError::TooLarge);
@@ -386,16 +416,8 @@ pub(super) fn parse_xml(document: &str) -> Result<libxml::tree::Document, Reques
     refuse_markup_declarations(document)?;
     refuse_other_encodings(document)?;
 
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        no_net: true,
-        no_def_dtd: true,
-        ignore_enc: true,
-        encoding: Some("UTF-8"),
-        ..Default::default()
-    };
     libxml::parser::Parser::default()
-        .parse_string_with_options(document.as_bytes(), options)
+        .parse_string_with_options(document.as_bytes(), receiver_parser_options())
         .map_err(|_| RequestError::Malformed)
 }
 

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A byte-order mark no longer hides an XML declaration from the SAML "plainly
+  UTF-8" refusal (#605, R1W1-07).** The refusal read the declaration only when
+  the text began with `<?xml`, so a document beginning with U+FEFF skipped it
+  while libxml2 skipped the mark and honoured whatever encoding the declaration
+  named. A document whose first character after XML whitespace is not `<` is now
+  refused — a byte-order mark is refused, never skipped — at the SP's assertion
+  consumer, at the IdP metadata parse and at the IdP's request receiver (and its
+  SP metadata import). Every libxml parse of a received document, including the
+  ACS's signature-placement and assertion-binding parses and the metadata
+  signature check, which used libxml's defaults, now uses the receiver's options:
+  no recovery, no network access, no default DTD, UTF-8 forced. samael's own
+  re-parse inside signature verification still uses libxml's defaults; it is
+  recorded as the residual of T-474 (T-67, T-69 and T-474 carry dated
+  corrections).
+
 ## [1.0.0] - 2026-10-10
 
 #### What 1.0.0 means
@@ -1395,6 +1412,7 @@ an open issue on `ilpanich/axiam`.
   - #603 — R1W1-05: the Vault revocation sweep can starve.
   - #604 — R1W1-06: device-grant redemption does not ask `account_may_act`.
   - #605 — R1W1-07: the UTF-8 refusal does not see past a byte-order mark.
+    Fixed in `1.0.1` (see `[Unreleased]`).
   - #606 — R1W1-08: the SHA-1 escape hatch admits every algorithm.
   - #607 — R1W1-09: the CRL route's global lock and per-request read.
   - #608 — R1W1-10: CRL consistency across replicas and caches.

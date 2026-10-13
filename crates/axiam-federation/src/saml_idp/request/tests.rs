@@ -273,6 +273,52 @@ fn a_document_in_another_encoding_is_refused() {
     assert!(parse_authn_request(&utf8, Utc::now()).is_ok());
 }
 
+/// #605 (R1W1-07): a byte-order mark does not hide the declaration. libxml2
+/// skips a leading U+FEFF and honours the encoding the declaration after it
+/// names; `trim_start` does not remove one, so the check used to skip the
+/// declaration altogether. The document must now begin with `<` after XML
+/// whitespace, so a BOM is refused, never skipped — whatever follows it.
+#[test]
+fn p605_a_byte_order_mark_is_refused_not_skipped() {
+    let bom = '\u{feff}';
+    for declared in [
+        r#"<?xml version="1.0" encoding="UTF-16"?>"#,
+        r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        "",
+    ] {
+        let document = format!("{bom}{declared}{}", request("_e"));
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "BOM + {declared:?}"
+        );
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed),
+            "BOM + {declared:?}"
+        );
+    }
+    // Any other text before the markup is refused the same way; XML
+    // whitespace — and only XML whitespace — is not.
+    for lead in ["x", "\u{a0}", "\u{3000}", "\u{c}"] {
+        let document = format!("{lead}{}", request("_e"));
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "{lead:?}"
+        );
+    }
+    assert_eq!(refuse_other_encodings(""), Err(RequestError::Malformed));
+    assert_eq!(
+        refuse_other_encodings(" \r\n\t"),
+        Err(RequestError::Malformed)
+    );
+    let spaced = format!(" \r\n\t{}", request("_e"));
+    assert_eq!(refuse_other_encodings(&spaced), Ok(()));
+    assert!(parse_authn_request(&spaced, Utc::now()).is_ok());
+}
+
 #[test]
 fn malformed_xml_is_refused_not_repaired() {
     for broken in [

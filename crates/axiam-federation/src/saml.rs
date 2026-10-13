@@ -29,7 +29,8 @@ use uuid::Uuid;
 use crate::error::FederationError;
 use crate::oidc::FederationCallbackResult;
 use crate::saml_idp::request::{
-    ALLOWED_XML_SIGNATURE_ALGORITHMS, refuse_markup_declarations, refuse_other_encodings,
+    ALLOWED_XML_SIGNATURE_ALGORITHMS, receiver_parser_options, refuse_markup_declarations,
+    refuse_other_encodings,
 };
 use crate::saml_metadata::{
     MetadataFetcher, SamlMetadataCache, SsoHostChange, guarded_metadata_fetcher, parse_idp_metadata,
@@ -729,7 +730,7 @@ where
             FederationError::SamlSignatureInvalid("SAML response is not UTF-8".into())
         })?;
         let doc = libxml::parser::Parser::default()
-            .parse_string(xml_bytes)
+            .parse_string_with_options(xml_bytes, receiver_parser_options())
             .map_err(|e| {
                 FederationError::SamlSignatureInvalid(format!("SAML response is not XML: {e}"))
             })?;
@@ -1020,11 +1021,13 @@ fn bind_signature_to_assertion(
     claimed_assertion_id: &str,
 ) -> Result<(), FederationError> {
     let parser = libxml::parser::Parser::default();
-    let doc = parser.parse_string(xml_bytes).map_err(|e| {
-        FederationError::SamlResponseFailed(format!(
-            "XSW binding check: failed to re-parse SAML response XML: {e}"
-        ))
-    })?;
+    let doc = parser
+        .parse_string_with_options(xml_bytes, receiver_parser_options())
+        .map_err(|e| {
+            FederationError::SamlResponseFailed(format!(
+                "XSW binding check: failed to re-parse SAML response XML: {e}"
+            ))
+        })?;
 
     let mut context = libxml::xpath::Context::new(&doc).map_err(|()| {
         FederationError::SamlResponseFailed(

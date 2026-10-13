@@ -55,8 +55,8 @@ use uuid::Uuid;
 use crate::error::FederationError;
 use crate::saml::IdpMetadata;
 use crate::saml_idp::request::{
-    ALLOWED_XML_SIGNATURE_ALGORITHMS, refuse_markup_declarations, refuse_other_encodings,
-    signature_placement,
+    ALLOWED_XML_SIGNATURE_ALGORITHMS, receiver_parser_options, refuse_markup_declarations,
+    refuse_other_encodings, signature_placement,
 };
 
 /// SAML 2.0 metadata namespace.
@@ -268,7 +268,7 @@ fn verify_metadata_signature(text: &str, pem: &str) -> Result<String, Federation
     let der = crate::cert::pem_cert_to_der(pem)?;
 
     let doc = libxml::parser::Parser::default()
-        .parse_string(text.as_bytes())
+        .parse_string_with_options(text.as_bytes(), receiver_parser_options())
         .map_err(|_| metadata_failed("metadata is not XML"))?;
     let root = doc
         .get_root_element()
@@ -615,6 +615,25 @@ mod tests {
         );
         let err = parse_idp_metadata(&doc, None, Utc::now()).unwrap_err();
         assert!(err.to_string().contains("DTD"), "{err}");
+    }
+
+    /// #605 (R1W1-07): a byte-order mark in front of a declaration naming
+    /// another encoding used to skip the check; it is refused now, as is a
+    /// byte-order mark in front of an otherwise valid document, with or
+    /// without a metadata signing certificate (the refusal precedes both).
+    #[test]
+    fn p605_bom_prefixed_metadata_in_another_encoding_is_refused() {
+        let valid = document("https://sso.example.test/sso", "");
+        assert!(parse_idp_metadata(&valid, None, Utc::now()).is_ok());
+        for doc in [
+            format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{valid}"),
+            format!("\u{feff}{valid}"),
+        ] {
+            for pem in [None, Some("not consulted")] {
+                let err = parse_idp_metadata(&doc, pem, Utc::now()).unwrap_err();
+                assert!(err.to_string().contains("UTF-8"), "{err}");
+            }
+        }
     }
 
     /// #530: a second sign-in within the document's freshness is served from

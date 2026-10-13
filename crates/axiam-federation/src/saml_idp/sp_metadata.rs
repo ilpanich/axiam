@@ -61,7 +61,7 @@ use samael::metadata::{
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use super::request::{refuse_markup_declarations, refuse_other_encodings};
+use super::request::{receiver_parser_options, refuse_markup_declarations, refuse_other_encodings};
 
 /// The largest metadata document accepted, in bytes — the cap the SP side's
 /// `fetch_idp_metadata` already uses.
@@ -234,16 +234,8 @@ pub fn parse_sp_metadata(document: &[u8]) -> Result<SpMetadataDraft, MetadataErr
     refuse_other_encodings(text).map_err(|_| refused)?;
 
     // libxml first: well-formedness, a bounded depth, and the root's identity.
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        no_net: true,
-        no_def_dtd: true,
-        ignore_enc: true,
-        encoding: Some("UTF-8"),
-        ..Default::default()
-    };
     let doc = libxml::parser::Parser::default()
-        .parse_string_with_options(document, options)
+        .parse_string_with_options(document, receiver_parser_options())
         .map_err(|_| refused)?;
     let root = doc.get_root_element().ok_or(refused)?;
     if root.get_name() != "EntityDescriptor"
@@ -803,6 +795,9 @@ mod tests {
         assert_eq!(parse(&bare_entity), Err(MetadataError::NotSpMetadata));
         let utf16_declaration = base.replace("encoding=\"UTF-8\"", "encoding=\"UTF-16\"");
         assert_eq!(parse(&utf16_declaration), Err(MetadataError::NotSpMetadata));
+        // #605: a byte-order mark no longer hides the declaration.
+        let bom_utf16 = format!("\u{feff}{utf16_declaration}");
+        assert_eq!(parse(&bom_utf16), Err(MetadataError::NotSpMetadata));
         // UTF-16 on the wire: a NUL after every ASCII byte, not UTF-8 at all.
         let utf16: Vec<u8> = base.encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(parse_sp_metadata(&utf16), Err(MetadataError::NotSpMetadata));

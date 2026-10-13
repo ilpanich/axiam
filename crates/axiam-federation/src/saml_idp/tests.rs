@@ -653,6 +653,10 @@ async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
                 .flat_map(|c| [c, '\0'])
                 .collect::<String>(),
             format!(r#"<?xml version="1.0" encoding="UTF-16"?>{valid}"#),
+            // #605: behind a byte-order mark, which used to skip the check,
+            // and a byte-order mark alone in front of the valid response.
+            format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{valid}"),
+            format!("\u{feff}{valid}"),
         ] {
             let result =
                 sp_accepts_with(config.clone(), &xml, Some(REQUEST_ID), Some(ACS), true).await;

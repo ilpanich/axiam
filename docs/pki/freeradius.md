@@ -135,8 +135,12 @@ FreeRADIUS (through OpenSSL's partial-chain flag) accepts a chain that ends at
 a CA it trusts directly, so the organization CA above it is not needed. Leaving
 it out is the point: a certificate issued by another tenant's signing CA — even
 one of the same organization, under the same root — leads to a CA this server
-does not hold, and is refused with `unable to get local issuer certificate`. The
-end-to-end test issues such a device and checks exactly that.
+does not hold, and is refused with `unable to get local issuer certificate`, or
+with `self-signed certificate in certificate chain` when the device also sends
+the root. The end-to-end test issues both tenants' signing CAs under one
+organization CA and checks exactly that, with the other tenant's device
+presenting its leaf, its leaf and signing CA, and its whole chain up to the
+shared root; the tenant's own device presenting its whole chain is admitted.
 
 **One tenant per trust anchor.** The boundary is that `ca_file` holds one tenant's
 signing CA. A FreeRADIUS server that serves two tenants needs two trust
@@ -509,10 +513,10 @@ they produce into the shipped FreeRADIUS configuration, and authenticates with
 
 | Case | What it asserts |
 |---|---|
-| **issue** | an organization CA, a tenant signing CA and a `Device` certificate are issued; the leaf carries `clientAuth` and its issuer's CRL distribution point; the CA is exported |
+| **issue** | an organization CA, two tenants' signing CAs beneath it and a `Device` certificate are issued; the leaf carries `clientAuth` and its issuer's CRL distribution point; the CA is exported |
 | **bind** | the certificate is bound to a service account and listed as bound; the placement table generated from that list is keyed on the bound certificates' serials, and no entry on anything else |
 | **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept |
-| **wrong CA** | a device of another tenant of the same organization, and a device of another organization, are refused with `unable to get local issuer certificate` |
+| **wrong CA** | a device of another tenant of the same organization — whose signing CA is under the same organization CA as the trusted one — is refused presenting its leaf, its leaf and signing CA (`unable to get local issuer certificate`) and its whole chain up to the shared root (`self-signed certificate in certificate chain`); a device of another organization is refused; the tenant's own device presenting its whole chain is admitted |
 | **revoked after the CRL refresh** | a revoked device is still admitted while FreeRADIUS holds the old list; once AXIAM's list is in `ca_path` and FreeRADIUS has read it, the device is refused with `certificate revoked` and another device is not |
 | unplaced | a valid, unrevoked, unbound device is refused, although the table also holds a bound certificate whose subject is `DEFAULT` (which is admitted, as itself) |
 | TLS 1.2 | a supplicant offering only TLS 1.2 is refused |

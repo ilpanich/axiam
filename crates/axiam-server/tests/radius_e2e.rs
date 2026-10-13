@@ -30,7 +30,10 @@
 //! 3. **accept** — the bound device is admitted, with the VLAN attributes of
 //!    RFC 3580 and a bounded `Session-Timeout`;
 //! 4. **wrong CA** — a device of another organization, and a device of another
-//!    tenant of the same organization, are refused;
+//!    tenant of the same organization, whose signing CA chains to the **same**
+//!    organization CA, are refused; the latter also when it presents its signing
+//!    CA, and its whole chain up to that shared root, while the tenant's own
+//!    device presenting its whole chain is admitted;
 //! 5. **revoked after the CRL refresh** — a revoked device keeps being admitted
 //!    while FreeRADIUS holds the old list, which is the revocation lag; once the
 //!    list AXIAM publishes is in FreeRADIUS's `ca_path` and FreeRADIUS has
@@ -624,28 +627,50 @@ async fn organization(
     }
 }
 
-/// One tenant signing CA, issued the way an operator issues it: an
-/// organization CA, then a signing CA beneath it for the tenant.
-struct SigningCa {
+/// An organization CA (the root), issued once per organization, as the guide
+/// says: every tenant signing CA of the organization is issued beneath it.
+struct OrgRoot {
     id: String,
     pem: String,
 }
 
-async fn signing_ca(api: &Api, org: &Org, tenant: usize, subject: &str) -> SigningCa {
+async fn org_root(api: &Api, org: &Org, subject: &str) -> OrgRoot {
     let (status, root) = api
         .post(
             &format!("/api/v1/organizations/{}/ca-certificates", org.id),
             &org.ca_admin,
             json!({
-                "subject": format!("{subject} root"),
+                "subject": subject,
                 "key_algorithm": "Ed25519",
                 "validity_days": 365,
             }),
         )
         .await;
     assert_eq!(status, 201, "issue: the organization CA: {root}");
-    let root_id = root["id"].as_str().expect("the CA id").to_string();
+    OrgRoot {
+        id: root["id"].as_str().expect("the CA id").to_string(),
+        pem: root["public_cert_pem"]
+            .as_str()
+            .expect("the root certificate")
+            .to_string(),
+    }
+}
 
+/// One tenant signing CA, issued the way an operator issues it: beneath the
+/// organization's CA, for the tenant.
+struct SigningCa {
+    id: String,
+    pem: String,
+}
+
+async fn signing_ca(
+    api: &Api,
+    org: &Org,
+    root: &OrgRoot,
+    tenant: usize,
+    subject: &str,
+) -> SigningCa {
+    let root_id = &root.id;
     let tenant_id = org.tenants[tenant].0;
     let (status, ca) = api
         .post(
@@ -919,6 +944,30 @@ async fn refresh_crl(api: &Api, org: Uuid, ca: &SigningCa, capath: &Path) -> Str
     String::from_utf8(openssl_in(&["crl", "-noout", "-text"], &pem)).expect("CRL text")
 }
 
+/// A `client_cert` file holding a leaf and the certificates above it, in order.
+fn write_chain(dir: &Path, name: &str, pems: &[&str]) -> PathBuf {
+    let path = dir.join(format!("{name}.pem"));
+    let mut chain = String::new();
+    for pem in pems {
+        chain.push_str(pem.trim_end());
+        chain.push('\n');
+    }
+    std::fs::write(&path, chain).expect("the chain can be written");
+    path
+}
+
+/// Whether the supplicant loaded its `client_cert` as a chain, which is what
+/// makes it send the certificates above the leaf.
+fn sent_chain(attempt: &Attempt) -> bool {
+    attempt
+        .output
+        .contains("SSL_use_certificate_chain_file --> OK")
+}
+
+/// OpenSSL's refusal when the peer's chain ends at a self-signed root the
+/// server does not trust.
+const FULL_CHAIN_REFUSAL: &str = "self-signed certificate in certificate chain";
+
 fn set_readable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
@@ -1059,14 +1108,48 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     let plant_b = organization(&db, &auth, "plant-b", &["line-1"]).await;
 
     // ---- 1. issue ---------------------------------------------------------
-    let line1 = signing_ca(&api, &plant_a, 0, "Plant A line 1 devices").await;
-    let line2 = signing_ca(&api, &plant_a, 1, "Plant A line 2 devices").await;
-    let other_org = signing_ca(&api, &plant_b, 0, "Plant B line 1 devices").await;
+    // One organization CA per organization, and both of Plant A's tenant
+    // signing CAs beneath the same one: the case the tenant boundary has to hold
+    // in is the one where a chain check alone would not separate the tenants
+    // (spike R9, T-459, R101W6-01).
+    let plant_a_root = org_root(&api, &plant_a, "Plant A root").await;
+    let plant_b_root = org_root(&api, &plant_b, "Plant B root").await;
+    let line1 = signing_ca(&api, &plant_a, &plant_a_root, 0, "Plant A line 1 devices").await;
+    let line2 = signing_ca(&api, &plant_a, &plant_a_root, 1, "Plant A line 2 devices").await;
+    let other_org = signing_ca(&api, &plant_b, &plant_b_root, 0, "Plant B line 1 devices").await;
+    let root_file = work.join("plant-a-root.pem");
+    std::fs::write(&root_file, &plant_a_root.pem).expect("the root can be written");
+    for (ca, name) in [(&line1, "line 1"), (&line2, "line 2")] {
+        // openssl verify trusts only the file given as -CAfile: each signing CA
+        // verifies against Plant A's one root, so both chain to it.
+        let out = openssl_in(
+            &["verify", "-CAfile", path_str(&root_file)],
+            ca.pem.as_bytes(),
+        );
+        assert!(
+            String::from_utf8_lossy(&out).contains("OK"),
+            "issue: the {name} signing CA chains to Plant A's organization CA"
+        );
+    }
 
     let press07 = issue_device(&api, &plant_a, 0, &line1, "press-07", &work).await;
+    let press07_full = write_chain(
+        &work,
+        "press-07-full-chain",
+        &[&press07.pem, &line1.pem, &plant_a_root.pem],
+    );
     let press08 = issue_device(&api, &plant_a, 0, &line1, "press-08", &work).await;
     let press09 = issue_device(&api, &plant_a, 0, &line1, "press-09", &work).await;
     let gate03 = issue_device(&api, &plant_a, 1, &line2, "gate-03", &work).await;
+    // What a supplicant of the other tenant would send: its leaf and the chain
+    // above it, as a real deployment configures one (wpa_supplicant loads a
+    // client_cert file as a chain). The root is sent once without and once with.
+    let gate03_chain = write_chain(&work, "gate-03-chain", &[&gate03.pem, &line2.pem]);
+    let gate03_full = write_chain(
+        &work,
+        "gate-03-full-chain",
+        &[&gate03.pem, &line2.pem, &plant_a_root.pem],
+    );
     let crane01 = issue_device(&api, &plant_b, 0, &other_org, "crane-01", &work).await;
     // Two subjects a tenant certificate administrator may choose, and that a
     // table keyed on the subject would read as something else (R101W6-02):
@@ -1097,7 +1180,8 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     say(
         "issue",
         &format!(
-            "organization CA, tenant signing CA, {} Device certificates (one named DEFAULT{})",
+            "one organization CA per organization, both Plant A signing CAs under one, {} Device \
+             certificates (one named DEFAULT{})",
             6 + usize::from(injected.is_some()),
             if injected.is_some() {
                 ", one with a newline in its subject"
@@ -1216,6 +1300,11 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     say("accept", "press-07 admitted onto VLAN 20, session bounded");
 
     // ---- 4. wrong CA ------------------------------------------------------
+    // gate-03 belongs to line 2, another tenant of the same organization, and
+    // its signing CA chains to the same organization CA as line 1's. The server
+    // holds line 1's signing CA and nothing above it, so neither the leaf
+    // alone, nor the leaf with its signing CA, nor the whole chain up to the
+    // shared root reaches a CA it trusts.
     let wrong_tenant = radius.eap_tls(
         "gate-03",
         path_str(&gate03.cert),
@@ -1229,6 +1318,54 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
                 .contains("unable to get local issuer certificate"),
         "wrong CA: another tenant of the same organization is refused:\n{}",
         wrong_tenant.log
+    );
+    let wrong_tenant_chain = radius.eap_tls(
+        "gate-03",
+        path_str(&gate03_chain),
+        path_str(&gate03.key),
+        true,
+    );
+    assert!(
+        sent_chain(&wrong_tenant_chain)
+            && wrong_tenant_chain
+                .log
+                .contains("TLS-Cert-Subject := \"/CN=Plant A line 2 devices\"")
+            && !wrong_tenant_chain.accepted
+            && wrong_tenant_chain
+                .log
+                .contains("unable to get local issuer certificate"),
+        "wrong CA: another tenant's device presenting its signing CA is refused:\n{}",
+        wrong_tenant_chain.report()
+    );
+    let wrong_tenant_full = radius.eap_tls(
+        "gate-03",
+        path_str(&gate03_full),
+        path_str(&gate03.key),
+        true,
+    );
+    assert!(
+        sent_chain(&wrong_tenant_full)
+            && wrong_tenant_full
+                .log
+                .contains("TLS-Cert-Subject := \"/CN=Plant A root\"")
+            && !wrong_tenant_full.accepted
+            && wrong_tenant_full.log.contains(FULL_CHAIN_REFUSAL),
+        "wrong CA: another tenant's device presenting its whole chain, up to the organization \
+         CA both tenants share, is refused:\n{}",
+        wrong_tenant_full.report()
+    );
+    // The control: the tenant's own device presenting the same shape of chain,
+    // to the same root, is admitted, so the refusals above are the anchor's.
+    let own_full = radius.eap_tls(
+        "press-07",
+        path_str(&press07_full),
+        path_str(&press07.key),
+        true,
+    );
+    assert!(
+        sent_chain(&own_full) && own_full.accepted,
+        "wrong CA (control): press-07 presenting its whole chain is admitted:\n{}",
+        own_full.report()
     );
     let wrong_org = radius.eap_tls(
         "crane-01",
@@ -1246,7 +1383,8 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     );
     say(
         "wrong CA",
-        "gate-03 (other tenant) and crane-01 (other organization) refused",
+        "gate-03 (other tenant, same organization CA; leaf, leaf + signing CA, whole chain) and \
+         crane-01 (other organization) refused; press-07 with its whole chain admitted",
     );
 
     // ---- placement: a valid certificate that is not in the table ----------

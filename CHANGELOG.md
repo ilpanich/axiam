@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The authenticated federation flow routes are rate limited (#614).**
+  `POST /api/v1/federation/saml/authn-request` had no limiter, and neither had
+  its four siblings, `POST /api/v1/federation/saml/acs`,
+  `GET /api/v1/federation/saml/metadata`,
+  `POST /api/v1/federation/oidc/authorize` and `POST /api/v1/federation/oidc/callback`.
+  Each now carries the browser-endpoint preset (`end_session_per_min`, per IP,
+  default 30) in a bucket of its own (`federation_saml_authn_request`,
+  `federation_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`,
+  `federation_oidc_callback`), so one route's exhaustion never spends another's
+  allowance; past its bucket a route answers `429`. No new setting. A backend
+  that relays many people's federated sign-ins to these routes from one address
+  shares one bucket per route and should raise `end_session_per_min`. Threat
+  model: T-474 carries a dated extension; totals unchanged.
 - **Replacing or clearing a SAML configuration's assertion certificate is
   audited (#611).** `idp_signing_cert_pem` is the anchor of every federated
   sign-in, yet changing it wrote no specific audit row while the metadata

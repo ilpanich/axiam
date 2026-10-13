@@ -498,7 +498,9 @@ pub struct RateLimitConfig {
     ///
     /// It is also the **browser-endpoint preset**: the same number bounds
     /// `/oauth2/authorize` (both mounts, bucket `oauth2_authorize` — #532),
-    /// the `/oauth2/authorize/logout` hop and the SAML IdP's browser routes,
+    /// the `/oauth2/authorize/logout` hop, the SAML IdP's browser routes and the
+    /// five authenticated federation flow routes (`/federation/saml/authn-request`,
+    /// `/acs`, `/metadata` and `/federation/oidc/authorize`, `/callback` — #614),
     /// each under a bucket of its own.
     pub end_session_per_min: u32,
     /// Max `POST /oauth2/register` requests per minute per IP (default: 5 —

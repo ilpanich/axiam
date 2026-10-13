@@ -145,6 +145,9 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 /// endpoints (authn-request, ACS, metadata).
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
+        test_app!($db, $auth, RateLimitConfig::default())
+    };
+    ($db:expr, $auth:expr, $rate_limit:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -160,9 +163,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
-                .configure(|cfg| {
-                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
-                }),
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &$rate_limit)),
         )
         .await
     };
@@ -778,6 +779,7 @@ async fn saml_authn_request_rejects_empty_acs_url() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/authn-request")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -804,6 +806,7 @@ async fn saml_acs_rejects_empty_saml_response() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -836,6 +839,7 @@ async fn saml_acs_rejects_empty_acs_url() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -862,6 +866,7 @@ async fn saml_metadata_returns_xml() {
     let config_id = config["id"].as_str().unwrap();
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!(
             "/api/v1/federation/saml/metadata?config_id={config_id}\
              &acs_url=https%3A%2F%2Fexample.com%2Facs"
@@ -916,6 +921,7 @@ async fn saml_metadata_rejects_oidc_config() {
     let config_id = oidc_config["id"].as_str().unwrap();
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!(
             "/api/v1/federation/saml/metadata?config_id={config_id}\
              &acs_url=https%3A%2F%2Fexample.com%2Facs"
@@ -941,6 +947,7 @@ async fn saml_authn_request_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/authn-request")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
@@ -1625,6 +1632,7 @@ async fn oidc_authorize_rejects_empty_redirect_uri() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1650,6 +1658,7 @@ async fn oidc_authorize_rejects_empty_state() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1675,6 +1684,7 @@ async fn oidc_authorize_rejects_empty_nonce() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1704,6 +1714,7 @@ async fn oidc_authorize_fails_when_service_not_configured() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1727,6 +1738,7 @@ async fn oidc_authorize_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
@@ -1751,6 +1763,7 @@ async fn oidc_callback_rejects_empty_code() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1777,6 +1790,7 @@ async fn oidc_callback_rejects_empty_redirect_uri() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1803,6 +1817,7 @@ async fn oidc_callback_rejects_empty_state() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1829,6 +1844,7 @@ async fn oidc_callback_fails_when_service_not_configured() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1853,6 +1869,7 @@ async fn oidc_callback_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/oidc/callback")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
@@ -1882,6 +1899,7 @@ async fn saml_authn_request_nonexistent_config_returns_error() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/authn-request")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1905,6 +1923,7 @@ async fn saml_acs_nonexistent_config_returns_error() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Authorization", format!("Bearer {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -1927,6 +1946,7 @@ async fn saml_acs_without_auth_returns_401() {
 
     let req = test::TestRequest::post()
         .uri("/api/v1/federation/saml/acs")
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
@@ -1952,6 +1972,7 @@ async fn saml_metadata_rejects_empty_acs_url() {
     let config_id = config["id"].as_str().unwrap();
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!(
             "/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="
         ))
@@ -1974,6 +1995,7 @@ async fn saml_metadata_without_auth_returns_401() {
     let config_id = config["id"].as_str().unwrap();
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!(
             "/api/v1/federation/saml/metadata?config_id={config_id}\
              &acs_url=https%3A%2F%2Fexample.com%2Facs"
@@ -1993,6 +2015,7 @@ async fn saml_metadata_nonexistent_config_returns_error() {
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!(
             "/api/v1/federation/saml/metadata?config_id={}\
              &acs_url=https%3A%2F%2Fexample.com%2Facs",
@@ -2737,6 +2760,7 @@ async fn p23w3_07_a_cached_sign_in_fetches_once_and_a_moved_sso_host_is_audited(
     let sign_in = || {
         test::TestRequest::post()
             .uri("/api/v1/federation/saml/authn-request")
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .insert_header(("Authorization", format!("Bearer {token}")))
             .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
@@ -3124,5 +3148,133 @@ async fn r1_611_clearing_or_replacing_the_assertion_signing_certificate_is_audit
         "federation.metadata_signing_cert_changed",
     ] {
         assert!(rows(db.clone(), action).await.is_empty(), "{action}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #614 (D-3): the authenticated federation flow routes are rate limited
+// ---------------------------------------------------------------------------
+
+/// One request to each of the five authenticated federation flow routes, each
+/// a request the handler answers `400` to without touching the database or the
+/// network, so what the test measures is the limiter and nothing else.
+#[cfg(feature = "saml")]
+fn federation_flow_request(
+    route: &str,
+    token: &str,
+    config_id: &str,
+    peer: &str,
+) -> actix_http::Request {
+    let base = |builder: test::TestRequest, uri: &str| {
+        builder
+            .uri(uri)
+            .peer_addr(peer.parse::<SocketAddr>().unwrap())
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+    };
+    match route {
+        "federation_saml_authn_request" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/saml/authn-request",
+        )
+        .set_json(serde_json::json!({ "config_id": config_id, "acs_url": "" })),
+        "federation_saml_acs" => base(test::TestRequest::post(), "/api/v1/federation/saml/acs")
+            .set_json(serde_json::json!({
+                "config_id": config_id,
+                "saml_response": "",
+                "acs_url": "https://sp.example.com/acs"
+            })),
+        "federation_saml_metadata" => base(
+            test::TestRequest::get(),
+            &format!("/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="),
+        ),
+        "federation_oidc_authorize" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/oidc/authorize",
+        )
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "redirect_uri": "",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        })),
+        "federation_oidc_callback" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/oidc/callback",
+        )
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "code": "",
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        })),
+        other => panic!("not a federation flow route: {other}"),
+    }
+    .to_request()
+}
+
+/// #614 (D-3): each of the five authenticated federation flow routes — SAML
+/// `authn-request`, `acs`, `metadata` and OIDC `authorize`, `callback` — is
+/// under the browser-endpoint preset (`end_session_per_min`, per IP) in a bucket
+/// of its own. Past the bucket a route answers `429`; another address still
+/// gets through that route, and the other four routes' buckets are untouched
+/// (each answers its own `400`, not `429`, and then runs out on its own count).
+#[cfg(feature = "saml")]
+#[actix_rt::test]
+async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
+    const PER_MIN: u32 = 3;
+    const ROUTES: [&str; 5] = [
+        "federation_saml_authn_request",
+        "federation_saml_acs",
+        "federation_saml_metadata",
+        "federation_oidc_authorize",
+        "federation_oidc_callback",
+    ];
+    const PEER: &str = "203.0.113.61:4000";
+    const OTHER_PEER: &str = "203.0.113.62:4000";
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let rate_limit = RateLimitConfig {
+        end_session_per_min: PER_MIN,
+        ..RateLimitConfig::default()
+    };
+    let app = test_app!(db, auth, rate_limit);
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap().to_owned();
+    let call = |route: &'static str, peer: &'static str| {
+        test::call_service(
+            &app,
+            federation_flow_request(route, &token, &config_id, peer),
+        )
+    };
+
+    // Spend one route's bucket: the first PER_MIN requests reach the handler
+    // (and are refused there), the next is the limiter's.
+    for i in 0..PER_MIN {
+        let status = call(ROUTES[0], PEER).await.status().as_u16();
+        assert_eq!(status, 400, "{} request {i} is within the limit", ROUTES[0]);
+    }
+    let resp = call(ROUTES[0], PEER).await;
+    assert_eq!(resp.status().as_u16(), 429, "{} past its bucket", ROUTES[0]);
+    assert!(resp.headers().contains_key("retry-after"));
+
+    // The bucket is per address.
+    let status = call(ROUTES[0], OTHER_PEER).await.status().as_u16();
+    assert_eq!(status, 400, "another address is not charged");
+
+    // The other four routes, from the exhausted address, are untouched: each
+    // has its whole allowance, and each then runs out on its own count.
+    for route in &ROUTES[1..] {
+        for i in 0..PER_MIN {
+            let status = call(route, PEER).await.status().as_u16();
+            assert_eq!(status, 400, "{route} request {i} is within its own bucket");
+        }
+        let status = call(route, PEER).await.status().as_u16();
+        assert_eq!(status, 429, "{route} past its bucket");
     }
 }

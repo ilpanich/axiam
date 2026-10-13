@@ -709,6 +709,8 @@ async fn oidc_linking_ignores_client_supplied_nonce() {
     // callback must be rejected before ever considering the attacker-supplied
     // nonce/code. ---
     let req = actix_test::TestRequest::post()
+        // The route is under a per-IP limiter, which keys on the peer address.
+        .peer_addr("127.0.0.1:23456".parse().unwrap())
         .uri("/api/v1/federation/oidc/callback")
         .insert_header(("Authorization", format!("Bearer {bearer_token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))

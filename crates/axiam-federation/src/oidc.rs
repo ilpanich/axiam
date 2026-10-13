@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::credentialed_fetch::redirect_refusal;
 use crate::discovery_cache::DiscoveryCache;
 use crate::error::FederationError;
 use crate::jwks_cache::JwksCache;
@@ -766,11 +767,18 @@ where
         // Test-only seam — see `discover()`'s matching comment. `false` in
         // every production code path (`JwksCache::new()`'s default).
         let allow_private = self.cache.allow_private_networks();
-        let response = crate::ssrf::guarded_fetch(token_endpoint, allow_private, |c, u| {
-            c.post(u).form(&form_params)
-        })
-        .await
-        .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
+        // One hop, no redirect (R1W2-04, T-112): this request carries the
+        // client secret, the code and the PKCE verifier, and a token endpoint
+        // has no business redirecting.
+        let response =
+            crate::ssrf::guarded_fetch_no_redirect(token_endpoint, allow_private, |c, u| {
+                c.post(u).form(&form_params)
+            })
+            .await
+            .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
+        if let Some(reason) = redirect_refusal("token endpoint", token_endpoint, &response) {
+            return Err(FederationError::TokenExchangeFailed(reason));
+        }
 
         // CQ-B23: same 256 KiB cap as `discover`, enforced via a streaming,
         // running-byte-count read (`ssrf::read_capped_body`) rather than
@@ -2082,6 +2090,86 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             matches!(err, FederationError::TokenExchangeFailed(ref m) if m.contains("400")),
             "got: {err:?}"
         );
+    }
+
+    /// R1W2-04, T-112: the token exchange carries the client secret, the code
+    /// and (on the OAuth2 path) the PKCE verifier, so a `3xx` is an error and
+    /// the `Location` is never visited. The second server stands for "any
+    /// public HTTPS host the IdP's token endpoint redirects to".
+    #[tokio::test]
+    async fn exchange_code_refuses_a_redirect_and_the_second_server_sees_nothing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let elsewhere = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id_token": "stolen"
+            })))
+            .mount(&elsewhere)
+            .await;
+
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/collect?x=1", elsewhere.uri())),
+            )
+            .expect(1)
+            .mount(&idp)
+            .await;
+
+        let svc = make_stub_service(
+            StubLinkRepo::provisioning(),
+            StubUserRepo::provisioning(),
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let endpoint = format!("{}/token?tenant=acme", idp.uri());
+        let err = svc
+            .exchange_code(&endpoint, "code", "https://rp/cb", "cid", "secret")
+            .await
+            .expect_err("a redirecting token endpoint must fail");
+
+        let FederationError::TokenExchangeFailed(reason) = &err else {
+            panic!("expected TokenExchangeFailed, got: {err:?}");
+        };
+        assert!(reason.contains("redirect not followed"), "{reason}");
+        assert!(reason.contains("/token"), "names the endpoint: {reason}");
+        assert!(reason.contains("307"), "{reason}");
+        assert!(!reason.contains("tenant=acme"), "no query: {reason}");
+        assert!(!reason.contains("collect"), "no Location target: {reason}");
+        assert!(
+            elsewhere
+                .received_requests()
+                .await
+                .expect("request recording is on")
+                .is_empty(),
+            "the redirect target must never be contacted"
+        );
+        idp.verify().await;
+    }
+
+    /// The token exchange goes out through the one-hop guard and nothing else
+    /// (R1W2-04, T-112); pinned against the source as the webhook deliverer is,
+    /// so the redirect-following guard cannot come back beside it.
+    #[test]
+    fn the_token_exchange_uses_the_no_redirect_guarded_fetch() {
+        let source = include_str!("oidc.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the production half of the file");
+        assert_eq!(
+            production
+                .matches("crate::ssrf::guarded_fetch_no_redirect(token_endpoint")
+                .count(),
+            1
+        );
+        // The discovery fetch carries no credential and keeps the redirect-
+        // following guard through `DiscoveryCache`; nothing else here may use it.
+        assert_eq!(production.matches("guarded_fetch(").count(), 0);
+        assert_eq!(production.matches("guarded_fetch_with_cap(").count(), 0);
     }
 
     #[tokio::test]

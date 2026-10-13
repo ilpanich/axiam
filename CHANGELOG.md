@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Federation no longer sends a credential through a redirect (#591,
+  R1W2-04).** The OIDC and OAuth2 token exchanges (client secret, authorization
+  code, PKCE verifier) and the OAuth2 userinfo and GitHub verified-email calls
+  (the user's access token) went through the redirect-following guard, which
+  rebuilt the request on every hop, so a `3xx` from the IdP's endpoint sent the
+  secret or the token on to its `Location` — any public HTTPS host. The four calls now use the one-hop guard and a `3xx` is a
+  `FederationError` reading "redirect not followed" and naming the endpoint's
+  host and path (never the `Location`, a query or the response body). An IdP
+  whose token or userinfo endpoint redirects must be configured with its final
+  URL. Discovery, JWKS and metadata fetches carry no credential and still follow
+  a redirect. Threat model: T-112 carries a dated correction of its rule (and the
+  Phase 23 W6 review's "the one exception left"); totals unchanged.
 - **The authenticated federation flow routes are rate limited (#614).**
   `POST /api/v1/federation/saml/authn-request` had no limiter, and neither had
   its four siblings, `POST /api/v1/federation/saml/acs`,

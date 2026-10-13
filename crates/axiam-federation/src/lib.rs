@@ -7,6 +7,7 @@
 /// Sign in with Apple's ES256 client secret, minted rather than stored.
 pub mod apple;
 pub mod cert;
+pub(crate) mod credentialed_fetch;
 pub mod discovery_cache;
 pub mod error;
 /// Templated OIDC issuers (Entra ID's `{tenantid}`) and the allow-list that

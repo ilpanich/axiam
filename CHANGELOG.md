@@ -116,6 +116,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not reachable — every `<!DOCTYPE` is refused on the bytes before libxml,
   and network access was off — and it is now off. Threat model: T-474 carries a
   dated correction, T-67 and T-69 a short one.
+- **Received SAML documents are parsed without a use-after-free, and the
+  signature checks fail closed.** `receiver_parser_options()` named UTF-8 as
+  libxml's encoding, and libxml-rs 0.3.3 frees that name before libxml2 reads
+  it, so every received SAML document (the assertion consumer, signed IdP
+  metadata, the IdP's SSO and SLO receiver) was decoded under whatever the
+  freed memory then held: usually the parse failed — valid documents were
+  refused intermittently, and `cargo test -p axiam-federation --lib` failed
+  about one run in ten — and sometimes the XML-DSig namespace read differently,
+  which at the IdP's POST-binding verification let a signature reach xmlsec
+  without the transform allow-list (R101W2-01). The IdP receiver had it since
+  1.0.0. No encoding is named now (`ignore_enc` keeps UTF-8); signatures are
+  found by local name, and an element named `Signature` outside the XML-DSig
+  namespace refuses the document; `verify_post_signature` refuses a document
+  with no signature; the allow-list counts `Transform`s in any namespace.
+  **Behaviour change:** an `AuthnRequest`, logout message or signed IdP
+  metadata carrying a non-XML-DSig element named `Signature` is refused.
+  Threat model: T-477 carries a dated correction, T-67, T-69 and T-474 a short
+  one.
 
 ## [1.0.0] - 2026-10-10
 

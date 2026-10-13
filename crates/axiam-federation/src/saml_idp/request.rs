@@ -407,10 +407,21 @@ pub fn parse_authn_request(
 /// that is not well-formed is refused, not repaired), no network access
 /// (`XML_PARSE_NONET`), no entity substitution and no DTD loading, defaulting or
 /// validation (`XML_PARSE_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID` all off), and
-/// UTF-8 forced whatever the document declares (`XML_PARSE_IGNORE_ENC` plus the
-/// explicit encoding, #605). [`refuse_other_encodings`] has already refused any
-/// other declaration, so forcing UTF-8 changes no document that reaches the
+/// UTF-8 whatever the document declares (#605): `XML_PARSE_IGNORE_ENC` makes
+/// libxml skip the declaration, and its own detection reads any text that
+/// passed [`refuse_other_encodings`] — valid UTF-8, no NUL, no second
+/// byte-order mark, beginning with `<` — as UTF-8. That function has already
+/// refused any other declaration, so this changes no document that reaches the
 /// parser; it removes the parser's freedom to read one differently.
+///
+/// `encoding` stays **`None`**. libxml-rs 0.3.3's `parse_string_with_options`
+/// turns `Some(name)` into a `CString` that is dropped inside the `match` that
+/// takes its pointer, so libxml2 read the encoding name from freed memory: a
+/// use-after-free (found under valgrind on 2026-10-13). Whatever the allocator
+/// had put there named the encoding the document was decoded with — usually
+/// none, and the parse failed; sometimes a 7-bit national variant of ASCII,
+/// and `#` in the XML-DSig namespace URI read as another character. Every
+/// receiver parse set it from W2.1 (#605), the IdP receiver's since T23.2.3.
 ///
 /// `no_def_dtd` stays **off**. libxml-rs 0.3 maps it to the value 4 for both
 /// parsers, which is `HTML_PARSE_NODEFDTD` for the HTML parser but
@@ -428,7 +439,7 @@ pub fn receiver_parser_options() -> libxml::parser::ParserOptions<'static> {
         no_net: true,
         no_def_dtd: false,
         ignore_enc: true,
-        encoding: Some("UTF-8"),
+        encoding: None,
         ..Default::default()
     }
 }
@@ -504,7 +515,10 @@ fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
 
 /// Where the document's signatures sit: `Ok(false)` for none, `Ok(true)` for
 /// exactly one enveloped child of the root referencing the root's `ID`, and
-/// [`RequestError::SignaturePlacement`] for anything else.
+/// [`RequestError::SignaturePlacement`] for anything else — including an
+/// element locally named `Signature` that is not an XML-DSig one, so a
+/// namespace this check misreads refuses the document rather than reading it
+/// as unsigned.
 ///
 /// **A function over any root element** (D-38): `root` is whatever the caller
 /// established the document's root to be — an `AuthnRequest` here, a
@@ -517,12 +531,7 @@ pub(crate) fn signature_placement(
     root_id: &str,
 ) -> Result<bool, RequestError> {
     let mut context = libxml::xpath::Context::new(doc).map_err(|()| RequestError::Malformed)?;
-    let all = context
-        .findnodes(
-            &format!("//*[local-name()='Signature' and namespace-uri()='{NS_DSIG}']"),
-            None,
-        )
-        .map_err(|()| RequestError::Malformed)?;
+    let all = every_signature(&mut context)?;
     if all.is_empty() {
         return Ok(false);
     }
@@ -663,13 +672,13 @@ pub(crate) fn signature_transforms_admitted(
     }
 
     // Nothing the walk above did not judge: a `Transform` in a `Manifest` or a
-    // `KeyInfo/RetrievalMethod`, or a second canonicalization.
+    // `KeyInfo/RetrievalMethod`, or a second canonicalization. Counted by local
+    // name in any namespace, so a `Transforms` or `Transform` the walk skipped
+    // because its namespace did not read as XML-DSig refuses the signature
+    // instead of escaping the count (fail closed).
     let everywhere = |context: &mut libxml::xpath::Context, name: &str| {
         context
-            .findnodes(
-                &format!(".//*[local-name()='{name}' and namespace-uri()='{NS_DSIG}']"),
-                Some(signature),
-            )
+            .findnodes(&format!(".//*[local-name()='{name}']"), Some(signature))
             .map(|nodes| nodes.len())
     };
     Ok(everywhere(context, "Transform")? == transforms_seen
@@ -710,6 +719,26 @@ pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str)
             .is_some_and(|ns| ns.get_href() == namespace)
 }
 
+/// Every element in the document locally named `Signature`, in any namespace,
+/// each of which must be an XML-DSig `Signature`:
+/// [`RequestError::SignaturePlacement`] otherwise. Searching by local name and
+/// then checking the namespace — rather than searching for the namespace — is
+/// what makes a namespace this reader gets wrong refuse the document instead
+/// of hiding a signature from the checks while xmlsec, on its own parse, still
+/// finds and verifies it.
+fn every_signature(
+    context: &mut libxml::xpath::Context,
+) -> Result<Vec<libxml::tree::Node>, RequestError> {
+    let all = context
+        .findnodes("//*[local-name()='Signature']", None)
+        .map_err(|()| RequestError::Malformed)?;
+    if all.iter().all(|s| is_element(s, NS_DSIG, "Signature")) {
+        Ok(all)
+    } else {
+        Err(RequestError::SignaturePlacement)
+    }
+}
+
 /// Verify a POST-binding request's enveloped signature against the SP's
 /// registered certificate (DER). Call only after [`parse_authn_request`]
 /// answered `enveloped_signature: true`, which is what established that the one
@@ -738,12 +767,13 @@ pub fn verify_post_signature(document: &str, sp_cert_der: &[u8]) -> Result<(), R
     // issued response's assertion.)
     let doc = parse_xml(document).map_err(|_| RequestError::SignatureInvalid)?;
     let mut context = libxml::xpath::Context::new(&doc).map_err(|()| RequestError::Malformed)?;
-    let signatures = context
-        .findnodes(
-            &format!("//*[local-name()='Signature' and namespace-uri()='{NS_DSIG}']"),
-            None,
-        )
-        .map_err(|()| RequestError::Malformed)?;
+    let signatures = every_signature(&mut context)?;
+    // Called only for a document whose parse found its signature: finding none
+    // here means this read and that one disagree, and xmlsec would verify
+    // whatever it finds with nothing checked first. Refused (fail closed).
+    if signatures.is_empty() {
+        return Err(RequestError::SignatureInvalid);
+    }
     for signature in &signatures {
         if !signature_transforms_admitted(&mut context, signature)
             .map_err(|()| RequestError::Malformed)?

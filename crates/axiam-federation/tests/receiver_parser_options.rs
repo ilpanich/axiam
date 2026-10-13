@@ -1,5 +1,6 @@
 //! The libxml options AXIAM parses every received SAML document with
-//! (`receiver_parser_options`) never load an external DTD subset.
+//! (`receiver_parser_options`): they never load an external DTD subset, and
+//! they read UTF-8 whatever the document declares without naming an encoding.
 //!
 //! libxml-rs 0.3's `no_def_dtd` is `XML_PARSE_DTDLOAD` for the XML parser, and
 //! the receiver once set it. This is its own test binary on purpose: xmlsec,
@@ -20,7 +21,9 @@ fn the_receiver_options_never_load_an_external_dtd() {
     let options = receiver_parser_options();
     assert!(!options.no_def_dtd, "no_def_dtd is XML_PARSE_DTDLOAD");
     assert!(!options.recover && options.no_net && options.ignore_enc);
-    assert_eq!(options.encoding, Some("UTF-8"));
+    // libxml-rs 0.3.3 frees the encoding name before libxml2 reads it
+    // (use-after-free); UTF-8 comes from `ignore_enc` instead — see below.
+    assert_eq!(options.encoding, None);
 
     // A local, deliberately malformed DTD: reading it makes the document not
     // well-formed, so a successful parse proves it was never read.
@@ -63,5 +66,32 @@ fn the_receiver_options_never_load_an_external_dtd() {
     assert_eq!(
         refuse_markup_declarations(&document),
         Err(RequestError::Dtd)
+    );
+}
+
+/// UTF-8 whatever the document declares, without naming an encoding: with
+/// `ignore_enc` libxml skips the declaration and reads the text as UTF-8, so
+/// `é` (two UTF-8 bytes) under a Latin-1 declaration is still `é`. The control
+/// honours the declaration and reads the two bytes as two Latin-1 characters.
+/// (Every receiver refuses such a declaration on the bytes first; this parses
+/// straight through libxml.)
+#[test]
+fn the_receiver_options_read_utf8_whatever_the_declaration_says() {
+    let document = r#"<?xml version="1.0" encoding="ISO-8859-1"?><r>é</r>"#;
+    let content = |options: ParserOptions| {
+        Parser::default()
+            .parse_string_with_options(document.as_bytes(), options)
+            .expect("parses")
+            .get_root_element()
+            .map(|r| r.get_content())
+    };
+    assert_eq!(content(receiver_parser_options()), Some("é".to_owned()));
+    assert_eq!(
+        content(ParserOptions {
+            ignore_enc: false,
+            ..receiver_parser_options()
+        }),
+        Some("Ã©".to_owned()),
+        "control: the declaration honoured"
     );
 }

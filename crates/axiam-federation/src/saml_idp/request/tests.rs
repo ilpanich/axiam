@@ -636,6 +636,49 @@ fn a_signature_anywhere_else_refuses_the_request() {
     }
 }
 
+/// Fail closed: an element locally named `Signature` that does not read as an
+/// XML-DSig one — a foreign namespace here; a misread namespace to this reader
+/// — refuses the request at the parse and at `verify_post_signature`, rather
+/// than reading as unsigned (the parse) or leaving the signature xmlsec finds
+/// unchecked (`verify_post_signature`). A document with no signature at all
+/// is refused by `verify_post_signature` before xmlsec.
+#[test]
+fn a_signature_outside_the_xml_dsig_namespace_fails_closed() {
+    let foreign = r#"<x:Signature xmlns:x="urn:example:not-xmldsig"/>"#;
+    let signed = signed_with("_f1", sp_key());
+    let unsigned = request("_f2");
+    let with_foreign = |document: &str| {
+        swapped(
+            document,
+            "</samlp:AuthnRequest>",
+            &format!("{foreign}</samlp:AuthnRequest>"),
+        )
+    };
+    for (label, document) in [
+        ("signed, plus a foreign Signature", with_foreign(&signed)),
+        (
+            "unsigned, plus a foreign Signature",
+            with_foreign(&unsigned),
+        ),
+    ] {
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::SignaturePlacement),
+            "{label}: parse"
+        );
+        assert_eq!(
+            verify_post_signature(&document, &sp_key().cert_der),
+            Err(RequestError::SignaturePlacement),
+            "{label}: verify_post_signature"
+        );
+    }
+    assert_eq!(
+        verify_post_signature(&unsigned, &sp_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "no signature at all"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // HTTP-Redirect: the query signature over the exact octets
 // ---------------------------------------------------------------------------
@@ -937,6 +980,22 @@ pub(crate) fn hostile_transform_variants(document: &str) -> Vec<(&'static str, S
                     r##"<ds:KeyInfo><ds:RetrievalMethod URI="#x"><ds:Transforms>"##,
                     r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116"/>"#,
                     r#"</ds:Transforms></ds:RetrievalMethod>"#
+                ),
+            ),
+        ),
+        (
+            // Fail closed: a `Transform` outside every container the walk
+            // reads as XML-DSig — what a misread namespace looks like to it —
+            // still counts against the transforms it judged.
+            "a Transform outside the XML-DSig namespace",
+            swapped(
+                document,
+                "</ds:Transforms>",
+                concat!(
+                    "</ds:Transforms>",
+                    r#"<x:Steps xmlns:x="urn:example:not-xmldsig">"#,
+                    r#"<x:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116"/>"#,
+                    "</x:Steps>"
                 ),
             ),
         ),

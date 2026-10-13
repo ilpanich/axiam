@@ -3088,47 +3088,11 @@ where
     // spoofable proxy header. Only fires on the rustls bind with client-auth
     // enabled; on plaintext / server-auth-only connections there is no peer cert
     // and nothing is inserted (backward compatible).
-    .on_connect(|conn, ext| {
-        use actix_tls::accept::rustls_0_23::TlsStream;
-        use actix_web::rt::net::TcpStream;
-        if let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() {
-            let (_io, session) = tls.get_ref();
-            if let Some(certs) = session.peer_certificates()
-                && let Some(leaf) = certs.first()
-            {
-                // Whether this certificate chained to a configured anchor
-                // cannot be read off the handshake result — rustls's
-                // `ClientCertVerified` carries no payload and the verifier is
-                // given no connection handle to key a side channel on — so it
-                // is re-derived here, where the peer chain is in hand. Free
-                // under every client-auth policy except `optional_self_signed`;
-                // see `crate::tls::peer_certificate_trust`.
-                let trust = crate::tls::peer_certificate_trust(leaf, &certs[1..]);
-                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
-                    Ok(vc) => {
-                        // R1W1-02: the chain it verified through, so
-                        // `tls_client_auth` can require its anchor to be the
-                        // client's organization's. A self-asserted certificate
-                        // has none.
-                        let issuer_path = if trust.is_chained_to_anchor() {
-                            crate::tls::peer_certificate_issuer_path(leaf, &certs[1..])
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        ext.insert(vc.with_issuer_path(issuer_path));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "failed to parse verified client certificate; \
-                             cert-mapped identity will be unavailable for this connection"
-                        );
-                    }
-                }
-            }
-        }
-    });
+    //
+    // The body lives in `crate::tls::lift_verified_client_certificate` so the
+    // route-level `tls_client_auth` tests (`tests/server_leaf_profile.rs`)
+    // install the very hook this listener does (#610).
+    .on_connect(crate::tls::lift_verified_client_certificate);
 
     // G8/B2: optional HTTP/2 window tuning for the TLS bind. Unset keys are
     // never forwarded to actix, so the default build is bit-identical to

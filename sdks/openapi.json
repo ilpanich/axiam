@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:fe15d7d658ca0888ca7888c0cf50bbc2edd664aafd92056fa99ee754ad3737bf"
+    "x-axiam-spec-digest": "sha256:2de3fba40cad83f5cfc692405ea841ba3e1a2c3e7d60949076e89ec8f604afd9"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -12237,7 +12237,7 @@
             "description": "No such stream in this tenant"
           },
           "409": {
-            "description": "The audience is already used by another SSF stream, or the stream changed since it was read (reload it and retry)"
+            "description": "The audience is already used by another SSF stream, or the stream changed since it was read — since the `expected_updated_at` the request carried (a receiver's pause or narrowing included), or, when it carried none, since the server read it during the request (reload it and retry)"
           },
           "429": {
             "description": "Rate limit"
@@ -25562,7 +25562,15 @@
             "items": {
               "$ref": "#/components/schemas/SsfEventType"
             },
-            "description": "A subset of `events_allowed`; absent means all of them. The receiver may\nnarrow it later, never widen it."
+            "description": "A subset of `events_allowed`; absent means all of them. The receiver may\nnarrow it later, never widen it. On update, absent therefore *resets* a\nnarrowing the receiver made to every allowed event, and `[]` keeps a\nreceiver's \"none\": a client that edits a stream sends the value it read\n(cut to the new `events_allowed`), never an absent field."
+          },
+          "expected_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The `updated_at` of the stream as the client read it (R1W2-03, T-406).\n**Update only; create ignores it.** When present, the replacement lands\nonly if the stream still has that version, else `409` (reload and\nretry): a pause or a narrowing the receiver made after the form was\nread is not silently reverted. When absent the replacement is\nconditional on the version the server reads during the request — an\nold client keeps that behaviour, and the console always sends it."
           },
           "receiver_client_id": {
             "type": "string",

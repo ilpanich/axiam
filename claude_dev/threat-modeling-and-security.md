@@ -392,6 +392,15 @@
 > state shown, so an administrator can see which third parties receive security
 > events and turn either surface off during an incident without the API. Status
 > and totals are unchanged.
+> *Correction, 2026-10-13 (`1.0.1`, #590, R1W2-03):* the `PUT` the page sent was
+> conditional only on the version the server read during the request, so a
+> receiver's pause or narrowing between the form's read and its save was
+> reverted, and removing every narrowed event omitted `events_requested`, which
+> reads as every allowed event. `SsfStreamInput` carries the optional
+> `expected_updated_at` (a stale one is `409`; absent keeps the old behaviour),
+> the page sends the version of the row it opened from, never omits the
+> narrowing and refuses a save that would empty it. Status and totals are
+> unchanged.
 >
 > **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
 > T-416 amended, still Mitigated).** The administrators' `PUT` was conditional

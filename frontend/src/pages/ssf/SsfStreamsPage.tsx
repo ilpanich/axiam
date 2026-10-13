@@ -98,11 +98,34 @@ function formFrom(stream: SsfStream): FormState {
 }
 
 /**
+ * The narrowing an edit would empty: the receiver had asked for some events,
+ * and the new ceiling (`events_allowed`) no longer contains any of them.
+ * Saving that would leave the stream carrying nothing the receiver asked for,
+ * and a replacement cannot say so without either widening it (an omitted
+ * `events_requested` is "all allowed") or inventing a narrowing of its own, so
+ * the page refuses it with a sentence (R1W2-03).
+ */
+function emptiesNarrowing(
+  form: FormState,
+  stored: SsfStream | null,
+): boolean {
+  if (!stored || stored.events_requested.length === 0) return false;
+  return !stored.events_requested.some((e) => form.eventsAllowed.includes(e));
+}
+
+const EMPTIES_NARROWING_MESSAGE =
+  "Every event this receiver asked for is outside the allowed events you selected. Keep at least one of them allowed, or delete the stream: saving would otherwise widen what the receiver asked for.";
+
+/**
  * The replacement body for a form.
  *
  * `events_requested` is what the *receiver* narrowed to, and a replacement that
- * omitted it would put it back to "everything allowed", so an edit sends the
- * stored value cut to the new ceiling. A create omits it.
+ * omitted it would put it back to "everything allowed", so an edit always
+ * sends the stored value cut to the new ceiling (never omitted; an
+ * {@link emptiesNarrowing} edit is refused before it gets here). A create
+ * omits it. `expected_updated_at` is the version of the row the form was
+ * opened from, so a receiver's pause or narrowing since is a `409`, not a
+ * silent revert.
  */
 function inputFrom(form: FormState, stored: SsfStream | null): SsfStreamInput {
   const push = form.deliveryMethod === "push";
@@ -122,10 +145,11 @@ function inputFrom(form: FormState, stored: SsfStream | null): SsfStreamInput {
       ? { clear_authorization_header: true }
       : {}),
     events_allowed: form.eventsAllowed,
-    ...(requested && requested.length > 0 ? { events_requested: requested } : {}),
+    ...(requested ? { events_requested: requested } : {}),
     subject_format: form.subjectFormat,
     status: form.status,
     status_reason: form.statusReason.trim() || null,
+    ...(stored ? { expected_updated_at: stored.updated_at } : {}),
   };
 }
 
@@ -471,9 +495,10 @@ export function SsfStreamsPage() {
     },
     onError: (err: unknown) => {
       const message = getApiErrorMessage(err, "Failed to update the stream.");
-      // T-406: the write is conditional on the version the server read, so a
-      // `409` that is not about the audience means the stream changed under
-      // the form (its receiver, or another administrator). The form's values
+      // T-406: the write is conditional on the version the form was opened
+      // from (`expected_updated_at`), so a `409` that is not about the audience
+      // means the stream changed under the form (its receiver, or another
+      // administrator). The form's values
       // are stale: reload the list and say so, rather than offer a retry that
       // would be judged against a stream the administrator has not seen.
       if (getApiErrorStatus(err) === 409 && !/audience/i.test(message)) {
@@ -500,6 +525,10 @@ export function SsfStreamsPage() {
     e.preventDefault();
     setEditError("");
     if (!editStream) return;
+    if (emptiesNarrowing(editForm, editStream)) {
+      setEditError(EMPTIES_NARROWING_MESSAGE);
+      return;
+    }
     const payload = inputFrom(editForm, editStream);
     if (endpointMoveNeedsHeader(editStream, payload)) {
       setEditError(

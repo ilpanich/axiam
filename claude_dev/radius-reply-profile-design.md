@@ -114,6 +114,14 @@ Read from the tree on 2026-10-13:
 - **Device certificates bind to service accounts**: `DeviceIdentity { service_account_id,
   tenant_id, org_id, certificate_id }` (`crates/axiam-core/src/models/certificate.rs:886`).
   Certificates bound to users are item D6 and do not exist.
+  **Binding is a write with its own permission and no network check.**
+  `POST /api/v1/service-accounts/{sa_id}/bind-certificate` checks `certificates:bind`
+  on `Uuid::nil()` and that the certificate and the account share the tenant, and
+  writes the `cert_bound_to` edge (`crates/axiam-api-rest/src/handlers/certificates.rs:527`);
+  issuance checks `certificates:generate` on `Uuid::nil()` (`:168`, `:292`) and
+  binds nothing. Placement (§4.3) is decided for the account a certificate is bound
+  to, so this edge is half of what places a device. §5.3 bounds it
+  (correction of 2026-10-13, see there).
 - **Tenant signing CAs exist** (`CaCertificate::tenant_id`,
   `crates/axiam-core/src/models/certificate.rs:190ff`); the organization CA is shared
   by the organization's tenants.
@@ -317,7 +325,9 @@ rules apply to them, each a `400`:
 ### 4.3 How a profile is chosen
 
 A decision is asked for a subject (the service account the presented certificate
-is bound to) in a tenant (§7) and a site:
+is bound to) in a tenant (§7) and a site. Two writes therefore decide where a
+device lands: the role assignment that gives the account `network:join`, and the
+certificate binding that makes the device that account (§5.3 bounds both):
 
 1. The subject is `Active` (`account_may_act`) and, with D4, the certificate's row
    is valid now (`DeviceAuthService::authenticate_der`, tenant-equal, spike §6.5).
@@ -387,8 +397,9 @@ the server calls, not an approval surface a token can drive (§6.8 of the spike)
 
 The authorization logic of §5.2 and §5.3 lives in **one domain function in
 `axiam-authz`**, not in handlers. A test enumerates every write path that can
-create a profile, a segment, a network-sensitive role grant or assignment (today
-REST only: `roles.rs`, `permissions.rs`, the new network handlers), and fails if
+create a profile, a segment, a network-sensitive role grant or assignment, or a
+certificate binding to a service account (today REST only: `roles.rs`,
+`permissions.rs`, `certificates.rs` `bind`, the new network handlers), and fails if
 one reaches the repository without that function. This is the T-429 lesson
 applied to a write surface. `axiam-authz` is opted into `missing_docs`
 (`CLAUDE.md`), so that code is documented from its first commit.
@@ -421,7 +432,7 @@ audit row records the refusal:
 | **H3** | every value lies inside `S`'s envelope: `filter_id ∈ S.filter_ids`, `session_timeout_secs ≤` the tenant cap, the VLAN derived from `S` and never chosen | The envelope is written under `network:segments_write` on `S`'s parent, a **separate** permission. A profile writer cannot widen the set of ACL names or the VLAN they choose from, and a tenant can split the two duties between two people |
 | **H4** | if `conf_admin(P, S)`: `W` holds `network:grant_admin` **and** `network:admin` on `S` | Literally "no more than the writer holds": conferring administrative login on a segment's equipment requires holding it. Vacuous under option B |
 | **H5** | `S.kind` is not changed by this write, and a write to a `kind = quarantine` segment's profile also needs `network:grant` on `/network/quarantine/<site>` | The quarantine profile is reached by every quarantined device of a site. Shaping it is a grant to all of them |
-| **H6** | `W ≠` a subject that is itself `network:join`-able on `S` through the same write | A service account that writes its own segment's profile is a device configuring its own access. Refused, whatever it holds |
+| **H6** | `W ≠` a subject that is itself `network:join`-able on `S` through the same write | A service account that writes its own segment's profile is a device configuring its own access. Refused, whatever it holds. The same holds for binding (§5.3): a subject may not bind a certificate to itself, nor one authenticated through a certificate bound to the account being written |
 
 A **delete** of `P` needs H1 only: no profile means no candidate, which only
 narrows. A segment **envelope** write (`network:segments_write`) that would leave
@@ -437,13 +448,14 @@ policy, not a delegation chain. The audit row (§5.4) records who wrote it, and 
 re-validation sweep that flags profiles whose last writer no longer holds H1–H4 is
 a possible later item (§9, residual 1), not a gate.
 
-### 5.3 The role-assignment side — where the rule would otherwise leak
+### 5.3 The role-assignment and certificate-binding sides — where the rule would otherwise leak
 
-A profile is inert until a device may join its segment, and joining is a role
-assignment. Today any `roles:assign` holder can assign any role, at any node,
-to any subject (§2). Unless the assignment side is held to the same rule, H2 is
-decoration. So, for **network-sensitive** roles only (§4.2), in addition to
-`roles:assign` / `roles:unassign`:
+A profile is inert until a device may join its segment. Joining is a role
+assignment, **and a device is the account that holds the join only through
+the certificate bound to that account** (§4.3 step 1). Today any `roles:assign` holder
+can assign any role, at any node, to any subject (§2). Unless the assignment side
+is held to the same rule, H2 is decoration. So, for **network-sensitive** roles
+only (§4.2), in addition to `roles:assign` / `roles:unassign`:
 
 | Write | Additional requirement |
 |---|---|
@@ -453,6 +465,35 @@ decoration. So, for **network-sensitive** roles only (§4.2), in addition to
 | Assign a role carrying a meta permission (`network:grant`, `network:profiles_write`, `network:segments_write`, `network:decide`, `network:export`) at `N` | `W` holds **every such permission** at `N`. You delegate only what you hold |
 | `permissions:grant` / `permissions:revoke` of a `network:` permission on a role (either effect) | `W` holds `network:grant` at `/network`, plus every meta permission granted. It changes every existing assignment of the role at once |
 | `roles:delete` of a role carrying a `network:` **deny** | as unassign, at `/network` |
+| **Bind** a certificate to a service account `A` (or re-bind it from another account), at `certificates:bind`, where `A` holds any `network:join` **allow** at a node `N`, directly or through a role | `W` holds `network:grant` at **every such `N`**. `A`'s `network:join` allows are read at write time with `check_access`'s own evaluation, deny-override in force, so an allow that a deny already beats is not one `W` must hold. Binding to an account with no `network:join` allow, or only a deny, asks nothing extra |
+| Any other path that issues a certificate already bound to an account (none exists today: `certificates:generate` and `sign-csr` bind nothing) | the same row, evaluated at issuance. Such a path is not built until it calls the §5.1 function |
+
+**Correction of 2026-10-13 (R101W6-03, F4 review of W6).** This note first said
+that the assignment side is the whole of the leak ("joining is a role
+assignment"). It is not: a holder of `certificates:generate` and `certificates:bind`
+(both tenant-wide) could issue a certificate for a device they hold and bind it to a
+service account that already holds `network:join` on a privileged segment. That
+confers the segment's placement and its profile without `network:grant`, by the
+second door. The two rows above close it. The rule is that **placement is conferred by the
+pair (the account's joins, the certificate binding), and a write to either edge needs `network:grant` on what the other already
+carries.** Role assignment to an account with certificates already bound is the
+first rows' case (the assignment needs `network:grant` at `N`); binding to an
+account that already has the join is the new rows' case. The alternative, deriving
+placement only from roles the binder could assign, was rejected: it needs the
+binder recorded on the edge and re-evaluated at every decision, and it would make a
+role revocation by someone else change a device's placement silently. The write-time
+gate is the same shape as every other row of this table. Binding is also bound by
+H6's spirit: a service account that authenticates by a certificate may not bind a
+certificate to itself or to the account it is. D6, which binds certificates to
+users, adds a user path to this row and reopens it with §4.2 rule 2.
+
+*Plan vs tree:* the review words the second door as "issue a certificate and bind
+it". In the tree the two are separate routes and issuance binds nothing, so the rule
+attaches to the bind (`certificates.rs:527`), with the second table row held ready
+for any future path that binds at issuance. The permission names
+(`certificates:generate`, `certificates:bind`, `network:grant`'s tenant-wide
+`Uuid::nil()` checks) match `crates/axiam-api-rest/src/permissions.rs:76ff`.
+`network:*` is not in the tree yet (nothing is built).
 
 This is a **namespace-limited** delegation bound. AXIAM today has no general "you
 cannot assign more than you hold" rule, and this note does not propose one. That
@@ -467,6 +508,7 @@ the tree uses (`scim_target.created`, `crates/axiam-api-rest/src/handlers/scim_t
 `network_segment.created` · `.updated` · `.moved` · `.deleted` ·
 `reply_profile.created` · `.replaced` · `.deleted` · `reply_profile.write_refused` ·
 `network_segment.write_refused` · `network_role.assign_refused` ·
+`certificate_binding.refused` (§5.3, a bind refused for want of `network:grant`) ·
 `reply_profile.invalid` (§3.4, one per profile per window) · and, if §6.2 is built,
 `network_export.read`.
 
@@ -643,7 +685,8 @@ Under option B there is no NAS registry in AXIAM. The "authenticated NAS" is the
    administrator asserts. Placing the wrong number on the quarantine segment is a
    configuration error AXIAM audits and cannot detect.
 7. **The general delegation gap.** Outside the `network:` namespace,
-   `roles:assign` remains unbounded (§2, §5.3). This note does not change that. It
+   `roles:assign` remains unbounded, and so does `certificates:bind` for an
+   account that holds no `network:join` (§2, §5.3). This note does not change that. It
    is pre-existing and its own item.
 
 ---
@@ -683,8 +726,9 @@ the re-read found, for the entries' own text, dated, in the pass that edits them
   (RFC 5080 §2.2.2; §1, 1j).
 
 **To D4, when scheduled:** §4.3 is the decision; §6.3 its caller rules and its
-contract section; §8 its personal-data rule; §5.3 must already be built, or D4
-serves a model any `roles:assign` holder can rewrite.
+contract section; §8 its personal-data rule; §5.3 must already be built (both
+its role-assignment rows and its certificate-binding rows), or D4 serves a model any
+`roles:assign` or `certificates:bind` holder can rewrite.
 
 **To option A's A-8 / A-9, if reopened:** the same model with a NAS registry in
 place of the caller. The site key is then a property of the NAS row, and moving a
@@ -707,7 +751,7 @@ rule.
 | **§6.7** `NotificationGate` | §5.5 | Met (gate only) |
 | **§6.8** no approval surface | §5.1 (the reactor hook is a server-called veto, not an approval a token drives) | Met (by absence) |
 | **§6.9** MFA not bypassable; downgrade refused | §3.3 (admin class disabled in option B: no password path); §3.4 (unknown dictionary version or field refused, never ignored) | MFA: **not applicable to option B** (no password flow, spike §5.2). Downgrade: met for the dictionary; the EAP/TLS downgrade rules are FreeRADIUS's (W6.2) |
-| **T-461** reply profile beyond its writer | §3 (closed typed dictionary, VLAN derived), §4.4 (quarantine), §5.2 (H1–H6), §5.3 (assignment side), §5.4 (audit) | **The design T-461 asks for.** Still *Not applicable*, and Mitigated only when built with the tests §5.1 names |
+| **T-461** reply profile beyond its writer | §3 (closed typed dictionary, VLAN derived), §4.4 (quarantine), §5.2 (H1–H6), §5.3 (assignment **and certificate-binding** sides; added 2026-10-13, R101W6-03), §5.4 (audit) | **The design T-461 asks for.** Still *Not applicable*, and Mitigated only when built with the tests §5.1 names |
 | **T-459** cross-tenant | §7 | Design input to D4 and W6.2 |
 | **T-462** session outlives revocation | §3.4 (tenant cap, floor, `RADIUS-Request`); §6.3 table | Bound defined; stays Open-if-built |
 | **T-463** decisions audited | §5.4; §6.3 | Writes here; decisions **deferred to D4** |

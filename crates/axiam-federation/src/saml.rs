@@ -414,7 +414,7 @@ where
             FederationError::SamlResponseFailed(format!("Base64 decode failed: {e}"))
         })?;
 
-        let xml = String::from_utf8(decoded).map_err(|e| {
+        let decoded_xml = String::from_utf8(decoded).map_err(|e| {
             FederationError::SamlResponseFailed(format!("Invalid UTF-8 in SAML response: {e}"))
         })?;
 
@@ -425,10 +425,15 @@ where
         // handling; and a NUL or a declared encoding other than UTF-8 — the
         // two ways to hide a declaration from that scan — is refused first.
         // Neither depends on `allow_sha1_signatures`.
-        refuse_other_encodings(&xml).map_err(|_| {
+        //
+        // R101W2-02: `xml` is the accepted text without its one leading
+        // byte-order mark, if it had one. It is the only binding read below —
+        // the samael parse, `verify_signature` and `bind_signature_to_assertion`
+        // all read these same characters.
+        let xml = refuse_other_encodings(&decoded_xml).map_err(|_| {
             FederationError::SamlResponseFailed("SAML response is not plain UTF-8".into())
         })?;
-        refuse_markup_declarations(&xml).map_err(|_| {
+        refuse_markup_declarations(xml).map_err(|_| {
             FederationError::SamlResponseFailed("SAML response declares a DTD or an entity".into())
         })?;
 

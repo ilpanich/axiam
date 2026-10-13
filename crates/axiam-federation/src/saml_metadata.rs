@@ -177,7 +177,11 @@ pub fn parse_idp_metadata(
     now: DateTime<Utc>,
 ) -> Result<ParsedIdpMetadata, FederationError> {
     // #531's rule for SAML responses, on the bytes and before any parser.
-    refuse_other_encodings(text).map_err(|_| metadata_failed("metadata is not plain UTF-8"))?;
+    // R101W2-02: from here on `text` is the document without its one leading
+    // byte-order mark (Entra ID's metadata has one), so the signature check
+    // and samael read the same characters.
+    let text =
+        refuse_other_encodings(text).map_err(|_| metadata_failed("metadata is not plain UTF-8"))?;
     refuse_markup_declarations(text)
         .map_err(|_| metadata_failed("metadata declares a DTD or an entity"))?;
 
@@ -618,22 +622,58 @@ mod tests {
     }
 
     /// #605 (R1W1-07): a byte-order mark in front of a declaration naming
-    /// another encoding used to skip the check; it is refused now, as is a
-    /// byte-order mark in front of an otherwise valid document, with or
+    /// another encoding used to skip the check; it is refused now, with or
     /// without a metadata signing certificate (the refusal precedes both).
+    /// R101W2-02: one leading BOM in front of an otherwise valid document is
+    /// stripped, not refused; a second is refused.
     #[test]
     fn p605_bom_prefixed_metadata_in_another_encoding_is_refused() {
         let valid = document("https://sso.example.test/sso", "");
         assert!(parse_idp_metadata(&valid, None, Utc::now()).is_ok());
+        assert!(parse_idp_metadata(&format!("\u{feff}{valid}"), None, Utc::now()).is_ok());
         for doc in [
             format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{valid}"),
-            format!("\u{feff}{valid}"),
+            format!("\u{feff}\u{feff}{valid}"),
+            format!("x{valid}"),
         ] {
             for pem in [None, Some("not consulted")] {
                 let err = parse_idp_metadata(&doc, pem, Utc::now()).unwrap_err();
                 assert!(err.to_string().contains("UTF-8"), "{err}");
             }
         }
+    }
+
+    /// R101W2-02: Microsoft Entra ID's federation metadata, as fetched on
+    /// 2026-10-13, begins `ef bb bf 3c 3f 78 6d 6c` — a UTF-8 BOM, then a
+    /// lower-case `utf-8` declaration, then an `EntityDescriptor` in the default
+    /// namespace with an `ID`. 1.0.0 read it; 1.0.1 must too, or every Entra ID
+    /// sign-in fails (the SSO URL comes only from this document).
+    #[test]
+    fn r101w2_02_entra_id_shaped_metadata_is_read() {
+        let entra = "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+            <EntityDescriptor ID=\"_6c0a3f1e-2d4b-4c8e-9f7a-1b2c3d4e5f60\" \
+            entityID=\"https://sts.windows.net/00000000-0000-0000-0000-000000000000/\" \
+            xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\">\
+            <IDPSSODescriptor protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\">\
+            <SingleSignOnService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\" \
+            Location=\"https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/saml2\"/>\
+            <SingleSignOnService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" \
+            Location=\"https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/saml2\"/>\
+            </IDPSSODescriptor></EntityDescriptor>";
+        assert_eq!(&entra.as_bytes()[..8], b"\xef\xbb\xbf<?xml");
+        let parsed = parse_idp_metadata(entra, None, Utc::now()).expect("Entra ID metadata");
+        assert_eq!(
+            parsed.metadata.entity_id,
+            "https://sts.windows.net/00000000-0000-0000-0000-000000000000/"
+        );
+        assert_eq!(
+            parsed.metadata.sso_url,
+            "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/saml2"
+        );
+        // The same document declaring UTF-16 behind the BOM is still refused.
+        let utf16 = entra.replace("encoding=\"utf-8\"", "encoding=\"UTF-16\"");
+        let err = parse_idp_metadata(&utf16, None, Utc::now()).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
     }
 
     /// #530: a second sign-in within the document's freshness is served from

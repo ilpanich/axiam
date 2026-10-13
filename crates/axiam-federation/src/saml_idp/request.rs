@@ -289,18 +289,29 @@ pub fn refuse_markup_declarations(document: &str) -> Result<(), RequestError> {
 /// reading the same characters.
 ///
 /// #605 (R1W1-07): the declaration is read only where the parser reads it — at
-/// the start of the document — so the start must be markup. A byte-order mark
-/// (U+FEFF, which `str::trim_start` does not remove, and which libxml2 skips
-/// before honouring the declaration that follows) is refused, never skipped,
-/// as is any other leading text.
+/// the start of the document — so the start must be markup. Exactly one
+/// leading byte-order mark is stripped first (R101W2-02: Microsoft Entra ID's
+/// federation metadata begins with one, as .NET's UTF-8 writer emits by
+/// default). In a validated `&str` a leading U+FEFF can only be the UTF-8 BOM
+/// `ef bb bf` — a UTF-16 or UTF-32 BOM is not valid UTF-8, and a NUL is refused
+/// — so the strip changes no encoding. After it the rules apply to the true
+/// start: a second BOM, or any other leading text, is refused, and a
+/// declaration naming another encoding is read and refused.
+///
+/// Returns the accepted document **without** that BOM. Every caller rebinds to
+/// the returned slice before anything else reads the document, so the
+/// byte-level scans, libxml, samael and xmlsec all read the same characters.
+/// The BOM is never part of what a signature covers: canonicalisation works on
+/// the parsed tree, which a BOM never enters.
 ///
 /// # Errors
 ///
 /// [`RequestError::Malformed`].
-pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
+pub fn refuse_other_encodings(document: &str) -> Result<&str, RequestError> {
     if document.contains('\0') {
         return Err(RequestError::Malformed);
     }
+    let document = document.strip_prefix('\u{feff}').unwrap_or(document);
     // XML's whitespace (`S`): space, tab, CR, LF — and nothing else.
     let trimmed = document.trim_start_matches([' ', '\t', '\r', '\n']);
     if !trimmed.starts_with('<') {
@@ -322,7 +333,7 @@ pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
             }
         }
     }
-    Ok(())
+    Ok(document)
 }
 
 /// Parse an `AuthnRequest` and check what needs no SP: shape, `Version`, `ID`,
@@ -413,8 +424,9 @@ pub(super) fn parse_xml(document: &str) -> Result<libxml::tree::Document, Reques
     if document.len() > MAX_REQUEST_XML_BYTES {
         return Err(RequestError::TooLarge);
     }
+    // R101W2-02: from here on, `document` is the text without its BOM.
+    let document = refuse_other_encodings(document)?;
     refuse_markup_declarations(document)?;
-    refuse_other_encodings(document)?;
 
     libxml::parser::Parser::default()
         .parse_string_with_options(document.as_bytes(), receiver_parser_options())
@@ -539,6 +551,10 @@ pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str)
 /// [`RequestError::SignatureInvalid`] — a wrong key, a changed byte, a SHA-1
 /// algorithm, or anything xmlsec refuses.
 pub fn verify_post_signature(document: &str, sp_cert_der: &[u8]) -> Result<(), RequestError> {
+    // R101W2-02: xmlsec reads exactly the text `parse_xml` read — the same
+    // function strips the same one BOM, so the two never see different
+    // characters, whatever string the caller holds.
+    let document = refuse_other_encodings(document).map_err(|_| RequestError::SignatureInvalid)?;
     let cert = CertificateDer::from(sp_cert_der.to_vec());
     <XmlSec as CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
         document,

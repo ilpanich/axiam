@@ -60,10 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UTF-8" refusal (#605, R1W1-07).** The refusal read the declaration only when
   the text began with `<?xml`, so a document beginning with U+FEFF skipped it
   while libxml2 skipped the mark and honoured whatever encoding the declaration
-  named. A document whose first character after XML whitespace is not `<` is now
-  refused — a byte-order mark is refused, never skipped — at the SP's assertion
+  named. A leading byte-order mark is now stripped once; anything else before
+  `<` (after XML whitespace) is refused, and a declaration naming any encoding
+  but UTF-8 is read from the true start and refused — at the SP's assertion
   consumer, at the IdP metadata parse and at the IdP's request receiver (and its
-  SP metadata import). Every libxml parse of a received document, including the
+  SP metadata import). Every consumer reads the same stripped text: the
+  byte-level scans, libxml, samael and xmlsec. A single UTF-8 byte-order mark
+  in front of an otherwise plain document is accepted, as in 1.0.0 — Microsoft
+  Entra ID serves its federation metadata with one (R101W2-02); a second, or
+  one in front of a UTF-16 declaration, is refused. Every libxml parse of a received document, including the
   ACS's signature-placement and assertion-binding parses and the metadata
   signature check, which used libxml's defaults, now uses the receiver's options:
   no recovery, no network access, no default DTD, UTF-8 forced. samael's own

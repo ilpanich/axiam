@@ -276,16 +276,20 @@ fn a_document_in_another_encoding_is_refused() {
 /// #605 (R1W1-07): a byte-order mark does not hide the declaration. libxml2
 /// skips a leading U+FEFF and honours the encoding the declaration after it
 /// names; `trim_start` does not remove one, so the check used to skip the
-/// declaration altogether. The document must now begin with `<` after XML
-/// whitespace, so a BOM is refused, never skipped — whatever follows it.
+/// declaration altogether.
+///
+/// R101W2-02 (correcting #605's "refused, not skipped"): exactly one leading
+/// BOM is stripped, and the rules then apply to the true start — so a
+/// declaration behind it naming another encoding is read and refused, a second
+/// BOM is refused, and so is any other leading text. A BOM in front of a UTF-8
+/// declaration, or of no declaration, is what .NET writes (Entra ID's
+/// metadata) and is accepted, as 1.0.0 accepted it.
 #[test]
-fn p605_a_byte_order_mark_is_refused_not_skipped() {
+fn r101w2_02_one_leading_byte_order_mark_is_stripped_anything_else_refused() {
     let bom = '\u{feff}';
     for declared in [
         r#"<?xml version="1.0" encoding="UTF-16"?>"#,
         r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
-        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
-        "",
     ] {
         let document = format!("{bom}{declared}{}", request("_e"));
         assert_eq!(
@@ -299,9 +303,43 @@ fn p605_a_byte_order_mark_is_refused_not_skipped() {
             "BOM + {declared:?}"
         );
     }
-    // Any other text before the markup is refused the same way; XML
-    // whitespace — and only XML whitespace — is not.
-    for lead in ["x", "\u{a0}", "\u{3000}", "\u{c}"] {
+    for declared in [
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        "",
+    ] {
+        let unprefixed = format!("{declared}{}", request("_e"));
+        let document = format!("{bom}{unprefixed}");
+        // Exactly the BOM is gone, nothing else.
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Ok(unprefixed.as_str()),
+            "BOM + {declared:?}"
+        );
+        let parsed = parse_authn_request(&document, Utc::now())
+            .unwrap_or_else(|e| panic!("BOM + {declared:?}: {e:?}"));
+        assert_eq!(parsed.id, "_e");
+    }
+    // Stripped once, not repeatedly, and only at the very start.
+    for document in [
+        format!("{bom}{bom}{}", request("_e")),
+        format!(" {bom}{}", request("_e")),
+        format!("{bom} {bom}{}", request("_e")),
+    ] {
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "{:?}",
+            document.chars().take(3).collect::<String>()
+        );
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed)
+        );
+    }
+    // Any other text before the markup is refused; XML whitespace — and only
+    // XML whitespace — is not, before or after the BOM.
+    for lead in ["x", "\u{a0}", "\u{3000}", "\u{c}", "\u{fffe}", "\u{200b}"] {
         let document = format!("{lead}{}", request("_e"));
         assert_eq!(
             refuse_other_encodings(&document),
@@ -311,12 +349,58 @@ fn p605_a_byte_order_mark_is_refused_not_skipped() {
     }
     assert_eq!(refuse_other_encodings(""), Err(RequestError::Malformed));
     assert_eq!(
+        refuse_other_encodings(&bom.to_string()),
+        Err(RequestError::Malformed)
+    );
+    assert_eq!(
         refuse_other_encodings(" \r\n\t"),
         Err(RequestError::Malformed)
     );
     let spaced = format!(" \r\n\t{}", request("_e"));
-    assert_eq!(refuse_other_encodings(&spaced), Ok(()));
+    assert_eq!(refuse_other_encodings(&spaced), Ok(spaced.as_str()));
     assert!(parse_authn_request(&spaced, Utc::now()).is_ok());
+    let bom_spaced = format!("{bom}{spaced}");
+    assert_eq!(refuse_other_encodings(&bom_spaced), Ok(spaced.as_str()));
+    assert!(parse_authn_request(&bom_spaced, Utc::now()).is_ok());
+}
+
+/// R101W2-02: a BOM-prefixed signed POST `AuthnRequest` verifies — the
+/// signature covers the element (canonicalised from the parsed tree), never
+/// the BOM — and every check still bites behind one: the wrong key, a changed
+/// attribute, a BOM in front of another encoding's declaration.
+#[test]
+fn r101w2_02_a_bom_prefixed_signed_post_request_verifies() {
+    let signed = signed_with("_pbom", sp_key());
+    let document = format!("\u{feff}{signed}");
+    let parsed = parse_authn_request(&document, Utc::now()).expect("parses");
+    assert!(parsed.enveloped_signature);
+    assert_eq!(verify_post_signature(&document, &sp_key().cert_der), Ok(()));
+    // The signature is over the same characters with or without the BOM.
+    assert_eq!(verify_post_signature(&signed, &sp_key().cert_der), Ok(()));
+    assert_eq!(
+        verify_post_signature(&document, &other_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "the wrong key"
+    );
+    let tampered = document.replace(DESTINATION, "https://axiam.example.test/saml/v2/u/sso");
+    assert_eq!(
+        verify_post_signature(&tampered, &sp_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "a changed attribute"
+    );
+    for refused in [
+        format!("\u{feff}\u{feff}{signed}"),
+        format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{signed}"),
+    ] {
+        assert_eq!(
+            parse_authn_request(&refused, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed)
+        );
+        assert_eq!(
+            verify_post_signature(&refused, &sp_key().cert_der),
+            Err(RequestError::SignatureInvalid)
+        );
+    }
 }
 
 #[test]

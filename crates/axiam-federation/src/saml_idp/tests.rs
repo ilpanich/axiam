@@ -911,10 +911,10 @@ async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
                 .flat_map(|c| [c, '\0'])
                 .collect::<String>(),
             format!(r#"<?xml version="1.0" encoding="UTF-16"?>{valid}"#),
-            // #605: behind a byte-order mark, which used to skip the check,
-            // and a byte-order mark alone in front of the valid response.
+            // #605: behind a byte-order mark, which used to skip the check.
             format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{valid}"),
-            format!("\u{feff}{valid}"),
+            // R101W2-02: one BOM is stripped; a second is refused.
+            format!("\u{feff}\u{feff}{valid}"),
         ] {
             let result =
                 sp_accepts_with(config.clone(), &xml, Some(REQUEST_ID), Some(ACS), true).await;
@@ -926,6 +926,17 @@ async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
                 ),
                 "allow_sha1_signatures={allow}: refused as not plainly UTF-8"
             );
+        }
+        // R101W2-02: a single leading BOM is stripped and the signed response
+        // behind it is accepted — the signatures cover elements, not the BOM —
+        // with or without a UTF-8 declaration between the two.
+        for xml in [
+            format!("\u{feff}{valid}"),
+            format!("\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>{valid}"),
+        ] {
+            sp_accepts_with(config.clone(), &xml, Some(REQUEST_ID), Some(ACS), true)
+                .await
+                .unwrap_or_else(|e| panic!("allow_sha1_signatures={allow}: BOM-prefixed: {e}"));
         }
         // Comments and CDATA are not declarations.
         let commented = valid.replacen("<saml:Issuer", "<!-- a comment --><saml:Issuer", 1);
@@ -2554,6 +2565,34 @@ fn p23w3_07_signed_metadata_is_read_through_its_signature() {
         assert_eq!(
             metadata.sso_binding,
             "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+        );
+    }
+}
+
+/// R101W2-02: signed metadata behind a UTF-8 byte-order mark — as Entra ID
+/// serves it — verifies with the certificate set: the signature covers the
+/// `EntityDescriptor`, never the BOM. The check still bites behind one.
+#[test]
+fn r101w2_02_bom_prefixed_signed_metadata_verifies() {
+    let signed = signed_idp_metadata();
+    for document in [
+        format!("\u{feff}{signed}"),
+        format!("\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>{signed}"),
+    ] {
+        for certificate_configured in [true, false] {
+            let metadata = read_idp_metadata(&document, certificate_configured)
+                .unwrap_or_else(|e| panic!("configured={certificate_configured}: {e}"));
+            assert_eq!(metadata.entity_id, "https://idp.example.test/metadata");
+            assert_eq!(metadata.sso_url, METADATA_SSO);
+        }
+    }
+    let tampered =
+        format!("\u{feff}{signed}").replace(METADATA_SSO, "https://phish.example.net/sso");
+    refused_because(read_idp_metadata(&tampered, true), "does not verify");
+    for certificate_configured in [true, false] {
+        refused_because(
+            read_idp_metadata(&format!("\u{feff}\u{feff}{signed}"), certificate_configured),
+            "UTF-8",
         );
     }
 }

@@ -28,6 +28,7 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
+use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{CreateDeviceGrant, CreateRefreshToken, DeviceGrantStatus};
 use axiam_core::repository::{
     DeviceGrantRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
@@ -331,11 +332,32 @@ where
             .get_by_id(tenant_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
-        let user = self
-            .user_repo
-            .get_by_id(tenant_id, user_id)
-            .await
-            .map_err(|_| OAuth2Error::InvalidGrant("user no longer exists".into()))?;
+        // The subject is re-read after the approval is spent, and asked the
+        // same question every other grant asks (R1W1-06 / #604): may this
+        // account act, and is it free of brute-force lockout? A user
+        // suspended, deleted or locked out between the approval and the
+        // device's next poll gets `invalid_grant` and nothing is minted; the
+        // grant is already `Redeemed`, so the next poll is refused too. The
+        // predicate is CIBA's (`crate::ciba::user_may_be_subject`), shared
+        // rather than copied so the two backchannel-style grants cannot drift.
+        let refused = || {
+            OAuth2Error::InvalidGrant(
+                "the account this grant was issued for can no longer sign in".into(),
+            )
+        };
+        let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
+            Ok(user) => user,
+            Err(AxiamError::NotFound { .. }) => return Err(refused()),
+            Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
+        };
+        if !crate::ciba::user_may_be_subject(&user) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing a device-grant redemption: the account may no longer sign in or is locked out"
+            );
+            return Err(refused());
+        }
 
         let refresh_token = axiam_auth::token::generate_refresh_token();
         self.refresh_token_repo

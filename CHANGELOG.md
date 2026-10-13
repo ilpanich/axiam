@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The device grant asks whether the account may still sign in before it mints
+  (R1W1-06, #604, T-39, T-163; Low).** `POST /oauth2/token` with
+  `grant_type=urn:ietf:params:oauth:grant-type:device_code` re-read the user
+  after redeeming an approved code and minted an access token and a refresh token
+  without `account_may_act`, unlike CIBA and every other grant, so a user
+  suspended between the approval and the device's next poll was served a fresh
+  access token (the refresh token was then refused). It now applies CIBA's
+  predicate, shared rather than copied (`account_may_act` and no brute-force
+  lockout): a suspended, locked-out, deleted or removed account is
+  `invalid_grant`, nothing is minted and no refresh-token row is written. The
+  approval is spent either way, so a further poll with the same device code is
+  refused as a used code, and the device starts a new flow after a
+  reactivation. A store error on the re-read is now a server error rather than
+  `invalid_grant`, as for CIBA.
+
 ## [1.0.0] - 2026-10-10
 
 #### What 1.0.0 means

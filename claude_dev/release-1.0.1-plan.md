@@ -1,6 +1,6 @@
 # Release 1.0.1 plan — closing the open issues after the 1.0.0 tag
 
-> **Status: IN PROGRESS — W1 and W4 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
+> **Status: IN PROGRESS — W1, W2 and W4 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
 > `0a90de0` (`chore(release): prepare axiam 1.0.0`). It covers **28 of the 30
 > open issues** on `ilpanich/axiam`: the twenty-five Low and Informational
 > findings of the 1.0.0 F4 review (#590 … #614), the two deferred non-local
@@ -323,7 +323,7 @@ code. W6.2's guide ends with the paragraph that says so.
 | Wave | Branch / head | Review document | Closes | Left to the next wave / to 1.0.x |
 |---|---|---|---|---|
 | W1 | `claude/release-1.0.1-w1` @ `08c4c38` — cut from the tag `v1.0.0` (`0a90de0`), see §11.0 | [`security-review-release-1.0.1-w1-2026-10-13.md`](security-review-release-1.0.1-w1-2026-10-13.md) (`37582a3`): 1 Medium (R101W1-01, fixed in-wave `08c4c38`), 4 Low, 4 Informational | #603, #607, #608, #609, #612, #533; the (a) half of #611 and the (c) half of #610 | Low/Informational filed on `1.0.x`: #615 … #622 (R101W1-02 … -09). To W5: §27.11 `user_id` (W5.1), CRL §35 rule 4 (W5.7), CA-revoke pending outcome and audit names (W5.8). To W7.3: T-472 dated corrections (W1.4, W1.7), T-102, T-470, T-336, T-187, new T-476 |
-| W2 | | | | |
+| W2 | `claude/release-1.0.1-w2` @ `e55e5c9` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w2-2026-10-13.md`](security-review-release-1.0.1-w2-2026-10-13.md) (`79d11a7`): **1 High** (R101W2-01), 2 Medium (R101W2-02, -04), 1 Low, 3 Informational — High and Medium fixed in-wave, plus two libxml defects found while fixing the High | #605, #606, #614, #591, #538; the (b) half of #611 | Low/Informational filed on `1.0.x`: #632, #633, #634 (R101W2-03, -05, -06; -07's text drift landed with the fixes and #632). New threat entry **T-477** (W1 holds T-476). To W5: note 6 (SHA-1 adds SHA-1 only), note 7 (`federation.idp_signing_cert_changed`/`_cleared`), the `backchannel_logout_uri` `400` on client registration; `sdks/openapi.json` regenerated on this branch too. To the maintainer: the libxml-rs 0.3.3 use-after-free (§11.2) is not reported upstream |
 | W3 | | | | |
 | W4 | `claude/release-1.0.1-w4` @ `a234f32` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w4-2026-10-13.md`](security-review-release-1.0.1-w4-2026-10-13.md) (`a3f917c`): 1 Medium (R101W4-01, fixed in-wave `a234f32` with R101W4-06), 5 Low, 5 Informational | #590, #592, #593, #594, #595, #596, #597 (no commit, W4.1), #598, #600 | Low/Informational filed on `1.0.x`: #623 … #631 (R101W4-02 … -05, -07 … -11). To W5: §32 `expected_updated_at` and the `PUT` semantics of `events_requested` (absent = all allowed, `[]` = none; #631: SDK update helpers send what they read); `request_audit.outbound_abandoned_dropped` on `/health/jobs`. To W7: `sdks/openapi.json` is regenerated on W1 and on W4 — the merge conflict is resolved by regenerating. To W7.3: T-406, T-108, T-445, T-444 amendments; R101W4-09's stale stop arithmetic |
 | W5 | | | | |
@@ -358,6 +358,28 @@ model its row names; none was re-sized.
 Residual recorded, not fixed: an erased account's revoked certificate rows keep
 the PEM, subject and `metadata` for the tenant's lifetime (T-187; R101W1-05,
 #618).
+
+### 11.2 W2 — what landed, and where the tree overruled the plan
+
+Twelve commits on `v1.0.0`, every one signed; no item was re-sized. Builds ran
+with `saml` on and CI's SAML-off `cargo check` before every commit. The Keycloak
+image was pulled through `mirror.gcr.io` (quay.io is blocked from the session,
+Docker Hub rate-limited) and tagged locally.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W2.1 #605 | `ab01a52` | Opus 5.5 | the five parse sites all sit in `axiam-federation`; no crate edge. The row's "a BOM is refused" was overruled by R101W2-02 |
+| W2.2 #606 | `20cfb1d` | Opus 5.5 | the residual sentence the row placed in T-67 is T-69's; the linked xmlsec cannot sign `rsa-md5`, so that fixture is a URI swap (refused before verification) and a validly signed RSA-SHA224 response shows the hole |
+| W2.3 #611(b) | `8cd2dd8` | Sonnet 5.5 | the plan's names (`federation.idp_signing_cert_changed` / `_cleared`) over the issue's; `_cleared` is reachable on update |
+| W2.4 #614 | `50cbb6e` | Sonnet 5.5 | **D-3: the four sibling routes wrapped in the same commit**, five buckets on `end_session_per_min`. Two names collide with existing public buckets (R101W2-03, #632) |
+| W2.5 #591 | `272629e` | Sonnet 5.5 | every `guarded_fetch` caller classified; only the four named calls carried credentials |
+| W2.6 #538 | `d9584f0` | Opus 5.5 | four Keycloak single-logout tests, both directions, both bindings, each with a broken-signature control Keycloak refuses; 6/6 locally against Keycloak 26.7.0; no CI change, no AXIAM defect |
+| W2.7 | `79d11a7` | Opus 5.5 | the F4 review |
+| R101W2-02 | `032c344` | Opus 5.5 | **overrules W2.1's row on the review's evidence:** Microsoft Entra ID's metadata starts with a UTF-8 BOM (fetched); exactly one leading BOM is now stripped and every consumer reads the stripped text. ADFS not verified |
+| R101W2-01 | `7055077` | Opus 5.5 | **High, pre-existing:** a received signature may use only enveloped-signature and the c14n family (XSLT/XPath were evaluated before the signature value); ACS, metadata and IdP-receiver verification moved into `spawn_blocking` under the crypto semaphore; **T-477** added |
+| — | `21025c7` | Opus 5.5 | found while fixing R101W2-01: libxml-rs 0.3.3's `no_def_dtd` is `XML_PARSE_DTDLOAD` for the XML parser; W2.1 had spread it to five sites. Removed |
+| — | `7eec4ae` | Opus 5.5 | found while fixing R101W2-01: an intermittent federation test failure (about 1 in 10, also at `v1.0.0`) is a **use-after-free in libxml-rs 0.3.3** (`parse_string_with_options` frees the encoding name before `xmlReadMemory` reads it; valgrind: 21 invalid reads). AXIAM now passes no encoding name (`ignore_enc` keeps UTF-8); 50/50 runs and valgrind clean. When the lookup misfired, `verify_post_signature` failed **open** past the T-477 allow-list; every signature check now fails closed by local name |
+| R101W2-04 | `e55e5c9` | Sonnet 5.5 | **Medium, pre-existing:** back-channel logout delivered through `guarded_fetch_no_redirect`; `backchannel_logout_uri` validated with the D-49 push-endpoint rule rather than the redirect-URI rule the brief named (that rule admits private IP literals). Examples Smoke dispatched on the branch: run 38404923036 **green** |
 
 ### 11.4 W4 — what landed, and where the tree overruled the plan
 

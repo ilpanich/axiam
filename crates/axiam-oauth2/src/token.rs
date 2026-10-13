@@ -654,6 +654,15 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// deployment without reactors holds the no-op gate, so every grant runs
     /// the same code.
     reactor_gate: SharedReactorGate,
+    /// #613 (T-289) — the tenant's effective `dcr_allowed_scopes`, the ceiling
+    /// on what an externally registered client may obtain. Read only for a
+    /// `dcr` or `cimd` client; see [`crate::scope_ceiling`].
+    ///
+    /// Builder-installed like the reactor gate, but **not** silent when left
+    /// out: the default refuses every read, so an unwired composition root
+    /// answers every external client's grant with `server_error` rather than
+    /// quietly trusting the client row.
+    scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
 impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
@@ -695,6 +704,7 @@ where
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+            scope_policy: crate::scope_ceiling::unwired(),
         }
     }
 
@@ -985,6 +995,34 @@ where
     pub fn with_reactor_gate(mut self, gate: SharedReactorGate) -> Self {
         self.reactor_gate = gate;
         self
+    }
+
+    /// Install the tenant scope policy (#613). See the `scope_policy`
+    /// field documentation for why the default refuses.
+    #[must_use]
+    pub fn with_scope_policy(mut self, policy: crate::scope_ceiling::SharedScopePolicy) -> Self {
+        self.scope_policy = policy;
+        self
+    }
+
+    /// Narrow an authenticated client's scopes to its tenant's current
+    /// `dcr_allowed_scopes` (#613), for the endpoints that authenticate a
+    /// client through [`Self::authenticate_client`] and then hand it to
+    /// another service — `/oauth2/bc-authorize` and the token-exchange grant.
+    ///
+    /// Separate from [`Self::authenticate_client`] on purpose: revocation,
+    /// introspection and PAR authenticate through it too and decide nothing
+    /// from the client's scopes, so they should not pay the policy read.
+    ///
+    /// A no-op for an administrator's client.
+    ///
+    /// # Errors
+    ///
+    /// `server_error` when an external client's policy cannot be read.
+    pub async fn apply_scope_ceiling(&self, client: &mut OAuth2Client) -> Result<(), OAuth2Error> {
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), client)
+            .await
+            .map(|_| ())
     }
 
     /// Run `token.pre_issue` and return the `ext` claims to mint with.
@@ -2030,6 +2068,19 @@ where
             }
         }
 
+        // #613 (T-289) — a code is the scopes `/oauth2/authorize` admitted, and
+        // for an externally registered client those were bounded by the
+        // tenant's `dcr_allowed_scopes` *then*. A scope withdrawn while the
+        // code was in flight is dropped here, before the code is spent, so a
+        // policy read that fails refuses without burning it. No read at all
+        // for an administrator's client.
+        let mut auth_code = auth_code;
+        if let Some(ceiling) =
+            crate::scope_ceiling::ceiling_for(self.scope_policy.as_ref(), &client).await?
+        {
+            crate::scope_ceiling::narrow(&mut auth_code.scopes, &ceiling);
+        }
+
         // Now atomically consume (mark as used) the code.
         if self
             .code_repo
@@ -2395,6 +2446,13 @@ where
             ));
         }
 
+        // #613 (T-289) — for an externally registered client, "the client's
+        // scopes" are the row's scopes within the tenant's current
+        // `dcr_allowed_scopes`. A no-op, and no read, for an administrator's
+        // client.
+        let mut client = client;
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
+
         // Resolve scopes: use requested scope if provided, else client's.
         // Validate requested scopes are a subset of the client's allowed
         // scopes to prevent minting tokens with arbitrary privileges.
@@ -2653,6 +2711,17 @@ where
         // user about it (the rule `resolve_bound` applies to the resource
         // below). Everything minted from here — the access token, the rotated
         // refresh token, the ID token and the response's `scope` — uses this.
+        //
+        // #613 (T-289) — and for an externally registered client "the client's
+        // scopes" are bounded by the tenant's `dcr_allowed_scopes` as it is
+        // *now*, not as it was when the row was last written. A tenant that
+        // withdraws a scope from the list therefore narrows every outstanding
+        // refresh grant of every `dcr`/`cimd` client at its next use, without
+        // waiting for the client to re-register. Read before the predecessor
+        // is rotated, so a failed read refuses without spending it; no read at
+        // all for an administrator's client.
+        let mut client = client;
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
         let scopes: Vec<String> = stored
             .scopes
             .iter()

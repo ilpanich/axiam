@@ -202,6 +202,20 @@ async fn bc_authorize_inner<C: Connection + Clone>(
     }
 
     // --- 6 ---------------------------------------------------------------
+    // #613 (T-289): an externally registered client's scopes are bounded by
+    // the tenant's current `dcr_allowed_scopes`, so a withdrawn scope is
+    // refused by `initiate` as an unregistered one is. No read for an
+    // administrator's client; after the rate limit, so a flood costs no read.
+    let mut client = client;
+    if let Err(e) = state
+        .oauth2
+        .token_service
+        .apply_scope_ceiling(&mut client)
+        .await
+    {
+        return build_oauth2_error_response(&e);
+    }
+    let client = client;
     let mut issuers = vec![state.auth_config.root_issuer().to_owned()];
     if let Some(tenant_issuer) = state.auth_config.tenant_issuer(tenant_id) {
         issuers.push(tenant_issuer);

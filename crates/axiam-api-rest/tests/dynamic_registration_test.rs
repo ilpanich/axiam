@@ -1706,6 +1706,179 @@ async fn rfc7592_an_update_cannot_widen_beyond_the_tenants_policy() {
     );
 }
 
+/// **#613 (T-289): a tenant's withdrawal reaches the clients already
+/// registered.** The `PUT` above refuses to *widen*; this is the other
+/// direction, which no client request drives. A `dcr` client registered with
+/// `openid profile` holds a refresh grant for both; an administrator of an
+/// administrator's client holds the same. The tenant then withdraws `profile`
+/// from `dcr_allowed_scopes`, and nothing else happens — no RFC 7592 `PUT`, no
+/// rewrite of either row. At the next request:
+///
+/// * the `dcr` client's refresh no longer carries `profile`, and the grant it
+///   rotates to does not either;
+/// * its authorization request naming `profile` is refused as an unregistered
+///   scope would be;
+/// * its RFC 7592 read still reports `openid profile` — the row is untouched;
+///   the ceiling is applied where scopes are read, not by rewriting rows;
+/// * the administrator's client is unaffected: same withdrawal, full refresh.
+#[actix_rt::test]
+async fn t613_a_withdrawn_scope_is_gone_from_an_existing_dcr_clients_next_refresh() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let challenge = pkce_challenge(VERIFIER);
+
+    // --- a self-registered client, with a refresh grant for both scopes ----
+    let (_, registered) = register!(app, f, inspector_registration());
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let (status, _) = admin!(
+        app,
+        f,
+        post,
+        "/api/v1/account/consents/oidc-scopes",
+        json!({ "client_id": client_id, "scopes": ["openid", "profile"] })
+    );
+    assert_eq!(status, 200);
+    let (_, location) = get_authorize!(
+        app,
+        f,
+        format!(
+            "response_type=code&client_id={client_id}&redirect_uri={INSPECTOR_CALLBACK}\
+             &scope=openid+profile&code_challenge={challenge}&code_challenge_method=S256\
+             &resource={MCP}"
+        )
+    );
+    let code = param(&location.unwrap(), "code").expect("a code");
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={INSPECTOR_CALLBACK}\
+             &client_id={client_id}&code_verifier={VERIFIER}&resource={MCP}"
+        )
+    );
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["scope"], "openid profile");
+    let dcr_refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
+
+    // --- an administrator's client, with the same grant --------------------
+    let admin_callback = "https://rp.example.com/callback";
+    let (status, created) = admin!(
+        app,
+        f,
+        post,
+        "/api/v1/oauth2-clients",
+        json!({
+            "name": "admin-rp",
+            "redirect_uris": [admin_callback],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "scopes": ["openid", "profile"],
+            "token_endpoint_auth_method": "none",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let admin_client_id = created["client_id"].as_str().unwrap().to_owned();
+    let (_, location) = get_authorize!(
+        app,
+        f,
+        format!(
+            "response_type=code&client_id={admin_client_id}\
+             &redirect_uri=https%3A%2F%2Frp.example.com%2Fcallback&scope=openid+profile\
+             &code_challenge={challenge}&code_challenge_method=S256"
+        )
+    );
+    let location = location.unwrap();
+    let code = param(&location, "code").unwrap_or_else(|| panic!("a code: {location}"));
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https%3A%2F%2Frp.example.com%2Fcallback\
+             &client_id={admin_client_id}&code_verifier={VERIFIER}"
+        )
+    );
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["scope"], "openid profile");
+    let admin_refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
+
+    // --- the tenant withdraws `profile`, and does nothing else --------------
+    set_org_settings(
+        &f,
+        SetOrgSettings {
+            dcr_allowed_scopes: vec!["openid".into()],
+            ..anonymous_policy()
+        },
+    )
+    .await
+    .unwrap();
+
+    // The self-registered client's next refresh no longer carries it ...
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!("grant_type=refresh_token&refresh_token={dcr_refresh}&client_id={client_id}")
+    );
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["scope"], "openid", "the withdrawn scope is gone");
+    // ... nor does the grant it rotated to.
+    let rotated = tokens["refresh_token"].as_str().unwrap().to_owned();
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!("grant_type=refresh_token&refresh_token={rotated}&client_id={client_id}")
+    );
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["scope"], "openid");
+
+    // Its authorization request naming the scope is refused, by redirect.
+    let (status, location) = get_authorize!(
+        app,
+        f,
+        format!(
+            "response_type=code&client_id={client_id}&redirect_uri={INSPECTOR_CALLBACK}\
+             &scope=openid+profile&code_challenge={challenge}&code_challenge_method=S256\
+             &resource={MCP}"
+        )
+    );
+    assert_eq!(status, 302);
+    let location = location.unwrap();
+    assert_eq!(
+        param(&location, "error").as_deref(),
+        Some("invalid_scope"),
+        "{location}"
+    );
+
+    // The row was not rewritten: the registration still reads as registered.
+    let (status, _, read) = manage!(
+        app,
+        get,
+        &config_path(&registered),
+        bearer(&rat(&registered))
+    );
+    assert_eq!(status, 200);
+    assert_eq!(read["scope"], "openid profile");
+
+    // The administrator's client is unaffected by the same withdrawal.
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!(
+            "grant_type=refresh_token&refresh_token={admin_refresh}&client_id={admin_client_id}"
+        )
+    );
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(
+        tokens["scope"], "openid profile",
+        "a non-DCR client keeps it"
+    );
+}
+
 /// A `PUT` can never move what a registration cannot set: the stored row's
 /// profile, X7 flags, provenance and audiences stay what they were, however
 /// the body asks.

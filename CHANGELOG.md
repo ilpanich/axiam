@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A scope a tenant withdraws from `dcr_allowed_scopes` is gone from its
+  self-registered clients at their next request (#613, T-289, T-55; Low).** The
+  list bounded what a `managed_by: dcr` or `cimd` client could register, and
+  was checked only at registration, an RFC 7592 `PUT` and a CIMD fetch, so a
+  client already registered kept a withdrawn scope until it chose to
+  re-register, and the refresh grant's `stored.scopes ∩ client.scopes` (#520)
+  intersected against a row that still held it. The tenant's effective list is
+  now a ceiling on such a client's scopes wherever they are read —
+  `/oauth2/authorize` (and PAR), the `authorization_code`, `client_credentials`,
+  `refresh_token`, CIBA and token-exchange grants, `/oauth2/bc-authorize` and
+  `/oauth2/device_authorization` — without rewriting the client row. A
+  withdrawn scope is `invalid_scope` when requested and dropped from refreshed
+  and newly minted tokens; an access token minted earlier keeps it until it
+  expires. An empty list offers nothing, as at registration. A list that
+  cannot be read refuses the request with `server_error`. Clients created by an
+  administrator never read the list and are unaffected.
+
 - **Deleting an OAuth2 client voids its device grants and CIBA requests (#610
   (d), T-289, T-275; Low).** `ClientGrantStores::revoke`, which the
   administrator's `DELETE /api/v1/oauth2-clients/{id}`, RFC 7592's

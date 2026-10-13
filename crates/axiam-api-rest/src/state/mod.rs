@@ -718,8 +718,20 @@ impl<C: Connection + Clone> AppState<C> {
         let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_cert_repo.clone());
         let service_account_repo = SurrealServiceAccountRepository::new(db.clone());
         let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), None);
+        // #613 (T-289): one tenant scope policy, shared by every service that
+        // reads a client's scopes, over the same `tenant_id -> org` cache the
+        // state below holds.
+        let tenant_org_cache: Arc<crate::tenant_org_cache::TenantOrgCache> =
+            Arc::new(Default::default());
+        let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
+            Arc::new(crate::scope_policy::SettingsScopePolicy::new(
+                tenant_repo.clone(),
+                SurrealSettingsRepository::new(db.clone()),
+                Arc::clone(&tenant_org_cache),
+            ));
         let authorize_service =
-            AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600);
+            AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600)
+                .with_scope_policy(Arc::clone(&scope_policy));
         let token_service = TokenService::new(
             oauth2_client_repo.clone(),
             service_account_repo.clone(),
@@ -743,7 +755,8 @@ impl<C: Connection + Clone> AppState<C> {
                 cert_repo.clone(),
                 ca_cert_repo.clone(),
             )),
-        );
+        )
+        .with_scope_policy(Arc::clone(&scope_policy));
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
         // different origin from the issuer is a phishing shape, and deriving
@@ -787,7 +800,8 @@ impl<C: Connection + Clone> AppState<C> {
             auth_config.clone(),
             2_592_000,
             verification_uri,
-        );
+        )
+        .with_scope_policy(Arc::clone(&scope_policy));
         // B3: the exchanged-token ceiling. The ordinary access-token lifetime
         // is the right default — an exchange is a narrowing, so it has no
         // business producing something longer-lived than a normal token — and
@@ -824,7 +838,7 @@ impl<C: Connection + Clone> AppState<C> {
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
-            tenant_org_cache: Arc::new(Default::default()),
+            tenant_org_cache,
             client_managed_by_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),

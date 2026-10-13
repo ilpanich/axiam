@@ -278,6 +278,11 @@ pub struct AuthorizeService<OC, AC> {
     client_repo: OC,
     code_repo: AC,
     code_lifetime_secs: u64,
+    /// #613 (T-289) — the tenant's effective `dcr_allowed_scopes`, the ceiling
+    /// on what an externally registered client may request. Refuses until a
+    /// composition root installs one ([`Self::with_scope_policy`]); read only
+    /// for a `dcr` or `cimd` client. See [`crate::scope_ceiling`].
+    scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
 impl<OC, AC> AuthorizeService<OC, AC>
@@ -290,7 +295,15 @@ where
             client_repo,
             code_repo,
             code_lifetime_secs,
+            scope_policy: crate::scope_ceiling::unwired(),
         }
+    }
+
+    /// Install the tenant scope policy (#613).
+    #[must_use]
+    pub fn with_scope_policy(mut self, policy: crate::scope_ceiling::SharedScopePolicy) -> Self {
+        self.scope_policy = policy;
+        self
     }
 
     /// Process an authorization request.
@@ -405,10 +418,21 @@ where
 
         // 5. Validate the scopes (parsed above) against the client's
         //    registered set.
+        //
+        //    #613 (T-289): for an externally registered client the registered
+        //    set is bounded by the tenant's `dcr_allowed_scopes` as it is now,
+        //    so a scope the tenant withdrew is refused here exactly as an
+        //    unregistered one is — whatever the row still says. The read is
+        //    made only when there is a scope to check and only for a `dcr` or
+        //    `cimd` client; an administrator's client costs nothing.
         if req.scope.is_some() {
+            let ceiling =
+                crate::scope_ceiling::ceiling_for(self.scope_policy.as_ref(), &client).await?;
             let invalid: Vec<&str> = scopes
                 .iter()
-                .filter(|s| !client.scopes.contains(s))
+                .filter(|s| {
+                    !client.scopes.contains(s) || ceiling.as_ref().is_some_and(|c| !c.contains(s))
+                })
                 .map(String::as_str)
                 .collect();
             if !invalid.is_empty() {

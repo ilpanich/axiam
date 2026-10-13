@@ -14,6 +14,7 @@ pub mod middleware;
 pub mod openapi;
 pub mod permissions;
 pub mod reactor_hooks;
+pub mod scope_policy;
 pub mod server;
 pub mod ssf_emitter;
 pub mod state;

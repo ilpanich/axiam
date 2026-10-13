@@ -97,6 +97,8 @@ pub struct DeviceAuthorizationService<DG, OC, TR, RT, UR> {
     refresh_token_lifetime_secs: i64,
     /// Base URI the user is sent to, e.g. `https://id.example.com/device`.
     verification_uri: String,
+    /// #613 (T-289) — see [`crate::scope_ceiling`].
+    scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
 impl<DG, OC, TR, RT, UR> DeviceAuthorizationService<DG, OC, TR, RT, UR>
@@ -127,7 +129,17 @@ where
             auth_config,
             refresh_token_lifetime_secs,
             verification_uri,
+            scope_policy: crate::scope_ceiling::unwired(),
         }
+    }
+
+    /// Install the tenant scope policy (#613). Until one is installed an
+    /// externally registered client's device authorization is refused with
+    /// `server_error`; an administrator's client never reads it.
+    #[must_use]
+    pub fn with_scope_policy(mut self, policy: crate::scope_ceiling::SharedScopePolicy) -> Self {
+        self.scope_policy = policy;
+        self
     }
 
     /// RFC 8628 §3.1–3.2 — issue a device code and a user code.
@@ -157,6 +169,12 @@ where
                 "client is not registered for the device authorization grant".into(),
             ));
         }
+
+        // #613 (T-289) — for an externally registered client, "what the client
+        // is registered for" is bounded by the tenant's current
+        // `dcr_allowed_scopes`. No read for an administrator's client.
+        let mut client = client;
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
 
         // Scopes are narrowed to what the client is registered for. A device
         // asking for more than its registration allows gets the intersection,

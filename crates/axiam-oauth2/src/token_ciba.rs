@@ -179,12 +179,24 @@ where
             CibaRequestStatus::Approved => {}
         }
 
+        // #613 (T-289) — the tenant's current `dcr_allowed_scopes`, for an
+        // externally registered client. Read before the request is spent, so
+        // a failed read refuses without burning the user's approval; `None`,
+        // and no read, for an administrator's client.
+        let ceiling =
+            crate::scope_ceiling::ceiling_for(self.scope_policy.as_ref(), &client).await?;
+
         // --- 6. single use, on the X6 arbiter ------------------------------
-        let redeemed = requests
+        let mut redeemed = requests
             .redeem(tenant_id, &hash, &client.client_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
             .ok_or_else(|| OAuth2Error::InvalidGrant("auth_req_id has already been used".into()))?;
+        // A scope the tenant withdrew while the request waited for the user is
+        // not minted, as it would not be at the request's first refresh.
+        if let Some(ceiling) = &ceiling {
+            crate::scope_ceiling::narrow(&mut redeemed.scopes, ceiling);
+        }
         let (Some(user_id), Some(approval)) = (redeemed.user_id, redeemed.approval.clone()) else {
             // An approved request with no subject or no evidence is a datastore
             // inconsistency: refuse rather than mint a token for nobody.

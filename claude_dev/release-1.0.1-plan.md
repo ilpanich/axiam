@@ -417,6 +417,34 @@ Twelve commits on `v1.0.0`, every one signed; no item was re-sized.
 | W4.10 | `a3f917c` | Opus 5.5 | the F4 review (a first attempt was lost to a container restart before it committed anything) |
 | R101W4-01 | `a234f32` | Opus 5.5 | bulk SCIM producers stop at the first refusal and the publisher writes one summary row (`OutboundPublisher::record_not_offered`, since `axiam-scim` has no audit sink) — so a run meeting a full queue leaves at most two rows; `try_record` keeps a quarter of the audit channel for request rows and counts what it sheds in `request_audit.outbound_abandoned_dropped` (closes R101W4-06). OpenAPI regenerated |
 
+
+### 11.5 W5 — the merges, the contract and the eleven SDKs
+
+On `claude/release-1.0.1` (cut from `main` at `c6f916e`), W1, W2, W3 and W4
+merged in that order, then the contract; every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| merge W1 | `abcd020` | orchestrator | clean |
+| merge W2 | `9071207` | orchestrator | threat-model conflicts only: `threatTop` 477, STRIDE table re-totalled |
+| merge W3 | `76f841c` | orchestrator | `tenant.rs` purge keeps W1's NotFound check and returns W3's `TenantPurgeReport`; both purge tests kept; T-472 / T-102 amendments of the two waves both kept |
+| merge W4 | `0570b34` | orchestrator | W1's `vault_revocation_failing` job and the #612 comment ported into W4's `CleanupTask::tick()`; the GDPR loop takes W4's stop check; a semantic conflict (`CreateCertificate` without `user_id` in `server_leaf_profile.rs`) fixed; `cargo check --workspace --all-targets`, the SAML-off check and `fmt` pass |
+| W5.9 | `55c3e30` | orchestrator | run before the contract text rather than after it, as part of resolving the merges: each wave's spec was regenerated on its own base, and only the merged tree's spec is the drift job's (190 operations). The contract commit changes no route, so no second regeneration was needed |
+| W5.1–W5.8 | `058d8e0` | Sonnet 5.5 | contract **1.61**; §34.5 is the record. The orchestrator's review corrected one sentence before commit: the CRL number is monotone only under the conditions #615 (R101W1-02) names, not "never falls"; §35 rule 4 says so |
+| W5.10 | eleven branches `claude/contract-1.61-sync` | Sonnet 5.5 (three sessions) | vendored byte-identical from `058d8e0`; fields REST-only in all eleven (no gRPC or AMQP message carries these models); `CibaPendingList` modelled by none (no registry operation reaches it — Q1). Go's first draft dropped `[]` through `omitempty` and was fixed before push. Draft PRs, all CI green on their first head: [rust#126](https://github.com/ilpanich/axiam-rust-sdk/pull/126) `d69294f`, [typescript#136](https://github.com/ilpanich/axiam-typescript-sdk/pull/136) `7567064`, [python#96](https://github.com/ilpanich/axiam-python-sdk/pull/96) `7d84d76`, [go#97](https://github.com/ilpanich/axiam-go-sdk/pull/97) `fae4b2c`, [java#113](https://github.com/ilpanich/axiam-java-sdk/pull/113) `1bc7c55`, [php#81](https://github.com/ilpanich/axiam-php-sdk/pull/81) `2382b91`, [kotlin#75](https://github.com/ilpanich/axiam-kotlin-sdk/pull/75) `5c434f6`, [csharp#105](https://github.com/ilpanich/axiam-csharp-sdk/pull/105) `fd8e5bd`, [c#72](https://github.com/ilpanich/axiam-c-sdk/pull/72) `d706d8f`, [cplusplus#74](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/74) `cd1b904`, [swift#73](https://github.com/ilpanich/axiam-swift-sdk/pull/73) `f99692c`. Each merges after the `axiam` release PR (its drift check compares with `main`) |
+| W5.11 | `7007f04` | Sonnet 5.5 | [`sdk-contract-1.61-conformance-review.md`](sdk-contract-1.61-conformance-review.md): no wire defect. Two SDK fixes on the same branches: Java `35ed4d7` (the mTLS provisioning example had not compiled since 1.0.0; a test now compiles it; the helper's Javadoc says it re-renders the instant), Python `a034e2f` (a test for the dropped `null` on `ScimTargetInput.expected_updated_at`). Suites not run here: PHP (composer blocked; a probe instead), Swift (no toolchain) |
+
+**Questions for the `axiam` PR** (review §5, never worked around): Q1 is
+`CibaPendingList` SDK work when no registry operation reaches it; Q2 does the
+`events_allowed` cut bind a converter; Q3 an assigned `null` on a request
+member (TypeScript sends it); Q4 Java and Kotlin re-render `updated_at` to the
+same instant; Q5 the new members are not source-compatible in Rust (struct
+literals), Java (record constructors), Kotlin and PHP (positional parameters) —
+which bears on tagging those SDKs 1.0.1; Q6 the three meanings at the
+`update_stream` call site; Q7 a typed UUID as a client-side judgement. Plus the
+orchestrator's: §33.3 rule 13 says the per-client CIBA bucket answers
+`rate_limit_exceeded`, while the code answers `slow_down` since 1.0.0.
+
 ---
 
 ## 12. Kickoff prompts

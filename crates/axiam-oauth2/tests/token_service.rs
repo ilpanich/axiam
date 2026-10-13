@@ -412,8 +412,16 @@ enum TenantOutcome {
     Db,
 }
 
+/// Counts its `get_by_id` reads: R1W1-03 reads the tenant once in client
+/// authentication and the grants must not read it again.
 #[derive(Clone)]
-struct MockTenantRepo(TenantOutcome);
+struct MockTenantRepo(TenantOutcome, Arc<std::sync::atomic::AtomicUsize>);
+
+impl MockTenantRepo {
+    fn new(outcome: TenantOutcome) -> Self {
+        Self(outcome, Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+    }
+}
 
 impl TenantRepository for MockTenantRepo {
     async fn get_organization_tenant(
@@ -427,6 +435,7 @@ impl TenantRepository for MockTenantRepo {
         unimplemented!()
     }
     async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.0 {
             TenantOutcome::Found => Ok(Tenant {
                 kind: axiam_core::models::tenant::TenantKind::Standard,
@@ -1082,7 +1091,7 @@ fn build_with_upgrade_log(
         MockClientRepo(client, log.clone()),
         MockSaRepo(SaOutcome::NotFound, log.clone()),
         code,
-        MockTenantRepo(tenant),
+        MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
         MockSessionRepo::default(),
@@ -1108,7 +1117,7 @@ fn build_with_session_log(
         MockClientRepo(client, upgrade.clone()),
         MockSaRepo(SaOutcome::NotFound, upgrade),
         code,
-        MockTenantRepo(tenant),
+        MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
         MockSessionRepo(None, sessions.clone(), Arc::new(Mutex::new(Vec::new()))),
@@ -1403,7 +1412,7 @@ async fn auth_code_consume_fails() {
 }
 
 #[tokio::test]
-async fn auth_code_tenant_not_found() {
+async fn auth_code_tenant_not_found_is_invalid_client() {
     let svc = build(
         ClientOutcome::Found(make_client(&["authorization_code"], &[])),
         MockCodeRepo::ok(make_auth_code(&[], None)),
@@ -1415,7 +1424,7 @@ async fn auth_code_tenant_not_found() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -1732,7 +1741,7 @@ async fn cc_invalid_requested_scope() {
 }
 
 #[tokio::test]
-async fn cc_tenant_not_found() {
+async fn cc_tenant_not_found_is_invalid_client() {
     let svc = build(
         ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
         dummy_code_repo(),
@@ -1744,7 +1753,7 @@ async fn cc_tenant_not_found() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -2210,6 +2219,117 @@ async fn introspect_client_auth_fails() {
     );
 }
 
+/// [`build`], but handing back the count of tenant reads.
+fn build_counting_tenant_reads(
+    client: ClientOutcome,
+    tenant: TenantOutcome,
+) -> (Svc, Arc<std::sync::atomic::AtomicUsize>) {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let tenants = MockTenantRepo::new(tenant);
+    let reads = tenants.1.clone();
+    let svc = TokenService::new(
+        MockClientRepo(client, log.clone()),
+        MockSaRepo(SaOutcome::NotFound, log),
+        dummy_code_repo(),
+        tenants,
+        MockRefreshRepo::new(),
+        MockUserRepo,
+        MockSessionRepo::default(),
+        MockAuditRepo::default(),
+        test_config(),
+        2_592_000,
+        not_issued_here(),
+    );
+    (svc, reads)
+}
+
+// R1W1-03 (#601, T-472): a client authenticates only while its tenant is there.
+// The client row survives a tombstone until the purge, so the credential alone
+// proves nothing about the tenant.
+
+#[tokio::test]
+async fn a_tombstoned_tenants_client_authenticates_nowhere() {
+    let client = || ClientOutcome::Found(make_client(&["client_credentials"], &["api"]));
+    let (svc, _) = build_counting_tenant_reads(client(), TenantOutcome::NotFound);
+    assert_eq!(
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    // The same client over a live tenant authenticates: the refusal is the
+    // tenant's, not the fixture's.
+    let (svc, _) = build_counting_tenant_reads(client(), TenantOutcome::Found);
+    assert!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_read_that_fails_is_a_server_error_not_bad_credentials() {
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Db,
+    );
+    assert_eq!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn the_tenant_is_read_after_the_credential_and_once_per_grant() {
+    use std::sync::atomic::Ordering::SeqCst;
+    // A wrong secret is refused before the tenant is consulted: a caller who
+    // has proven nothing costs no extra read.
+    let (svc, reads) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Found,
+    );
+    let mut req = base_req("client_credentials");
+    req.client_secret = Some("not-the-secret".into());
+    assert_eq!(
+        svc.exchange(client_tenant(), req, &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(reads.load(SeqCst), 0);
+
+    // A grant reads it once — authentication's read serves the `org_id` claim.
+    svc.exchange(client_tenant(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(reads.load(SeqCst), 1, "client_credentials");
+
+    // So does revocation, which needs no `org_id` at all.
+    svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(reads.load(SeqCst), 2, "revocation");
+}
+
 #[tokio::test]
 async fn introspect_valid_access_token_same_tenant_active() {
     // The *introspecting client's* tenant, so "same tenant" means the token,
@@ -2473,7 +2593,7 @@ async fn refresh_client_db_outage_is_server_error() {
 }
 
 #[tokio::test]
-async fn refresh_tenant_not_found_is_invalid_request() {
+async fn refresh_tenant_not_found_is_invalid_client() {
     let refresh =
         MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
     let svc = build(
@@ -2487,7 +2607,7 @@ async fn refresh_tenant_not_found_is_invalid_request() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -2837,7 +2957,7 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         MockClientRepo(client, upgrade.clone()),
         MockSaRepo(SaOutcome::NotFound, upgrade),
         dummy_code_repo(),
-        MockTenantRepo(TenantOutcome::Found),
+        MockTenantRepo::new(TenantOutcome::Found),
         refresh,
         MockUserRepo,
         MockSessionRepo(None, Arc::new(Mutex::new(Vec::new())), replays.clone()),
@@ -2855,7 +2975,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockClientRepo(ClientOutcome::NotFound, log.clone()),
         MockSaRepo(sa, log.clone()),
         MockCodeRepo::none(),
-        MockTenantRepo(TenantOutcome::Found),
+        MockTenantRepo::new(TenantOutcome::Found),
         MockRefreshRepo::new(),
         MockUserRepo,
         MockSessionRepo::default(),
@@ -4592,7 +4712,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
             MockClientRepo(ClientOutcome::Found(d9_honour_client()), upgrade.clone()),
             MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
             dummy_code_repo(),
-            MockTenantRepo(TenantOutcome::Found),
+            MockTenantRepo::new(TenantOutcome::Found),
             MockRefreshRepo::new().with_get(stored),
             MockUserRepo,
             MockSessionRepo(

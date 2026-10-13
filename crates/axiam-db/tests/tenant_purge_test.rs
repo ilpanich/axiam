@@ -9,19 +9,21 @@
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::session::CreateSession;
 use axiam_core::models::settings::TenantSettingsOverride;
 use axiam_core::models::tenant::{CreateTenant, TenantKind, UpdateTenant};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    AuditLogRepository, OrganizationRepository, Pagination, SessionRepository, SettingsRepository,
-    TenantRepository, UserRepository,
+    AuditLogRepository, OAuth2ClientRepository, OrganizationRepository, Pagination,
+    SessionRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealOrganizationRepository, SurrealSessionRepository,
-    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealAuditLogRepository, SurrealOAuth2ClientRepository, SurrealOrganizationRepository,
+    SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use axiam_db::{CountRow, SessionValidationCache};
 use chrono::{Duration, Utc};
@@ -134,6 +136,21 @@ async fn a_tombstoned_tenant_leaves_every_read_path_at_once() {
     let doomed = tenant(&db, org, "doomed").await;
     let kept = tenant(&db, org, "kept").await;
     populate(&db, doomed).await;
+    // R1W1-03 (#601): the tenant's OAuth2 client. Its row is not among the
+    // rows the tombstone transaction removes, so the client reader still
+    // answers for it after the delete — which is why client authentication has
+    // to ask the tenant reader, and why `get_by_id` refusing the tombstoned
+    // tenant (below) is what it relies on.
+    let clients = SurrealOAuth2ClientRepository::new(db.clone());
+    let client_input: CreateOAuth2Client = serde_json::from_value(serde_json::json!({
+        "tenant_id": doomed,
+        "name": "portal",
+        "redirect_uris": ["https://portal.example.com/cb"],
+        "grant_types": ["client_credentials"],
+        "scopes": ["openid"],
+    }))
+    .unwrap();
+    let (client, _secret) = clients.create(client_input).await.unwrap();
     let settings = SurrealSettingsRepository::new(db.clone());
     settings
         .set_tenant_override(doomed, TenantSettingsOverride::default())
@@ -142,6 +159,14 @@ async fn a_tombstoned_tenant_leaves_every_read_path_at_once() {
     let before = tenants.count_for_shared_issuer().await.unwrap();
 
     tenants.delete(doomed).await.unwrap();
+
+    assert!(
+        clients
+            .get_by_client_id(doomed, &client.client_id)
+            .await
+            .is_ok(),
+        "the client row survives the tombstone until the purge"
+    );
 
     assert!(matches!(
         tenants.get_by_id(doomed).await,

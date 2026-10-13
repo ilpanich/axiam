@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reactivation. A store error on the re-read is now a server error rather than
   `invalid_grant`, as for CIBA.
 
+- **A tombstoned tenant's OAuth2 clients no longer authenticate (R1W1-03, #601,
+  T-472; Low).** Client authentication read the client row, which lives until the
+  tenant purge, and never the tenant, so after `DELETE .../tenants/{id}` the
+  tenant's client could still start a CIBA request at `bc-authorize` (stored, and
+  the user mailed), have the tenant's unexpired access tokens introspected
+  `active`, and write revocation and PAR rows. Client authentication now reads
+  the tenant once, after the credential, and a tenant that is gone is the
+  `invalid_client` a wrong credential gets, at `client_credentials`,
+  `bc-authorize`, introspection, revocation, PAR, the UMA ticket grant and token
+  exchange from the `204` on; `bc-authorize` stores nothing and mails nobody. The
+  grants use that read for `org_id` rather than reading the tenant again, so
+  those four grants cost no extra read; the other endpoints cost one indexed
+  read. The grants' answer for a deleted tenant changes from
+  `invalid_request` ("unknown tenant") to `invalid_client`.
+
 ## [1.0.0] - 2026-10-10
 
 #### What 1.0.0 means

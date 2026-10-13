@@ -112,7 +112,8 @@ where
         if client.tenant_id != tenant_id {
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
-        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
+        let tenant = self
+            .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
         if !holds_ciba_grant(&client.grant_types) {
@@ -213,14 +214,7 @@ where
         }
 
         // --- 8. issuance ---------------------------------------------------
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
+        // `tenant` is the one client authentication read (R1W1-03).
         let cnf = self.certificate_binding_for(&client, ctx)?;
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
         let ext = self

@@ -1081,6 +1081,9 @@ const TEST_PEER: &str = "127.0.0.1:12345";
 /// registers, so an access token whose session was revoked is refused.
 macro_rules! session_checked_app {
     ($db:expr, $auth:expr) => {
+        session_checked_app!($db, $auth, AppState::for_test($db.clone(), $auth.clone()))
+    };
+    ($db:expr, $auth:expr, $state:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -1088,10 +1091,7 @@ macro_rules! session_checked_app {
                     axiam_db::repository::SurrealSessionRepository::new($db.clone()),
                 )
                     as Arc<dyn axiam_api_rest::SessionValidator>))
-                .app_data(web::Data::new(AppState::for_test(
-                    $db.clone(),
-                    $auth.clone(),
-                )))
+                .app_data(web::Data::new($state))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
@@ -1235,7 +1235,12 @@ macro_rules! whoami_status {
 /// a permission and a resource, an OAuth2 client with two refresh tokens, a
 /// webhook, a certificate, a federation configuration, an e-mail configuration,
 /// a consent and audit entries.
-async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
+///
+/// Returns the OAuth2 client's `(client_id, client_secret)`: a confidential
+/// `client_secret_post` client that also holds `client_credentials` and the
+/// CIBA grant (poll mode), so the tests can drive every client-authenticating
+/// endpoint with it.
+async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) -> (String, String) {
     use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
     use axiam_core::models::federation::CreateFederationConfig;
     use axiam_core::models::gdpr::CreateConsent;
@@ -1336,11 +1341,17 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
         "tenant_id": tenant_id,
         "name": "portal",
         "redirect_uris": ["https://portal.example.com/cb"],
-        "grant_types": ["authorization_code", "refresh_token"],
+        "grant_types": [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials",
+            "urn:openid:params:grant-type:ciba"
+        ],
         "scopes": ["openid"],
+        "ciba": { "backchannel_token_delivery_mode": "poll" },
     }))
     .unwrap();
-    let (client, _secret) = SurrealOAuth2ClientRepository::new(db.clone())
+    let (client, secret) = SurrealOAuth2ClientRepository::new(db.clone())
         .create(client_input)
         .await
         .unwrap();
@@ -1439,6 +1450,144 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
         })
         .await
         .unwrap();
+    (client.client_id, secret)
+}
+
+/// A notifier that records what it was asked to send: the user-facing mail of
+/// a `bc-authorize` request.
+#[derive(Default)]
+struct RecordingNotifier {
+    sent: std::sync::Mutex<Vec<axiam_core::models::ciba::CibaUserNotification>>,
+}
+
+impl axiam_core::models::ciba::CibaUserNotifier for RecordingNotifier {
+    fn notify(
+        &self,
+        notification: axiam_core::models::ciba::CibaUserNotification,
+    ) -> axiam_core::models::ciba::CibaNotifyFuture<'_> {
+        self.sent.lock().unwrap().push(notification);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl RecordingNotifier {
+    /// What has been sent, waiting a moment first: the notification is detached
+    /// from the request that triggers it.
+    async fn sent_after_settling(&self) -> usize {
+        for _ in 0..100 {
+            if !self.sent.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.sent.lock().unwrap().len()
+    }
+}
+
+/// POST a form to an OAuth2 endpoint of `tenant_id`; the status and the
+/// `error` member of the JSON answer (empty when there is none).
+async fn post_oauth2_form(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    path: &str,
+    tenant_id: Uuid,
+    body: String,
+) -> (u16, serde_json::Value) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse().unwrap())
+        .uri(&format!("{path}?tenant_id={tenant_id}"))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Every endpoint at which a client authenticates, called with the tenant's
+/// client: `client_credentials`, `bc-authorize`, introspection, revocation, PAR,
+/// the UMA ticket grant and token exchange (R1W1-03, T-472). Returns
+/// `(endpoint, status, answer)` for each.
+///
+/// `token` is the access token introspection is asked about. The bodies are the
+/// least that gets past client authentication; what lies beyond it (a ticket
+/// that does not exist, a subject token that is not one) answers something other
+/// than `invalid_client`, which is the whole of what the callers compare.
+async fn client_authenticated_calls(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    (client_id, secret): &(String, String),
+    token: &str,
+) -> Vec<(&'static str, u16, serde_json::Value)> {
+    let enc = |s: &str| -> String { url::form_urlencoded::byte_serialize(s.as_bytes()).collect() };
+    let creds = format!("client_id={client_id}&client_secret={secret}");
+    let calls = [
+        (
+            "client_credentials",
+            "/oauth2/token",
+            format!("grant_type=client_credentials&{creds}"),
+        ),
+        (
+            "bc-authorize",
+            "/oauth2/bc-authorize",
+            format!("{creds}&scope=openid&login_hint=alice"),
+        ),
+        (
+            "introspection",
+            "/oauth2/introspect",
+            format!("{creds}&token={token}"),
+        ),
+        (
+            "revocation",
+            "/oauth2/revoke",
+            format!("{creds}&token=not-a-refresh-token"),
+        ),
+        (
+            "PAR",
+            "/oauth2/par",
+            format!(
+                "{creds}&response_type=code&redirect_uri={}&scope=openid\
+                 &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+                 &code_challenge_method=S256",
+                enc("https://portal.example.com/cb")
+            ),
+        ),
+        (
+            "uma-ticket",
+            "/oauth2/token",
+            format!(
+                "grant_type={}&{creds}&ticket=no-such-ticket",
+                enc("urn:ietf:params:oauth:grant-type:uma-ticket")
+            ),
+        ),
+        (
+            "token-exchange",
+            "/oauth2/token",
+            format!(
+                "grant_type={}&{creds}&subject_token=not-a-token&subject_token_type={}",
+                enc("urn:ietf:params:oauth:grant-type:token-exchange"),
+                enc("urn:ietf:params:oauth:token-type:access_token")
+            ),
+        ),
+    ];
+    let mut answers = Vec::new();
+    for (name, path, body) in calls {
+        let (status, json) = post_oauth2_form(app, path, tenant_id, body).await;
+        answers.push((name, status, json));
+    }
+    answers
 }
 
 /// How many rows of each tenant-scoped table name `tenant_id`, in purge order.
@@ -1500,11 +1649,14 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
     let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
     let auth = test_auth_config();
     let token = session_backed_token(&db, &auth, user_id, org_tenant, org_id).await;
-    let app = session_checked_app!(db, auth);
+    let notifier = Arc::new(RecordingNotifier::default());
+    let mut state = AppState::for_test(db.clone(), auth.clone());
+    state.oauth2.ciba_notifier = notifier.clone();
+    let app = session_checked_app!(db, auth, state);
 
     let doomed = create_tenant_via_api!(app, token, org_id, "doomed-populated").unwrap();
     let bystander = create_tenant_via_api!(app, token, org_id, "bystander").unwrap();
-    populate_tenant(&db, doomed).await;
+    let doomed_client = populate_tenant(&db, doomed).await;
     populate_tenant(&db, bystander).await;
 
     // Both tenants are in use: alice is signed in to each, and her session in
@@ -1530,6 +1682,50 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
         "the doomed tenant is populated: {doomed_before:?}"
     );
 
+    // R1W1-03 (#601): the tenant's client works, at every endpoint a client
+    // authenticates at, until the tenant is deleted. `bc-authorize` mails the
+    // user once; the access token the client minted is `active` to introspection.
+    let (status, minted) = post_oauth2_form(
+        &app,
+        "/oauth2/token",
+        doomed,
+        format!(
+            "grant_type=client_credentials&client_id={}&client_secret={}",
+            doomed_client.0, doomed_client.1
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{minted}");
+    let client_token = minted["access_token"].as_str().unwrap().to_owned();
+    for (endpoint, status, answer) in
+        client_authenticated_calls(&app, doomed, &doomed_client, &client_token).await
+    {
+        assert!(
+            (200..300).contains(&status) || answer["error"] != "invalid_client",
+            "{endpoint} before the delete: {status} {answer}"
+        );
+        if endpoint == "introspection" {
+            assert_eq!(answer["active"], true, "the client's own token is active");
+        }
+        if endpoint == "bc-authorize" {
+            assert_eq!(status, 200, "{answer}");
+        }
+    }
+    assert_eq!(
+        notifier.sent_after_settling().await,
+        1,
+        "bc-authorize mailed the user once while the tenant was live"
+    );
+    notifier.sent.lock().unwrap().clear();
+    let ciba_requests = |rows: Vec<(&'static str, u64)>| {
+        rows.into_iter()
+            .find(|(table, _)| *table == "ciba_request")
+            .unwrap()
+            .1
+    };
+    let ciba_stored = ciba_requests(tenant_rows(&db, doomed).await);
+    assert_eq!(ciba_stored, 1, "the live bc-authorize stored its request");
+
     let _ = export_audit_body!(app, token, org_id, doomed);
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/organizations/{org_id}/tenants/{doomed}"))
@@ -1541,6 +1737,31 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
         test::call_service(&app, req).await.status().as_u16(),
         204,
         "the status code is unchanged: the purge is not the caller's to wait for"
+    );
+
+    // R1W1-03 (#601, T-472): from the `204` on, the tenant's client — whose row
+    // survives until the purge — authenticates nowhere. Every endpoint answers
+    // `invalid_client`, the introspection of a token the tenant minted included
+    // (it would have reported it `active` for up to its lifetime), and the user
+    // is mailed nothing and no request is stored for them.
+    let refused = client_authenticated_calls(&app, doomed, &doomed_client, &client_token).await;
+    assert_eq!(refused.len(), 7);
+    for (endpoint, status, answer) in refused {
+        assert_eq!(status, 401, "{endpoint} after the delete: {answer}");
+        assert_eq!(
+            answer["error"], "invalid_client",
+            "{endpoint} after the delete: {answer}"
+        );
+    }
+    assert_eq!(
+        notifier.sent_after_settling().await,
+        0,
+        "bc-authorize sent the deleted tenant's user no mail"
+    );
+    assert_eq!(
+        ciba_requests(tenant_rows(&db, doomed).await),
+        0,
+        "the deletion cleared the live request and bc-authorize stored nothing after it"
     );
 
     // Immediately, before any purge: the last session cannot refresh, the

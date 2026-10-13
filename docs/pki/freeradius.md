@@ -137,6 +137,12 @@ one of the same organization, under the same root — leads to a CA this server
 does not hold, and is refused with `unable to get local issuer certificate`. The
 end-to-end test issues such a device and checks exactly that.
 
+**One tenant per trust anchor.** The boundary is that `ca_file` holds one tenant's
+signing CA. A FreeRADIUS server that serves two tenants needs two trust
+configurations (two servers, or two virtual servers on separate listeners), not
+two CAs in one file: with both in `ca_file`, a device of either tenant is admitted
+through any NAS the server answers.
+
 The cost is stated plainly: with the signing CA as the trust anchor nothing above
 it is looked at, so **a revoked signing CA is not noticed by FreeRADIUS**. The
 organization CA's list is what names it, and this configuration does not load
@@ -445,6 +451,18 @@ figures in [§6.3 of the reply-profile note](../../claude_dev/radius-reply-profi
 that compare this recipe with the designs that would replace it are read from the
 defaults (a list valid for a day), not measured; this page's bound, with a
 five-minute fetch, is tighter.
+
+## Which threat-model entries this covers
+
+The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md))
+holds the RADIUS entries the declined native front end was written for. Four of
+them are mitigated by this recipe's configuration, with the end-to-end test above
+as their test: **T-449** (`Message-Authenticator` required), **T-456** (EAP-TLS
+only, TLS 1.3 only), **T-459** (one tenant's signing CA as the only anchor) and
+**T-454** (the recipe references an upstream image by digest and vendors
+nothing). The remaining seventeen stay *not applicable*, each saying why: they
+are about code AXIAM would have to write, about a FreeRADIUS control this recipe
+does not test, or, for **T-462**, about the revocation lag this page states.
 
 ## Operating notes
 

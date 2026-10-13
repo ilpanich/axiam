@@ -527,6 +527,12 @@ and v90 – v94 run at startup like every earlier one.
   FreeRADIUS and refused after. AXIAM still speaks no RADIUS, and the `rlm_rest`
   authorize endpoint (D4) is not in 1.0.1; the guide ends on that. The
   authentik comparison's RADIUS row reads *recipe, not native*.
+  Threat model: T-449 (`Message-Authenticator` required), T-454 (the recipe
+  vendors nothing), T-456 (EAP-TLS only, TLS 1.3 only) and T-459 (the tenant
+  signing CA is the only anchor) move from Not applicable to Mitigated with that
+  end-to-end as their test; the other seventeen RADIUS entries stay Not
+  applicable and each says why. T-449 carries a dated correction: `Proxy-State`
+  is returned unmodified, not refused (RFC 2865 §5.33).
 
 - **A certificate revocation list per issuing CA** (#565, P23W6-10). Each CA
   whose key AXIAM holds publishes a signed RFC 5280 CRL (version 2, DER,

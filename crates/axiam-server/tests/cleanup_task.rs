@@ -816,6 +816,8 @@ fn grants(
         axiam_db::SurrealRefreshTokenRepository::new(db.clone()),
         axiam_db::SurrealAuthorizationCodeRepository::new(db.clone()),
         axiam_db::SurrealPushedAuthRequestRepository::new(db.clone()),
+        axiam_db::SurrealDeviceGrantRepository::new(db.clone()),
+        axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
     )
 }
 
@@ -2127,7 +2129,10 @@ async fn purged_records(db: &Surreal<surrealdb::engine::local::Db>) -> Vec<Audit
 /// The sweep purges a tombstoned tenant — its rows, then its row — leaves a
 /// live tenant alone, sweeps an orphaned tenant id (rows left by a deletion
 /// made before the tombstone) only when asked to look for orphans, and records
-/// each purge in the system log as `tenants.purged`.
+/// each purge in the system log as `tenants.purged` — with, for the tombstoned
+/// tenant, the export time its deletion record names and how many of its audit
+/// rows went (those at or before it) and stayed (R1W1-04, #602). The audit
+/// retention sweep then removes a kept row once it is past the window.
 #[tokio::test]
 async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_records_it() {
     let db = setup_db().await;
@@ -2145,7 +2150,46 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
     let tombstoned = tenant_with_a_user(&db, org, "tombstoned").await;
     let orphan = tenant_with_a_user(&db, org, "orphan").await;
     let live = tenant_with_a_user(&db, org, "live").await;
+    let entry = |tenant_id: Uuid, action: &str, metadata: Option<serde_json::Value>| {
+        let audit = &audit;
+        let action = action.to_owned();
+        async move {
+            audit
+                .append(CreateAuditLogEntry {
+                    tenant_id,
+                    actor_id: Uuid::nil(),
+                    actor_type: ActorType::System,
+                    action,
+                    resource_id: None,
+                    outcome: AuditOutcome::Success,
+                    ip_address: None,
+                    metadata,
+                })
+                .await
+                .unwrap()
+        }
+    };
+    // The tombstoned tenant's trail: one row the export holds, then the
+    // export, then one row it does not hold.
+    entry(tombstoned, "users.updated", None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let exported_through = Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let late = entry(tombstoned, "users.created", None).await;
     tenants.delete(tombstoned).await.unwrap();
+    audit
+        .append(CreateAuditLogEntry {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::User,
+            action: axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.into(),
+            resource_id: Some(tombstoned),
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({ "audit_exported_through": exported_through })),
+        })
+        .await
+        .unwrap();
     db.query("DELETE type::record('tenant', $id)")
         .bind(("id", orphan.to_string()))
         .await
@@ -2172,9 +2216,42 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
 
     let records = purged_records(&db).await;
     let of = |id: Uuid| records.iter().find(|e| e.resource_id == Some(id));
-    assert_eq!(of(tombstoned).unwrap().metadata["orphan"], false);
+    let purged = &of(tombstoned).unwrap().metadata;
+    assert_eq!(purged["orphan"], false);
+    assert_eq!(
+        purged["audit_exported_through"],
+        serde_json::json!(exported_through)
+    );
+    assert_eq!(purged["audit_rows_deleted"], 1);
+    assert_eq!(purged["audit_rows_kept"], 1);
     assert_eq!(of(orphan).unwrap().metadata["orphan"], true);
+    assert_eq!(
+        of(orphan).unwrap().metadata["audit_exported_through"],
+        serde_json::Value::Null
+    );
     assert!(of(live).is_none());
+
+    // The row written after the export survived under the tenant id, and the
+    // audit retention sweep (T-119) removes it once it is past the window.
+    let kept = audit.get_by_ids(tombstoned, &[late.id]).await.unwrap();
+    assert_eq!(kept.len(), 1, "the row after the export survives the purge");
+    db.query("UPDATE audit_log SET timestamp = time::now() - 400d WHERE tenant_id = $tenant")
+        .bind(("tenant", tombstoned.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    audit
+        .prune_older_than(Utc::now() - chrono::Duration::days(365))
+        .await
+        .unwrap();
+    assert!(
+        audit
+            .get_by_ids(tombstoned, &[late.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// #610: the cleanup job runs on every replica. Two replicas' sweeps over one

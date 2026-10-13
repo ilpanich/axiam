@@ -1825,6 +1825,25 @@ pub trait DeviceGrantRepository: Send + Sync {
 
     /// Remove expired grants. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every grant issued to `client_id` in `tenant_id`, whatever its
+    /// status — pending, approved, denied or redeemed (#517, #610). Returns
+    /// the number deleted.
+    ///
+    /// Called when the client is removed: a `managed_by: cimd` client is
+    /// re-materialised under the same `client_id`, and an approved grant left
+    /// behind would redeem against the new row. Scoped by tenant **and**
+    /// client id, never by client id alone — the id is unique only within its
+    /// tenant. Idempotent.
+    ///
+    /// Against a poll in flight: [`Self::redeem`]'s guarded write needs the
+    /// row to exist, so a redeem that wrote before this delete committed has already
+    /// minted for the old client, and one that writes after matches nothing.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for CIBA backchannel authentication requests (G-7).
@@ -1858,15 +1877,30 @@ pub trait CibaRequestRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
 
-    /// The `pending`, unexpired requests addressed to `user_id`, soonest
-    /// expiry first, at most `limit`. A request for nobody (`user_id` unset) is
-    /// never listed, whoever asks.
+    /// The `pending`, unexpired requests addressed to `user_id`, oldest first
+    /// (by `created_at`, so a request keeps its place however short-lived its
+    /// neighbours are), at most `limit`. A request for nobody (`user_id` unset)
+    /// is never listed, whoever asks.
     fn list_pending_for_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         limit: u32,
     ) -> impl Future<Output = AxiamResult<Vec<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// How many `pending`, unexpired requests are addressed to `user_id` in
+    /// `tenant_id`: those of `client_id` alone when it is given, of every
+    /// client when it is `None`. The count behind the list's `total_pending`
+    /// (#599). A request for nobody is never counted — which is why no answer
+    /// of `bc-authorize` may depend on this count: a refusal keyed on it would
+    /// tell a client which hints name users (T-422; the per-(client, hint) cap
+    /// counts calls per hint instead).
+    fn count_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        client_id: Option<&str>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// `pending → approved`, conditional on `version = expected_version`, on
     /// the row's user being `user_id`, and on the request being unexpired.
@@ -1938,6 +1972,21 @@ pub trait CibaRequestRepository: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         retention: chrono::Duration,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every request started by `client_id` in `tenant_id`, whatever
+    /// its status (#517, #610). Returns the number deleted.
+    ///
+    /// Called when the client is removed: a pending request would otherwise
+    /// stay listed on the approval surface for a client that no longer exists,
+    /// and an approved one could be redeemed once a `managed_by: cimd` client
+    /// is re-materialised under the same `client_id`. Scoped by tenant **and**
+    /// client id. Idempotent. A [`Self::redeem`] racing this delete either
+    /// wrote first (and minted for the old client) or matches nothing.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

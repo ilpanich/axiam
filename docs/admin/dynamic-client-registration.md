@@ -323,10 +323,20 @@ client already holds is narrowed at its next use: the refresh grant keeps only
 the scopes the registration still names, mints the access token (and the ID
 token, while `openid` remains) with those, and rotates to a refresh token that
 holds only those. Adding the scope back to the registration later does not
-restore it to an existing grant; the end user authorizes again. A tenant that
-withdraws a scope from `dcr_allowed_scopes` reaches a client's grants through
-the client's next `PUT` (or, for a Client ID Metadata Document, its next
-fetch), which must drop the scope.
+restore it to an existing grant; the end user authorizes again.
+
+**A scope the tenant withdraws is gone at the client's next request** (#613).
+`dcr_allowed_scopes` is a ceiling on every self-registered and Client ID
+Metadata Document client's scopes wherever they are read, not only when the
+client registers: removing a scope from the list makes an authorization request
+naming it `invalid_scope`, and drops it from the next refresh (and from the
+refresh token that refresh rotates to), from a `client_credentials` or CIBA
+token and from a token exchange — without the client sending a `PUT` and
+without the client row being rewritten, so `GET` still reports what was
+registered. An access token minted before the change keeps the scope until it
+expires. Putting the scope back on the list offers it again to new
+authorizations; a refresh token already narrowed stays narrowed. Clients an
+administrator created are not affected by the list.
 
 **Rotation.** A successful `PUT` returns a new token and the old one stops
 working in the same database statement. Of two concurrent updates with one

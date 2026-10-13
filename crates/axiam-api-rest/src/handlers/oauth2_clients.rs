@@ -1115,7 +1115,8 @@ pub async fn delete<C: Connection + Clone>(
 }
 
 /// Revoke what deleting a client must revoke: its refresh tokens, its
-/// authorization codes and its pushed requests (#517). Both deletion paths
+/// authorization codes, its pushed requests, and (#610 (d)) its device grants
+/// and CIBA requests (#517). Both deletion paths
 /// call it — `DELETE /api/v1/oauth2-clients/{id}` (an administrator) and RFC
 /// 7592's `DELETE /oauth2/register/{client_id}` (the client itself) — and the
 /// unused-client sweep calls the same [`ClientGrantStores::revoke`]. What is
@@ -1130,6 +1131,9 @@ pub(crate) async fn revoke_client_grants<C: Connection + Clone>(
         state.refresh_token_repo.clone(),
         axiam_db::SurrealAuthorizationCodeRepository::new(state.db.clone()),
         axiam_db::SurrealPushedAuthRequestRepository::new(state.db.clone()),
+        axiam_db::SurrealDeviceGrantRepository::new(state.db.clone()),
+        // Only `delete_all_for_client` is called, which needs no sealing key.
+        axiam_db::SurrealCibaRequestRepository::new(state.db.clone(), None),
     )
     .revoke(tenant_id, client_id)
     .await

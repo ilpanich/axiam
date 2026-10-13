@@ -164,6 +164,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata carrying a non-XML-DSig element named `Signature` is refused.
   Threat model: T-477 carries a dated correction, T-67, T-69 and T-474 a short
   one.
+- **One client may make three CIBA requests for one hint in ten minutes, and
+  the pending list keeps its bounds (#599, T-424; Informational).** The list
+  was soonest-expiry-first and capped at fifty, and `requested_expiry` is the
+  client's to choose, so a client that may address a user could keep fifty
+  short-lived requests ahead of another client's real one; its badge polled a
+  30-a-minute bucket keyed on the address, so thirty console tabs behind one
+  egress address silenced each other. `POST /oauth2/bc-authorize` now admits at
+  most three calls of one client for one hint in any ten minutes (the longest a
+  request may live; a client that has made three waits ten to twenty) and
+  answers the rest with `429 slow_down`, the per-client limiter's answer, before
+  the hint is looked up, stored or mailed. The cap counts calls per (client, hint)
+  in the shared rate-limit table, atomically and across replicas, not the
+  user's open requests: a hint naming nobody is refused at the same call as a
+  real user's, so the refusal says nothing about the hint (T-422), and an
+  approved, denied or expired request still counts until its ten minutes have
+  passed. One user named by username, by address and by ID token is three
+  hints.
+  `GET /api/v1/ciba/requests` is ordered by creation, reads each client's name
+  once per call, and gains two additive fields, `total_pending` and
+  `truncated`; its rate-limit bucket is the signed-in user's, not the
+  address's, on the shared counter, or on an in-process per-user limiter when
+  `AXIAM__RATE_LIMIT__SHARED=off` (which admits everything on the shared
+  counter), and the route keeps a per-address governor at ten times
+  `ciba_approval_per_min` as the backstop for calls whose token does not
+  authenticate (R101W3-04). The console badge counts `total_pending`.
+
+- **The tenant purge deletes only the audit rows the export holds (#602,
+  T-118, T-472; Low).** The deletion accepts an export receipt up to six hours
+  old, and the purge then deleted every audit row of the tenant, including the
+  receipt and everything written after the export: activity before the
+  deletion, the deletion's own revocations, the refusals until the purge. The
+  deletion now copies the export's own bound (`exported_through`, the instant
+  the export started) into its `tenants.deleted` system-log record as
+  `audit_exported_through`, and the purge deletes the tenant's `audit_log` rows
+  at or before it, and an `audit_signature` row only when every entry it signs
+  is gone. Later rows stay under the tenant id until the audit retention sweep
+  removes them (730 days by default); nothing is copied. Without a readable
+  export time the purge deletes no audit row; a deletion recorded by 1.0.0 is
+  answered from the receipt it names. `tenants.purged` records the export time
+  used and the audit rows deleted and kept.
+
+- **A scope a tenant withdraws from `dcr_allowed_scopes` is gone from its
+  self-registered clients at their next request (#613, T-289, T-55; Low).** The
+  list bounded what a `managed_by: dcr` or `cimd` client could register, and
+  was checked only at registration, an RFC 7592 `PUT` and a CIMD fetch, so a
+  client already registered kept a withdrawn scope until it chose to
+  re-register, and the refresh grant's `stored.scopes ∩ client.scopes` (#520)
+  intersected against a row that still held it. The tenant's effective list is
+  now a ceiling on such a client's scopes wherever they are read —
+  `/oauth2/authorize` (and PAR), the `authorization_code`, `client_credentials`,
+  `refresh_token`, CIBA and token-exchange grants, `/oauth2/bc-authorize` and
+  `/oauth2/device_authorization` — without rewriting the client row. A
+  withdrawn scope is `invalid_scope` when requested and dropped from refreshed
+  and newly minted tokens; an access token minted earlier keeps it until it
+  expires. An empty list offers nothing, as at registration. A list that
+  cannot be read refuses the request with `server_error`. Clients created by an
+  administrator never read the list and are unaffected.
+
+- **Deleting an OAuth2 client voids its device grants and CIBA requests (#610
+  (d), T-289, T-275; Low).** `ClientGrantStores::revoke`, which the
+  administrator's `DELETE /api/v1/oauth2-clients/{id}`, RFC 7592's
+  `DELETE /oauth2/register/{client_id}` and the unused-client sweep share,
+  revoked refresh tokens and deleted authorization codes and pushed requests, but
+  left the client's device grants and CIBA requests. The device poll authenticates
+  nothing but the device code, so an approved grant still redeemed for a token
+  set after its client was deleted, and again once a `managed_by: cimd` client
+  was re-materialised under the same `client_id`; a pending CIBA request stayed on
+  its user's approval surface naming a client that was gone. `revoke` now also
+  deletes both, in every status, scoped by tenant and client id
+  (`DeviceGrantRepository::delete_all_for_client`,
+  `CibaRequestRepository::delete_all_for_client`). The stores are visited in a
+  fixed order and the first failure is returned, so the callers that delete the
+  row afterwards keep it and retry. A poll in flight when the delete lands cannot
+  redeem: `redeem` is one guarded `UPDATE`, which matches nothing once the row is
+  gone.
+
+- **The device grant asks whether the account may still sign in before it mints
+  (R1W1-06, #604, T-39, T-163; Low).** `POST /oauth2/token` with
+  `grant_type=urn:ietf:params:oauth:grant-type:device_code` re-read the user
+  after redeeming an approved code and minted an access token and a refresh token
+  without `account_may_act`, unlike CIBA and every other grant, so a user
+  suspended between the approval and the device's next poll was served a fresh
+  access token (the refresh token was then refused). It now applies CIBA's
+  predicate, shared rather than copied (`account_may_act` and no brute-force
+  lockout): a suspended, locked-out, deleted or removed account is
+  `invalid_grant`, nothing is minted and no refresh-token row is written. The
+  approval is spent either way, so a further poll with the same device code is
+  refused as a used code, and the device starts a new flow after a
+  reactivation. A store error on the re-read is now a server error rather than
+  `invalid_grant`, as for CIBA.
+
+- **A tombstoned tenant's OAuth2 clients no longer authenticate (R1W1-03, #601,
+  T-472; Low).** Client authentication read the client row, which lives until the
+  tenant purge, and never the tenant, so after `DELETE .../tenants/{id}` the
+  tenant's client could still start a CIBA request at `bc-authorize` (stored, and
+  the user mailed), have the tenant's unexpired access tokens introspected
+  `active`, and write revocation and PAR rows. Client authentication now reads
+  the tenant once, after the credential, and a tenant that is gone is the
+  `invalid_client` a wrong credential gets, at `client_credentials`,
+  `bc-authorize`, introspection, revocation, PAR, the UMA ticket grant and token
+  exchange from the `204` on; `bc-authorize` stores nothing and mails nobody. The
+  grants use that read for `org_id` rather than reading the tenant again, so
+  those four grants cost no extra read; the other endpoints cost one indexed
+  read. The grants' answer for a deleted tenant changes from
+  `invalid_request` ("unknown tenant") to `invalid_client`.
 
 ## [1.0.0] - 2026-10-10
 

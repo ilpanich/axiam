@@ -321,15 +321,29 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 - **The cleanup job's `tenant_purge` sweep** then deletes every row of every
   tenant-scoped table, in the order the purge pipeline above uses — grants and
   sessions, federation links, credentials, the authorization graph, the
-  tenant's audit trail, GDPR records (consents, deletion requests, export jobs,
-  erasure proofs), the accounts, the configuration — and the tenant row last.
-  Unlike the per-user pipeline it **deletes** the accounts and the audit
-  entries rather than pseudonymizing them: nothing of the tenant is left for an
-  entry to resolve to, and the deletion is refused until the tenant's audit
-  trail has been exported (T-118), so the controller holds that copy under its
-  own retention obligations. The export may be up to six hours old, and rows
-  the tenant writes after it — until the purge — are deleted without being in
-  it (#602, filed for `1.0.x`).
+  tenant's audit entries the export holds, GDPR records (consents, deletion
+  requests, export jobs, erasure proofs), the accounts, the configuration — and
+  the tenant row last. Unlike the per-user pipeline it **deletes** the accounts
+  and those audit entries rather than pseudonymizing them: nothing of the tenant
+  is left for an entry to resolve to, and the deletion is refused until the
+  tenant's audit trail has been exported (T-118), so the controller holds that
+  copy under its own retention obligations.
+- **Audit entries no export holds stay until the retention window ends**
+  (R1W1-04, #602, decision D-5). The export the deletion accepts may be up to
+  six hours old, and the tenant keeps producing entries after it — the receipt
+  itself, activity before the deletion, the deletion's own revocations and the
+  refusals until the purge. The purge deletes only the entries with a timestamp
+  at or before the instant the export started (its `exported_through`, which
+  the deletion copies into `tenants.deleted` as `audit_exported_through`), and
+  a signature only when every entry it signs is gone. Later entries stay under
+  the tenant id, read by no API, and the audit retention sweep (§2a,
+  `AXIAM__AUDIT_RETENTION_DAYS`, 730 days by default) deletes them when they
+  reach the window, as it deletes every entry; nothing is copied to the system
+  log. If the purge cannot read an export time (the deletion record is
+  missing), it deletes no audit entry at all and leaves the whole trail to the
+  retention sweep. This is the same storage-limitation basis as the rest of
+  the audit log (Art. 5(1)(e), Art. 17(3)(b)/(e)): the entries are kept for
+  the retention window and no longer.
 - **One retention, until expiry:** a revoked certificate or signing CA whose
   validity has not ended is kept — the certificate as issued, its issuer, serial
   and dates, with its free-form `metadata` and a CA's sealed key cleared —
@@ -338,18 +352,23 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
   AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
   17(3)(b), Art. 32), bounded by the certificate's own `notAfter`; the cleanup
   job deletes the row then.
-- The system audit log keeps `tenants.deleted` (who deleted it, and the export
-  receipt that authorised it) and gains `tenants.purged` when the sweep is done —
-  the tenant-level counterpart of an erasure proof.
+- The system audit log keeps `tenants.deleted` (who deleted it, the export
+  receipt that authorised it, and the time that export covered up to) and gains
+  `tenants.purged` when the sweep is done — the tenant-level counterpart of an
+  erasure proof, recording the export time used and how many audit entries were
+  deleted and how many were kept for the retention sweep.
 
 Completeness is a test, not a list someone maintains:
 `schema.rs::every_tenant_scoped_table_is_purged` fails when a table with a
 `tenant_id` field (or a tenant `scope_id`) is missing from the purge; the two
-certificate tables are its one named exemption, for the retention above. Rows left
+certificate tables and the two audit tables are its named exemptions, for the
+retentions above. Rows left
 by deletions made before 1.0.0 are found and purged by the same sweep at
 start-up and daily, except their audit entries, which the retention window
 (§2a) governs. Proven by
-`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`
+`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`;
+for the audit entries, by `tenant_purge_test.rs::a_row_written_after_the_export_survives_the_purge`
+and `tenant_test.rs::an_audit_row_written_after_the_export_survives_the_purge`;
 and, for the certificate retention,
 `crl_test.rs::a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire`.
 

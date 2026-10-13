@@ -357,6 +357,60 @@ pub fn peer_certificate_issuer_path(
         .and_then(|(verifier, _)| verifier.issuer_path(leaf, intermediates))
 }
 
+/// The REST listener's `on_connect` hook: lift the client certificate rustls
+/// verified during the handshake into the connection's extensions, as the
+/// [`axiam_api_rest::VerifiedClientCert`] cert-auth handlers and the token
+/// endpoint read through `HttpRequest::conn_data`.
+///
+/// Only a rustls connection with a peer certificate inserts anything; on a
+/// plaintext or server-auth-only connection there is no peer certificate and
+/// the extensions are left empty. A function rather than a closure in `boot`
+/// so the route-level `tls_client_auth` tests install exactly this hook (#610).
+pub fn lift_verified_client_certificate(
+    conn: &dyn std::any::Any,
+    ext: &mut actix_web::dev::Extensions,
+) {
+    use actix_tls::accept::rustls_0_23::TlsStream;
+    use actix_web::rt::net::TcpStream;
+    let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() else {
+        return;
+    };
+    let (_io, session) = tls.get_ref();
+    let Some(certs) = session.peer_certificates() else {
+        return;
+    };
+    let Some(leaf) = certs.first() else {
+        return;
+    };
+    // Whether this certificate chained to a configured anchor cannot be read
+    // off the handshake result — rustls's `ClientCertVerified` carries no
+    // payload and the verifier is given no connection handle to key a side
+    // channel on — so it is re-derived here, where the peer chain is in hand.
+    // Free under every client-auth policy except `optional_self_signed`; see
+    // [`peer_certificate_trust`].
+    let trust = peer_certificate_trust(leaf, &certs[1..]);
+    match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
+        Ok(vc) => {
+            // R1W1-02: the chain it verified through, so `tls_client_auth`
+            // can require its anchor to be the client's organization's. A
+            // self-asserted certificate has none.
+            let issuer_path = if trust.is_chained_to_anchor() {
+                peer_certificate_issuer_path(leaf, &certs[1..]).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            ext.insert(vc.with_issuer_path(issuer_path));
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to parse verified client certificate; \
+                 cert-mapped identity will be unavailable for this connection"
+            );
+        }
+    }
+}
+
 /// Install `pem` as the live client trust anchor set, without a restart.
 ///
 /// Returns the number of anchors now trusted, or `None` when this process has

@@ -412,8 +412,16 @@ enum TenantOutcome {
     Db,
 }
 
+/// Counts its `get_by_id` reads: R1W1-03 reads the tenant once in client
+/// authentication and the grants must not read it again.
 #[derive(Clone)]
-struct MockTenantRepo(TenantOutcome);
+struct MockTenantRepo(TenantOutcome, Arc<std::sync::atomic::AtomicUsize>);
+
+impl MockTenantRepo {
+    fn new(outcome: TenantOutcome) -> Self {
+        Self(outcome, Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+    }
+}
 
 impl TenantRepository for MockTenantRepo {
     async fn get_organization_tenant(
@@ -427,6 +435,7 @@ impl TenantRepository for MockTenantRepo {
         unimplemented!()
     }
     async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.0 {
             TenantOutcome::Found => Ok(Tenant {
                 kind: axiam_core::models::tenant::TenantKind::Standard,
@@ -1082,7 +1091,7 @@ fn build_with_upgrade_log(
         MockClientRepo(client, log.clone()),
         MockSaRepo(SaOutcome::NotFound, log.clone()),
         code,
-        MockTenantRepo(tenant),
+        MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
         MockSessionRepo::default(),
@@ -1108,7 +1117,7 @@ fn build_with_session_log(
         MockClientRepo(client, upgrade.clone()),
         MockSaRepo(SaOutcome::NotFound, upgrade),
         code,
-        MockTenantRepo(tenant),
+        MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
         MockSessionRepo(None, sessions.clone(), Arc::new(Mutex::new(Vec::new()))),
@@ -1403,7 +1412,7 @@ async fn auth_code_consume_fails() {
 }
 
 #[tokio::test]
-async fn auth_code_tenant_not_found() {
+async fn auth_code_tenant_not_found_is_invalid_client() {
     let svc = build(
         ClientOutcome::Found(make_client(&["authorization_code"], &[])),
         MockCodeRepo::ok(make_auth_code(&[], None)),
@@ -1415,7 +1424,7 @@ async fn auth_code_tenant_not_found() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -1732,7 +1741,7 @@ async fn cc_invalid_requested_scope() {
 }
 
 #[tokio::test]
-async fn cc_tenant_not_found() {
+async fn cc_tenant_not_found_is_invalid_client() {
     let svc = build(
         ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
         dummy_code_repo(),
@@ -1744,7 +1753,7 @@ async fn cc_tenant_not_found() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -2063,6 +2072,334 @@ async fn p23w1_13_a_refresh_narrows_the_grant_to_the_clients_current_scopes() {
     assert!(created.lock().unwrap()[0].scopes.is_empty());
 }
 
+// ---------------------------------------------------------------------------
+// #613 (T-289) — the tenant's `dcr_allowed_scopes` bounds an externally
+// registered client at every grant, not only at registration
+// ---------------------------------------------------------------------------
+
+/// A tenant scope policy whose list a test sets, and which counts its reads so
+/// a test can assert that an administrator's client never costs one.
+#[derive(Clone)]
+struct FakeScopePolicy {
+    list: Arc<Mutex<Option<Vec<String>>>>,
+    reads: Arc<Mutex<usize>>,
+}
+
+impl FakeScopePolicy {
+    /// `None` makes every read fail.
+    fn new(list: Option<&[&str]>) -> Self {
+        Self {
+            list: Arc::new(Mutex::new(
+                list.map(|l| l.iter().map(|s| (*s).to_owned()).collect()),
+            )),
+            reads: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        *self.reads.lock().unwrap()
+    }
+}
+
+impl axiam_oauth2::scope_ceiling::ExternalClientScopePolicy for FakeScopePolicy {
+    fn allowed_scopes<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AxiamResult<Vec<String>>> + Send + 'a>>
+    {
+        *self.reads.lock().unwrap() += 1;
+        let list = self.list.lock().unwrap().clone();
+        Box::pin(
+            async move { list.ok_or_else(|| AxiamError::Database("settings read failed".into())) },
+        )
+    }
+}
+
+fn with_policy(svc: Svc, policy: &FakeScopePolicy) -> Svc {
+    svc.with_scope_policy(Arc::new(policy.clone()))
+}
+
+fn external(
+    mut client: Box<OAuth2Client>,
+    managed_by: axiam_core::models::oauth2_client::ManagedBy,
+) -> Box<OAuth2Client> {
+    client.managed_by = managed_by;
+    client
+}
+
+/// **The issue's acceptance case.** A `dcr` client registered with `openid
+/// profile`, holding a refresh grant for both; the tenant then withdraws
+/// `profile` from `dcr_allowed_scopes`. The client row still says `openid
+/// profile` — nothing rewrote it — and the refresh no longer carries `profile`:
+/// not in the response, not in the access token, not in the rotated grant.
+#[tokio::test]
+async fn t613_a_withdrawn_dcr_scope_is_gone_at_the_next_refresh() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+
+    for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+        let refresh = MockRefreshRepo::new().with_get(make_refresh(
+            Some(Uuid::new_v4()),
+            "client-1",
+            &["openid", "profile"],
+        ));
+        let created = refresh.created.clone();
+        let policy = FakeScopePolicy::new(Some(&["openid"]));
+        let svc = with_policy(
+            build(
+                ClientOutcome::Found(external(
+                    make_client(&["refresh_token"], &["openid", "profile"]),
+                    managed_by,
+                )),
+                dummy_code_repo(),
+                TenantOutcome::Found,
+                refresh,
+            ),
+            &policy,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.scope.as_deref(), Some("openid"), "{managed_by}");
+        let claims =
+            axiam_auth::token::decode_access_token_any_audience(&resp.access_token, &test_config())
+                .unwrap();
+        assert_eq!(claims.scope.as_deref(), Some("openid"), "{managed_by}");
+        assert_eq!(
+            created.lock().unwrap()[0].scopes,
+            vec!["openid".to_owned()],
+            "{managed_by}: the rotated grant starts from the narrowed set"
+        );
+        assert_eq!(policy.reads(), 1, "{managed_by}: one policy read");
+    }
+}
+
+/// The ceiling only ever narrows, and an unchanged list changes nothing: a
+/// scope the tenant still offers is kept, in the grant's order, and an empty
+/// list — "offer nothing", which is what registration reads it as — narrows to
+/// nothing rather than meaning "no ceiling". Withdrawing the last scope must
+/// not restore the others.
+#[tokio::test]
+async fn t613_the_ceiling_only_narrows_and_an_empty_list_offers_nothing() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+
+    for (list, expected) in [
+        (&["profile", "openid", "email"][..], Some("profile openid")),
+        (&[][..], None),
+    ] {
+        let refresh = MockRefreshRepo::new().with_get(make_refresh(
+            Some(Uuid::new_v4()),
+            "client-1",
+            &["profile", "openid"],
+        ));
+        let policy = FakeScopePolicy::new(Some(list));
+        let svc = with_policy(
+            build(
+                ClientOutcome::Found(external(
+                    make_client(&["refresh_token"], &["openid", "profile"]),
+                    ManagedBy::Dcr,
+                )),
+                dummy_code_repo(),
+                TenantOutcome::Found,
+                refresh,
+            ),
+            &policy,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.scope.as_deref(), expected, "list {list:?}");
+    }
+}
+
+/// **A non-DCR client is unaffected.** An administrator's client, under the
+/// same withdrawn list, keeps every scope its row grants — and the policy is
+/// never read, so the admin path costs nothing new. The same holds with no
+/// policy wired at all.
+#[tokio::test]
+async fn t613_an_administrators_client_is_unaffected_and_costs_no_read() {
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["openid", "profile"],
+    ));
+    let policy = FakeScopePolicy::new(Some(&["openid"]));
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &["openid", "profile"])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        ),
+        &policy,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("openid profile"));
+    assert_eq!(policy.reads(), 0, "an admin client never reads the policy");
+
+    // client_credentials and the authorization code, likewise.
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(make_client(&["client_credentials"], &["api", "read"])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        ),
+        &policy,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("api read"));
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+            MockCodeRepo::ok(make_auth_code(&["profile"], None)),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        ),
+        &policy,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("profile"));
+    assert_eq!(policy.reads(), 0);
+
+    // Unwired: the default policy refuses every read, which an admin client
+    // never makes.
+    let svc = build(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("api"));
+}
+
+/// **A read that fails refuses.** For an external client an unreadable policy
+/// is `server_error` — never a fall-back to the row, which is the value #613
+/// exists to distrust — and the refresh token is not rotated, so the client can
+/// retry. An unwired service answers the same way.
+#[tokio::test]
+async fn t613_an_unreadable_policy_fails_closed_for_an_external_client() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["openid"],
+    ));
+    let created = refresh.created.clone();
+    let policy = FakeScopePolicy::new(None);
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(external(
+                make_client(&["refresh_token"], &["openid"]),
+                ManagedBy::Dcr,
+            )),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        ),
+        &policy,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), "server_error");
+    assert!(created.lock().unwrap().is_empty(), "nothing was rotated");
+
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["openid"],
+    ));
+    let unwired = build(
+        ClientOutcome::Found(external(
+            make_client(&["refresh_token"], &["openid"]),
+            ManagedBy::Cimd,
+        )),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    assert_eq!(
+        unwired
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+/// The other two grants a `dcr` client can reach through `TokenService`: an
+/// authorization code issued before the withdrawal mints without the scope,
+/// and `client_credentials` (which an administrator may have added to a `dcr`
+/// row) refuses the scope by name and omits it by default.
+#[tokio::test]
+async fn t613_the_code_and_client_credentials_grants_are_bounded_too() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+
+    let policy = FakeScopePolicy::new(Some(&["openid"]));
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(external(
+                make_client(&["authorization_code"], &["openid", "profile"]),
+                ManagedBy::Dcr,
+            )),
+            MockCodeRepo::ok(make_auth_code(&["openid", "profile"], None)),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        ),
+        &policy,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("openid"));
+
+    let svc = with_policy(
+        build(
+            ClientOutcome::Found(external(
+                make_client(&["client_credentials"], &["openid", "profile"]),
+                ManagedBy::Dcr,
+            )),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        ),
+        &policy,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("openid"));
+    let mut req = base_req("client_credentials");
+    req.scope = Some("profile".into());
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), req, &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_scope"
+    );
+}
+
 #[tokio::test]
 async fn refresh_revoke_old_not_found_is_invalid_grant() {
     let mut refresh =
@@ -2208,6 +2545,117 @@ async fn introspect_client_auth_fails() {
             .await
             .is_err()
     );
+}
+
+/// [`build`], but handing back the count of tenant reads.
+fn build_counting_tenant_reads(
+    client: ClientOutcome,
+    tenant: TenantOutcome,
+) -> (Svc, Arc<std::sync::atomic::AtomicUsize>) {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let tenants = MockTenantRepo::new(tenant);
+    let reads = tenants.1.clone();
+    let svc = TokenService::new(
+        MockClientRepo(client, log.clone()),
+        MockSaRepo(SaOutcome::NotFound, log),
+        dummy_code_repo(),
+        tenants,
+        MockRefreshRepo::new(),
+        MockUserRepo,
+        MockSessionRepo::default(),
+        MockAuditRepo::default(),
+        test_config(),
+        2_592_000,
+        not_issued_here(),
+    );
+    (svc, reads)
+}
+
+// R1W1-03 (#601, T-472): a client authenticates only while its tenant is there.
+// The client row survives a tombstone until the purge, so the credential alone
+// proves nothing about the tenant.
+
+#[tokio::test]
+async fn a_tombstoned_tenants_client_authenticates_nowhere() {
+    let client = || ClientOutcome::Found(make_client(&["client_credentials"], &["api"]));
+    let (svc, _) = build_counting_tenant_reads(client(), TenantOutcome::NotFound);
+    assert_eq!(
+        svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(
+        svc.introspect_token(client_tenant(), introspect_req("t"), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    // The same client over a live tenant authenticates: the refusal is the
+    // tenant's, not the fixture's.
+    let (svc, _) = build_counting_tenant_reads(client(), TenantOutcome::Found);
+    assert!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_read_that_fails_is_a_server_error_not_bad_credentials() {
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Db,
+    );
+    assert_eq!(
+        svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+#[tokio::test]
+async fn the_tenant_is_read_after_the_credential_and_once_per_grant() {
+    use std::sync::atomic::Ordering::SeqCst;
+    // A wrong secret is refused before the tenant is consulted: a caller who
+    // has proven nothing costs no extra read.
+    let (svc, reads) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Found,
+    );
+    let mut req = base_req("client_credentials");
+    req.client_secret = Some("not-the-secret".into());
+    assert_eq!(
+        svc.exchange(client_tenant(), req, &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+    assert_eq!(reads.load(SeqCst), 0);
+
+    // A grant reads it once — authentication's read serves the `org_id` claim.
+    svc.exchange(client_tenant(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(reads.load(SeqCst), 1, "client_credentials");
+
+    // So does revocation, which needs no `org_id` at all.
+    svc.revoke_token(client_tenant(), revoke_req("t"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(reads.load(SeqCst), 2, "revocation");
 }
 
 #[tokio::test]
@@ -2473,7 +2921,7 @@ async fn refresh_client_db_outage_is_server_error() {
 }
 
 #[tokio::test]
-async fn refresh_tenant_not_found_is_invalid_request() {
+async fn refresh_tenant_not_found_is_invalid_client() {
     let refresh =
         MockRefreshRepo::new().with_get(make_refresh(Some(Uuid::new_v4()), "client-1", &[]));
     let svc = build(
@@ -2487,7 +2935,7 @@ async fn refresh_tenant_not_found_is_invalid_request() {
             .await
             .unwrap_err()
             .error_code(),
-        "invalid_request"
+        "invalid_client"
     );
 }
 
@@ -2837,7 +3285,7 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         MockClientRepo(client, upgrade.clone()),
         MockSaRepo(SaOutcome::NotFound, upgrade),
         dummy_code_repo(),
-        MockTenantRepo(TenantOutcome::Found),
+        MockTenantRepo::new(TenantOutcome::Found),
         refresh,
         MockUserRepo,
         MockSessionRepo(None, Arc::new(Mutex::new(Vec::new())), replays.clone()),
@@ -2855,7 +3303,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockClientRepo(ClientOutcome::NotFound, log.clone()),
         MockSaRepo(sa, log.clone()),
         MockCodeRepo::none(),
-        MockTenantRepo(TenantOutcome::Found),
+        MockTenantRepo::new(TenantOutcome::Found),
         MockRefreshRepo::new(),
         MockUserRepo,
         MockSessionRepo::default(),
@@ -4592,7 +5040,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
             MockClientRepo(ClientOutcome::Found(d9_honour_client()), upgrade.clone()),
             MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
             dummy_code_repo(),
-            MockTenantRepo(TenantOutcome::Found),
+            MockTenantRepo::new(TenantOutcome::Found),
             MockRefreshRepo::new().with_get(stored),
             MockUserRepo,
             MockSessionRepo(

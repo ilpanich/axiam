@@ -4707,6 +4707,20 @@ async fn handle_token_exchange<C: Connection + Clone>(
         ));
     };
 
+    // #613 (T-289): the exchange narrows to `client.scopes`, and for an
+    // externally registered client those are bounded by the tenant's current
+    // `dcr_allowed_scopes`. No read for an administrator's client.
+    let mut client = client;
+    if let Err(e) = state
+        .oauth2
+        .token_service
+        .apply_scope_ceiling(&mut client)
+        .await
+    {
+        return build_oauth2_error_response(&e);
+    }
+    let client = client;
+
     match state
         .oauth2
         .token_exchange_service

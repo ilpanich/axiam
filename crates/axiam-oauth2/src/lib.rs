@@ -31,6 +31,7 @@ pub mod pkce;
 pub mod private_key_jwt;
 pub mod redirect_uri;
 pub mod resource;
+pub mod scope_ceiling;
 pub mod sensitive;
 pub mod ssf;
 pub mod ssf_delivery;

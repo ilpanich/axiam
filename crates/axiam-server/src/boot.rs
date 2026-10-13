@@ -1187,12 +1187,29 @@ where
     // RefreshTokenRepository access via web::Data (TokenService owns the main one).
     let handler_refresh_token_repo = SurrealRefreshTokenRepository::new(pool.handle_for_repo());
 
+    // A2/J2: the `tenant_id -> organization_id` cache. Built here rather than
+    // in the `AppState` literal because the tenant scope policy below shares
+    // it: one mapping, one place a deleted tenant is dropped from.
+    let tenant_org_cache: Arc<axiam_api_rest::tenant_org_cache::TenantOrgCache> =
+        Arc::new(Default::default());
+    // #613 (T-289) — the tenant's effective `dcr_allowed_scopes`, read by every
+    // service that decides what an externally registered client's token may
+    // carry. Left unwired, those services refuse such clients with
+    // `server_error` rather than trust the client row.
+    let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
+        Arc::new(axiam_api_rest::scope_policy::SettingsScopePolicy::new(
+            tenant_repo.clone(),
+            settings_repo.clone(),
+            Arc::clone(&tenant_org_cache),
+        ));
+
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
         oauth2_client_repo.clone(),
         auth_code_repo.clone(),
         config.auth.auth_code_lifetime_secs,
-    );
+    )
+    .with_scope_policy(Arc::clone(&scope_policy));
     let token_service = TokenService::new(
         oauth2_client_repo.clone(),
         // Service accounts authenticate via client-credentials too; the handler
@@ -1223,6 +1240,8 @@ where
     // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
     // `login.post_auth` share one routing table and one per-tenant cap.
     .with_reactor_gate(Arc::clone(&reactor_gate))
+    // #613 (T-289) — see `scope_policy` above.
+    .with_scope_policy(Arc::clone(&scope_policy))
     // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
     // client-authentication families.
     //
@@ -1276,7 +1295,8 @@ where
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
         device_verification_uri,
-    );
+    )
+    .with_scope_policy(Arc::clone(&scope_policy));
 
     // G-7 — CIBA. The pending-request store seals a ping-mode request's
     // notification credentials under `pki_encryption_key`, the key webhook
@@ -1293,6 +1313,16 @@ where
         ciba_request_repo.clone(),
         user_repo.clone(),
         config.auth.jwt_public_key_pem.clone(),
+        // #599 (T-424) — the per-(client, hint) cap on `bc-authorize` counts in
+        // the shared rate-limit table every replica writes, so it holds across
+        // replicas; its bucket keys are an HMAC under a key derived from the
+        // signing key every replica already shares.
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+                pool.handle_for_repo(),
+            )),
+            config.auth.jwt_private_key_pem.as_bytes(),
+        ),
     )
     // D-61 — signed authentication requests (CIBA Core §7.1.1, FAPI-CIBA).
     // The keys come through the same federation JWKS cache the
@@ -2731,12 +2761,15 @@ where
         Arc::new(oauth2_client_repo.clone()),
         Arc::new(oauth2_registration_token_repo.clone()),
         Arc::new(settings_repo.clone()),
-        // #517 — a swept client's refresh tokens, codes and pushed requests.
+        // #517, #610 (d) — a swept client's refresh tokens, codes, pushed requests,
+        // device grants and CIBA requests.
         Arc::new(cleanup::SweptClientGrants::new(
             axiam_db::SurrealRefreshTokenRepository::new(db_handle.clone()),
             axiam_db::SurrealAuthorizationCodeRepository::new(db_handle.clone()),
             axiam_db::SurrealPushedAuthRequestRepository::new(db_handle.clone()),
-        )),
+            axiam_db::SurrealDeviceGrantRepository::new(db_handle.clone()),
+            axiam_db::SurrealCibaRequestRepository::new(db_handle.clone(), None),
+)),
         job_health.clone(),
         cleanup_shutdown_rx,
     )
@@ -2816,8 +2849,9 @@ where
         tenant_repo: tenant_repo.clone(),
         // A2/J2: refresh rotation reads the tenant only for `organization_id`,
         // an immutable field — cache it rather than pay a round trip per
-        // refresh (see axiam_api_rest::tenant_org_cache).
-        tenant_org_cache: Arc::new(Default::default()),
+        // refresh (see axiam_api_rest::tenant_org_cache). Shared with the
+        // tenant scope policy (#613), so it is built above.
+        tenant_org_cache,
         // The authorize path reads a client once more only to learn
         // `managed_by`, which never changes for a `client_id` — cache it
         // (see axiam_api_rest::client_managed_by_cache).
@@ -2861,6 +2895,8 @@ where
         jwks_cache: jwks_cache.clone(),
         crypto_semaphore: Arc::clone(&crypto_semaphore),
         shared_rate_limit: shared_rate_limit_counter.clone(),
+        // R101W3-04: one per process; sized from `rate_limit_cfg` on first use.
+        ciba_list_limiter: Arc::new(Default::default()),
         pki: bundles::PkiState {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),
@@ -3060,47 +3096,11 @@ where
     // spoofable proxy header. Only fires on the rustls bind with client-auth
     // enabled; on plaintext / server-auth-only connections there is no peer cert
     // and nothing is inserted (backward compatible).
-    .on_connect(|conn, ext| {
-        use actix_tls::accept::rustls_0_23::TlsStream;
-        use actix_web::rt::net::TcpStream;
-        if let Some(tls) = conn.downcast_ref::<TlsStream<TcpStream>>() {
-            let (_io, session) = tls.get_ref();
-            if let Some(certs) = session.peer_certificates()
-                && let Some(leaf) = certs.first()
-            {
-                // Whether this certificate chained to a configured anchor
-                // cannot be read off the handshake result — rustls's
-                // `ClientCertVerified` carries no payload and the verifier is
-                // given no connection handle to key a side channel on — so it
-                // is re-derived here, where the peer chain is in hand. Free
-                // under every client-auth policy except `optional_self_signed`;
-                // see `crate::tls::peer_certificate_trust`.
-                let trust = crate::tls::peer_certificate_trust(leaf, &certs[1..]);
-                match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
-                    Ok(vc) => {
-                        // R1W1-02: the chain it verified through, so
-                        // `tls_client_auth` can require its anchor to be the
-                        // client's organization's. A self-asserted certificate
-                        // has none.
-                        let issuer_path = if trust.is_chained_to_anchor() {
-                            crate::tls::peer_certificate_issuer_path(leaf, &certs[1..])
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        ext.insert(vc.with_issuer_path(issuer_path));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "failed to parse verified client certificate; \
-                             cert-mapped identity will be unavailable for this connection"
-                        );
-                    }
-                }
-            }
-        }
-    });
+    //
+    // The body lives in `crate::tls::lift_verified_client_certificate` so the
+    // route-level `tls_client_auth` tests (`tests/server_leaf_profile.rs`)
+    // install the very hook this listener does (#610).
+    .on_connect(crate::tls::lift_verified_client_certificate);
 
     // G8/B2: optional HTTP/2 window tuning for the TLS bind. Unset keys are
     // never forwarded to actix, so the default build is bit-identical to

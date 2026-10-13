@@ -24,6 +24,21 @@
 //!   (the session it came from is revoked), and a voided code is not evidence
 //!   of theft.
 //! * **Pushed authorization requests** — deleted, spent or not.
+//! * **Device grants** (RFC 8628) — deleted in every status. An *approved*
+//!   grant is the dangerous one: the device holds the device code and is
+//!   polling, and a re-materialised CIMD client authenticates that poll, so
+//!   the grant would redeem for the new row (#610 (d)). A poll in flight when
+//!   the delete lands is safe in the same way: `redeem` is one guarded
+//!   `UPDATE … WHERE status = 'approved'`, so once the row is gone it matches
+//!   nothing, however recently the poll read the grant. A poll whose redeem
+//!   committed *before* the delete has already minted for the old client and
+//!   holds a refresh token the second revoke pass (run by every caller after
+//!   the row is gone) voids, unless it was written after that pass too — the
+//!   window every flow shares, bounded by the access-token lifetime.
+//! * **CIBA requests** (OpenID CIBA) — deleted in every status, for the same
+//!   reason: an approved one redeems against a re-materialised client, and a
+//!   pending one would stay on the user's approval surface naming a client
+//!   that no longer exists. `redeem` is guarded the same way.
 //! * **Access tokens** — self-contained JWTs, revoked by nothing in AXIAM;
 //!   they expire within the access-token lifetime.
 //! * **The end user's AXIAM sessions** — not the client's to end: they are
@@ -36,41 +51,58 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::repository::{
-    AuthorizationCodeRepository, PushedAuthRequestRepository, RefreshTokenRepository,
+    AuthorizationCodeRepository, CibaRequestRepository, DeviceGrantRepository,
+    PushedAuthRequestRepository, RefreshTokenRepository,
 };
 use uuid::Uuid;
 
 /// The stores holding what a client was granted, revoked together when the
 /// client is removed. See the [module documentation](self).
 #[derive(Debug, Clone)]
-pub struct ClientGrantStores<RT, AC, PR> {
+pub struct ClientGrantStores<RT, AC, PR, DG, CB> {
     refresh_tokens: RT,
     codes: AC,
     pushed_requests: PR,
+    device_grants: DG,
+    ciba_requests: CB,
 }
 
-impl<RT, AC, PR> ClientGrantStores<RT, AC, PR>
+impl<RT, AC, PR, DG, CB> ClientGrantStores<RT, AC, PR, DG, CB>
 where
     RT: RefreshTokenRepository,
     AC: AuthorizationCodeRepository,
     PR: PushedAuthRequestRepository,
+    DG: DeviceGrantRepository,
+    CB: CibaRequestRepository,
 {
-    /// Group the three stores.
-    pub fn new(refresh_tokens: RT, codes: AC, pushed_requests: PR) -> Self {
+    /// Group the five stores.
+    pub fn new(
+        refresh_tokens: RT,
+        codes: AC,
+        pushed_requests: PR,
+        device_grants: DG,
+        ciba_requests: CB,
+    ) -> Self {
         Self {
             refresh_tokens,
             codes,
             pushed_requests,
+            device_grants,
+            ciba_requests,
         }
     }
 
-    /// Revoke every refresh token, and delete every authorization code and
-    /// pushed request, issued to `client_id` in `tenant_id`.
+    /// Revoke every refresh token, and delete every authorization code,
+    /// pushed request, device grant and CIBA request, issued to `client_id` in
+    /// `tenant_id`.
     ///
     /// Idempotent, so a caller may run it before and again after removing the
-    /// row. The first failure is returned; a caller that has not yet removed
-    /// the row should then keep it, so the removal can be retried rather than
-    /// leave a row-less client whose grants are still live.
+    /// row. The stores are visited in a fixed order (refresh tokens, codes,
+    /// pushed requests, device grants, CIBA requests) and the first failure is
+    /// returned without visiting the rest — the ones already done stay done,
+    /// the ones after it are retried by the next call. A caller that has not
+    /// yet removed the row should then keep it, so the removal can be retried
+    /// rather than leave a row-less client whose grants are still live.
     pub async fn revoke(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {
         self.refresh_tokens
             .revoke_all_for_client(tenant_id, client_id)
@@ -79,6 +111,12 @@ where
             .delete_all_for_client(tenant_id, client_id)
             .await?;
         self.pushed_requests
+            .delete_all_for_client(tenant_id, client_id)
+            .await?;
+        self.device_grants
+            .delete_all_for_client(tenant_id, client_id)
+            .await?;
+        self.ciba_requests
             .delete_all_for_client(tenant_id, client_id)
             .await?;
         Ok(())

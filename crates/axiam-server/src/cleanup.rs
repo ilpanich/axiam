@@ -71,6 +71,8 @@ pub type SweptClientGrants<C> = ClientGrantStores<
     SurrealRefreshTokenRepository<C>,
     axiam_db::SurrealAuthorizationCodeRepository<C>,
     axiam_db::SurrealPushedAuthRequestRepository<C>,
+    axiam_db::SurrealDeviceGrantRepository<C>,
+    axiam_db::SurrealCibaRequestRepository<C>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -222,12 +224,15 @@ pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 /// A free function, and public, for the reason [`run_erasure_pipeline`] is
 /// one. Each tenant is purged by
 /// [`SurrealTenantRepository::purge_tombstoned`] — every tenant-scoped table in
-/// the order user erasure uses, its audit trail included (exported before the
-/// deletion was allowed, T-118), then the tenant row — or, for an orphan, by
-/// [`SurrealTenantRepository::purge_orphan`], which leaves the audit trail to
-/// the retention sweep. Each completed purge is recorded in the **system** log
-/// as `tenants.purged`, beside the `tenants.deleted` record the deletion wrote;
-/// neither is ever purged.
+/// the order user erasure uses, of its audit trail the rows at or before the
+/// time of the export the deletion required (T-118, R1W1-04), then the tenant
+/// row — or, for an orphan, by [`SurrealTenantRepository::purge_orphan`], which
+/// leaves the audit trail to the retention sweep. Audit rows the purge keeps
+/// name a tenant that no longer exists and are deleted by the audit retention
+/// sweep (T-119) like any other. Each completed purge is recorded in the
+/// **system** log as `tenants.purged`, beside the `tenants.deleted` record the
+/// deletion wrote, with the export time used and the audit rows deleted and
+/// kept; neither record is ever purged.
 ///
 /// Every replica runs this sweep (#610). A tombstoned tenant is purged only by
 /// the replica whose [`SurrealTenantRepository::claim_purge`] wins it; the
@@ -302,21 +307,24 @@ where
                         }
                         Err(e)
                     }
-                    Ok(()) => Ok(()),
+                    Ok(report) => Ok(report),
                 },
                 Err(e) => Err(e),
             }
         };
-        if let Err(e) = outcome {
-            failed += 1;
-            tracing::warn!(
+        let report = match outcome {
+            Ok(report) => report,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
                 error = %e,
                 %tenant_id,
                 orphan,
-                "tenant purge incomplete; the tenant stays tombstoned and the next sweep resumes it"
-            );
-            continue;
-        }
+                    "tenant purge incomplete; the tenant stays tombstoned and the next sweep resumes it"
+                );
+                continue;
+            }
+        };
         purged += 1;
         write_audit_with_dead_letter(
             audit,
@@ -328,11 +336,22 @@ where
                 resource_id: Some(tenant_id),
                 outcome: AuditOutcome::Success,
                 ip_address: None,
-                metadata: Some(serde_json::json!({ "orphan": orphan })),
+                metadata: Some(serde_json::json!({
+                    "orphan": orphan,
+                    "audit_exported_through": report.audit_exported_through,
+                    "audit_rows_deleted": report.audit_rows_deleted,
+                    "audit_rows_kept": report.audit_rows_kept,
+                })),
             },
         )
         .await;
-        tracing::info!(%tenant_id, orphan, "deleted tenant's data purged");
+        tracing::info!(
+            %tenant_id,
+            orphan,
+            audit_rows_deleted = report.audit_rows_deleted,
+            audit_rows_kept = report.audit_rows_kept,
+            "deleted tenant's data purged"
+        );
     }
 
     if failed > 0 {
@@ -589,11 +608,11 @@ pub fn cimd_client_is_due_for_sweep(
 
 /// The `dcr` arm of [`sweep_unused_external_clients`], kept as a named entry
 /// point because T21.4's tests and the task method both call it that.
-pub async fn sweep_unused_dcr_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_dcr_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
@@ -603,6 +622,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
@@ -616,11 +637,11 @@ where
 }
 
 /// The `cimd` arm of [`sweep_unused_external_clients`] (T21.8 / MCP-04).
-pub async fn sweep_unused_cimd_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_cimd_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
 where
@@ -630,6 +651,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     sweep_unused_external_clients(
         client_repo,
@@ -691,11 +714,11 @@ where
 ///
 /// A tenant whose settings cannot be read is skipped: the fail-closed
 /// direction for a sweep that **deletes** is to delete nothing.
-pub async fn sweep_unused_external_clients<CR, TR, SR, RT, AC, PR>(
+pub async fn sweep_unused_external_clients<CR, TR, SR, RT, AC, PR, DG, CB>(
     client_repo: &CR,
     tenant_repo: &TR,
     settings_repo: &SR,
-    grants: &ClientGrantStores<RT, AC, PR>,
+    grants: &ClientGrantStores<RT, AC, PR, DG, CB>,
     managed_by: axiam_core::models::oauth2_client::ManagedBy,
     now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError>
@@ -706,6 +729,8 @@ where
     RT: axiam_core::repository::RefreshTokenRepository,
     AC: axiam_core::repository::AuthorizationCodeRepository,
     PR: axiam_core::repository::PushedAuthRequestRepository,
+    DG: axiam_core::repository::DeviceGrantRepository,
+    CB: axiam_core::repository::CibaRequestRepository,
 {
     use axiam_core::models::oauth2_client::ManagedBy;
     use axiam_core::repository::SettingsRepository;

@@ -17,6 +17,13 @@
 //! contemporaneous with the deletion, not that one was taken at some time in
 //! the tenant's history.
 //!
+//! What the purge then destroys is what the export holds and no more
+//! (R1W1-04): the rows at or before the instant the export started, which the
+//! deletion record carries as `audit_exported_through`. Rows written after it —
+//! the receipt, the deletion's own revocations, refusals until the purge — stay
+//! under the tenant id until the retention sweep (T-119) takes them (see
+//! `axiam_db::repository::tenant_purge`).
+//!
 //! ## What this does and does not prove
 //!
 //! It proves that a named principal asked this server for the whole trail, and
@@ -72,19 +79,24 @@ use axiam_authz::types::SubjectScope;
 /// Namespaced under `tenants.` like the rest of the management surface. It is
 /// written with `outcome = Success` only after the whole trail has been
 /// streamed, so a half-finished download leaves no receipt behind.
-pub const AUDIT_EXPORT_ACTION: &str = "tenants.audit_exported";
+pub const AUDIT_EXPORT_ACTION: &str = axiam_db::repository::tenant_purge::AUDIT_EXPORT_ACTION;
 
 /// Audit action recorded — in the **system** log, not the tenant's — when a
-/// tenant is deleted. The tenant's own entries are purged with the rest of its
-/// data (#523); this is what is left to say the deletion happened, who did it,
-/// and which export receipt authorised it.
-pub const TENANT_DELETED_ACTION: &str = "tenants.deleted";
+/// tenant is deleted. The tenant's own entries the export holds are purged with
+/// the rest of its data (#523, R1W1-04); this is what is left to say the
+/// deletion happened, who did it, which export receipt authorised it, and the
+/// time that export covered up to (`audit_exported_through`), which bounds
+/// what the purge may delete of the tenant's trail.
+pub const TENANT_DELETED_ACTION: &str = axiam_db::repository::tenant_purge::TENANT_DELETED_ACTION;
 
 /// Audit action the cleanup job records in the **system** log when it has
 /// purged a deleted tenant's data (#523, D-4) — the evidence that the deletion
 /// recorded by [`TENANT_DELETED_ACTION`] was carried out, as an erasure proof
 /// is for one account. `metadata.orphan` is `true` for a tenant id whose row
-/// a deletion made before the tombstone existed had already removed.
+/// a deletion made before the tombstone existed had already removed;
+/// `audit_exported_through`, `audit_rows_deleted` and `audit_rows_kept` say
+/// which of the tenant's audit rows went and how many stay for the retention
+/// sweep (R1W1-04).
 pub const TENANT_PURGED_ACTION: &str = "tenants.purged";
 
 /// How recent the export receipt must be for [`delete`] to accept it.
@@ -119,7 +131,10 @@ enum ExportPhase {
 }
 
 /// The most recent successful export receipt for `tenant_id`, if one falls
-/// inside the freshness window.
+/// inside the freshness window: its id, when it was written, and the instant
+/// the export it records covered up to (`exported_through` — when the export
+/// started, which is earlier than the receipt). `None` for that instant only on
+/// a receipt that does not carry it, which this version never writes.
 ///
 /// Reads the tenant's own audit log — the receipt is an ordinary append-only
 /// entry, so this needs no new table, no new retention rule and no second
@@ -128,7 +143,7 @@ async fn recent_export_receipt<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<Option<(Uuid, DateTime<Utc>)>, AxiamError> {
+) -> Result<Option<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)>, AxiamError> {
     let cutoff = now - chrono::Duration::hours(AUDIT_EXPORT_MAX_AGE_HOURS);
     let page = state
         .audit_repo
@@ -148,11 +163,13 @@ async fn recent_export_receipt<C: Connection + Clone>(
             },
         )
         .await?;
-    Ok(page
-        .items
-        .into_iter()
-        .next()
-        .map(|entry| (entry.id, entry.timestamp)))
+    Ok(page.items.into_iter().next().map(|entry| {
+        let exported_through = entry
+            .metadata
+            .get(axiam_db::repository::tenant_purge::RECEIPT_EXPORTED_THROUGH)
+            .and_then(|v| serde_json::from_value::<DateTime<Utc>>(v.clone()).ok());
+        (entry.id, entry.timestamp, exported_through)
+    }))
 }
 
 /// Request body for tenant creation (organization_id comes from the URL path).
@@ -672,7 +689,7 @@ pub async fn delete<C: Connection + Clone>(
     // recently. Checked BEFORE the delete, so a refusal leaves the tenant
     // exactly as it was.
     let now = Utc::now();
-    let Some((receipt_id, exported_at)) =
+    let Some((receipt_id, exported_at, exported_through)) =
         recent_export_receipt(state.get_ref(), path.tenant_id, now).await?
     else {
         return Err(AxiamError::Conflict {
@@ -724,11 +741,14 @@ pub async fn delete<C: Connection + Clone>(
         cache.invalidate_tenant(path.tenant_id);
     }
 
-    // The tenant's own audit entries — including the export receipt just
-    // checked — are removed by the cleanup job's `tenant_purge` sweep with the
-    // rest of its data (they were exported first, T-118). So this record goes
-    // to the SYSTEM log (nil tenant), which the purge never touches and which
-    // is the only part of the trail that outlives the tenant. Written through
+    // The tenant's own audit entries the export holds are removed by the
+    // cleanup job's `tenant_purge` sweep with the rest of its data (T-118);
+    // the ones written after the export — the receipt just checked among them
+    // — stay for the retention sweep (R1W1-04). This record goes to the SYSTEM
+    // log (nil tenant), which the purge never touches, and it is where the
+    // purge reads `audit_exported_through` from: the instant the export
+    // covered up to, and so the newest audit row the purge may delete. Without
+    // it the purge deletes no audit row at all. Written through
     // the dead-lettering sink for the same reason the erasure records are:
     // this is the last chance to record it, and a transient datastore failure
     // must not be how it gets lost.
@@ -747,6 +767,7 @@ pub async fn delete<C: Connection + Clone>(
                 "tenant_slug": existing.slug,
                 "audit_export_receipt_id": receipt_id,
                 "audit_exported_at": exported_at,
+                "audit_exported_through": exported_through,
                 "certificates_revoked": certificates.revoked,
                 "vault_revocations_pending": certificates.vault_pending,
                 "signing_cas_revoked": signing_cas.revoked,

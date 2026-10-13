@@ -267,8 +267,12 @@ impl<C: Connection> SurrealTenantRepository<C> {
         .map_err(Into::into)
     }
 
-    /// Remove every tenant-scoped row of a **tombstoned** tenant, its audit
-    /// trail included, then the tenant row.
+    /// Remove every tenant-scoped row of a **tombstoned** tenant, then the
+    /// tenant row. Of its audit trail, only the rows the export its deletion
+    /// required holds go — those at or before the export time the
+    /// `tenants.deleted` record names (R1W1-04); the rest, or all of it when no
+    /// export time can be read, stays for the retention sweep. The report says
+    /// which.
     ///
     /// Each table is one idempotent `DELETE`; a failure stops the purge with
     /// the tenant still tombstoned, and calling this again resumes it. A live
@@ -287,7 +291,10 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// `NotFound` for a tenant that is not tombstoned (live, or already
     /// purged — before this call or while it ran); a datastore failure
     /// otherwise.
-    pub async fn purge_tombstoned(&self, id: Uuid) -> AxiamResult<()> {
+    pub async fn purge_tombstoned(
+        &self,
+        id: Uuid,
+    ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
         if !self.list_tombstoned().await?.contains(&id) {
             return Err(DbError::NotFound {
                 entity: "tombstoned tenant".into(),
@@ -295,8 +302,12 @@ impl<C: Connection> SurrealTenantRepository<C> {
             }
             .into());
         }
-        super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Tombstoned)
-            .await?;
+        let report = super::tenant_purge::purge_rows(
+            &self.db,
+            id,
+            super::tenant_purge::PurgeScope::Tombstoned,
+        )
+        .await?;
         // Last, and only while still tombstoned: the guard is in the statement
         // too, so nothing here can remove a live tenant's row. `RETURN BEFORE`
         // says whether this call removed it, or an overlapping purge did.
@@ -320,7 +331,7 @@ impl<C: Connection> SurrealTenantRepository<C> {
             }
             .into());
         }
-        Ok(())
+        Ok(report)
     }
 
     /// Tenant ids that own rows but have no tenant row at all — the residue of
@@ -340,13 +351,17 @@ impl<C: Connection> SurrealTenantRepository<C> {
 
     /// Remove an orphaned tenant id's rows, as [`Self::purge_tombstoned`] does
     /// for a tombstoned tenant, except its audit trail, which no export receipt
-    /// covers and which the audit retention sweep governs.
+    /// covers and which the audit retention sweep governs (the report counts
+    /// it as kept).
     ///
     /// # Errors
     ///
     /// `Conflict` when a tenant row with this id exists (live or tombstoned);
     /// a datastore failure otherwise.
-    pub async fn purge_orphan(&self, id: Uuid) -> AxiamResult<()> {
+    pub async fn purge_orphan(
+        &self,
+        id: Uuid,
+    ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
         let mut result = self
             .db
             .current()
@@ -362,9 +377,10 @@ impl<C: Connection> SurrealTenantRepository<C> {
                 reason: "a tenant row exists for this id; it is not an orphan".into(),
             });
         }
-        super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Orphan)
-            .await?;
-        Ok(())
+        Ok(
+            super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Orphan)
+                .await?,
+        )
     }
 }
 

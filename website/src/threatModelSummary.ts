@@ -65,8 +65,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "diagramCount": 10,
  "total": 477,
  "open": 17,
- "mitigated": 439,
- "notApplicable": 21,
+ "mitigated": 443,
+ "notApplicable": 17,
  "areas": [
   {
    "id": 0,
@@ -136,7 +136,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "title": "RADIUS front end — not built (G-11, declined 2026-10-06)",
    "total": 21,
    "open": 0,
-   "notApplicable": 21
+   "notApplicable": 17
   }
  ],
  "categories": [
@@ -150,7 +150,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "name": "Tampering",
    "total": 93,
    "open": 1,
-   "notApplicable": 5
+   "notApplicable": 2
   },
   {
    "name": "Repudiation",
@@ -174,7 +174,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "name": "Elevation of privilege",
    "total": 90,
    "open": 2,
-   "notApplicable": 4
+   "notApplicable": 3
   }
  ],
  "severities": [
@@ -182,19 +182,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "name": "Critical",
    "total": 43,
    "open": 2,
-   "notApplicable": 2
+   "notApplicable": 0
   },
   {
    "name": "High",
    "total": 198,
    "open": 8,
-   "notApplicable": 9
+   "notApplicable": 8
   },
   {
    "name": "Medium",
    "total": 200,
    "open": 6,
-   "notApplicable": 9
+   "notApplicable": 8
   },
   {
    "name": "Low",

@@ -1,0 +1,108 @@
+name: RADIUS E2E
+
+# W6.2 / D3 of the RADIUS spike: 802.1X with an AXIAM-issued Device certificate,
+# against a REAL FreeRADIUS and a REAL `eapol_test`. Every claim in
+# docs/pki/freeradius.md is a line of the configuration this job runs, so this job
+# is the oracle for the guide: AXIAM's own routes issue the tenant signing CA and
+# the Device certificates, export the CA and publish the revocation list; the
+# shipped FreeRADIUS configuration trusts that CA and reads that list; and
+# `eapol_test` authenticates (accept), is refused by a wrong CA, and is refused
+# once a revoked certificate's list has reached FreeRADIUS (revoked-after-refresh).
+#
+# What it runs: `crates/axiam-server/tests/radius_e2e.rs`, gated by
+# AXIAM_E2E_RADIUS=1 (without it the test prints SKIPPED, which is why the CI
+# `test` job needs no containers). With the variable set a missing docker,
+# eapol_test or FreeRADIUS is a FAILURE, never a skip: this job cannot go green by
+# not running the thing it exists for.
+#
+# Why a workflow of its own, and a paths filter
+# ---------------------------------------------
+# It pulls an image and waits for FreeRADIUS to re-read a revocation list (the
+# smallest `ca_path_reload_interval` it accepts is 300 seconds), so it takes
+# several minutes and should not run on every PR. The usual caveat about a
+# workflow-level `paths:` filter (a *required* check that never reports blocks the
+# PR; see surreal-race-probe.yml) does not apply: this check is not marked
+# required, so a PR that does not touch the recipe simply does not run it. If it
+# is ever made required, replace the filter with a `detect` job as that workflow
+# does.
+#
+# Local equivalent: docker/radius/README.md.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/axiam-server/tests/radius_e2e.rs"
+      - "crates/axiam-pki/src/crl*"
+      - "crates/axiam-pki/src/cert.rs"
+      - "crates/axiam-pki/src/ca.rs"
+      - "crates/axiam-api-rest/src/handlers/crl.rs"
+      - "crates/axiam-api-rest/src/handlers/certificates.rs"
+      - "crates/axiam-api-rest/src/handlers/ca_certificates.rs"
+      - "docker/radius/**"
+      - "docker/docker-compose.radius.yml"
+      - "docs/pki/freeradius.md"
+      - ".github/workflows/radius-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  radius-e2e:
+    name: FreeRADIUS + eapol_test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+
+      # `eapoltest` is wpa_supplicant's `eapol_test`, the supplicant the test
+      # drives (universe, Ubuntu 24.04). The SAML feature is off for this test
+      # (--no-default-features), so no libxml2 is needed.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler eapoltest
+
+      - name: eapol_test is installed
+        run: command -v eapol_test
+
+      # The image is named once, in the compose file, by digest; pull exactly that,
+      # with a retry, since Docker Hub rate-limits anonymous pulls.
+      - name: Pull the pinned FreeRADIUS image
+        run: |
+          image=$(sed -n 's/^ *image: *//p' docker/docker-compose.radius.yml | head -n1)
+          echo "pulling $image"
+          for attempt in 1 2 3 4; do
+            docker pull "$image" && exit 0
+            echo "pull failed (attempt $attempt)"; sleep $((attempt * 15))
+          done
+          exit 1
+
+      # The test mints the run's CA material, issues everything from AXIAM,
+      # brings docker/docker-compose.radius.yml up itself (the trust material does
+      # not exist until AXIAM has issued it) and takes it down again.
+      - name: RADIUS e2e
+        run: cargo test -p axiam-server --no-default-features --test radius_e2e -- --nocapture
+        env:
+          AXIAM_E2E_RADIUS: "1"
+
+      - name: FreeRADIUS logs on failure
+        if: failure()
+        run: |
+          docker logs --tail=300 axiam-radius-e2e-freeradius || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          if [ -f docker/.secrets/radius/env ]; then
+            docker compose -f docker/docker-compose.radius.yml --env-file docker/.secrets/radius/env down -v || true
+          fi

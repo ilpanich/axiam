@@ -34,8 +34,8 @@ issue closed — every finding in this register is now Fixed.
 **No open deferred finding of any severity. 1.0.0 ships with no known High security holes in this register (D-04).**
 
 **Re-verified 2026-10-10 against threat model 2.40.0, after the 1.0.0 waves**
-(`ThreatDragonModels/Axiam/Axiam.json`, 476 threats, 438 mitigated / 17 open /
-21 not applicable; the Security section of the website
+(`ThreatDragonModels/Axiam/Axiam.json`, 476 threats, 442 mitigated / 17 open /
+17 not applicable; the Security section of the website
 publishes the same list). This register records findings: defects with a fix
 owed, and there are none open. The threat model is the wider list, and it is
 not empty of High: ten entries are still `Open` at High or Critical severity —

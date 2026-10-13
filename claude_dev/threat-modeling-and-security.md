@@ -371,6 +371,52 @@
 > carries a second dated correction; no entry is added, so the counts above do
 > not move.
 >
+> **The 1.0.1 release wave, W6 (model 2.40.0 — T-449, T-454, T-456 and T-459
+> move from Not applicable to Mitigated, 2026-10-13).** Option B of the RADIUS
+> spike ships as a recipe (#563, D3): `docs/pki/freeradius.md`, a compose file
+> that references the upstream FreeRADIUS image by digest, and an `eapol_test`
+> end-to-end (`radius_e2e.rs`, job `radius-e2e.yml`). FreeRADIUS, not AXIAM,
+> terminates RADIUS and EAP-TLS, and its configuration closes four of the
+> entries the declined native front end was written for, each with that
+> end-to-end as its test: **T-449** (`require_message_authenticator = yes`; a
+> request without the attribute is discarded), **T-456** (EAP-TLS only, TLS 1.3
+> only; a TLS 1.2 supplicant and EAP-MD5 are refused), **T-459** (the tenant
+> signing CA is the only trust anchor; another tenant's and another
+> organization's devices are refused) and **T-454** (the recipe references an
+> upstream image and vendors nothing). The elements they sit on, AXIAM's own
+> listener and EAP state machine, are not built, so each entry's text keeps the
+> requirement on a native build beside the recipe's control. The other seventeen
+> stay Not applicable and each now says why: they are about code AXIAM would have
+> to write, about a FreeRADIUS control the recipe does not test, or (T-462) about
+> the revocation lag the guide states. **T-449** carries a dated correction from
+> W6.1's re-read of RFC 2865 §5.33: `Proxy-State` is returned unmodified, not
+> refused. T-453's correction (the duplicate cache's key) waits for the
+> reconciliation below. The model is **476 threats, 442 mitigated / 17 open / 17
+> not applicable** on the basis of the copies above (`Axiam.json` itself also
+> counts T-477 and reads 443 / 17 / 17 of 477; the copies are reconciled once,
+> at the end of the release).
+>
+> **The W6 F4 review's fixes (2026-10-13; T-461 amended, T-459 corrected).** The wave's review
+> ([`security-review-release-1.0.1-w6-2026-10-13.md`](security-review-release-1.0.1-w6-2026-10-13.md),
+> R101W6-02) found that the recipe's placement table — the third of its
+> pillars, "a valid certificate is not enough" — was keyed on the certificate's
+> subject, written into FreeRADIUS's `files` entry unescaped. AXIAM accepts
+> `DEFAULT` as a subject, and `rlm_files` matches a `DEFAULT` entry for every
+> key, so one bound certificate named `DEFAULT` placed every certificate the
+> tenant signing CA had issued, unbound ones included. The guide and the shipped
+> `check-eap-tls` now key the table on `TLS-Client-Cert-Serial`, which AXIAM
+> assigns and which is hex, and the end-to-end binds a certificate named
+> `DEFAULT` and asserts that an unbound one stays refused. **T-461** carries the
+> dated amendment and stays Not applicable; no count moves. The same review's
+> R101W6-01 found that **T-459**'s test did not run the case the entry names:
+> the end-to-end issued a fresh organization CA for every signing CA, so the
+> "other tenant of the same organization" device chained to a different root,
+> and it sent only its leaf. Both of the organization's signing CAs are now
+> issued under one organization CA, and the other tenant's device is refused
+> presenting its leaf, its signing CA and its whole chain up to that shared
+> root, while the tenant's own device with its whole chain is admitted. T-459
+> carries a dated correction and stays Mitigated; no count moves.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1724,8 +1770,8 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 476 |
-| Mitigated / Open | 438 / 17 |
-| Not applicable (specified, not built) | 21 |
+| Mitigated / Open | 442 / 17 |
+| Not applicable (specified, not built) | 17 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -3211,7 +3257,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 17 of 476. The 21
+Every threat the model records as open, most severe first — 17 of 476. The 17
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

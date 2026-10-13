@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.60";
+export const CONTRACT_VERSION = "1.61";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -263,7 +263,8 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34.1": "#§341-what-was-read",
  "34.2": "#§342-clarifications-normative-from-159",
  "34.3": "#§343-divergences",
- "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned"
+ "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned",
+ "34.5": "#§345-contract-161--the-101-fields"
 };
 
 /**

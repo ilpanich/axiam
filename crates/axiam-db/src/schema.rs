@@ -492,6 +492,26 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_vault_revocation",
         sql: SCHEMA_V94,
     },
+    Migration {
+        version: 95,
+        name: "certificate_vault_forward_backoff",
+        sql: SCHEMA_V95,
+    },
+    Migration {
+        version: 96,
+        name: "ca_certificate_vault_revocation",
+        sql: SCHEMA_V96,
+    },
+    Migration {
+        version: 97,
+        name: "tenant_purge_claim",
+        sql: SCHEMA_V97,
+    },
+    Migration {
+        version: 98,
+        name: "certificate_user_binding",
+        sql: SCHEMA_V98,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4692,6 +4712,93 @@ const SCHEMA_V94: &str = "\
 DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v95 — the Vault revocation sweep's backoff (#603)
+// -----------------------------------------------------------------------
+//
+// A revocation Vault refuses for good used to be retried at every tick, and a
+// hundred of them kept every later one off Vault's list. The sweep now keeps,
+// per pending row, how many times Vault refused it (`vault_forward_attempts`),
+// the sanitised reason (`vault_forward_last_error`, never a token or a response
+// body) and when it is next due (`vault_next_attempt_at`) — the date a replica
+// claims a row by writing before it attempts it, so two replicas never attempt
+// one row. The index serves the sweep's read: unforwarded rows by due date.
+// Additive: three optional columns and an index, absent on every existing row,
+// which therefore reads as "none attempted, due now"; no row is rewritten (D-6).
+const SCHEMA_V95: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE certificate TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE certificate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_vault_forward ON TABLE certificate \
+    FIELDS vault_revoked_at, vault_next_attempt_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v96 — a revoked subordinate CA forwarded to its parent's list in Vault (#612)
+// -----------------------------------------------------------------------
+//
+// Revoking a tenant signing CA whose parent's key Vault's PKI engine holds
+// deleted the CA's issuer from Vault but left its certificate off the list
+// Vault signs for the parent; only AXIAM's own list (#565) named it. The CA's
+// serial is now forwarded to the parent's signing mount, as a leaf's is to its
+// issuer's (v94), and the row records when Vault accepted it
+// (`vault_revoked_at`). A forward that did not complete is retried by the
+// cleanup job's `vault_revocation` sweep with the leaves' backoff (v95): the
+// same three columns and the same index, on this table.
+// Additive: four optional columns and an index, absent on every existing row,
+// which therefore reads as "not forwarded, none attempted, due now" — so a
+// subordinate CA revoked before the upgrade is forwarded by the first sweep;
+// no row is rewritten (D-6).
+const SCHEMA_V96: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE ca_certificate TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE ca_certificate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_ca_certificate_vault_forward ON TABLE ca_certificate \
+    FIELDS vault_revoked_at, vault_next_attempt_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v97 — one replica purges a tombstoned tenant (#610)
+// -----------------------------------------------------------------------
+//
+// The cleanup job runs on every replica, and so did the `tenant_purge` sweep:
+// two replicas purging one tenant wrote two `tenants.purged` records, or the
+// second found the tenant row gone and marked the job failed. A replica now
+// claims a tombstoned tenant before it purges it, by a conditional write of
+// `purge_claimed_at` that matches only while the field is NONE or older than
+// the claim's lease (`SurrealTenantRepository::claim_purge`); the other
+// replicas skip the tenant. No index: the claim writes one record by id.
+// Additive: one optional column, absent on every existing row, which therefore
+// reads as "unclaimed" — so a tenant tombstoned before the upgrade is claimed
+// and purged by the first sweep; no row is rewritten (D-6).
+const SCHEMA_V97: &str = "\
+DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE tenant TYPE option<datetime>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v98 — a `User` certificate names the account it was issued for (#533)
+// -----------------------------------------------------------------------
+//
+// No certificate row recorded which user it belonged to, so directory linking
+// (D-28) found a user's `User` certificates by convention — `metadata.user_id`,
+// or a subject common name equal to the username or email, ignoring case —
+// which can revoke another user's certificate whose CN happens to match.
+// Issuance and CSR signing now store the account a `User` certificate is for
+// (`user_id`, validated against the tenant's users), and revoking a user's
+// certificates — linking, administrator deletion, Art. 17 erasure — matches on
+// it; the convention is kept only for rows whose `user_id` is NONE. The index
+// serves that revocation's `tenant_id, user_id` lookup.
+// Additive: one optional column and an index, absent on every existing row,
+// which therefore reads as "issued before the binding" and stays under the
+// convention; no row is rewritten — in particular, `metadata.user_id` is not
+// copied into the column (D-6).
+const SCHEMA_V98: &str = "\
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
+    FIELDS tenant_id, user_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4738,6 +4845,114 @@ mod tests {
             assert!(
                 !SCHEMA_V94.contains(forbidden),
                 "v94 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #603 — v95 adds the Vault forward backoff columns and the index that
+    /// serves the sweep, and rewrites no row.
+    #[test]
+    fn v95_adds_only_the_vault_forward_backoff() {
+        let statements: Vec<&str> = SCHEMA_V95
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE certificate \
+                 TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE certificate \
+                 TYPE option<string>",
+                "DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE certificate \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_vault_forward ON TABLE certificate \
+                 FIELDS vault_revoked_at, vault_next_attempt_at",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V95.contains(forbidden),
+                "v95 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #612 — v96 gives `ca_certificate` the leaf table's Vault forwarding
+    /// columns and index (v94, v95), and rewrites no row.
+    #[test]
+    fn v96_adds_only_the_ca_vault_forward_columns() {
+        let statements: Vec<&str> = SCHEMA_V96
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE ca_certificate \
+                 TYPE option<datetime>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_attempts ON TABLE ca_certificate \
+                 TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS vault_forward_last_error ON TABLE ca_certificate \
+                 TYPE option<string>",
+                "DEFINE FIELD IF NOT EXISTS vault_next_attempt_at ON TABLE ca_certificate \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_ca_certificate_vault_forward ON TABLE \
+                 ca_certificate FIELDS vault_revoked_at, vault_next_attempt_at",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V96.contains(forbidden),
+                "v96 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #610 — v97 gives `tenant` the purge claim's one column, and rewrites no
+    /// row.
+    #[test]
+    fn v97_adds_only_the_tenant_purge_claim() {
+        let statements: Vec<&str> = SCHEMA_V97
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE tenant TYPE option<datetime>"]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V97.contains(forbidden),
+                "v97 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #533 — v98 gives `certificate` the user binding and its index, and
+    /// rewrites no row (D-6: no backfill from `metadata.user_id`).
+    #[test]
+    fn v98_adds_only_the_certificate_user_binding() {
+        let statements: Vec<&str> = SCHEMA_V98
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS user_id ON TABLE certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
+                 FIELDS tenant_id, user_id",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V98.contains(forbidden),
+                "v98 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6208,8 +6423,18 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&94),
-            "v94 is the newest migration (T-470 — `certificate.vault_revoked_at`, set once \
+            Some(&98),
+            "v98 is the newest migration (#533 — `certificate.user_id` and its index, the \
+             account a `User` certificate was issued for, so revoking a user's certificates \
+             matches the binding rather than a name; v97 was #610 — `tenant.purge_claimed_at`, \
+             the claim one replica writes before it purges a tombstoned tenant, so two replicas \
+             never purge one tenant twice; v96 was #612 — `ca_certificate.vault_revoked_at` and the \
+             leaf table's three backoff columns and index, so a revoked subordinate CA is \
+             forwarded to its parent's list in Vault and retried by the sweep; v95 was #603 — \
+             the Vault revocation sweep's backoff \
+             columns `certificate.vault_forward_attempts`, `vault_forward_last_error` and \
+             `vault_next_attempt_at` and the index on `(vault_revoked_at, vault_next_attempt_at)`; \
+             v94 was T-470 — `certificate.vault_revoked_at`, set once \
              Vault has accepted the revocation of a `vault_pki` CA's leaf; v93 was #530, \
              P23W3-07 — \
              `federation_config.idp_metadata_signing_cert_pem`, the certificate a SAML IdP's \

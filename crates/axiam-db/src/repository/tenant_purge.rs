@@ -42,7 +42,9 @@
 //! # Revocation evidence outlives the tenant (R1W1-01)
 //!
 //! Two tables are not emptied: `certificate` and `ca_certificate` keep every
-//! **revoked, unexpired** row ([`Retain::RevokedUntilExpiry`]). An issuing CA's
+//! **revoked** row that is unexpired or expired less than eight days ago
+//! ([`Retain::RevokedUntilExpiry`]; the grace is the longest time a list keeps
+//! an expired entry, #608). An issuing CA's
 //! revocation list (`axiam_pki::crl`, T-102) is read from those rows, across
 //! tenants, by issuer; deleting them took a revoked leaf off its organization
 //! CA's list and made it valid again to every relying party outside AXIAM. The
@@ -55,9 +57,9 @@
 //! What is kept is what the list needs and no more: the step clears a
 //! certificate's free-form `metadata` and a CA's sealed private key. The rows
 //! name a tenant id with no tenant row, which is what the orphan scan looks
-//! for; it ignores a kept row until it expires, and then the orphan purge
-//! removes it — the cleanup job deletes the evidence once no relying party can
-//! need it.
+//! for; it ignores a kept row until eight days after it expires, and then the
+//! orphan purge removes it — the cleanup job deletes the evidence once no list
+//! names it and no relying party can need it.
 //!
 //! # Completeness is pinned
 //!
@@ -113,9 +115,9 @@ pub enum PurgeStage {
 pub enum Retain {
     /// None: every row of the tenant goes.
     Nothing,
-    /// A revoked certificate whose `not_after` is still ahead — the evidence
-    /// its issuer's revocation list is read from (R1W1-01; see the module
-    /// documentation). Every other row goes; an unrevoked, unexpired row is
+    /// A revoked certificate whose `not_after` is still ahead, or passed less
+    /// than eight days ago — the evidence its issuer's revocation list is read
+    /// from (R1W1-01, #608; see the module documentation). Every other row goes; an unrevoked, unexpired row is
     /// revoked first, and a kept row has `strip` applied (an `UPDATE … SET`
     /// clause clearing what the list does not need).
     RevokedUntilExpiry {
@@ -124,8 +126,18 @@ pub enum Retain {
     },
 }
 
-/// The condition a row the purge keeps satisfies.
-const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now()";
+/// The condition a row the purge keeps satisfies: revoked, and expired for
+/// less than eight days.
+///
+/// Not "unexpired" (#608). An issuing CA's list keeps an expired entry until it
+/// has appeared on a list issued after the expiry — RFC 5280 §3.3 requires
+/// that — which is up to one `nextUpdate` interval past `notAfter`, at most
+/// seven days (`axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS`). A row the purge
+/// deleted inside that window would leave the list mid-way through a refresh
+/// epoch, which changes the list without moving its `thisUpdate` and so breaks
+/// the CRL number every replica derives from them. The eighth day is margin
+/// for the datastore's clock against the replicas'.
+const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now() - 8d";
 
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]
@@ -160,7 +172,7 @@ impl PurgeStep {
     }
 
     /// A certificate table: keyed by `tenant_id`, keeping revocation evidence
-    /// until it expires.
+    /// until eight days after it expires.
     const fn keeping_revocations(
         table: &'static str,
         strip: &'static str,
@@ -272,8 +284,8 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("notification_rule", Configuration),
     PurgeStep::by_tenant("reactor", Configuration),
     PurgeStep::by_tenant("oauth2_client", Configuration),
-    // R1W1-01: revocation evidence stays until it expires; see the module
-    // documentation.
+    // R1W1-01, #608: revocation evidence stays until eight days after it
+    // expires; see the module documentation.
     PurgeStep::keeping_revocations("certificate", "metadata = {}", Configuration),
     PurgeStep::keeping_revocations(
         "ca_certificate",
@@ -336,7 +348,7 @@ pub(crate) async fn purge_rows<C: Connection>(
 /// see [`PurgeScope::Orphan`]) but have no tenant row — tombstoned or live.
 ///
 /// A row a purge keeps ([`Retain::RevokedUntilExpiry`]) is not counted until
-/// it expires; then it is, and the orphan purge removes it.
+/// eight days after it expires; then it is, and the orphan purge removes it.
 ///
 /// The tables are read **before** the tenant set: a tenant row is written
 /// before any row naming it, so a tenant created while this runs is either

@@ -171,3 +171,81 @@ async fn export_failure_sets_failed_status() {
         "failed job must not appear in find_queued"
     );
 }
+
+/// #533: the purge is re-selectable after a partial failure, so its
+/// certificate step (b4) can run twice for one account. The second run revokes
+/// nothing and leaves the first revocation's date alone — the date the issuer's
+/// revocation list states, which a retry must not move — and the row is kept
+/// (revoked, never deleted: the list is computed from it).
+#[tokio::test]
+async fn a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::models::user::CreateUser;
+    use axiam_core::repository::{CertificateRepository, UserRepository};
+    use axiam_db::{SurrealCertificateRepository, SurrealUserRepository};
+    use axiam_server::cleanup::revoke_erased_users_certificates;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "dana".into(),
+            email: "dana@example.com".into(),
+            password: axiam_test_support::test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    let cert = certs
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: issuer,
+            subject: "dana-laptop".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: "fp-dana".into(),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::minutes(1),
+            not_after: Utc::now() + chrono::Duration::days(30),
+            metadata: serde_json::json!({}),
+            user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, &user)
+            .await
+            .unwrap(),
+        1
+    );
+    let first = certs
+        .list_revoked_by_issuer(issuer, Utc::now())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, &user)
+            .await
+            .unwrap(),
+        0,
+        "the retry finds nothing left to revoke"
+    );
+    let second = certs
+        .list_revoked_by_issuer(issuer, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first, second,
+        "the list's entry, its date included, is unchanged"
+    );
+    let kept = certs.get_by_id(tenant_id, cert.id).await.unwrap();
+    assert_eq!(kept.status, CertificateStatus::Revoked);
+    assert_eq!(kept.user_id, Some(user.id));
+}

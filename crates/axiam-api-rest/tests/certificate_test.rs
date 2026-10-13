@@ -560,6 +560,7 @@ async fn a_revocation_vault_refuses_still_stands_and_is_audited() {
             not_before: now - chrono::Duration::days(1),
             not_after: now + chrono::Duration::days(30),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .unwrap();
@@ -1030,4 +1031,244 @@ async fn signing_a_tenant_ca_csr_over_http_yields_an_intermediate_with_external_
         body.get("private_key_pem").is_none() || body["private_key_pem"].is_null(),
         "there is no key to return, got: {body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #533 — a `User` certificate names the account it was issued for
+// ---------------------------------------------------------------------------
+
+/// A plain account of `tenant_id`, for a certificate to be issued for.
+async fn tenant_user(db: &Surreal<TestDb>, tenant_id: Uuid, name: &str) -> Uuid {
+    SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: name.into(),
+            email: format!("{name}@example.com"),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+/// `POST` `payload` to `uri` as `token`; the status and the JSON body.
+async fn post_json<S, B>(
+    app: &S,
+    uri: &str,
+    token: &str,
+    payload: serde_json::Value,
+) -> (u16, serde_json::Value)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let req = test::TestRequest::post()
+        .uri(uri)
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(payload)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    (status, body)
+}
+
+/// Both issuance paths store the account a `User` certificate is for, and every
+/// read returns it; a certificate issued without one says `null`.
+#[actix_rt::test]
+async fn a_user_certificate_carries_the_account_it_was_issued_for() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let alice = tenant_user(&db, tenant_id, "alice").await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
+
+    let (status, generated) = post_json(
+        &app,
+        "/api/v1/certificates",
+        &token,
+        serde_json::json!({
+            "issuer_ca_id": ca_id, "subject": "alice-laptop", "cert_type": "User",
+            "key_algorithm": "Ed25519", "validity_days": 30, "user_id": alice,
+            // Agreeing with `user_id` is accepted.
+            "metadata": { "user_id": alice.to_string() },
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "generate: {generated}");
+    assert_eq!(generated["user_id"], alice.to_string());
+
+    let (status, signed) = post_json(
+        &app,
+        "/api/v1/certificates/sign-csr",
+        &token,
+        serde_json::json!({
+            "issuer_ca_id": ca_id, "csr_pem": plain_csr("alice-token"),
+            "cert_type": "User", "validity_days": 30, "user_id": alice,
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "sign-csr: {signed}");
+    assert_eq!(signed["user_id"], alice.to_string());
+
+    let (status, unbound) = post_json(
+        &app,
+        "/api/v1/certificates",
+        &token,
+        serde_json::json!({
+            "issuer_ca_id": ca_id, "subject": "device-7", "cert_type": "Device",
+            "key_algorithm": "Ed25519", "validity_days": 30,
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "unbound: {unbound}");
+    assert!(
+        unbound["user_id"].is_null(),
+        "no binding asked, none stored"
+    );
+
+    for (issued, expected) in [
+        (&generated, serde_json::json!(alice.to_string())),
+        (&signed, serde_json::json!(alice.to_string())),
+        (&unbound, serde_json::Value::Null),
+    ] {
+        let id = issued["id"].as_str().unwrap();
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/certificates/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let fetched: serde_json::Value =
+            test::read_body_json(test::call_service(&app, req).await).await;
+        assert_eq!(fetched["user_id"], expected, "GET {id}");
+    }
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let listed: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
+    let row = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == generated["id"])
+        .expect("listed");
+    assert_eq!(row["user_id"], alice.to_string());
+}
+
+/// A binding that does not hold is a `400` naming the problem, on both paths,
+/// and nothing is issued.
+#[actix_rt::test]
+async fn a_user_binding_that_does_not_hold_is_a_400() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let alice = tenant_user(&db, tenant_id, "alice").await;
+    let gone = tenant_user(&db, tenant_id, "gone").await;
+    SurrealUserRepository::new(db.clone())
+        .delete(tenant_id, gone)
+        .await
+        .unwrap();
+    let elsewhere = {
+        let other = SurrealTenantRepository::new(db.clone())
+            .create(CreateTenant {
+                organization_id: org_id,
+                kind: TenantKind::Standard,
+                name: "Other Tenant".into(),
+                slug: "other-tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        tenant_user(&db, other.id, "bob").await
+    };
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db.clone(), auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
+
+    let generate = |cert_type: &str, user: Uuid, metadata: serde_json::Value| {
+        serde_json::json!({
+            "issuer_ca_id": ca_id, "subject": "refused", "cert_type": cert_type,
+            "key_algorithm": "Ed25519", "validity_days": 30, "user_id": user,
+            "metadata": metadata,
+        })
+    };
+    let cases: Vec<(&str, &str, serde_json::Value, &str)> = vec![
+        (
+            "a binding on a Device certificate",
+            "/api/v1/certificates",
+            generate("Device", alice, serde_json::json!({})),
+            "only on a User certificate",
+        ),
+        (
+            "a binding on a Service certificate signed from a CSR",
+            "/api/v1/certificates/sign-csr",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr("svc"),
+                "cert_type": "Service", "validity_days": 30, "user_id": alice,
+            }),
+            "only on a User certificate",
+        ),
+        (
+            "an account that does not exist",
+            "/api/v1/certificates",
+            generate("User", Uuid::new_v4(), serde_json::json!({})),
+            "does not name a user of this tenant",
+        ),
+        (
+            "another tenant's account",
+            "/api/v1/certificates/sign-csr",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr("bob"),
+                "cert_type": "User", "validity_days": 30, "user_id": elsewhere,
+            }),
+            "does not name a user of this tenant",
+        ),
+        (
+            "a deleted account",
+            "/api/v1/certificates",
+            generate("User", gone, serde_json::json!({})),
+            "does not name a user of this tenant",
+        ),
+        (
+            "a metadata.user_id naming someone else",
+            "/api/v1/certificates",
+            generate(
+                "User",
+                alice,
+                serde_json::json!({ "user_id": Uuid::new_v4().to_string() }),
+            ),
+            "metadata.user_id",
+        ),
+    ];
+    for (what, uri, payload, expected) in cases {
+        let (status, body) = post_json(&app, uri, &token, payload).await;
+        assert_eq!(status, 400, "{what} must be a 400: {body}");
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "{what}: expected {expected:?}, got {message:?}"
+        );
+    }
+
+    use axiam_core::repository::{CertificateRepository as _, Pagination};
+    let issued = SurrealCertificateRepository::new(db)
+        .list(tenant_id, Pagination::default())
+        .await
+        .unwrap();
+    assert_eq!(issued.total, 0, "a refused request issues nothing");
 }

@@ -423,6 +423,7 @@ A minimal policy:
 ```hcl
 path "pki/root/generate/internal"        { capabilities = ["update"] }
 path "pki/issuer/+/sign-intermediate"    { capabilities = ["update"] }
+path "pki/revoke"                        { capabilities = ["update"] }
 path "pki/issuer/+"                      { capabilities = ["delete"] }
 path "pki/key/+"                         { capabilities = ["delete"] }
 
@@ -445,7 +446,9 @@ well can add a role against the same issuer; what they cannot do is have
 neither.
 
 Revocation deletes the issuer and then the key, at both tiers — in that order,
-because Vault refuses to delete a key an issuer still references.
+because Vault refuses to delete a key an issuer still references. A tenant
+signing CA has one tier of its own to delete (the root above it is the
+organization's) and is then revoked on the root's mount; see below.
 
 ### Revoking a leaf, and the list relying parties read
 
@@ -468,7 +471,59 @@ no request — a directory deprovisioning revokes a user's certificates in bulk 
 and, on the first tick after an upgrade, the revocations of such leaves made
 before 1.0.0. Vault answers a second revocation of the same serial with
 success, so a retry is harmless. A leaf of a CA that has itself been revoked is
-not forwarded: revoking the CA deleted its issuer from Vault.
+not forwarded: revoking the CA deleted its issuer from Vault, and the CA's own
+revocation goes on its parent's list instead (below).
+
+**A revocation Vault keeps refusing.** The sweep does not ask again at every
+tick. Each refusal is recorded on the certificate row (schema v95:
+`vault_forward_attempts`, `vault_forward_last_error`, `vault_next_attempt_at`)
+and pushes its next attempt out: one minute, doubling, to a ceiling of six
+hours. A row is read soonest-due first, so a serial Vault refuses for good (one
+a `no_store` role never recorded, a mount since reconfigured) does not hold back
+the revocations behind it. A replica claims a row by writing its next-attempt
+date before it asks Vault, and only the replica whose write matched asks, so
+several replicas sweeping at once cost one call per row, not one each. The
+recorded reason is a status and a short message, cut to 256 characters; it
+never holds a token or a response body.
+
+While a row has failed fewer than twelve times, a refusal fails the
+`vault_revocation` job in `/health/jobs`, as before. From the twelfth failure —
+about a day of attempts — the job stops failing for that row and the count of
+such rows is reported as a separate job, `vault_revocation_failing`, which is
+unhealthy while any row has reached it. The row is still retried every six
+hours; clearing it is the operator's: fix the Vault mount or policy so the
+revoke call succeeds, and the next retry forwards it. A revocation Vault cannot
+ever accept (a serial it never recorded) stays in that count until the
+certificate expires, since a `no_store` role has nothing for Vault to revoke and
+the leaf is bounded by its validity.
+
+**Revoking a tenant signing CA.** A tenant signing CA under a `vault_pki`
+organization CA was signed by that CA's root in Vault (`pki/issuer/<root>/sign-intermediate`),
+so the list relying parties check for it is the root's, which Vault signs.
+Revoking it (`POST /api/v1/organizations/{org_id}/ca-certificates/{id}/revoke`,
+or deleting its tenant) releases its issuer and key from `pki_int` and then
+revokes its certificate with `POST <root_mount>/revoke` and its serial — hence
+`pki/revoke` in the policy above. (For an organization CA whose key locator
+records no root, imported or created with `issue_from_root`, it is that CA's
+own mount.) The order is deliberate: Vault refuses to revoke a serial that is
+still an issuer in the same mount, and once the tenant CA's issuer is deleted
+its serial is a stored certificate like any leaf's. A CA signed from a caller's
+CSR (`external` custody) is forwarded the same way; one signed in AXIAM before
+its parent's key moved into Vault is not, since Vault never recorded it, and
+AXIAM's own list for the parent names it either way.
+
+Everything that applies to a leaf applies here: AXIAM's revocation stands
+whatever Vault answers, the request tries twice within ten seconds (a tenant
+deletion once per CA, within one ten-second budget for all of them), a refusal
+is recorded as `ca_certificate.vault_revocation_pending` in the organization's
+audit log (and as `signing_ca_vault_revocations_pending` on the tenant
+deletion's record), and the `vault_revocation` sweep retries it with the same
+backoff and claim, from the CA's row (schema v96: `vault_revoked_at` and the
+three backoff columns on `ca_certificate`), which keeps the certificate and its
+parent after the key is gone and until eight days after it expires. A CA
+refused twelve times counts in `vault_revocation_failing` with the leaves. On
+the first tick after an upgrade, the sweep forwards the subordinate CAs revoked
+before 1.0.1.
 
 **Where relying parties fetch the list.** Leaves of a `vault_pki` CA carry
 Vault's own profile, not an AXIAM distribution point. Configure the
@@ -526,6 +581,53 @@ when the issuing CA is under `vault_pki` custody, `chain_pem` holding the chain
 the signer returned. A tenant may cap `validity_days` via its
 `max_certificate_validity_days` metadata setting; requests exceeding that cap
 are rejected.
+
+### A user certificate names its account (`user_id`, 1.0.1)
+
+A `User` certificate can say which account it was issued for: send `user_id`
+(the user's id) on `POST /api/v1/certificates` or `POST
+/api/v1/certificates/sign-csr`, and every read of the certificate returns it.
+It is optional, accepted only with `cert_type: User`, must name a user of the
+tenant being acted on that has not been deleted or erased, and, when the
+request also carries `metadata.user_id`, the two must agree — each refusal is a
+`400` naming the problem. It does not change what the certificate
+authenticates as: that is still the service account it is bound to.
+
+What it changes is which certificates are revoked when an account loses its
+credentials — **linking it to a directory entry, an administrator deleting it,
+and the Art. 17 erasure purge** all revoke the account's still-active `User`
+certificates:
+
+- a certificate whose `user_id` is the account is revoked;
+- a certificate whose `user_id` names **another** account is never revoked on
+  this account's behalf, whatever its common name or metadata says;
+- a certificate with no `user_id` — every certificate issued before 1.0.1
+  (schema v98 copies nothing into the new column), and a `User` certificate
+  issued without one — falls back to the 1.0.0 convention: revoked when its
+  `metadata.user_id` names the account, or when its subject common name equals
+  the account's username or email, ignoring case — the name match bounded
+  twice:
+  - only a certificate **issued since the account was created** matches by
+    name: one older than the account was not issued for it;
+  - a name **another account of the tenant also holds**, ignoring case, as its
+    username or email and in any status, matches nothing: usernames and
+    emails are unique only case-sensitively, so `alice` and `Alice` can both
+    exist, and deleting or erasing one must not revoke the other's
+    certificate.
+
+  Within those bounds the name match still errs towards revoking — an unbound
+  certificate issued after the account, under its unambiguous name, is revoked
+  with it even if it was meant for someone else — and an unbound certificate
+  of the account that falls outside them (older than the account, or under a
+  shared name) stays active: revoke it by id
+  (`POST /api/v1/certificates/{id}/revoke`). Issuing with `user_id` is how to
+  avoid both.
+
+The revocations are dated, so they are on the issuer's
+[revocation list](#certificate-revocation-lists) at once, and under a
+`vault_pki` CA the cleanup job's `vault_revocation` sweep forwards them to
+Vault. Revoked rows are kept, not deleted, until they expire, as every revoked
+certificate is.
 
 ### Which CA a caller may issue under
 
@@ -1088,11 +1190,12 @@ Deleting a tenant (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
 revokes, before its `204`, every unexpired certificate of the tenant and every
 signing CA of the tenant — through the same paths a single revocation takes, so
 a `vault_pki` leaf is forwarded to Vault and a CA's key is released by its
-custodian — and the tenant purge then **keeps** each revoked, unexpired
-certificate and CA row (without the certificate's `metadata` and without the
-CA's sealed key) until its `notAfter`, when the cleanup job removes it. So a
-deleted tenant's certificates appear on their issuers' lists from the deletion
-until they expire, the ones revoked before the deletion included, and every
+custodian — and the tenant purge then **keeps** each revoked certificate and
+CA row (without the certificate's `metadata` and without the CA's sealed key)
+until eight days after its `notAfter`, when the cleanup job removes it — the
+longest a list keeps an expired entry (below), plus a day. So a deleted
+tenant's certificates appear on their issuers' lists from the deletion until
+they expire, the ones revoked before the deletion included, and every
 AXIAM sign-in that reads a certificate's status refuses them. Before 1.0.0
 (R1W1-01) a deletion revoked none of them, and the purge deleted the rows, which
 took a leaf revoked before the deletion back off its organization CA's list.
@@ -1125,18 +1228,36 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   else stops startup), and never past the CA's own expiry. The list carries a
   CRL number and an authority key identifier equal to the CA's subject key
   identifier.
+- **The same list from every replica.** Time is cut into *refresh epochs*,
+  half the `nextUpdate` interval long and aligned to the Unix epoch, so every
+  replica cuts at the same instants. `thisUpdate` is the start of the epoch the
+  list was signed in, or the newest revocation on the list if that is later
+  (never before the CA's own `notBefore`); the CRL number is that `thisUpdate`
+  in seconds, shifted left 24 bits, plus the number of entries. Both are
+  functions of the revocations and the epoch alone, and both CA key types sign
+  deterministically, so every replica signs the same state in the same epoch
+  to the same bytes, CRL number and `ETag`: a relying party behind a load
+  balancer revalidates to `304` wherever its request lands. The number grows
+  with every change of the list, an entry leaving included (RFC 5280 §5.2.3).
 - **Entries**: every certificate the CA signed and revoked that has not yet
-  expired — its leaves in every tenant, a deleted tenant's included, and the
+  expired, or expired during the current or the previous refresh epoch — so an
+  entry appears on a list issued after its expiry, as RFC 5280 §3.3 requires,
+  and leaves only at an epoch boundary — its leaves in every tenant, a deleted tenant's included, and the
   subordinate CAs it signed, so an organization CA's list names a revoked tenant
   signing CA. Each carries the
   serial and the revocation date; a certificate revoked before 1.0.0, when the
   date was not yet recorded, is listed from its own `notBefore`. No reason code
   is recorded, so none is listed.
-- **Served as** `application/pkix-crl`, with `Cache-Control: public, max-age`
-  running to `nextUpdate`, an `ETag` and `Last-Modified`; a matching
-  `If-None-Match` answers `304`. The list is signed once and kept until the set
-  of revocations changes or half its validity has passed, so revalidating costs
-  no signature and a revocation is in the very next response.
+- **Served as** `application/pkix-crl`, with an `ETag` and `Last-Modified`; a
+  matching `If-None-Match` answers `304`. `Cache-Control: public, max-age` runs
+  to the end of the refresh epoch — at most half the `nextUpdate` interval —
+  and not to `nextUpdate`: a shared cache revalidates at least that often
+  rather than serving a list from before a revocation for the whole interval,
+  and revalidating an unchanged list is a `304`. The list is signed once and
+  kept until the set of revocations changes or its epoch ends, so revalidating
+  costs no signature and a revocation is in the very next response from the
+  origin. A relying party may still trust a list it holds until its
+  `nextUpdate`.
 - **`404`** for a CA that does not exist in that organization and, alike, for a
   CA that publishes no list: a revoked or expired CA (its own status is on its
   parent's list), an imported trust anchor AXIAM holds no key for, and a
@@ -1144,6 +1265,13 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   The route does not say which, nor point at Vault: it is unauthenticated, and
   which custodian holds a CA's key — or where that custodian listens — is not an
   outsider's business.
+- **`503`** when the list has to be re-signed and no permit of the crypto gate
+  that issuance and password hashing share comes free within five seconds. A
+  list that has not changed is served from the cache and needs no permit, and
+  each CA is re-signed on its own, so a slow custodian (a Vault round trip)
+  holds up only its own CA's changed list. Whether a list changed is decided
+  from each revoked certificate's fingerprint and revocation date; the
+  certificates are read only when the list is signed.
 
 **The distribution point.** Every certificate AXIAM signs in-process from
 1.0.0 on — leaves issued by `POST /api/v1/certificates` and by

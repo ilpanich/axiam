@@ -409,7 +409,12 @@ impl<
     ///   the directory deciding** is retired: its WebAuthn credentials are
     ///   deleted, its federation links deleted (an upstream OIDC or SAML
     ///   identity signs in through the link without the directory deciding,
-    ///   F4 P23W3-01), its `User`-type certificates revoked, and every session
+    ///   F4 P23W3-01), its `User`-type certificates revoked (those issued for
+    ///   it, `certificate.user_id`; for a certificate without that binding,
+    ///   the `metadata.user_id` / common-name convention, #533, the name match
+    ///   limited to certificates issued since the account was created and to
+    ///   names no other account holds, R101W1-01 — see
+    ///   [`CertificateRepository::revoke_user_certificates`]), and every session
     ///   and OAuth2 refresh token revoked. TOTP is kept: it is a second factor
     ///   *behind* the directory password.
     ///
@@ -614,8 +619,22 @@ impl<
                 .await
                 .map_err(|error| ("federation_links", error))?;
         }
+        // The account being linked already exists (linking marks it; it does
+        // not create one), so `created_at` is the local account's and every
+        // certificate issued to it is younger. The age bound and the
+        // ambiguity rule (R101W1-01) hold here as for deletion: a certificate
+        // older than the account, or under a name another account also
+        // folds to, is no evidence of being this account's, and revoking a
+        // namesake's is irreversible. An ambiguous one left active is the
+        // administrator's to revoke by id.
         let certificates = certificate_repo
-            .revoke_user_certificates(tenant_id, user.id, &user.username, &user.email)
+            .revoke_user_certificates(
+                tenant_id,
+                user.id,
+                &user.username,
+                &user.email,
+                user.created_at,
+            )
             .await
             .map_err(|error| ("user_certificates", error))?;
         self.revoke_all_sessions(tenant_id, user.id)

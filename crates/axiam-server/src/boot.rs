@@ -2711,6 +2711,8 @@ where
         Arc::new(group_repo.clone()),
         Arc::new(webauthn_cred_repo.clone()),
         Arc::new(password_history_repo.clone()),
+        // #533: an erased account's certificates are revoked by the purge.
+        Arc::new(cert_repo.clone()),
         Arc::new(export_job_repo.clone()),
         Arc::new(consent_repo.clone()),
         Arc::new(tenant_repo.clone()),

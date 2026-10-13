@@ -3,8 +3,8 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::certificate::{
-    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, RevokedCertificate,
-    StoreCertificate,
+    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, RevocationStamp,
+    RevokedCertificate, StoreCertificate, VaultForwardCandidate,
 };
 use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -15,7 +15,8 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
+    CountRow, classify_write_error, paginate, retry_hot_row, search_bind, search_filter,
+    take_first_or_not_found,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,8 @@ struct CertificateRow {
     not_after: DateTime<Utc>,
     status: String,
     metadata: serde_json::Value,
+    /// #533 (schema v98); NONE on every row issued before it.
+    user_id: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -52,8 +55,78 @@ struct CertificateRowWithId {
     not_after: DateTime<Utc>,
     status: String,
     metadata: serde_json::Value,
+    /// #533 (schema v98); NONE on every row issued before it.
+    user_id: Option<String>,
     created_at: DateTime<Utc>,
 }
+
+/// A pending Vault forward: the certificate and the sweep's bookkeeping on it.
+#[derive(Debug, SurrealValue)]
+struct VaultForwardRow {
+    record_id: String,
+    tenant_id: String,
+    issuer_ca_id: String,
+    subject: String,
+    public_cert_pem: String,
+    fingerprint: String,
+    cert_type: String,
+    key_algorithm: String,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+    status: String,
+    metadata: serde_json::Value,
+    user_id: Option<String>,
+    created_at: DateTime<Utc>,
+    vault_forward_attempts: Option<i64>,
+    vault_forward_last_error: Option<String>,
+    vault_next_attempt_at: Option<DateTime<Utc>>,
+}
+
+impl VaultForwardRow {
+    fn try_into_candidate(self) -> Result<VaultForwardCandidate, DbError> {
+        let attempts = self.vault_forward_attempts;
+        let last_error = self.vault_forward_last_error;
+        let next_attempt_at = self.vault_next_attempt_at;
+        let certificate = CertificateRowWithId {
+            record_id: self.record_id,
+            tenant_id: self.tenant_id,
+            issuer_ca_id: self.issuer_ca_id,
+            subject: self.subject,
+            public_cert_pem: self.public_cert_pem,
+            fingerprint: self.fingerprint,
+            cert_type: self.cert_type,
+            key_algorithm: self.key_algorithm,
+            not_before: self.not_before,
+            not_after: self.not_after,
+            status: self.status,
+            metadata: self.metadata,
+            user_id: self.user_id,
+            created_at: self.created_at,
+        }
+        .try_into_entry()?;
+        Ok(VaultForwardCandidate {
+            certificate,
+            // Rows from before v95 carry no count: none attempted, due now (D-6).
+            attempts: attempts.map_or(0, |n| u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
+            next_attempt_at,
+            last_error,
+        })
+    }
+}
+
+/// The longest error text a row keeps (#603): a status and a short message.
+/// The sweep sanitises before it writes; this bound holds whatever the caller
+/// sent.
+const MAX_FORWARD_ERROR_CHARS: usize = 256;
+
+/// The unforwarded revocations of active `vault_pki` CAs: the rows the sweep
+/// is about. One definition for the list, the due list and the count.
+const UNFORWARDED_WHERE: &str = "status = 'Revoked' \
+       AND vault_revoked_at = NONE \
+       AND not_after > time::now() \
+       AND issuer_ca_id IN (SELECT VALUE meta::id(id) FROM ca_certificate \
+                            WHERE key_custody = 'vault_pki' \
+                              AND status = 'Active')";
 
 #[derive(Debug, SurrealValue)]
 struct RevokedCertificateRow {
@@ -74,6 +147,24 @@ impl From<RevokedEntryRow> for RevokedCertificate {
     fn from(row: RevokedEntryRow) -> Self {
         Self {
             public_cert_pem: row.public_cert_pem,
+            fingerprint: row.fingerprint,
+            revoked_at: row.revoked_at,
+            not_before: row.not_before,
+        }
+    }
+}
+
+/// What decides whether a revocation list changed (#607): no PEM.
+#[derive(Debug, SurrealValue)]
+pub(crate) struct RevocationStampRow {
+    pub(crate) fingerprint: String,
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
+    pub(crate) not_before: DateTime<Utc>,
+}
+
+impl From<RevocationStampRow> for RevocationStamp {
+    fn from(row: RevocationStampRow) -> Self {
+        Self {
             fingerprint: row.fingerprint,
             revoked_at: row.revoked_at,
             not_before: row.not_before,
@@ -156,6 +247,12 @@ fn cert_type_str(t: &CertificateType) -> &'static str {
     }
 }
 
+/// The stored user binding (#533): NONE for a row without one.
+fn parse_user_id(s: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    s.map(|s| Uuid::parse_str(s).map_err(|e| DbError::Migration(format!("invalid user UUID: {e}"))))
+        .transpose()
+}
+
 // ---------------------------------------------------------------------------
 // Row → domain conversion
 // ---------------------------------------------------------------------------
@@ -179,6 +276,7 @@ impl CertificateRow {
             not_after: self.not_after,
             status: parse_status(&self.status)?,
             metadata: self.metadata,
+            user_id: parse_user_id(self.user_id.as_deref())?,
             created_at: self.created_at,
         })
     }
@@ -205,6 +303,7 @@ impl CertificateRowWithId {
             not_after: self.not_after,
             status: parse_status(&self.status)?,
             metadata: self.metadata,
+            user_id: parse_user_id(self.user_id.as_deref())?,
             created_at: self.created_at,
         })
     }
@@ -246,7 +345,8 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                  not_before = $not_before, \
                  not_after = $not_after, \
                  status = $status, \
-                 metadata = $metadata",
+                 metadata = $metadata, \
+                 user_id = $user_id",
             )
             .bind(("id", id_str))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -260,6 +360,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .bind(("not_after", input.not_after))
             .bind(("status", status_str(&CertificateStatus::Active)))
             .bind(("metadata", input.metadata))
+            .bind(("user_id", input.user_id.map(|id| id.to_string())))
             .await
             .map_err(DbError::from)?;
 
@@ -376,6 +477,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
     async fn list_revoked_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevokedCertificate>> {
         let result = self
             .db
@@ -384,10 +486,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                 "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM certificate \
                  WHERE issuer_ca_id = $issuer_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result
@@ -397,21 +500,46 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    async fn list_unforwarded_revocations(&self, limit: u32) -> AxiamResult<Vec<Certificate>> {
+    async fn list_revocation_stamps_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
+    ) -> AxiamResult<Vec<RevocationStamp>> {
+        // The same rows as `list_revoked_by_issuer`, without the PEMs (#607).
         let result = self
             .db
             .current()
             .query(
-                "SELECT meta::id(id) AS record_id, * FROM certificate \
-                 WHERE status = 'Revoked' \
-                   AND vault_revoked_at = NONE \
-                   AND not_after > time::now() \
-                   AND issuer_ca_id IN (SELECT VALUE meta::id(id) FROM ca_certificate \
-                                        WHERE key_custody = 'vault_pki' \
-                                          AND status = 'Active') \
-                 ORDER BY revoked_at \
-                 LIMIT $limit",
+                "SELECT fingerprint, revoked_at, not_before FROM certificate \
+                 WHERE issuer_ca_id = $issuer_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > $expiring_after \
+                 ORDER BY fingerprint",
             )
+            .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevocationStampRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_unforwarded_revocations(&self, limit: u32) -> AxiamResult<Vec<Certificate>> {
+        // A row never attempted has no `vault_next_attempt_at`, which sorts
+        // first; then the soonest due, then the oldest revocation.
+        let query = format!(
+            "SELECT meta::id(id) AS record_id, * FROM certificate \
+             WHERE {UNFORWARDED_WHERE} \
+             ORDER BY vault_next_attempt_at, revoked_at \
+             LIMIT $limit"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
             .bind(("limit", limit))
             .await
             .map_err(DbError::from)?;
@@ -422,6 +550,132 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         rows.into_iter()
             .map(|row| row.try_into_entry().map_err(Into::into))
             .collect()
+    }
+
+    async fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> AxiamResult<Vec<VaultForwardCandidate>> {
+        let query = format!(
+            "SELECT meta::id(id) AS record_id, * FROM certificate \
+             WHERE {UNFORWARDED_WHERE} \
+               AND (vault_next_attempt_at = NONE OR vault_next_attempt_at <= $now) \
+             ORDER BY vault_next_attempt_at, revoked_at \
+             LIMIT $limit"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("now", now))
+            .bind(("limit", limit))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<VaultForwardRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_candidate().map_err(Into::into))
+            .collect()
+    }
+
+    async fn claim_vault_forward(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        // The value read is the precondition of the write (the SCIM
+        // `claim_reconciliation` pattern): of two replicas that read the same
+        // row, one write matches and moves the date; the other either matches
+        // nothing or loses the optimistic write, retries, and then finds the
+        // winner's date. A forwarded row, or another tenant's, matches nothing.
+        let seen = if seen_next_attempt_at.is_some() {
+            "vault_next_attempt_at = $seen"
+        } else {
+            "vault_next_attempt_at = NONE"
+        };
+        let query = format!(
+            "UPDATE type::record('certificate', $id) SET vault_next_attempt_at = $lease \
+             WHERE tenant_id = $tenant_id \
+               AND status = 'Revoked' \
+               AND vault_revoked_at = NONE \
+               AND {seen} \
+             RETURN VALUE meta::id(id)"
+        );
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.clone())
+                .bind(("id", id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("seen", seen_next_attempt_at))
+                .bind(("lease", lease_until))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "certificate"))?;
+            let claimed: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!claimed.is_empty())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn record_vault_forward_failure(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> AxiamResult<()> {
+        let error: String = error.chars().take(MAX_FORWARD_ERROR_CHARS).collect();
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('certificate', $id) SET \
+                   vault_forward_attempts = $attempts, \
+                   vault_forward_last_error = $error, \
+                   vault_next_attempt_at = $next \
+                 WHERE tenant_id = $tenant_id AND vault_revoked_at = NONE",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("attempts", i64::from(attempts)))
+            .bind(("error", error))
+            .bind(("next", next_attempt_at))
+            .await
+            .map_err(DbError::from)?;
+        result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn count_vault_forwards_failing(&self, min_attempts: u32) -> AxiamResult<u64> {
+        let query = format!(
+            "SELECT count() AS total FROM certificate \
+             WHERE {UNFORWARDED_WHERE} AND vault_forward_attempts >= $min \
+             GROUP ALL"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("min", i64::from(min_attempts)))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let row: Option<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(row.map_or(0, |r| r.total))
     }
 
     async fn revoke_all_for_tenant(&self, tenant_id: Uuid) -> AxiamResult<Vec<Certificate>> {
@@ -484,11 +738,22 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         user_id: Uuid,
         username: &str,
         email: &str,
+        user_created_at: DateTime<Utc>,
     ) -> AxiamResult<u64> {
-        // See the trait for why "belongs to" is a convention here. A
-        // certificate matches on `metadata.user_id`, or on its subject common
-        // name equalling the account's username or email, ignoring case — and
-        // only `User`-type certificates that are still active.
+        // See the trait: the binding first (#533), and the convention —
+        // `metadata.user_id`, or the subject common name equalling the
+        // account's username or email, ignoring case — only for a row with no
+        // binding, so another account's certificate is never matched by name.
+        // Only `User`-type certificates that are still active.
+        //
+        // R101W1-01: the name match is further limited to rows created at or
+        // after the account, and to names no other account of the tenant
+        // holds. `$taken` is the collision rule of
+        // `SurrealUserRepository::identity_collision` — both columns, folded,
+        // every status, the account itself left out — computed in the same
+        // query as the revocation, so no caller can skip it. The binding and
+        // the `metadata.user_id` match (a random id nobody can be named
+        // after) are not bounded.
         let names: Vec<String> = [username, email]
             .into_iter()
             .map(|name| name.trim().to_lowercase())
@@ -498,23 +763,36 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .db
             .current()
             .query(
-                "SELECT meta::id(id) AS record_id FROM \
+                "LET $taken = array::flatten( \
+                     SELECT VALUE [string::lowercase(username), string::lowercase(email)] \
+                     FROM user \
+                     WHERE tenant_id = $tenant_id \
+                       AND meta::id(id) != $user_id \
+                       AND (string::lowercase(username) IN $names \
+                            OR string::lowercase(email) IN $names)); \
+                 LET $unambiguous = array::complement($names, $taken); \
+                 SELECT meta::id(id) AS record_id FROM \
                  (UPDATE certificate SET status = 'Revoked', revoked_at = time::now() \
                   WHERE tenant_id = $tenant_id \
                     AND cert_type = 'User' \
                     AND status = 'Active' \
-                    AND (metadata.user_id = $user_id \
-                         OR string::lowercase(subject) IN $names))",
+                    AND (user_id = $user_id \
+                         OR (user_id = NONE \
+                             AND (metadata.user_id = $user_id \
+                                  OR (created_at >= $user_created_at \
+                                      AND string::lowercase(subject) IN $unambiguous)))))",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .bind(("names", names))
+            .bind(("user_created_at", user_created_at))
             .await
             .map_err(DbError::from)?;
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<RevokedCertificateRow> = result.take(0).map_err(DbError::from)?;
+        // LET, LET, SELECT.
+        let rows: Vec<RevokedCertificateRow> = result.take(2).map_err(DbError::from)?;
         Ok(rows.len() as u64)
     }
 

@@ -15,7 +15,8 @@ use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{
-        CaCertificate, Certificate, RevokedCertificate, StoreCaCertificate, StoreCertificate,
+        CaCertificate, CaVaultForwardCandidate, Certificate, RevocationStamp, RevokedCertificate,
+        StoreCaCertificate, StoreCertificate, VaultForwardCandidate,
     },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
@@ -2836,15 +2837,30 @@ pub trait CaCertificateRepository: Send + Sync {
         &self,
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
 
-    /// The revoked, not yet expired CAs `parent_ca_id` signed — the CA half of
-    /// that CA's certificate revocation list (#565, T-102).
+    /// The revoked CAs `parent_ca_id` signed whose `notAfter` is later than
+    /// `expiring_after` — the CA half of that CA's certificate revocation list
+    /// (#565, T-102).
+    ///
+    /// The caller names the cut-off rather than the datastore's clock (#608):
+    /// a list keeps an expired entry until a refresh epoch boundary, so that
+    /// two replicas list the same entries and an entry leaves only when the
+    /// list's `thisUpdate` moves forward (see `axiam_pki::crl`).
     ///
     /// Not organization-scoped: the parent is already resolved inside its
     /// organization by the caller, and a child always shares it.
     fn list_revoked_children(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// The same set as [`Self::list_revoked_children`], without the
+    /// certificates: what decides whether the parent's list changed (#607).
+    fn list_revoked_children_stamps(
+        &self,
+        parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
 
     /// Every CA record, in any organization and of any status, whose
     /// certificate has one of these SHA-256 fingerprints (R1W1-02).
@@ -2858,6 +2874,64 @@ pub trait CaCertificateRepository: Send + Sync {
         &self,
         fingerprints: &[String],
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
+
+    /// Revoked, not yet expired subordinate CAs whose revocation the parent's
+    /// list in Vault does not have yet, whose turn has come at `now` (never
+    /// attempted, or `vault_next_attempt_at` not after it), in the order the
+    /// sweep takes them, at most `limit` (#612) — the CA rows'
+    /// counterpart of [`CertificateRepository::list_due_vault_forwards`].
+    ///
+    /// A row qualifies when its **parent** is an active `vault_pki` CA (Vault
+    /// signed it, so Vault's list for the parent must name it) and the row
+    /// itself was signed there: custody `vault_pki` (generated through the
+    /// parent) or `external` (a caller's CSR the parent signed). A `database`
+    /// or `vault` CA under a `vault_pki` parent was signed in AXIAM before the
+    /// parent's key moved into Vault, which therefore never recorded it.
+    /// Across organizations: the sweep is deployment-wide.
+    fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<CaVaultForwardCandidate>>> + Send;
+
+    /// Claim a pending CA revocation for one attempt (#612), on the terms of
+    /// [`CertificateRepository::claim_vault_forward`]: `true` for the one
+    /// caller whose conditional write of `vault_next_attempt_at` matched.
+    fn claim_vault_forward(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record that Vault refused a claimed CA row (#612), on the terms of
+    /// [`CertificateRepository::record_vault_forward_failure`].
+    fn record_vault_forward_failure(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many pending CA revocations have failed at least `min_attempts`
+    /// times (#612): counted with the leaves' in `vault_revocation_failing`.
+    fn count_vault_forwards_failing(
+        &self,
+        min_attempts: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Record that Vault has accepted a revoked CA's revocation onto its
+    /// parent's list (`vault_revoked_at`, schema v96; #612). The first
+    /// forwarding's time stands. `NotFound` for a CA that is not revoked or
+    /// not the organization's.
+    fn mark_revocation_forwarded(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {
@@ -2884,31 +2958,97 @@ pub trait CertificateRepository: Send + Sync {
     /// its revocation list says.
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// The revoked, not yet expired leaves `issuer_ca_id` signed, in every
-    /// tenant — the leaf half of that CA's certificate revocation list (#565,
-    /// T-102).
+    /// The revoked leaves `issuer_ca_id` signed whose `notAfter` is later than
+    /// `expiring_after`, in every tenant — the leaf half of that CA's
+    /// certificate revocation list (#565, T-102). The caller names the cut-off
+    /// (#608), as for [`CaCertificateRepository::list_revoked_children`].
     ///
     /// Across tenants on purpose: a CRL belongs to its issuer, not to a tenant,
     /// and an organization CA's leaves may be recorded under more than one.
     fn list_revoked_by_issuer(
         &self,
         issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
+    /// The same set as [`Self::list_revoked_by_issuer`], without the
+    /// certificates: what decides whether the issuer's list changed (#607).
+    fn list_revocation_stamps_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Vec<RevocationStamp>>> + Send;
+
     /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
-    /// revocation Vault has not yet been told of, oldest revocation first, at
-    /// most `limit` (T-470).
+    /// revocation Vault has not yet been told of, in the order the sweep takes
+    /// them (a row never attempted first, then by `vault_next_attempt_at`, then
+    /// oldest revocation), at most `limit` (T-470) — *whether or not* a row's
+    /// backoff has run out: this is "what is pending", and
+    /// [`Self::list_due_vault_forwards`] is "what is due".
     ///
     /// Vault signs such a CA's list, not AXIAM, so a revocation reaches it only
-    /// by being forwarded; this is what the cleanup sweep reads to forward the
-    /// ones a revoke request could not, and the revocations that never went
-    /// through one (a directory deprovisioning revokes in bulk). Across tenants:
-    /// the sweep is deployment-wide. A revoked CA's leaves are left out, since
-    /// revoking the CA removed its issuer from Vault.
+    /// by being forwarded; the cleanup sweep forwards the ones a revoke request
+    /// could not, and the revocations that never went through one (a directory
+    /// deprovisioning revokes in bulk). Across tenants: the sweep is
+    /// deployment-wide. A revoked CA's leaves are left out, since revoking the
+    /// CA removed its issuer from Vault.
     fn list_unforwarded_revocations(
         &self,
         limit: u32,
     ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// The rows [`Self::list_unforwarded_revocations`] names whose turn has
+    /// come at `now` — never attempted, or `vault_next_attempt_at` not after
+    /// `now` — in the order the sweep takes them, at most `limit` (#603).
+    ///
+    /// A row Vault refused is out of this list until its backoff runs out, so
+    /// a hundred permanently refused rows no longer hold every later one back,
+    /// and a row another replica claimed is out of it for the length of the
+    /// lease.
+    fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<VaultForwardCandidate>>> + Send;
+
+    /// Claim a pending revocation for one attempt (#603): a conditional write
+    /// that sets `vault_next_attempt_at` to `lease_until` **only if** it still
+    /// holds `seen_next_attempt_at` (the value [`Self::list_due_vault_forwards`]
+    /// read, `None` for a row never attempted) and the row is still unforwarded.
+    /// `true` for the one caller whose write matched; of two concurrent claims
+    /// of one row exactly one gets `true`.
+    ///
+    /// A claimant that dies leaves the lease to run out, after which the row is
+    /// due again; nothing is counted against the row for that.
+    fn claim_vault_forward(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record that Vault refused a claimed row: its failed-attempt count
+    /// (`attempts`, including this one), the sanitised `error` (stored
+    /// truncated — a status and a short message, never a token or a response
+    /// body) and when it is next due (#603). A row already forwarded is left
+    /// alone.
+    fn record_vault_forward_failure(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many unforwarded revocations of an active `vault_pki` CA have
+    /// failed at least `min_attempts` times (#603): the rows the sweep has all
+    /// but given up on, which `/health/jobs` reports as its own job.
+    fn count_vault_forwards_failing(
+        &self,
+        min_attempts: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Revoke every certificate of `tenant_id` that is not revoked and not yet
     /// expired, recording when, and return the certificates this revoked
@@ -2935,18 +3075,42 @@ pub trait CertificateRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Revoke every **active `User`-type certificate** that belongs to
-    /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
+    /// `user_id`, recording when, and return how many were revoked (G-3,
+    /// T23.3.3, D-28; #533).
     ///
-    /// **The model has no user-to-certificate relation**: a certificate
-    /// authenticates as the service account it is bound to, and nothing
-    /// records that a `User` certificate was issued *for* an account. "Belongs
-    /// to" is therefore the only convention that exists — a certificate's
-    /// `metadata.user_id` naming the account (the example
-    /// [`Certificate::metadata`] has always given), or its subject common name
-    /// equal, ignoring case, to the account's `username` or `email`. Both are
-    /// matched, and only among `User`-type, still-active certificates of the
-    /// tenant; over-matching revokes a certificate, which is the safe side of
-    /// the error.
+    /// "Belongs to" is, first, the binding: a certificate whose
+    /// [`Certificate::user_id`] is `user_id` (set at issuance since schema
+    /// v98). A row whose `user_id` is NONE — every certificate issued before
+    /// v98, and a `User` certificate issued without one — falls back to the
+    /// convention that was all there was before: its `metadata.user_id` naming
+    /// the account, or its subject common name equal, ignoring case, to the
+    /// account's `username` or `email`. A row bound to **another** account is
+    /// never matched by the convention, whatever its common name says. Only
+    /// `User`-type, still-active certificates of the tenant are considered.
+    ///
+    /// The common-name match is bounded twice (R101W1-01), because a folded
+    /// name is evidence only when nobody else could own it — deletion and the
+    /// self-service erasure revoke irreversibly, and usernames and emails are
+    /// unique only case-sensitively:
+    ///
+    /// * only a row **created at or after** `user_created_at` (the account's
+    ///   own `created_at`) matches by name: a certificate issued before the
+    ///   account existed was not issued for it;
+    /// * a name that **another account** of the tenant also holds, ignoring
+    ///   case, in either column and in any status (the rule of
+    ///   [`UserRepository::find_identity_collision`]), is dropped: an
+    ///   ambiguous name matches nothing.
+    ///
+    /// The binding and the `metadata.user_id` match (a random id the issuer
+    /// wrote, which nobody can be named after) are not bounded.
+    ///
+    /// What linking an account to its directory entry, an administrator's
+    /// deletion and the Art. 17 erasure call. Each revoked row carries
+    /// `revoked_at`, so it is on its issuer's revocation list, and
+    /// `vault_revoked_at` NONE, so the cleanup job's `vault_revocation` sweep
+    /// forwards it when its issuer's key is held by `vault_pki` (T-470). The
+    /// caller passes the account's names as they are **before** any erasure
+    /// overwrites them, and its `created_at`.
     ///
     /// Required, with no default, for the reason
     /// [`WebauthnCredentialRepository::delete_by_user`] gives: a default of
@@ -2957,6 +3121,7 @@ pub trait CertificateRepository: Send + Sync {
         user_id: Uuid,
         username: &str,
         email: &str,
+        user_created_at: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,

@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, classify_write_error, paginate, retry_hot_row, take_first_or_not_found,
+};
 
 /// D-55: bumped whenever this process creates or deletes a tenant or an
 /// organization, **after** the write commits, so a tenant count cached at an
@@ -182,6 +184,89 @@ impl<C: Connection> SurrealTenantRepository<C> {
             .collect())
     }
 
+    /// Claim a tombstoned tenant's purge for this replica (#610): `true` when
+    /// this call won it, `false` when the tenant is not tombstoned (live, or
+    /// already purged) or another replica's claim, stamped after
+    /// `now - lease`, still holds.
+    ///
+    /// The cleanup job runs on every replica, so every replica's
+    /// `tenant_purge` sweep sees the same tombstoned tenant. The lease is the
+    /// precondition of the write (the SCIM `claim_reconciliation` pattern):
+    /// of two concurrent claimants, one write matches and stamps
+    /// `purge_claimed_at`; the other either matches nothing or loses the
+    /// optimistic write, retries, and then finds the winner's stamp. A claim
+    /// older than the lease is taken over, so a replica that claimed and died
+    /// holds the tenant back for one lease at most. A purge still running when
+    /// its lease runs out may then overlap another replica's; every step of
+    /// it is idempotent and only one of them removes the tenant row (see
+    /// [`Self::purge_tombstoned`]), so that costs work, not correctness.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn claim_purge(
+        &self,
+        id: Uuid,
+        now: DateTime<Utc>,
+        lease: chrono::TimeDelta,
+    ) -> AxiamResult<bool> {
+        let cutoff = now - lease;
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "UPDATE type::record('tenant', $id) SET purge_claimed_at = $now \
+                     WHERE deleted_at != NONE \
+                       AND (purge_claimed_at = NONE OR purge_claimed_at <= $cutoff) \
+                     RETURN VALUE meta::id(id)",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("now", now))
+                .bind(("cutoff", cutoff))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "tenant"))?;
+            let claimed: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!claimed.is_empty())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Give up a claim [`Self::claim_purge`] stamped at `claimed_at`, so the
+    /// next sweep — this replica's or another's — retries a purge that failed
+    /// without waiting out the lease. A claim another replica has since taken
+    /// over carries a different stamp and is left alone.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn release_purge_claim(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        retry_hot_row(|| async {
+            self.db
+                .current()
+                .query(
+                    "UPDATE type::record('tenant', $id) SET purge_claimed_at = NONE \
+                     WHERE purge_claimed_at = $claimed_at",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("claimed_at", claimed_at))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "tenant"))?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
     /// Remove every tenant-scoped row of a **tombstoned** tenant, its audit
     /// trail included, then the tenant row.
     ///
@@ -190,10 +275,18 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// tenant is refused before anything is touched — the purge never decides
     /// on its own that a tenant is gone.
     ///
+    /// `Ok` means **this call** removed the tenant row (#610): when two purges
+    /// of one tenant overlap — a claim whose lease ran out mid-purge, taken
+    /// over by another replica — both run the same idempotent steps, but only
+    /// one of their final `DELETE`s finds the row, and the other answers
+    /// `NotFound`, as for a tenant purged before the call. The caller records
+    /// the purge on `Ok` only, so it is recorded once.
+    ///
     /// # Errors
     ///
     /// `NotFound` for a tenant that is not tombstoned (live, or already
-    /// purged); a datastore failure otherwise.
+    /// purged — before this call or while it ran); a datastore failure
+    /// otherwise.
     pub async fn purge_tombstoned(&self, id: Uuid) -> AxiamResult<()> {
         if !self.list_tombstoned().await?.contains(&id) {
             return Err(DbError::NotFound {
@@ -205,15 +298,28 @@ impl<C: Connection> SurrealTenantRepository<C> {
         super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Tombstoned)
             .await?;
         // Last, and only while still tombstoned: the guard is in the statement
-        // too, so nothing here can remove a live tenant's row.
-        self.db
+        // too, so nothing here can remove a live tenant's row. `RETURN BEFORE`
+        // says whether this call removed it, or an overlapping purge did.
+        let mut result = self
+            .db
             .current()
-            .query("DELETE type::record('tenant', $id) WHERE deleted_at != NONE")
+            .query(
+                "SELECT count() AS total FROM (DELETE type::record('tenant', $id) \
+                 WHERE deleted_at != NONE RETURN BEFORE) GROUP ALL",
+            )
             .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?
             .check()
             .map_err(DbError::from)?;
+        let removed: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        if removed.first().is_none_or(|r| r.total == 0) {
+            return Err(DbError::NotFound {
+                entity: "tombstoned tenant".into(),
+                id: id.to_string(),
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -494,8 +600,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         //   `vault_pki` leaf to Vault and release a CA's key; this pass catches
         //   one issued while it ran, atomically with the stamp. A deleted
         //   tenant's certificates are disowned, so they go on their issuers'
-        //   revocation lists — and the purge keeps each revoked, unexpired row
-        //   until it expires, so they stay there (`tenant_purge`).
+        //   revocation lists — and the purge keeps each revoked row until
+        //   eight days after it expires, so they stay there (`tenant_purge`).
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from

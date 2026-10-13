@@ -196,7 +196,11 @@ impl VaultCaKeyStore {
     /// operator asked for is how a misconfiguration becomes a connection to
     /// something that is not their Vault.
     pub fn new(config: VaultCaKeyConfig) -> AxiamResult<Self> {
-        let mut builder = Client::builder().timeout(VAULT_TIMEOUT);
+        // Never follow a redirect: every request carries `X-Vault-Token`, which
+        // reqwest does not strip on a cross-host hop. T-476.
+        let mut builder = Client::builder()
+            .timeout(VAULT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none());
 
         if let Some(ref path) = config.ca_cert_path {
             let pem = std::fs::read(path).map_err(|e| {
@@ -299,6 +303,9 @@ impl VaultCaKeyStore {
         section: &str,
         capabilities: &[&str],
     ) -> String {
+        if let Some(refusal) = crate::vault_pki::redirect_refusal(status, url) {
+            return refusal;
+        }
         let base = format!("vault: {url} answered {status} on {operation}");
         if status != reqwest::StatusCode::FORBIDDEN {
             return base;

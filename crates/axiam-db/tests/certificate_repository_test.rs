@@ -2,19 +2,20 @@
 //! existing axiam-db-local test file covers this repository at all.
 //! Uses the in-memory SurrealDB engine — no external services required.
 
+use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::models::certificate::{
-    CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    CertificateStatus, CertificateType, KeyAlgorithm, StoreCaCertificate, StoreCertificate,
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
-    CertificateRepository, OrganizationRepository, Pagination, ServiceAccountRepository,
-    TenantRepository,
+    CaCertificateRepository, CertificateRepository, OrganizationRepository, Pagination,
+    ServiceAccountRepository, TenantRepository,
 };
 use axiam_db::repository::{
-    SurrealCertificateRepository, SurrealOrganizationRepository, SurrealServiceAccountRepository,
-    SurrealTenantRepository,
+    SurrealCaCertificateRepository, SurrealCertificateRepository, SurrealOrganizationRepository,
+    SurrealServiceAccountRepository, SurrealTenantRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -61,6 +62,7 @@ fn sample_cert(tenant_id: Uuid, issuer_ca_id: Uuid, fingerprint: &str) -> StoreC
         not_before: Utc::now() - Duration::minutes(1),
         not_after: Utc::now() + Duration::days(365),
         metadata: serde_json::json!({}),
+        user_id: None,
     }
 }
 
@@ -335,4 +337,351 @@ async fn the_inventory_stores_every_type_but_the_saml_signing_leaf() {
         repo.create(saml).await.is_err(),
         "the certificate inventory must refuse the SAML signing leaf"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The Vault revocation sweep's bookkeeping (T-470, #603)
+// ---------------------------------------------------------------------------
+
+/// An active CA whose key Vault's PKI engine holds, and `n` leaves of it,
+/// revoked in AXIAM and not forwarded to Vault.
+async fn revoked_vault_leaves(
+    db: &Db,
+    org: Uuid,
+    tenant_id: Uuid,
+    n: usize,
+) -> (
+    SurrealCertificateRepository<surrealdb::engine::local::Db>,
+    Vec<Uuid>,
+) {
+    let ca_id = Uuid::new_v4();
+    SurrealCaCertificateRepository::new(db.clone())
+        .create(StoreCaCertificate {
+            id: ca_id,
+            organization_id: org,
+            tenant_id: None,
+            parent_ca_id: None,
+            subject: "CN=Vault CA".into(),
+            public_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----"
+                .into(),
+            chain_pem: None,
+            fingerprint: "sha256:vault-ca".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - Duration::minutes(1),
+            not_after: Utc::now() + Duration::days(3650),
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::VaultPki,
+            key_locator: Some("{}".into()),
+        })
+        .await
+        .unwrap();
+    let repo = SurrealCertificateRepository::new(db.clone());
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let cert = repo
+            .create(sample_cert(tenant_id, ca_id, &format!("fp-vault-{i}")))
+            .await
+            .unwrap();
+        repo.revoke(tenant_id, cert.id).await.unwrap();
+        ids.push(cert.id);
+        // `revoked_at` orders rows of equal due date; keep them apart.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    (repo, ids)
+}
+
+/// A row never attempted carries none of the v95 fields and is due at once with
+/// no attempts (D-6: no backfill); a refused row leaves the due list until its
+/// backoff runs out and comes back with what was recorded.
+#[tokio::test]
+async fn a_refused_revocation_leaves_the_due_list_until_its_backoff_runs_out() {
+    let (db, org, tenant_id) = setup().await;
+    let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 3).await;
+    let now = Utc::now();
+
+    let due = repo.list_due_vault_forwards(now, 10).await.unwrap();
+    assert_eq!(
+        due.iter().map(|c| c.certificate.id).collect::<Vec<_>>(),
+        ids,
+        "never attempted: all due, oldest revocation first"
+    );
+    assert!(
+        due.iter()
+            .all(|c| c.attempts == 0 && c.next_attempt_at.is_none() && c.last_error.is_none())
+    );
+
+    // The oldest is refused: its next attempt is an hour away.
+    repo.record_vault_forward_failure(
+        tenant_id,
+        ids[0],
+        1,
+        now + Duration::hours(1),
+        "vault pki: answered 403 Forbidden: permission denied",
+    )
+    .await
+    .unwrap();
+    let due = repo.list_due_vault_forwards(now, 10).await.unwrap();
+    assert_eq!(
+        due.iter().map(|c| c.certificate.id).collect::<Vec<_>>(),
+        ids[1..],
+        "a refused row does not hold the later ones back"
+    );
+    // The unfiltered read still names it, last.
+    let pending = repo.list_unforwarded_revocations(10).await.unwrap();
+    assert_eq!(
+        pending.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [ids[1], ids[2], ids[0]]
+    );
+
+    // An hour on it is due again, with what the failure recorded.
+    let later = repo
+        .list_due_vault_forwards(now + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    let first = later.iter().find(|c| c.certificate.id == ids[0]).unwrap();
+    assert_eq!(first.attempts, 1);
+    assert_eq!(
+        first.last_error.as_deref(),
+        Some("vault pki: answered 403 Forbidden: permission denied")
+    );
+    assert!(first.next_attempt_at.is_some());
+    assert_eq!(later[0].certificate.id, ids[1], "never attempted first");
+}
+
+/// Of any number of replicas that read one row, exactly one claims it; a claim
+/// made on a stale read, or on a forwarded row, wins nothing.
+#[tokio::test]
+async fn of_concurrent_claims_of_one_row_exactly_one_wins() {
+    let (db, org, tenant_id) = setup().await;
+    let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 1).await;
+    let id = ids[0];
+    let lease = Utc::now() + Duration::minutes(2);
+
+    // Two replicas, then eight, each holding the read `next_attempt_at = NONE`.
+    for round in 0..2 {
+        let claimants = if round == 0 { 2 } else { 8 };
+        let mut tasks = Vec::new();
+        for _ in 0..claimants {
+            let repo = repo.clone();
+            tasks.push(tokio::spawn(async move {
+                repo.claim_vault_forward(tenant_id, id, None, lease)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut won = 0;
+        for task in tasks {
+            won += usize::from(task.await.unwrap());
+        }
+        assert_eq!(won, 1, "round {round}: exactly one claim wins");
+
+        // Release the lease for the next round, as a failure would.
+        repo.record_vault_forward_failure(tenant_id, id, round + 1, Utc::now(), "again")
+            .await
+            .unwrap();
+        // The row now holds a date; the stale read (`NONE`) no longer matches.
+        assert!(
+            !repo
+                .claim_vault_forward(tenant_id, id, None, lease)
+                .await
+                .unwrap(),
+            "a claim on a stale read wins nothing"
+        );
+        // Reset to "never attempted" for the next round's claimants.
+        db.query("UPDATE type::record('certificate', $id) SET vault_next_attempt_at = NONE")
+            .bind(("id", id.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    // The claim moved the date: the row is not due while the lease holds.
+    assert!(
+        repo.claim_vault_forward(tenant_id, id, None, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.list_due_vault_forwards(Utc::now(), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a claimed row is not due for another replica"
+    );
+    // Claiming on the date the first claim wrote works once, then not again.
+    let next = lease + Duration::minutes(1);
+    assert!(
+        repo.claim_vault_forward(tenant_id, id, Some(lease), next)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .claim_vault_forward(tenant_id, id, Some(lease), next)
+            .await
+            .unwrap()
+    );
+
+    // A forwarded row cannot be claimed, and a failure does not touch it.
+    repo.mark_revocation_forwarded(tenant_id, id).await.unwrap();
+    assert!(
+        !repo
+            .claim_vault_forward(tenant_id, id, Some(next), lease)
+            .await
+            .unwrap()
+    );
+    repo.record_vault_forward_failure(tenant_id, id, 9, Utc::now(), "late")
+        .await
+        .unwrap();
+    assert_eq!(repo.count_vault_forwards_failing(1).await.unwrap(), 0);
+}
+
+/// Another tenant cannot claim, or write a failure on, this tenant's row.
+#[tokio::test]
+async fn the_claim_and_the_failure_stay_inside_the_tenant() {
+    let (db, org, tenant_id) = setup().await;
+    let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 1).await;
+    let other = Uuid::new_v4();
+    assert!(
+        !repo
+            .claim_vault_forward(other, ids[0], None, Utc::now() + Duration::minutes(2))
+            .await
+            .unwrap()
+    );
+    repo.record_vault_forward_failure(other, ids[0], 5, Utc::now(), "not yours")
+        .await
+        .unwrap();
+    let due = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(due[0].attempts, 0);
+}
+
+/// The reason a row keeps is bounded whatever the caller sent, and the count of
+/// failing rows follows the attempts recorded.
+#[tokio::test]
+async fn the_stored_reason_is_bounded_and_failing_rows_are_counted() {
+    let (db, org, tenant_id) = setup().await;
+    let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 3).await;
+    let soon = Utc::now() + Duration::hours(1);
+
+    repo.record_vault_forward_failure(tenant_id, ids[0], 12, soon, &"x".repeat(5_000))
+        .await
+        .unwrap();
+    repo.record_vault_forward_failure(tenant_id, ids[1], 11, soon, "fewer")
+        .await
+        .unwrap();
+    repo.record_vault_forward_failure(tenant_id, ids[2], 30, soon, "many")
+        .await
+        .unwrap();
+
+    assert_eq!(repo.count_vault_forwards_failing(12).await.unwrap(), 2);
+    assert_eq!(repo.count_vault_forwards_failing(11).await.unwrap(), 3);
+    assert_eq!(repo.count_vault_forwards_failing(31).await.unwrap(), 0);
+
+    let due = repo
+        .list_due_vault_forwards(soon + Duration::hours(1), 10)
+        .await
+        .unwrap();
+    let long = due.iter().find(|c| c.certificate.id == ids[0]).unwrap();
+    assert_eq!(long.last_error.as_ref().unwrap().chars().count(), 256);
+    assert_eq!(long.attempts, 12);
+
+    // A forwarded row drops out of the count.
+    repo.mark_revocation_forwarded(tenant_id, ids[0])
+        .await
+        .unwrap();
+    assert_eq!(repo.count_vault_forwards_failing(12).await.unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The user binding (#533, schema v98)
+// ---------------------------------------------------------------------------
+
+/// `user_id` is stored and every read returns it; a row without one reads
+/// `None`. A user's certificates revoked through `revoke_user_certificates`
+/// are dated, so on their issuer's list, and — under a `vault_pki` CA — due to
+/// the Vault sweep (T-470): the bulk path sets exactly what the sweep reads.
+#[tokio::test]
+async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_sweep() {
+    let (db, org, tenant_id) = setup().await;
+    let vault_ca = Uuid::new_v4();
+    SurrealCaCertificateRepository::new(db.clone())
+        .create(StoreCaCertificate {
+            id: vault_ca,
+            organization_id: org,
+            tenant_id: None,
+            parent_ca_id: None,
+            subject: "CN=Vault CA".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            chain_pem: None,
+            fingerprint: "sha256:vault-ca-533".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - Duration::minutes(1),
+            not_after: Utc::now() + Duration::days(3650),
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::VaultPki,
+            key_locator: Some("{}".into()),
+        })
+        .await
+        .unwrap();
+    let repo = SurrealCertificateRepository::new(db.clone());
+    let user = Uuid::new_v4();
+
+    let bound = repo
+        .create(StoreCertificate {
+            user_id: Some(user),
+            ..sample_cert(tenant_id, vault_ca, "fp-bound")
+        })
+        .await
+        .unwrap();
+    let unbound = repo
+        .create(sample_cert(tenant_id, vault_ca, "fp-unbound"))
+        .await
+        .unwrap();
+    assert_eq!(bound.user_id, Some(user));
+    assert_eq!(unbound.user_id, None);
+    assert_eq!(
+        repo.get_by_id(tenant_id, bound.id).await.unwrap().user_id,
+        Some(user)
+    );
+    assert_eq!(
+        repo.get_by_fingerprint(tenant_id, "fp-bound")
+            .await
+            .unwrap()
+            .user_id,
+        Some(user)
+    );
+    let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    for cert in &page.items {
+        let expected = if cert.id == bound.id {
+            Some(user)
+        } else {
+            None
+        };
+        assert_eq!(cert.user_id, expected, "{}", cert.fingerprint);
+    }
+
+    // The sample's CN matches no name passed here: only the binding matches.
+    let revoked = repo
+        .revoke_user_certificates(
+            tenant_id,
+            user,
+            "nobody",
+            "nobody@example.com",
+            Utc::now() - Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked, 1);
+
+    let due = repo.list_due_vault_forwards(Utc::now(), 100).await.unwrap();
+    assert_eq!(due.len(), 1, "the revoked leaf is the sweep's to forward");
+    assert_eq!(due[0].certificate.id, bound.id);
+    assert_eq!(due[0].certificate.user_id, Some(user));
+    let listed = repo
+        .list_revoked_by_issuer(vault_ca, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].revoked_at.is_some());
 }

@@ -143,6 +143,7 @@ impl Fixture {
                     validity_days: 30,
                     metadata: None,
                     subject_alt_names: vec![],
+                    user_id: None,
                 },
                 None,
                 &[],
@@ -285,8 +286,10 @@ async fn next_update_is_honoured() {
     assert_eq!(next_update - this_update, 3_600);
     assert_eq!(crl.this_update.timestamp(), this_update);
     assert_eq!(crl.next_update.timestamp(), next_update);
-    assert!(crl.max_age_secs(Utc::now()) <= 3_600);
-    assert!(crl.max_age_secs(Utc::now()) > 3_500);
+    // #608: a cache keeps it until the next scheduled re-sign — at most half
+    // the interval — and never until nextUpdate.
+    assert!(crl.max_age_secs(Utc::now()) <= 1_800);
+    assert_eq!(crl.max_age_secs(crl.refresh_at), 0);
     assert_eq!(crl.max_age_secs(crl.next_update + Duration::seconds(5)), 0);
 
     // A CA with a day left is not listed as current for a week.
@@ -400,6 +403,26 @@ async fn a_ca_that_cannot_sign_a_list_publishes_none() {
     ));
 }
 
+/// The distribution point written into a certificate is the parsed form of the
+/// configured URL, not the operator's text: a tab or newline the parser removes,
+/// an upper-case host and a trailing slash do not reach the certificate.
+#[tokio::test]
+async fn the_issued_distribution_point_is_the_normalised_url() {
+    let mut f = Fixture::new().await;
+    let messy = CrlDistribution::new(" HTTPS://ID.Example.TEST/pk\ti/\n").unwrap();
+    f.cas = f.cas.with_crl_distribution(Some(messy.clone()));
+    f.certs = f.certs.with_crl_distribution(Some(messy));
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let leaf = f.leaf(root.certificate.id, "device-normalised").await;
+    assert_eq!(
+        distribution_uris(&leaf.public_cert_pem),
+        vec![format!(
+            "https://id.example.test/pki/pki/v1/{}/ca/{}/crl",
+            f.org, root.certificate.id
+        )]
+    );
+}
+
 /// Every certificate AXIAM signs in-process from now on names its issuer's
 /// list: a generated leaf, a CSR-signed leaf and a subordinate CA.
 #[tokio::test]
@@ -435,6 +458,7 @@ async fn a_newly_issued_certificate_carries_the_crl_distribution_point() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -520,7 +544,14 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
         "the live leaf and the one under the tenant CA"
     );
     assert_eq!(revoked.vault_pending, 0);
-    assert_eq!(f.cas.revoke_tenant_cas(f.org, doomed).await.unwrap(), 1);
+    assert_eq!(
+        f.cas
+            .revoke_tenant_cas(f.org, doomed)
+            .await
+            .unwrap()
+            .revoked,
+        1
+    );
     // A leaf issued while the deletion ran: the tombstone transaction revokes it.
     let raced = f.leaf(root.certificate.id, "raced").await;
     tenants.delete(doomed).await.unwrap();
@@ -594,8 +625,11 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
         .unwrap();
     assert_eq!(row.status, CertificateStatus::Active);
 
-    // Kept rows are not orphans until they expire; then the orphan purge
-    // removes them, and only them.
+    // Kept rows are not orphans until eight days after they expire (#608): an
+    // entry that has just expired is still on the list — RFC 5280 §3.3 keeps
+    // it until a list issued after its expiry names it — and the purge must
+    // not take it off mid-epoch. Then the orphan purge removes them, and only
+    // them.
     assert!(
         !tenants
             .orphaned_tenant_ids()
@@ -603,12 +637,37 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
             .unwrap()
             .contains(&doomed)
     );
-    f.db.query("UPDATE certificate SET not_after = time::now() - 1s WHERE fingerprint = $fp")
-        .bind(("fp", revoked_before.fingerprint.clone()))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+    let expire = |ago: &'static str| {
+        let db = f.db.clone();
+        let fp = revoked_before.fingerprint.clone();
+        async move {
+            db.query(format!(
+                "UPDATE certificate SET not_after = time::now() - {ago} WHERE fingerprint = $fp"
+            ))
+            .bind(("fp", fp))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        }
+    };
+    expire("1s").await;
+    assert!(
+        !tenants
+            .orphaned_tenant_ids()
+            .await
+            .unwrap()
+            .contains(&doomed),
+        "a row that has just expired is kept"
+    );
+    tenants.purge_orphan(doomed).await.unwrap();
+    let crl = crls.current(f.org, root.certificate.id).await.unwrap();
+    assert_eq!(
+        listed(&crl),
+        expected,
+        "a just-expired entry stays on the list"
+    );
+    expire("9d").await;
     assert_eq!(tenants.orphaned_tenant_ids().await.unwrap(), vec![doomed]);
     tenants.purge_orphan(doomed).await.unwrap();
     assert!(matches!(
@@ -621,4 +680,435 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
     expected.retain(|s| *s != serial_of(&revoked_before.public_cert_pem));
     assert_eq!(listed(&crl), expected, "an expired entry leaves the list");
     assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// #607: one CA's re-sign holds up nothing but itself
+// ---------------------------------------------------------------------------
+
+/// A fake Vault KV v2 endpoint that answers each request only when the test
+/// says so: the custodian double that lets a test hold a CA's re-sign inside
+/// its custodian `load` — the remote call the issue names — for as long as it
+/// likes, and know for certain that it is there.
+struct HeldVault {
+    listener: tokio::net::TcpListener,
+}
+
+impl HeldVault {
+    async fn start() -> Self {
+        Self {
+            listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        }
+    }
+
+    fn address(&self) -> String {
+        format!("http://{}", self.listener.local_addr().unwrap())
+    }
+
+    /// Wait until a request has arrived and been read in full, and return the
+    /// connection, unanswered.
+    async fn next_request(&self) -> tokio::net::TcpStream {
+        use tokio::io::AsyncReadExt;
+        let (mut socket, _) = self.listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the custodian closed its request");
+            request.extend_from_slice(&buf[..n]);
+        }
+        socket
+    }
+
+    /// Answer a held request with the KV v2 read of `private_key_pem`.
+    async fn answer(mut socket: tokio::net::TcpStream, private_key_pem: &str) {
+        use tokio::io::AsyncWriteExt;
+        let body =
+            serde_json::json!({ "data": { "data": { "private_key_pem": private_key_pem } } })
+                .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.shutdown().await.unwrap();
+    }
+}
+
+/// The issue's test: CA A's re-sign is in flight — held inside its custodian
+/// `load` — and CA B's cached list answers, as does a first list for CA C.
+///
+/// Before the fix one process-wide lock was held from the cache lookup to the
+/// signature, so B's request (a cache hit) and C's queued behind A's custodian
+/// call, however long it took. The test knows A is inside `load` because the
+/// fake Vault has read A's request; nothing here depends on timing. The
+/// timeouts only turn the old behaviour's hang into a failure.
+#[tokio::test]
+async fn a_cached_list_answers_while_another_cas_re_sign_is_in_flight() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    use axiam_pki::{DatabaseCaKeyStore, VaultCaKeyConfig, VaultCaKeyStore};
+    use std::time::Duration as StdDuration;
+
+    const GUARD: StdDuration = StdDuration::from_secs(30);
+
+    let f = Fixture::new().await;
+    let vault = HeldVault::start().await;
+    let a = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let b = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let c = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let revoked = f.leaf(a.certificate.id, "device-under-a").await;
+    f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+
+    // A's key moves to Vault — the remote custodian — and B and C keep theirs
+    // in the database.
+    f.db.query(
+        "UPDATE type::record('ca_certificate', $id) SET key_custody = 'vault', \
+         key_locator = 'axiam/ca-keys/held'",
+    )
+    .bind(("id", a.certificate.id.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let custodians = Arc::new(
+        CaKeyCustodians::new(
+            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(
+                VaultCaKeyStore::new(VaultCaKeyConfig {
+                    address: vault.address(),
+                    token: "hvs.test-only-not-a-real-token".into(), // gitleaks:allow
+                    mount: "secret".into(),
+                    prefix: "axiam/ca-keys".into(),
+                    ca_cert_path: None,
+                })
+                .unwrap(),
+            ),
+            None,
+            Some(CaKeyCustody::Database),
+        )
+        .unwrap(),
+    );
+    let crls = CrlService::new(
+        SurrealCaCertificateRepository::new(f.db.clone()),
+        SurrealCertificateRepository::new(f.db.clone()),
+        f.semaphore.clone(),
+        custodians,
+        DEFAULT_CRL_NEXT_UPDATE_SECS,
+    );
+
+    let b_cached = crls.current(f.org, b.certificate.id).await.unwrap();
+
+    let in_flight = tokio::spawn({
+        let crls = crls.clone();
+        let (org, ca) = (f.org, a.certificate.id);
+        async move { crls.current(org, ca).await }
+    });
+    let held = tokio::time::timeout(GUARD, vault.next_request())
+        .await
+        .expect("A's re-sign reaches its custodian");
+
+    // A is inside `load`, holding its own re-sign. B's cached list answers…
+    let b_again = tokio::time::timeout(GUARD, crls.current(f.org, b.certificate.id))
+        .await
+        .expect("B's cached list does not wait on A's re-sign")
+        .unwrap();
+    assert_eq!(b_again.etag, b_cached.etag);
+    assert_eq!(b_again.der, b_cached.der);
+    // …and so does a first list for C, which has to be signed.
+    let c_list = tokio::time::timeout(GUARD, crls.current(f.org, c.certificate.id))
+        .await
+        .expect("C's re-sign does not wait on A's")
+        .unwrap();
+    assert!(verified_serials(&c_list, &c.certificate.public_cert_pem).is_empty());
+    assert!(!in_flight.is_finished(), "A is still held in its custodian");
+
+    // Released, A's list is signed with the key Vault handed over.
+    HeldVault::answer(held, a.private_key_pem.as_deref().expect("A's key")).await;
+    let a_list = tokio::time::timeout(GUARD, in_flight)
+        .await
+        .expect("A completes once its custodian answers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        verified_serials(&a_list, &a.certificate.public_cert_pem),
+        vec![serial_of(&revoked.public_cert_pem)]
+    );
+}
+
+/// A re-sign waits for a crypto permit at most the permit wait, then answers
+/// `ServiceUnavailable` (the route's `503`); a cached list needs no permit and
+/// is served throughout. Deterministic: every permit is held by the test for
+/// the whole wait.
+#[tokio::test]
+async fn a_saturated_crypto_gate_refuses_a_re_sign_but_not_a_cached_list() {
+    let f = Fixture::new().await;
+    let cached = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let unsigned = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let crls = f
+        .crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS)
+        .with_permit_wait(std::time::Duration::from_millis(50));
+    let before = crls.current(f.org, cached.certificate.id).await.unwrap();
+
+    let permits = u32::try_from(f.semaphore.available_permits()).unwrap();
+    let held = f
+        .semaphore
+        .clone()
+        .acquire_many_owned(permits)
+        .await
+        .unwrap();
+    assert!(matches!(
+        crls.current(f.org, unsigned.certificate.id).await,
+        Err(AxiamError::ServiceUnavailable(_))
+    ));
+    let during = crls.current(f.org, cached.certificate.id).await.unwrap();
+    assert_eq!(during.etag, before.etag, "the cached list needs no permit");
+
+    drop(held);
+    crls.current(f.org, unsigned.certificate.id)
+        .await
+        .expect("signed once a permit is free");
+}
+
+/// The per-CA cache does not grow under requests for CA ids that do not exist
+/// — the route is unauthenticated — and lets go of a CA once it stops
+/// publishing a list.
+#[tokio::test]
+async fn the_cache_holds_only_cas_that_publish_a_list() {
+    let f = Fixture::new().await;
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let tenant_ca = f.tenant_ca(root.certificate.id).await;
+    let crls = f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS);
+
+    for _ in 0..64 {
+        assert!(matches!(
+            crls.current(f.org, Uuid::new_v4()).await,
+            Err(AxiamError::NotFound { .. })
+        ));
+    }
+    assert_eq!(crls.cached_ca_count(), 0, "made-up CA ids add nothing");
+
+    crls.current(f.org, tenant_ca.certificate.id).await.unwrap();
+    crls.current(f.org, root.certificate.id).await.unwrap();
+    assert_eq!(crls.cached_ca_count(), 2);
+
+    f.cas.revoke(f.org, tenant_ca.certificate.id).await.unwrap();
+    assert!(matches!(
+        crls.current(f.org, tenant_ca.certificate.id).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    assert_eq!(crls.cached_ca_count(), 1, "a revoked CA's slot is dropped");
+}
+
+/// The light read that decides whether a list changed names exactly the
+/// certificates, with exactly the dates, the list is signed over.
+#[tokio::test]
+async fn the_light_read_names_exactly_what_the_list_is_signed_over() {
+    use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
+
+    let f = Fixture::new().await;
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let tenant_ca = f.tenant_ca(root.certificate.id).await;
+    let revoked = f.leaf(root.certificate.id, "device-light-a").await;
+    let _kept = f.leaf(root.certificate.id, "device-light-b").await;
+    f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+    f.cas.revoke(f.org, tenant_ca.certificate.id).await.unwrap();
+
+    let certs = SurrealCertificateRepository::new(f.db.clone());
+    let cas = SurrealCaCertificateRepository::new(f.db.clone());
+    let issuer = root.certificate.id;
+    let now = Utc::now();
+    let light = |stamps: Vec<axiam_core::models::certificate::RevocationStamp>| {
+        stamps
+            .into_iter()
+            .map(|s| (s.fingerprint, s.revoked_at, s.not_before))
+            .collect::<Vec<_>>()
+    };
+    let full = |entries: Vec<axiam_core::models::certificate::RevokedCertificate>| {
+        entries
+            .into_iter()
+            .map(|e| (e.fingerprint, e.revoked_at, e.not_before))
+            .collect::<Vec<_>>()
+    };
+    let leaves = light(
+        certs
+            .list_revocation_stamps_by_issuer(issuer, now)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(leaves.len(), 1);
+    assert_eq!(leaves[0].0, revoked.fingerprint);
+    assert!(leaves[0].1.is_some(), "the revocation date is read");
+    assert_eq!(
+        leaves,
+        full(certs.list_revoked_by_issuer(issuer, now).await.unwrap())
+    );
+    let children = light(cas.list_revoked_children_stamps(issuer, now).await.unwrap());
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].0, tenant_ca.certificate.fingerprint);
+    assert_eq!(
+        children,
+        full(cas.list_revoked_children(issuer, now).await.unwrap())
+    );
+
+    // #608: the caller's cut-off decides which expired entries are named — a
+    // cut-off past every notAfter names none, in either read.
+    let later = now + Duration::days(400);
+    assert!(
+        certs
+            .list_revocation_stamps_by_issuer(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        certs
+            .list_revoked_by_issuer(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas.list_revoked_children_stamps(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas.list_revoked_children(issuer, later)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #608: the same list from every replica, and a number that only grows
+// ---------------------------------------------------------------------------
+
+/// The start of the refresh epoch after the current one, for lists valid
+/// `next_update_secs`: an instant every revocation the test makes precedes.
+fn next_epoch_start(next_update_secs: i64) -> chrono::DateTime<Utc> {
+    let half = next_update_secs / 2;
+    let now = Utc::now().timestamp();
+    chrono::DateTime::from_timestamp((now.div_euclid(half) + 1) * half, 0).unwrap()
+}
+
+/// The issue's test: two `CrlService`s over one store — two replicas, each
+/// with its own cache — sign the same state to the same bytes, CRL number and
+/// `ETag`, at different instants of one refresh epoch, for both key types a CA
+/// can have. Before the fix each signed its own list with its own clock's
+/// `thisUpdate` and number, so a relying party behind a balancer got `200`s
+/// instead of `304`s.
+#[tokio::test]
+async fn two_replicas_sign_the_same_state_to_the_same_bytes() {
+    for key_algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
+        let f = Fixture::new().await;
+        let ca = f.root(key_algorithm.clone(), 365).await;
+        let revoked = f.leaf(ca.certificate.id, "device-replicated").await;
+        f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+
+        let (one, two) = (
+            f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS),
+            f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS),
+        );
+        let half = i64::try_from(DEFAULT_CRL_NEXT_UPDATE_SECS / 2).unwrap();
+        let epoch = next_epoch_start(i64::try_from(DEFAULT_CRL_NEXT_UPDATE_SECS).unwrap());
+        let early = epoch + Duration::seconds(5);
+        let late = epoch + Duration::seconds(half - 5);
+
+        let a = one
+            .current_at(f.org, ca.certificate.id, early)
+            .await
+            .unwrap();
+        let b = two
+            .current_at(f.org, ca.certificate.id, late)
+            .await
+            .unwrap();
+        assert_eq!(a.der, b.der, "{key_algorithm:?}: the same bytes");
+        assert_eq!(a.etag, b.etag);
+        assert_eq!(a.crl_number, b.crl_number);
+        assert_eq!(a.this_update, epoch, "thisUpdate is the epoch's start");
+        assert_eq!(a.refresh_at, epoch + Duration::seconds(half));
+        assert_eq!(
+            verified_serials(&b, &ca.certificate.public_cert_pem),
+            vec![serial_of(&revoked.public_cert_pem)]
+        );
+
+        // A revocation reaches both at once, and both again agree.
+        let second = f.leaf(ca.certificate.id, "device-replicated-2").await;
+        f.certs.revoke(f.tenant, second.id).await.unwrap();
+        let c = two
+            .current_at(f.org, ca.certificate.id, early)
+            .await
+            .unwrap();
+        let d = one
+            .current_at(f.org, ca.certificate.id, late)
+            .await
+            .unwrap();
+        assert_eq!(c.der, d.der, "{key_algorithm:?}: the same bytes again");
+        assert!(c.crl_number > a.crl_number);
+    }
+}
+
+/// RFC 5280 §5.2.3: a CA's CRL number grows with every change of its list —
+/// a revocation, the next epoch, and an entry that expires and leaves, which
+/// takes an epoch boundary — and a just-expired entry stays until a list issued
+/// after its expiry has named it (§3.3).
+#[tokio::test]
+async fn the_crl_number_grows_across_revocations_epochs_and_an_expiry() {
+    const SECS: u64 = 3_600;
+    let half = Duration::seconds(1_800);
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let expiring = f.leaf(ca.certificate.id, "device-expiring").await;
+    let staying = f.leaf(ca.certificate.id, "device-staying").await;
+    let crls = f.crl_service(SECS);
+    let at = next_epoch_start(i64::try_from(SECS).unwrap()) + Duration::seconds(10);
+
+    f.certs.revoke(f.tenant, expiring.id).await.unwrap();
+    let first = crls.current_at(f.org, ca.certificate.id, at).await.unwrap();
+    f.certs.revoke(f.tenant, staying.id).await.unwrap();
+    let second = crls.current_at(f.org, ca.certificate.id, at).await.unwrap();
+    assert!(second.crl_number > first.crl_number, "a revocation");
+
+    // The first leaf expires ten seconds into the epoch `at` is in.
+    f.db.query("UPDATE certificate SET not_after = $t WHERE fingerprint = $fp")
+        .bind(("t", at + Duration::seconds(10)))
+        .bind(("fp", expiring.fingerprint.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    // The next epoch: expired during the previous one, it is still listed.
+    let third = crls
+        .current_at(f.org, ca.certificate.id, at + half)
+        .await
+        .unwrap();
+    assert!(third.crl_number > second.crl_number, "the next epoch");
+    assert_eq!(
+        verified_serials(&third, &ca.certificate.public_cert_pem).len(),
+        2
+    );
+
+    // The epoch after: it has left, and the number is greater still.
+    let fourth = crls
+        .current_at(f.org, ca.certificate.id, at + half + half)
+        .await
+        .unwrap();
+    assert!(fourth.crl_number > third.crl_number, "an entry left");
+    assert!(fourth.this_update > third.this_update);
+    assert_eq!(
+        verified_serials(&fourth, &ca.certificate.public_cert_pem),
+        vec![serial_of(&staying.public_cert_pem)]
+    );
+
+    // And another replica, asked at the same instant, says the same.
+    let other = f
+        .crl_service(SECS)
+        .current_at(f.org, ca.certificate.id, at + half + half)
+        .await
+        .unwrap();
+    assert_eq!(other.der, fourth.der);
 }

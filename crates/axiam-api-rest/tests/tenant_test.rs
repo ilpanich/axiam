@@ -1387,6 +1387,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
             not_before: Utc::now() - Duration::minutes(1),
             not_after: Utc::now() + Duration::days(365),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .unwrap();

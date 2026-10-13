@@ -1183,7 +1183,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Sixteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export`, `audit_retention`, `tenant_purge` and `vault_revocation` (which forwards to Vault the revocations of leaves of a `vault_pki` CA that Vault has not yet accepted, and fails while any remains). Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+        text: "Seventeen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export`, `audit_retention`, `tenant_purge`, `vault_revocation` (which forwards to Vault the revocations of leaves of a `vault_pki` CA, and of tenant signing CAs its root signed, that Vault has not yet accepted, backing a refused one off from a minute to six hours, and fails while any remains) and `vault_revocation_failing` (unhealthy while a revocation has been refused twelve times, about a day). Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
       },
       {
         type: "table",

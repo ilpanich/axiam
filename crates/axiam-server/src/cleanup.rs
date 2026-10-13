@@ -118,6 +118,9 @@ pub struct CleanupTask<C: Connection> {
     group_repo: Arc<SurrealGroupRepository<C>>,
     webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
     password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
+    // #533: the erased account's `User` certificates are revoked (never
+    // deleted: their issuers' revocation lists are computed from the rows).
+    cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
     // GDPR export sweep (D-12).
     export_job_repo: Arc<SurrealExportJobRepository<C>>,
     consent_repo: Arc<SurrealConsentRepository<C>>,
@@ -195,6 +198,24 @@ pub struct CleanupTask<C: Connection> {
 /// code, and once a day after that.
 pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long a replica's claim on a tombstoned tenant's purge keeps the other
+/// replicas off it (#610); a claim older than this is taken over.
+///
+/// The purge is not batched: it is one `DELETE … WHERE tenant_id = $id` per
+/// tenant-scoped table, about seventy statements in sequence, each removing
+/// all of the tenant's rows of its table at once (the certificate tables three
+/// statements each), so even a large tenant's purge is expected to take
+/// minutes; an hour leaves an order of magnitude of headroom before a purge
+/// still running could be overlapped — and an overlap is safe in any case: the
+/// steps are idempotent and only one purge's final `DELETE` finds the tenant
+/// row, so the purge is recorded once. What the lease costs is the delay
+/// after a replica dies holding a claim: the tenant waits at most an hour for
+/// another replica, an erasure of data already out of every read path. Clock
+/// skew between replicas, which the stamp is written by, is seconds against an
+/// hour. A purge that fails releases its claim, so a failure is retried at the
+/// next tick as before.
+pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
+
 /// One pass of the `tenant_purge` job: purge every tombstoned tenant and, when
 /// `scan_orphans`, every orphaned tenant id.
 ///
@@ -208,10 +229,18 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// as `tenants.purged`, beside the `tenants.deleted` record the deletion wrote;
 /// neither is ever purged.
 ///
-/// * `Ok(n)` is the number of tenants (and orphaned ids) purged.
+/// Every replica runs this sweep (#610). A tombstoned tenant is purged only by
+/// the replica whose [`SurrealTenantRepository::claim_purge`] wins it; the
+/// others skip it for [`TENANT_PURGE_LEASE`]. A tenant the purge finds already
+/// purged — gone before the claim, or removed by an overlapping purge after a
+/// lease ran out — is success, not a failure, and is not recorded again: only
+/// the purge that removed the tenant row writes `tenants.purged`.
+///
+/// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
 ///   fail, naming how many failed and never a tenant's data. The failed tenant
-///   stays tombstoned and the next pass resumes it (every step is idempotent).
+///   stays tombstoned, its claim is released, and the next pass resumes it
+///   (every step is idempotent).
 ///
 /// # Errors
 ///
@@ -243,12 +272,40 @@ where
         }
     }
 
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE)
+        .map_err(|e| AxiamError::Internal(format!("tenant purge lease: {e}")))?;
     let (mut purged, mut failed) = (0u64, 0u64);
     for (tenant_id, orphan) in due {
         let outcome = if orphan {
             tenant_repo.purge_orphan(tenant_id).await
         } else {
-            tenant_repo.purge_tombstoned(tenant_id).await
+            let claimed_at = Utc::now();
+            match tenant_repo.claim_purge(tenant_id, claimed_at, lease).await {
+                // Another replica holds it, or it is already gone.
+                Ok(false) => continue,
+                Ok(true) => match tenant_repo.purge_tombstoned(tenant_id).await {
+                    // Purged by an overlapping replica: done, and recorded
+                    // by the purge that removed the row.
+                    Err(AxiamError::NotFound { .. }) => continue,
+                    Err(e) => {
+                        // Let the next tick (any replica's) retry it now
+                        // rather than after the lease; a failed release
+                        // leaves the lease to expire.
+                        if let Err(release) =
+                            tenant_repo.release_purge_claim(tenant_id, claimed_at).await
+                        {
+                            tracing::warn!(
+                                error = %release,
+                                %tenant_id,
+                                "could not release the tenant purge claim; it lapses with its lease"
+                            );
+                        }
+                        Err(e)
+                    }
+                    Ok(()) => Ok(()),
+                },
+                Err(e) => Err(e),
+            }
         };
         if let Err(e) = outcome {
             failed += 1;
@@ -763,6 +820,44 @@ where
 // Erasure pipeline (test-seam extraction — RESEARCH.md Pattern 3, SECHRD-06)
 // ---------------------------------------------------------------------------
 
+/// Revoke the still-active `User` certificates of an account the Art. 17 purge
+/// is erasing, returning how many (#533) — the purge's step (b4).
+///
+/// Revoked, not deleted: each row carries `revoked_at`, so it stays on its
+/// issuer's revocation list until it expires, and a `vault_pki` issuer's list
+/// in Vault gets it from the cleanup job's `vault_revocation` sweep. Deleting
+/// the row would make the certificate valid again to every relying party
+/// outside AXIAM — the retention `docs/compliance/gdpr-compliance.md` records
+/// for a deleted tenant's certificates, here for one account's.
+///
+/// Matches the binding (`certificate.user_id`, schema v98) and, for a row
+/// without one, the older convention on the account's username and email —
+/// limited to certificates created since the account was and to names no other
+/// account of the tenant holds (R101W1-01), so a holder erasing their own
+/// account cannot revoke a namesake's certificate — so it must run **before** `anonymize_user` overwrites them, which the purge
+/// does by calling it ahead of [`run_erasure_pipeline_reporting`]. Fatal there
+/// (`?`), like the credential deletions beside it: the account stays due and
+/// the next sweep retries, with its names still in place.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is.
+pub async fn revoke_erased_users_certificates<CR>(
+    cert_repo: &CR,
+    user: &axiam_core::models::user::User,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::CertificateRepository,
+{
+    cert_repo
+        .revoke_user_certificates(
+            user.tenant_id,
+            user.id,
+            &user.username,
+            &user.email,
+            user.created_at,
+        )
+        .await
+}
+
 /// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
 /// references, anonymize the user row, then write the erasure proof
 /// STRICTLY LAST.
@@ -978,6 +1073,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         group_repo: Arc<SurrealGroupRepository<C>>,
         webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
         password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
+        // #533 — required, not a builder step, for the reason
+        // `audit_retention` is: an erasure that silently skipped the account's
+        // certificates is the omission this exists to make impossible.
+        cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
         export_job_repo: Arc<SurrealExportJobRepository<C>>,
         consent_repo: Arc<SurrealConsentRepository<C>>,
         tenant_repo: Arc<SurrealTenantRepository<C>>,
@@ -1025,6 +1124,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             group_repo,
             webauthn_repo,
             password_history_repo,
+            cert_repo,
             export_job_repo,
             consent_repo,
             tenant_repo,
@@ -1258,13 +1358,40 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     // T-470: a `vault_pki` leaf revoked in AXIAM whose
                     // revocation Vault does not have yet — a revoke request
                     // could not reach it, or the revocation came from a bulk
-                    // path. WARN on failure (`record`), since until it runs
-                    // Vault's list omits a revoked certificate.
+                    // path — and (#612) a revoked tenant signing CA its
+                    // parent's list in Vault does not name yet. WARN on failure
+                    // (`record`), since until it runs Vault's list omits a
+                    // revoked certificate.
                     if let Some(certs) = &self.vault_revocations {
                         Self::record(
                             &self.job_health,
                             "vault_revocation",
                             certs.forward_pending_revocations().await,
+                            tracing::Level::INFO,
+                        );
+
+                        // #603: a revocation Vault has refused twelve times
+                        // (about a day of backoff; a CA's counted with the
+                        // leaves', #612) is retried every six hours
+                        // and the pass above no longer fails for it. A distinct
+                        // job, so a stuck revocation is not hidden by a green
+                        // `vault_revocation` and a flapping Vault is not
+                        // mistaken for one.
+                        Self::record(
+                            &self.job_health,
+                            "vault_revocation_failing",
+                            certs.failing_revocations().await.and_then(|failing| {
+                                if failing == 0 {
+                                    return Ok(0);
+                                }
+                                Err(AxiamError::Internal(format!(
+                                    "{failing} certificate revocation(s) Vault has refused {} \
+                                     times or more; each is retried every {} hours and needs an \
+                                     operator (see the PKI guide)",
+                                    axiam_pki::vault_forward::FAILING_AFTER_ATTEMPTS,
+                                    axiam_pki::vault_forward::BACKOFF_CAP.as_secs() / 3600,
+                                )))
+                            }),
                             tracing::Level::INFO,
                         );
                     }
@@ -1575,6 +1702,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// (b) Hard-delete federation links.
     /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
     /// (b3) Prune `member_of` and `has_role` graph edges (isolated tombstone).
+    /// (b4) Revoke the account's `User` certificates (#533) — kept, on their
+    ///     issuers' revocation lists, never deleted.
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
     /// (d)/(e)/(g) Run [`run_erasure_pipeline`]: pseudonymize all audit
     ///     entries for this user (now FATAL, D-01/D-03/D-04) -> anonymize the
@@ -1600,10 +1729,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let mut purged: u64 = 0;
 
         for user in due {
-            if let Err(e) = self
-                .purge_single_user(user.id, user.tenant_id, pepper)
-                .await
-            {
+            if let Err(e) = self.purge_single_user(&user, pepper).await {
                 tracing::warn!(
                     error = ?e,
                     user_id = %user.id,
@@ -1624,23 +1750,22 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// one cause, and the platform's own (`system`).
     async fn purge_single_user(
         &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
+        user: &axiam_core::models::user::User,
         pepper: [u8; 32],
     ) -> Result<(), AxiamError> {
         with_cause(
             Some(InitiatingEntity::System),
-            self.purge_single_user_inner(user_id, tenant_id, pepper),
+            self.purge_single_user_inner(user, pepper),
         )
         .await
     }
 
     async fn purge_single_user_inner(
         &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
+        user: &axiam_core::models::user::User,
         pepper: [u8; 32],
     ) -> Result<(), AxiamError> {
+        let (user_id, tenant_id) = (user.id, user.tenant_id);
         // (a) Revoke all sessions and OAuth2 refresh tokens.
         self.auth_svc
             .revoke_all_sessions(tenant_id, user_id)
@@ -1704,6 +1829,13 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
                 .await?;
         }
+
+        // (b4) Revoke the account's `User` certificates (#533), while its
+        // username and email — which the convention for a certificate issued
+        // without a `user_id` reads — are still on the row. Fail-closed, like
+        // the steps above; idempotent (an already revoked row is not matched).
+        let certificates_revoked =
+            revoke_erased_users_certificates(self.cert_repo.as_ref(), user).await?;
 
         // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
         let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);
@@ -1787,6 +1919,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 ip_address: None,
                 metadata: Some(serde_json::json!({
                     "pseudonym": pseudonym,
+                    // #533: the account's certificates this purge revoked; a
+                    // count, as directory linking records its own.
+                    "certificates_revoked": certificates_revoked,
                 })),
             },
         )

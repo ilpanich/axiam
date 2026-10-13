@@ -282,6 +282,22 @@ impl VaultSecretProvider {
                 AxiamError::Internal(format!("vault: request to {url} failed: {e}"))
             })?;
 
+        if response.status().is_redirection() {
+            // `client` is expected to carry `redirect(Policy::none())` (T-476),
+            // so a redirect lands here rather than being followed with the
+            // token. Say so: a bare status would point at the token's policy.
+            let host = reqwest::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "<unparseable>".into());
+            return Err(AxiamError::Internal(format!(
+                "vault: host {host} answered {} with a redirect; redirects are not \
+                 followed because the request carries the Vault token — set the \
+                 Vault address to the final URL",
+                response.status()
+            )));
+        }
+
         if !response.status().is_success() {
             return Err(AxiamError::Internal(format!(
                 "vault: {url} answered {} — check the token's policy and the mount path",
@@ -461,7 +477,8 @@ impl SecretProviderKind {
                                 path.display()
                             )));
                         }
-                        let mut builder = reqwest::Client::builder();
+                        let mut builder =
+                            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
                         for anchor in anchors {
                             builder = builder.add_root_certificate(anchor);
                         }

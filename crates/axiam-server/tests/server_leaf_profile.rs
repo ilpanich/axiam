@@ -118,6 +118,7 @@ async fn issue_pki() -> IssuedPki {
         validity_days: 30,
         metadata: None,
         subject_alt_names: sans,
+        user_id: None,
     };
 
     // Off the list: there is no leaf to present for it at all.

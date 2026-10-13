@@ -818,3 +818,185 @@ async fn cross_org_import_returns_403() {
     .await;
     assert_eq!(status, 403);
 }
+
+/// #612: revoking a tenant signing CA whose parent's key Vault's PKI engine
+/// holds goes on the parent's list in Vault too. When Vault refuses, the route
+/// still answers `200`, the CA reads `Revoked`, and one
+/// `ca_certificate.vault_revocation_pending` row in the organization's own
+/// audit log says why.
+#[actix_rt::test]
+async fn a_ca_revocation_vault_refuses_still_stands_and_is_audited() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    use axiam_core::models::certificate::{KeyAlgorithm, StoreCaCertificate};
+    use axiam_core::repository::CaCertificateRepository;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // Vault releases the tenant CA's issuer and key, then refuses the
+    // revocation on the root's mount as often as the request tries.
+    let vault = MockServer::start().await;
+    for (kind, id) in [("issuer", "tenant-issuer-id"), ("key", "tenant-key-id")] {
+        Mock::given(method("DELETE"))
+            .and(path(format!("/v1/pki_int/{kind}/{id}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&vault)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/pki/revoke"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": ["sealed"] })),
+        )
+        .expect(u64::from(axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS))
+        .mount(&vault)
+        .await;
+    let custodians = Arc::new(
+        axiam_pki::CaKeyCustodians::new(
+            None,
+            None,
+            Some(
+                axiam_pki::VaultPkiCaKeyStore::new(axiam_pki::VaultPkiConfig {
+                    address: vault.uri(),
+                    token: "hvs.test-only-not-a-real-token".into(), // gitleaks:allow
+                    root_mount: "pki".into(),
+                    int_mount: "pki_int".into(),
+                    ca_cert_path: None,
+                })
+                .unwrap(),
+            ),
+            Some(CaKeyCustody::VaultPki),
+        )
+        .unwrap(),
+    );
+
+    // The organization CA and the tenant CA its root signed, as rows: creation
+    // through Vault is vault_pki_test's.
+    let now = chrono::Utc::now();
+    let root_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    root_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Vault Root");
+    root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let root_cert = root_params.self_signed(&root_key).unwrap();
+    let tenant_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut tenant_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    tenant_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Tenant Signing CA");
+    tenant_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    let tenant_pem = tenant_params
+        .signed_by(&tenant_key, &rcgen::Issuer::new(root_params, root_key))
+        .unwrap()
+        .pem();
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let row = |id: Uuid, parent: Option<Uuid>, pem: String, locator: serde_json::Value| {
+        StoreCaCertificate {
+            id,
+            organization_id: org_id,
+            tenant_id: parent.map(|_| Uuid::new_v4()),
+            parent_ca_id: parent,
+            subject: id.to_string(),
+            public_cert_pem: pem,
+            chain_pem: None,
+            fingerprint: id.to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now - chrono::Duration::days(1),
+            not_after: now + chrono::Duration::days(365),
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::VaultPki,
+            key_locator: Some(locator.to_string()),
+        }
+    };
+    let parent = ca_repo
+        .create(row(
+            Uuid::new_v4(),
+            None,
+            root_cert.pem(),
+            serde_json::json!({
+                "issuing": { "mount": "pki_int", "issuer": "int-issuer-id", "key": "int-key-id" },
+                "root": { "mount": "pki", "issuer": "root-issuer-id", "key": "root-key-id" },
+            }),
+        ))
+        .await
+        .unwrap();
+    let tenant_ca = ca_repo
+        .create(row(
+            Uuid::new_v4(),
+            Some(parent.id),
+            tenant_pem,
+            serde_json::json!({
+                "issuing": { "mount": "pki_int", "issuer": "tenant-issuer-id", "key": "tenant-key-id" },
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new({
+                let mut state = AppState::for_test(db.clone(), auth.clone());
+                state.pki.ca_service = CaService::new(
+                    ca_repo,
+                    test_pki_config(),
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+                    custodians,
+                );
+                state
+            }))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/ca-certificates/{}/revoke",
+            tenant_ca.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "Vault's refusal fails nothing");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "revoked");
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/ca-certificates/{}",
+            tenant_ca.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let body: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body["status"], "Revoked", "AXIAM's revocation stands");
+
+    let rows: Vec<serde_json::Value> = db
+        .query("SELECT * FROM audit_log WHERE action = 'ca_certificate.vault_revocation_pending'")
+        .await
+        .unwrap()
+        .take(0)
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the refusal is audited once: {rows:?}");
+    assert_eq!(rows[0]["resource_id"], tenant_ca.id.to_string());
+    assert_eq!(rows[0]["tenant_id"], tenant_id.to_string());
+    assert_eq!(rows[0]["outcome"], "Failure");
+    assert!(
+        rows[0]["metadata"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("sealed")),
+        "the audit row says why: {rows:?}"
+    );
+    vault.verify().await;
+}

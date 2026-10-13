@@ -581,8 +581,26 @@ pub struct Certificate {
     /// Validity end.
     pub not_after: DateTime<Utc>,
     pub status: CertificateStatus,
-    /// Arbitrary key-value metadata (e.g., device serial, user ID binding).
+    /// Arbitrary key-value metadata (e.g., a device serial).
+    ///
+    /// Free-form and never authoritative: the account a `User` certificate was
+    /// issued for is `user_id`. A `metadata.user_id` is still read, by
+    /// the revocation of a user's certificates, for a row issued before the
+    /// binding existed (schema v98, #533).
     pub metadata: serde_json::Value,
+    /// The user account a `User` certificate was issued for, in this tenant
+    /// (#533); `null` for every other type, for a `User` certificate issued
+    /// without one, and for every certificate issued before schema v98.
+    ///
+    /// What revoking a user's certificates matches on — directory linking,
+    /// administrator deletion and Art. 17 erasure. A row with `None` is matched
+    /// by the older convention instead (`metadata.user_id`, or a subject common
+    /// name equal to the account's username or email); a row naming another
+    /// account never is. It does not make the certificate authenticate as the
+    /// user: a certificate authenticates only as the service account it is
+    /// bound to.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -593,10 +611,10 @@ pub struct Certificate {
 /// and for subordinate CAs
 /// ([`crate::repository::CaCertificateRepository::list_revoked_children`]) alike:
 /// a CA's list names every certificate it signed and then disowned, whatever
-/// that certificate is for. Only certificates still inside their validity
-/// window are returned — RFC 5280 §3.3 lets an entry leave the list once the
-/// certificate has expired, and an expired certificate fails validation on its
-/// own.
+/// that certificate is for. Only certificates whose `notAfter` is later than a
+/// cut-off the caller names are returned: RFC 5280 §3.3 lets an entry leave the
+/// list once it has appeared on one list issued after the certificate expired,
+/// and the CRL service keeps it that long and no longer (#608).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokedCertificate {
     /// The certificate as issued. The serial number a CRL entry carries is read
@@ -613,6 +631,61 @@ pub struct RevokedCertificate {
     pub revoked_at: Option<DateTime<Utc>>,
     /// The certificate's validity start.
     pub not_before: DateTime<Utc>,
+}
+
+/// What decides whether an issuing CA's revocation list has changed: one
+/// revoked certificate's identity and the date its entry states, without the
+/// certificate itself (#607, T-102).
+///
+/// The light half of [`RevokedCertificate`]. The revocation list route is
+/// unauthenticated and reads the set on every request so that a revocation is
+/// in the very next response; reading every revoked certificate's PEM to find
+/// out that nothing changed made each anonymous request cost a read of the
+/// whole list. The PEMs are read only when the list is signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationStamp {
+    /// SHA-256 fingerprint of the certificate, hex.
+    pub fingerprint: String,
+    /// When AXIAM recorded the revocation; `None` before schema v90.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// The certificate's validity start, the date stated when `revoked_at` is
+    /// `None`.
+    pub not_before: DateTime<Utc>,
+}
+
+/// A revoked `vault_pki` leaf Vault has not been told of, with the bookkeeping
+/// the cleanup sweep keeps about forwarding it (T-470, #603).
+///
+/// What the sweep reads, rather than a bare [`Certificate`], because the claim
+/// on the row is conditional on the very `next_attempt_at` that was read.
+#[derive(Debug, Clone)]
+pub struct VaultForwardCandidate {
+    /// The revoked certificate.
+    pub certificate: Certificate,
+    /// Failed forwarding attempts so far; `0` for a row never attempted
+    /// (`vault_forward_attempts` absent).
+    pub attempts: u32,
+    /// When the row is next due; `None` for a row never attempted, which is due
+    /// at once. Also the value a claim must still find.
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    /// The sanitised reason the last attempt failed, if one did.
+    pub last_error: Option<String>,
+}
+
+/// A revoked subordinate CA whose parent's list Vault keeps and has not been
+/// told of, with the same bookkeeping as a [`VaultForwardCandidate`] (#612).
+#[derive(Debug, Clone)]
+pub struct CaVaultForwardCandidate {
+    /// The revoked CA. Its row keeps the certificate (and so the serial) and
+    /// `parent_ca_id`, which is all a forward needs, after its key is gone.
+    pub ca: CaCertificate,
+    /// Failed forwarding attempts so far; `0` for a row never attempted.
+    pub attempts: u32,
+    /// When the row is next due; `None` for a row never attempted. Also the
+    /// value a claim must still find.
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    /// The sanitised reason the last attempt failed, if one did.
+    pub last_error: Option<String>,
 }
 
 /// Fields required to generate a new tenant certificate (user-facing DTO).
@@ -637,6 +710,12 @@ pub struct CreateCertificate {
     /// tenant's effective `server_cert_allowed_names`.
     #[serde(default)]
     pub subject_alt_names: Vec<SubjectAltName>,
+    /// The account a `User` certificate is issued for (#533), stored as the
+    /// certificate's `user_id`. Only accepted for `cert_type: User`; it must
+    /// name a user of this tenant (the REST handler checks), and a
+    /// `metadata.user_id`, if the request carries one, must agree with it.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
 }
 
 /// Sign a certificate signing request for an **end-entity** certificate.
@@ -678,6 +757,9 @@ pub struct SignCertificateCsr {
     /// CSR: a CSR requesting `subjectAltName` is refused.
     #[serde(default)]
     pub subject_alt_names: Vec<SubjectAltName>,
+    /// See [`CreateCertificate::user_id`].
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
 }
 
 /// Elided rather than redacted, for the reason [`SignIntermediateCsr`]'s own
@@ -694,6 +776,7 @@ impl std::fmt::Debug for SignCertificateCsr {
             .field("validity_days", &self.validity_days)
             .field("metadata", &self.metadata)
             .field("subject_alt_names", &self.subject_alt_names)
+            .field("user_id", &self.user_id)
             .finish()
     }
 }
@@ -713,6 +796,9 @@ pub struct StoreCertificate {
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub metadata: serde_json::Value,
+    /// See [`Certificate::user_id`]. The service layer has already refused it
+    /// on anything but a `User` certificate.
+    pub user_id: Option<Uuid>,
 }
 
 /// Request to bind a certificate to a service account.

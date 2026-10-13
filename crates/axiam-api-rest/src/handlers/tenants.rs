@@ -707,8 +707,9 @@ pub async fn delete<C: Connection + Clone>(
     // take it. A deleted tenant's certificates go on their issuers' revocation
     // lists, through the same paths a single revocation takes; the purge then
     // keeps each revoked, unexpired row until it expires, so the lists keep
-    // naming them after the tenant is gone. A Vault forward that did not
-    // complete here is retried by the cleanup job's sweep.
+    // naming them after the tenant is gone. Each signing CA its parent signed
+    // through Vault goes on the parent's list there too (#612). A Vault forward
+    // that did not complete here is retried by the cleanup job's sweep.
     let certificates = state.pki.cert_service.revoke_tenant(path.tenant_id).await?;
     let signing_cas = state
         .pki
@@ -748,7 +749,10 @@ pub async fn delete<C: Connection + Clone>(
                 "audit_exported_at": exported_at,
                 "certificates_revoked": certificates.revoked,
                 "vault_revocations_pending": certificates.vault_pending,
-                "signing_cas_revoked": signing_cas,
+                "signing_cas_revoked": signing_cas.revoked,
+                // #612: of those, the ones the parent's list in Vault does not
+                // name yet; the cleanup job's sweep forwards them.
+                "signing_ca_vault_revocations_pending": signing_cas.vault_pending,
             })),
         },
     )

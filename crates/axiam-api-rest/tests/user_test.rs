@@ -479,3 +479,156 @@ async fn list_users_non_privileged_caller_returns_403() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 403);
 }
+
+/// #533 — deleting a user revokes the `User` certificates issued for them —
+/// by the binding, and for a certificate issued before it by the convention on
+/// the account's username — and not another account's certificate that only
+/// shares the name. Revoked, not deleted: each stays on its issuer's list. One
+/// `user.certificates_revoked` audit row carries the count.
+#[actix_rt::test]
+async fn deleting_a_user_revokes_their_user_certificates_and_no_one_elses() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::{
+        AuditLogFilter, AuditLogRepository, CertificateRepository, Pagination,
+    };
+    use axiam_db::repository::{SurrealAuditLogRepository, SurrealCertificateRepository};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let alice = create_user_no_role(&db, tenant_id, "alice", "alice@example.com").await;
+    let bob = create_user_no_role(&db, tenant_id, "bob", "bob@example.com").await;
+    let app = test_app!(db, auth);
+
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    let leaf = |fingerprint: &str, subject: &str, user_id: Option<Uuid>| StoreCertificate {
+        tenant_id,
+        issuer_ca_id: issuer,
+        subject: subject.into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: chrono::Utc::now() - chrono::Duration::minutes(1),
+        not_after: chrono::Utc::now() + chrono::Duration::days(30),
+        metadata: serde_json::json!({}),
+        user_id,
+    };
+    let bound = certs
+        .create(leaf("fp-bound", "alice-laptop", Some(alice)))
+        .await
+        .unwrap();
+    let legacy = certs
+        .create(leaf("fp-legacy", "Alice", None))
+        .await
+        .unwrap();
+    let bobs = certs
+        .create(leaf("fp-bob", "alice", Some(bob)))
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{alice}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    for (cert, expected) in [
+        (&bound, CertificateStatus::Revoked),
+        (&legacy, CertificateStatus::Revoked),
+        (&bobs, CertificateStatus::Active),
+    ] {
+        let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+    }
+    let listed: Vec<String> = certs
+        .list_revoked_by_issuer(issuer, chrono::Utc::now())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            assert!(entry.revoked_at.is_some(), "the revocation is dated");
+            entry.fingerprint
+        })
+        .collect();
+    assert_eq!(listed.len(), 2, "both on the issuer's list: {listed:?}");
+
+    let rows = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some("user.certificates_revoked".into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.items.len(), 1, "one summary row");
+    let row = &rows.items[0];
+    assert_eq!(row.actor_id, admin);
+    assert_eq!(row.resource_id, Some(alice));
+    assert_eq!(row.metadata["certificates_revoked"], 2);
+}
+
+/// R101W1-01 — deleting an account does not revoke another account's
+/// certificate by a name the two share only up to case: `alice`'s unbound
+/// CN-`alice` certificate, issued before `Alice` existed, stays active when an
+/// administrator deletes `Alice`.
+#[actix_rt::test]
+async fn deleting_an_account_leaves_an_older_namesakes_certificate_alone() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::CertificateRepository;
+    use axiam_db::repository::SurrealCertificateRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    create_user_no_role(&db, tenant_id, "alice", "alice@example.com").await;
+
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let alices = certs
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "alice".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: "fp-alice".into(),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: chrono::Utc::now() - chrono::Duration::minutes(1),
+            not_after: chrono::Utc::now() + chrono::Duration::days(30),
+            metadata: serde_json::json!({}),
+            user_id: None,
+        })
+        .await
+        .unwrap();
+    // Created after the certificate, named after its CN in another case.
+    let upper = create_user_no_role(&db, tenant_id, "Alice", "ALICE@example.com").await;
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{upper}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    assert_eq!(
+        certs.get_by_id(tenant_id, alices.id).await.unwrap().status,
+        CertificateStatus::Active,
+        "alice's certificate is not Alice's"
+    );
+}

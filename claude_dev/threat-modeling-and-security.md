@@ -236,6 +236,114 @@
 > T-306 (Critical) and T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216
 > (High), none of them a defect awaiting a fix in AXIAM's code.
 >
+> **The 1.0.1 release (model 2.40.0 — T-476 enters, Mitigated).** The Vault
+> clients put the operator's token in an `X-Vault-Token` header, and reqwest
+> strips only the standard credential headers on a cross-host redirect, so a
+> Vault address that answered `3xx` would have been followed, token included
+> (#611). All four clients (the startup secret provider's bootstrap and
+> private-CA clients, the Vault KV CA key store and the Vault PKI client) now
+> refuse redirects, and a `3xx` is an error naming the host. Entered as
+> **T-476**, Medium, Mitigated, with a wiremock test per client in which the
+> second host sees no request. The model is **476 threats, 438 mitigated / 17
+> open / 21 not applicable**; Information disclosure is 113 and Medium 200.
+>
+> **The 1.0.1 release (model 2.40.0 — T-102 amended, 2026-10-12).** The CRL
+> route's availability correction no longer holds (#607): each CA's list is
+> re-signed under a lock of its own, so a slow custodian or a saturated crypto
+> gate holds up only that CA's changed list and never a cached answer; whether
+> a list changed is read from fingerprints and revocation dates, the
+> certificates only to sign; and a re-sign waits at most five seconds for a
+> crypto permit, then answers `503`. A fake Vault that answers only when the
+> test says so holds one CA's re-sign inside its key read while another CA's
+> cached list and a third CA's first list are served. No status changes.
+>
+> **The 1.0.1 release (model 2.40.0 — T-102 amended again and T-472
+> corrected, 2026-10-12).** The CRL route's consistency correction no longer
+> holds either (#608). A list's `thisUpdate` and CRL number are derived from
+> the newest revocation on it and a refresh epoch (half the `nextUpdate`
+> interval, aligned to the Unix epoch), and both CA key types sign
+> deterministically, so every replica signs the same state to the same bytes
+> and `ETag`, and a relying party behind a balancer revalidates to `304`. The
+> number still grows with every change: an expired entry now stays until a
+> list issued after its expiry has named it (RFC 5280 §3.3) and leaves only at
+> an epoch boundary, and the tenant purge keeps a revoked row eight days past
+> its `notAfter` so it cannot take a listed entry off mid-epoch (T-472's
+> retention, corrected). `Cache-Control: max-age` runs to the next scheduled
+> re-sign, at most half the interval, not to `nextUpdate`. Two services over
+> one store produce identical lists for an Ed25519 and an RSA-4096 CA. No
+> status changes.
+>
+> **The 1.0.1 release (model 2.40.0 — T-470 amended, 2026-10-12).** The Vault
+> revocation sweep's retry correction no longer holds (#603). A refusal backs a
+> row off (schema v95: attempts, a sanitised reason, a next-attempt date; one
+> minute, doubling, to six hours), so a serial Vault refuses for good leaves the
+> front of the queue and no longer keeps later revocations off Vault's list.
+> A replica claims a row by a conditional write of its next-attempt date before
+> it asks Vault, so replicas sweeping at once make one call per due row between
+> them. A row refused twelve times no longer fails the `vault_revocation` job;
+> the separate job `vault_revocation_failing` in `/health/jobs` counts such
+> rows. The tests show a refused serial asked for once while a later one is
+> forwarded, two replicas making one call, and exactly one of eight concurrent
+> claims winning. No status changes.
+>
+> **The 1.0.1 release (model 2.40.0 — T-470 amended again, 2026-10-12).** A
+> revoked tenant signing CA now reaches its parent's list in Vault (#612): the
+> entry's last residual no longer holds. Revoking a CA whose parent's key Vault's
+> PKI engine holds releases the CA's own issuer and key, then revokes the CA's
+> serial on the mount the parent signed it from (the root's), twice at most
+> within ten seconds; a refusal is audited as
+> `ca_certificate.vault_revocation_pending` and retried by the
+> `vault_revocation` sweep from the CA's row (schema v96: `vault_revoked_at`
+> and the leaves' three backoff columns on `ca_certificate`), with the same
+> backoff, claim and failing threshold. The tests show the serial reaching the
+> root mount after the issuer's deletion, a refused forward retried from the row
+> alone, one of eight concurrent claims winning, and the refusal audited by the
+> REST route. No status changes.
+>
+> **The 1.0.1 release (model 2.40.0 — T-472 amended, 2026-10-12).** One replica
+> purges a deleted tenant (#610). The cleanup job runs on every replica, so two
+> replicas purging one tombstoned tenant at once wrote two `tenants.purged`
+> records, or the second found the tenant row gone and marked `tenant_purge`
+> failed. A replica now claims the tenant first, by a conditional write of
+> `tenant.purge_claimed_at` (schema v97) under a one-hour lease, and the others
+> skip it; a lapsed claim is taken over and a failed purge releases its own. A
+> purge that overlaps another after a lease ran out repeats idempotent steps,
+> and only the one whose final delete removes the tenant row records the purge;
+> the other's "already purged" is success. The tests show two replicas' sweeps
+> run at once over one store writing one record with both `Ok`, and one of eight
+> concurrent claims winning. The `vault_revocation` sweep's half of the issue was
+> closed by its own claim (#603). No status changes.
+>
+> **The 1.0.1 release (model 2.40.0 — T-336 and T-187 amended, 2026-10-12).** A
+> `User` certificate now names the account it was issued for (#533): schema v98
+> adds `certificate.user_id`, which both issuance routes store from an optional
+> field — only for a `User` certificate, only naming a live account of the
+> tenant, and only agreeing with any `metadata.user_id` — and every read
+> returns. Revoking an account's certificates matches the binding first and
+> falls back to the 1.0.0 convention (`metadata.user_id`, or a common name equal
+> to the username or email) only for a row with no binding, so another
+> account's certificate with the same common name is left alone; rows from
+> before v98 are not backfilled. Directory linking (T-336) uses it, and so now
+> do an administrator's deletion and the Art. 17 purge, which before revoked no
+> certificate (T-187); each revocation is dated, so it is on the issuer's list,
+> and the Vault sweep forwards it under a `vault_pki` CA. The rows are kept,
+> revoked; what they still hold about the person (the certificate's subject, the
+> free-form metadata) is a recorded residual of T-187. No status changes.
+>
+> **The 1.0.1 W1 security review (model 2.40.0 — T-336 and T-187 corrected,
+> 2026-10-13, R101W1-01).** The paragraph above left the 1.0.0 convention's
+> common-name match unbounded, and with deletion and the self-service Art. 17
+> erasure now running it, the over-matching it accepted was in new hands:
+> usernames and emails are unique only case-sensitively, so erasing `Alice`
+> revoked `alice`'s unbound certificate, and an account created after a
+> certificate could be named after its common name and revoke it by erasing
+> itself. The name match now reaches only an unbound certificate created at or
+> after the account, and only a name no other account of the tenant holds,
+> ignoring case, in any status; the binding and the `metadata.user_id` match are
+> unchanged, and directory linking — which marks an account that already
+> exists — takes the same bounds. An unbound certificate outside them stays
+> active and is revoked by id. No status changes.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1543,7 +1651,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 475 threats** and a
+The system is verified against a **STRIDE threat model of 476 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1566,8 +1674,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 475 |
-| Mitigated / Open | 437 / 17 |
+| Threats identified | 476 |
+| Mitigated / Open | 438 / 17 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -3054,7 +3162,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 17 of 475. The 21
+Every threat the model records as open, most severe first — 17 of 476. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

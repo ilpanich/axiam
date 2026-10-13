@@ -148,7 +148,11 @@ async fn main() -> std::io::Result<()> {
         let kind = SecretProviderKind::from_env()
             .unwrap_or_else(|e| panic!("secret provider configuration is invalid: {e}"));
         // A short-lived client: this runs once, before the shared one exists.
-        let bootstrap_http = reqwest::Client::new();
+        // It carries the Vault token, so it never follows a redirect (T-476).
+        let bootstrap_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("failed to build the bootstrap HTTP client");
         let provider = kind
             .build(&bootstrap_http, keys::ALL_KEYS, keys::ALL_SECRETS)
             .await

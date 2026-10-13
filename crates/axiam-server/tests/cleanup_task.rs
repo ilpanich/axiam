@@ -2176,3 +2176,307 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
     assert_eq!(of(orphan).unwrap().metadata["orphan"], true);
     assert!(of(live).is_none());
 }
+
+/// #610: the cleanup job runs on every replica. Two replicas' sweeps over one
+/// store, run at once, purge a tombstoned tenant once between them: one
+/// `tenants.purged` record, and both sweeps `Ok` — `CleanupTask::record` marks
+/// the job failed only on `Err`, so neither replica reports it failed. A
+/// replica holding a live claim keeps the others off the tenant; one that died
+/// holding it does so for the lease only.
+#[tokio::test]
+async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "purge-race".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    // Two replicas: each its own repositories over the one datastore.
+    let (tenants_a, audit_a) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let (tenants_b, audit_b) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let records_of = |records: &[AuditLogEntry], id: Uuid| {
+        records.iter().filter(|e| e.resource_id == Some(id)).count()
+    };
+
+    let doomed = tenant_with_a_user(&db, org, "doomed").await;
+    tenants_a.delete(doomed).await.unwrap();
+    let (a, b) = tokio::join!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false),
+        sweep_tenant_purge(&tenants_b, &audit_b, false)
+    );
+    let (a, b) = (a.expect("replica A's sweep"), b.expect("replica B's sweep"));
+    assert_eq!(a + b, 1, "one replica purged the tenant");
+    assert_eq!(users_in(&db, doomed).await, 0);
+    assert!(tenants_a.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(
+        records_of(&purged_records(&db).await, doomed),
+        1,
+        "one tenants.purged record"
+    );
+
+    // Replica B holds a live claim on another tenant: A's sweep leaves it,
+    // and is still `Ok`.
+    let lease = chrono::TimeDelta::from_std(axiam_server::cleanup::TENANT_PURGE_LEASE).unwrap();
+    let held = tenant_with_a_user(&db, org, "held").await;
+    tenants_a.delete(held).await.unwrap();
+    assert!(
+        tenants_b
+            .claim_purge(held, Utc::now(), lease)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(users_in(&db, held).await, 1);
+
+    // B died holding it: once the lease has run out (the claim is dated back
+    // past it), A takes the purge over.
+    let crashed_at = Utc::now() - lease - chrono::TimeDelta::minutes(1);
+    db.query("UPDATE type::record('tenant', $id) SET purge_claimed_at = $at")
+        .bind(("id", held.to_string()))
+        .bind(("at", crashed_at))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(users_in(&db, held).await, 0);
+    assert_eq!(records_of(&purged_records(&db).await, held), 1);
+}
+
+// ---------------------------------------------------------------------------
+// #533 — the Art. 17 purge revokes the erased account's certificates
+// ---------------------------------------------------------------------------
+
+/// The purge's step (b4), then the erasure pipeline, in the purge's order: the
+/// account's `User` certificates are revoked — by the binding, and for a row
+/// without one by the convention on the account's username and email — and
+/// another account's certificate with the same common name is not. Revoked,
+/// not deleted: the rows stay, dated, on their issuer's list. And why the step
+/// runs before `anonymize_user`: once the names are overwritten the convention
+/// has nothing left to match.
+#[tokio::test]
+async fn the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::CertificateRepository;
+    use axiam_db::SurrealCertificateRepository;
+    use axiam_server::cleanup::revoke_erased_users_certificates;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let erasure_proof_repo = SurrealErasureProofRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db.clone());
+
+    let erased = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "carol".into(),
+            email: "carol@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("create user");
+    let other = Uuid::new_v4();
+    user_repo
+        .mark_deletion_pending(
+            tenant_id,
+            erased.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("mark deletion pending");
+
+    let issuer = Uuid::new_v4();
+    let leaf = |fingerprint: &str, subject: &str, user_id: Option<Uuid>| StoreCertificate {
+        tenant_id,
+        issuer_ca_id: issuer,
+        subject: subject.into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - chrono::Duration::minutes(1),
+        not_after: Utc::now() + chrono::Duration::days(30),
+        metadata: serde_json::json!({}),
+        user_id,
+    };
+    let bound = certs
+        .create(leaf("fp-bound", "carol-phone", Some(erased.id)))
+        .await
+        .unwrap();
+    let legacy = certs
+        .create(leaf("fp-legacy", "Carol@Example.com", None))
+        .await
+        .unwrap();
+    let someone_elses = certs
+        .create(leaf("fp-other", "carol", Some(other)))
+        .await
+        .unwrap();
+
+    // The sweep hands the purge the account as `find_due_for_purge` read it.
+    let due = user_repo
+        .find_due_for_purge(Utc::now())
+        .await
+        .expect("find due");
+    let account = due
+        .iter()
+        .find(|u| u.id == erased.id)
+        .expect("the account is due");
+    let revoked = revoke_erased_users_certificates(&certs, account)
+        .await
+        .expect("step (b4)");
+    assert_eq!(revoked, 2, "the bound and the legacy certificate");
+
+    run_erasure_pipeline(
+        &audit_repo,
+        &erasure_proof_repo,
+        &user_repo,
+        tenant_id,
+        erased.id,
+        "DELETED_USER_533",
+        "hashed_533",
+    )
+    .await
+    .expect("erasure pipeline");
+
+    for (cert, expected) in [
+        (&bound, CertificateStatus::Revoked),
+        (&legacy, CertificateStatus::Revoked),
+        (&someone_elses, CertificateStatus::Active),
+    ] {
+        // Read back at all: the erasure kept the row.
+        let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+    }
+    let on_the_list = certs
+        .list_revoked_by_issuer(issuer, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(on_the_list.len(), 2);
+    assert!(on_the_list.iter().all(|e| e.revoked_at.is_some()));
+
+    // After `anonymize_user` the account's names are gone, so a legacy
+    // certificate that carries the old name is no longer the account's by any
+    // rule the repository can apply — the reason (b4) runs first.
+    let late = certs.create(leaf("fp-late", "carol", None)).await.unwrap();
+    let anonymized = user_repo.get_by_id(tenant_id, erased.id).await.unwrap();
+    assert_ne!(anonymized.username, "carol");
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, &anonymized)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        certs.get_by_id(tenant_id, late.id).await.unwrap().status,
+        CertificateStatus::Active
+    );
+}
+
+/// R101W1-01 — the Art. 17 purge is started by the data subject, so an account
+/// named after an existing certificate's CN must not be able to revoke it by
+/// erasing itself: `Alice`, created after `alice`'s unbound CN-`alice`
+/// certificate, is erased and the certificate stays active.
+#[tokio::test]
+async fn erasing_an_account_leaves_an_older_namesakes_certificate_alone() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::CertificateRepository;
+    use axiam_db::SurrealCertificateRepository;
+    use axiam_server::cleanup::revoke_erased_users_certificates;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user_repo = SurrealUserRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db.clone());
+
+    user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("create alice");
+    let alices = certs
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "alice".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: "fp-alice".into(),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::minutes(1),
+            not_after: Utc::now() + chrono::Duration::days(30),
+            metadata: serde_json::json!({}),
+            user_id: None,
+        })
+        .await
+        .unwrap();
+    let erased = user_repo
+        .create(CreateUser {
+            tenant_id,
+            username: "Alice".into(),
+            email: "ALICE@example.com".into(),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("case variants coexist");
+    user_repo
+        .mark_deletion_pending(
+            tenant_id,
+            erased.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("mark deletion pending");
+
+    let due = user_repo
+        .find_due_for_purge(Utc::now())
+        .await
+        .expect("find due");
+    let account = due
+        .iter()
+        .find(|u| u.id == erased.id)
+        .expect("the account is due");
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, account)
+            .await
+            .expect("step (b4)"),
+        0
+    );
+    assert_eq!(
+        certs.get_by_id(tenant_id, alices.id).await.unwrap().status,
+        CertificateStatus::Active,
+        "alice's certificate is not Alice's"
+    );
+}

@@ -986,6 +986,35 @@ async fn the_limiter_counts_bc_authorize() {
     assert!(statuses[3..].iter().all(|s| *s == 429), "{statuses:?}");
 }
 
+/// #599 (T-424): a client may hold three open requests for one user. The fourth
+/// is refused before it is stored, in the shape the per-client limiter refuses
+/// in (`429 slow_down`, `Cache-Control: no-store`), and a hint naming nobody is
+/// never refused this way.
+#[actix_web::test]
+async fn the_fourth_open_request_for_one_user_gets_the_limiters_slow_down() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    for _ in 0..3 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    let (status, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+    assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
+    assert!(body["error_description"].as_str().is_some());
+    let mut count =
+        f.db.query("SELECT count() AS n FROM ciba_request GROUP ALL")
+            .await
+            .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    assert_eq!(n, Some(3), "the refused request was not stored");
+
+    for _ in 0..5 {
+        assert_eq!(
+            bc_authorize!(app, f, &f.ciba, "&login_hint=nobody-here").0,
+            200
+        );
+    }
+}
+
 /// The CIBA grant at the token endpoint is counted by the token endpoint's
 /// limiter like every other grant.
 #[actix_web::test]

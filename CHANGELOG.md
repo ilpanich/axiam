@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **One client may hold three open CIBA requests for one user, and the pending
+  list keeps its bounds (#599, T-424; Informational).** The list was
+  soonest-expiry-first and capped at fifty, and `requested_expiry` is the
+  client's to choose, so a client that may address a user could keep fifty
+  short-lived requests ahead of another client's real one; its badge polled a
+  30-a-minute bucket keyed on the address, so thirty console tabs behind one
+  egress address silenced each other. `POST /oauth2/bc-authorize` now refuses a
+  fourth pending, unexpired request of one client for one user with
+  `429 slow_down`, the per-client limiter's answer, before it is stored or
+  mailed (a count then a store: concurrent calls can overshoot by the number in
+  flight, and the overshoot expires within ten minutes). A hint naming nobody
+  is never refused this way, which makes the refusal a user-existence signal to
+  the client that made the three requests (recorded at T-424 and T-422).
+  `GET /api/v1/ciba/requests` is ordered by creation, reads each client's name
+  once per call, and gains two additive fields, `total_pending` and
+  `truncated`; its rate-limit bucket is the signed-in user's, not the
+  address's. The console badge counts `total_pending`.
+
 - **The tenant purge deletes only the audit rows the export holds (#602,
   T-118, T-472; Low).** The deletion accepts an export receipt up to six hours
   old, and the purge then deleted every audit row of the tenant, including the

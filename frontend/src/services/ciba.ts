@@ -4,7 +4,7 @@ import { ACR_MULTI_FACTOR, sanitizeRequiredAcr } from "@/lib/reauth";
 // ─── CIBA user approval (G-7, T23.7.2) ───────────────────────────────────────
 //
 // Mirrors `crates/axiam-api-rest/src/handlers/ciba_approval.rs`:
-//  - GET  /api/v1/ciba/requests?status=pending -> { requests: CibaApprovalRequest[] }
+//  - GET  /api/v1/ciba/requests?status=pending -> { requests, total_pending, truncated }
 //  - GET  /api/v1/ciba/requests/{id}          -> CibaApprovalRequest
 //  - POST /api/v1/ciba/requests/{id}/approve  -> { ok, decision }
 //  - POST /api/v1/ciba/requests/{id}/deny     -> { ok, decision }
@@ -41,12 +41,19 @@ export interface CibaStepUpRequired {
 }
 
 /**
- * The signed-in user's own pending requests, soonest expiry first. The way an
- * account that was sent no approval mail (D-74: no vouched address) finds them;
- * each entry is what the approval page shows for its `request_id`.
+ * The signed-in user's own pending requests, oldest first, at most fifty. The
+ * way an account that was sent no approval mail (D-74: no vouched address)
+ * finds them; each entry is what the approval page shows for its `request_id`.
  */
 export interface CibaPendingList {
   requests: CibaApprovalRequest[];
+  /**
+   * Every pending request the user has, the ones `requests` leaves out
+   * included (#599). Absent from a server that predates it.
+   */
+  total_pending?: number;
+  /** `true` when `total_pending` is more than `requests` holds. */
+  truncated?: boolean;
 }
 
 export const cibaService = {

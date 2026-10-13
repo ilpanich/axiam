@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:fe15d7d658ca0888ca7888c0cf50bbc2edd664aafd92056fa99ee754ad3737bf"
+    "x-axiam-spec-digest": "sha256:126106a3763301872989674156c3c06d86ab35423e6cc8be86ba7952c71d73da"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2617,7 +2617,7 @@
             "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
           },
           "429": {
-            "description": "The `ciba_approval_per_min` allowance of this route is spent"
+            "description": "The signed-in user's `ciba_approval_per_min` allowance of this route is spent"
           }
         },
         "security": [
@@ -13846,7 +13846,7 @@
             }
           },
           "429": {
-            "description": "Rate limit exceeded",
+            "description": "Rate limit exceeded, or the client already has the most open requests it may have for this user (`slow_down`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -16563,7 +16563,9 @@
         "type": "object",
         "description": "The signed-in user's pending requests.",
         "required": [
-          "requests"
+          "requests",
+          "total_pending",
+          "truncated"
         ],
         "properties": {
           "requests": {
@@ -16571,7 +16573,17 @@
             "items": {
               "$ref": "#/components/schemas/CibaApprovalPage"
             },
-            "description": "Soonest expiry first, at most 50. Each entry is what\n`GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`."
+            "description": "Oldest first (by creation), at most 50. Each entry is what\n`GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`."
+          },
+          "total_pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many pending, unexpired requests the caller has in all, the ones\n`requests` leaves out included. Never less than `requests.len()`.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`true` when `total_pending` is more than `requests` holds: the list is\nthe oldest 50 and the rest are waiting behind them."
           }
         }
       },

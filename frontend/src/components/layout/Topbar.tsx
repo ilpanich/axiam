@@ -50,7 +50,7 @@ export function Topbar({ onMenuClick }: TopbarProps) {
   const canActOnOrganization = useCanActOnOrganization();
   const queryClientInstance = useQueryClient();
   const { can } = usePermissions();
-  const pendingSignIns = usePendingSignInRequests();
+  const { requests: pendingSignIns, total: pendingTotal } = usePendingSignInRequests();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
   const tenantPanelRef = useRef<HTMLDivElement>(null);
@@ -407,9 +407,9 @@ export function Topbar({ onMenuClick }: TopbarProps) {
             aria-expanded={userMenuOpen}
             aria-haspopup="menu"
             aria-label={
-              pendingSignIns.length > 0
-                ? `User menu, ${pendingSignIns.length} sign-in ${
-                    pendingSignIns.length === 1 ? "request" : "requests"
+              pendingTotal > 0
+                ? `User menu, ${pendingTotal} sign-in ${
+                    pendingTotal === 1 ? "request" : "requests"
                   } waiting`
                 : "User menu"
             }
@@ -424,13 +424,13 @@ export function Topbar({ onMenuClick }: TopbarProps) {
               {user?.username ?? "User"}
             </span>
             <ChevronDown size={14} aria-hidden="true" />
-            {pendingSignIns.length > 0 && (
+            {pendingTotal > 0 && (
               <span
                 data-testid="pending-sign-ins-badge"
                 className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-primary text-[10px] leading-4 font-semibold text-primary-foreground text-center"
                 aria-hidden="true"
               >
-                {pendingSignIns.length}
+                {pendingTotal}
               </span>
             )}
           </button>
@@ -479,9 +479,9 @@ export function Topbar({ onMenuClick }: TopbarProps) {
                       <span className="truncate">{r.client_name}</span>
                     </button>
                   ))}
-                  {pendingSignIns.length > MAX_LISTED_SIGN_INS && (
+                  {pendingTotal > MAX_LISTED_SIGN_INS && (
                     <p className="px-3 py-1 text-xs text-muted-foreground">
-                      and {pendingSignIns.length - MAX_LISTED_SIGN_INS} more
+                      and {pendingTotal - MAX_LISTED_SIGN_INS} more
                     </p>
                   )}
                 </div>

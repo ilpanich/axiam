@@ -47,6 +47,14 @@
 //! `authorization_pending` until `expired_token`. `unknown_user_id` is never
 //! sent: answering it would let any registered CIBA client enumerate the
 //! tenant's usernames and e-mail addresses at the endpoint's rate limit.
+//!
+//! One exception, added by #599 (T-424) and recorded as such on 2026-10-13: the
+//! per-(client, user) cap ([`MAX_PENDING_PER_CLIENT_USER`]). A request for
+//! nobody has no user to count against, so only a real user's fourth open
+//! request from one client is refused (`slow_down`); the refusal tells that
+//! client the hint named a user who may sign in. It costs the client four
+//! requests per name, three of them left open, and is bounded by the
+//! per-client limiter.
 
 use axiam_core::models::ciba::{
     CIBA_GRANT_TYPE, CibaApprovalEvidence, CibaClientMetadata, CibaDeliveryMode,
@@ -766,9 +774,29 @@ pub struct CibaApproval {
 }
 
 /// The most pending requests one user's list returns. A user with more than
-/// this many open requests is being flooded (T-424); the soonest-expiring are
-/// shown and the rest wait their turn.
+/// this many open requests is being flooded (T-424); the oldest are shown, in
+/// the order they were made, and the list says how many more there are
+/// ([`CibaPendingPage::total_pending`]).
 pub const MAX_PENDING_LIST: u32 = 50;
+
+/// The most `pending`, unexpired requests one client may have open for one
+/// user (#599, T-424). A fourth is refused at `bc-authorize` before it is
+/// stored or mailed, with the `slow_down` the per-client limiter answers.
+///
+/// `requested_expiry` is the client's to choose, so without a per-client bound
+/// a client that may address a user could keep the whole list full of
+/// short-lived requests of its own. Three is room for a retry or two while the
+/// first is still on the user's phone; a client that needs more is waiting on
+/// a user who has not answered.
+///
+/// Checked, not enforced by the datastore: two `bc-authorize` calls that both
+/// read two open requests both store one, so a burst can overshoot by up to the
+/// number of calls in flight at once for the same (client, user) pair. The
+/// per-client limiter (`bc_authorize_per_min`) bounds that burst and the
+/// requests expire within [`MAX_REQUESTED_EXPIRY_SECS`], and the next call
+/// reads the true count and is refused — so the overshoot is transient and
+/// never compounds.
+pub const MAX_PENDING_PER_CLIENT_USER: u64 = 3;
 
 /// What the approval page may show (nothing the user's own request does not
 /// already say).
@@ -789,6 +817,23 @@ pub struct CibaApprovalView {
     pub acr_values: Vec<String>,
     /// When it expires.
     pub expires_at: DateTime<Utc>,
+}
+
+/// A user's pending requests as the console lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CibaPendingPage {
+    /// Oldest first, at most [`MAX_PENDING_LIST`].
+    pub requests: Vec<CibaApprovalView>,
+    /// Every `pending`, unexpired request addressed to the user, the ones not
+    /// in `requests` included; never less than `requests.len()`.
+    pub total_pending: u64,
+}
+
+impl CibaPendingPage {
+    /// Whether `requests` leaves some open requests out.
+    pub fn truncated(&self) -> bool {
+        self.total_pending > self.requests.len() as u64
+    }
 }
 
 /// The class a request's `acr_values` still need, given the authentication the
@@ -1006,8 +1051,10 @@ where
     ///
     /// # Errors
     ///
-    /// CIBA Core §13's codes for a malformed request; `server_error` for a
-    /// datastore failure (or a ping request with no sealing key).
+    /// CIBA Core §13's codes for a malformed request; `slow_down` when the
+    /// client already has [`MAX_PENDING_PER_CLIENT_USER`] open requests for the
+    /// user the hint names (#599); `server_error` for a datastore failure (or a
+    /// ping request with no sealing key).
     pub async fn initiate(
         &self,
         client: &OAuth2Client,
@@ -1092,6 +1139,21 @@ where
         let subject = self
             .resolve_subject(tenant_id, &hint, &client.client_id, acceptable_issuers)
             .await?;
+
+        // #599 (T-424): the per-(client, user) cap, before anything is stored
+        // or mailed. A request for nobody has no user to crowd out and is not
+        // counted. `slow_down` is the answer the per-client limiter gives; the
+        // handler renders it as that limiter's 429.
+        if let Some(user) = &subject
+            && self
+                .requests
+                .count_pending_for_user(tenant_id, user.id, Some(&client.client_id))
+                .await
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
+                >= MAX_PENDING_PER_CLIENT_USER
+        {
+            return Err(OAuth2Error::SlowDown);
+        }
 
         let expires_at = Utc::now() + Duration::seconds(expires_in as i64);
         let stored = self
@@ -1179,10 +1241,11 @@ where
         }))
     }
 
-    /// The signed-in user's own pending requests, soonest expiry first, at
-    /// most [`MAX_PENDING_LIST`] — what the console lists for an account the
-    /// approval mail never reached (D-74). Each entry is what
-    /// [`Self::lookup_for_approval`] would return for it.
+    /// The signed-in user's own pending requests, oldest first, at most
+    /// [`MAX_PENDING_LIST`] — what the console lists for an account the
+    /// approval mail never reached (D-74) — with the number of open requests
+    /// there are in all. Each entry is what [`Self::lookup_for_approval`] would
+    /// return for it.
     ///
     /// # Errors
     ///
@@ -1191,13 +1254,18 @@ where
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Vec<CibaApprovalView>, OAuth2Error> {
+    ) -> Result<CibaPendingPage, OAuth2Error> {
         let rows = self
             .requests
             .list_pending_for_user(tenant_id, user_id, MAX_PENDING_LIST)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
-        Ok(rows
+        let counted = self
+            .requests
+            .count_pending_for_user(tenant_id, user_id, None)
+            .await
+            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        let requests: Vec<CibaApprovalView> = rows
             .into_iter()
             .map(|req| CibaApprovalView {
                 request_id: req.id,
@@ -1208,7 +1276,14 @@ where
                 acr_values: req.acr_values,
                 expires_at: req.expires_at,
             })
-            .collect())
+            .collect();
+        // The two reads are not one snapshot: a request decided between them
+        // must not make the total smaller than what was just listed.
+        let total_pending = counted.max(requests.len() as u64);
+        Ok(CibaPendingPage {
+            requests,
+            total_pending,
+        })
     }
 
     /// The user approves (T23.7.2's page, after full authentication).
@@ -1405,6 +1480,27 @@ mod tests {
         assert_eq!(step_up_required(&either, &pwd_only), None);
         // And no evidence at all is single-factor, the strict reading.
         assert_eq!(step_up_required(&mfa, &[]), Some(Acr::MultiFactor));
+    }
+
+    #[test]
+    fn a_pending_page_is_truncated_only_when_open_requests_are_left_out() {
+        let view = |n: u8| CibaApprovalView {
+            request_id: Uuid::from_u128(u128::from(n)),
+            version: 0,
+            client_id: "oa_x".into(),
+            scopes: vec!["openid".into()],
+            binding_message: None,
+            acr_values: Vec::new(),
+            expires_at: Utc::now(),
+        };
+        let page = |held: u8, total: u64| CibaPendingPage {
+            requests: (0..held).map(view).collect(),
+            total_pending: total,
+        };
+        assert!(!page(0, 0).truncated());
+        assert!(!page(3, 3).truncated());
+        assert!(page(3, 4).truncated());
+        assert_eq!(MAX_PENDING_PER_CLIENT_USER, 3);
     }
 
     #[test]

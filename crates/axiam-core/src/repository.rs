@@ -1876,15 +1876,28 @@ pub trait CibaRequestRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
 
-    /// The `pending`, unexpired requests addressed to `user_id`, soonest
-    /// expiry first, at most `limit`. A request for nobody (`user_id` unset) is
-    /// never listed, whoever asks.
+    /// The `pending`, unexpired requests addressed to `user_id`, oldest first
+    /// (by `created_at`, so a request keeps its place however short-lived its
+    /// neighbours are), at most `limit`. A request for nobody (`user_id` unset)
+    /// is never listed, whoever asks.
     fn list_pending_for_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         limit: u32,
     ) -> impl Future<Output = AxiamResult<Vec<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// How many `pending`, unexpired requests are addressed to `user_id` in
+    /// `tenant_id`: those of `client_id` alone when it is given, of every
+    /// client when it is `None`. The count behind the per-(client, user) cap at
+    /// `bc-authorize` (#599) and the list's `total_pending`. A request for
+    /// nobody is never counted.
+    fn count_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        client_id: Option<&str>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// `pending → approved`, conditional on `version = expected_version`, on
     /// the row's user being `user_id`, and on the request being unexpired.

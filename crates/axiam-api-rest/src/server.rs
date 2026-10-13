@@ -816,13 +816,15 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // caller's own answers 404.
             // The list is for the account the approval mail never reaches
             // (D-74, #566), and a bucket of its own under the same allowance.
+            // D-4 (#599): that bucket is the signed-in user's, not the
+            // address's, and an IP-keyed layer would put thirty tabs behind one
+            // egress address back into one bucket — so the route carries no
+            // `build_governor` / `RateLimitShared`: the principal exists only
+            // once the handler's extractor has authenticated it, and the
+            // handler spends `ciba_approval_list:{tenant}:{user}` from the
+            // shared counter before anything is read.
             .service(
                 web::resource("/ciba/requests")
-                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
-                    .wrap(RateLimitShared::<C>::new(
-                        "ciba_approval_list",
-                        rate_limit_cfg.ciba_approval_per_min,
-                    ))
                     .route(web::get().to(handlers::ciba_approval::list_requests::<C>)),
             )
             .service(

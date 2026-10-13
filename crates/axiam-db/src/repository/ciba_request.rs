@@ -68,6 +68,11 @@ const SELECT_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, \
      approval_session_id, auth_time, acr, amr, decided_at, created_at";
 
 #[derive(Debug, SurrealValue)]
+struct CountRow {
+    n: i64,
+}
+
+#[derive(Debug, SurrealValue)]
 struct CibaRequestRow {
     record_id: String,
     tenant_id: String,
@@ -368,7 +373,7 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
                 "SELECT {SELECT_FIELDS} FROM ciba_request \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
                      AND status = 'pending' AND expires_at > time::now() \
-                 ORDER BY expires_at ASC LIMIT $limit"
+                 ORDER BY created_at ASC, record_id ASC LIMIT $limit"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -380,6 +385,35 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
             .map(CibaRequestRow::try_into_request)
             .collect::<Result<_, _>>()
             .map_err(Into::into)
+    }
+
+    async fn count_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        client_id: Option<&str>,
+    ) -> AxiamResult<u64> {
+        let client_clause = if client_id.is_some() {
+            " AND client_id = $client_id"
+        } else {
+            ""
+        };
+        let db = self.db.current();
+        let mut query = db
+            .query(format!(
+                "SELECT count() AS n FROM ciba_request \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id{client_clause} \
+                     AND status = 'pending' AND expires_at > time::now() \
+                 GROUP ALL"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()));
+        if let Some(client_id) = client_id {
+            query = query.bind(("client_id", client_id.to_owned()));
+        }
+        let mut result = query.await.map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map_or(0, |row| row.n.max(0) as u64))
     }
 
     async fn approve(

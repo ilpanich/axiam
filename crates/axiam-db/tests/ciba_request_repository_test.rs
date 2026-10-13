@@ -221,9 +221,10 @@ async fn approval_is_conditional_on_version_user_status_and_expiry() {
 }
 
 /// The pending list (#566) holds the user's own, unexpired, undecided requests
-/// of one tenant, soonest expiry first, and honours the limit.
+/// of one tenant, oldest first (#599: by creation, not by expiry), and honours
+/// the limit.
 #[tokio::test]
-async fn the_pending_list_is_one_users_open_requests_soonest_first() {
+async fn the_pending_list_is_one_users_open_requests_oldest_first() {
     let db = setup().await;
     let repo = repo(&db);
     let tenant = Uuid::new_v4();
@@ -257,16 +258,84 @@ async fn the_pending_list_is_one_users_open_requests_soonest_first() {
 
     let listed = repo.list_pending_for_user(tenant, user, 50).await.unwrap();
     let ids: Vec<Uuid> = listed.iter().map(|r| r.id).collect();
-    assert_eq!(ids, [sooner.id, later.id]);
+    // `later` was made first and expires last: creation order puts it first.
+    assert_eq!(ids, [later.id, sooner.id]);
     let limited = repo.list_pending_for_user(tenant, user, 1).await.unwrap();
     assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].id, sooner.id);
+    assert_eq!(limited[0].id, later.id);
     assert!(
         repo.list_pending_for_user(tenant, Uuid::new_v4(), 50)
             .await
             .unwrap()
             .is_empty()
     );
+}
+
+/// #599: the count behind the per-(client, user) cap and the list's
+/// `total_pending` is the same set the list holds — pending, unexpired, the
+/// user's, one tenant's — narrowed to one client when asked, and a request for
+/// nobody is in no count.
+#[tokio::test]
+async fn pending_requests_are_counted_per_user_and_per_client() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let other_client = |mut i: CreateCibaRequest| {
+        i.client_id = "oa_other_client".into();
+        i
+    };
+
+    assert_eq!(
+        repo.count_pending_for_user(tenant, user, None)
+            .await
+            .unwrap(),
+        0
+    );
+    let decided = repo
+        .create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(tenant, Some(user), &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(other_client(input(tenant, Some(user), &digest(), 300)))
+        .await
+        .unwrap();
+    // Not counted: expired, another user's, nobody's, another tenant's.
+    repo.create(input(tenant, Some(user), &digest(), -1))
+        .await
+        .unwrap();
+    repo.create(input(tenant, Some(Uuid::new_v4()), &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(tenant, None, &digest(), 300))
+        .await
+        .unwrap();
+    repo.create(input(Uuid::new_v4(), Some(user), &digest(), 300))
+        .await
+        .unwrap();
+
+    let count = |client: Option<&'static str>| {
+        let repo = &repo;
+        async move {
+            repo.count_pending_for_user(tenant, user, client)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(count(None).await, 4);
+    assert_eq!(count(Some("oa_ciba_client")).await, 3);
+    assert_eq!(count(Some("oa_other_client")).await, 1);
+    assert_eq!(count(Some("oa_nobody")).await, 0);
+
+    // A decided request stops counting.
+    assert!(repo.deny(tenant, decided.id, 0, user).await.unwrap());
+    assert_eq!(count(Some("oa_ciba_client")).await, 2);
+    assert_eq!(count(None).await, 3);
 }
 
 #[tokio::test]

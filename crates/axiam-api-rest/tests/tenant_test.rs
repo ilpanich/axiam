@@ -598,7 +598,7 @@ async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
         .unwrap();
 
     let app = test_app!(db, auth);
-    let _ = export_audit_body!(app, token, org_id, doomed.id);
+    let manifest = manifest_of(&export_audit_body!(app, token, org_id, doomed.id));
 
     let req = test::TestRequest::delete()
         .uri(&format!(
@@ -636,6 +636,17 @@ async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
     assert!(
         entry.metadata["audit_export_receipt_id"].is_string(),
         "the deletion record names the export that authorised it"
+    );
+    // R1W1-04: and the instant that export covered up to — the export's
+    // `exported_through`, not the receipt's later timestamp — which is the
+    // newest audit row of the tenant the purge may delete.
+    assert_eq!(
+        entry.metadata["audit_exported_through"], manifest["exported_through"],
+        "the deletion record carries the export's own bound"
+    );
+    assert_ne!(
+        entry.metadata["audit_exported_through"],
+        entry.metadata["audit_exported_at"]
     );
 }
 
@@ -1726,7 +1737,10 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
     let ciba_stored = ciba_requests(tenant_rows(&db, doomed).await);
     assert_eq!(ciba_stored, 1, "the live bc-authorize stored its request");
 
-    let _ = export_audit_body!(app, token, org_id, doomed);
+    let exported_through: chrono::DateTime<Utc> = serde_json::from_value(
+        manifest_of(&export_audit_body!(app, token, org_id, doomed))["exported_through"].clone(),
+    )
+    .unwrap();
     let req = test::TestRequest::delete()
         .uri(&format!("/api/v1/organizations/{org_id}/tenants/{doomed}"))
         .insert_header(("Authorization", format!("Bearer {token}")))
@@ -1800,12 +1814,49 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
     // The purge (the cleanup job's `tenant_purge` sweep) empties every
     // tenant-scoped table for the tenant, then removes its row — except the
     // revoked, unexpired certificate, which its issuer's revocation list must
-    // keep naming until it expires (R1W1-01).
-    tenants.purge_tombstoned(doomed).await.unwrap();
+    // keep naming until it expires (R1W1-01), and the audit rows written after
+    // the export, which no export holds and the retention sweep governs
+    // (R1W1-04).
+    let audit_before_purge = tenant_rows(&db, doomed)
+        .await
+        .into_iter()
+        .find(|(table, _)| *table == "audit_log")
+        .unwrap()
+        .1;
+    let report = tenants.purge_tombstoned(doomed).await.unwrap();
+    assert_eq!(report.audit_exported_through, Some(exported_through));
+    assert!(
+        report.audit_rows_deleted > 0,
+        "the rows the export holds went"
+    );
+    assert_eq!(
+        report.audit_rows_deleted + report.audit_rows_kept,
+        audit_before_purge
+    );
     for (table, n) in tenant_rows(&db, doomed).await {
-        let kept = u64::from(table == "certificate");
+        let kept = match table {
+            "certificate" => 1,
+            "audit_log" => report.audit_rows_kept,
+            _ => 0,
+        };
         assert_eq!(n, kept, "{table} holds the deleted tenant's rows");
     }
+    let mut late = db
+        .query(
+            "SELECT count() AS total FROM audit_log \
+             WHERE tenant_id = $tenant AND timestamp > $through GROUP ALL",
+        )
+        .bind(("tenant", doomed.to_string()))
+        .bind(("through", exported_through))
+        .await
+        .unwrap();
+    let late: Vec<axiam_db::CountRow> = late.take(0).unwrap();
+    assert_eq!(
+        late.first().map_or(0, |r| r.total),
+        report.audit_rows_kept,
+        "every kept audit row was written after the export, the receipt among them"
+    );
+    assert!(report.audit_rows_kept >= 1);
     assert_eq!(certificate_status(&db, doomed).await, "Revoked");
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
     // The graph edges went with their records: only the bystander's remain.
@@ -1879,4 +1930,75 @@ async fn a_deleted_tenants_slug_is_refused_until_the_purge_frees_it() {
     let reborn = create_tenant_via_api!(app, token, org_id, "reused-slug")
         .expect("the slug is free once the old tenant is purged");
     assert_ne!(reborn, doomed);
+}
+
+/// The issue's test at the API (R1W1-04, #602, D-5): an audit row of the tenant
+/// written after the export — here between the export and the deletion, and
+/// after the deletion — survives the purge under the tenant id, as does the
+/// export receipt; the row the export holds is gone. Before the fix the purge
+/// deleted all of them.
+#[actix_rt::test]
+async fn an_audit_row_written_after_the_export_survives_the_purge() {
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
+    let app = test_app!(db, auth);
+    let doomed = create_tenant_via_api!(app, token, org_id, "doomed-late-rows").unwrap();
+
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let entry = |action: &'static str| CreateAuditLogEntry {
+        tenant_id: doomed,
+        actor_id: user_id,
+        actor_type: ActorType::User,
+        action: action.into(),
+        resource_id: None,
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: None,
+    };
+    let held = audit_repo.append(entry("users.updated")).await.unwrap();
+    let body = export_audit_body!(app, token, org_id, doomed);
+    assert!(
+        body.contains(&held.id.to_string()),
+        "the export holds the row"
+    );
+    let receipt_id: Uuid = manifest_of(&body)["receipt_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let before_delete = audit_repo.append(entry("users.created")).await.unwrap();
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants/{doomed}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+    let after_delete = audit_repo.append(entry("auth.login_failed")).await.unwrap();
+
+    let report = SurrealTenantRepository::new(db.clone())
+        .purge_tombstoned(doomed)
+        .await
+        .unwrap();
+
+    let ids = [held.id, receipt_id, before_delete.id, after_delete.id];
+    let mut left: Vec<Uuid> = audit_repo
+        .get_by_ids(doomed, &ids)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    left.sort();
+    let mut expected = vec![receipt_id, before_delete.id, after_delete.id];
+    expected.sort();
+    assert_eq!(
+        left, expected,
+        "every row the export does not hold survives"
+    );
+    assert_eq!(report.audit_rows_kept, 3);
+    assert!(report.audit_rows_deleted >= 1);
+    assert!(report.audit_exported_through.is_some());
 }

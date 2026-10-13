@@ -5,7 +5,8 @@
 //! repository-level rules — a tombstoned tenant leaves every read, keeps its
 //! slug until purged, cannot be updated; the purge refuses a live tenant; and
 //! the orphan sweep finds and purges the rows a pre-tombstone deletion left,
-//! keeping their audit trail for the retention sweep.
+//! keeping their audit trail for the retention sweep; and the purge deletes
+//! only the audit rows the export the deletion required holds (R1W1-04, #602).
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -19,7 +20,7 @@ use axiam_core::repository::{
     AuditLogRepository, OAuth2ClientRepository, OrganizationRepository, Pagination,
     SessionRepository, SettingsRepository, TenantRepository, UserRepository,
 };
-use axiam_db::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
+use axiam_db::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey, TenantPurgeReport};
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealOAuth2ClientRepository, SurrealOrganizationRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealTenantRepository,
@@ -101,6 +102,91 @@ async fn populate(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
         .await
         .unwrap();
     user.id
+}
+
+/// Now, once the clock has moved on from every row written so far — and
+/// before it reaches any row written next.
+async fn after_a_tick() -> chrono::DateTime<Utc> {
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let now = Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    now
+}
+
+/// The `tenants.deleted` metadata the deletion handler writes, naming an
+/// export that covered up to `exported_through`.
+fn deletion_metadata(exported_through: chrono::DateTime<Utc>) -> serde_json::Value {
+    serde_json::json!({
+        "audit_export_receipt_id": Uuid::new_v4(),
+        "audit_exported_at": exported_through + Duration::seconds(1),
+        "audit_exported_through": exported_through,
+    })
+}
+
+/// The system-log record of `tenant_id`'s deletion, with `metadata`.
+async fn record_deletion(db: &Surreal<Db>, tenant_id: Uuid, metadata: serde_json::Value) {
+    SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::User,
+            action: "tenants.deleted".into(),
+            resource_id: Some(tenant_id),
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(metadata),
+        })
+        .await
+        .unwrap();
+}
+
+/// One audit entry of `tenant_id`, returning its id.
+async fn audit_entry(db: &Surreal<Db>, tenant_id: Uuid, action: &str) -> Uuid {
+    SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: action.into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+/// An `audit_signature` row of `tenant_id` over `entries`.
+async fn signature(db: &Surreal<Db>, tenant_id: Uuid, entries: &[Uuid]) {
+    db.query(
+        "CREATE audit_signature SET tenant_id = $tenant, signing_key_id = 'key', \
+         entry_ids = $entries, signature_armored = 'sig'",
+    )
+    .bind(("tenant", tenant_id.to_string()))
+    .bind((
+        "entries",
+        entries.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+    ))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+}
+
+/// The `action`s of `tenant_id`'s audit rows, sorted.
+async fn audit_actions(db: &Surreal<Db>, tenant_id: Uuid) -> Vec<String> {
+    let mut result = db
+        .query("SELECT VALUE action FROM audit_log WHERE tenant_id = $tenant")
+        .bind(("tenant", tenant_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let mut actions: Vec<String> = result.take(0).unwrap();
+    actions.sort();
+    actions
 }
 
 /// Rows naming `tenant_id` in `table` (keyed as the purge keys it).
@@ -273,8 +359,8 @@ async fn a_tombstoned_tenants_slug_is_not_reused_until_it_is_purged() {
 }
 
 /// The purge never removes a live tenant, and removes a tombstoned one's rows
-/// — its audit trail included — and then its row, leaving the system log and
-/// another tenant alone.
+/// — its audit trail included, all of it written before the export — and then
+/// its row, leaving the system log and another tenant alone.
 #[tokio::test]
 async fn the_purge_refuses_a_live_tenant_and_empties_a_tombstoned_one() {
     let (db, org) = setup().await;
@@ -283,20 +369,8 @@ async fn the_purge_refuses_a_live_tenant_and_empties_a_tombstoned_one() {
     let kept = tenant(&db, org, "kept").await;
     populate(&db, doomed).await;
     populate(&db, kept).await;
-    let audit = SurrealAuditLogRepository::new(db.clone());
-    audit
-        .append(CreateAuditLogEntry {
-            tenant_id: Uuid::nil(),
-            actor_id: Uuid::nil(),
-            actor_type: ActorType::System,
-            action: "tenants.deleted".into(),
-            resource_id: Some(doomed),
-            outcome: AuditOutcome::Success,
-            ip_address: None,
-            metadata: None,
-        })
-        .await
-        .unwrap();
+    let exported_through = after_a_tick().await;
+    record_deletion(&db, doomed, deletion_metadata(exported_through)).await;
 
     assert!(matches!(
         tenants.purge_tombstoned(doomed).await,
@@ -309,11 +383,19 @@ async fn the_purge_refuses_a_live_tenant_and_empties_a_tombstoned_one() {
     );
 
     tenants.delete(doomed).await.unwrap();
-    tenants.purge_tombstoned(doomed).await.unwrap();
+    let report = tenants.purge_tombstoned(doomed).await.unwrap();
 
     for step in TENANT_PURGE_ORDER {
         assert_eq!(rows(&db, step.table, doomed).await, 0, "{}", step.table);
     }
+    assert_eq!(
+        report,
+        TenantPurgeReport {
+            audit_exported_through: Some(exported_through),
+            audit_rows_deleted: 1,
+            audit_rows_kept: 0,
+        }
+    );
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
     assert_eq!(rows(&db, "user", kept).await, 1);
     assert_eq!(rows(&db, "audit_log", kept).await, 1);
@@ -372,4 +454,166 @@ async fn an_orphaned_tenants_rows_are_found_and_purged_but_its_audit_trail_is_ke
     assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
     assert_eq!(rows(&db, "user", live).await, 1);
     assert_eq!(rows(&db, "user", tombstoned).await, 1);
+}
+
+/// The issue's test (R1W1-04, #602, D-5): the purge deletes the audit rows at
+/// or before the export the deletion required and keeps every later one —
+/// the receipt, what happened before the deletion, what the deletion and the
+/// wait for the purge produced — under the tenant id. A signature over deleted
+/// entries only goes; one that also signs a kept entry stays. The kept rows do
+/// not make the tenant id an orphan, and the audit retention sweep removes them
+/// once they are past the window. Before the fix every row went.
+#[tokio::test]
+async fn a_row_written_after_the_export_survives_the_purge() {
+    let (db, org) = setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let doomed = tenant(&db, org, "doomed").await;
+    populate(&db, doomed).await;
+    let exported = audit_entry(&db, doomed, "users.updated").await;
+    let exported_through = after_a_tick().await;
+    let receipt = audit_entry(&db, doomed, "tenants.audit_exported").await;
+    let late = audit_entry(&db, doomed, "users.created").await;
+    tenants.delete(doomed).await.unwrap();
+    record_deletion(&db, doomed, deletion_metadata(exported_through)).await;
+    audit_entry(&db, doomed, "auth.login_failed").await;
+    signature(&db, doomed, &[exported]).await;
+    signature(&db, doomed, &[exported, late]).await;
+    signature(&db, doomed, &[receipt]).await;
+
+    let report = tenants.purge_tombstoned(doomed).await.unwrap();
+
+    assert_eq!(
+        audit_actions(&db, doomed).await,
+        [
+            "auth.login_failed",
+            "tenants.audit_exported",
+            "users.created"
+        ],
+        "only the rows after the export survive, under the tenant id"
+    );
+    assert_eq!(
+        report,
+        TenantPurgeReport {
+            audit_exported_through: Some(exported_through),
+            audit_rows_deleted: 2,
+            audit_rows_kept: 3,
+        }
+    );
+    assert_eq!(
+        rows(&db, "audit_signature", doomed).await,
+        2,
+        "the signature over exported entries only went; the two signing a kept entry stayed"
+    );
+    for step in TENANT_PURGE_ORDER {
+        if step.stage != axiam_db::repository::tenant_purge::PurgeStage::AuditTrail {
+            assert_eq!(rows(&db, step.table, doomed).await, 0, "{}", step.table);
+        }
+    }
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert!(
+        tenants.orphaned_tenant_ids().await.unwrap().is_empty(),
+        "kept audit rows do not make the tenant id an orphan"
+    );
+
+    // The audit retention sweep (T-119) deletes a kept row like any other,
+    // tenant or no tenant, once it is past the window.
+    db.query("UPDATE audit_log SET timestamp = time::now() - 400d WHERE tenant_id = $tenant")
+        .bind(("tenant", doomed.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        audit
+            .prune_older_than(Utc::now() - Duration::days(365))
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(rows(&db, "audit_log", doomed).await, 0);
+}
+
+/// Fail-safe: with no export time to go by — no `tenants.deleted` record (its
+/// write was dead-lettered, or the purge ran before it landed), or one without
+/// the time — the purge deletes no audit row and no signature of the tenant,
+/// and says so. A record written before `audit_exported_through` existed is
+/// answered from the receipt it names.
+#[tokio::test]
+async fn without_an_export_time_the_purge_keeps_the_whole_audit_trail() {
+    let (db, org) = setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+
+    // No deletion record at all.
+    let unrecorded = tenant(&db, org, "unrecorded").await;
+    let entry = audit_entry(&db, unrecorded, "users.created").await;
+    signature(&db, unrecorded, &[entry]).await;
+    tenants.delete(unrecorded).await.unwrap();
+    let report = tenants.purge_tombstoned(unrecorded).await.unwrap();
+    assert_eq!(
+        report,
+        TenantPurgeReport {
+            audit_exported_through: None,
+            audit_rows_deleted: 0,
+            audit_rows_kept: 1,
+        }
+    );
+    assert_eq!(rows(&db, "audit_signature", unrecorded).await, 1);
+    assert_eq!(rows(&db, "user", unrecorded).await, 0);
+
+    // A record without an export time, or with one that does not parse.
+    for (slug, metadata) in [
+        ("no-time", serde_json::json!({ "tenant_slug": "no-time" })),
+        (
+            "bad-time",
+            serde_json::json!({ "audit_exported_through": "yesterday" }),
+        ),
+    ] {
+        let t = tenant(&db, org, slug).await;
+        audit_entry(&db, t, "users.created").await;
+        tenants.delete(t).await.unwrap();
+        record_deletion(&db, t, metadata).await;
+        let report = tenants.purge_tombstoned(t).await.unwrap();
+        assert_eq!(report.audit_exported_through, None, "{slug}");
+        assert_eq!(report.audit_rows_kept, 1, "{slug}");
+    }
+
+    // A 1.0.0 deletion record: only the receipt id. The receipt's own
+    // `exported_through` is the export time.
+    let legacy = tenant(&db, org, "legacy").await;
+    audit_entry(&db, legacy, "users.created").await;
+    let exported_through = after_a_tick().await;
+    let receipt = SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id: legacy,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::User,
+            action: "tenants.audit_exported".into(),
+            resource_id: Some(legacy),
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "record_count": 1,
+                "exported_through": exported_through,
+            })),
+        })
+        .await
+        .unwrap();
+    tenants.delete(legacy).await.unwrap();
+    record_deletion(
+        &db,
+        legacy,
+        serde_json::json!({ "audit_export_receipt_id": receipt.id }),
+    )
+    .await;
+    let report = tenants.purge_tombstoned(legacy).await.unwrap();
+    assert_eq!(
+        report,
+        TenantPurgeReport {
+            audit_exported_through: Some(exported_through),
+            audit_rows_deleted: 1,
+            audit_rows_kept: 1,
+        }
+    );
+    assert_eq!(audit_actions(&db, legacy).await, ["tenants.audit_exported"]);
 }

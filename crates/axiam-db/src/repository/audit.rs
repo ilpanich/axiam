@@ -13,6 +13,12 @@
 //! - [`AuditLogRepository::prune_older_than`] — retention (T-119), driven by
 //!   the background sweep on a clock and reachable from no HTTP handler.
 //!
+//! One deletion lives outside this module: the tenant purge
+//! (`super::tenant_purge`, run by the cleanup job after a tenant's deletion)
+//! deletes that tenant's rows at or before the time of the export its
+//! deletion required (T-118, R1W1-04), and the signatures over nothing else.
+//! It deletes nothing the export does not hold and updates no row.
+//!
 //! Adding a third is a security decision, not a refactor.
 
 use axiam_core::audit_minimisation::AuditMinimisation;

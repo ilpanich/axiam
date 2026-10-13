@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The tenant purge deletes only the audit rows the export holds (#602,
+  T-118, T-472; Low).** The deletion accepts an export receipt up to six hours
+  old, and the purge then deleted every audit row of the tenant, including the
+  receipt and everything written after the export: activity before the
+  deletion, the deletion's own revocations, the refusals until the purge. The
+  deletion now copies the export's own bound (`exported_through`, the instant
+  the export started) into its `tenants.deleted` system-log record as
+  `audit_exported_through`, and the purge deletes the tenant's `audit_log` rows
+  at or before it, and an `audit_signature` row only when every entry it signs
+  is gone. Later rows stay under the tenant id until the audit retention sweep
+  removes them (730 days by default); nothing is copied. Without a readable
+  export time the purge deletes no audit row; a deletion recorded by 1.0.0 is
+  answered from the receipt it names. `tenants.purged` records the export time
+  used and the audit rows deleted and kept.
+
 - **A scope a tenant withdraws from `dcr_allowed_scopes` is gone from its
   self-registered clients at their next request (#613, T-289, T-55; Low).** The
   list bounded what a `managed_by: dcr` or `cimd` client could register, and

@@ -4790,12 +4790,16 @@ mod tests {
     fn every_tenant_scoped_table_is_purged() {
         use crate::repository::tenant_purge::{Retain, TENANT_PURGE_ORDER, TenantKey};
 
-        // The one exemption, and why (R1W1-01): a revoked certificate or
+        // The two exemptions, and why. R1W1-01: a revoked certificate or
         // signing CA is the evidence its issuer's revocation list is read
         // from, across tenants, by issuer (T-102). Deleting it with its tenant
         // took it off the list and made it valid again outside AXIAM, so these
         // two tables keep revoked rows until `not_after` and lose everything
-        // else. Any other table that keeps a row would outlive its tenant.
+        // else. R1W1-04 (#602, D-5): the purge deletes only the audit rows the
+        // export the deletion required holds; later ones, and the signatures
+        // over them, stay for the audit retention sweep (T-119), which deletes
+        // by age whatever tenant a row names. Any other table that keeps a row
+        // would outlive its tenant.
         const KEEPS_REVOCATION_EVIDENCE: [&str; 2] = ["certificate", "ca_certificate"];
 
         let by_tenant = tables_defining("tenant_id");
@@ -4821,10 +4825,21 @@ mod tests {
                 );
             };
             assert_eq!(step.key, expected, "{} is keyed wrongly", step.table);
-            assert_eq!(
-                step.retain != Retain::Nothing,
-                KEEPS_REVOCATION_EVIDENCE.contains(&step.table),
-                "{}: only the certificate tables may keep rows past the purge, and they must",
+            let allowed = match step.retain {
+                Retain::Nothing => {
+                    !KEEPS_REVOCATION_EVIDENCE.contains(&step.table)
+                        && !["audit_log", "audit_signature"].contains(&step.table)
+                }
+                Retain::RevokedUntilExpiry { .. } => {
+                    KEEPS_REVOCATION_EVIDENCE.contains(&step.table)
+                }
+                Retain::AfterExport => step.table == "audit_log",
+                Retain::CoveringKeptEntries => step.table == "audit_signature",
+            };
+            assert!(
+                allowed,
+                "{}: only the certificate tables (revocation evidence) and the audit \
+                 tables (rows no export holds) may keep rows past the purge, and they must",
                 step.table
             );
         }

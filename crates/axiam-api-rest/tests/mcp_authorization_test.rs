@@ -267,8 +267,10 @@ async fn setup(mode: Mode) -> Fixture {
 /// Wide enough that a test driving a whole handshake is not measuring the
 /// governor. The shipped default is asserted by `dynamic_registration_test`,
 /// which is the file that is *about* the limit. `end_session_per_min` sizes
-/// the `oauth2_authorize` bucket, which the shared counter pro-rates for a peer
-/// first seen late in a minute (#532); it is pinned by `oauth2_tenant_path_sso_test`.
+/// the `oauth2_authorize` bucket. The browser-endpoint preset gives a peer first
+/// seen late in a minute its whole budget, but 30 a minute is a count a
+/// handshake-driving test can meet from one peer; it is pinned by
+/// `oauth2_tenant_path_sso_test`.
 fn permissive_rate_limits() -> RateLimitConfig {
     RateLimitConfig {
         dcr_per_min: 1_000,

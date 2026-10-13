@@ -486,8 +486,9 @@ impl World {
 }
 
 /// `end_session_per_min` sizes the `oauth2_authorize` bucket the step-up
-/// return legs go through, which the shared counter pro-rates for a peer first
-/// seen late in a minute (#532).
+/// return legs go through. The browser-endpoint preset gives a peer first seen
+/// late in a minute its whole budget, but 30 a minute is a count a test driving
+/// many return legs from one peer can meet.
 fn permissive_limits() -> RateLimitConfig {
     RateLimitConfig {
         ssf_per_min: 100_000,

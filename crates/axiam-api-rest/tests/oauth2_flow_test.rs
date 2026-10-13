@@ -128,10 +128,12 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 }
 
 /// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
-/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
-/// counter pro-rates a peer first seen partway through a minute, so at the
-/// shipped 30 a test that starts late in the minute is refused after as few as
-/// three authorization requests (#532). The limit is pinned by
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The preset
+/// gives a peer first seen partway through a minute its whole budget (the
+/// counter's cold-entry seed is not applied to the browser-endpoint buckets),
+/// so the lift is not for timing; it is because 30 a minute is a count a test
+/// driving many authorizations from one peer can meet across a run (#532). The
+/// limit is pinned by
 /// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
 fn permissive_rate_limits() -> RateLimitConfig {
     RateLimitConfig {

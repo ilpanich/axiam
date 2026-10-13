@@ -298,6 +298,21 @@ class GateTest(unittest.TestCase):
             # ...and some module must complete unattended, or nothing is evaluated.
             self.assertLess(len(waiting), len(baseline["plans"][name]["modules"]), name)
 
+    def test_the_committed_unattended_baseline_is_a_recording_not_a_seed(self):
+        data = json.loads(gate.DEFAULT_UNATTENDED.read_text())
+        self.assertNotIn("SEEDED", data["source"])
+        self.assertIn("38317560409", data["source"])
+        self.assertIn("--record-unattended", data["source"])
+        # Recorded from the run's gate log: the sizes are that run's WAITING sets,
+        # and the nbf-8 module, which the seed wrongly left out, parks in private-key-jwt.
+        sizes = {name: len(plan["waiting"]) for name, plan in data["plans"].items()}
+        self.assertEqual(sizes, {"fapi2-security-profile-final-mtls": 27,
+                                 "fapi2-security-profile-final-self-signed": 27,
+                                 "fapi2-security-profile-final-private-key-jwt": 40})
+        self.assertIn(
+            "fapi2-security-profile-final-par-ensure-jwt-client-assertions-nbf-8-seconds-in-the-future-is-accepted",
+            data["plans"]["fapi2-security-profile-final-private-key-jwt"]["waiting"])
+
     def test_the_committed_baselines_gate_an_unattended_run_that_matches_them(self):
         baseline = json.loads(gate.DEFAULT_BASELINE.read_text())
         unattended = gate.read_unattended(gate.DEFAULT_UNATTENDED)

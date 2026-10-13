@@ -226,13 +226,18 @@ file: a module that moves out of the list began to finish on the runner, and one
 that moves in is exactly the regression this file exists to catch, to be
 explained before it is accepted, not recorded away.
 
-**The committed file is currently a seed**, built from the 2026-09-08 reports
-(the only runs without a browser) and the plan definitions, and its `source` field
-says so; the first unattended run replaces it. The seed errs towards listing a
-module as parked when the tree could not confirm that it finishes, so its likely
-error is a tolerated park, not a false red; but it is a reading of the tree, not a
-run, and the first gate run against it may name modules the seed got wrong in
-either direction.
+**The committed file is a recording, not a seed.** It was first committed (2026-10-12) as a
+seed read from the 2026-09-08 reports and the plan definitions; it was replaced the same day by the
+lists of run 38317560409 (`workflow_dispatch` on `claude/release-1.0.1-w4` at `31ca68717`, built
+from source, `module_timeout=30`): 27 modules for mtls, 27 for self-signed, 40 for private-key-jwt.
+The run's artifact could not be fetched, so the lists were transcribed from the gate step's log,
+which prints every module that ended `WAITING`; `--record-unattended` over the artifact's
+`conformance/.run/results/` produces the same lists, and the file's `source` field says so. The
+seed had listed 6 modules per FAPI plan (7 for private-key-jwt) that finish unattended after all,
+and had left out `par-ensure-jwt-client-assertions-nbf-8-seconds-in-the-future-is-accepted`, which
+continues to the authorization endpoint once PAR accepts the assertion and so needs a browser.
+Re-record after any change to the plans the workflow runs or to which modules AXIAM completes
+without a browser.
 
 The gate's rules are unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
 CI's docs job); the workflow also passes every `workflow_dispatch` input through

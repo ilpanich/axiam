@@ -179,8 +179,16 @@ pub struct CleanupTask<C: Connection> {
     /// first tick, which always looks; then once per
     /// [`ORPHAN_TENANT_SCAN_INTERVAL`].
     last_orphan_scan: Option<std::time::Instant>,
+    /// **Test seam, never set in production** (#598): a step run first in each
+    /// tick, so a test can hold a tick open across a stop.
+    step_for_tests: Option<CleanupStepForTests>,
     shutdown: watch::Receiver<bool>,
 }
+
+/// A step [`CleanupTask::with_step_for_tests`] runs first in each tick.
+#[doc(hidden)]
+pub type CleanupStepForTests =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Tenant purge (#523, P23W2-04, D-4)
@@ -1048,6 +1056,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ciba_request_repo: None,
             vault_revocations: None,
             last_orphan_scan: None,
+            step_for_tests: None,
             shutdown,
         }
     }
@@ -1112,6 +1121,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         self
     }
 
+    /// **Test seam, never set in production** (#598): run `step` first in each
+    /// tick — a sweep a test controls, such as one that outlasts the stop's
+    /// bound on the cleanup join.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_step_for_tests(mut self, step: Option<CleanupStepForTests>) -> Self {
+        self.step_for_tests = step;
+        self
+    }
+
     /// Run the cleanup loop until a shutdown signal is received.
     ///
     /// Never returns `Err` — all sweep errors are logged at `warn` level and
@@ -1123,241 +1142,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            // A stop that arrived during a tick ends the loop here, whatever the
+            // ticker says: the select below may otherwise pick a tick that is
+            // already due over the shutdown change.
+            if self.stop_requested() {
+                tracing::info!("cleanup task received shutdown signal");
+                return Ok(());
+            }
             tokio::select! {
                 _ = ticker.tick() => {
-                    // Existing federation cleanup sweeps.
-                    Self::record(
-                        &self.job_health,
-                        "saml_assertion_replay",
-                        self.replay_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    Self::record(
-                        &self.job_health,
-                        "federation_login_state",
-                        self.state_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    Self::record(
-                        &self.job_health,
-                        "sso_handoff_code",
-                        self.sso_handoff_code_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // T23.2.3: expired pending SAML AuthnRequests.
-                    Self::record(
-                        &self.job_health,
-                        "saml_authn_request",
-                        self.saml_pending_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // T23.2.4: the SAML single-logout participant rows and logout
-                    // runs. Each is its own job in `/health/jobs`, so a stuck
-                    // sweep of one is not hidden by the other.
-                    Self::record(
-                        &self.job_health,
-                        "saml_sp_session",
-                        self.saml_participant_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-                    Self::record(
-                        &self.job_health,
-                        "saml_logout_run",
-                        self.saml_logout_run_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // NEW-4: sweep expired AMQP replay-protection nonces.
-                    Self::record(
-                        &self.job_health,
-                        "amqp_nonce_replay",
-                        self.amqp_nonce_repo.cleanup_expired().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // GDPR purge sweep (D-01..D-06, D-08).
-                    Self::record(
-                        &self.job_health,
-                        "gdpr_purge",
-                        self.sweep_pending_purges().await,
-                        tracing::Level::INFO,
-                    );
-
-                    // GDPR export sweep (D-10..D-12).
-                    Self::record(
-                        &self.job_health,
-                        "gdpr_export",
-                        self.sweep_pending_exports().await,
-                        tracing::Level::INFO,
-                    );
-
-                    // Audit retention sweep (T-119).
-                    // INFO because this is the one sweep that destroys records
-                    // nothing else can reconstruct: that it ran, and how much it
-                    // removed, belongs in the operational log by default.
-                    Self::record(
-                        &self.job_health,
-                        "audit_retention",
-                        self.sweep_audit_retention().await,
-                        tracing::Level::INFO,
-                    );
-
-                    // T-39/T-143: drop revocation entries whose access tokens
-                    // have all expired. DEBUG, not INFO: unlike the audit
-                    // sweep this destroys nothing anyone could want back —
-                    // an expired entry describes only tokens that have
-                    // expired on their own `exp`.
-                    // Recorded only when the feed is on, as the directory sync
-                    // is only when it is configured: `/health/jobs` registers
-                    // it on the same condition (`job_health::sweep_jobs`).
-                    if self.revoked_session_repo.is_some() {
-                        Self::record(
-                            &self.job_health,
-                            "revocation_feed",
-                            self.sweep_revocation_feed().await,
-                            tracing::Level::DEBUG,
-                        );
-                    }
-
-                    // G-5 (T23.5.3, D-48): events held for a poll or paused SSF
-                    // stream for more than seven days. DEBUG: an expired event
-                    // is one nobody can still act on.
-                    Self::record(
-                        &self.job_health,
-                        "ssf_event_buffer",
-                        self.sweep_ssf_event_buffer().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // G-5 (T23.5.3, D-53 (1)): step-up records nobody returned
-                    // for within ten minutes. DEBUG: an expired record is one
-                    // no return leg may use.
-                    Self::record(
-                        &self.job_health,
-                        "ssf_step_up",
-                        self.sweep_ssf_step_up().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // G-7 (T23.7.1): CIBA requests past their expiry are
-                    // marked `expired`, and deleted ten minutes later (a client
-                    // still polling is told `expired_token` meanwhile). DEBUG:
-                    // an expired request is one nobody can still approve or
-                    // redeem.
-                    Self::record(
-                        &self.job_health,
-                        "ciba_request",
-                        self.sweep_ciba_requests().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // T-470: a `vault_pki` leaf revoked in AXIAM whose
-                    // revocation Vault does not have yet — a revoke request
-                    // could not reach it, or the revocation came from a bulk
-                    // path. WARN on failure (`record`), since until it runs
-                    // Vault's list omits a revoked certificate.
-                    if let Some(certs) = &self.vault_revocations {
-                        Self::record(
-                            &self.job_health,
-                            "vault_revocation",
-                            certs.forward_pending_revocations().await,
-                            tracing::Level::INFO,
-                        );
-                    }
-
-                    // T21.4 — delete self-registered clients nobody has used.
-                    // INFO rather than DEBUG, and for the audit sweep's
-                    // reason: this one destroys a registration an end user's
-                    // client depends on, and an operator debugging "my MCP
-                    // client suddenly has to register again" needs to find the
-                    // sweep in the log.
-                    Self::record(
-                        &self.job_health,
-                        "dcr_unused_clients",
-                        self.sweep_unused_dcr_clients().await,
-                        tracing::Level::INFO,
-                    );
-
-                    // T21.8 / MCP-04 — the same for CIMD shadow rows, on its
-                    // own counter rather than folded into the one above: the
-                    // two sweeps delete different things for different reasons
-                    // and an operator debugging either should not have to read
-                    // the other's number. INFO for the `dcr` sweep's reason —
-                    // it destroys a registration a client depends on, even if
-                    // that client re-materialises it on its next request.
-                    Self::record(
-                        &self.job_health,
-                        "cimd_unused_clients",
-                        self.sweep_unused_cimd_clients().await,
-                        tracing::Level::INFO,
-                    );
-
-                    // #523 (D-4) — purge deleted tenants' data, after the GDPR
-                    // purge so an account erasure due in a tombstoned tenant
-                    // finishes before its tenant's rows go. INFO, for the audit
-                    // sweep's reason: it destroys records nothing can rebuild.
-                    let scan_orphans = self
-                        .last_orphan_scan
-                        .is_none_or(|at| at.elapsed() >= ORPHAN_TENANT_SCAN_INTERVAL);
-                    let outcome = sweep_tenant_purge(
-                        self.tenant_repo.as_ref(),
-                        self.audit_repo.as_ref(),
-                        scan_orphans,
-                    )
-                    .await;
-                    if scan_orphans && outcome.is_ok() {
-                        self.last_orphan_scan = Some(std::time::Instant::now());
-                    }
-                    Self::record(
-                        &self.job_health,
-                        "tenant_purge",
-                        outcome,
-                        tracing::Level::INFO,
-                    );
-
-                    // T21.4 — drop expired initial access tokens, spent or
-                    // not. DEBUG: an expired token authorises nothing, and
-                    // the evidence a spent one carried is in the audit log,
-                    // which is append-only.
-                    Self::record(
-                        &self.job_health,
-                        "dcr_registration_tokens",
-                        self.sweep_expired_registration_tokens().await,
-                        tracing::Level::DEBUG,
-                    );
-
-                    // G-3 (T23.3.5, D-31) — the directory sync, last in the tick:
-                    // it talks to other people's servers and can take minutes, and
-                    // nothing above should wait on it. INFO, because it changes
-                    // who may sign in, and an operator asking "why can alice no
-                    // longer sign in" needs to find it in the log.
-                    if let Some(sync) = &self.directory_sync {
-                        Self::record(
-                            &self.job_health,
-                            "directory_sync",
-                            sweep_directories(sync, self.shutdown.clone()).await,
-                            tracing::Level::INFO,
-                        );
-                    }
-
-                    // G-6 (T23.6.3, D-58) — the outbound SCIM reconciliation,
-                    // after the directory sync for the same reason: it talks to
-                    // other people's servers. INFO, because it deprovisions
-                    // accounts downstream. One log line per target per run is
-                    // written by the run itself, never one per page.
-                    if let Some(reconciliation) = &self.scim_reconciliation {
-                        Self::record(
-                            &self.job_health,
-                            "scim_reconcile",
-                            sweep_scim_reconciliation(reconciliation.as_ref(), &self.shutdown)
-                                .await,
-                            tracing::Level::INFO,
-                        );
-                    }
+                    self.tick().await;
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -1366,6 +1160,317 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether the process has asked the task to stop (#598).
+    fn stop_requested(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
+    /// One tick: every sweep, in order.
+    ///
+    /// A stop request is checked between sweeps (#598): once the process is
+    /// stopping no further sweep starts, and the GDPR purge and export sweeps
+    /// check it between users and jobs too. The sweep that is running when the
+    /// stop arrives finishes, or is cut where it is if it outlasts the
+    /// composition root's bounded join (`ShutdownBudget::cleanup`); every sweep
+    /// is re-run by the next tick, so the next start resumes what a stop left.
+    async fn tick(&mut self) {
+        if let Some(step) = &self.step_for_tests {
+            step().await;
+        }
+        if self.stop_requested() {
+            return;
+        }
+        // Existing federation cleanup sweeps.
+        Self::record(
+            &self.job_health,
+            "saml_assertion_replay",
+            self.replay_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        Self::record(
+            &self.job_health,
+            "federation_login_state",
+            self.state_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        Self::record(
+            &self.job_health,
+            "sso_handoff_code",
+            self.sso_handoff_code_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T23.2.3: expired pending SAML AuthnRequests.
+        Self::record(
+            &self.job_health,
+            "saml_authn_request",
+            self.saml_pending_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T23.2.4: the SAML single-logout participant rows and logout
+        // runs. Each is its own job in `/health/jobs`, so a stuck
+        // sweep of one is not hidden by the other.
+        Self::record(
+            &self.job_health,
+            "saml_sp_session",
+            self.saml_participant_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+        Self::record(
+            &self.job_health,
+            "saml_logout_run",
+            self.saml_logout_run_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // NEW-4: sweep expired AMQP replay-protection nonces.
+        Self::record(
+            &self.job_health,
+            "amqp_nonce_replay",
+            self.amqp_nonce_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // GDPR purge sweep (D-01..D-06, D-08).
+        Self::record(
+            &self.job_health,
+            "gdpr_purge",
+            self.sweep_pending_purges().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // GDPR export sweep (D-10..D-12).
+        Self::record(
+            &self.job_health,
+            "gdpr_export",
+            self.sweep_pending_exports().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // Audit retention sweep (T-119).
+        // INFO because this is the one sweep that destroys records
+        // nothing else can reconstruct: that it ran, and how much it
+        // removed, belongs in the operational log by default.
+        Self::record(
+            &self.job_health,
+            "audit_retention",
+            self.sweep_audit_retention().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T-39/T-143: drop revocation entries whose access tokens
+        // have all expired. DEBUG, not INFO: unlike the audit
+        // sweep this destroys nothing anyone could want back —
+        // an expired entry describes only tokens that have
+        // expired on their own `exp`.
+        // Recorded only when the feed is on, as the directory sync
+        // is only when it is configured: `/health/jobs` registers
+        // it on the same condition (`job_health::sweep_jobs`).
+        if self.revoked_session_repo.is_some() {
+            Self::record(
+                &self.job_health,
+                "revocation_feed",
+                self.sweep_revocation_feed().await,
+                tracing::Level::DEBUG,
+            );
+        }
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-5 (T23.5.3, D-48): events held for a poll or paused SSF
+        // stream for more than seven days. DEBUG: an expired event
+        // is one nobody can still act on.
+        Self::record(
+            &self.job_health,
+            "ssf_event_buffer",
+            self.sweep_ssf_event_buffer().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-5 (T23.5.3, D-53 (1)): step-up records nobody returned
+        // for within ten minutes. DEBUG: an expired record is one
+        // no return leg may use.
+        Self::record(
+            &self.job_health,
+            "ssf_step_up",
+            self.sweep_ssf_step_up().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-7 (T23.7.1): CIBA requests past their expiry are
+        // marked `expired`, and deleted ten minutes later (a client
+        // still polling is told `expired_token` meanwhile). DEBUG:
+        // an expired request is one nobody can still approve or
+        // redeem.
+        Self::record(
+            &self.job_health,
+            "ciba_request",
+            self.sweep_ciba_requests().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T-470: a `vault_pki` leaf revoked in AXIAM whose
+        // revocation Vault does not have yet — a revoke request
+        // could not reach it, or the revocation came from a bulk
+        // path. WARN on failure (`record`), since until it runs
+        // Vault's list omits a revoked certificate.
+        if let Some(certs) = &self.vault_revocations {
+            Self::record(
+                &self.job_health,
+                "vault_revocation",
+                certs.forward_pending_revocations().await,
+                tracing::Level::INFO,
+            );
+        }
+
+        if self.stop_requested() {
+            return;
+        }
+        // T21.4 — delete self-registered clients nobody has used.
+        // INFO rather than DEBUG, and for the audit sweep's
+        // reason: this one destroys a registration an end user's
+        // client depends on, and an operator debugging "my MCP
+        // client suddenly has to register again" needs to find the
+        // sweep in the log.
+        Self::record(
+            &self.job_health,
+            "dcr_unused_clients",
+            self.sweep_unused_dcr_clients().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T21.8 / MCP-04 — the same for CIMD shadow rows, on its
+        // own counter rather than folded into the one above: the
+        // two sweeps delete different things for different reasons
+        // and an operator debugging either should not have to read
+        // the other's number. INFO for the `dcr` sweep's reason —
+        // it destroys a registration a client depends on, even if
+        // that client re-materialises it on its next request.
+        Self::record(
+            &self.job_health,
+            "cimd_unused_clients",
+            self.sweep_unused_cimd_clients().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // #523 (D-4) — purge deleted tenants' data, after the GDPR
+        // purge so an account erasure due in a tombstoned tenant
+        // finishes before its tenant's rows go. INFO, for the audit
+        // sweep's reason: it destroys records nothing can rebuild.
+        let scan_orphans = self
+            .last_orphan_scan
+            .is_none_or(|at| at.elapsed() >= ORPHAN_TENANT_SCAN_INTERVAL);
+        let outcome = sweep_tenant_purge(
+            self.tenant_repo.as_ref(),
+            self.audit_repo.as_ref(),
+            scan_orphans,
+        )
+        .await;
+        if scan_orphans && outcome.is_ok() {
+            self.last_orphan_scan = Some(std::time::Instant::now());
+        }
+        Self::record(
+            &self.job_health,
+            "tenant_purge",
+            outcome,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // T21.4 — drop expired initial access tokens, spent or
+        // not. DEBUG: an expired token authorises nothing, and
+        // the evidence a spent one carried is in the audit log,
+        // which is append-only.
+        Self::record(
+            &self.job_health,
+            "dcr_registration_tokens",
+            self.sweep_expired_registration_tokens().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-3 (T23.3.5, D-31) — the directory sync, last in the tick:
+        // it talks to other people's servers and can take minutes, and
+        // nothing above should wait on it. INFO, because it changes
+        // who may sign in, and an operator asking "why can alice no
+        // longer sign in" needs to find it in the log.
+        if let Some(sync) = &self.directory_sync {
+            Self::record(
+                &self.job_health,
+                "directory_sync",
+                sweep_directories(sync, self.shutdown.clone()).await,
+                tracing::Level::INFO,
+            );
+        }
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-6 (T23.6.3, D-58) — the outbound SCIM reconciliation,
+        // after the directory sync for the same reason: it talks to
+        // other people's servers. INFO, because it deprovisions
+        // accounts downstream. One log line per target per run is
+        // written by the run itself, never one per page.
+        if let Some(reconciliation) = &self.scim_reconciliation {
+            Self::record(
+                &self.job_health,
+                "scim_reconcile",
+                sweep_scim_reconciliation(reconciliation.as_ref(), &self.shutdown).await,
+                tracing::Level::INFO,
+            );
         }
     }
 
@@ -1599,7 +1704,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let due = self.user_repo.find_due_for_purge(now).await?;
         let mut purged: u64 = 0;
 
-        for user in due {
+        let due_count = due.len();
+        for (started, user) in due.into_iter().enumerate() {
+            // #598: no erasure starts once the process is stopping; the users
+            // left are still due, and the next start purges them.
+            if self.stop_requested() {
+                tracing::info!(
+                    purged,
+                    left = due_count - started,
+                    "GDPR purge sweep stopped: the process is stopping (the rest stay due)"
+                );
+                break;
+            }
             if let Err(e) = self
                 .purge_single_user(user.id, user.tenant_id, pepper)
                 .await
@@ -1830,6 +1946,15 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let mut processed: u64 = 0;
 
         for job in queued {
+            // #598: no export starts once the process is stopping; the jobs
+            // left stay queued, and the next start processes them.
+            if self.stop_requested() {
+                tracing::info!(
+                    processed,
+                    "GDPR export sweep stopped: the process is stopping (the rest stay queued)"
+                );
+                break;
+            }
             if let Err(e) = self
                 .process_export_job(job.id, job.tenant_id, job.user_id, key)
                 .await

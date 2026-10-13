@@ -1703,7 +1703,9 @@ its volumes can never be the dev or prod stack's.
 Both ports are published on the loopback interface only: put a TLS-terminating
 proxy in front of the REST port. The compose file also gives the server a
 **40 s stop grace period** and a named volume for the audit dead-letter file
-(below).
+(below). An instance that loses its lease has 15 s, not 40, and cuts requests
+still in flight after 5 s; [the grace period](#stopping-and-the-grace-period)
+says what each stop can cut and by how much.
 
 **On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
 `AXIAM__AMQP__*` URL, TLS or signing-key settings, no RabbitMQ, **`replicas: 1`**
@@ -1808,32 +1810,67 @@ In audit terms, a restart loses the following, and nothing else:
 ### Stopping, and the grace period
 
 An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
-finishes the requests in flight, finishes the cleanup tick it is in (so a GDPR
-erasure and its audit row stay together) and then **writes the audit rows the
-audit middleware still holds, waiting up to 5 s for it**, before the process
-exits. Before that drain, in the minimal profile, each in-process outbound
-queue is closed and one `<kind>.delivery_abandoned` row is written for every
-delivery still queued or waiting for a retry. A `SIGKILL` or an out-of-memory
-kill does none of that and loses what is queued.
+finishes the requests in flight, tells the cleanup task to stop (it starts no
+further sweep, GDPR erasure or export) and then **writes the audit rows the
+audit middleware still holds**, before the process exits. Before that drain, in
+the minimal profile, each in-process outbound queue is closed and one
+`<kind>.delivery_abandoned` row is written for every delivery still queued or
+waiting for a retry. A `SIGKILL` or an out-of-memory kill does none of that and
+loses what is queued.
 
-**Give the container a termination grace period of at least 40 s.** The stop
-has four bounded steps. The REST listener waits up to **20 s** for requests in
-flight (`shutdown_timeout`, set explicitly in `boot.rs`; actix's own default is
-30 s). The gRPC server then gets up to **5 s** to finish its calls, the
-in-process outbound queues up to **2 s** (`OUTBOUND_DRAIN_DEADLINE`) to account
-for what they hold, and the audit queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`)
-to be written. That is 32 s, and 40 s leaves a margin. A shorter grace period lets the orchestrator kill the process
-during the drain, which loses exactly the audit rows the orderly stop exists to
-keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
+**Give the container a termination grace period of at least 40 s.** A
+`SIGTERM` stop has five bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
+arithmetic is checked when the server is built). The REST listener waits up to
+**20 s** for requests in flight (`shutdown_timeout`, set explicitly; actix's own
+default is 30 s). The gRPC server then gets up to **5 s** to finish its calls,
+the in-process outbound queues up to **2 s** to account for what they hold, the
+audit queue up to **5 s** to be written, and the cleanup task up to **5 s** to
+finish the sweep it was in. That is 37 s, and 40 s leaves a 3 s margin. A
+shorter grace period lets the orchestrator kill the process during the drain,
+which loses exactly the audit rows the orderly stop exists to keep. Compose's
+default is 10 s and Kubernetes' is 30 s, so both are set:
 `stop_grace_period: 40s` in `docker-compose.prod.yml` and
 `docker-compose.minimal.yml`, and `terminationGracePeriodSeconds: 40` in
-`k8s/server/deployment.yml`. If you change the shutdown timeout, move the grace
-period with it. An instance that loses its lease, or whose consumer or gRPC
-server dies, stops accepting at once, finishes in-flight requests and exits
-non-zero. A backstop ends the process regardless if the stop overruns: 15 s
-after it began for a lost lease (which must not run beside its successor for
-longer), 35 s — the four steps and a margin, inside the grace period — for a
-dead consumer or gRPC server.
+`k8s/server/deployment.yml`. If you change a bound, move the grace period with
+it.
+
+**What a stop can cut, and by how much.** Two steps end work that has not
+finished rather than wait for it:
+
+* **The cleanup task, in every stop.** A sweep still running at its bound (5 s
+  after the audit drain for `SIGTERM`, 2 s after a lost lease) is cut where it
+  is. Every sweep is re-run by the next tick, so the next start resumes it,
+  with two exceptions: a GDPR erasure cut after the user row was anonymized and
+  before `gdpr.user_pseudonymized` was written leaves the erasure and its proof
+  without that audit row (the user is no longer due, so nothing writes it
+  later), and a data export cut after it was marked ready and before its mail
+  was queued leaves a download nobody was told about, which expires after 24 h.
+  (A SCIM target whose reconciliation is cut mid-run is reconciled again at its
+  next daily run.)
+  Both need a sweep that was already running when the cleanup task was told to
+  stop and is still running when its bound runs out — 5 to 12 s later for
+  `SIGTERM` (the drains before the join take up to 7 s), 2 to 6 s after a lost
+  lease. The log says `the cleanup task's sweep did not finish in time` when it
+  happens.
+* **The requests in flight, after a lost lease.** An instance that loses its
+  lease must not run beside its successor for longer than **15 s**
+  (`LeaseTiming::lost_stop_deadline`), so its stop has a budget of its own
+  (`LEASE_LOSS_STOP`): requests in flight **5 s**, gRPC 2 s, outbound queues
+  1 s, audit drain 3 s, cleanup 2 s — 13 s. actix's drain is fixed at 20 s when
+  the listener is bound and cannot be shortened for one stop, so a request still
+  running 5 s after the loss is **cut** (the connection is closed without a
+  response) and the teardown runs on; the log says `requests still in flight
+  after a lost minimal-profile lease were cut`. Without the cut, a slow request
+  held the drain until the backstop ended the process and the audit drain never
+  ran. A `SIGTERM` stop never cuts a request before its 20 s.
+
+An instance that loses its lease, or whose consumer or gRPC server dies, exits
+non-zero after the stop. A backstop ends the process regardless if the stop
+overruns: 15 s after it began for a lost lease, 38 s — the whole `SIGTERM`
+budget and 1 s, inside the grace period — for a dead consumer or gRPC server.
+A lease lost while a `SIGTERM` stop is already past its REST drain keeps the
+`SIGTERM` bounds for the steps left, so its 15 s backstop can end that stop up
+to 2 s early; the exit is non-zero either way.
 
 ### Audit durability
 

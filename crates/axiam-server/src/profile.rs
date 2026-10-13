@@ -56,14 +56,19 @@ pub struct LeaseTiming {
     /// How long an instance that lost the lease may take to stop in order —
     /// stop accepting, finish what is in flight, write its queued audit rows —
     /// before the backstop ends the process anyway. It runs beside the new
-    /// holder for that long at most, accepting no new connection.
+    /// holder for that long at most, accepting no new connection. The stop it
+    /// bounds has its own, shorter budget (`boot::LEASE_LOSS_STOP`), which a
+    /// compile-time check keeps inside [`LeaseTiming::PRODUCTION`]'s value.
     pub lost_stop_deadline: Duration,
 }
 
 impl LeaseTiming {
     /// TTL 30 s, renewed every 10 s, a boot waits up to 45 s (D-59); a lost
-    /// lease stops the instance within 15 s (T23.8.2) — the REST listener's
-    /// idle keep-alive (5 s) and the audit drain's bound (5 s) fit inside it.
+    /// lease stops the instance within 15 s (T23.8.2). The stop after a lost
+    /// lease is budgeted to fit inside that (#598, `boot::LEASE_LOSS_STOP`):
+    /// requests in flight get 5 s and are then cut, gRPC 2 s, the outbound
+    /// queues 1 s, the audit drain 3 s and the cleanup task 2 s — 13 s, so the
+    /// backstop only ends a stop that has overrun.
     pub const PRODUCTION: Self = Self {
         ttl: Duration::from_secs(30),
         renew_every: Duration::from_secs(10),
@@ -227,13 +232,23 @@ pub fn signal_on_lease_lost(lost: watch::Sender<bool>) -> OnLeaseLost {
 /// Once `lost` is raised: log it, call `stop` (the composition root's orderly
 /// stop: the REST listener stops accepting and finishes what is in flight, the
 /// teardown after it drains the audit queue and the cleanup task, and `serve`
-/// returns an error, so the process exits non-zero), and, if the process is
-/// still here `deadline` later, run `backstop`. The composition root aborts the
-/// returned task when its teardown has finished, which disarms the backstop. A
+/// returns an error, so the process exits non-zero); if the process is still
+/// here `cut_after` later, call `cut` (the composition root ends the requests
+/// still in flight, #598); and if it is still here `deadline` after the stop
+/// began, run `backstop`. The composition root aborts the returned task when
+/// its teardown has finished, which disarms the cut and the backstop. A
 /// dropped `lost` sender without the flag raised ends the task quietly.
+///
+/// The cut exists because the REST listener's drain is an actix setting fixed
+/// at bind time (`shutdown_timeout`, sized for `SIGTERM`), and a lost lease's
+/// stop has less time: without the cut a slow request would hold the drain
+/// until the backstop and the teardown after it — the audit drain — would never
+/// run.
 pub fn spawn_lease_loss_stop(
     mut lost: watch::Receiver<bool>,
     stop: impl FnOnce() + Send + 'static,
+    cut_after: Duration,
+    cut: impl FnOnce() + Send + 'static,
     deadline: Duration,
     backstop: OnLeaseLost,
 ) -> JoinHandle<()> {
@@ -243,11 +258,15 @@ pub fn spawn_lease_loss_stop(
         }
         error!(
             deadline_secs = deadline.as_secs_f64(),
+            requests_cut_after_secs = cut_after.as_secs_f64(),
             "the minimal-profile lease is lost — stopping in order (no new connections, \
              in-flight work finished, queued audit rows written) and then exiting non-zero"
         );
         stop();
-        tokio::time::sleep(deadline).await;
+        let cut_after = cut_after.min(deadline);
+        tokio::time::sleep(cut_after).await;
+        cut();
+        tokio::time::sleep(deadline - cut_after).await;
         error!(
             "the orderly stop after a lost minimal-profile lease did not finish in time — \
              exiting now"
@@ -356,6 +375,10 @@ mod tests {
         lost_stop_deadline: Duration::from_millis(150),
     };
 
+    /// When the lease-loss stop cuts the requests still in flight: inside
+    /// [`FAST`]'s backstop deadline, as `LEASE_LOSS_STOP.rest` is inside 15 s.
+    const FAST_CUT: Duration = Duration::from_millis(60);
+
     async fn db() -> Surreal<Db> {
         let db = Surreal::new::<Mem>(()).await.unwrap();
         db.use_ns("test").use_db("test").await.unwrap();
@@ -406,8 +429,16 @@ mod tests {
     {
         let (tx, rx) = watch::channel(false);
         let (stops, stop) = counter();
+        let (cuts, cut) = counter();
         let (backstops, backstop) = counter();
-        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+        let task = spawn_lease_loss_stop(
+            rx,
+            move || stop(),
+            FAST_CUT,
+            move || cut(),
+            FAST.lost_stop_deadline,
+            backstop,
+        );
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
@@ -433,6 +464,7 @@ mod tests {
             .await
             .expect("the task ends after the backstop")
             .unwrap();
+        assert_eq!(cuts.load(Ordering::SeqCst), 1, "the cut ran before it");
         assert_eq!(
             backstops.load(Ordering::SeqCst),
             1,
@@ -440,17 +472,67 @@ mod tests {
         );
     }
 
+    /// #598: the requests still in flight are cut at `cut_after`, well before
+    /// the backstop, so the teardown after the REST listener — the audit drain
+    /// — runs inside the lease's deadline instead of being ended with it.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_lease_cuts_the_requests_in_flight_before_the_backstop() {
+        let (tx, rx) = watch::channel(false);
+        let (stops, stop) = counter();
+        let (cuts, cut) = counter();
+        let (backstops, backstop) = counter();
+        let deadline = LeaseTiming::PRODUCTION.lost_stop_deadline;
+        let cut_after = crate::boot::LEASE_LOSS_STOP.rest;
+        let task = spawn_lease_loss_stop(
+            rx,
+            move || stop(),
+            cut_after,
+            move || cut(),
+            deadline,
+            backstop,
+        );
+        tx.send_replace(true);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "the stop starts at once");
+        assert_eq!(cuts.load(Ordering::SeqCst), 0);
+
+        tokio::time::sleep(cut_after).await;
+        assert_eq!(cuts.load(Ordering::SeqCst), 1, "cut at `cut_after`");
+        assert_eq!(backstops.load(Ordering::SeqCst), 0);
+
+        // The teardown after the cut fits before the backstop (the rest of
+        // `LEASE_LOSS_STOP`): when it finishes, the composition root aborts the
+        // task and the backstop never runs.
+        let rest_of_the_stop =
+            crate::boot::LEASE_LOSS_STOP.total() - crate::boot::LEASE_LOSS_STOP.rest;
+        tokio::time::sleep(rest_of_the_stop).await;
+        assert_eq!(backstops.load(Ordering::SeqCst), 0);
+        task.abort();
+        tokio::time::sleep(deadline).await;
+        assert_eq!(backstops.load(Ordering::SeqCst), 0, "disarmed");
+    }
+
     #[tokio::test]
     async fn an_orderly_stop_that_finishes_in_time_disarms_the_backstop() {
         let (tx, rx) = watch::channel(false);
         let (_, stop) = counter();
+        let (cuts, cut) = counter();
         let (backstops, backstop) = counter();
-        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+        let task = spawn_lease_loss_stop(
+            rx,
+            move || stop(),
+            FAST_CUT,
+            move || cut(),
+            FAST.lost_stop_deadline,
+            backstop,
+        );
         tx.send_replace(true);
         tokio::time::sleep(Duration::from_millis(20)).await;
         // The composition root's teardown finished: it aborts the task.
         task.abort();
         tokio::time::sleep(FAST.lost_stop_deadline * 2).await;
+        assert_eq!(cuts.load(Ordering::SeqCst), 0, "nothing left to cut");
         assert_eq!(backstops.load(Ordering::SeqCst), 0);
     }
 
@@ -461,7 +543,14 @@ mod tests {
         drop(tx); // the renewal task ended after raising it
         let (stops, stop) = counter();
         let (_, backstop) = counter();
-        let task = spawn_lease_loss_stop(rx, move || stop(), Duration::from_secs(60), backstop);
+        let task = spawn_lease_loss_stop(
+            rx,
+            move || stop(),
+            Duration::from_secs(30),
+            || {},
+            Duration::from_secs(60),
+            backstop,
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(stops.load(Ordering::SeqCst), 1);
         task.abort();
@@ -471,14 +560,23 @@ mod tests {
     async fn a_lease_never_lost_never_stops() {
         let (tx, rx) = watch::channel(false);
         let (stops, stop) = counter();
+        let (cuts, cut) = counter();
         let (backstops, backstop) = counter();
-        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+        let task = spawn_lease_loss_stop(
+            rx,
+            move || stop(),
+            FAST_CUT,
+            move || cut(),
+            FAST.lost_stop_deadline,
+            backstop,
+        );
         drop(tx); // an orderly stop for another reason: the renewal task went
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("the watch ends with its sender")
             .unwrap();
         assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert_eq!(cuts.load(Ordering::SeqCst), 0);
         assert_eq!(backstops.load(Ordering::SeqCst), 0);
     }
 

@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dead-letter file as `channel_full`. The `WARN` for a refusal is logged for the
   first one of a kind and then at most once a minute, with the count suppressed
   since (#596).
+- An orderly stop no longer waits without a bound for the cleanup task: it is
+  told to stop before the drains, starts no further sweep, GDPR erasure or
+  export, and is given 5 s after the audit drain (2 s after a lost lease) before
+  the sweep it is in is cut, so a long sweep at `SIGTERM` no longer meets the
+  orchestrator's kill. The `SIGTERM` stop now adds up to 37 s inside the 40 s
+  grace period; the dead-component backstop moves from 35 s to 38 s. In the
+  minimal profile, the stop after a lost lease fits its 15 s backstop: requests
+  still in flight 5 s after the loss are cut (closed without a response) so the
+  audit drain runs, where before a slow request held the drain until the
+  backstop ended the process. The deployment guide says what each stop can cut
+  and by how much (#598).
 
 ## [1.0.0] - 2026-10-10
 

@@ -1387,14 +1387,36 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ),
             )
             // --- Federation OIDC Flow ---
+            //
+            // #614 (D-3): the five authenticated federation flow routes — these
+            // two and the three SAML ones registered at the end — carry the
+            // browser-endpoint preset (`end_session_per_min`, per IP), each
+            // under a bucket of its own (`federation_oidc_authorize`,
+            // `federation_oidc_callback`, `federation_saml_authn_request`,
+            // `federation_saml_acs`, `federation_saml_metadata`), so one
+            // route's exhaustion never spends another's allowance. A person's
+            // sign-in drives them, relayed by the application that holds the
+            // bearer token; none is an IdP back-channel (the IdP sends the
+            // *browser* to the application, which then calls these). No new
+            // knob, so `rl_prod_check.py` needs no row.
             .service(
                 web::resource("/federation/oidc/authorize")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::browser_preset(
+                        "federation_oidc_authorize",
+                        rate_limit_cfg,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_authorize::<C>),
                     ),
             )
             .service(
                 web::resource("/federation/oidc/callback")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::browser_preset(
+                        "federation_oidc_callback",
+                        rate_limit_cfg,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
@@ -1816,16 +1838,33 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
     // Authenticated SAML SP routes — only when the `saml` feature is on.
     #[cfg(feature = "saml")]
     let api_scope = api_scope
+        // #614 (D-3): the browser-endpoint preset, a bucket per route — see the
+        // note on the OIDC flow routes above.
         .service(
             web::resource("/federation/saml/authn-request")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_authn_request",
+                    rate_limit_cfg,
+                ))
                 .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
         )
         .service(
             web::resource("/federation/saml/acs")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_acs",
+                    rate_limit_cfg,
+                ))
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),
         )
         .service(
             web::resource("/federation/saml/metadata")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_metadata",
+                    rate_limit_cfg,
+                ))
                 .route(web::get().to(handlers::federation::saml_metadata::<C>)),
         );
     cfg.service(api_scope);

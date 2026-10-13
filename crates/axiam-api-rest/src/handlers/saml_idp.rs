@@ -625,6 +625,29 @@ struct Incoming<'q> {
     redirect: Option<RedirectQuery<'q>>,
 }
 
+/// A POST-binding message's enveloped signature, verified by
+/// [`saml_request::verify_post_signature`] on the blocking pool under the
+/// crypto semaphore, as the IdP's own signing is (R101W2-01): xmlsec's work is
+/// CPU-bound, and the SSO and SLO endpoints are public, so no verification may
+/// hold an async worker. The transform allow-list inside it bounds that work;
+/// this bounds how much of it runs at once. A task that does not complete is a
+/// signature that did not verify.
+pub(crate) async fn verify_post_signature_off_worker<C: Connection + Clone>(
+    state: &AppState<C>,
+    document: &str,
+    sp_cert_der: &[u8],
+) -> Result<(), RequestError> {
+    let permit = state.crypto_semaphore.clone().acquire_owned().await;
+    let document = document.to_owned();
+    let sp_cert_der = sp_cert_der.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        saml_request::verify_post_signature(&document, &sp_cert_der)
+    })
+    .await
+    .unwrap_or(Err(RequestError::SignatureInvalid))
+}
+
 /// Everything the first leg decides, in the order the module docs give.
 async fn accept<C: Connection + Clone>(
     state: &AppState<C>,
@@ -676,7 +699,7 @@ async fn accept<C: Connection + Clone>(
         (Some(cert), true) => {
             let outcome = match &incoming.redirect {
                 Some(query) => query.verify_signature(cert),
-                None => saml_request::verify_post_signature(&incoming.document, cert),
+                None => verify_post_signature_off_worker(state, &incoming.document, cert).await,
             };
             if let Err(e) = outcome {
                 return request_refused(e, tenant_id);

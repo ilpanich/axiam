@@ -705,6 +705,23 @@ W6 is the phase's last wave. This section is for the project.
 * **`guarded_fetch_no_redirect`.** Every credential-bearing outbound request
   (SCIM, the SCIM token request, CIBA ping, SSF push) uses it with
   `allow_private = false`; the webhook deliverer is the one exception left (#555).
+  > **Correction, 2026-10-13 (R1W2-04, #591).** "The one exception left" was
+  > wrong, and the rule was not yet true: the four credential-bearing federation
+  > calls (the OIDC and OAuth2 token exchanges, the OAuth2 userinfo call and
+  > GitHub's verified-email call) still went through the redirect-following
+  > `guarded_fetch`, which re-sent the client secret, the authorization code and
+  > the PKCE verifier, or the user's bearer token, to whatever `Location` the
+  > IdP's endpoint named. They now use `guarded_fetch_no_redirect` and refuse a
+  > `3xx` with "redirect not followed"; T-112 carries the same correction.
+  >
+  > **Second correction, 2026-10-13 (R101W2-04).** That correction left one
+  > credential-bearing request outside the rule: OIDC back-channel logout sent
+  > its logout token to the client's `backchannel_logout_uri` with a plain
+  > `reqwest` client, without an address check, following redirects, and with
+  > the URI never validated at registration. It now goes through
+  > `guarded_fetch_no_redirect` with `allow_private = false`, and registration
+  > refuses a URI that is not a public `https` URL. T-112 carries the same
+  > correction.
 * **Two-writer registries.** A registry an administrator and a background worker
   both write is written conditionally on the version the writer read, the worker
   re-reads before a credential leaves, and a credential is bound to every

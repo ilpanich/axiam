@@ -834,8 +834,9 @@ pub struct FederationConfig {
     ///
     /// **Default `false`.** Since 1.0.0 the SP verifier accepts only the SHA-2
     /// RSA and ECDSA signature algorithms, as the SAML IdP's receiver does;
-    /// `true` restores the earlier rule, under which any algorithm xmlsec
-    /// verifies is accepted. Refused on a non-SAML config, and audited
+    /// `true` admits `rsa-sha1`, `ecdsa-sha1` and the `sha1` digest in
+    /// addition, and nothing else (#606: in 1.0.0 it admitted any algorithm
+    /// xmlsec verifies). Refused on a non-SAML config, and audited
     /// (`federation.sha1_signatures_allowed`) whenever it is turned on.
     #[serde(default)]
     pub allow_sha1_signatures: bool,

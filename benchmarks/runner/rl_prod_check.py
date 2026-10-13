@@ -203,7 +203,10 @@ ENDPOINTS = {
     "end_session_per_min": (
         None,
         "GET|POST /oauth2/end_session (OIDC RP-initiated logout); also GET /oauth2/authorize "
-        "and /oauth2/authorize/logout, and the SAML IdP browser routes, each in its own bucket",
+        "and /oauth2/authorize/logout, the SAML IdP browser routes, and the authenticated "
+        "federation flow routes (POST /federation/saml/authn-request, POST /federation/saml/acs, "
+        "GET /federation/saml/metadata, POST /federation/oidc/authorize, POST "
+        "/federation/oidc/callback; #614), each in its own bucket",
     ),
     # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
     # family could not appear here even as "not checked" — a knob that does not

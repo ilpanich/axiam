@@ -28,9 +28,11 @@
 //! * **HTTP-POST** — an enveloped `ds:Signature`, and only one place may hold it:
 //!   the child of the `AuthnRequest` root, with exactly one reference, naming the
 //!   root's `ID`. Any other `ds:Signature` anywhere refuses the document (the
-//!   placement rule D-23 gave the SP side). The one admitted signature is
-//!   verified by xmlsec against the SP's registered certificate, on its own
-//!   node, with SHA-1 algorithms refused.
+//!   placement rule D-23 gave the SP side). The one admitted signature may
+//!   name only `enveloped-signature` and the canonicalizations without comments
+//!   ([`signature_transforms_admitted`], R101W2-01), and is then verified by
+//!   xmlsec against the SP's registered certificate, on its own node, with
+//!   SHA-1 algorithms refused.
 //! * **HTTP-Redirect** — the `Signature` query parameter over the octets SAML
 //!   Bindings §3.4.4.1 names, **exactly as received**:
 //!   `SAMLRequest=…[&RelayState=…]&SigAlg=…`, each value still percent-encoded
@@ -282,18 +284,41 @@ pub fn refuse_markup_declarations(document: &str) -> Result<(), RequestError> {
 
 /// Refuse a document that is not plainly UTF-8: one containing a NUL (which is
 /// how UTF-16 and UTF-32 spell ASCII, and would hide a `<!DOCTYPE` from
-/// [`refuse_markup_declarations`]), or one whose XML declaration names another
-/// encoding. The parse here forces UTF-8, and xmlsec's honours the declaration;
-/// refusing every other declaration keeps the two reading the same characters.
+/// [`refuse_markup_declarations`]), one whose first character after XML
+/// whitespace is not `<`, or one whose XML declaration names another encoding.
+/// AXIAM's own parses force UTF-8 ([`receiver_parser_options`]), and xmlsec's
+/// honours the declaration; refusing every other declaration keeps the two
+/// reading the same characters.
+///
+/// #605 (R1W1-07): the declaration is read only where the parser reads it — at
+/// the start of the document — so the start must be markup. Exactly one
+/// leading byte-order mark is stripped first (R101W2-02: Microsoft Entra ID's
+/// federation metadata begins with one, as .NET's UTF-8 writer emits by
+/// default). In a validated `&str` a leading U+FEFF can only be the UTF-8 BOM
+/// `ef bb bf` — a UTF-16 or UTF-32 BOM is not valid UTF-8, and a NUL is refused
+/// — so the strip changes no encoding. After it the rules apply to the true
+/// start: a second BOM, or any other leading text, is refused, and a
+/// declaration naming another encoding is read and refused.
+///
+/// Returns the accepted document **without** that BOM. Every caller rebinds to
+/// the returned slice before anything else reads the document, so the
+/// byte-level scans, libxml, samael and xmlsec all read the same characters.
+/// The BOM is never part of what a signature covers: canonicalisation works on
+/// the parsed tree, which a BOM never enters.
 ///
 /// # Errors
 ///
 /// [`RequestError::Malformed`].
-pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
+pub fn refuse_other_encodings(document: &str) -> Result<&str, RequestError> {
     if document.contains('\0') {
         return Err(RequestError::Malformed);
     }
-    let trimmed = document.trim_start();
+    let document = document.strip_prefix('\u{feff}').unwrap_or(document);
+    // XML's whitespace (`S`): space, tab, CR, LF — and nothing else.
+    let trimmed = document.trim_start_matches([' ', '\t', '\r', '\n']);
+    if !trimmed.starts_with('<') {
+        return Err(RequestError::Malformed);
+    }
     if let Some(rest) = trimmed.strip_prefix("<?xml") {
         let declaration = rest.split("?>").next().unwrap_or_default();
         if let Some(at) = declaration.find("encoding") {
@@ -310,7 +335,7 @@ pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
             }
         }
     }
-    Ok(())
+    Ok(document)
 }
 
 /// Parse an `AuthnRequest` and check what needs no SP: shape, `Version`, `ID`,
@@ -376,26 +401,62 @@ pub fn parse_authn_request(
     })
 }
 
+/// The libxml options every document AXIAM receives is parsed with — an
+/// `AuthnRequest` or logout message here, imported SP metadata, a `SAMLResponse`
+/// at the ACS, IdP metadata: no recovery (`XML_PARSE_RECOVER` off: a document
+/// that is not well-formed is refused, not repaired), no network access
+/// (`XML_PARSE_NONET`), no entity substitution and no DTD loading, defaulting or
+/// validation (`XML_PARSE_NOENT`, `DTDLOAD`, `DTDATTR`, `DTDVALID` all off), and
+/// UTF-8 whatever the document declares (#605): `XML_PARSE_IGNORE_ENC` makes
+/// libxml skip the declaration, and its own detection reads any text that
+/// passed [`refuse_other_encodings`] — valid UTF-8, no NUL, no second
+/// byte-order mark, beginning with `<` — as UTF-8. That function has already
+/// refused any other declaration, so this changes no document that reaches the
+/// parser; it removes the parser's freedom to read one differently.
+///
+/// `encoding` stays **`None`**. libxml-rs 0.3.3's `parse_string_with_options`
+/// turns `Some(name)` into a `CString` that is dropped inside the `match` that
+/// takes its pointer, so libxml2 read the encoding name from freed memory: a
+/// use-after-free (found under valgrind on 2026-10-13). Whatever the allocator
+/// had put there named the encoding the document was decoded with — usually
+/// none, and the parse failed; sometimes a 7-bit national variant of ASCII,
+/// and `#` in the XML-DSig namespace URI read as another character. Every
+/// receiver parse set it from W2.1 (#605), the IdP receiver's since T23.2.3.
+///
+/// `no_def_dtd` stays **off**. libxml-rs 0.3 maps it to the value 4 for both
+/// parsers, which is `HTML_PARSE_NODEFDTD` for the HTML parser but
+/// `XML_PARSE_DTDLOAD` — *load the external DTD subset* — for the XML parser.
+/// Until 2026-10-13 it was set here, asking libxml for the opposite of what the
+/// comment said; [`refuse_markup_declarations`] refusing every `<!DOCTYPE` on
+/// the bytes, and `no_net`, kept that from being reachable — as does, once
+/// xmlsec is initialised, the process-wide external-entity loader xmlsec
+/// installs, which refuses every input but the document itself. Public so the
+/// `receiver_parser_options` integration test can parse with it in a process
+/// where xmlsec never runs.
+pub fn receiver_parser_options() -> libxml::parser::ParserOptions<'static> {
+    libxml::parser::ParserOptions {
+        recover: false,
+        no_net: true,
+        no_def_dtd: false,
+        ignore_enc: true,
+        encoding: None,
+        ..Default::default()
+    }
+}
+
 /// Parse a document the way every message this IdP receives is parsed: size
 /// bound, no markup declaration, no other encoding — all on the bytes, before
-/// libxml — then libxml without recovery and without network access.
+/// libxml — then libxml with [`receiver_parser_options`].
 pub(super) fn parse_xml(document: &str) -> Result<libxml::tree::Document, RequestError> {
     if document.len() > MAX_REQUEST_XML_BYTES {
         return Err(RequestError::TooLarge);
     }
+    // R101W2-02: from here on, `document` is the text without its BOM.
+    let document = refuse_other_encodings(document)?;
     refuse_markup_declarations(document)?;
-    refuse_other_encodings(document)?;
 
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        no_net: true,
-        no_def_dtd: true,
-        ignore_enc: true,
-        encoding: Some("UTF-8"),
-        ..Default::default()
-    };
     libxml::parser::Parser::default()
-        .parse_string_with_options(document.as_bytes(), options)
+        .parse_string_with_options(document.as_bytes(), receiver_parser_options())
         .map_err(|_| RequestError::Malformed)
 }
 
@@ -454,7 +515,10 @@ fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
 
 /// Where the document's signatures sit: `Ok(false)` for none, `Ok(true)` for
 /// exactly one enveloped child of the root referencing the root's `ID`, and
-/// [`RequestError::SignaturePlacement`] for anything else.
+/// [`RequestError::SignaturePlacement`] for anything else — including an
+/// element locally named `Signature` that is not an XML-DSig one, so a
+/// namespace this check misreads refuses the document rather than reading it
+/// as unsigned.
 ///
 /// **A function over any root element** (D-38): `root` is whatever the caller
 /// established the document's root to be — an `AuthnRequest` here, a
@@ -467,12 +531,7 @@ pub(crate) fn signature_placement(
     root_id: &str,
 ) -> Result<bool, RequestError> {
     let mut context = libxml::xpath::Context::new(doc).map_err(|()| RequestError::Malformed)?;
-    let all = context
-        .findnodes(
-            &format!("//*[local-name()='Signature' and namespace-uri()='{NS_DSIG}']"),
-            None,
-        )
-        .map_err(|()| RequestError::Malformed)?;
+    let all = every_signature(&mut context)?;
     if all.is_empty() {
         return Ok(false);
     }
@@ -493,11 +552,164 @@ pub(crate) fn signature_placement(
         .collect();
     let expected = format!("#{root_id}");
     match references.as_slice() {
-        [reference] if reference.get_attribute("URI").as_deref() == Some(expected.as_str()) => {
-            Ok(true)
-        }
-        _ => Err(RequestError::SignaturePlacement),
+        [reference] if reference.get_attribute("URI").as_deref() == Some(expected.as_str()) => {}
+        _ => return Err(RequestError::SignaturePlacement),
     }
+    // R101W2-01: before xmlsec, which evaluates a reference's transforms
+    // before it checks the signature value.
+    if signature_transforms_admitted(&mut context, signature)
+        .map_err(|()| RequestError::Malformed)?
+    {
+        Ok(true)
+    } else {
+        Err(RequestError::SignaturePlacement)
+    }
+}
+
+/// Exclusive XML canonicalization 1.0, without comments.
+const C14N_EXCLUSIVE: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
+/// Canonical XML 1.0, without comments.
+const C14N_10: &str = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+/// Canonical XML 1.1, without comments.
+const C14N_11: &str = "http://www.w3.org/2006/12/xml-c14n11";
+/// The enveloped-signature transform.
+const TRANSFORM_ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
+/// The namespace of exclusive canonicalization's `InclusiveNamespaces`.
+const NS_EXC_C14N: &str = C14N_EXCLUSIVE;
+/// The most `Transform`s one `Reference` may name: `enveloped-signature` and a
+/// canonicalization.
+const MAX_REFERENCE_TRANSFORMS: usize = 2;
+
+/// The one attribute named `Algorithm` on `method`, in any namespace — the
+/// value xmlsec's `xmlGetProp` reads. `Ok(None)` when there is not exactly one;
+/// `Err(())` when the XPath evaluation itself fails.
+///
+/// Shared by the transform allow-list ([`signature_transforms_admitted`]) and
+/// the SP's SHA-1 escape-hatch check (#606), so both read an algorithm the
+/// same way.
+pub(crate) fn sole_algorithm(
+    context: &mut libxml::xpath::Context,
+    method: &libxml::tree::Node,
+) -> Result<Option<String>, ()> {
+    let attributes = context.findnodes("@*[local-name()='Algorithm']", Some(method))?;
+    Ok(match attributes.as_slice() {
+        [attribute] => Some(attribute.get_content()),
+        _ => None,
+    })
+}
+
+/// Whether `signature` names only the transforms and the canonicalization a
+/// SAML signature needs (R101W2-01).
+///
+/// xmlsec admits every transform it registers for a `Reference` — XSLT, XPath,
+/// XPath Filter 2, XPointer as this build links it — and evaluates them, and
+/// the canonicalization, **before** it compares the signature value; samael
+/// restricts neither. So whoever sends a document chooses how much work the
+/// verifier does before it refuses an unsigned one. This allow-list runs on the
+/// libxml tree the caller already holds, before samael, on every path (the SHA-2
+/// default and the SP's SHA-1 escape hatch alike):
+///
+/// * exactly one `SignedInfo` with exactly one `CanonicalizationMethod`, whose
+///   algorithm is exclusive c14n, c14n 1.0 or c14n 1.1 — never a
+///   `#WithComments` variant;
+/// * per `Reference` at most one `Transforms`, holding only `Transform`
+///   elements, at most [`MAX_REFERENCE_TRANSFORMS`] of them, each
+///   `enveloped-signature` or one of those canonicalizations;
+/// * no `Transform` or `CanonicalizationMethod` anywhere else in the signature
+///   (a `Manifest` or `RetrievalMethod` would carry one);
+/// * each method with exactly one attribute named `Algorithm`
+///   ([`sole_algorithm`]), compared exactly, and no element child except one
+///   `ec:InclusiveNamespaces` carrying only `PrefixList`, under exclusive c14n.
+///
+/// Keycloak, samael, Microsoft Entra ID, Okta, Shibboleth and AXIAM's own
+/// signer use `enveloped-signature` with exclusive c14n, so this admits them.
+/// `Err(())` only when an XPath evaluation fails.
+pub(crate) fn signature_transforms_admitted(
+    context: &mut libxml::xpath::Context,
+    signature: &libxml::tree::Node,
+) -> Result<bool, ()> {
+    fn dsig_children(node: &libxml::tree::Node, name: &str) -> Vec<libxml::tree::Node> {
+        node.get_child_elements()
+            .into_iter()
+            .filter(|c| is_element(c, NS_DSIG, name))
+            .collect()
+    }
+    let canonicalization = |uri: &str| [C14N_EXCLUSIVE, C14N_10, C14N_11].contains(&uri);
+
+    let signed_infos = dsig_children(signature, "SignedInfo");
+    let [signed_info] = signed_infos.as_slice() else {
+        return Ok(false);
+    };
+    let methods = dsig_children(signed_info, "CanonicalizationMethod");
+    let [c14n] = methods.as_slice() else {
+        return Ok(false);
+    };
+    if !method_admitted(context, c14n, canonicalization)? {
+        return Ok(false);
+    }
+
+    let mut transforms_seen = 0;
+    for reference in dsig_children(signed_info, "Reference") {
+        let containers = dsig_children(&reference, "Transforms");
+        let transforms = match containers.as_slice() {
+            [] => continue,
+            [transforms] => transforms.get_child_elements(),
+            _ => return Ok(false),
+        };
+        if transforms.len() > MAX_REFERENCE_TRANSFORMS {
+            return Ok(false);
+        }
+        for transform in &transforms {
+            if !is_element(transform, NS_DSIG, "Transform")
+                || !method_admitted(context, transform, |uri| {
+                    uri == TRANSFORM_ENVELOPED || canonicalization(uri)
+                })?
+            {
+                return Ok(false);
+            }
+        }
+        transforms_seen += transforms.len();
+    }
+
+    // Nothing the walk above did not judge: a `Transform` in a `Manifest` or a
+    // `KeyInfo/RetrievalMethod`, or a second canonicalization. Counted by local
+    // name in any namespace, so a `Transforms` or `Transform` the walk skipped
+    // because its namespace did not read as XML-DSig refuses the signature
+    // instead of escaping the count (fail closed).
+    let everywhere = |context: &mut libxml::xpath::Context, name: &str| {
+        context
+            .findnodes(&format!(".//*[local-name()='{name}']"), Some(signature))
+            .map(|nodes| nodes.len())
+    };
+    Ok(everywhere(context, "Transform")? == transforms_seen
+        && everywhere(context, "CanonicalizationMethod")? == 1)
+}
+
+/// One method element of [`signature_transforms_admitted`]: exactly one
+/// `Algorithm`, admitted by `admitted`, and no element child but exclusive
+/// c14n's `InclusiveNamespaces` with only a `PrefixList`.
+fn method_admitted(
+    context: &mut libxml::xpath::Context,
+    method: &libxml::tree::Node,
+    admitted: impl Fn(&str) -> bool,
+) -> Result<bool, ()> {
+    let Some(algorithm) = sole_algorithm(context, method)? else {
+        return Ok(false);
+    };
+    if !admitted(&algorithm) {
+        return Ok(false);
+    }
+    Ok(match method.get_child_elements().as_slice() {
+        [] => true,
+        [inclusive] if algorithm == C14N_EXCLUSIVE => {
+            // `@PrefixList` in XPath is the attribute in no namespace.
+            is_element(inclusive, NS_EXC_C14N, "InclusiveNamespaces")
+                && inclusive.get_child_elements().is_empty()
+                && context.findnodes("@*", Some(inclusive))?.len() == 1
+                && context.findnodes("@PrefixList", Some(inclusive))?.len() == 1
+        }
+        _ => false,
+    })
 }
 
 pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
@@ -507,6 +719,26 @@ pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str)
             .is_some_and(|ns| ns.get_href() == namespace)
 }
 
+/// Every element in the document locally named `Signature`, in any namespace,
+/// each of which must be an XML-DSig `Signature`:
+/// [`RequestError::SignaturePlacement`] otherwise. Searching by local name and
+/// then checking the namespace — rather than searching for the namespace — is
+/// what makes a namespace this reader gets wrong refuse the document instead
+/// of hiding a signature from the checks while xmlsec, on its own parse, still
+/// finds and verifies it.
+fn every_signature(
+    context: &mut libxml::xpath::Context,
+) -> Result<Vec<libxml::tree::Node>, RequestError> {
+    let all = context
+        .findnodes("//*[local-name()='Signature']", None)
+        .map_err(|()| RequestError::Malformed)?;
+    if all.iter().all(|s| is_element(s, NS_DSIG, "Signature")) {
+        Ok(all)
+    } else {
+        Err(RequestError::SignaturePlacement)
+    }
+}
+
 /// Verify a POST-binding request's enveloped signature against the SP's
 /// registered certificate (DER). Call only after [`parse_authn_request`]
 /// answered `enveloped_signature: true`, which is what established that the one
@@ -514,9 +746,41 @@ pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str)
 ///
 /// # Errors
 ///
-/// [`RequestError::SignatureInvalid`] — a wrong key, a changed byte, a SHA-1
-/// algorithm, or anything xmlsec refuses.
+/// [`RequestError::SignaturePlacement`] — a `ds:Signature` in the document
+/// names a transform or canonicalization outside
+/// [`signature_transforms_admitted`]'s set (R101W2-01): checked here again, on
+/// this very text, before xmlsec runs, so this function never hands xmlsec a
+/// transform whatever its caller checked. [`RequestError::SignatureInvalid`] —
+/// a wrong key, a changed byte, a SHA-1 algorithm, a document that does not
+/// parse, or anything xmlsec refuses.
+///
+/// CPU-bound: the SSO and SLO endpoints call it off the async workers, under
+/// the crypto semaphore.
 pub fn verify_post_signature(document: &str, sp_cert_der: &[u8]) -> Result<(), RequestError> {
+    // R101W2-02: xmlsec reads exactly the text `parse_xml` read — the same
+    // function strips the same one BOM, so the two never see different
+    // characters, whatever string the caller holds.
+    let document = refuse_other_encodings(document).map_err(|_| RequestError::SignatureInvalid)?;
+    // R101W2-01: the transform allow-list, on every signature of the very
+    // text xmlsec is handed. (The placement rule is the parse's: this function
+    // also verifies documents whose signature sits on a child, such as an
+    // issued response's assertion.)
+    let doc = parse_xml(document).map_err(|_| RequestError::SignatureInvalid)?;
+    let mut context = libxml::xpath::Context::new(&doc).map_err(|()| RequestError::Malformed)?;
+    let signatures = every_signature(&mut context)?;
+    // Called only for a document whose parse found its signature: finding none
+    // here means this read and that one disagree, and xmlsec would verify
+    // whatever it finds with nothing checked first. Refused (fail closed).
+    if signatures.is_empty() {
+        return Err(RequestError::SignatureInvalid);
+    }
+    for signature in &signatures {
+        if !signature_transforms_admitted(&mut context, signature)
+            .map_err(|()| RequestError::Malformed)?
+        {
+            return Err(RequestError::SignaturePlacement);
+        }
+    }
     let cert = CertificateDer::from(sp_cert_der.to_vec());
     <XmlSec as CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
         document,
@@ -726,4 +990,4 @@ pub fn name_id_format_compatible(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

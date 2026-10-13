@@ -7,6 +7,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **SAML single logout is tested against a real service provider (#538,
+  P23W4-09).** The Keycloak round trip (`saml_idp_keycloak_roundtrip_test`)
+  gains four tests that end a brokered session from each side on both bindings
+  Keycloak supports: a logout started at Keycloak, whose own signed
+  `LogoutRequest` (its `NameID`, the `SessionIndex` AXIAM gave it) AXIAM's
+  `/slo` verifies and answers with a signed `LogoutResponse` that Keycloak
+  verifies; and a logout started at AXIAM's `/sso/logout`, whose signed
+  `LogoutRequest` Keycloak's `SingleLogoutService` verifies and answers with a
+  signed `Success` that AXIAM counts as confirmed. Each checks the AXIAM session
+  in `/oauth2/revocations` and Keycloak's session gone through its admin API.
+  They run in the existing compose step of the `e2e` job; no code changed.
+
+- **Federation no longer sends a credential through a redirect (#591,
+  R1W2-04).** The OIDC and OAuth2 token exchanges (client secret, authorization
+  code, PKCE verifier) and the OAuth2 userinfo and GitHub verified-email calls
+  (the user's access token) went through the redirect-following guard, which
+  rebuilt the request on every hop, so a `3xx` from the IdP's endpoint sent the
+  secret or the token on to its `Location` — any public HTTPS host. The four calls now use the one-hop guard and a `3xx` is a
+  `FederationError` reading "redirect not followed" and naming the endpoint's
+  host and path (never the `Location`, a query or the response body). An IdP
+  whose token or userinfo endpoint redirects must be configured with its final
+  URL. Discovery, JWKS and metadata fetches carry no credential and still follow
+  a redirect. Threat model: T-112 carries a dated correction of its rule (and the
+  Phase 23 W6 review's "the one exception left"); totals unchanged.
+- **OIDC back-channel logout no longer delivers its token through an unguarded
+  request, and refuses to register a destination it could not safely reach
+  (R101W2-04).** The logout token — a signed JWT naming the user's session — was
+  POSTed to a client's `backchannel_logout_uri` with a plain HTTP client: no
+  address check, redirects followed, `http` accepted, and the URI was never
+  validated when the client was created or updated, so a tenant administrator who
+  could manage OAuth2 clients could make AXIAM send that request to an internal
+  or link-local address, or to a public URL that redirected there. Delivery now
+  goes through the one-hop SSRF guard (`https` required, a non-public resolved
+  address refused, the validated address pinned) and a `3xx` is a failed attempt,
+  retried like any other and never followed; the retry bound and the failure
+  logging are unchanged. **Behaviour change:** `POST` and `PUT
+  /api/v1/oauth2-clients` now answer `400` for a `backchannel_logout_uri` that is
+  not an absolute `https` URL with a host, carries credentials or a fragment, is
+  a loopback, private, link-local or cloud-metadata IP literal, or is
+  `localhost`, `*.localhost`, `*.local` or `*.internal` (the rule CIBA ping and
+  SSF push endpoints already follow; a loopback `http` URI, which a redirect URI
+  may use, is refused because delivery could never reach it). An empty string on
+  update still clears the URI. Clients registered under 1.0.0 are **not**
+  rewritten (no backfill): a stored value this rule would refuse stays as it is
+  and is refused at send time by the guard, so it cannot reach a private
+  address — the RP is simply not notified, and the log carries the failed
+  attempts. A receiver on a private network is reached by naming its host in
+  `AXIAM__PKI__SSRF_ALLOWED_HOSTS` and registering its `https` URL. Dynamic
+  registration and Client ID Metadata Documents never read the member. The
+  `examples/b5-rp-logout-app` smoke test, whose receiver is plain `http`, now
+  proves the refusal instead of the delivery unless `RP_BACKCHANNEL_URL` is an
+  `https` receiver. Threat model: T-112 carries a second dated correction
+  (back-channel logout was the remaining exception to its rule); totals
+  unchanged.
+- **The authenticated federation flow routes are rate limited (#614).**
+  `POST /api/v1/federation/saml/authn-request` had no limiter, and neither had
+  its four siblings, `POST /api/v1/federation/saml/acs`,
+  `GET /api/v1/federation/saml/metadata`,
+  `POST /api/v1/federation/oidc/authorize` and `POST /api/v1/federation/oidc/callback`.
+  Each now carries the browser-endpoint preset (`end_session_per_min`, per IP,
+  default 30) in a bucket of its own (`federation_saml_authn_request`,
+  `federation_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`,
+  `federation_oidc_callback`), so one route's exhaustion never spends another's
+  allowance; past its bucket a route answers `429`. No new setting. A backend
+  that relays many people's federated sign-ins to these routes from one address
+  shares one bucket per route and should raise `end_session_per_min`. Threat
+  model: T-474 carries a dated extension; totals unchanged.
+- **Replacing or clearing a SAML configuration's assertion certificate is
+  audited (#611).** `idp_signing_cert_pem` is the anchor of every federated
+  sign-in, yet changing it wrote no specific audit row while the metadata
+  certificate did. An update that replaces it with a different certificate now
+  writes `federation.idp_signing_cert_changed`, and one that clears it
+  `federation.idp_signing_cert_cleared` (the configuration then fails closed),
+  each naming the configuration, its provider and the administrator and never the
+  certificate, as the metadata pair does. Setting one where there was none,
+  re-saving the same one and clearing an absent one write nothing. Threat model:
+  T-474 carries a dated extension; totals unchanged.
+- **A byte-order mark no longer hides an XML declaration from the SAML "plainly
+  UTF-8" refusal (#605, R1W1-07).** The refusal read the declaration only when
+  the text began with `<?xml`, so a document beginning with U+FEFF skipped it
+  while libxml2 skipped the mark and honoured whatever encoding the declaration
+  named. A leading byte-order mark is now stripped once; anything else before
+  `<` (after XML whitespace) is refused, and a declaration naming any encoding
+  but UTF-8 is read from the true start and refused — at the SP's assertion
+  consumer, at the IdP metadata parse and at the IdP's request receiver (and its
+  SP metadata import). Every consumer reads the same stripped text: the
+  byte-level scans, libxml, samael and xmlsec. A single UTF-8 byte-order mark
+  in front of an otherwise plain document is accepted, as in 1.0.0 — Microsoft
+  Entra ID serves its federation metadata with one (R101W2-02); a second, or
+  one in front of a UTF-16 declaration, is refused. Every libxml parse of a received document, including the
+  ACS's signature-placement and assertion-binding parses and the metadata
+  signature check, which used libxml's defaults, now uses the receiver's options:
+  no recovery, no network access, no default DTD, UTF-8 forced. samael's own
+  re-parse inside signature verification still uses libxml's defaults; it is
+  recorded as the residual of T-474 (T-67, T-69 and T-474 carry dated
+  corrections).
+- **`allow_sha1_signatures` admits SHA-1, not every algorithm (#606,
+  R1W1-08).** samael has no SHA-1 entry in its algorithm list, so with the
+  per-federation escape hatch set the SAML SP verifier passed no list at all,
+  which samael reads as "no restriction": any signature or digest algorithm the
+  linked xmlsec verifies was accepted (RSA-SHA224, DSA, HMAC, MD5 where xmlsec
+  has it). With the flag set, AXIAM now checks every signature's
+  `SignatureMethod` and every reference's `DigestMethod` itself before xmlsec
+  runs, and refuses the response unless each is a SHA-2 algorithm the default
+  path admits, `rsa-sha1`/`ecdsa-sha1` or the `sha1` digest (exact URI match; a
+  missing or repeated `Algorithm` is refused). **Behaviour change:** an IdP on
+  a configuration with the flag set that signs with anything else (DSA,
+  RSA-SHA224, MD5) is now refused at the signature check. Configurations
+  without the flag are unaffected. T-69 carries a dated correction.
+- **A received XML signature may use only `enveloped-signature` and the c14n
+  family, and is verified off the request workers (R101W2-01).** Nothing
+  restricted the transforms or the canonicalisation method a signature names,
+  and the linked xmlsec (XSLT compiled in) evaluates them — XSLT, XPath, XPath
+  Filter 2, XPointer — before it checks the signature value, so a sender with
+  no valid signature chose how much CPU AXIAM spent at the SAML assertion
+  consumer, at the SAML IdP's SSO and SLO endpoints and at the IdP-metadata
+  signature check; the first two verified on the async workers. Every
+  signature is now refused before xmlsec runs unless its canonicalisation is
+  exclusive c14n, c14n 1.0 or c14n 1.1 without comments and each reference
+  carries at most two transforms, each `enveloped-signature` or one of those
+  (the only child element admitted is exclusive c14n's `InclusiveNamespaces`;
+  exactly one `Algorithm` per method, compared exactly) — on the default path
+  and with `allow_sha1_signatures` set alike. The ACS, the IdP's POST-binding
+  verification and the metadata check now run on the blocking pool under the
+  crypto semaphore. Keycloak, Entra ID, Okta, Shibboleth and samael sign with
+  `enveloped-signature` and exclusive c14n and are unaffected. **Behaviour
+  change:** an IdP or SP whose signatures name any other transform or a
+  `#WithComments` canonicalisation is refused. Threat model: T-477 enters
+  (High, Mitigated); T-69 carries a dated correction.
+- **The SAML receiver's parser no longer asks libxml to load an external DTD.**
+  `receiver_parser_options()`, the libxml options for every received SAML
+  document (the assertion consumer, IdP and SP metadata, the IdP's SSO and SLO
+  receiver), set libxml-rs's `no_def_dtd` meaning "no default DTD"; for the XML
+  parser that value is `XML_PARSE_DTDLOAD`, *load the external DTD subset*. It
+  was not reachable — every `<!DOCTYPE` is refused on the bytes before libxml,
+  and network access was off — and it is now off. Threat model: T-474 carries a
+  dated correction, T-67 and T-69 a short one.
+- **Received SAML documents are parsed without a use-after-free, and the
+  signature checks fail closed.** `receiver_parser_options()` named UTF-8 as
+  libxml's encoding, and libxml-rs 0.3.3 frees that name before libxml2 reads
+  it, so every received SAML document (the assertion consumer, signed IdP
+  metadata, the IdP's SSO and SLO receiver) was decoded under whatever the
+  freed memory then held: usually the parse failed — valid documents were
+  refused intermittently, and `cargo test -p axiam-federation --lib` failed
+  about one run in ten — and sometimes the XML-DSig namespace read differently,
+  which at the IdP's POST-binding verification let a signature reach xmlsec
+  without the transform allow-list (R101W2-01). The IdP receiver had it since
+  1.0.0. No encoding is named now (`ignore_enc` keeps UTF-8); signatures are
+  found by local name, and an element named `Signature` outside the XML-DSig
+  namespace refuses the document; `verify_post_signature` refuses a document
+  with no signature; the allow-list counts `Transform`s in any namespace.
+  **Behaviour change:** an `AuthnRequest`, logout message or signed IdP
+  metadata carrying a non-XML-DSig element named `Signature` is refused.
+  Threat model: T-477 carries a dated correction, T-67, T-69 and T-474 a short
+  one.
+
 ## [1.0.0] - 2026-10-10
 
 #### What 1.0.0 means
@@ -1395,7 +1553,9 @@ an open issue on `ilpanich/axiam`.
   - #603 — R1W1-05: the Vault revocation sweep can starve.
   - #604 — R1W1-06: device-grant redemption does not ask `account_may_act`.
   - #605 — R1W1-07: the UTF-8 refusal does not see past a byte-order mark.
+    Fixed in `1.0.1` (see `[Unreleased]`).
   - #606 — R1W1-08: the SHA-1 escape hatch admits every algorithm.
+    Fixed in `1.0.1` (see `[Unreleased]`).
   - #607 — R1W1-09: the CRL route's global lock and per-request read.
   - #608 — R1W1-10: CRL consistency across replicas and caches.
   - #609 — R1W1-11: the CRL distribution point is not the URL validated.

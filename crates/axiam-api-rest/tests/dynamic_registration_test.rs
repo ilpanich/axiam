@@ -605,6 +605,44 @@ async fn d3_a_registered_client_inherits_the_tenants_audiences() {
     );
 }
 
+/// R101W2-04 — `backchannel_logout_uri` is not an RFC 7591 member AXIAM reads,
+/// so a self-registering client cannot name a logout-token destination at all:
+/// the member is ignored, however hostile its value, and the stored row holds
+/// none. (The admin API validates the field; this registration path has no
+/// field to validate, which is the stronger guarantee.)
+#[actix_rt::test]
+async fn r101w2_04_dynamic_registration_cannot_set_a_backchannel_logout_uri() {
+    use axiam_core::repository::OAuth2ClientRepository;
+
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+
+    for hostile in [
+        "https://169.254.169.254/latest/meta-data/",
+        "https://10.0.0.8/logout",
+        "http://127.0.0.1:9/logout",
+    ] {
+        let mut body = inspector_registration();
+        body["backchannel_logout_uri"] = json!(hostile);
+        body["backchannel_logout_session_required"] = json!(true);
+        let (status, registered) = register!(app, f, body);
+        assert_eq!(status, 201, "{registered}");
+        assert!(
+            registered.get("backchannel_logout_uri").is_none(),
+            "the response does not echo a member that was not read: {registered}"
+        );
+        let stored = axiam_db::repository::SurrealOAuth2ClientRepository::new(f.db.clone())
+            .get_by_client_id(f.tenant_id, registered["client_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.backchannel_logout_uri, None,
+            "{hostile} must not reach the stored row"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The acceptance case: register, consent, authorize, get a bound token
 // ---------------------------------------------------------------------------

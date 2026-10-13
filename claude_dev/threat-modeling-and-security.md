@@ -344,6 +344,33 @@
 > exists — takes the same bounds. An unbound certificate outside them stays
 > active and is revoked by id. No status changes.
 >
+> **The 1.0.1 release wave, W2 (T-477 enters, Mitigated; T-69 corrected).** The
+> wave's F4 review
+> ([`security-review-release-1.0.1-w2-2026-10-13.md`](security-review-release-1.0.1-w2-2026-10-13.md),
+> R101W2-01) found that nothing restricted the transforms or the
+> canonicalisation a received XML signature names, and that the linked xmlsec —
+> XSLT compiled in — evaluates them before it checks the signature value: an
+> unauthenticated sender chose how much CPU AXIAM spent at the SAML assertion
+> consumer, the SAML IdP's SSO and SLO receiver and the IdP-metadata check, the
+> first two on the async workers. Entered as **T-477**, High, Mitigated: every
+> signature may now name only `enveloped-signature` and the c14n family without
+> comments, checked before xmlsec at all three, and all three verify on the
+> blocking pool under the crypto semaphore. T-69's residual, which named the gap
+> without its consequence, carries a dated correction. The model is **476
+> threats, 438 mitigated / 17 open / 21 not applicable** (the W1 half of the
+> wave enters its own entry; the copies are reconciled once, at the end of the
+> release). The same review's R101W2-04 found that W2.5's rule for **T-112**, "every
+> credential-bearing outbound request uses `guarded_fetch_no_redirect`", was not
+> yet true: OIDC back-channel logout POSTed its logout token — a signed JWT
+> naming the user's session — to a `backchannel_logout_uri` that was never
+> validated at registration, with a plain client that did no address check and
+> followed redirects. It was the remaining exception and is now closed: delivery
+> uses the one-hop guard (a `3xx` is a failed attempt), and registration refuses
+> a URI that is not a public `https` URL (a **behaviour change**; rows written
+> under 1.0.0 are not rewritten, and the guard refuses them at send time). T-112
+> carries a second dated correction; no entry is added, so the counts above do
+> not move.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1695,7 +1722,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | System context | 34 | 2 | 0 |
 | Authentication & session management | 36 | 0 | 0 |
 | OAuth2 / OIDC authorization server | 86 | 0 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 126 | 3 | 0 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 127 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 32 | 1 | 0 |
 | Audit, webhooks, email & notifications | 56 | 2 | 0 |
@@ -1830,7 +1857,7 @@ the category recorded against it in the model.
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 1 | 1 |
 | Information disclosure | 112 | 6 | 4 |
-| Denial of service | 59 | 3 | 4 |
+| Denial of service | 60 | 3 | 4 |
 | Elevation of privilege | 90 | 2 | 4 |
 
 ### Coverage by severity
@@ -1838,7 +1865,7 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 197 | 8 | 9 |
+| High | 198 | 8 | 9 |
 | Medium | 199 | 6 | 9 |
 | Low | 36 | 1 | 1 |
 

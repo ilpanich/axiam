@@ -1356,6 +1356,10 @@ async fn back_channel_logout_is_dispatched_to_oidc_rps_bound_to_the_session() {
     use axiam_core::repository::{OAuth2ClientRepository, SessionClientRepository};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // The RP is a loopback receiver over plain `http`; delivery is a guarded,
+    // non-redirecting hop (R101W2-04) that refuses that unless this test seam
+    // is on. Nothing but test code calls it.
+    axiam_api_rest::backchannel_logout::admit_private_networks_for_tests();
     let w = world().await;
     register(&w, Sp::new("a", Some(SamlBinding::HttpRedirect))).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

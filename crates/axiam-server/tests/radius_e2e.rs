@@ -1,0 +1,1285 @@
+//! 802.1X with an AXIAM-issued `Device` certificate, against a real FreeRADIUS
+//! and a real `eapol_test` (W6.2, D3 of the RADIUS spike).
+//!
+//! The recipe in `docs/pki/freeradius.md` makes claims about a configuration
+//! AXIAM does not run and cannot unit-test. This file is the oracle for them:
+//! the same AXIAM routes an operator calls issue the certificates, the CA and
+//! the revocation list they export go into the shipped FreeRADIUS configuration
+//! (`docker/radius/raddb/`, `docker/docker-compose.radius.yml`), and a
+//! supplicant implementation somebody else wrote (`eapol_test`, from
+//! `wpa_supplicant`) authenticates against it over EAP-TLS.
+//!
+//! # What is real
+//!
+//! * FreeRADIUS 3.2.8, the upstream image pinned by digest, with the recipe's
+//!   configuration mounted over it and no other change;
+//! * `eapol_test` (Ubuntu package `eapoltest`), the supplicant;
+//! * the routes: `POST .../ca-certificates`, `POST .../signing-cas`,
+//!   `GET .../ca-certificates/{id}` (the export), `POST /certificates`,
+//!   `POST /service-accounts/{id}/bind-certificate`, `GET /certificates`,
+//!   `POST /certificates/{id}/revoke` and the unauthenticated
+//!   `GET /pki/v1/{org}/ca/{ca}/crl`, mounted by the production
+//!   `register_api_v1_routes` over an in-memory database, as in
+//!   `directory_e2e.rs`.
+//!
+//! # The cases
+//!
+//! 1. **issue** — an organization CA, a tenant signing CA and a `Device`
+//!    certificate (clientAuth, the CRL distribution point of its issuer);
+//! 2. **bind** — the certificate bound to a service account, and listed as such;
+//! 3. **accept** — the bound device is admitted, with the VLAN attributes of
+//!    RFC 3580 and a bounded `Session-Timeout`;
+//! 4. **wrong CA** — a device of another organization, and a device of another
+//!    tenant of the same organization, are refused;
+//! 5. **revoked after the CRL refresh** — a revoked device keeps being admitted
+//!    while FreeRADIUS holds the old list, which is the revocation lag; once the
+//!    list AXIAM publishes is in FreeRADIUS's `ca_path` and FreeRADIUS has
+//!    re-read it, the device is refused and the others are not;
+//!
+//! and the settings the guide stands behind: a valid certificate that is not in
+//! the placement table is refused, TLS 1.2 is refused, EAP-MD5 is refused, and
+//! an Access-Request without a `Message-Authenticator` is discarded.
+//!
+//! # Gating
+//!
+//! `cargo test` needs no container, no `eapol_test` and no `docker`: without
+//! `AXIAM_E2E_RADIUS=1` the test prints `SKIPPED` and returns. With it set the
+//! test is **not** allowed to skip: a missing `docker`, `eapol_test` or
+//! `openssl`, or a FreeRADIUS that does not come up, is a failure with the
+//! command that fixes it.
+//!
+//! `AXIAM_E2E_RADIUS_REFRESH=restart` refreshes FreeRADIUS's revocation lists by
+//! restarting the container instead of waiting for `ca_path_reload_interval`
+//! (300 seconds, the smallest value FreeRADIUS accepts); it is for iterating
+//! locally and is not what CI runs. `AXIAM_E2E_RADIUS_KEEP=1` leaves the stack up.
+//!
+//! # Credentials
+//!
+//! None is written in this file. The shared secret is random per run; the
+//! server certificate, every device key and the CA are minted per run into
+//! `docker/.secrets/radius/` (gitignored).
+
+use std::net::{SocketAddr, UdpSocket};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::rc::Rc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use actix_web::{App, test, web};
+use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::state::AppState;
+use axiam_api_rest::{RateLimitConfig, register_api_v1_routes};
+use axiam_auth::config::AuthConfig;
+use axiam_auth::token::{AUD_USER, issue_access_token};
+use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
+use axiam_core::models::user::CreateUser;
+use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_db::repository::{
+    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+};
+use axiam_test_support::test_password;
+use serde_json::{Value, json};
+use surrealdb::Surreal;
+use surrealdb::engine::local::Mem;
+use uuid::Uuid;
+
+type TestDb = surrealdb::engine::local::Db;
+
+const CONTAINER: &str = "axiam-radius-e2e-freeradius";
+const CSRF_TOKEN: &str = "radius-e2e-csrf-token";
+/// The CRL route is metered per IP; the test says which one it is.
+const CRL_PEER: &str = "203.0.113.30:4000";
+/// The VLAN the placement table puts every device on.
+const VLAN: &str = "20";
+
+// ===========================================================================
+// The gate, and the commands the test shells out to
+// ===========================================================================
+
+fn gate() -> bool {
+    if std::env::var("AXIAM_E2E_RADIUS").as_deref() != Ok("1") {
+        eprintln!(
+            "SKIPPED: set AXIAM_E2E_RADIUS=1 (with docker, `eapol_test` and `openssl` installed) \
+             to run the FreeRADIUS e2e; see docker/radius/README.md"
+        );
+        return false;
+    }
+    for (program, probe, hint) in [
+        (
+            "docker",
+            vec!["compose", "version"],
+            "install Docker with the compose plugin",
+        ),
+        (
+            "openssl",
+            vec!["version"],
+            "install openssl (sudo apt-get install -y openssl)",
+        ),
+        (
+            "eapol_test",
+            // `eapol_test` has no version flag; an unknown one prints usage.
+            vec!["-h"],
+            "install it with `sudo apt-get install -y eapoltest` (wpa_supplicant's test tool)",
+        ),
+    ] {
+        assert!(
+            Command::new(program)
+                .args(&probe)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok(),
+            "AXIAM_E2E_RADIUS is set but `{program}` cannot be run: {hint}"
+        );
+    }
+    true
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Where the run's material goes: `docker/.secrets/radius` unless
+/// `AXIAM_E2E_RADIUS_DIR` says otherwise. Wiped at the start of a run, so the
+/// last path component must say what it is.
+fn work_dir() -> PathBuf {
+    let dir = std::env::var_os("AXIAM_E2E_RADIUS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("docker/.secrets/radius"));
+    assert!(
+        dir.file_name().is_some_and(|n| n == "radius"),
+        "AXIAM_E2E_RADIUS_DIR must end in `radius`: the test deletes and recreates it"
+    );
+    dir
+}
+
+/// Run a command to completion and require success; on failure the panic
+/// carries the command's own stderr and stdout.
+fn run_ok(program: &str, args: &[&str]) -> String {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("`{program}` could not be run: {e}"));
+    assert!(
+        out.status.success(),
+        "`{program} {}` failed ({}):\n{}\n{}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn path_str(path: &Path) -> &str {
+    path.to_str().expect("a UTF-8 path")
+}
+
+fn openssl_in(args: &[&str], stdin: &[u8]) -> Vec<u8> {
+    let mut child = Command::new("openssl")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("openssl can be run");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .expect("a piped stdin")
+            .write_all(stdin)
+            .expect("openssl takes its input");
+    }
+    let out = child.wait_with_output().expect("openssl finishes");
+    assert!(
+        out.status.success(),
+        "`openssl {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs()
+}
+
+// ===========================================================================
+// The FreeRADIUS stack
+// ===========================================================================
+
+struct Stack {
+    compose: PathBuf,
+    env_file: PathBuf,
+}
+
+impl Stack {
+    fn new(work: &Path) -> Self {
+        Self {
+            compose: repo_root().join("docker/docker-compose.radius.yml"),
+            env_file: work.join("env"),
+        }
+    }
+
+    fn compose(&self, args: &[&str]) -> std::process::Output {
+        Command::new("docker")
+            .args(["compose", "-f", path_str(&self.compose), "--env-file"])
+            .arg(&self.env_file)
+            .args(args)
+            .output()
+            .expect("`docker compose` can be run")
+    }
+
+    fn up(&self) {
+        // A stack left by an aborted run would keep the fixed address.
+        let _ = self.compose(&["down", "-v"]);
+        let out = self.compose(&["up", "-d", "--wait"]);
+        assert!(
+            out.status.success(),
+            "FreeRADIUS did not come up (docker compose up -d --wait -f \
+             docker/docker-compose.radius.yml):\n{}\n{}\n--- container log ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout),
+            self.log_tail()
+        );
+    }
+
+    fn restart(&self) {
+        let out = self.compose(&["restart", "--no-deps", "freeradius"]);
+        assert!(
+            out.status.success(),
+            "restarting FreeRADIUS failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // `restart` does not wait for the healthcheck.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let health = Command::new("docker")
+                .args(["inspect", "--format", "{{.State.Health.Status}}", CONTAINER])
+                .output()
+                .expect("docker inspect");
+            if String::from_utf8_lossy(&health.stdout).trim() == "healthy" {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "FreeRADIUS did not become healthy after the restart"
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// The server's log since `epoch` (Unix seconds), stdout and stderr.
+    fn log_since(&self, epoch: u64) -> String {
+        let out = Command::new("docker")
+            .args(["logs", "--since", &epoch.to_string(), CONTAINER])
+            .output()
+            .expect("docker logs");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    fn log_tail(&self) -> String {
+        let out = Command::new("docker")
+            .args(["logs", "--tail", "200", CONTAINER])
+            .output()
+            .expect("docker logs");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+}
+
+impl Drop for Stack {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "--- FreeRADIUS log (last 200 lines) ---\n{}",
+                self.log_tail()
+            );
+        }
+        if std::env::var("AXIAM_E2E_RADIUS_KEEP").as_deref() == Ok("1") {
+            eprintln!("AXIAM_E2E_RADIUS_KEEP=1: the stack is left up (docker/radius/README.md)");
+            return;
+        }
+        let _ = self.compose(&["down", "-v"]);
+    }
+}
+
+/// What one `eapol_test` run said.
+struct Attempt {
+    accepted: bool,
+    /// `eapol_test`'s own output, for the RADIUS attributes of an Accept.
+    output: String,
+    /// FreeRADIUS's log from the moment the attempt started.
+    log: String,
+}
+
+impl Attempt {
+    /// What to print when an assertion about this attempt fails: the end of
+    /// `eapol_test`'s output (the supplicant's side) and the server's log.
+    fn report(&self) -> String {
+        let lines: Vec<&str> = self.output.lines().collect();
+        let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+        format!(
+            "--- eapol_test (last 40 lines) ---\n{tail}\n--- FreeRADIUS ---\n{}",
+            self.log
+        )
+    }
+}
+
+struct Radius<'a> {
+    stack: &'a Stack,
+    work: PathBuf,
+    ip: String,
+    secret: String,
+}
+
+impl Radius<'_> {
+    /// Authenticate with EAP-TLS and the given device files.
+    fn eap_tls(&self, name: &str, cert: &str, key: &str, tls13: bool) -> Attempt {
+        let conf = self.work.join(format!("supplicant-{name}.conf"));
+        std::fs::write(
+            &conf,
+            format!(
+                "network={{\n\tssid=\"axiam-e2e\"\n\tkey_mgmt=WPA-EAP\n\teap=TLS\n\
+                 \tidentity=\"{name}\"\n\tca_cert=\"{ca}\"\n\tclient_cert=\"{cert}\"\n\
+                 \tprivate_key=\"{key}\"\n\tphase1=\"tls_disable_tlsv1_3={disable}\"\n}}\n",
+                ca = path_str(&self.work.join("server-ca.pem")),
+                disable = if tls13 { 0 } else { 1 },
+            ),
+        )
+        .expect("the supplicant configuration can be written");
+        self.run_eapol(&conf)
+    }
+
+    /// Authenticate with EAP-MD5 (a method this server does not offer).
+    fn eap_md5(&self) -> Attempt {
+        let conf = self.work.join("supplicant-md5.conf");
+        std::fs::write(
+            &conf,
+            "network={\n\tssid=\"axiam-e2e\"\n\tkey_mgmt=WPA-EAP\n\teap=MD5\n\
+             \tidentity=\"md5-device\"\n\tpassword=\"not-a-real-password\"\n}\n",
+        )
+        .expect("the supplicant configuration can be written");
+        self.run_eapol(&conf)
+    }
+
+    fn run_eapol(&self, conf: &Path) -> Attempt {
+        // FreeRADIUS logs with one-second resolution: start each attempt in a
+        // second of its own so a reason read from the log is this attempt's.
+        std::thread::sleep(Duration::from_millis(1100));
+        let since = unix_now();
+        let out = Command::new("eapol_test")
+            .args(["-c", path_str(conf), "-a", &self.ip, "-p", "1812", "-s"])
+            .arg(&self.secret)
+            .args(["-t", "20"])
+            .output()
+            .expect("eapol_test can be run");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Let the server finish writing the decision.
+        std::thread::sleep(Duration::from_millis(300));
+        let accepted = output
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .is_some_and(|l| l.trim() == "SUCCESS");
+        Attempt {
+            accepted,
+            output,
+            log: self.stack.log_since(since),
+        }
+    }
+
+    /// An Access-Request that carries a `User-Name` and nothing else, in
+    /// particular no `Message-Authenticator`, from the host's address on the
+    /// compose network (which `clients.conf` lists). Returns whether anything
+    /// answered within three seconds.
+    fn bare_access_request(&self) -> (bool, String) {
+        std::thread::sleep(Duration::from_millis(1100));
+        let since = unix_now();
+        let socket = UdpSocket::bind("0.0.0.0:0").expect("a UDP socket");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("a read timeout");
+        let user = b"no-message-authenticator";
+        let mut packet = vec![1u8, 7u8]; // Access-Request, Identifier 7
+        let length = 20 + 2 + user.len();
+        packet.extend_from_slice(&(length as u16).to_be_bytes());
+        packet.extend_from_slice(&Uuid::new_v4().into_bytes()); // Request Authenticator
+        packet.push(1); // User-Name
+        packet.push((2 + user.len()) as u8);
+        packet.extend_from_slice(user);
+        let to: SocketAddr = format!("{}:1812", self.ip).parse().expect("an address");
+        socket.send_to(&packet, to).expect("the request is sent");
+        let mut buf = [0u8; 4096];
+        let answered = socket.recv_from(&mut buf).is_ok();
+        std::thread::sleep(Duration::from_millis(300));
+        (answered, self.stack.log_since(since))
+    }
+}
+
+// ===========================================================================
+// The AXIAM side: the production route table, in process
+// ===========================================================================
+
+type Reply = (u16, Vec<u8>);
+type ReplyFuture = Pin<Box<dyn Future<Output = Reply>>>;
+
+struct Api {
+    call: Box<dyn Fn(test::TestRequest) -> ReplyFuture>,
+}
+
+impl Api {
+    async fn new(state: AppState<TestDb>, auth: AuthConfig, authz: Arc<dyn AuthzChecker>) -> Self {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(authz))
+                .app_data(web::Data::new(state))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await;
+        let app = Rc::new(app);
+        Self {
+            call: Box::new(move |req| {
+                let app = Rc::clone(&app);
+                Box::pin(async move {
+                    let resp = test::call_service(&*app, req.to_request()).await;
+                    let status = resp.status().as_u16();
+                    let body = test::read_body(resp).await.to_vec();
+                    (status, body)
+                })
+            }),
+        }
+    }
+
+    async fn send(&self, req: test::TestRequest) -> Reply {
+        (self.call)(req).await
+    }
+
+    /// A bearer-token request carrying the CSRF pair the middleware checks.
+    async fn json(
+        &self,
+        method: actix_web::http::Method,
+        uri: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
+        let mut req = test::TestRequest::default()
+            .method(method)
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN));
+        if let Some(body) = body {
+            req = req.set_json(body);
+        }
+        let (status, bytes) = self.send(req).await;
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn post(&self, uri: &str, token: &str, body: Value) -> (u16, Value) {
+        self.json(actix_web::http::Method::POST, uri, token, Some(body))
+            .await
+    }
+
+    async fn get(&self, uri: &str, token: &str) -> (u16, Value) {
+        self.json(actix_web::http::Method::GET, uri, token, None)
+            .await
+    }
+
+    /// `GET /pki/v1/{org}/ca/{ca}/crl`, with no credential, as a relying party
+    /// calls it. Returns the DER list.
+    async fn crl(&self, org: Uuid, ca: &str) -> Vec<u8> {
+        let (status, body) = self
+            .send(
+                test::TestRequest::get()
+                    .uri(&format!("/pki/v1/{org}/ca/{ca}/crl"))
+                    .peer_addr(CRL_PEER.parse().expect("a peer address")),
+            )
+            .await;
+        assert_eq!(status, 200, "the CRL route answers a relying party");
+        body
+    }
+}
+
+fn auth_config() -> AuthConfig {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 keypair");
+    AuthConfig {
+        jwt_private_key_pem: key.serialize_pem(),
+        jwt_public_key_pem: key.public_key_pem(),
+        access_token_lifetime_secs: 900,
+        jwt_issuer: "axiam-test".into(),
+        // Names the CRL distribution point of every certificate issued.
+        oauth2_issuer_url: "https://id.radius.example".into(),
+        ..AuthConfig::default()
+    }
+}
+
+/// An organization with two tenants, an organization-level administrator for
+/// the CA calls and a tenant administrator for each tenant.
+struct Org {
+    id: Uuid,
+    ca_admin: String,
+    tenants: Vec<(Uuid, String)>,
+}
+
+async fn mint(
+    db: &Surreal<TestDb>,
+    auth: &AuthConfig,
+    org: Uuid,
+    tenant: Uuid,
+    name: &str,
+) -> String {
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: name.into(),
+            email: format!("{name}@example.test"),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("an administrator");
+    issue_access_token(
+        user.id,
+        tenant,
+        org,
+        &[],
+        auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .expect("a token")
+}
+
+async fn organization(
+    db: &Surreal<TestDb>,
+    auth: &AuthConfig,
+    slug: &str,
+    tenant_slugs: &[&str],
+) -> Org {
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: format!("RADIUS e2e {slug}"),
+            slug: slug.into(),
+            metadata: None,
+        })
+        .await
+        .expect("an organization");
+    // CA operations are organization-level: they need a principal that lives in
+    // the organization's reserved scope.
+    let scope = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org.id))
+        .await
+        .expect("the organization scope");
+    let ca_admin = mint(db, auth, org.id, scope.id, "org-admin").await;
+    let mut tenants = Vec::new();
+    for slug in tenant_slugs {
+        let tenant = SurrealTenantRepository::new(db.clone())
+            .create(CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: (*slug).into(),
+                slug: (*slug).into(),
+                metadata: None,
+            })
+            .await
+            .expect("a tenant");
+        let admin = mint(db, auth, org.id, tenant.id, "tenant-admin").await;
+        tenants.push((tenant.id, admin));
+    }
+    Org {
+        id: org.id,
+        ca_admin,
+        tenants,
+    }
+}
+
+/// One tenant signing CA, issued the way an operator issues it: an
+/// organization CA, then a signing CA beneath it for the tenant.
+struct SigningCa {
+    id: String,
+    pem: String,
+}
+
+async fn signing_ca(api: &Api, org: &Org, tenant: usize, subject: &str) -> SigningCa {
+    let (status, root) = api
+        .post(
+            &format!("/api/v1/organizations/{}/ca-certificates", org.id),
+            &org.ca_admin,
+            json!({
+                "subject": format!("{subject} root"),
+                "key_algorithm": "Ed25519",
+                "validity_days": 365,
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "issue: the organization CA: {root}");
+    let root_id = root["id"].as_str().expect("the CA id").to_string();
+
+    let tenant_id = org.tenants[tenant].0;
+    let (status, ca) = api
+        .post(
+            &format!(
+                "/api/v1/organizations/{}/tenants/{tenant_id}/signing-cas",
+                org.id
+            ),
+            &org.ca_admin,
+            json!({
+                "parent_ca_id": root_id,
+                "subject": subject,
+                "key_algorithm": "Ed25519",
+                // A signing CA may not outlive its parent.
+                "validity_days": 364,
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "issue: the tenant signing CA: {ca}");
+    let id = ca["id"].as_str().expect("the CA id").to_string();
+
+    // The export: the CA certificate an operator copies to FreeRADIUS.
+    let (status, exported) = api
+        .get(
+            &format!("/api/v1/organizations/{}/ca-certificates/{id}", org.id),
+            &org.ca_admin,
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "issue: the export of the signing CA: {exported}"
+    );
+    let pem = exported["public_cert_pem"]
+        .as_str()
+        .expect("the exported certificate")
+        .to_string();
+    assert_eq!(
+        ca["public_cert_pem"].as_str(),
+        Some(pem.as_str()),
+        "the export is the certificate that was issued"
+    );
+    SigningCa { id, pem }
+}
+
+/// AXIAM returns an Ed25519 private key as PKCS#8 **version 2** (RFC 5958): the
+/// 32-byte seed followed by the public key. OpenSSL 3.0 — the library behind
+/// Ubuntu 24.04's `wpa_supplicant` and so `eapol_test` — refuses that encoding
+/// ("DECODER routines::unsupported") and reads only version 1, which is the same
+/// seed without the public key. This re-encodes the key the way an operator has
+/// to for such a supplicant (docs/pki/freeradius.md, "Issue and bind"); it
+/// changes no key material. A key that is not in the expected shape is returned
+/// as it is, and the supplicant says why it cannot read it.
+fn supplicant_readable_key(pem: &str) -> String {
+    use base64::Engine as _;
+    const V2_PREFIX: [u8; 16] = [
+        0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    const V1_PREFIX: [u8; 16] = [
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    let Ok(der) = base64::engine::general_purpose::STANDARD.decode(body.trim()) else {
+        return pem.to_string();
+    };
+    if der.len() != 83 || der[..16] != V2_PREFIX {
+        return pem.to_string();
+    }
+    let mut v1 = V1_PREFIX.to_vec();
+    v1.extend_from_slice(&der[16..48]);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(v1);
+    let mut out = String::from("-----BEGIN PRIVATE KEY-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        out.push('\n');
+    }
+    out.push_str("-----END PRIVATE KEY-----\n");
+    out
+}
+
+/// A device certificate and its key, written where `eapol_test` reads them.
+struct Device {
+    name: String,
+    id: String,
+    cert: PathBuf,
+    key: PathBuf,
+    pem: String,
+}
+
+async fn issue_device(
+    api: &Api,
+    org: &Org,
+    tenant: usize,
+    ca: &SigningCa,
+    name: &str,
+    dir: &Path,
+) -> Device {
+    let (status, leaf) = api
+        .post(
+            "/api/v1/certificates",
+            &org.tenants[tenant].1,
+            json!({
+                "issuer_ca_id": ca.id,
+                "subject": name,
+                "cert_type": "Device",
+                "key_algorithm": "Ed25519",
+                "validity_days": 30,
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "issue: the device certificate {name}: {leaf}");
+    let pem = leaf["public_cert_pem"]
+        .as_str()
+        .expect("the certificate")
+        .to_string();
+    let key = supplicant_readable_key(
+        leaf["private_key_pem"]
+            .as_str()
+            .expect("the key is returned once, at issuance"),
+    );
+    let cert_path = dir.join(format!("{name}.pem"));
+    let key_path = dir.join(format!("{name}.key"));
+    std::fs::write(&cert_path, &pem).expect("the certificate can be written");
+    std::fs::write(&key_path, key).expect("the key can be written");
+    Device {
+        name: name.into(),
+        id: leaf["id"].as_str().expect("the certificate id").to_string(),
+        cert: cert_path,
+        key: key_path,
+        pem,
+    }
+}
+
+async fn bind(api: &Api, org: &Org, tenant: usize, device: &Device) -> String {
+    let token = &org.tenants[tenant].1;
+    let (status, sa) = api
+        .post(
+            "/api/v1/service-accounts",
+            token,
+            json!({ "name": format!("sa-{}", device.name) }),
+        )
+        .await;
+    assert_eq!(status, 201, "bind: the service account: {sa}");
+    let sa_id = sa["id"]
+        .as_str()
+        .expect("the service account id")
+        .to_string();
+    let (status, bound) = api
+        .post(
+            &format!("/api/v1/service-accounts/{sa_id}/bind-certificate"),
+            token,
+            json!({ "certificate_id": device.id }),
+        )
+        .await;
+    assert_eq!(status, 200, "bind: {bound}");
+    assert_eq!(bound["status"], "bound");
+    sa_id
+}
+
+/// What an operator's script would do: the placement table is the tenant's
+/// active `Device` certificates that are bound to a service account.
+async fn placement_from_axiam(api: &Api, org: &Org, tenant: usize) -> (String, Vec<String>) {
+    let (status, list) = api
+        .get(
+            "/api/v1/certificates?offset=0&limit=200",
+            &org.tenants[tenant].1,
+        )
+        .await;
+    assert_eq!(status, 200, "bind: the certificate list: {list}");
+    let mut table = String::new();
+    let mut placed = Vec::new();
+    for item in list["items"].as_array().expect("an item list") {
+        let bound = !item["bound_service_account_id"].is_null();
+        if item["cert_type"] == "Device" && item["status"] == "Active" && bound {
+            let cn = item["subject"].as_str().expect("a subject");
+            table.push_str(&format!(
+                "{cn}\n\tTunnel-Type = VLAN,\n\tTunnel-Medium-Type = IEEE-802,\n\
+                 \tTunnel-Private-Group-Id = \"{VLAN}\",\n\tSession-Timeout = 3600,\n\
+                 \tTermination-Action = RADIUS-Request\n\n"
+            ));
+            placed.push(cn.to_string());
+        }
+    }
+    (table, placed)
+}
+
+/// Fetch the signing CA's list from AXIAM and put it where FreeRADIUS reads it:
+/// DER to PEM, named by the hash of the issuer's name (`<hash>.r0`), moved into
+/// place so FreeRADIUS never reads a half-written file. Returns the PEM list's
+/// `openssl crl -text`.
+async fn refresh_crl(api: &Api, org: Uuid, ca: &SigningCa, capath: &Path) -> String {
+    let der = api.crl(org, &ca.id).await;
+    let pem = openssl_in(&["crl", "-inform", "DER", "-outform", "PEM"], &der);
+    let hash = String::from_utf8(openssl_in(&["crl", "-hash", "-noout"], &pem))
+        .expect("a hash")
+        .trim()
+        .to_string();
+    let staged = capath.join(".incoming");
+    std::fs::write(&staged, &pem).expect("the list can be staged");
+    set_readable(&staged);
+    std::fs::rename(&staged, capath.join(format!("{hash}.r0"))).expect("the list moves into place");
+    String::from_utf8(openssl_in(&["crl", "-noout", "-text"], &pem)).expect("CRL text")
+}
+
+fn set_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+        .expect("permissions can be set");
+}
+
+fn certificate_serial(pem: &str) -> String {
+    let out = openssl_in(&["x509", "-noout", "-serial"], pem.as_bytes());
+    String::from_utf8(out)
+        .expect("serial output")
+        .trim()
+        .trim_start_matches("serial=")
+        .to_ascii_lowercase()
+}
+
+fn certificate_text(pem: &str) -> String {
+    String::from_utf8(openssl_in(&["x509", "-noout", "-text"], pem.as_bytes())).expect("text")
+}
+
+// ===========================================================================
+// The test
+// ===========================================================================
+
+fn say(step: &str, what: &str) {
+    eprintln!("[radius-e2e] {step:<22} {what}");
+}
+
+#[actix_web::test]
+async fn eap_tls_with_an_axiam_issued_device_certificate() {
+    if !gate() {
+        return;
+    }
+
+    // ---- the run's directory, the server's own certificate, the secret ----
+    let work = work_dir();
+    let _ = std::fs::remove_dir_all(&work);
+    let trust = work.join("trust");
+    let capath = trust.join("capath");
+    std::fs::create_dir_all(&capath).expect("the run directory can be created");
+    let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    std::fs::write(
+        work.join("env"),
+        format!("RADIUS_E2E_SHARED_SECRET={secret}\n"),
+    )
+    .expect("the env file can be written");
+    let ip = std::env::var("RADIUS_E2E_IP").unwrap_or_else(|_| "172.28.78.10".into());
+
+    // The certificate FreeRADIUS shows the supplicant. It has nothing to do
+    // with AXIAM's CA: the supplicant validates the server against this one.
+    let server_ca_key = work.join("server-ca.key");
+    let server_ca = work.join("server-ca.pem");
+    run_ok(
+        "openssl",
+        &[
+            "req",
+            "-x509",
+            "-newkey",
+            "ed25519",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            "/CN=AXIAM e2e RADIUS server CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign",
+            "-keyout",
+            path_str(&server_ca_key),
+            "-out",
+            path_str(&server_ca),
+        ],
+    );
+    let server_csr = work.join("server.csr");
+    run_ok(
+        "openssl",
+        &[
+            "req",
+            "-newkey",
+            "ed25519",
+            "-nodes",
+            "-subj",
+            "/CN=radius.example.test",
+            "-keyout",
+            path_str(&trust.join("server.key")),
+            "-out",
+            path_str(&server_csr),
+        ],
+    );
+    let server_ext = work.join("server.ext");
+    std::fs::write(
+        &server_ext,
+        "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n\
+         extendedKeyUsage=serverAuth\nsubjectAltName=DNS:radius.example.test\n",
+    )
+    .expect("the extension file can be written");
+    run_ok(
+        "openssl",
+        &[
+            "x509",
+            "-req",
+            "-in",
+            path_str(&server_csr),
+            "-CA",
+            path_str(&server_ca),
+            "-CAkey",
+            path_str(&server_ca_key),
+            "-CAcreateserial",
+            "-days",
+            "2",
+            "-extfile",
+            path_str(&server_ext),
+            "-out",
+            path_str(&trust.join("server.pem")),
+        ],
+    );
+    set_readable(&trust.join("server.key"));
+    set_readable(&trust.join("server.pem"));
+
+    // ---- AXIAM -----------------------------------------------------------
+    let db = Surreal::new::<Mem>(())
+        .await
+        .expect("an in-memory database");
+    db.use_ns("test").use_db("test").await.expect("a namespace");
+    axiam_db::run_migrations(&db).await.expect("migrations");
+    let auth = auth_config();
+    let authz: Arc<dyn AuthzChecker> = Arc::new(AllowAllAuthzChecker);
+    let api = Api::new(
+        AppState::for_test(db.clone(), auth.clone()),
+        auth.clone(),
+        authz,
+    )
+    .await;
+
+    // Plant A has the line FreeRADIUS serves and a second line; Plant B is
+    // another organization altogether.
+    let plant_a = organization(&db, &auth, "plant-a", &["line-1", "line-2"]).await;
+    let plant_b = organization(&db, &auth, "plant-b", &["line-1"]).await;
+
+    // ---- 1. issue ---------------------------------------------------------
+    let line1 = signing_ca(&api, &plant_a, 0, "Plant A line 1 devices").await;
+    let line2 = signing_ca(&api, &plant_a, 1, "Plant A line 2 devices").await;
+    let other_org = signing_ca(&api, &plant_b, 0, "Plant B line 1 devices").await;
+
+    let press07 = issue_device(&api, &plant_a, 0, &line1, "press-07", &work).await;
+    let press08 = issue_device(&api, &plant_a, 0, &line1, "press-08", &work).await;
+    let press09 = issue_device(&api, &plant_a, 0, &line1, "press-09", &work).await;
+    let gate03 = issue_device(&api, &plant_a, 1, &line2, "gate-03", &work).await;
+    let crane01 = issue_device(&api, &plant_b, 0, &other_org, "crane-01", &work).await;
+
+    let text = certificate_text(&press07.pem);
+    assert!(
+        text.contains("TLS Web Client Authentication"),
+        "issue: a Device certificate carries clientAuth:\n{text}"
+    );
+    assert!(
+        text.contains(&format!("/pki/v1/{}/ca/{}/crl", plant_a.id, line1.id)),
+        "issue: the certificate names its issuer's revocation list:\n{text}"
+    );
+    say(
+        "issue",
+        "organization CA, tenant signing CA, five Device certificates",
+    );
+
+    // ---- 2. bind ----------------------------------------------------------
+    bind(&api, &plant_a, 0, &press07).await;
+    bind(&api, &plant_a, 0, &press09).await;
+    bind(&api, &plant_a, 1, &gate03).await;
+    bind(&api, &plant_b, 0, &crane01).await;
+    // press-08 is issued and valid, and bound to nothing.
+    let (table, placed) = placement_from_axiam(&api, &plant_a, 0).await;
+    let mut placed = placed;
+    placed.sort();
+    assert_eq!(
+        placed,
+        ["press-07", "press-09"],
+        "bind: exactly the bound devices of the tenant are listed as bound"
+    );
+    say("bind", "press-07, press-09 bound; press-08 left unbound");
+
+    // ---- the trust material, and the stack -------------------------------
+    std::fs::write(trust.join("ca.pem"), &line1.pem).expect("the CA can be written");
+    std::fs::write(trust.join("placement"), table).expect("the placement table can be written");
+    set_readable(&trust.join("ca.pem"));
+    set_readable(&trust.join("placement"));
+    let initial = refresh_crl(&api, plant_a.id, &line1, &capath).await;
+    assert!(
+        initial.contains("No Revoked Certificates"),
+        "the list starts empty:\n{initial}"
+    );
+    std::fs::set_permissions(&capath, {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(0o755)
+    })
+    .expect("permissions");
+
+    let stack = Stack::new(&work);
+    stack.up();
+    let radius = Radius {
+        stack: &stack,
+        work: work.clone(),
+        ip,
+        secret,
+    };
+    say(
+        "stack",
+        "FreeRADIUS 3.2.8 up, trusting only the line 1 signing CA",
+    );
+
+    // ---- 3. accept --------------------------------------------------------
+    let accept = radius.eap_tls(
+        "press-07",
+        path_str(&press07.cert),
+        path_str(&press07.key),
+        true,
+    );
+    assert!(
+        accept.accepted,
+        "accept: press-07 is admitted:\n{}",
+        accept.report()
+    );
+    assert!(
+        accept.log.contains("Sent Access-Accept"),
+        "accept: the server says it admitted the device"
+    );
+    for (number, name) in [
+        (64, "Tunnel-Type"),
+        (65, "Tunnel-Medium-Type"),
+        (81, "Tunnel-Private-Group-Id"),
+        (27, "Session-Timeout"),
+        (29, "Termination-Action"),
+    ] {
+        assert!(
+            accept
+                .output
+                .contains(&format!("Attribute {number} ({name})")),
+            "accept: the Access-Accept carries {name} (RFC 3580): {}",
+            accept.output
+        );
+    }
+    say("accept", "press-07 admitted onto VLAN 20, session bounded");
+
+    // ---- 4. wrong CA ------------------------------------------------------
+    let wrong_tenant = radius.eap_tls(
+        "gate-03",
+        path_str(&gate03.cert),
+        path_str(&gate03.key),
+        true,
+    );
+    assert!(
+        !wrong_tenant.accepted
+            && wrong_tenant
+                .log
+                .contains("unable to get local issuer certificate"),
+        "wrong CA: another tenant of the same organization is refused:\n{}",
+        wrong_tenant.log
+    );
+    let wrong_org = radius.eap_tls(
+        "crane-01",
+        path_str(&crane01.cert),
+        path_str(&crane01.key),
+        true,
+    );
+    assert!(
+        !wrong_org.accepted
+            && wrong_org
+                .log
+                .contains("unable to get local issuer certificate"),
+        "wrong CA: another organization's device is refused:\n{}",
+        wrong_org.log
+    );
+    say(
+        "wrong CA",
+        "gate-03 (other tenant) and crane-01 (other organization) refused",
+    );
+
+    // ---- placement: a valid certificate that is not in the table ----------
+    let unplaced = radius.eap_tls(
+        "press-08",
+        path_str(&press08.cert),
+        path_str(&press08.key),
+        true,
+    );
+    assert!(
+        !unplaced.accepted
+            && unplaced
+                .log
+                .contains("Certificate rejected by the virtual server"),
+        "unplaced: a valid but unbound device is refused, not admitted onto a default:\n{}",
+        unplaced.log
+    );
+    say("unplaced", "press-08 (valid, unbound) refused");
+
+    // ---- the settings the guide stands behind -----------------------------
+    let tls12 = radius.eap_tls(
+        "press-07",
+        path_str(&press07.cert),
+        path_str(&press07.key),
+        false,
+    );
+    assert!(
+        !tls12.accepted && tls12.log.contains("protocol_version"),
+        "TLS 1.3 only: a TLS 1.2 supplicant is refused:\n{}",
+        tls12.log
+    );
+    let md5 = radius.eap_md5();
+    assert!(
+        !md5.accepted && md5.output.contains("EAP-Failure"),
+        "EAP allow-list: EAP-MD5 is refused:\n{}",
+        md5.output
+    );
+    let (answered, log) = radius.bare_access_request();
+    assert!(
+        !answered && log.contains("does not contain required Message-Authenticator"),
+        "Message-Authenticator: a request without one is discarded, unanswered:\n{log}"
+    );
+    say(
+        "settings",
+        "TLS 1.2, EAP-MD5 and a request without Message-Authenticator refused",
+    );
+
+    // ---- 5. revoked after the CRL refresh ----------------------------------
+    let before = radius.eap_tls(
+        "press-09",
+        path_str(&press09.cert),
+        path_str(&press09.key),
+        true,
+    );
+    assert!(
+        before.accepted,
+        "revoked: press-09 is admitted before it is revoked"
+    );
+
+    let (status, _) = api
+        .post(
+            &format!("/api/v1/certificates/{}/revoke", press09.id),
+            &plant_a.tenants[0].1,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "revoked: AXIAM revokes press-09");
+    let revoked_at = Instant::now();
+
+    // AXIAM publishes it at once: the next response from the CRL route names it.
+    let der = api.crl(plant_a.id, &line1.id).await;
+    let published = String::from_utf8(openssl_in(
+        &["crl", "-inform", "DER", "-noout", "-text"],
+        &der,
+    ))
+    .expect("CRL text")
+    .to_ascii_lowercase();
+    assert!(
+        published.contains(&certificate_serial(&press09.pem)),
+        "revoked: the list AXIAM serves names press-09 at once:\n{published}"
+    );
+
+    // The revocation lag: FreeRADIUS still holds the old list.
+    let lagging = radius.eap_tls(
+        "press-09",
+        path_str(&press09.cert),
+        path_str(&press09.key),
+        true,
+    );
+    assert!(
+        lagging.accepted,
+        "revoked: until FreeRADIUS reads the new list, a revoked device is still admitted \
+         (the lag the guide states):\n{}",
+        lagging.log
+    );
+    say(
+        "revocation lag",
+        &format!(
+            "revoked in AXIAM {}s ago, still admitted: FreeRADIUS holds the old list",
+            revoked_at.elapsed().as_secs()
+        ),
+    );
+
+    // The refresh: fetch the list from AXIAM into ca_path ...
+    let fetched = refresh_crl(&api, plant_a.id, &line1, &capath)
+        .await
+        .to_ascii_lowercase();
+    assert!(fetched.contains(&certificate_serial(&press09.pem)));
+    say("refresh", "list fetched from AXIAM into ca_path");
+
+    // ... and FreeRADIUS reads it: by its own ca_path_reload_interval, or, for
+    // a quick local run, by a restart.
+    if std::env::var("AXIAM_E2E_RADIUS_REFRESH").as_deref() == Ok("restart") {
+        stack.restart();
+    }
+    let deadline = Instant::now() + Duration::from_secs(420);
+    let refused = loop {
+        let attempt = radius.eap_tls(
+            "press-09",
+            path_str(&press09.cert),
+            path_str(&press09.key),
+            true,
+        );
+        if !attempt.accepted {
+            break attempt;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "revoked: FreeRADIUS still admits press-09 {}s after the list was revoked and \
+             fetched",
+            revoked_at.elapsed().as_secs()
+        );
+        std::thread::sleep(Duration::from_secs(15));
+    };
+    assert!(
+        refused.log.contains("certificate revoked"),
+        "revoked: press-09 is refused because it is revoked:\n{}",
+        refused.log
+    );
+    say(
+        "revoked",
+        &format!(
+            "press-09 refused {}s after the revocation; the lag is the fetch interval plus \
+             ca_path_reload_interval",
+            revoked_at.elapsed().as_secs()
+        ),
+    );
+
+    // Revoking one device does not touch the others.
+    let still = radius.eap_tls(
+        "press-07",
+        path_str(&press07.cert),
+        path_str(&press07.key),
+        true,
+    );
+    assert!(
+        still.accepted,
+        "revoked: press-07 is still admitted:\n{}",
+        still.log
+    );
+    say("done", "press-07 still admitted");
+}

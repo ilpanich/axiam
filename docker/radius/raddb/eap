@@ -1,0 +1,65 @@
+# EAP for 802.1X with an AXIAM-issued Device certificate
+# (docs/pki/freeradius.md). Replaces the image's mods-available/eap: the only
+# EAP method is TLS, over TLS 1.3, against the tenant signing CA and nothing else.
+
+eap {
+	default_eap_type = tls
+	timer_expire = 60
+
+	# A supplicant that asks for another method (EAP-MD5, PEAP, TTLS, ...) is
+	# refused, not negotiated: no other method is configured below, and this
+	# makes an unknown one a failure rather than something to skip.
+	ignore_unknown_eap_types = no
+
+	max_sessions = ${max_requests}
+
+	tls-config tls-common {
+		# This server's own certificate, for the supplicant to validate. It is
+		# NOT issued by the CA below and has nothing to do with it.
+		private_key_file = /etc/freeradius/axiam/server.key
+		certificate_file = /etc/freeradius/axiam/server.pem
+
+		# The trust anchor: the tenant signing CA, exported from AXIAM, and ONLY
+		# that. FreeRADIUS accepts a chain that ends at a CA it trusts directly,
+		# so the organization CA above it is not needed here, and leaving it out
+		# is what keeps another tenant's devices out: their leaves chain to a
+		# different tenant signing CA that this file does not contain.
+		ca_file = /etc/freeradius/axiam/ca.pem
+
+		# The revocation lists. OpenSSL looks a CRL up by the hash of its
+		# issuer's name, so the file is named <hash>.r0 (openssl crl -hash).
+		# OpenSSL does not re-read this directory by itself;
+		# ca_path_reload_interval makes FreeRADIUS do it. 300 seconds is the
+		# smallest value FreeRADIUS accepts (it raises a smaller one to 300).
+		# This interval, added to how often the lists are fetched, is how long a
+		# revoked device keeps being accepted.
+		ca_path = /etc/freeradius/axiam/capath
+		ca_path_reload_interval = 300
+
+		check_crl = yes
+
+		# Only the device's own issuer (the tenant signing CA) is checked. With
+		# the tenant signing CA as the anchor there is nothing above it in the
+		# chain for check_all_crl to look at, and the list that would name a
+		# revoked signing CA is the organization CA's, which is not loaded here.
+		# A revoked signing CA is handled by replacing ca.pem (the guide).
+		check_all_crl = no
+
+		# TLS 1.3 and nothing older.
+		tls_min_version = "1.3"
+		tls_max_version = "1.3"
+
+		# No session cache: a resumed session skips the certificate check, so a
+		# revoked device could be admitted again from a ticket. Leave it off.
+		cache {
+			enable = no
+		}
+	}
+
+	tls {
+		tls = tls-common
+
+		# Runs once the client certificate is verified: the placement policy.
+		virtual_server = check-eap-tls
+	}
+}

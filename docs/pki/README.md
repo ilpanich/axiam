@@ -1289,8 +1289,8 @@ relying parties read Vault's list.
 **A relying party.** A FreeRADIUS server doing EAP-TLS reads CRLs from files
 (`check_crl = yes` with the lists in its `ca_path`), so fetch each issuing
 CA's list on a schedule shorter than `nextUpdate` and convert it with
-`openssl crl -inform DER -outform PEM`. AXIAM still does not speak RADIUS: the
-G-11 spike declined a native front end and keeps a FreeRADIUS-backend route for
-when a named adopter asks
-([decision record](../../claude_dev/radius-eap-tls-spike-2026-10-06.md)); the
-list was the step of that route that stands on its own, and it now exists.
+`openssl crl -inform DER -outform PEM`. AXIAM still does not speak RADIUS, but
+[802.1X with an AXIAM-issued Device certificate](freeradius.md) is the whole
+recipe for this consumer — trust anchor, fetch job, FreeRADIUS configuration and
+the revocation lag it implies — and an end-to-end test runs it against a real
+FreeRADIUS.

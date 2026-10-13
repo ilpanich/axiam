@@ -1,0 +1,26 @@
+# Placement: a device that presents a certificate this server trusts is admitted
+# only if it is listed in the placement file. A valid certificate that is not
+# listed is REJECTED, not dropped onto some default network (the
+# reply-profile design note, "An unplaced device is rejected").
+#
+# The attributes of the client certificate (TLS-Client-Cert-*) exist while this
+# server runs, which is why the decision is made here and not in `post-auth`.
+
+server check-eap-tls {
+	authorize {
+		update control {
+			Tmp-String-0 := &TLS-Client-Cert-Common-Name
+		}
+
+		axiam_placement
+
+		# Fail closed: anything but a match, including a module failure, rejects.
+		if (!ok) {
+			reject
+		}
+
+		update control {
+			Auth-Type := Accept
+		}
+	}
+}

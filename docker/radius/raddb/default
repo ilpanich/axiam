@@ -1,0 +1,33 @@
+# The only virtual server that answers the network: RADIUS authentication for
+# EAP-TLS. No accounting, no status port, no password protocol.
+
+server default {
+	listen {
+		type = auth
+		ipaddr = *
+		port = 0
+	}
+
+	authorize {
+		# EAP-Message present: hand it to the eap module and stop.
+		eap {
+			ok = return
+			updated = return
+		}
+
+		# Anything else (PAP, CHAP, MS-CHAP, a request with no credential): this
+		# server holds no passwords, so there is nothing to check one against.
+		reject
+	}
+
+	authenticate {
+		eap
+	}
+
+	post-auth {
+		Post-Auth-Type REJECT {
+			attr_filter.access_reject
+			eap
+		}
+	}
+}

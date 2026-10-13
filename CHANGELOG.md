@@ -510,6 +510,24 @@ and v90 – v94 run at startup like every earlier one.
 
 #### Federation and PKI
 
+- **802.1X with an AXIAM-issued Device certificate: a FreeRADIUS recipe, not a
+  RADIUS server (#563, D3 of the RADIUS spike).** `docs/pki/freeradius.md` is the
+  guide — issue and bind a `Device` certificate, export the tenant signing CA,
+  a FreeRADIUS configuration that trusts that CA only, EAP-TLS over TLS 1.3 only,
+  `require_message_authenticator = yes`, a placement table that rejects a valid
+  certificate nobody listed, RadSec where the NAS allows, and the revocation lag
+  stated as the fetch interval plus `ca_path_reload_interval` (300 s at the
+  smallest) plus the session's `Session-Timeout`.
+  `docker/docker-compose.radius.yml` references the upstream FreeRADIUS image by
+  digest and ships configuration only (`docker/radius/raddb/`); nothing of
+  FreeRADIUS (GPLv2) is in the tree. `radius_e2e.rs`, run by `radius-e2e.yml`
+  (path-filtered, `workflow_dispatch`, gated by `AXIAM_E2E_RADIUS=1`; a missing
+  server is a failure), drives `eapol_test` through issue, bind, accept, a wrong
+  CA, and a revoked device that is still admitted until the list reaches
+  FreeRADIUS and refused after. AXIAM still speaks no RADIUS, and the `rlm_rest`
+  authorize endpoint (D4) is not in 1.0.1; the guide ends on that. The
+  authentik comparison's RADIUS row reads *recipe, not native*.
+
 - **A certificate revocation list per issuing CA** (#565, P23W6-10). Each CA
   whose key AXIAM holds publishes a signed RFC 5280 CRL (version 2, DER,
   `application/pkix-crl`) at `GET /pki/v1/{org_id}/ca/{ca_id}/crl`:

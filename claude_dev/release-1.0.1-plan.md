@@ -1,6 +1,6 @@
 # Release 1.0.1 plan — closing the open issues after the 1.0.0 tag
 
-> **Status: PLAN — not started.** Written on 2026-10-12 against `main` at
+> **Status: IN PROGRESS — W1 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
 > `0a90de0` (`chore(release): prepare axiam 1.0.0`). It covers **28 of the 30
 > open issues** on `ilpanich/axiam`: the twenty-five Low and Informational
 > findings of the 1.0.0 F4 review (#590 … #614), the two deferred non-local
@@ -322,13 +322,52 @@ code. W6.2's guide ends with the paragraph that says so.
 
 | Wave | Branch / head | Review document | Closes | Left to the next wave / to 1.0.x |
 |---|---|---|---|---|
-| W1 | | | | |
+| W1 | `claude/release-1.0.1-w1` @ `08c4c38` — cut from the tag `v1.0.0` (`0a90de0`), see §11.0 | [`security-review-release-1.0.1-w1-2026-10-13.md`](security-review-release-1.0.1-w1-2026-10-13.md) (`37582a3`): 1 Medium (R101W1-01, fixed in-wave `08c4c38`), 4 Low, 4 Informational | #603, #607, #608, #609, #612, #533; the (a) half of #611 and the (c) half of #610 | Low/Informational filed on `1.0.x`: #615 … #622 (R101W1-02 … -09). To W5: §27.11 `user_id` (W5.1), CRL §35 rule 4 (W5.7), CA-revoke pending outcome and audit names (W5.8). To W7.3: T-472 dated corrections (W1.4, W1.7), T-102, T-470, T-336, T-187, new T-476 |
 | W2 | | | | |
 | W3 | | | | |
 | W4 | | | | |
 | W5 | | | | |
 | W6 | | | | |
 | W7 | | | | |
+
+### 11.0 Base commit (D-1)
+
+`v1.0.0` was on `origin` when W1 started (2026-10-12; tag object `9b2e6f5` →
+`0a90de0`), so W1 … W4 are cut from the tag, as D-1 directs. The plan branch
+`claude/release-1.0.1` is cut from `main` at `c6f916e` (the tag plus this plan),
+and it carries this section.
+
+### 11.1 W1 — what landed, and where the tree overruled the plan
+
+Ten commits on `v1.0.0`, every one signed. Each item ran as one executor at the
+model its row names; none was re-sized.
+
+| Task | Commit | Model | Plan vs tree (from the commit body) |
+|---|---|---|---|
+| W1.1 #609 | `9637c64` | Sonnet 5.5 | the callers go through `CrlDistribution::resolve`; no caller edit |
+| W1.2 #611(a) | `b8f2985` | Sonnet 5.5 | T-476 added (Mitigated; model 476 = 438 / 17 / 21, still 2.40.0). The `main.rs` bootstrap client is reviewed, not tested (R101W1-07, #620) |
+| W1.3 #607 | `0df1c7c` | Opus 5.5 | the revocation read already ran outside the lock; the lock covered `load`, the permit wait and the signature. `503` after a 5 s permit wait |
+| W1.4 #608 | `fe77681` | Opus 5.5 | **not in the row:** the tenant purge keeps revoked certificate rows until `notAfter` + 8 days (a list keeps an expired entry at most one interval, ≤ 7 days by `boot.rs`'s bound); the four revocation reads take the cut-off from the caller. T-472 correction |
+| W1.5 #603 | `f05bd40` | Sonnet 5.5 | v95. The due read is a second method; the "distinct job-health error" is a second job, `vault_revocation_failing`, so `JobStatus` (an OpenAPI schema) is unchanged |
+| W1.6 #612 | `363b40d` | Opus 5.5 | v96 also carries the three backoff columns on `ca_certificate`. **The forward runs after `store.delete`, not before:** Vault refuses `/revoke` of a serial that is still an issuer in the same mount (confirmed by the F4 review; residual R101W1-04, #617) |
+| W1.7 #610(c) | `5844249` | Opus 5.5 | v97. `purge_tombstoned`'s final delete now counts what it removed so that `NotFound` means "already purged"; lease 1 h |
+| W1.8 #533 | `2b6607a` | Opus 5.5 | v98; no backfill (D-6). `sdks/openapi.json` and `sdks/management-registry.json` regenerated (they also carry W1.3/W1.4/W1.6's route text). The name fallback applies to every `user_id = NONE` row |
+| W1.9 | `37582a3` | Opus 5.5 | the F4 review; one Medium |
+| R101W1-01 | `08c4c38` | Opus 5.5 | revoke-by-name skips certificates older than the account and names another account of the tenant shares; checked inside the query, not through `identity_collision`. Linking no longer revokes an unbound certificate whose name a case-variant sibling also holds (deliberate; revocable by id) |
+
+Residual recorded, not fixed: an erased account's revoked certificate rows keep
+the PEM, subject and `metadata` for the tenant's lifetime (T-187; R101W1-05,
+#618).
+
+### 11.4 W4 — in progress
+
+W4.1 (#597): no commit; the tree was verified again and the comment posted
+(issuecomment-6131477654). D-7: the orchestrator dispatched `fapi-conformance.yml`
+itself — run 38300274398 (tag-only image) failed at "Select the AXIAM image" as
+W4.2 requires; run 38300842144 (default `module_timeout` 180) was cancelled at
+the job's 150-minute cap; run 38317560409 (`module_timeout` 30) completed and
+is the recording behind W4.3's `baseline-unattended.json` (`b34a0d0`),
+transcribed from the gate log because the session cannot fetch artifacts.
 
 ---
 

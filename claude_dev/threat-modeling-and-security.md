@@ -527,6 +527,15 @@
 > state shown, so an administrator can see which third parties receive security
 > events and turn either surface off during an incident without the API. Status
 > and totals are unchanged.
+> *Correction, 2026-10-13 (`1.0.1`, #590, R1W2-03):* the `PUT` the page sent was
+> conditional only on the version the server read during the request, so a
+> receiver's pause or narrowing between the form's read and its save was
+> reverted, and removing every narrowed event omitted `events_requested`, which
+> reads as every allowed event. `SsfStreamInput` carries the optional
+> `expected_updated_at` (a stale one is `409`; absent keeps the old behaviour),
+> the page sends the version of the row it opened from, never omits the
+> narrowing and refuses a save that would empty it. Status and totals are
+> unchanged.
 >
 > **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
 > T-416 amended, still Mitigated).** The administrators' `PUT` was conditional
@@ -577,7 +586,20 @@
 > `conformance/baseline.json`, failing on a `FAILED` module, one below its
 > baseline or a missing plan, and tolerating `WAITING`/`SKIPPED`. The workflow's
 > dispatch inputs reach its scripts through `env:`. CI-only; no threat entry
-> changes.
+> changes. *Correction, 2026-10-12 (`1.0.1`, #592, R1W2-05):* `env:` alone did not
+> make the `axiam_image` input safe: it was still appended to `$GITHUB_ENV`
+> unchecked (a newline set any variable for later steps) and the summary printed
+> "(digest-pinned)" for any value. The select step now fails the job unless the
+> value is `repo[:tag]@sha256:<64 hex>`, and the summary reads the validated
+> verdict, not the raw input. Still CI-only; no threat entry changes.
+> *Correction, 2026-10-12 (`1.0.1`, #593, R1W2-06):* the gate tolerated `WAITING` whatever
+> the baseline said, so a regression that made a module park on a browser instead of failing read green (the baseline is the
+> browser-driven run, where all of them are `PASSED`). It now also reads
+> `conformance/baseline-unattended.json` and tolerates `WAITING` only for the modules
+> that file lists per plan; any other module that parks is a regression, and an
+> unreadable or malformed file ends the step red. The committed list was a seed from the
+> 2026-09-08 reports and the plan definitions; *correction, 2026-10-12:* it is now the
+> list recorded from unattended run 38317560409. Still CI-only; no threat entry changes.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on

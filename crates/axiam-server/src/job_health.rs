@@ -203,6 +203,7 @@ impl JobHealthReporter for JobHealth {
             dead_letter_full: s.dead_letter_full,
             last_loss_at: s.last_loss_at.map(|t| t.to_rfc3339()),
             recent_loss: s.recent_loss,
+            outbound_abandoned_dropped: s.outbound_abandoned_dropped,
         })
     }
 }
@@ -335,9 +336,14 @@ mod tests {
             ip_address: None,
             metadata: None,
         };
-        loss.record_dropped(entry(), "audit channel full");
-        loss.record_failed(entry(), &"datastore down");
-        loss.record_failed(entry(), &"datastore down");
+        let at = chrono::Utc::now();
+        loss.record_dropped(
+            entry(),
+            at,
+            axiam_audit::dead_letter::DeadLetterReason::ChannelFull,
+        );
+        loss.record_failed(entry(), at, &"datastore down");
+        loss.record_failed(entry(), at, &"datastore down");
 
         let after = h.request_audit().expect("counted");
         assert_eq!((after.dropped, after.failed), (1, 2));
@@ -345,6 +351,14 @@ mod tests {
         assert!(!after.dead_letter_configured);
         assert!(!after.dead_letter_full);
         assert!(after.recent_loss && after.last_loss_at.is_some());
+        assert_eq!(after.outbound_abandoned_dropped, 0);
+
+        // R101W4-06: a shed outbound refusal row is reported beside `dropped`,
+        // never in it, and adds nothing unrecoverable to the request rows' count.
+        loss.record_outbound_abandoned_dropped();
+        let shed = h.request_audit().expect("counted");
+        assert_eq!(shed.outbound_abandoned_dropped, 1);
+        assert_eq!((shed.dropped, shed.failed, shed.not_recoverable), (1, 2, 3));
     }
 
     #[test]

@@ -398,8 +398,14 @@ export interface TenantSettingsOverride {
   cimd?: CimdPolicy;
   // G-2 / G-5 — disable-only, like `cimd.enabled`: `false` switches the surface
   // off for this tenant; `true` is refused unless the organization has it on.
-  // Sent with the tenant's *effective* value by the settings page, because an
-  // omitted field means "inherit" and so would drop a tenant's `false`.
+  // `PUT /settings` replaces the override, so an omitted field means "inherit"
+  // and drops a `false` the tenant already carries. The settings page therefore
+  // sends a switch only when the administrator changed it or the tenant's own
+  // override already carries it (#600): sending the effective value on every
+  // save wrote the organization's inherited `false` into the tenant's override,
+  // where it outlived the organization turning the surface on. Switching a
+  // surface back on omits the field rather than sending `true` (the inherited
+  // value) — see `surfaceOverride` in `SettingsPage.tsx`.
   saml_idp_enabled?: boolean;
   ssf_enabled?: boolean;
 }

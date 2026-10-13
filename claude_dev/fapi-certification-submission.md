@@ -145,8 +145,9 @@ and repeatable by anyone with repository access:
 
 **Actions → “FAPI 2.0 conformance” → Run workflow**, with:
 
-- `axiam_image` = the **digest** from step 1 (leaving it empty builds from the
-  checkout, which the workflow labels as a smoke test and not evidence)
+- `axiam_image` = the **digest** from step 1, as `repo[:tag]@sha256:<64 hex>`
+  (the workflow fails on a tag-only or malformed value; leaving it empty builds
+  from the checkout, which the workflow labels as a smoke test and not evidence)
 - `plan_name` = the default unless upstream has renamed the plan
 - `module_timeout` = the default
 

@@ -907,3 +907,73 @@ async fn reconciliation_queues_references_only() {
     // One reference per resource (the user and the group), each queued once.
     assert_eq!(queued.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// R101W4-01: a full queue stops the run's enqueues
+// ---------------------------------------------------------------------------
+
+/// A run that meets a full queue offers nothing after the first refusal: the
+/// queue sees the references it took plus the one it refused, the rest are
+/// counted in `enqueue_failed`, and the run records them as **one** row
+/// (`record_not_offered`, which the in-process dispatcher writes as a
+/// `scim_push.delivery_abandoned` row with `refused_count`) — not a row per
+/// in-scope user, which is what filled the audit channel (R101W4-01).
+#[actix_rt::test]
+async fn a_run_that_meets_a_full_queue_stops_and_records_one_row_with_the_count() {
+    const USERS: usize = 7;
+    const ROOM: usize = 2;
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    for i in 0..USERS {
+        w.active_user(&format!("user{i}")).await;
+    }
+    // Nothing synced: no links, so the run's references are the users.
+    w.queue.clear();
+    w.queue.set_limit(Some(ROOM));
+
+    let report = ran(&w, &target).await;
+    assert_eq!(report.enqueued, ROOM as u64);
+    assert_eq!(report.enqueue_failed, (USERS - ROOM) as u64);
+    assert!(report.is_failure(), "a refused reference fails the run");
+    assert_eq!(
+        w.queue.offered(),
+        ROOM + 1,
+        "the queue saw what it took and the one it refused, nothing after"
+    );
+    assert_eq!(
+        w.queue.not_offered(),
+        vec![(
+            axiam_core::outbound::OutboundKind::ScimPush,
+            w.tenant_id,
+            target.id,
+            (USERS - ROOM - 1) as u64
+        )],
+        "one row for the run, carrying the count held back"
+    );
+
+    // The next run, with room again, offers every reference.
+    w.queue.set_limit(None);
+    w.queue.clear();
+    expire_claim(&w, &target).await;
+    let report = ran(&w, &target).await;
+    assert_eq!(report.enqueue_failed, 0);
+    assert_eq!(report.enqueued, USERS as u64);
+    assert!(w.queue.not_offered().is_empty());
+}
+
+/// A single refusal — the last reference of a run — is the refused message's
+/// own row and nothing more: `record_not_offered` is not called for zero.
+#[actix_rt::test]
+async fn a_run_refused_only_at_its_last_reference_adds_no_row() {
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    w.active_user("alice").await;
+    w.active_user("bob").await;
+    w.queue.clear();
+    w.queue.set_limit(Some(1));
+
+    let report = ran(&w, &target).await;
+    assert_eq!((report.enqueued, report.enqueue_failed), (1, 1));
+    assert_eq!(w.queue.offered(), 2);
+    assert!(w.queue.not_offered().is_empty());
+}

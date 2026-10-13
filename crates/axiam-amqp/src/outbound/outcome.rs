@@ -31,7 +31,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::outbound::{DeliveryOutcome, OutboundError, OutboundMessage};
+use axiam_core::outbound::{DeliveryOutcome, OutboundError, OutboundKind, OutboundMessage};
 
 use super::retry::{OutboundRetryConfig, backoff_ttl_ms};
 
@@ -126,6 +126,33 @@ pub(crate) fn abandoned_entry(msg: &OutboundMessage, reason: &str) -> CreateAudi
             "reason": reason,
         }),
     )
+}
+
+/// The one `<slug>.delivery_abandoned` row of the messages a bulk producer held
+/// back after the queue refused one of its run (R101W4-01): `refused_count` of
+/// them, none attempted, none with a row of its own. No `delivery_id`: the row
+/// stands for many deliveries that never had one queued.
+pub(crate) fn not_offered_entry(
+    kind: OutboundKind,
+    tenant_id: Uuid,
+    target_id: Uuid,
+    reason: &str,
+    refused_count: u64,
+) -> CreateAuditLogEntry {
+    CreateAuditLogEntry {
+        tenant_id,
+        actor_id: Uuid::nil(),
+        actor_type: ActorType::System,
+        action: format!("{}.delivery_abandoned", kind.as_str()),
+        resource_id: Some(target_id),
+        outcome: AuditOutcome::Failure,
+        ip_address: None,
+        metadata: Some(serde_json::json!({
+            "attempts_made": 0,
+            "reason": reason,
+            "refused_count": refused_count,
+        })),
+    }
 }
 
 /// Decide what one attempt's `outcome` means for `msg` under `cfg`.

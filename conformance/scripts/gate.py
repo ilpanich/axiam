@@ -6,32 +6,52 @@
 anything that is not `PASSED`/`SKIPPED`) fails every run. A gate that is red by
 design signals nothing, and a gate nobody trusts is one people learn to click
 past. This script is the gate that can be trusted: it reads the same
-`*.results.json` files `report.py` reads, plus the committed baseline
-(`conformance/baseline.json`, the 2026-09-25 runs), and exits non-zero only on a
-REGRESSION:
+`*.results.json` files `report.py` reads, plus two committed baselines, and
+exits non-zero only on a REGRESSION:
+
+* `conformance/baseline.json` is the browser-driven 2026-09-25 run: what a
+  module may reach when somebody drives the browser;
+* `conformance/baseline-unattended.json` is the other half: which modules park
+  (`WAITING`) on the runner because they need a browser. A module that
+  completed unattended and now parks is a regression, which `baseline.json`
+  alone cannot see (every browser module is `PASSED` there and `WAITING` here).
+
+The regressions are:
 
 * a module the suite ended `FAILED`, `COULD_NOT_START` or `INTERRUPTED`, or that
   was still running (or never answered) when the harness stopped waiting;
 * a module that ended in a verdict below its baseline (it was `PASSED` and is
   now `REVIEW` or `WARNING`);
 * a module the baseline names that the run did not report at all;
+* a module that ended `WAITING` and is not listed for its plan in the unattended
+  baseline (it completed unattended before, or it is new and nobody has said
+  it needs a browser);
 * a plan the baseline names that the run left no result file for, or a plan
   that evaluated nothing (no module `PASSED`).
 
-`WAITING` (parked on a browser, so no assertion was evaluated) and `SKIPPED`
-(not applicable to the variant) are tolerated, and so is a module the baseline
-has never heard of unless it failed outright. "Tolerated" is not "passed": the
-summary names every module it tolerated, and the report step still renders them.
+`WAITING` is tolerated only for a module the unattended baseline lists for that
+plan, and only then; `SKIPPED` (not applicable to the variant) is tolerated, and
+so is a module the baseline has never heard of unless it failed outright (or
+parked, see above). "Tolerated" is not "passed": the summary names every module
+it tolerated, and the report step still renders them.
+
+The gate fails closed on its inputs: an unreadable or malformed baseline of
+either kind, an unreadable result file, or a plan the unattended baseline does
+not name (every `WAITING` in it is then a regression) all end red, never
+silently tolerant. The one deliberate exception predates this file: a plan the
+main baseline does not name is checked for outright failures only.
 
 Stdlib only, like `report.py`.
 
     gate.py --results conformance/.run/results --plan fapi2-security-profile-final-mtls ...  # the CI gate
-    gate.py --results DIR --write-baseline > baseline.json  # record a new baseline
+    gate.py --results DIR --write-baseline > baseline.json  # record a new baseline (browser-driven run)
+    gate.py --results DIR --record-unattended > baseline-unattended.json  # record the parked set (unattended run)
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import pathlib
 import sys
@@ -44,6 +64,7 @@ RANK = {"PASSED": 2, "REVIEW": 1, "WARNING": 1}
 GOOD = set(RANK)
 
 DEFAULT_BASELINE = pathlib.Path(__file__).resolve().parent.parent / "baseline.json"
+DEFAULT_UNATTENDED = pathlib.Path(__file__).resolve().parent.parent / "baseline-unattended.json"
 
 
 def verdict_of(module: dict) -> str:
@@ -72,8 +93,15 @@ def load_results(results_dir: pathlib.Path) -> dict[str, dict]:
     return runs
 
 
-def check_plan(name: str, run: dict, baseline: dict | None) -> tuple[list[str], list[str]]:
-    """Return (regressions, tolerated notes) for one plan's run."""
+def check_plan(name: str, run: dict, baseline: dict | None,
+               parked: set[str] | None = None) -> tuple[list[str], list[str]]:
+    """Return (regressions, tolerated notes) for one plan's run.
+
+    `parked` is the set of modules the unattended baseline lists for this plan,
+    i.e. the only ones allowed to end `WAITING`. `None` (not an empty set) means
+    "do not check parking", which is only right for a plan the main baseline
+    does not name; an empty set means nothing may park.
+    """
     regressions: list[str] = []
     notes: list[str] = []
     modules = {m.get("module", "?"): verdict_of(m) for m in run.get("modules", [])}
@@ -81,7 +109,16 @@ def check_plan(name: str, run: dict, baseline: dict | None) -> tuple[list[str], 
 
     for module, verdict in sorted(modules.items()):
         base = expected.get(module)
-        if verdict in TOLERATED:
+        if verdict == "WAITING" and parked is not None and module not in parked:
+            if base in RANK:
+                regressions.append(
+                    f"{name}: {module} is WAITING for a browser but completed unattended "
+                    f"before (the unattended baseline does not list it)")
+            else:
+                regressions.append(
+                    f"{name}: {module} is WAITING for a browser and the unattended baseline "
+                    f"does not list it (a new module that needs one? re-record after reading it)")
+        elif verdict in TOLERATED:
             notes.append(f"{name}: {module} {verdict}")
         elif verdict not in GOOD:
             regressions.append(f"{name}: {module} ended {verdict}")
@@ -98,10 +135,17 @@ def check_plan(name: str, run: dict, baseline: dict | None) -> tuple[list[str], 
     return regressions, notes
 
 
-def gate(results_dir: pathlib.Path, baseline: dict, only: list[str] | None = None) -> int:
-    """Gate the plans in `only` (default: every plan the baseline names)."""
+def gate(results_dir: pathlib.Path, baseline: dict, unattended: dict,
+         only: list[str] | None = None) -> int:
+    """Gate the plans in `only` (default: every plan the baseline names).
+
+    `unattended` is the parsed unattended baseline (see `read_unattended`); it is
+    required, not optional, so a caller that forgets it cannot get the old
+    tolerate-every-WAITING behaviour by accident.
+    """
     runs = load_results(results_dir) if results_dir.is_dir() else {}
     plans = baseline.get("plans", {})
+    parked_by_plan = unattended.get("plans", {})
     required = sorted(only or plans)
     if only:
         runs = {n: r for n, r in runs.items() if n in only}
@@ -112,7 +156,10 @@ def gate(results_dir: pathlib.Path, baseline: dict, only: list[str] | None = Non
         if name not in runs:
             regressions.append(f"{name}: no result file under {results_dir}")
     for name, run in sorted(runs.items()):
-        r, n = check_plan(name, run, plans.get(name))
+        # A plan the main baseline names must say which modules park; one that
+        # the unattended baseline omits has none, so any WAITING in it is red.
+        parked = set(parked_by_plan.get(name, {}).get("waiting", [])) if name in plans else None
+        r, n = check_plan(name, run, plans.get(name), parked)
         regressions += r
         notes += n
         if name not in plans:
@@ -128,7 +175,7 @@ def gate(results_dir: pathlib.Path, baseline: dict, only: list[str] | None = Non
     if regressions:
         print(f"[gate] {len(regressions)} regression(s); {len(notes)} tolerated", file=sys.stderr)
         return 1
-    print(f"[gate] no regression against the baseline; {len(notes)} module(s) tolerated "
+    print(f"[gate] no regression against the baselines; {len(notes)} module(s) tolerated "
           "(WAITING/SKIPPED are not passes — read the report)")
     return 0
 
@@ -143,18 +190,64 @@ def write_baseline(results_dir: pathlib.Path) -> dict:
     return {"plans": plans}
 
 
+def read_unattended(path: pathlib.Path) -> dict:
+    """Parse and shape-check the unattended baseline; raise on anything else.
+
+    The shape is `{"plans": {<plan>: {"waiting": [<module>, ...]}}}` plus free
+    `source`/`note` provenance. A file that parses but has another shape (a
+    `waiting` that is a string, a plan that is a list) would read as "nothing
+    parks" or crash mid-gate; both must be a refusal here instead.
+    """
+    data = json.loads(path.read_text())
+    plans = data.get("plans") if isinstance(data, dict) else None
+    if not isinstance(plans, dict):
+        raise ValueError('expected an object with a "plans" object')
+    for name, plan in plans.items():
+        waiting = plan.get("waiting") if isinstance(plan, dict) else None
+        if not isinstance(waiting, list) or not all(isinstance(m, str) for m in waiting):
+            raise ValueError(f'plan {name}: expected {{"waiting": [module names]}}')
+    return data
+
+
+def record_unattended(results_dir: pathlib.Path) -> dict:
+    """Record which modules a run left `WAITING`, per plan.
+
+    Refuses a plan in which no module `PASSED`: a suite that never answered
+    leaves everything parked, and baselining that would let the gate tolerate
+    exactly the outage it exists to catch.
+    """
+    plans = {}
+    runs = load_results(results_dir)
+    if not runs:
+        raise ValueError(f"no *.results.json under {results_dir}")
+    for name, run in runs.items():
+        verdicts = {m["module"]: verdict_of(m) for m in run.get("modules", [])}
+        if "PASSED" not in verdicts.values():
+            raise ValueError(f"{name}: no module PASSED — this run evaluated nothing, "
+                             "so it is not a baseline of anything")
+        plans[name] = {"waiting": sorted(m for m, v in verdicts.items() if v == "WAITING")}
+    return {"plans": plans}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="conformance/.run/results",
                     help="directory holding *.results.json from run-plan.sh")
     ap.add_argument("--baseline", default=str(DEFAULT_BASELINE),
                     help="the committed baseline (default: conformance/baseline.json)")
+    ap.add_argument("--baseline-unattended", default=str(DEFAULT_UNATTENDED),
+                    help="the committed unattended baseline: the modules that park on "
+                         "a browser on the runner (default: conformance/baseline-unattended.json)")
     ap.add_argument("--plan", action="append", default=[], metavar="NAME",
                     help="gate only this plan (the results file's stem); repeatable. "
                          "Each one named must have a result file. Default: every "
                          "plan the baseline names")
     ap.add_argument("--write-baseline", action="store_true",
-                    help="print a baseline built from --results instead of gating")
+                    help="print a baseline built from --results instead of gating "
+                         "(record it from a browser-driven run)")
+    ap.add_argument("--record-unattended", action="store_true",
+                    help="print an unattended baseline built from --results instead of "
+                         "gating (record it from an unattended run)")
     args = ap.parse_args()
 
     results_dir = pathlib.Path(args.results)
@@ -162,12 +255,33 @@ def main() -> int:
         json.dump(write_baseline(results_dir), sys.stdout, indent=2, sort_keys=True)
         print()
         return 0
+    if args.record_unattended:
+        try:
+            recorded = record_unattended(results_dir)
+        except ValueError as e:
+            print(f"[gate] cannot record an unattended baseline: {e}", file=sys.stderr)
+            return 1
+        json.dump({
+            "source": f"gate.py --record-unattended over {results_dir}, "
+                      f"{datetime.date.today().isoformat()}",
+            "note": "The modules that ended WAITING (parked on a browser) on an unattended "
+                    "run. gate.py tolerates WAITING only for these.",
+            **recorded,
+        }, sys.stdout, indent=2)
+        print()
+        return 0
     try:
         baseline = json.loads(pathlib.Path(args.baseline).read_text())
     except (OSError, json.JSONDecodeError) as e:
         print(f"[gate] cannot read the baseline {args.baseline}: {e}", file=sys.stderr)
         return 1
-    return gate(results_dir, baseline, args.plan)
+    try:
+        unattended = read_unattended(pathlib.Path(args.baseline_unattended))
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"[gate] cannot read the unattended baseline {args.baseline_unattended}: {e}",
+              file=sys.stderr)
+        return 1
+    return gate(results_dir, baseline, unattended, args.plan)
 
 
 if __name__ == "__main__":

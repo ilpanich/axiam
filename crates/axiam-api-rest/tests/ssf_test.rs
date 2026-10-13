@@ -719,6 +719,214 @@ async fn an_administrator_registers_reads_lists_replaces_and_deletes_a_stream() 
     );
 }
 
+/// The administrator's replacement of `stream` as the console builds it: the
+/// stored values, nothing the receiver narrowed widened.
+fn replacement_of(stream: &SsfStream, read: &Value) -> Value {
+    json!({
+        "receiver_client_id": stream.receiver_client_id,
+        "audience": stream.audience,
+        "delivery_method": "push",
+        "endpoint_url": PUSH_URL,
+        "events_allowed": SsfEventType::uris(&stream.events_allowed),
+        "events_requested": SsfEventType::uris(&stream.events_requested),
+        "subject_format": "iss_sub",
+        "status": "enabled",
+        "expected_updated_at": read,
+    })
+}
+
+/// R1W2-03 (T-406): a receiver that pauses or narrows the stream between the
+/// form's read and its save makes the save a `409`; the receiver's write
+/// survives and the version the administrator then re-reads is accepted.
+#[actix_rt::test]
+async fn a_receiver_write_between_the_read_and_the_save_makes_the_put_409() {
+    let w = world().await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Push,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    let app = app!(w.state(), w);
+    let admin = w.admin_token();
+    let receiver = w.receiver_token();
+    let uri = format!("{}/{}", streams_uri(w.tenant_id), stream.id);
+    let read = json!(stream.updated_at);
+
+    // The receiver narrows, then pauses, after the form was opened.
+    let (status, body) = send(
+        &app,
+        request(Method::PATCH, "/ssf/v1/stream", Some(&receiver)).set_json(json!({
+            "stream_id": stream.id,
+            "events_requested": [SsfEventType::SessionRevoked.uri()],
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = send(
+        &app,
+        request(Method::POST, "/ssf/v1/status", Some(&receiver))
+            .set_json(json!({"stream_id": stream.id, "status": "paused"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // The save carries the stale stored values, as the page's form would.
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&admin)).set_json(replacement_of(&stream, &read)),
+    )
+    .await;
+    assert_eq!(status, 409, "the stale save: {body}");
+    assert!(
+        json_of(&body).to_string().contains("changed"),
+        "the refusal says the stream changed: {body}"
+    );
+    let kept = w.repo().get(w.tenant_id, stream.id).await.unwrap();
+    assert_eq!(kept.status, SsfStreamStatus::Paused, "the pause survives");
+    assert_eq!(
+        kept.events_requested,
+        vec![SsfEventType::SessionRevoked],
+        "the narrowing survives"
+    );
+    assert!(
+        w.audit_rows(w.tenant_id, "ssf_stream.updated")
+            .await
+            .is_empty()
+    );
+
+    // Re-read, then save: the new version is the one that holds.
+    let (status, body) = send(&app, request(Method::GET, &uri, Some(&admin))).await;
+    assert_eq!(status, 200);
+    let fresh = json_of(&body);
+    let mut again = replacement_of(&stream, &fresh["updated_at"]);
+    again["events_requested"] = fresh["events_requested"].clone();
+    again["status"] = json!("paused");
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&admin)).set_json(again),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+/// Two administrators who opened the form at the same version: the second
+/// save is a `409` and the first one's edit survives.
+#[actix_rt::test]
+async fn two_puts_carrying_the_same_expected_updated_at_the_second_is_409() {
+    let w = world().await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Push,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    let app = app!(w.state(), w);
+    let admin = w.admin_token();
+    let uri = format!("{}/{}", streams_uri(w.tenant_id), stream.id);
+    let read = json!(stream.updated_at);
+
+    let mut first = replacement_of(&stream, &read);
+    first["description"] = json!("first");
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&admin)).set_json(first),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let mut second = replacement_of(&stream, &read);
+    second["description"] = json!("second");
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&admin)).set_json(second),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        w.repo()
+            .get(w.tenant_id, stream.id)
+            .await
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("first")
+    );
+}
+
+/// Additive: a body without the field keeps today's behaviour — conditional on
+/// the version the server reads during the request.
+#[actix_rt::test]
+async fn a_put_without_expected_updated_at_still_works() {
+    let w = world().await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Push,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    let app = app!(w.state(), w);
+    let admin = w.admin_token();
+    let uri = format!("{}/{}", streams_uri(w.tenant_id), stream.id);
+    for text in ["one", "two"] {
+        let mut body = replacement_of(&stream, &Value::Null);
+        body.as_object_mut().unwrap().remove("expected_updated_at");
+        body["description"] = json!(text);
+        let (status, out) = send(
+            &app,
+            request(Method::PUT, &uri, Some(&admin)).set_json(body),
+        )
+        .await;
+        assert_eq!(status, 200, "{out}");
+    }
+}
+
+/// R1W2-03: what the API does with `events_requested` on a replacement. `[]`
+/// is the receiver's "none" and is stored as such — it never widens; an absent
+/// field is the documented reset to every allowed event, which is why the
+/// console never omits it on an edit.
+#[actix_rt::test]
+async fn an_empty_events_requested_on_a_put_is_none_and_an_absent_one_is_all() {
+    let w = world().await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Push,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    let app = app!(w.state(), w);
+    let admin = w.admin_token();
+    let uri = format!("{}/{}", streams_uri(w.tenant_id), stream.id);
+
+    let mut none = replacement_of(&stream, &Value::Null);
+    none["events_requested"] = json!([]);
+    none.as_object_mut().unwrap().remove("expected_updated_at");
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&admin)).set_json(none),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let view = json_of(&body);
+    assert_eq!(view["events_requested"], json!([]));
+    assert_eq!(view["events_delivered"], json!([]));
+
+    let mut all = replacement_of(&stream, &Value::Null);
+    all.as_object_mut().unwrap().remove("expected_updated_at");
+    all.as_object_mut().unwrap().remove("events_requested");
+    let (status, body) = send(&app, request(Method::PUT, &uri, Some(&admin)).set_json(all)).await;
+    assert_eq!(status, 200, "{body}");
+    let view = json_of(&body);
+    assert_eq!(view["events_requested"], view["events_allowed"]);
+}
+
 #[actix_rt::test]
 async fn every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule() {
     let w = world().await;

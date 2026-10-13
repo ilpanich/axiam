@@ -355,8 +355,9 @@ pub struct ServeOptions {
     /// stops accepting, gRPC stops, the audit queue is drained, the cleanup
     /// task finishes — and [`serve`] returns an error, so `main` exits non-zero
     /// (T23.8.2, P23W5-A1, P23W5-A12). This runs only if that has not finished
-    /// within [`LeaseTiming::lost_stop_deadline`] (a lost lease) or
-    /// `FATAL_STOP_BACKSTOP` (a dead component); production exits the process.
+    /// within [`LeaseTiming::lost_stop_deadline`] (a lost lease, whose stop is
+    /// budgeted by [`LEASE_LOSS_STOP`]) or `FATAL_STOP_BACKSTOP` (a dead
+    /// component, [`ORDERLY_STOP`] and 1 s); production exits the process.
     pub lease_lost_backstop: OnLeaseLost,
     /// **Test seam, never set in production.** Lets the webhook and SSF push
     /// deliverers reach a loopback `http://` receiver (their own
@@ -365,6 +366,11 @@ pub struct ServeOptions {
     /// untouched.
     #[doc(hidden)]
     pub admit_private_networks_for_tests: bool,
+    /// **Test seam, never set in production** (#598). A step the cleanup task
+    /// runs first in each tick, so a test can hold a tick open across a stop
+    /// and watch the bounded join cut it.
+    #[doc(hidden)]
+    pub cleanup_step_for_tests: Option<cleanup::CleanupStepForTests>,
 }
 
 impl Default for ServeOptions {
@@ -374,6 +380,7 @@ impl Default for ServeOptions {
             lease_timing: LeaseTiming::PRODUCTION,
             lease_lost_backstop: profile::exit_on_lease_lost(),
             admit_private_networks_for_tests: false,
+            cleanup_step_for_tests: None,
         }
     }
 }
@@ -2669,6 +2676,10 @@ where
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
     // after `http_server.run()` returns.
     let audit_shutdown = audit_middleware.clone();
+    // The in-process dispatcher's refused enqueues leave their `delivery_abandoned`
+    // row in this middleware's non-blocking queue rather than writing it on the
+    // producer's path (#596). No-op with the broker.
+    outbound.bind_audit(&audit_middleware);
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so
@@ -2801,7 +2812,8 @@ where
     // G-7 (T23.7.1): the CIBA pending-request expiry.
     .with_ciba(Arc::new(ciba_request_repo.clone()))
     // T-470: `vault_pki` revocations a revoke request could not forward.
-    .with_vault_revocations(Arc::new(cert_service.clone()));
+    .with_vault_revocations(Arc::new(cert_service.clone()))
+    .with_step_for_tests(opts.cleanup_step_for_tests.take());
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -3130,12 +3142,13 @@ where
     );
 
     // How long a stop waits for requests in flight (#569). actix's default is
-    // 30 s; it is set so that this, `GRPC_STOP_DEADLINE`, `OUTBOUND_DRAIN_DEADLINE`
-    // and `AUDIT_DRAIN_DEADLINE` add up to less than the container's stop grace
-    // period (40 s in the shipped
-    // Compose files and Kubernetes manifests), or a stop with a request still
-    // running is killed during the audit drain.
-    http_server = http_server.shutdown_timeout(REST_SHUTDOWN_TIMEOUT_SECS);
+    // 30 s; it is set so that the whole `ORDERLY_STOP` — this, then gRPC, the
+    // outbound and audit drains and the cleanup join — adds up to less than the
+    // container's stop grace period (40 s in the shipped Compose files and
+    // Kubernetes manifests), or a stop with a request still running is killed
+    // during the audit drain. It is fixed here, at bind time, for every stop; a
+    // lost lease's shorter drain is an outer cut (`LEASE_LOSS_STOP`, below).
+    http_server = http_server.shutdown_timeout(ORDERLY_STOP.rest.as_secs());
 
     // Bind plaintext (proxy-terminated TLS, the default) or, when
     // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /
@@ -3168,13 +3181,18 @@ where
     } else {
         http_server.bind(&bind_addr)?
     };
-    let http_server = http_server.run();
+    let mut http_server = http_server.run();
 
     // The minimal profile: a lost lease stops this instance through the same
     // orderly path as a SIGTERM — no new connections, in-flight requests
     // finished, then the teardown below — instead of ending the process
     // wherever it is, which lost every audit row still queued (T23.8.2,
     // P23W5-A1). The backstop runs only if that overruns its deadline.
+    //
+    // Its requests in flight get `LEASE_LOSS_STOP.rest`, not the 20 s actix was
+    // bound with (#598): the cut below ends them, so the teardown — the audit
+    // drain above all — runs before the lease's backstop instead of with it.
+    let (rest_cut_tx, rest_cut) = tokio::sync::oneshot::channel::<()>();
     let lease_loss_stop = lease_renewal.as_ref().map(|_| {
         let handle = http_server.handle();
         profile::spawn_lease_loss_stop(
@@ -3184,15 +3202,19 @@ where
                 // reports completion, which the teardown below observes.
                 tokio::spawn(handle.stop(true));
             },
+            LEASE_LOSS_STOP.rest,
+            move || {
+                let _ = rest_cut_tx.send(());
+            },
             opts.lease_timing.lost_stop_deadline,
             Arc::clone(&opts.lease_lost_backstop),
         )
     });
 
     // A consumer or the gRPC server that dies stops this instance the same way:
-    // in order, then non-zero (P23W5-A12). Its backstop covers the whole stop —
-    // not the lease's 15 s, which is tied to lease safety and shorter than the
-    // REST shutdown timeout alone.
+    // in order, then non-zero (P23W5-A12). Its backstop covers the whole
+    // `ORDERLY_STOP` — not the lease's 15 s, which is tied to lease safety and
+    // shorter than the REST shutdown timeout alone.
     let component_died_stop = {
         let handle = http_server.handle();
         spawn_fatal_stop(
@@ -3205,21 +3227,49 @@ where
         )
     };
 
-    http_server.await?;
+    // The REST listener runs until a stop has drained it — or, after a lost
+    // lease, until the cut: actix cannot be given a second, shorter drain once
+    // a graceful stop is under way (it handles one stop command), so the cut
+    // drops the server, which force-stops its workers and ends the requests
+    // they still hold. Without a lease there is no cut (the sender is dropped).
+    let rest_cut = async {
+        if rest_cut.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    let served = tokio::select! {
+        served = &mut http_server => Some(served),
+        () = rest_cut => None,
+    };
+    match served {
+        Some(served) => served?,
+        None => {
+            drop(http_server);
+            tracing::error!(
+                after_secs = LEASE_LOSS_STOP.rest.as_secs_f64(),
+                "requests still in flight after a lost minimal-profile lease were cut, so the \
+                 audit drain runs before the lease's backstop"
+            );
+        }
+    }
     let lease_was_lost = *lease_lost.borrow();
     let dead_component = *component_died.borrow();
+    // The teardown's bounds: a lost lease has the shorter budget its backstop
+    // allows; every other stop has the one the grace period allows.
+    let budget = if lease_was_lost {
+        LEASE_LOSS_STOP
+    } else {
+        ORDERLY_STOP
+    };
 
     // The REST listener has stopped: stop gRPC after it, and wait for it before
     // the audit drain below, so a call that audits through gRPC is not cut off
     // by the drain (P23W5-A11). Bounded: a client holding a stream open cannot
     // hold the stop up.
     let _ = grpc_stop.send(());
-    if tokio::time::timeout(GRPC_STOP_DEADLINE, grpc_task)
-        .await
-        .is_err()
-    {
+    if tokio::time::timeout(budget.grpc, grpc_task).await.is_err() {
         tracing::warn!(
-            deadline_secs = GRPC_STOP_DEADLINE.as_secs_f64(),
+            deadline_secs = budget.grpc.as_secs_f64(),
             "the gRPC server did not stop in time — stopping without it"
         );
     }
@@ -3238,9 +3288,11 @@ where
         }
     }
 
-    // Signal the cleanup task first, so it winds down while the audit queue
-    // drains; it finishes the tick it is in, so an erasure and its
-    // `gdpr.user_pseudonymized` row are not separated.
+    // Signal the cleanup task first, so it winds down while the queues drain:
+    // it starts no further sweep, erasure or export, and finishes the one it is
+    // in if that ends before the bounded join below (an erasure and its
+    // `gdpr.user_pseudonymized` row are written together unless the join's
+    // bound cuts them apart — #598).
     let _ = cleanup_shutdown_tx.send(true);
 
     // The minimal profile's in-process outbound queues hold deliveries that die
@@ -3250,10 +3302,10 @@ where
     // still enqueue one, and a refused enqueue writes its own row), and the rows
     // go straight to the repository, so this runs before the audit drain and
     // within its own bound.
-    let unfinished = outbound_shutdown.stop(OUTBOUND_DRAIN_DEADLINE).await;
+    let unfinished = outbound_shutdown.stop(budget.outbound).await;
     if !unfinished.is_empty() {
         tracing::error!(
-            deadline_secs = OUTBOUND_DRAIN_DEADLINE.as_secs_f64(),
+            deadline_secs = budget.outbound.as_secs_f64(),
             kinds = ?unfinished,
             "in-process outbound deliveries could not be accounted for in time — they are lost \
              without an audit row"
@@ -3265,17 +3317,20 @@ where
     // so a clean stop does not log `Audit worker channel closed` at WARN — see
     // `AuditMiddleware::begin_shutdown` for why that matters. Bounded: a
     // datastore that never answers cannot hold the stop up.
-    if !audit_shutdown.drain(AUDIT_DRAIN_DEADLINE).await {
+    if !audit_shutdown.drain(budget.audit).await {
         tracing::error!(
-            deadline_secs = AUDIT_DRAIN_DEADLINE.as_secs_f64(),
+            deadline_secs = budget.audit.as_secs_f64(),
             "audit entries still queued at shutdown could not be written in time — \
              they are lost (see the `Failed to write audit log entry` warnings above)"
         );
     }
 
-    if let Err(e) = cleanup_handle.await {
-        tracing::warn!(error = ?e, "cleanup task join error");
-    }
+    // The cleanup task, bounded (#598): it was told to stop above and starts
+    // nothing new, but a sweep already running — a GDPR erasure, an export, a
+    // tenant purge, a statement against a slow datastore — could otherwise hold
+    // the stop past the grace period, where the orchestrator's SIGKILL ends it
+    // anyway and the backstops are moot. At the bound it is cut where it is.
+    join_cleanup(cleanup_handle, budget.cleanup).await;
 
     // The teardown is done: disarm the backstops.
     component_died_stop.abort();
@@ -3299,49 +3354,129 @@ where
     Ok(())
 }
 
-/// How long, in seconds, the REST listener waits for requests in flight once a
-/// stop begins (#569). Stop grace period = this + [`GRPC_STOP_DEADLINE`] +
-/// [`OUTBOUND_DRAIN_DEADLINE`] + [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 2 + 5
-/// and a margin of 8 = 40 s; the fatal-stop backstop ([`FATAL_STOP_BACKSTOP`],
-/// 35 s) sits inside it.
-const REST_SHUTDOWN_TIMEOUT_SECS: u64 = 20;
+/// How long each step of an orderly stop may take (#569, #598). The steps run
+/// one after the other, in this order, so a stop takes at most [`Self::total`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownBudget {
+    /// How long the REST listener waits for requests in flight once the stop
+    /// begins. For `SIGTERM` this is actix's `shutdown_timeout`; for a lost
+    /// lease the requests still in flight are cut at it (see
+    /// [`LEASE_LOSS_STOP`]).
+    pub rest: Duration,
+    /// How long the teardown waits for the gRPC server to finish its calls once
+    /// the REST listener has stopped (P23W5-A11).
+    pub grpc: Duration,
+    /// How long the teardown waits for the in-process outbound consumers to
+    /// write the `delivery_abandoned` rows of what they still hold (P23W5-A4,
+    /// minimal profile). A consumer gives the attempt it is in
+    /// `IN_FLIGHT_STOP_GRACE` (500 ms) to finish before it abandons it too.
+    pub outbound: Duration,
+    /// How long the teardown waits for the audit middleware's queue to be
+    /// written (T23.8.2). The queue holds at most 4 096 entries; written one at a
+    /// time against a healthy datastore that is well under this.
+    pub audit: Duration,
+    /// How long the teardown waits for the cleanup task once the audit queue is
+    /// drained (#598). The task was told to stop before the outbound drain, and
+    /// starts no sweep (nor erasure, nor export) after that; a sweep still
+    /// running at this bound is cut where it is.
+    pub cleanup: Duration,
+}
 
-/// How long the teardown waits for the gRPC server to finish its calls once the
-/// REST listener has stopped (P23W5-A11).
-const GRPC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+impl ShutdownBudget {
+    /// The longest the stop can take: every step at its bound.
+    #[must_use]
+    pub const fn total(&self) -> Duration {
+        Duration::from_millis(
+            (self.rest.as_millis()
+                + self.grpc.as_millis()
+                + self.outbound.as_millis()
+                + self.audit.as_millis()
+                + self.cleanup.as_millis()) as u64,
+        )
+    }
+}
 
-/// How long the teardown waits for the in-process outbound consumers to write
-/// the `delivery_abandoned` rows of what they still hold (P23W5-A4, minimal
-/// profile). A consumer gives the attempt it is in `IN_FLIGHT_STOP_GRACE`
-/// (500 ms) to finish before it abandons it too, so a slow receiver delays the
-/// stop by at most that.
-const OUTBOUND_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+/// The stop for `SIGTERM` and for a dead consumer or gRPC server: REST 20 s,
+/// gRPC 5, outbound 2, audit 5, cleanup 5 — 37 s, inside the shipped 40 s grace
+/// period with a 3 s margin that [`FATAL_STOP_BACKSTOP`] sits in.
+pub const ORDERLY_STOP: ShutdownBudget = ShutdownBudget {
+    // actix's default is 30 s; set explicitly so the whole stop fits the grace.
+    rest: Duration::from_secs(20),
+    grpc: Duration::from_secs(5),
+    outbound: Duration::from_secs(2),
+    audit: Duration::from_secs(5),
+    cleanup: Duration::from_secs(5),
+};
 
-// The deadline has to outlast the grace, or a stuck attempt always overruns it.
-const _: () =
-    assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < OUTBOUND_DRAIN_DEADLINE.as_millis());
+/// The stop after a lost minimal-profile lease (#598): REST 5 s, gRPC 2,
+/// outbound 1, audit 3, cleanup 2 — 13 s, inside
+/// [`LeaseTiming::lost_stop_deadline`] (15 s), which is tied to lease safety —
+/// how long the instance may run beside its successor — and is not lengthened
+/// for it. The REST drain is actix's, fixed at bind time at
+/// [`ORDERLY_STOP`]'s 20 s, so this stop cannot ask actix for less: the
+/// requests still in flight `rest` after the loss are **cut** (the server is
+/// dropped, which force-stops its workers) and the teardown runs on.
+pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
+    rest: Duration::from_secs(5),
+    grpc: Duration::from_secs(2),
+    outbound: Duration::from_secs(1),
+    audit: Duration::from_secs(3),
+    cleanup: Duration::from_secs(2),
+};
 
-/// How long the teardown waits for the audit middleware's queue to be written
-/// (T23.8.2). The queue holds at most 4 096 entries; written one at a time
-/// against a healthy datastore that is well under this.
-const AUDIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wait for the cleanup task for at most `bound` (#598); past it, abort the task
+/// — it is cut at the await it is in — and say so.
+///
+/// What a cut leaves behind is for the next start to resume: every sweep's
+/// writes are idempotent or a compare-and-set, and every sweep is re-run by the
+/// next tick, with two exceptions listed in T-444 — an erasure cut after the
+/// user row was anonymized and before `gdpr.user_pseudonymized` was written
+/// (the proof exists, the audit row does not, and the next start does not redo
+/// the user), and an export cut after it was marked ready and before its mail
+/// was queued (a download nobody was told about, which expires).
+async fn join_cleanup<T>(mut handle: tokio::task::JoinHandle<T>, bound: Duration) {
+    match tokio::time::timeout(bound, &mut handle).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = ?e, "cleanup task join error"),
+        Err(_) => {
+            handle.abort();
+            tracing::error!(
+                deadline_secs = bound.as_secs_f64(),
+                "the cleanup task's sweep did not finish in time — it is cut where it is (the \
+                 next start resumes it; see T-444 for the two steps a cut can leave unfinished)"
+            );
+        }
+    }
+}
 
 /// The stop grace period the shipped Compose files and Kubernetes manifest give
-/// the server (#569). Not read by the code; it is here so the check below can
+/// the server (#569). Not read by the code; it is here so the checks below can
 /// fail the build if the stop outgrows it.
-const SHIPPED_STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(40);
+const SHIPPED_STOP_GRACE_PERIOD: Duration = Duration::from_secs(40);
 
 /// When the backstop ends a process stopped by a dead consumer or gRPC server
-/// (#554): the whole orderly stop — REST shutdown, gRPC stop, outbound and audit
-/// drain — and a 3 s margin, so the backstop only runs for a stop that has overrun.
-/// A lost lease keeps its own, shorter `LeaseTiming::lost_stop_deadline`.
-const FATAL_STOP_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(
-    REST_SHUTDOWN_TIMEOUT_SECS
-        + GRPC_STOP_DEADLINE.as_secs()
-        + OUTBOUND_DRAIN_DEADLINE.as_secs()
-        + AUDIT_DRAIN_DEADLINE.as_secs()
-        + 3,
-);
+/// (#554): the whole of [`ORDERLY_STOP`] and 1 s, so it only runs for a stop
+/// that has overrun, and still 2 s before the orchestrator's `SIGKILL`. A lost
+/// lease keeps its own `LeaseTiming::lost_stop_deadline`.
+const FATAL_STOP_BACKSTOP: Duration =
+    Duration::from_millis(ORDERLY_STOP.total().as_millis() as u64 + 1_000);
 
-// The backstop must fire before the orchestrator's own SIGKILL, or it is moot.
-const _: () = assert!(FATAL_STOP_BACKSTOP.as_secs() < SHIPPED_STOP_GRACE_PERIOD.as_secs());
+// The arithmetic, checked when the crate is built (#569, #598). Each stop fits
+// its backstop, and the `SIGTERM` stop's backstop fits the grace period: a
+// backstop that fires after the orchestrator's own SIGKILL is moot, and one
+// that fires before the stop could finish cuts a stop that was in time.
+const _: () = assert!(ORDERLY_STOP.total().as_millis() < FATAL_STOP_BACKSTOP.as_millis());
+const _: () = assert!(FATAL_STOP_BACKSTOP.as_millis() < SHIPPED_STOP_GRACE_PERIOD.as_millis());
+const _: () = assert!(
+    LEASE_LOSS_STOP.total().as_millis() < LeaseTiming::PRODUCTION.lost_stop_deadline.as_millis()
+);
+// The lease-loss cut is only a cut if it comes before actix's own timeout.
+const _: () = assert!(LEASE_LOSS_STOP.rest.as_millis() < ORDERLY_STOP.rest.as_millis());
+// actix takes the timeout in whole seconds.
+const _: () = assert!(ORDERLY_STOP.rest.subsec_nanos() == 0);
+// An outbound deadline has to outlast the consumers' grace, or a stuck attempt
+// always overruns it.
+const _: () =
+    assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < ORDERLY_STOP.outbound.as_millis());
+const _: () =
+    assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < LEASE_LOSS_STOP.outbound.as_millis());

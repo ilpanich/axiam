@@ -156,8 +156,18 @@ so the workflow's final step used to fail every run: a gate that is red by desig
 signals nothing. D-60 counts the baseline green when every non-interactive module
 matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
 `conformance/scripts/gate.py` reads the suite's `*.results.json` (the files
-`run-plan.sh` writes, the same ones `report.py` renders) and the committed
-`conformance/baseline.json`, and exits non-zero on a regression only:
+`run-plan.sh` writes, the same ones `report.py` renders) and two committed
+baselines, and exits non-zero on a regression only:
+
+- `conformance/baseline.json`, the browser-driven 2026-09-25 runs: the best
+  verdict each module may reach.
+- `conformance/baseline-unattended.json`, per plan, the modules that park
+  (`WAITING`) on the runner because they need a browser. Without it the gate
+  could not tell a module that always needs a browser from one that used to
+  finish on its own and now parks: every browser module is `PASSED` in the first
+  file and `WAITING` on the runner, so a regression that made a module wait
+  instead of fail read green (R1W2-06, #593).
+
 
 | Result | Gate |
 |---|---|
@@ -166,26 +176,85 @@ matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
 | `PASSED` in the baseline, `REVIEW` or `WARNING` now | red: below its baseline |
 | named by the baseline, absent from the run | red |
 | a plan with no result file, or a plan in which no module `PASSED` | red: the run did not happen, or evaluated nothing |
-| `WAITING` (parked on a browser) | tolerated and named; not a pass |
+| `WAITING` (parked on a browser), module listed for its plan in the unattended baseline | tolerated and named; not a pass |
+| `WAITING`, module **not** listed there | red: it completed unattended before and parks now, or it is new and nobody has said it needs a browser |
+| `WAITING` in a plan the unattended baseline does not name | red for every module in it |
 | `SKIPPED` | tolerated and named |
-| a module the baseline has never heard of | red only if it failed outright |
+| a module the baseline has never heard of | red if it failed outright or parked; otherwise tolerated |
+| an unreadable or malformed baseline of either kind, or an unreadable result file | red: the gate fails closed, it never falls back to tolerating |
 
 The workflow's last step runs it over the three FAPI plans and appends its output
-to the job summary. **Green means "no regression against the baseline", not "every
-module passed"** and not "certified": the `WAITING` modules (the `REVIEW` and
-`WARNING` ones among them) are exactly what the maintainer's browser-driven run
-decides. The baseline names only `PASSED`, `REVIEW` and `WARNING` modules; the two
-`SKIPPED` modules of 2026-09-25 (one in the Basic plan, one in `private_key_jwt`)
-are not named by those reports, so any `SKIPPED` is tolerated.
+to the job summary. **Green means "no regression among the modules that complete
+unattended"**: every one of them is at its baseline verdict, none that finished
+before has started to park, and every baselined module was reported. It is not
+"every module passed" and not "certified". The modules the unattended baseline
+lists were not evaluated by that run at all (no assertion ran while they waited
+for a browser), so their `PASSED`, `REVIEW` and `WARNING` verdicts, and the
+`REVIEW` and `WARNING` ones among them above all, are exactly what the
+maintainer's browser-driven run decides. The baseline names only `PASSED`,
+`REVIEW` and `WARNING` modules; the two `SKIPPED` modules of 2026-09-25 (one in the
+Basic plan, one in `private_key_jwt`) are not named by those reports, so any
+`SKIPPED` is tolerated. `oidcc-basic-static` is not run by the workflow and has
+no entry in the unattended baseline, so gating it would treat every `WAITING` as
+a regression until one is recorded.
+
+**Fail-closed.** The gate already treated an unreadable result file, a missing
+plan and a run that evaluated nothing as regressions; the unattended baseline
+follows the same rule. A missing, unparsable or wrongly shaped
+`baseline-unattended.json` ends the step red (exit 1, "cannot read the unattended
+baseline"), as does an unreadable `baseline.json`. There is no flag that makes a
+missing file mean "tolerate every `WAITING`": that reading is the bug R1W2-06
+named. A plan the file does not list therefore tolerates no `WAITING` at all.
 
 To re-record the baseline after the maintainer's final run (alongside, not over:
 keep the dated reports), point the script at that run's results:
 `python3 conformance/scripts/gate.py --results <dir> --write-baseline > conformance/baseline.json`.
 Run it on a browser-driven run: an unattended one has no verdict for its
-interactive modules, and they would drop out of the baseline. The gate's rules are
-unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
+interactive modules, and they would drop out of the baseline.
+
+**Recording the unattended baseline.** Dispatch the workflow once unattended
+(the default), download the artifact `fapi-conformance-<run id>`, and point the
+script at the raw results it carries (`conformance/.run/results/` inside it, the
+`*.results.json` files):
+`python3 conformance/scripts/gate.py --results <dir> --record-unattended > conformance/baseline-unattended.json`.
+Read the run before recording it: the recorder refuses a plan in which no module
+`PASSED`, but it cannot tell a module that waits by design from one that waits
+because of a defect, so check that nothing `FAILED` and that the modules which
+should finish did (the gate's own output over the same results, run against the
+old file, names every difference). Then review the diff against the committed
+file: a module that moves out of the list began to finish on the runner, and one
+that moves in is exactly the regression this file exists to catch, to be
+explained before it is accepted, not recorded away.
+
+**The committed file is a recording, not a seed.** It was first committed (2026-10-12) as a
+seed read from the 2026-09-08 reports and the plan definitions; it was replaced the same day by the
+lists of run 38317560409 (`workflow_dispatch` on `claude/release-1.0.1-w4` at `31ca68717`, built
+from source, `module_timeout=30`): 27 modules for mtls, 27 for self-signed, 40 for private-key-jwt.
+The run's artifact could not be fetched, so the lists were transcribed from the gate step's log,
+which prints every module that ended `WAITING`; `--record-unattended` over the artifact's
+`conformance/.run/results/` produces the same lists, and the file's `source` field says so. The
+seed had listed 6 modules per FAPI plan (7 for private-key-jwt) that finish unattended after all,
+and had left out `par-ensure-jwt-client-assertions-nbf-8-seconds-in-the-future-is-accepted`, which
+continues to the authorization endpoint once PAR accepts the assertion and so needs a browser.
+Re-record after any change to the plans the workflow runs or to which modules AXIAM completes
+without a browser.
+
+The gate's rules are unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
 CI's docs job); the workflow also passes every `workflow_dispatch` input through
 `env:` rather than interpolating it into a `run:` script.
+
+**The `axiam_image` dispatch input is validated, not trusted (R1W2-05, #592).**
+Anyone who may dispatch the workflow chooses that text, and the "Select the AXIAM
+image" step appends it to `$GITHUB_ENV`, where a newline would set any variable
+(`BASH_ENV`, `NODE_OPTIONS`, ...) for every later step. The step therefore fails
+the job, before any use, unless the value matches
+`^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$`: a repository, an optional
+tag, and a full sha256 digest. A tag-only value (`...server:1.0.0`) is refused,
+because a tag is mutable and a run against it is not evidence. Empty stays valid
+and means "build from this checkout" (smoke test). The report step prints
+"(digest-pinned)" only when that step accepted a value; it reads the verdict the
+select step recorded (`AXIAM_TARGET`), never the raw input, and says "not selected"
+if the select step failed. A rejected value is echoed back escaped on one line.
 
 ---
 
@@ -512,7 +581,7 @@ necessarily a regression.
       image. Note that `fapi-conformance.yml` cannot drive a browser, so the
       interactive modules (both FAPI `REVIEW` modules among them) are finished on the
       local rig above; the workflow's artifact is a smoke test unless `axiam_image`
-      is a digest. Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
+      is a digest (the workflow refuses any other non-empty value). Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
       `target/debug/axiam-server`), and `fapi-conformance.yml` runs only the FAPI
       plans. Whether the Basic run must be against the digest-pinned release
       image, and how to serve it, is not documented anywhere in the repository.

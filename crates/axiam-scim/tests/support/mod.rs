@@ -12,6 +12,7 @@
 pub mod scim_server;
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axiam_core::models::group::CreateGroup;
@@ -21,8 +22,8 @@ use axiam_core::models::scim_target::{
 use axiam_core::models::ssf::Late;
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::outbound::{
-    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundMessage,
-    OutboundPublisher,
+    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundKind,
+    OutboundMessage, OutboundPublisher,
 };
 use axiam_core::provisioning::ProvisioningSink;
 use axiam_core::repository::{GroupRepository, ScimTargetRepository, UserRepository};
@@ -68,9 +69,31 @@ pub fn generated(prefix: &str) -> String {
 pub struct Queue {
     pending: Mutex<VecDeque<OutboundMessage>>,
     all: Mutex<Vec<OutboundMessage>>,
+    /// When set, an enqueue that finds this many messages pending is refused,
+    /// like the in-process dispatcher's full channel.
+    limit: Mutex<Option<usize>>,
+    /// Every enqueue call, refused ones included.
+    offered: AtomicUsize,
+    /// Every `record_not_offered` call: (kind, tenant, target, count).
+    not_offered: Mutex<Vec<(OutboundKind, Uuid, Uuid, u64)>>,
 }
 
 impl Queue {
+    /// Refuse an enqueue once `limit` messages are pending (`None`: never).
+    pub fn set_limit(&self, limit: Option<usize>) {
+        *self.limit.lock().unwrap() = limit;
+    }
+
+    /// How many enqueues were attempted, refused ones included.
+    pub fn offered(&self) -> usize {
+        self.offered.load(Ordering::SeqCst)
+    }
+
+    /// The `record_not_offered` calls so far.
+    pub fn not_offered(&self) -> Vec<(OutboundKind, Uuid, Uuid, u64)> {
+        self.not_offered.lock().unwrap().clone()
+    }
+
     /// Every message ever enqueued, oldest first.
     pub fn all(&self) -> Vec<OutboundMessage> {
         self.all.lock().unwrap().clone()
@@ -80,6 +103,8 @@ impl Queue {
     pub fn clear(&self) {
         self.pending.lock().unwrap().clear();
         self.all.lock().unwrap().clear();
+        self.not_offered.lock().unwrap().clear();
+        self.offered.store(0, Ordering::SeqCst);
     }
 
     pub fn pending_len(&self) -> usize {
@@ -109,9 +134,30 @@ impl OutboundPublisher for Queue {
         msg: &'a OutboundMessage,
     ) -> OutboundFuture<'a, Result<(), OutboundError>> {
         Box::pin(async move {
-            self.pending.lock().unwrap().push_back(msg.clone());
+            self.offered.fetch_add(1, Ordering::SeqCst);
+            let limit = *self.limit.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap();
+            if limit.is_some_and(|limit| pending.len() >= limit) {
+                return Err(OutboundError::Enqueue("the test queue is full".into()));
+            }
+            pending.push_back(msg.clone());
             self.all.lock().unwrap().push(msg.clone());
             Ok(())
+        })
+    }
+
+    fn record_not_offered<'a>(
+        &'a self,
+        kind: OutboundKind,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        not_offered: u64,
+    ) -> OutboundFuture<'a, ()> {
+        Box::pin(async move {
+            self.not_offered
+                .lock()
+                .unwrap()
+                .push((kind, tenant_id, target_id, not_offered));
         })
     }
 }

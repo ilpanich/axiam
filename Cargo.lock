@@ -774,6 +774,7 @@ dependencies = [
 name = "axiam-amqp"
 version = "1.0.0"
 dependencies = [
+ "actix-web",
  "axiam-audit",
  "axiam-authz",
  "axiam-core",

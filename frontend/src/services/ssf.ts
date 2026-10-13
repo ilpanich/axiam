@@ -150,12 +150,20 @@ export interface SsfStreamInput {
   /**
    * Omitted means *all of* `events_allowed`. An update is a replacement, so an
    * edit that omitted it would widen what the receiver had narrowed: the page
-   * sends the stored value, cut to the new ceiling.
+   * sends the stored value, cut to the new ceiling, and never omits it on an
+   * edit. `[]` is a receiver's "none", kept as is.
    */
   events_requested?: string[];
   subject_format: SsfSubjectFormat;
   status: SsfStreamStatus;
   status_reason?: string | null;
+  /**
+   * Update only (create ignores it): the `updated_at` of the stream as the
+   * page read it (R1W2-03, T-406). The server answers `409` when the stream
+   * has changed since — a receiver's pause or narrowing included — instead of
+   * reverting it. The page always sends it.
+   */
+  expected_updated_at?: string;
 }
 
 // ─── Client-side mirrors of the server's rules ───────────────────────────────

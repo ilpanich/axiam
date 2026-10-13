@@ -127,6 +127,13 @@ pub struct RequestAuditHealth {
     /// Whether a row was lost in the last 15 minutes. Turns the endpoint's
     /// `status` to `degraded`, and clears itself once rows are being recorded again.
     pub recent_loss: bool,
+    /// Not request rows: the minimal profile's outbound
+    /// `<kind>.delivery_abandoned` rows (an enqueue the in-process queue
+    /// refused) that were shed because the audit queue was down to the quarter
+    /// it keeps for request rows. Counted apart from `dropped`, not written to
+    /// the dead-letter file, and not a `recent_loss`; a rising count means an
+    /// outbound queue is refusing faster than the audit trail records it.
+    pub outbound_abandoned_dropped: u64,
 }
 
 /// Reports no jobs. The default in [`AppState::for_test`], and what a

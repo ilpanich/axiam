@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::federation::{CreateFederationLink, FederationConfig, FederationProtocol};
@@ -23,6 +24,7 @@ use samael::metadata::{HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
 use samael::schema::{AuthnRequest, Issuer, NameIdPolicy};
 use samael::traits::ToXml;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use tracing::info;
 use uuid::Uuid;
 
@@ -30,10 +32,11 @@ use crate::error::FederationError;
 use crate::oidc::FederationCallbackResult;
 use crate::saml_idp::request::{
     ALLOWED_XML_SIGNATURE_ALGORITHMS, receiver_parser_options, refuse_markup_declarations,
-    refuse_other_encodings,
+    refuse_other_encodings, signature_transforms_admitted, sole_algorithm,
 };
 use crate::saml_metadata::{
-    MetadataFetcher, SamlMetadataCache, SsoHostChange, guarded_metadata_fetcher, parse_idp_metadata,
+    MetadataFetcher, SamlMetadataCache, SsoHostChange, guarded_metadata_fetcher,
+    parse_idp_metadata_off_worker,
 };
 
 /// SAML success status URI.
@@ -137,6 +140,18 @@ pub struct SamlFederationService<FC, FL, UR, AR> {
     /// #530: how a metadata document is fetched — [`guarded_metadata_fetcher`]
     /// everywhere but tests.
     metadata_fetcher: MetadataFetcher,
+    /// R101W2-01: XML signature verification — the response's at the ACS and
+    /// the metadata's — runs on the blocking pool under this gate, never on an
+    /// async worker. The composition root passes the deployment's crypto
+    /// semaphore ([`Self::with_crypto_semaphore`]); until then the service
+    /// holds one of its own.
+    crypto_gate: Arc<Semaphore>,
+}
+
+/// The permits of a service's own verification gate when none is passed:
+/// the CPU count, at most four — the crypto semaphore's own default.
+fn default_verification_permits() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
 }
 
 impl<FC, FL, UR, AR> SamlFederationService<FC, FL, UR, AR>
@@ -154,15 +169,28 @@ where
         replay_repo: AR,
         http_client: reqwest::Client,
     ) -> Self {
+        let crypto_gate = Arc::new(Semaphore::new(default_verification_permits()));
         Self {
             federation_config_repo,
             federation_link_repo,
             user_repo,
             replay_repo,
             http_client,
-            metadata_cache: SamlMetadataCache::new(),
+            metadata_cache: SamlMetadataCache::new()
+                .with_crypto_semaphore(Arc::clone(&crypto_gate)),
             metadata_fetcher: guarded_metadata_fetcher(),
+            crypto_gate,
         }
+    }
+
+    /// Verify XML signatures under `gate` — the deployment's crypto semaphore,
+    /// which bounds every other CPU-heavy operation too (R101W2-01). Keeps the
+    /// metadata cache's entries.
+    #[must_use]
+    pub fn with_crypto_semaphore(mut self, gate: Arc<Semaphore>) -> Self {
+        self.metadata_cache = self.metadata_cache.with_crypto_semaphore(Arc::clone(&gate));
+        self.crypto_gate = gate;
+        self
     }
 
     /// Test seam: fetch IdP metadata with `fetcher` instead of over HTTPS.
@@ -175,7 +203,8 @@ where
     #[must_use]
     pub fn with_metadata_fetcher(mut self, fetcher: MetadataFetcher) -> Self {
         self.metadata_fetcher = fetcher;
-        self.metadata_cache = SamlMetadataCache::new();
+        self.metadata_cache =
+            SamlMetadataCache::new().with_crypto_semaphore(Arc::clone(&self.crypto_gate));
         self
     }
 
@@ -191,7 +220,14 @@ where
         signing_cert_pem: Option<&str>,
     ) -> Result<IdpMetadata, FederationError> {
         let text = (self.metadata_fetcher)(metadata_url.to_owned()).await?;
-        parse_idp_metadata(&text, signing_cert_pem, Utc::now()).map(|parsed| parsed.metadata)
+        parse_idp_metadata_off_worker(
+            text,
+            signing_cert_pem.map(str::to_owned),
+            Utc::now(),
+            Some(Arc::clone(&self.crypto_gate)),
+        )
+        .await
+        .map(|parsed| parsed.metadata)
     }
 
     /// Build a SAML AuthnRequest for the specified federation config.
@@ -448,7 +484,11 @@ where
         //     Response root or of its Assertion (XSW, D-23)
         //   - <ds:Signature> is absent from the document
         //   - the digest or signature value of ANY signature does not verify
-        self.verify_signature(xml.as_bytes(), config)?;
+        //
+        // R101W2-01: on the blocking pool, under the crypto gate, so no
+        // verification — even one the transform allow-list admits — holds an
+        // async worker.
+        self.verify_signature_off_worker(xml, config).await?;
 
         // Step 1a — Protocol binding checks (SEC-005/REQ-14 AC-5).
         // These run after signature verification so we only check authentic responses.
@@ -689,93 +729,32 @@ where
         ))
     }
 
-    /// Verify the XML signature(s) in a SAML response against the configured
-    /// IdP signing certificate.
-    ///
-    /// Behaviour (D-06/D-07/D-08, and D-23 since T23.2.2):
-    /// - If `config.idp_signing_cert_pem` is `None` → `ConfigIncomplete` (fail
-    ///   closed: the config is not finished).
-    /// - A `ds:Signature` is accepted in exactly two places — the enveloped
-    ///   child of the `Response` root, or of the `Assertion` that is the
-    ///   root's child — at most one per parent, each with one `Reference` to
-    ///   its parent's `ID` ([`check_signature_placement`]). A signature
-    ///   anywhere else refuses the whole document (`SamlResponseFailed`,
-    ///   XSW).
-    /// - If no signature is present → `SamlSignatureInvalid`.
-    /// - **Every** signature is verified on its own node with xmlsec
-    ///   (`reduce_xml_to_signed_with_allowed_algorithms`, which walks each
-    ///   `ds:Signature` and verifies it individually); any one that does not
-    ///   verify → `SamlSignatureInvalid`. IDs must be unique `NCName`s.
-    /// - Since #531 only the SHA-2 RSA and ECDSA algorithms verify, unless the
-    ///   config sets `allow_sha1_signatures`; that adds `rsa-sha1`,
-    ///   `ecdsa-sha1` and the SHA-1 digest and nothing else (#606,
-    ///   [`check_sha1_escape_hatch_algorithms`]).
-    ///
-    /// Before D-23 this called `verify_signed_xml`, which verifies only the
-    /// **first** `ds:Signature` in document order: a document the IdP signed
-    /// for another purpose (a logout message, an error response) placed ahead
-    /// of a forged assertion made the forged one pass.
-    ///
-    /// Must be called BEFORE `validate_conditions` so that a forged/unsigned
-    /// assertion is rejected before any claims are trusted, and before
-    /// [`bind_signature_to_assertion`], which relies on every signature in the
-    /// document having verified here.
-    fn verify_signature(
+    /// [`verify_signature`] on the blocking pool, under the service's
+    /// crypto gate (R101W2-01): no verification — even one the transform
+    /// allow-list admits — holds an async worker.
+    async fn verify_signature_off_worker(
         &self,
-        xml_bytes: &[u8],
-        config: &axiam_core::models::federation::FederationConfig,
+        xml: &str,
+        config: &FederationConfig,
     ) -> Result<(), FederationError> {
-        let pem = config
-            .idp_signing_cert_pem
-            .as_deref()
-            .ok_or(FederationError::ConfigIncomplete)?;
-
-        let der = crate::cert::pem_cert_to_der(pem)?;
-        let cert = samael::crypto::CertificateDer::from(der);
-
-        let xml = std::str::from_utf8(xml_bytes).map_err(|_| {
-            FederationError::SamlSignatureInvalid("SAML response is not UTF-8".into())
-        })?;
-        let doc = libxml::parser::Parser::default()
-            .parse_string_with_options(xml_bytes, receiver_parser_options())
-            .map_err(|e| {
-                FederationError::SamlSignatureInvalid(format!("SAML response is not XML: {e}"))
+        let permit = Arc::clone(&self.crypto_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                FederationError::SamlSignatureInvalid(
+                    "signature verification is unavailable".into(),
+                )
             })?;
-        if check_signature_placement(&doc)? == 0 {
-            return Err(FederationError::SamlSignatureInvalid(
-                "SAML response carries no signature".into(),
-            ));
-        }
-
-        // Every ds:Signature node — after the placement check, exactly the
-        // accepted ones — is verified individually against the certificate.
-        // PreDigest is the strictest reduce mode: it also refuses a document
-        // whose verified references are not one element, or one assertion
-        // inside one response.
-        //
-        // #531 (D-3): only the SHA-2 algorithms the IdP receiver accepts, for
-        // the signature and its digests. `allow_sha1_signatures` is the
-        // per-federation escape hatch for an IdP that still signs with SHA-1.
-        //
-        // #606: samael's list has no SHA-1 member, and `None` means "every
-        // algorithm xmlsec verifies" (MD5, HMAC, DSA, ...), not "SHA-1 too".
-        // So the escape hatch checks the URIs itself, on this document, before
-        // samael runs: the SHA-2 list plus `rsa-sha1`/`ecdsa-sha1` and the
-        // SHA-1 digest, nothing else. Only then is samael called unrestricted.
-        let allowed = if config.allow_sha1_signatures {
-            check_sha1_escape_hatch_algorithms(&doc)?;
-            None
-        } else {
-            Some(&ALLOWED_XML_SIGNATURE_ALGORITHMS[..])
-        };
-        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
-            xml,
-            &[cert],
-            samael::crypto::ReduceMode::PreDigest,
-            allowed,
-        )
-        .map(|_| ())
-        .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
+        let xml = xml.to_owned();
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verify_signature(xml.as_bytes(), &config)
+        })
+        .await
+        .map_err(|_| {
+            FederationError::SamlSignatureInvalid("signature verification did not complete".into())
+        })?
     }
 
     /// Provision a new user or link an existing one to the external
@@ -915,6 +894,97 @@ where
     }
 }
 
+/// Verify the XML signature(s) in a SAML response against the configured
+/// IdP signing certificate.
+///
+/// Behaviour (D-06/D-07/D-08, and D-23 since T23.2.2):
+/// - If `config.idp_signing_cert_pem` is `None` → `ConfigIncomplete` (fail
+///   closed: the config is not finished).
+/// - A `ds:Signature` is accepted in exactly two places — the enveloped
+///   child of the `Response` root, or of the `Assertion` that is the
+///   root's child — at most one per parent, each with one `Reference` to
+///   its parent's `ID` ([`check_signature_placement`]). A signature
+///   anywhere else refuses the whole document (`SamlResponseFailed`,
+///   XSW).
+/// - An accepted signature may name only `enveloped-signature` and the
+///   canonicalizations without comments; anything else refuses the document
+///   before xmlsec runs (`SamlResponseFailed`, R101W2-01,
+///   [`signature_transforms_admitted`]).
+/// - If no signature is present → `SamlSignatureInvalid`.
+/// - **Every** signature is verified on its own node with xmlsec
+///   (`reduce_xml_to_signed_with_allowed_algorithms`, which walks each
+///   `ds:Signature` and verifies it individually); any one that does not
+///   verify → `SamlSignatureInvalid`. IDs must be unique `NCName`s.
+/// - Since #531 only the SHA-2 RSA and ECDSA algorithms verify, unless the
+///   config sets `allow_sha1_signatures`; that adds `rsa-sha1`,
+///   `ecdsa-sha1` and the SHA-1 digest and nothing else (#606,
+///   [`check_sha1_escape_hatch_algorithms`]).
+///
+/// Before D-23 this called `verify_signed_xml`, which verifies only the
+/// **first** `ds:Signature` in document order: a document the IdP signed
+/// for another purpose (a logout message, an error response) placed ahead
+/// of a forged assertion made the forged one pass.
+///
+/// Must be called BEFORE `validate_conditions` so that a forged/unsigned
+/// assertion is rejected before any claims are trusted, and before
+/// [`bind_signature_to_assertion`], which relies on every signature in the
+/// document having verified here.
+///
+/// CPU-bound: the ACS calls it through
+/// `SamlFederationService::verify_signature_off_worker`.
+fn verify_signature(xml_bytes: &[u8], config: &FederationConfig) -> Result<(), FederationError> {
+    let pem = config
+        .idp_signing_cert_pem
+        .as_deref()
+        .ok_or(FederationError::ConfigIncomplete)?;
+
+    let der = crate::cert::pem_cert_to_der(pem)?;
+    let cert = samael::crypto::CertificateDer::from(der);
+
+    let xml = std::str::from_utf8(xml_bytes)
+        .map_err(|_| FederationError::SamlSignatureInvalid("SAML response is not UTF-8".into()))?;
+    let doc = libxml::parser::Parser::default()
+        .parse_string_with_options(xml_bytes, receiver_parser_options())
+        .map_err(|e| {
+            FederationError::SamlSignatureInvalid(format!("SAML response is not XML: {e}"))
+        })?;
+    if check_signature_placement(&doc)? == 0 {
+        return Err(FederationError::SamlSignatureInvalid(
+            "SAML response carries no signature".into(),
+        ));
+    }
+
+    // Every ds:Signature node — after the placement check, exactly the
+    // accepted ones — is verified individually against the certificate.
+    // PreDigest is the strictest reduce mode: it also refuses a document
+    // whose verified references are not one element, or one assertion
+    // inside one response.
+    //
+    // #531 (D-3): only the SHA-2 algorithms the IdP receiver accepts, for
+    // the signature and its digests. `allow_sha1_signatures` is the
+    // per-federation escape hatch for an IdP that still signs with SHA-1.
+    //
+    // #606: samael's list has no SHA-1 member, and `None` means "every
+    // algorithm xmlsec verifies" (MD5, HMAC, DSA, ...), not "SHA-1 too".
+    // So the escape hatch checks the URIs itself, on this document, before
+    // samael runs: the SHA-2 list plus `rsa-sha1`/`ecdsa-sha1` and the
+    // SHA-1 digest, nothing else. Only then is samael called unrestricted.
+    let allowed = if config.allow_sha1_signatures {
+        check_sha1_escape_hatch_algorithms(&doc)?;
+        None
+    } else {
+        Some(&ALLOWED_XML_SIGNATURE_ALGORITHMS[..])
+    };
+    <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
+        xml,
+        &[cert],
+        samael::crypto::ReduceMode::PreDigest,
+        allowed,
+    )
+    .map(|_| ())
+    .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
@@ -945,9 +1015,13 @@ fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
 /// Anything else — a signed logout message or error response embedded in
 /// `Extensions`, beside the assertion or in its `Advice`; a dummy signature at
 /// the root that names the assertion; a second signature in one parent — is an
-/// XSW shape and refuses the whole document. Returns how many signatures were
-/// accepted (zero, one or two).
-fn check_signature_placement(doc: &libxml::tree::Document) -> Result<usize, FederationError> {
+/// XSW shape and refuses the whole document. So does an accepted signature
+/// that names a transform or canonicalization outside
+/// [`signature_transforms_admitted`]'s set (R101W2-01). Returns how many
+/// signatures were accepted (zero, one or two).
+pub(crate) fn check_signature_placement(
+    doc: &libxml::tree::Document,
+) -> Result<usize, FederationError> {
     let root = doc
         .get_root_element()
         .ok_or_else(|| xsw_rejected("SAML response has no root element"))?;
@@ -1006,9 +1080,26 @@ fn check_signature_placement(doc: &libxml::tree::Document) -> Result<usize, Fede
                 "a ds:Signature whose Reference is not exactly its parent element",
             ));
         }
+        // R101W2-01: xmlsec evaluates a reference's transforms and the
+        // canonicalization before it checks the signature value, so they are
+        // held to the set a SAML signature needs before samael runs — on the
+        // SHA-2 default path and the SHA-1 escape hatch alike.
+        let admitted = signature_transforms_admitted(&mut context, signature).map_err(|()| {
+            FederationError::SamlResponseFailed("XSW check: XPath evaluation failed".into())
+        })?;
+        if !admitted {
+            return Err(FederationError::SamlResponseFailed(
+                SIGNATURE_TRANSFORMS_REFUSED.into(),
+            ));
+        }
     }
     Ok(signatures.len())
 }
+
+/// The refusal of a signature naming a transform or canonicalization outside
+/// the admitted set (R101W2-01). Fixed: nothing the sender wrote is echoed.
+const SIGNATURE_TRANSFORMS_REFUSED: &str =
+    "a ds:Signature names a transform or canonicalization method outside the admitted set";
 
 /// `rsa-sha1`, the one SHA-1 RSA `SignatureMethod` (XML-DSig 1.0).
 const XMLDSIG_RSA_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
@@ -1061,15 +1152,9 @@ fn check_sha1_escape_hatch_algorithms(doc: &libxml::tree::Document) -> Result<()
         method: &libxml::tree::Node,
         what: &str,
     ) -> Result<String, FederationError> {
-        let attributes = context
-            .findnodes("@*[local-name()='Algorithm']", Some(method))
-            .map_err(|()| refused("algorithm check: XPath evaluation failed"))?;
-        match attributes.as_slice() {
-            [attribute] => Ok(attribute.get_content()),
-            _ => Err(refused(&format!(
-                "a {what} without exactly one Algorithm attribute"
-            ))),
-        }
+        sole_algorithm(context, method)
+            .map_err(|()| refused("algorithm check: XPath evaluation failed"))?
+            .ok_or_else(|| refused(&format!("a {what} without exactly one Algorithm attribute")))
     }
 
     let signature_admitted = |uri: &str| {
@@ -1833,6 +1918,28 @@ pub(crate) mod tests {
         )
     }
 
+    /// R101W2-01: the ACS verifies on the blocking pool under the service's
+    /// crypto gate — with no permit free it waits, holding no worker, and it
+    /// completes as soon as one is.
+    #[tokio::test]
+    async fn r101w2_01_acs_verification_waits_for_the_crypto_gate() {
+        let gate = Arc::new(Semaphore::new(0));
+        let svc = make_service().with_crypto_semaphore(Arc::clone(&gate));
+        let xml = String::from_utf8(load_fixture("well_signed_response.xml")).unwrap();
+        let config = test_federation_config(Some(test_cert_pem()));
+        let pending = svc.verify_signature_off_worker(&xml, &config);
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut pending)
+                .await
+                .is_err(),
+            "no permit, no verification"
+        );
+        gate.add_permits(1);
+        pending.await.expect("verifies once a permit is free");
+        assert_eq!(gate.available_permits(), 1, "the permit is returned");
+    }
+
     // -----------------------------------------------------------------------
     // Signature verification tests (compiled with the `saml` feature, which
     // pulls samael's xmlsec backend; needs Debian libxmlsec1 1.2.x at build time)
@@ -1841,22 +1948,17 @@ pub(crate) mod tests {
     /// Verifies that a well-formed, correctly-signed SAML response passes.
     #[test]
     fn verify_accepts_well_signed_response() {
-        let svc = make_service();
         let xml = load_fixture("well_signed_response.xml");
         let config = test_federation_config(Some(test_cert_pem()));
-        svc.verify_signature(&xml, &config)
-            .expect("well-signed response should pass verification");
+        verify_signature(&xml, &config).expect("well-signed response should pass verification");
     }
 
     /// Verifies that a response with a tampered body is rejected (digest mismatch).
     #[test]
     fn verify_rejects_tampered_body() {
-        let svc = make_service();
         let xml = load_fixture("tampered_response.xml");
         let config = test_federation_config(Some(test_cert_pem()));
-        let err = svc
-            .verify_signature(&xml, &config)
-            .expect_err("tampered response must be rejected");
+        let err = verify_signature(&xml, &config).expect_err("tampered response must be rejected");
         assert!(
             matches!(err, FederationError::SamlSignatureInvalid(_)),
             "expected SamlSignatureInvalid, got: {err:?}"
@@ -1866,7 +1968,6 @@ pub(crate) mod tests {
     /// Verifies that a response with the signature block stripped is rejected.
     #[test]
     fn verify_rejects_missing_signature() {
-        let svc = make_service();
         let raw = load_fixture("well_signed_response.xml");
         let xml_str = String::from_utf8(raw).unwrap();
         // Strip the ds:Signature block.
@@ -1876,8 +1977,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let config = test_federation_config(Some(test_cert_pem()));
-        let err = svc
-            .verify_signature(stripped.as_bytes(), &config)
+        let err = verify_signature(stripped.as_bytes(), &config)
             .expect_err("unsigned response must be rejected");
         assert!(
             matches!(err, FederationError::SamlSignatureInvalid(_)),
@@ -1888,12 +1988,10 @@ pub(crate) mod tests {
     /// Verifies that ConfigIncomplete is returned when no cert is configured.
     #[test]
     fn verify_rejects_when_no_cert_configured() {
-        let svc = make_service();
         let xml = b"<whatever/>";
         let config = test_federation_config(None);
-        let err = svc
-            .verify_signature(xml, &config)
-            .expect_err("missing cert must return ConfigIncomplete");
+        let err =
+            verify_signature(xml, &config).expect_err("missing cert must return ConfigIncomplete");
         assert!(
             matches!(err, FederationError::ConfigIncomplete),
             "expected ConfigIncomplete, got: {err:?}"
@@ -3157,9 +3255,11 @@ pub(crate) mod tests {
 
     #[test]
     fn bind_signature_accepts_single_assertion_with_matching_reference() {
+        // R101W2-01: a signature names its canonicalization (XML-DSig requires
+        // one, and the transform allow-list reads it).
         let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
   <saml:Assertion ID="asrt-1">
-    <ds:Signature><ds:SignedInfo><ds:Reference URI="#asrt-1"/></ds:SignedInfo></ds:Signature>
+    <ds:Signature><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:Reference URI="#asrt-1"/></ds:SignedInfo></ds:Signature>
   </saml:Assertion>
 </samlp:Response>"##;
         bind_signature_to_assertion(xml.as_bytes(), "asrt-1")

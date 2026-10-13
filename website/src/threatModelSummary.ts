@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.40.0",
  "diagramCount": 10,
- "total": 475,
+ "total": 476,
  "open": 17,
- "mitigated": 437,
+ "mitigated": 438,
  "notApplicable": 21,
  "areas": [
   {
@@ -92,7 +92,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 126,
+   "total": 127,
    "open": 3,
    "notApplicable": 0
   },
@@ -166,7 +166,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Denial of service",
-   "total": 59,
+   "total": 60,
    "open": 3,
    "notApplicable": 4
   },
@@ -186,7 +186,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 197,
+   "total": 198,
    "open": 8,
    "notApplicable": 9
   },

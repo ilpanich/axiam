@@ -16,7 +16,9 @@
 //! enveloped child of the `md:EntityDescriptor` root, with one reference,
 //! naming the root's `ID` — the IdP receiver's placement rule
 //! ([`signature_placement`], D-23), applied to a different root. Any other
-//! `ds:Signature` refuses the document. The one admitted signature is verified
+//! `ds:Signature` refuses the document, and so does one naming a transform or
+//! canonicalization other than `enveloped-signature` and the c14n family
+//! without comments (R101W2-01). The one admitted signature is verified
 //! by xmlsec on its own node against the configured certificate, with the SHA-2
 //! algorithms only ([`ALLOWED_XML_SIGNATURE_ALGORITHMS`]; a configuration's
 //! `allow_sha1_signatures` applies to responses, not to metadata), and what is
@@ -26,6 +28,10 @@
 //! Every document, signed or not, is first refused on its bytes if it carries a
 //! markup declaration or an encoding other than UTF-8, as a SAML response is
 //! (#531): metadata has no use for a DTD.
+//!
+//! A fetched document is verified and parsed on the blocking pool, under the
+//! deployment's crypto semaphore ([`parse_idp_metadata_off_worker`],
+//! R101W2-01), never on an async worker.
 //!
 //! # Cache
 //!
@@ -50,6 +56,7 @@ use axiam_core::models::federation::FederationConfig;
 use chrono::{DateTime, Duration, Utc};
 use samael::crypto::{CertificateDer, CryptoProvider, ReduceMode, XmlSec};
 use samael::metadata::{EntityDescriptorType, HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::FederationError;
@@ -265,6 +272,38 @@ pub fn parse_idp_metadata(
     })
 }
 
+/// [`parse_idp_metadata`] on the blocking pool, under `gate` when one is given
+/// (R101W2-01): the signature check canonicalizes and hashes up to
+/// [`MAX_METADATA_SIZE`] bytes, which must not hold an async worker. A
+/// sign-in's cache miss and the uncached administrative fetch both go through
+/// here.
+///
+/// # Errors
+///
+/// What [`parse_idp_metadata`] returns, or [`FederationError::SamlMetadataFailed`]
+/// when the blocking task does not complete.
+pub async fn parse_idp_metadata_off_worker(
+    text: String,
+    signing_cert_pem: Option<String>,
+    now: DateTime<Utc>,
+    gate: Option<Arc<Semaphore>>,
+) -> Result<ParsedIdpMetadata, FederationError> {
+    let permit = match gate {
+        Some(gate) => Some(
+            gate.acquire_owned()
+                .await
+                .map_err(|_| metadata_failed("metadata verification is unavailable"))?,
+        ),
+        None => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        parse_idp_metadata(&text, signing_cert_pem.as_deref(), now)
+    })
+    .await
+    .map_err(|_| metadata_failed("metadata verification did not complete"))?
+}
+
 /// Verify the metadata's one enveloped signature and return the bytes it
 /// covers (xmlsec's pre-digest output: the `EntityDescriptor`, canonicalized,
 /// without its signature).
@@ -306,12 +345,15 @@ fn verify_metadata_signature(text: &str, pem: &str) -> Result<String, Federation
         return Err(metadata_failed("metadata repeats its root ID"));
     }
 
+    // The placement rule, and with it the transform allow-list (R101W2-01):
+    // before xmlsec, which evaluates the transforms before the signature value.
     match signature_placement(&doc, &root, &root_id) {
         Ok(true) => {}
         Ok(false) => return Err(metadata_failed("metadata is not signed")),
         Err(_) => {
             return Err(metadata_failed(
-                "a metadata signature may only be the EntityDescriptor root's own",
+                "a metadata signature may only be the EntityDescriptor root's own, \
+                 with enveloped-signature and canonicalization transforms only",
             ));
         }
     }
@@ -411,7 +453,13 @@ struct CacheEntry {
 /// Per-process cache of parsed IdP metadata, keyed by federation
 /// configuration. Cheap to clone; clones share the map.
 #[derive(Clone, Default)]
-pub struct SamlMetadataCache(Arc<Mutex<HashMap<Uuid, CacheEntry>>>);
+pub struct SamlMetadataCache {
+    entries: Arc<Mutex<HashMap<Uuid, CacheEntry>>>,
+    /// R101W2-01: the gate a miss verifies and parses under, on the blocking
+    /// pool ([`parse_idp_metadata_off_worker`]). `None`: the blocking pool
+    /// only.
+    gate: Option<Arc<Semaphore>>,
+}
 
 impl SamlMetadataCache {
     /// An empty cache.
@@ -420,10 +468,18 @@ impl SamlMetadataCache {
         Self::default()
     }
 
+    /// Verify and parse a fetched document under `gate` — the deployment's
+    /// crypto semaphore. Keeps the entries (clones still share them).
+    #[must_use]
+    pub fn with_crypto_semaphore(mut self, gate: Arc<Semaphore>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, CacheEntry>> {
         // A panic while the lock was held leaves a map of whole entries; keep
         // using it rather than failing every sign-in.
-        self.0
+        self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -467,8 +523,13 @@ impl SamlMetadataCache {
         }
 
         let text = fetch(metadata_url.to_owned()).await?;
-        let parsed =
-            parse_idp_metadata(&text, config.idp_metadata_signing_cert_pem.as_deref(), now)?;
+        let parsed = parse_idp_metadata_off_worker(
+            text,
+            config.idp_metadata_signing_cert_pem.clone(),
+            now,
+            self.gate.clone(),
+        )
+        .await?;
         let entry = CacheEntry {
             metadata_url: metadata_url.to_owned(),
             config_version: config.updated_at,

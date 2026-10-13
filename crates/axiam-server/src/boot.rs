@@ -1385,6 +1385,9 @@ where
     // SamlFederationService::new needs no encryption key — constructed
     // unconditionally regardless of the saml Cargo feature's own gating
     // (only the SAML REST handlers/routes stay #[cfg(feature = "saml")]).
+    //
+    // R101W2-01: the ACS's and the metadata's signature verification run on
+    // the blocking pool under the deployment's crypto semaphore.
     #[cfg(feature = "saml")]
     let saml_federation_service = SamlFederationService::new(
         federation_config_repo.clone(),
@@ -1392,7 +1395,8 @@ where
         user_repo.clone(),
         assertion_replay_repo.clone(),
         http_client.clone(),
-    );
+    )
+    .with_crypto_semaphore(Arc::clone(&crypto_semaphore));
     // T23.2.3 (G-2) — the SAML IdP: the SP registry, the pending-request store,
     // the tenant signing-credential service (D-21: its keys are sealed through
     // the database custodian of the same custodian set the CAs use) and the

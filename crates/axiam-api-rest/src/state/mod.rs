@@ -850,7 +850,7 @@ impl<C: Connection + Clone> AppState<C> {
             opaque_server: opaque_keys.map(OpaqueServer::new),
             http_client: reqwest::Client::new(),
             jwks_cache,
-            crypto_semaphore,
+            crypto_semaphore: Arc::clone(&crypto_semaphore),
             // Tests get a real, env-configured counter over the same
             // in-memory DB, so the shared-store layer behaves in tests
             // exactly as it does in production. A test that wants
@@ -942,13 +942,16 @@ impl<C: Connection + Clone> AppState<C> {
                 assertion_replay_repo: assertion_replay_repo.clone(),
                 oidc_federation_service: None,
                 #[cfg(feature = "saml")]
+                // R101W2-01: signature verification under the same gate as
+                // every other CPU-heavy operation, as the composition root does.
                 saml_federation_service: SamlFederationService::new(
                     federation_config_repo,
                     federation_link_repo,
                     user_repo,
                     assertion_replay_repo,
                     reqwest::Client::new(),
-                ),
+                )
+                .with_crypto_semaphore(Arc::clone(&crypto_semaphore)),
             },
             // No encryption key in a test harness: the feature is then
             // unavailable, exactly as on a deployment without one, and a test

@@ -28,9 +28,11 @@
 //! * **HTTP-POST** — an enveloped `ds:Signature`, and only one place may hold it:
 //!   the child of the `AuthnRequest` root, with exactly one reference, naming the
 //!   root's `ID`. Any other `ds:Signature` anywhere refuses the document (the
-//!   placement rule D-23 gave the SP side). The one admitted signature is
-//!   verified by xmlsec against the SP's registered certificate, on its own
-//!   node, with SHA-1 algorithms refused.
+//!   placement rule D-23 gave the SP side). The one admitted signature may
+//!   name only `enveloped-signature` and the canonicalizations without comments
+//!   ([`signature_transforms_admitted`], R101W2-01), and is then verified by
+//!   xmlsec against the SP's registered certificate, on its own node, with
+//!   SHA-1 algorithms refused.
 //! * **HTTP-Redirect** — the `Signature` query parameter over the octets SAML
 //!   Bindings §3.4.4.1 names, **exactly as received**:
 //!   `SAMLRequest=…[&RelayState=…]&SigAlg=…`, each value still percent-encoded
@@ -527,11 +529,164 @@ pub(crate) fn signature_placement(
         .collect();
     let expected = format!("#{root_id}");
     match references.as_slice() {
-        [reference] if reference.get_attribute("URI").as_deref() == Some(expected.as_str()) => {
-            Ok(true)
-        }
-        _ => Err(RequestError::SignaturePlacement),
+        [reference] if reference.get_attribute("URI").as_deref() == Some(expected.as_str()) => {}
+        _ => return Err(RequestError::SignaturePlacement),
     }
+    // R101W2-01: before xmlsec, which evaluates a reference's transforms
+    // before it checks the signature value.
+    if signature_transforms_admitted(&mut context, signature)
+        .map_err(|()| RequestError::Malformed)?
+    {
+        Ok(true)
+    } else {
+        Err(RequestError::SignaturePlacement)
+    }
+}
+
+/// Exclusive XML canonicalization 1.0, without comments.
+const C14N_EXCLUSIVE: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
+/// Canonical XML 1.0, without comments.
+const C14N_10: &str = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+/// Canonical XML 1.1, without comments.
+const C14N_11: &str = "http://www.w3.org/2006/12/xml-c14n11";
+/// The enveloped-signature transform.
+const TRANSFORM_ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
+/// The namespace of exclusive canonicalization's `InclusiveNamespaces`.
+const NS_EXC_C14N: &str = C14N_EXCLUSIVE;
+/// The most `Transform`s one `Reference` may name: `enveloped-signature` and a
+/// canonicalization.
+const MAX_REFERENCE_TRANSFORMS: usize = 2;
+
+/// The one attribute named `Algorithm` on `method`, in any namespace — the
+/// value xmlsec's `xmlGetProp` reads. `Ok(None)` when there is not exactly one;
+/// `Err(())` when the XPath evaluation itself fails.
+///
+/// Shared by the transform allow-list ([`signature_transforms_admitted`]) and
+/// the SP's SHA-1 escape-hatch check (#606), so both read an algorithm the
+/// same way.
+pub(crate) fn sole_algorithm(
+    context: &mut libxml::xpath::Context,
+    method: &libxml::tree::Node,
+) -> Result<Option<String>, ()> {
+    let attributes = context.findnodes("@*[local-name()='Algorithm']", Some(method))?;
+    Ok(match attributes.as_slice() {
+        [attribute] => Some(attribute.get_content()),
+        _ => None,
+    })
+}
+
+/// Whether `signature` names only the transforms and the canonicalization a
+/// SAML signature needs (R101W2-01).
+///
+/// xmlsec admits every transform it registers for a `Reference` — XSLT, XPath,
+/// XPath Filter 2, XPointer as this build links it — and evaluates them, and
+/// the canonicalization, **before** it compares the signature value; samael
+/// restricts neither. So whoever sends a document chooses how much work the
+/// verifier does before it refuses an unsigned one. This allow-list runs on the
+/// libxml tree the caller already holds, before samael, on every path (the SHA-2
+/// default and the SP's SHA-1 escape hatch alike):
+///
+/// * exactly one `SignedInfo` with exactly one `CanonicalizationMethod`, whose
+///   algorithm is exclusive c14n, c14n 1.0 or c14n 1.1 — never a
+///   `#WithComments` variant;
+/// * per `Reference` at most one `Transforms`, holding only `Transform`
+///   elements, at most [`MAX_REFERENCE_TRANSFORMS`] of them, each
+///   `enveloped-signature` or one of those canonicalizations;
+/// * no `Transform` or `CanonicalizationMethod` anywhere else in the signature
+///   (a `Manifest` or `RetrievalMethod` would carry one);
+/// * each method with exactly one attribute named `Algorithm`
+///   ([`sole_algorithm`]), compared exactly, and no element child except one
+///   `ec:InclusiveNamespaces` carrying only `PrefixList`, under exclusive c14n.
+///
+/// Keycloak, samael, Microsoft Entra ID, Okta, Shibboleth and AXIAM's own
+/// signer use `enveloped-signature` with exclusive c14n, so this admits them.
+/// `Err(())` only when an XPath evaluation fails.
+pub(crate) fn signature_transforms_admitted(
+    context: &mut libxml::xpath::Context,
+    signature: &libxml::tree::Node,
+) -> Result<bool, ()> {
+    fn dsig_children(node: &libxml::tree::Node, name: &str) -> Vec<libxml::tree::Node> {
+        node.get_child_elements()
+            .into_iter()
+            .filter(|c| is_element(c, NS_DSIG, name))
+            .collect()
+    }
+    let canonicalization = |uri: &str| [C14N_EXCLUSIVE, C14N_10, C14N_11].contains(&uri);
+
+    let signed_infos = dsig_children(signature, "SignedInfo");
+    let [signed_info] = signed_infos.as_slice() else {
+        return Ok(false);
+    };
+    let methods = dsig_children(signed_info, "CanonicalizationMethod");
+    let [c14n] = methods.as_slice() else {
+        return Ok(false);
+    };
+    if !method_admitted(context, c14n, canonicalization)? {
+        return Ok(false);
+    }
+
+    let mut transforms_seen = 0;
+    for reference in dsig_children(signed_info, "Reference") {
+        let containers = dsig_children(&reference, "Transforms");
+        let transforms = match containers.as_slice() {
+            [] => continue,
+            [transforms] => transforms.get_child_elements(),
+            _ => return Ok(false),
+        };
+        if transforms.len() > MAX_REFERENCE_TRANSFORMS {
+            return Ok(false);
+        }
+        for transform in &transforms {
+            if !is_element(transform, NS_DSIG, "Transform")
+                || !method_admitted(context, transform, |uri| {
+                    uri == TRANSFORM_ENVELOPED || canonicalization(uri)
+                })?
+            {
+                return Ok(false);
+            }
+        }
+        transforms_seen += transforms.len();
+    }
+
+    // Nothing the walk above did not judge: a `Transform` in a `Manifest` or a
+    // `KeyInfo/RetrievalMethod`, or a second canonicalization.
+    let everywhere = |context: &mut libxml::xpath::Context, name: &str| {
+        context
+            .findnodes(
+                &format!(".//*[local-name()='{name}' and namespace-uri()='{NS_DSIG}']"),
+                Some(signature),
+            )
+            .map(|nodes| nodes.len())
+    };
+    Ok(everywhere(context, "Transform")? == transforms_seen
+        && everywhere(context, "CanonicalizationMethod")? == 1)
+}
+
+/// One method element of [`signature_transforms_admitted`]: exactly one
+/// `Algorithm`, admitted by `admitted`, and no element child but exclusive
+/// c14n's `InclusiveNamespaces` with only a `PrefixList`.
+fn method_admitted(
+    context: &mut libxml::xpath::Context,
+    method: &libxml::tree::Node,
+    admitted: impl Fn(&str) -> bool,
+) -> Result<bool, ()> {
+    let Some(algorithm) = sole_algorithm(context, method)? else {
+        return Ok(false);
+    };
+    if !admitted(&algorithm) {
+        return Ok(false);
+    }
+    Ok(match method.get_child_elements().as_slice() {
+        [] => true,
+        [inclusive] if algorithm == C14N_EXCLUSIVE => {
+            // `@PrefixList` in XPath is the attribute in no namespace.
+            is_element(inclusive, NS_EXC_C14N, "InclusiveNamespaces")
+                && inclusive.get_child_elements().is_empty()
+                && context.findnodes("@*", Some(inclusive))?.len() == 1
+                && context.findnodes("@PrefixList", Some(inclusive))?.len() == 1
+        }
+        _ => false,
+    })
 }
 
 pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
@@ -548,13 +703,40 @@ pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str)
 ///
 /// # Errors
 ///
-/// [`RequestError::SignatureInvalid`] — a wrong key, a changed byte, a SHA-1
-/// algorithm, or anything xmlsec refuses.
+/// [`RequestError::SignaturePlacement`] — a `ds:Signature` in the document
+/// names a transform or canonicalization outside
+/// [`signature_transforms_admitted`]'s set (R101W2-01): checked here again, on
+/// this very text, before xmlsec runs, so this function never hands xmlsec a
+/// transform whatever its caller checked. [`RequestError::SignatureInvalid`] —
+/// a wrong key, a changed byte, a SHA-1 algorithm, a document that does not
+/// parse, or anything xmlsec refuses.
+///
+/// CPU-bound: the SSO and SLO endpoints call it off the async workers, under
+/// the crypto semaphore.
 pub fn verify_post_signature(document: &str, sp_cert_der: &[u8]) -> Result<(), RequestError> {
     // R101W2-02: xmlsec reads exactly the text `parse_xml` read — the same
     // function strips the same one BOM, so the two never see different
     // characters, whatever string the caller holds.
     let document = refuse_other_encodings(document).map_err(|_| RequestError::SignatureInvalid)?;
+    // R101W2-01: the transform allow-list, on every signature of the very
+    // text xmlsec is handed. (The placement rule is the parse's: this function
+    // also verifies documents whose signature sits on a child, such as an
+    // issued response's assertion.)
+    let doc = parse_xml(document).map_err(|_| RequestError::SignatureInvalid)?;
+    let mut context = libxml::xpath::Context::new(&doc).map_err(|()| RequestError::Malformed)?;
+    let signatures = context
+        .findnodes(
+            &format!("//*[local-name()='Signature' and namespace-uri()='{NS_DSIG}']"),
+            None,
+        )
+        .map_err(|()| RequestError::Malformed)?;
+    for signature in &signatures {
+        if !signature_transforms_admitted(&mut context, signature)
+            .map_err(|()| RequestError::Malformed)?
+        {
+            return Err(RequestError::SignaturePlacement);
+        }
+    }
     let cert = CertificateDer::from(sp_cert_der.to_vec());
     <XmlSec as CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
         document,
@@ -764,4 +946,4 @@ pub fn name_id_format_compatible(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

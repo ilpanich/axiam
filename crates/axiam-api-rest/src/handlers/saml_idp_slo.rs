@@ -387,7 +387,7 @@ async fn receive<C: Connection + Clone>(cx: &Ctx<'_, C>, incoming: Incoming<'_>)
     }
 
     // The signature, before anything the message names is trusted.
-    let verified = match verify(&incoming, &parsed, &sp) {
+    let verified = match verify(state, &incoming, &parsed, &sp).await {
         Ok(verified) => verified,
         Err(refusal) => return refusal.page(tenant_id),
     };
@@ -431,8 +431,11 @@ impl Refusal {
 /// `Ok(true)` when a signature was checked and held. **`verify_signed_xml` is
 /// never called**: the POST signature is the one placement allowed
 /// (`parse_logout_message` established it) checked on that node by xmlsec, and
-/// the Redirect signature is over the exact octets received.
-fn verify(
+/// the Redirect signature is over the exact octets received. The POST
+/// signature is verified off the async workers, under the crypto semaphore
+/// (R101W2-01).
+async fn verify<C: Connection + Clone>(
+    state: &AppState<C>,
     incoming: &Incoming<'_>,
     parsed: &ParsedLogoutMessage,
     sp: &SamlServiceProvider,
@@ -460,7 +463,10 @@ fn verify(
     }
     let outcome = match &incoming.redirect {
         Some(query) => query.verify_signature(&cert),
-        None => saml_request::verify_post_signature(&incoming.document, &cert),
+        None => {
+            super::saml_idp::verify_post_signature_off_worker(state, &incoming.document, &cert)
+                .await
+        }
     };
     outcome.map(|()| true).map_err(Refusal::Request)
 }

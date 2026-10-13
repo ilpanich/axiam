@@ -236,6 +236,23 @@
 > T-306 (Critical) and T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216
 > (High), none of them a defect awaiting a fix in AXIAM's code.
 >
+> **The 1.0.1 release wave, W2 (T-477 enters, Mitigated; T-69 corrected).** The
+> wave's F4 review
+> ([`security-review-release-1.0.1-w2-2026-10-13.md`](security-review-release-1.0.1-w2-2026-10-13.md),
+> R101W2-01) found that nothing restricted the transforms or the
+> canonicalisation a received XML signature names, and that the linked xmlsec —
+> XSLT compiled in — evaluates them before it checks the signature value: an
+> unauthenticated sender chose how much CPU AXIAM spent at the SAML assertion
+> consumer, the SAML IdP's SSO and SLO receiver and the IdP-metadata check, the
+> first two on the async workers. Entered as **T-477**, High, Mitigated: every
+> signature may now name only `enveloped-signature` and the c14n family without
+> comments, checked before xmlsec at all three, and all three verify on the
+> blocking pool under the crypto semaphore. T-69's residual, which named the gap
+> without its consequence, carries a dated correction. The model is **476
+> threats, 438 mitigated / 17 open / 21 not applicable** (the W1 half of the
+> wave enters its own entry; the copies are reconciled once, at the end of the
+> release).
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1543,7 +1560,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 475 threats** and a
+The system is verified against a **STRIDE threat model of 476 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1566,8 +1583,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 475 |
-| Mitigated / Open | 437 / 17 |
+| Threats identified | 476 |
+| Mitigated / Open | 438 / 17 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1587,7 +1604,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | System context | 34 | 2 | 0 |
 | Authentication & session management | 36 | 0 | 0 |
 | OAuth2 / OIDC authorization server | 86 | 0 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 126 | 3 | 0 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 127 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 32 | 1 | 0 |
 | Audit, webhooks, email & notifications | 56 | 2 | 0 |
@@ -1722,7 +1739,7 @@ the category recorded against it in the model.
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 1 | 1 |
 | Information disclosure | 112 | 6 | 4 |
-| Denial of service | 59 | 3 | 4 |
+| Denial of service | 60 | 3 | 4 |
 | Elevation of privilege | 90 | 2 | 4 |
 
 ### Coverage by severity
@@ -1730,7 +1747,7 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 197 | 8 | 9 |
+| High | 198 | 8 | 9 |
 | Medium | 199 | 6 | 9 |
 | Low | 36 | 1 | 1 |
 
@@ -3054,7 +3071,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 17 of 475. The 21
+Every threat the model records as open, most severe first — 17 of 476. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

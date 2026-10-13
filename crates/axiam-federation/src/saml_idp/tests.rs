@@ -2703,3 +2703,136 @@ fn p23w3_07_a_metadata_signature_is_accepted_only_on_the_entity_descriptor_root(
 fn root_id(document: &str) -> String {
     xpath(document, "/*/@ID").remove(0)
 }
+
+// ---------------------------------------------------------------------------
+// R101W2-01: a signature may name only enveloped-signature and the c14n family
+// ---------------------------------------------------------------------------
+
+use super::request::tests::{admitted_transform_variants, hostile_transform_variants};
+
+/// `xml`, carrying one signature, with its digest and signature values blanked
+/// and signed again: a valid signature over whatever the template now says.
+fn resigned(xml: &str) -> String {
+    fn blank(doc: &str, open: &str, close: &str) -> String {
+        let start = doc.find(open).expect(open) + open.len();
+        let end = start + doc[start..].find(close).expect(close);
+        format!("{}{}", &doc[..start], &doc[end..])
+    }
+    let doc = blank(xml, "<ds:DigestValue>", "</ds:DigestValue>");
+    let doc = blank(&doc, "<ds:SignatureValue>", "</ds:SignatureValue>");
+    signed(&doc)
+}
+
+/// Whether `result` is the ACS's transform refusal (R101W2-01): made by the
+/// placement check, before xmlsec — not `SamlSignatureInvalid`.
+fn refused_by_the_transform_check<T>(result: &Result<T, crate::error::FederationError>) -> bool {
+    matches!(
+        result,
+        Err(crate::error::FederationError::SamlResponseFailed(m))
+            if m.contains("transform or canonicalization method outside the admitted set")
+    )
+}
+
+/// Three shapes samael's own parse of the response refuses even earlier, as a
+/// duplicate or missing field — so at the ACS those are refused before the
+/// check is reached (still before xmlsec). The check itself is driven directly
+/// on every shape too.
+const REFUSED_FIRST_BY_SAMAEL: [&str; 3] = [
+    "a second Algorithm attribute in another namespace",
+    "a transform with no Algorithm",
+    "two Transforms in one Reference",
+];
+
+/// R101W2-01 at the SP's assertion consumer: every hostile shape is refused by
+/// the transform check ([`REFUSED_FIRST_BY_SAMAEL`] by samael's parse before
+/// it), on the SHA-2 default path and the SHA-1 escape hatch alike. The
+/// signature values are stale, so had xmlsec run first the refusal would have
+/// been `SamlSignatureInvalid`.
+#[tokio::test]
+async fn r101w2_01_the_acs_refuses_every_transform_outside_the_allow_list() {
+    let xml = decode(&Case::new().issue_ok());
+    sp_accepts(&xml, Some(REQUEST_ID), Some(ACS), true)
+        .await
+        .expect("the control verifies");
+    let placement = |document: &str| {
+        let doc = libxml::parser::Parser::default()
+            .parse_string(document.as_bytes())
+            .expect("parse");
+        crate::saml::check_signature_placement(&doc)
+    };
+    assert_eq!(placement(&xml).expect("the control is placed"), 1);
+    for (label, document) in hostile_transform_variants(&xml) {
+        let direct = placement(&document);
+        assert!(
+            refused_by_the_transform_check(&direct),
+            "{label}: the check itself"
+        );
+        for config in [sp_config(), sha1_allowed_config()] {
+            let sha1 = config.allow_sha1_signatures;
+            let result =
+                sp_accepts_with(config, &document, Some(REQUEST_ID), Some(ACS), true).await;
+            let refused = if REFUSED_FIRST_BY_SAMAEL.contains(&label) {
+                matches!(
+                    &result,
+                    Err(crate::error::FederationError::SamlResponseFailed(m))
+                        if m.starts_with("Failed to parse SAML Response XML")
+                )
+            } else {
+                refused_by_the_transform_check(&result)
+            };
+            assert!(
+                refused,
+                "{label} (allow_sha1_signatures={sha1}): {result:?}"
+            );
+        }
+    }
+}
+
+/// R101W2-01: what IdPs send stays accepted at the ACS — each admitted shape,
+/// validly signed, verifies end to end.
+#[tokio::test]
+async fn r101w2_01_the_acs_admits_enveloped_and_the_c14n_family() {
+    let xml = decode(&Case::new().issue_ok());
+    for (label, document) in admitted_transform_variants(&xml) {
+        let document = resigned(&document);
+        sp_accepts(&document, Some(REQUEST_ID), Some(ACS), true)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+    }
+}
+
+/// R101W2-01 at the metadata signature check: every hostile shape is refused
+/// by the placement rule, never as a signature that "does not verify".
+#[test]
+fn r101w2_01_metadata_refuses_every_transform_outside_the_allow_list() {
+    let document = signed_idp_metadata();
+    read_idp_metadata(&document, true).expect("the control verifies");
+    for (label, hostile) in hostile_transform_variants(&document) {
+        let result = read_idp_metadata(&hostile, true);
+        assert!(
+            matches!(
+                &result,
+                Err(crate::error::FederationError::SamlMetadataFailed(m))
+                    if m.contains("canonicalization transforms only")
+            ),
+            "{label}: {result:?}"
+        );
+    }
+}
+
+/// R101W2-01: each admitted shape, validly signed, is read through its
+/// signature.
+#[test]
+fn r101w2_01_metadata_admits_enveloped_and_the_c14n_family() {
+    let id = xml::new_id();
+    let template = idp_metadata_document(
+        &id,
+        &sign::signature_template(&id, &cert_bytes()),
+        METADATA_SSO,
+    );
+    for (label, document) in admitted_transform_variants(&template) {
+        let metadata =
+            read_idp_metadata(&signed(&document), true).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(metadata.sso_url, METADATA_SSO, "{label}");
+    }
+}

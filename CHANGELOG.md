@@ -88,6 +88,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a configuration with the flag set that signs with anything else (DSA,
   RSA-SHA224, MD5) is now refused at the signature check. Configurations
   without the flag are unaffected. T-69 carries a dated correction.
+- **A received XML signature may use only `enveloped-signature` and the c14n
+  family, and is verified off the request workers (R101W2-01).** Nothing
+  restricted the transforms or the canonicalisation method a signature names,
+  and the linked xmlsec (XSLT compiled in) evaluates them — XSLT, XPath, XPath
+  Filter 2, XPointer — before it checks the signature value, so a sender with
+  no valid signature chose how much CPU AXIAM spent at the SAML assertion
+  consumer, at the SAML IdP's SSO and SLO endpoints and at the IdP-metadata
+  signature check; the first two verified on the async workers. Every
+  signature is now refused before xmlsec runs unless its canonicalisation is
+  exclusive c14n, c14n 1.0 or c14n 1.1 without comments and each reference
+  carries at most two transforms, each `enveloped-signature` or one of those
+  (the only child element admitted is exclusive c14n's `InclusiveNamespaces`;
+  exactly one `Algorithm` per method, compared exactly) — on the default path
+  and with `allow_sha1_signatures` set alike. The ACS, the IdP's POST-binding
+  verification and the metadata check now run on the blocking pool under the
+  crypto semaphore. Keycloak, Entra ID, Okta, Shibboleth and samael sign with
+  `enveloped-signature` and exclusive c14n and are unaffected. **Behaviour
+  change:** an IdP or SP whose signatures name any other transform or a
+  `#WithComments` canonicalisation is refused. Threat model: T-477 enters
+  (High, Mitigated); T-69 carries a dated correction.
 
 ## [1.0.0] - 2026-10-10
 

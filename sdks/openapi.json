@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:426b808e2e857831afd3829cfbd55061364ab783e59a0ed9eea05334a5af8f19"
+    "x-axiam-spec-digest": "sha256:97110c3606d2bce7a250c3e0d46bdafd0afb028ab9355aee718c16922c375a06"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2617,7 +2617,7 @@
             "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
           },
           "429": {
-            "description": "The `ciba_approval_per_min` allowance of this route is spent"
+            "description": "The signed-in user's `ciba_approval_per_min` allowance of this route is spent"
           }
         },
         "security": [
@@ -12238,7 +12238,7 @@
             "description": "No such stream in this tenant"
           },
           "409": {
-            "description": "The audience is already used by another SSF stream, or the stream changed since it was read (reload it and retry)"
+            "description": "The audience is already used by another SSF stream, or the stream changed since it was read — since the `expected_updated_at` the request carried (a receiver's pause or narrowing included), or, when it carried none, since the server read it during the request (reload it and retry)"
           },
           "429": {
             "description": "Rate limit"
@@ -13848,7 +13848,7 @@
             }
           },
           "429": {
-            "description": "Rate limit exceeded",
+            "description": "Rate limit exceeded, or the client has made the most requests it may make for this hint in ten minutes (`slow_down`), whoever the hint names",
             "content": {
               "application/json": {
                 "schema": {
@@ -16576,7 +16576,9 @@
         "type": "object",
         "description": "The signed-in user's pending requests.",
         "required": [
-          "requests"
+          "requests",
+          "total_pending",
+          "truncated"
         ],
         "properties": {
           "requests": {
@@ -16584,7 +16586,17 @@
             "items": {
               "$ref": "#/components/schemas/CibaApprovalPage"
             },
-            "description": "Soonest expiry first, at most 50. Each entry is what\n`GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`."
+            "description": "Oldest first (by creation), at most 50. Each entry is what\n`GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`."
+          },
+          "total_pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many pending, unexpired requests the caller has in all, the ones\n`requests` leaves out included. Never less than `requests.len()`.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "`true` when `total_pending` is more than `requests` holds: the list is\nthe oldest 50 and the rest are waiting behind them."
           }
         }
       },
@@ -17391,7 +17403,7 @@
               "string",
               "null"
             ],
-            "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+            "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate. Must be an absolute `https` URL with\nno credentials and no fragment, naming a public host: an IP literal that\nis loopback, private, link-local or the cloud metadata address, and the\nnames `localhost`, `*.localhost`, `*.local` and `*.internal`, are refused\nwith `400`. Delivery is one request that does not follow redirects, and a\nname that resolves to a non-public address is refused when it is sent."
           },
           "backchannel_token_delivery_mode": {
             "type": [
@@ -22712,7 +22724,8 @@
           "not_recoverable",
           "dead_letter_configured",
           "dead_letter_full",
-          "recent_loss"
+          "recent_loss",
+          "outbound_abandoned_dropped"
         ],
         "properties": {
           "dead_letter_configured": {
@@ -22752,6 +22765,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Lost rows kept nowhere: no dead-letter file is configured, or it could not\ntake them.",
+            "minimum": 0
+          },
+          "outbound_abandoned_dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not request rows: the minimal profile's outbound\n`<kind>.delivery_abandoned` rows (an enqueue the in-process queue\nrefused) that were shed because the audit queue was down to the quarter\nit keeps for request rows. Counted apart from `dropped`, not written to\nthe dead-letter file, and not a `recent_loss`; a rising count means an\noutbound queue is refusing faster than the audit trail records it.",
             "minimum": 0
           },
           "recent_loss": {
@@ -25607,7 +25626,15 @@
             "items": {
               "$ref": "#/components/schemas/SsfEventType"
             },
-            "description": "A subset of `events_allowed`; absent means all of them. The receiver may\nnarrow it later, never widen it."
+            "description": "A subset of `events_allowed`; absent means all of them. The receiver may\nnarrow it later, never widen it. On update, absent therefore *resets* a\nnarrowing the receiver made to every allowed event, and `[]` keeps a\nreceiver's \"none\": a client that edits a stream sends the value it read\n(cut to the new `events_allowed`), never an absent field."
+          },
+          "expected_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The `updated_at` of the stream as the client read it (R1W2-03, T-406).\n**Update only; create ignores it.** When present, the replacement lands\nonly if the stream still has that version, else `409` (reload and\nretry): a pause or a narrowing the receiver made after the form was\nread is not silently reverted. When absent the replacement is\nconditional on the version the server reads during the request — an\nold client keeps that behaviour, and the console always sends it."
           },
           "receiver_client_id": {
             "type": "string",
@@ -27065,7 +27092,7 @@
               "string",
               "null"
             ],
-            "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+            "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned. Any other value\nis held to the same rule as on create."
           },
           "backchannel_token_delivery_mode": {
             "type": [

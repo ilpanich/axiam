@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-parse inside signature verification still uses libxml's defaults; it is
   recorded as the residual of T-474 (T-67, T-69 and T-474 carry dated
   corrections).
+- **`allow_sha1_signatures` admits SHA-1, not every algorithm (#606,
+  R1W1-08).** samael has no SHA-1 entry in its algorithm list, so with the
+  per-federation escape hatch set the SAML SP verifier passed no list at all,
+  which samael reads as "no restriction": any signature or digest algorithm the
+  linked xmlsec verifies was accepted (RSA-SHA224, DSA, HMAC, MD5 where xmlsec
+  has it). With the flag set, AXIAM now checks every signature's
+  `SignatureMethod` and every reference's `DigestMethod` itself before xmlsec
+  runs, and refuses the response unless each is a SHA-2 algorithm the default
+  path admits, `rsa-sha1`/`ecdsa-sha1` or the `sha1` digest (exact URI match; a
+  missing or repeated `Algorithm` is refused). **Behaviour change:** an IdP on
+  a configuration with the flag set that signs with anything else (DSA,
+  RSA-SHA224, MD5) is now refused at the signature check. Configurations
+  without the flag are unaffected. T-69 carries a dated correction.
 
 ## [1.0.0] - 2026-10-10
 
@@ -1414,6 +1427,7 @@ an open issue on `ilpanich/axiam`.
   - #605 — R1W1-07: the UTF-8 refusal does not see past a byte-order mark.
     Fixed in `1.0.1` (see `[Unreleased]`).
   - #606 — R1W1-08: the SHA-1 escape hatch admits every algorithm.
+    Fixed in `1.0.1` (see `[Unreleased]`).
   - #607 — R1W1-09: the CRL route's global lock and per-request read.
   - #608 — R1W1-10: CRL consistency across replicas and caches.
   - #609 — R1W1-11: the CRL distribution point is not the URL validated.

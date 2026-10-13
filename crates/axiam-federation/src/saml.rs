@@ -702,7 +702,9 @@ where
     ///   `ds:Signature` and verifies it individually); any one that does not
     ///   verify → `SamlSignatureInvalid`. IDs must be unique `NCName`s.
     /// - Since #531 only the SHA-2 RSA and ECDSA algorithms verify, unless the
-    ///   config sets `allow_sha1_signatures`.
+    ///   config sets `allow_sha1_signatures`; that adds `rsa-sha1`,
+    ///   `ecdsa-sha1` and the SHA-1 digest and nothing else (#606,
+    ///   [`check_sha1_escape_hatch_algorithms`]).
     ///
     /// Before D-23 this called `verify_signed_xml`, which verifies only the
     /// **first** `ds:Signature` in document order: a document the IdP signed
@@ -748,10 +750,19 @@ where
         //
         // #531 (D-3): only the SHA-2 algorithms the IdP receiver accepts, for
         // the signature and its digests. `allow_sha1_signatures` is the
-        // per-federation escape hatch for an IdP that still signs with SHA-1;
-        // it restores the earlier rule (no list: whatever xmlsec verifies).
-        let allowed =
-            (!config.allow_sha1_signatures).then_some(&ALLOWED_XML_SIGNATURE_ALGORITHMS[..]);
+        // per-federation escape hatch for an IdP that still signs with SHA-1.
+        //
+        // #606: samael's list has no SHA-1 member, and `None` means "every
+        // algorithm xmlsec verifies" (MD5, HMAC, DSA, ...), not "SHA-1 too".
+        // So the escape hatch checks the URIs itself, on this document, before
+        // samael runs: the SHA-2 list plus `rsa-sha1`/`ecdsa-sha1` and the
+        // SHA-1 digest, nothing else. Only then is samael called unrestricted.
+        let allowed = if config.allow_sha1_signatures {
+            check_sha1_escape_hatch_algorithms(&doc)?;
+            None
+        } else {
+            Some(&ALLOWED_XML_SIGNATURE_ALGORITHMS[..])
+        };
         <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
             xml,
             &[cert],
@@ -992,6 +1003,123 @@ fn check_signature_placement(doc: &libxml::tree::Document) -> Result<usize, Fede
         }
     }
     Ok(signatures.len())
+}
+
+/// `rsa-sha1`, the one SHA-1 RSA `SignatureMethod` (XML-DSig 1.0).
+const XMLDSIG_RSA_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+/// `ecdsa-sha1`, the one SHA-1 ECDSA `SignatureMethod` (RFC 6931 §2.3.6).
+const XMLDSIG_ECDSA_SHA1: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha1";
+/// `sha1`, the SHA-1 `DigestMethod` (XML-DSig 1.0).
+const XMLDSIG_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#sha1";
+
+/// What `allow_sha1_signatures` admits (#606): the `SignatureMethod` and
+/// `DigestMethod` URIs of [`ALLOWED_XML_SIGNATURE_ALGORITHMS`] — the SHA-2 set
+/// the default path hands samael, derived from that list so the two cannot
+/// drift — plus [`XMLDSIG_RSA_SHA1`], [`XMLDSIG_ECDSA_SHA1`] and
+/// [`XMLDSIG_SHA1`]. Like samael's own check, a digest is admitted on its own,
+/// not paired with its signature method.
+///
+/// Checked on **every** element named `Signature`, in any namespace (the
+/// placement rule has already refused any that is not an accepted
+/// `ds:Signature`), and on every `Reference` of its `SignedInfo`. Exactly one
+/// `SignedInfo`, one `SignatureMethod`, at least one `Reference` and one
+/// `DigestMethod` per `Reference`, each method with exactly one attribute
+/// named `Algorithm` (in any namespace, so the value read here is the one
+/// xmlsec's `xmlGetProp` reads) whose value is compared to the admitted URIs
+/// exactly. Anything else refuses the document before xmlsec sees it.
+fn check_sha1_escape_hatch_algorithms(doc: &libxml::tree::Document) -> Result<(), FederationError> {
+    fn refused(what: &str) -> FederationError {
+        FederationError::SamlSignatureInvalid(format!(
+            "{what} (allow_sha1_signatures admits the SHA-2 algorithms, rsa-sha1, \
+             ecdsa-sha1 and the sha1 digest only)"
+        ))
+    }
+    fn dsig_children<'a>(
+        node: &'a libxml::tree::Node,
+        name: &'a str,
+    ) -> impl Iterator<Item = libxml::tree::Node> + 'a {
+        node.get_child_elements()
+            .into_iter()
+            .filter(move |c| is_element(c, XMLNS_DSIG, name))
+    }
+    fn exactly_one<I: Iterator<Item = libxml::tree::Node>>(
+        mut nodes: I,
+        what: &str,
+    ) -> Result<libxml::tree::Node, FederationError> {
+        match (nodes.next(), nodes.next()) {
+            (Some(node), None) => Ok(node),
+            _ => Err(refused(&format!("not exactly one {what}"))),
+        }
+    }
+    fn algorithm(
+        context: &mut libxml::xpath::Context,
+        method: &libxml::tree::Node,
+        what: &str,
+    ) -> Result<String, FederationError> {
+        let attributes = context
+            .findnodes("@*[local-name()='Algorithm']", Some(method))
+            .map_err(|()| refused("algorithm check: XPath evaluation failed"))?;
+        match attributes.as_slice() {
+            [attribute] => Ok(attribute.get_content()),
+            _ => Err(refused(&format!(
+                "a {what} without exactly one Algorithm attribute"
+            ))),
+        }
+    }
+
+    let signature_admitted = |uri: &str| {
+        uri == XMLDSIG_RSA_SHA1
+            || uri == XMLDSIG_ECDSA_SHA1
+            || ALLOWED_XML_SIGNATURE_ALGORITHMS
+                .iter()
+                .any(|a| a.signature_uri() == uri)
+    };
+    let digest_admitted = |uri: &str| {
+        uri == XMLDSIG_SHA1
+            || ALLOWED_XML_SIGNATURE_ALGORITHMS
+                .iter()
+                .any(|a| a.digest_uri() == uri)
+    };
+
+    let mut context = libxml::xpath::Context::new(doc)
+        .map_err(|()| refused("algorithm check: failed to create XPath context"))?;
+    let signatures = context
+        .findnodes("//*[local-name()='Signature']", None)
+        .map_err(|()| refused("algorithm check: XPath evaluation failed"))?;
+    for signature in &signatures {
+        if !is_element(signature, XMLNS_DSIG, "Signature") {
+            return Err(refused(
+                "a Signature element outside the XML-DSig namespace",
+            ));
+        }
+        let signed_info = exactly_one(
+            dsig_children(signature, "SignedInfo"),
+            "SignedInfo in a ds:Signature",
+        )?;
+        let method = exactly_one(
+            dsig_children(&signed_info, "SignatureMethod"),
+            "SignatureMethod in a SignedInfo",
+        )?;
+        if !signature_admitted(&algorithm(&mut context, &method, "SignatureMethod")?) {
+            return Err(refused(
+                "a SignatureMethod algorithm outside the admitted set",
+            ));
+        }
+        let references: Vec<_> = dsig_children(&signed_info, "Reference").collect();
+        if references.is_empty() {
+            return Err(refused("a ds:Signature without a Reference"));
+        }
+        for reference in &references {
+            let digest = exactly_one(
+                dsig_children(reference, "DigestMethod"),
+                "DigestMethod in a Reference",
+            )?;
+            if !digest_admitted(&algorithm(&mut context, &digest, "DigestMethod")?) {
+                return Err(refused("a DigestMethod algorithm outside the admitted set"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bind the cryptographically verified XML signature to the assertion actually
@@ -1765,6 +1893,125 @@ pub(crate) mod tests {
             matches!(err, FederationError::ConfigIncomplete),
             "expected ConfigIncomplete, got: {err:?}"
         );
+    }
+
+    /// #606: the escape hatch's URI check on its own, over the shapes samael's
+    /// deserializer usually refuses before it (so the check does not lean on
+    /// that), and over a signature anywhere in the document.
+    #[test]
+    fn the_sha1_escape_hatch_check_refuses_malformed_methods() {
+        const RSA_SHA1: &str = r#"Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1""#;
+        const SHA1: &str = r#"Algorithm="http://www.w3.org/2000/09/xmldsig#sha1""#;
+        const MD5: &str = r#"Algorithm="http://www.w3.org/2001/04/xmldsig-more#md5""#;
+        fn doc(signed_info: &str) -> String {
+            format!(
+                r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:x="urn:x"><saml:Assertion><ds:Signature>{signed_info}</ds:Signature></saml:Assertion></samlp:Response>"#
+            )
+        }
+        fn check(xml: &str) -> Result<(), FederationError> {
+            let doc = libxml::parser::Parser::default()
+                .parse_string_with_options(xml.as_bytes(), receiver_parser_options())
+                .expect("parse");
+            check_sha1_escape_hatch_algorithms(&doc)
+        }
+        let reference = |digest: &str| {
+            format!(r##"<ds:Reference URI="#a"><ds:DigestMethod {digest}/></ds:Reference>"##)
+        };
+
+        let good = format!(
+            r#"<ds:SignedInfo><ds:SignatureMethod {RSA_SHA1}/>{}</ds:SignedInfo>"#,
+            reference(SHA1)
+        );
+        check(&doc(&good)).expect("rsa-sha1 over sha1 is admitted");
+
+        let refused = [
+            ("no SignedInfo", String::new(), "SignedInfo"),
+            (
+                "two SignedInfos",
+                format!("{good}{good}"),
+                "SignedInfo in a ds:Signature",
+            ),
+            (
+                "no SignatureMethod",
+                format!("<ds:SignedInfo>{}</ds:SignedInfo>", reference(SHA1)),
+                "SignatureMethod in a SignedInfo",
+            ),
+            (
+                "a SignatureMethod with no Algorithm",
+                format!(
+                    "<ds:SignedInfo><ds:SignatureMethod/>{}</ds:SignedInfo>",
+                    reference(SHA1)
+                ),
+                "Algorithm attribute",
+            ),
+            (
+                "a second, namespaced Algorithm",
+                format!(
+                    r#"<ds:SignedInfo><ds:SignatureMethod x:{} {RSA_SHA1}/>{}</ds:SignedInfo>"#,
+                    MD5,
+                    reference(SHA1)
+                ),
+                "Algorithm attribute",
+            ),
+            (
+                "no Reference",
+                format!(r#"<ds:SignedInfo><ds:SignatureMethod {RSA_SHA1}/></ds:SignedInfo>"#),
+                "without a Reference",
+            ),
+            (
+                "an MD5 digest on the second Reference",
+                format!(
+                    r#"<ds:SignedInfo><ds:SignatureMethod {RSA_SHA1}/>{}{}</ds:SignedInfo>"#,
+                    reference(SHA1),
+                    reference(MD5)
+                ),
+                "DigestMethod algorithm",
+            ),
+            (
+                "two DigestMethods",
+                format!(
+                    r##"<ds:SignedInfo><ds:SignatureMethod {RSA_SHA1}/><ds:Reference URI="#a"><ds:DigestMethod {SHA1}/><ds:DigestMethod {MD5}/></ds:Reference></ds:SignedInfo>"##
+                ),
+                "DigestMethod in a Reference",
+            ),
+            (
+                "methods outside the XML-DSig namespace",
+                format!(
+                    r#"<ds:SignedInfo><x:SignatureMethod {RSA_SHA1}/>{}</ds:SignedInfo>"#,
+                    reference(SHA1)
+                ),
+                "SignatureMethod in a SignedInfo",
+            ),
+        ];
+        for (shape, signed_info, what) in refused {
+            let result = check(&doc(&signed_info));
+            assert!(
+                matches!(&result, Err(FederationError::SamlSignatureInvalid(m)) if m.contains(what)),
+                "{shape}: refused ({what}): {result:?}"
+            );
+        }
+
+        // A second signature, anywhere, is checked as well; a `Signature` in
+        // another namespace is refused rather than skipped.
+        let md5_signed_info = format!(
+            r#"<ds:SignedInfo><ds:SignatureMethod {RSA_SHA1}/>{}</ds:SignedInfo>"#,
+            reference(MD5)
+        );
+        for xml in [
+            doc(&good).replace(
+                "<saml:Assertion>",
+                &format!("<ds:Signature>{md5_signed_info}</ds:Signature><saml:Assertion>"),
+            ),
+            doc(&good).replace(
+                "</saml:Assertion>",
+                &format!("</saml:Assertion><x:Signature>{good}</x:Signature>"),
+            ),
+        ] {
+            assert!(
+                matches!(check(&xml), Err(FederationError::SamlSignatureInvalid(_))),
+                "{xml}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -531,27 +531,40 @@ async fn an_idp_initiated_response_is_accepted_without_in_response_to() {
 // refuses markup declarations before parsing
 // ---------------------------------------------------------------------------
 
-/// `xml` re-signed with RSA-SHA1 over a SHA-1 digest: the same key, the same
-/// certificate, the same content, a valid signature — only the algorithms
-/// differ. `xml` must carry one signature (`sign_responses` off).
-fn resigned_with_sha1(xml: &str) -> String {
+const RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+const DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
+const RSA_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+const DIGEST_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#sha1";
+const RSA_MD5: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-md5";
+const DIGEST_MD5: &str = "http://www.w3.org/2001/04/xmldsig-more#md5";
+
+/// `xml` with its RSA-SHA256 `SignatureMethod` and SHA-256 `DigestMethod`
+/// replaced by `signature_method` and `digest_method`, signature and digest
+/// values left as they were (so no longer valid).
+fn with_algorithms(xml: &str, signature_method: &str, digest_method: &str) -> String {
+    xml.replace(RSA_SHA256, signature_method)
+        .replace(DIGEST_SHA256, digest_method)
+}
+
+/// `xml` re-signed with `signature_method` over a `digest_method` digest: the
+/// same key, the same certificate, the same content, a valid signature — only
+/// the algorithms differ. `xml` must carry one signature (`sign_responses`
+/// off).
+fn resigned_with(xml: &str, signature_method: &str, digest_method: &str) -> String {
     fn blank(doc: &str, open: &str, close: &str) -> String {
         let start = doc.find(open).expect(open) + open.len();
         let end = start + doc[start..].find(close).expect(close);
         format!("{}{}", &doc[..start], &doc[end..])
     }
-    let doc = xml
-        .replace(
-            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
-            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
-        )
-        .replace(
-            "http://www.w3.org/2001/04/xmlenc#sha256",
-            "http://www.w3.org/2000/09/xmldsig#sha1",
-        );
+    let doc = with_algorithms(xml, signature_method, digest_method);
     let doc = blank(&doc, "<ds:DigestValue>", "</ds:DigestValue>");
     let doc = blank(&doc, "<ds:SignatureValue>", "</ds:SignatureValue>");
     signed(&doc)
+}
+
+/// `xml` re-signed with RSA-SHA1 over a SHA-1 digest.
+fn resigned_with_sha1(xml: &str) -> String {
+    resigned_with(xml, RSA_SHA1, DIGEST_SHA1)
 }
 
 fn sha1_allowed_config() -> axiam_core::models::federation::FederationConfig {
@@ -584,7 +597,7 @@ async fn p23w3_08_a_sha1_signed_response_is_refused_unless_the_federation_allows
         "SHA-1 is refused by default, as an invalid signature"
     );
 
-    // The escape hatch restores the earlier rule for this federation only.
+    // The escape hatch admits SHA-1 for this federation only.
     let accepted = sp_accepts_with(
         sha1_allowed_config(),
         &xml,
@@ -610,6 +623,251 @@ async fn p23w3_08_a_sha1_signed_response_is_refused_unless_the_federation_allows
     )
     .await
     .expect("SHA-256 verifies with the escape hatch set");
+}
+
+/// Whether `result` is the escape hatch's own refusal (#606), naming `what`:
+/// refused for the algorithm URI, before xmlsec verifies anything.
+fn refused_by_the_sha1_algorithm_check(
+    result: &Result<crate::oidc::FederationCallbackResult, crate::error::FederationError>,
+    what: &str,
+) -> bool {
+    matches!(
+        result,
+        Err(crate::error::FederationError::SamlSignatureInvalid(m))
+            if m.contains("allow_sha1_signatures admits") && m.contains(what)
+    )
+}
+
+// ---------------------------------------------------------------------------
+// #606 (R1W1-08): the SHA-1 escape hatch admits SHA-1, not every algorithm
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn r1w1_08_the_sha1_escape_hatch_refuses_md5_and_every_other_algorithm() {
+    let sha2 = decode(&Case::new().issue_ok());
+
+    // An RSA-MD5 signature over an MD5 digest. The xmlsec linked here cannot
+    // make one (it signs no MD5), so the values are left stale: the refusal
+    // must name the algorithm, i.e. come from the URI check before xmlsec.
+    let md5 = with_algorithms(&sha2, RSA_MD5, DIGEST_MD5);
+    assert_eq!(
+        xpath(&md5, "//*[local-name()='SignatureMethod']/@Algorithm"),
+        [RSA_MD5]
+    );
+    let refused = sp_accepts_with(
+        sha1_allowed_config(),
+        &md5,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await;
+    assert!(
+        refused_by_the_sha1_algorithm_check(&refused, "SignatureMethod algorithm"),
+        "allow_sha1_signatures refuses RSA-MD5 for its algorithm: {refused:?}"
+    );
+    // Without the escape hatch it was, and is, refused by samael's list.
+    assert!(matches!(
+        sp_accepts(&md5, Some(REQUEST_ID), Some(ACS), true).await,
+        Err(crate::error::FederationError::SamlSignatureInvalid(_))
+    ));
+
+    // What the hole admitted, shown with an algorithm this xmlsec does make:
+    // a valid RSA-SHA224 signature over a SHA-224 digest verifies with no
+    // algorithm list (what the escape hatch used to hand samael), is outside
+    // the SHA-2 list, and is now refused by the escape hatch too.
+    let sha224 = resigned_with(
+        &sha2,
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha224",
+        "http://www.w3.org/2001/04/xmldsig-more#sha224",
+    );
+    <XmlSec as CryptoProvider>::reduce_xml_to_signed(
+        &sha224,
+        &[cert_der(material())],
+        ReduceMode::PreDigest,
+    )
+    .expect("the RSA-SHA224 signature is valid, so only an algorithm check refuses it");
+    for config in [sp_config(), sha1_allowed_config()] {
+        let allow = config.allow_sha1_signatures;
+        let result = sp_accepts_with(config, &sha224, Some(REQUEST_ID), Some(ACS), true).await;
+        assert!(
+            matches!(
+                &result,
+                Err(crate::error::FederationError::SamlSignatureInvalid(_))
+            ) && (!allow || refused_by_the_sha1_algorithm_check(&result, "SignatureMethod")),
+            "allow_sha1_signatures={allow}: a valid RSA-SHA224 signature is refused: {result:?}"
+        );
+    }
+
+    // RSA-SHA1 verifies with the flag on and is refused with it off.
+    let sha1 = resigned_with_sha1(&sha2);
+    sp_accepts_with(
+        sha1_allowed_config(),
+        &sha1,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await
+    .expect("allow_sha1_signatures admits an rsa-sha1 signature");
+    let refused = sp_accepts(&sha1, Some(REQUEST_ID), Some(ACS), true).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(crate::error::FederationError::SamlSignatureInvalid(_))
+        ) && !refused_by_the_sha1_algorithm_check(&refused, ""),
+        "with the flag off rsa-sha1 is refused by samael's SHA-2 list, as before"
+    );
+
+    // Each of these is refused by the URI check itself, before xmlsec runs
+    // (the signature values are left stale, so the message is what proves
+    // where the refusal came from).
+    let signature_method =
+        r#"<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>"#;
+    assert!(sha2.contains(signature_method), "fixture shape");
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "a SHA-256 signature over an MD5 digest",
+            with_algorithms(&sha2, RSA_SHA256, DIGEST_MD5),
+            "DigestMethod algorithm",
+        ),
+        (
+            "an RSA-MD5 signature over a SHA-256 digest",
+            with_algorithms(&sha2, RSA_MD5, DIGEST_SHA256),
+            "SignatureMethod algorithm",
+        ),
+        (
+            "HMAC-SHA1, keyed with whatever xmlsec makes of the certificate",
+            with_algorithms(
+                &sha2,
+                "http://www.w3.org/2000/09/xmldsig#hmac-sha1",
+                DIGEST_SHA1,
+            ),
+            "SignatureMethod algorithm",
+        ),
+        (
+            "DSA-SHA1",
+            with_algorithms(
+                &sha2,
+                "http://www.w3.org/2000/09/xmldsig#dsa-sha1",
+                DIGEST_SHA1,
+            ),
+            "SignatureMethod algorithm",
+        ),
+        (
+            "RSA-SHA224, outside the SHA-2 list the default path admits",
+            with_algorithms(
+                &sha2,
+                "http://www.w3.org/2001/04/xmldsig-more#rsa-sha224",
+                DIGEST_SHA256,
+            ),
+            "SignatureMethod algorithm",
+        ),
+        (
+            "an admitted URI with a suffix",
+            with_algorithms(&sha2, &format!("{RSA_SHA1}x"), DIGEST_SHA1),
+            "SignatureMethod algorithm",
+        ),
+        (
+            "an admitted digest URI with a trailing space",
+            with_algorithms(&sha2, RSA_SHA1, &format!("{DIGEST_SHA1} ")),
+            "DigestMethod algorithm",
+        ),
+    ];
+    for (shape, xml, what) in cases {
+        let result = sp_accepts_with(
+            sha1_allowed_config(),
+            &xml,
+            Some(REQUEST_ID),
+            Some(ACS),
+            true,
+        )
+        .await;
+        assert!(
+            refused_by_the_sha1_algorithm_check(&result, what),
+            "{shape}: refused by the escape hatch's URI check ({what}): {result:?}"
+        );
+    }
+
+    // Malformed methods are refused too — here by samael's deserializer,
+    // which runs first; the URI check refuses the same shapes on its own
+    // (`saml::tests::the_sha1_escape_hatch_check_refuses_malformed_methods`).
+    for (shape, xml) in [
+        (
+            "a SignatureMethod with no Algorithm",
+            sha2.replace(signature_method, "<ds:SignatureMethod/>"),
+        ),
+        (
+            "a SignatureMethod with a second, namespaced Algorithm",
+            sha2.replace(
+                signature_method,
+                &format!(
+                    r#"<ds:SignatureMethod xmlns:x="urn:x" x:Algorithm="{RSA_MD5}" Algorithm="{RSA_SHA1}"/>"#
+                ),
+            ),
+        ),
+        (
+            "two SignatureMethods",
+            sha2.replace(
+                signature_method,
+                &format!(r#"{signature_method}<ds:SignatureMethod Algorithm="{RSA_MD5}"/>"#),
+            ),
+        ),
+    ] {
+        let result =
+            sp_accepts_with(sha1_allowed_config(), &xml, Some(REQUEST_ID), Some(ACS), true).await;
+        assert!(result.is_err(), "{shape}: refused: {result:?}");
+    }
+
+    // Every signature is checked, not the first: with the response signed as
+    // well, an MD5 algorithm on the assertion's signature alone (the second in
+    // document order) refuses the document.
+    let mut case = Case::new();
+    case.sp.sign_responses = true;
+    let two = decode(&case.issue_ok());
+    assert_eq!(
+        xpath(&two, "//*[local-name()='SignatureMethod']/@Algorithm"),
+        [RSA_SHA256, RSA_SHA256]
+    );
+    let at = two.rfind(RSA_SHA256).expect("second signature method");
+    let second_md5 = format!("{}{RSA_MD5}{}", &two[..at], &two[at + RSA_SHA256.len()..]);
+    assert_eq!(
+        xpath(
+            &second_md5,
+            "//*[local-name()='SignatureMethod']/@Algorithm"
+        ),
+        [RSA_SHA256, RSA_MD5]
+    );
+    let result = sp_accepts_with(
+        sha1_allowed_config(),
+        &second_md5,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await;
+    assert!(
+        refused_by_the_sha1_algorithm_check(&result, "SignatureMethod algorithm"),
+        "the second signature's algorithm is checked: {result:?}"
+    );
+    let at = two.rfind(DIGEST_SHA256).expect("second digest method");
+    let second_digest_md5 = format!(
+        "{}{DIGEST_MD5}{}",
+        &two[..at],
+        &two[at + DIGEST_SHA256.len()..]
+    );
+    let result = sp_accepts_with(
+        sha1_allowed_config(),
+        &second_digest_md5,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await;
+    assert!(
+        refused_by_the_sha1_algorithm_check(&result, "DigestMethod algorithm"),
+        "the second signature's digest is checked: {result:?}"
+    );
 }
 
 #[tokio::test]

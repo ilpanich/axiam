@@ -942,7 +942,13 @@ async fn concurrent_redemptions_yield_exactly_one_token_set() {
     let app = app!(f, permissive());
 
     for round in 0..6 {
-        let (_, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+        // Three rounds per hint: the per-(client, hint) cap (#599) counts calls.
+        let hint = if round < 3 {
+            "&login_hint=alice"
+        } else {
+            "&login_hint=alice%40example.com"
+        };
+        let (_, body) = bc_authorize!(app, f, &f.ciba, hint);
         let id = body["auth_req_id"].as_str().unwrap().to_owned();
         approve(&f, &id, Uuid::new_v4()).await;
         let path = format!("/oauth2/token?tenant_id={}", f.tenant_id);
@@ -986,12 +992,27 @@ async fn the_limiter_counts_bc_authorize() {
     assert!(statuses[3..].iter().all(|s| *s == 429), "{statuses:?}");
 }
 
-/// #599 (T-424): a client may hold three open requests for one user. The fourth
-/// is refused before it is stored, in the shape the per-client limiter refuses
-/// in (`429 slow_down`, `Cache-Control: no-store`), and a hint naming nobody is
-/// never refused this way.
+/// How many CIBA requests are stored, for anyone.
+async fn stored_requests(f: &Fixture) -> i64 {
+    let mut count =
+        f.db.query("SELECT count() AS n FROM ciba_request GROUP ALL")
+            .await
+            .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    n.unwrap_or(0)
+}
+
+/// The notifications sent so far, once the detached ones have landed.
+async fn settled_notifications(f: &Fixture) -> usize {
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    f.notifier.sent.lock().unwrap().len()
+}
+
+/// #599 (T-424): a client may make three `bc-authorize` calls for one hint in
+/// the cap's window. The fourth is refused before anything is stored or mailed,
+/// in the shape the per-client limiter refuses in (`429 slow_down`).
 #[actix_web::test]
-async fn the_fourth_open_request_for_one_user_gets_the_limiters_slow_down() {
+async fn the_fourth_request_for_one_hint_gets_the_limiters_slow_down() {
     let f = setup().await;
     let app = app!(f, permissive());
     for _ in 0..3 {
@@ -1000,19 +1021,145 @@ async fn the_fourth_open_request_for_one_user_gets_the_limiters_slow_down() {
     let (status, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
     assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
     assert!(body["error_description"].as_str().is_some());
-    let mut count =
-        f.db.query("SELECT count() AS n FROM ciba_request GROUP ALL")
-            .await
-            .unwrap();
-    let n: Option<i64> = count.take("n").unwrap();
-    assert_eq!(n, Some(3), "the refused request was not stored");
+    assert_eq!(
+        stored_requests(&f).await,
+        3,
+        "the refused request was not stored"
+    );
+    // The refusal returns before the request exists, so there is no request a
+    // notification could name: the three admitted ones are all that was sent.
+    assert_eq!(settled_notifications(&f).await, 3);
+    assert!(
+        f.notifier
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|n| n.user_id == f.user_id)
+    );
+}
 
-    for _ in 0..5 {
-        assert_eq!(
-            bc_authorize!(app, f, &f.ciba, "&login_hint=nobody-here").0,
-            200
-        );
+/// #599 (T-422, D-63): the cap is no user oracle. A hint naming nobody is
+/// refused at exactly the call a real user's is, with the same answer, so four
+/// requests tell a client nothing about whether a hint names a user.
+#[actix_web::test]
+async fn a_hint_naming_nobody_meets_the_cap_at_the_same_call() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let mut real = Vec::new();
+    let mut nobody = Vec::new();
+    for _ in 0..4 {
+        real.push(bc_authorize!(app, f, &f.ciba, "&login_hint=alice"));
+        nobody.push(bc_authorize!(app, f, &f.ciba, "&login_hint=nobody-here"));
     }
+    let statuses = |answers: &[(u16, Value)]| answers.iter().map(|a| a.0).collect::<Vec<_>>();
+    assert_eq!(statuses(&real), [200, 200, 200, 429]);
+    assert_eq!(statuses(&nobody), statuses(&real));
+    assert_eq!(nobody[3].1, real[3].1, "the refusal is the same body");
+    // The admitted answers carry the same members either way (D-63).
+    let members = |v: &Value| {
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(members(&nobody[0].1), members(&real[0].1));
+    assert_eq!(stored_requests(&f).await, 6, "three of each were stored");
+
+    // A user who may not sign in is nobody, and meets the cap the same way.
+    let users = SurrealUserRepository::new(f.db.clone());
+    users
+        .update(
+            f.tenant_id,
+            f.user_id,
+            UpdateUser {
+                status: Some(UserStatus::Inactive),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let inactive: Vec<u16> = {
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            out.push(bc_authorize!(app, f, &f.other, "&login_hint=alice%40example.com").0);
+        }
+        out
+    };
+    assert_eq!(inactive, [200, 200, 200, 429]);
+}
+
+/// #599: the cap is per (client, hint). Another client naming the same hint,
+/// and the same client naming another hint, have counts of their own — the
+/// same user's e-mail address is another hint.
+#[actix_web::test]
+async fn the_cap_is_per_client_and_per_hint() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    for _ in 0..3 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 429);
+    assert_eq!(bc_authorize!(app, f, &f.other, "&login_hint=alice").0, 200);
+    assert_eq!(
+        bc_authorize!(app, f, &f.ciba, "&login_hint=alice%40example.com").0,
+        200
+    );
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=bob").0, 200);
+    // The hint is trimmed, as its lookup trims it: padding is the same hint.
+    assert_eq!(
+        bc_authorize!(app, f, &f.ciba, "&login_hint=%20alice%20").0,
+        429
+    );
+}
+
+/// A replica's state: its own `AppState` (and so its own CIBA service and
+/// counter store) over the fixture's datastore, or the fixture's own. Built
+/// here, outside the test's future, which an `AppState` would overflow.
+fn replica(f: &Fixture, fresh: bool) -> web::Data<AppState<TestDb>> {
+    let mut state = if fresh {
+        let mut state = AppState::for_test(f.db.clone(), f.auth.clone());
+        state.oauth2.ciba_notifier = f.notifier.clone();
+        state
+    } else {
+        f.state.clone()
+    };
+    state.rate_limit_cfg = permissive();
+    web::Data::new(state)
+}
+
+/// One `bc-authorize` as the fixture's CIBA client, through an app built over
+/// `state` for this call alone.
+async fn bc_authorize_on(state: web::Data<AppState<TestDb>>, f: &Fixture, hint: &str) -> u16 {
+    let limits = permissive();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.auth.clone()))
+            .app_data(state)
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| {
+                register_api_v1_routes_with::<TestDb>(cfg, &limits, RouteOptions::default())
+            }),
+    )
+    .await;
+    bc_authorize!(app, f, &f.ciba, hint).0
+}
+
+/// #599: the count lives in the datastore's shared rate-limit table, not in a
+/// replica's memory, so two replicas — two `AppState`s, each with its own
+/// services — over one store share one cap.
+#[actix_web::test]
+async fn the_cap_is_shared_by_replicas_over_one_store() {
+    let f = setup().await;
+    let a = replica(&f, false);
+    let b = replica(&f, true);
+    let hint = "&login_hint=nobody-here";
+    let mut statuses = Vec::new();
+    for state in [&a, &b, &a, &b, &a] {
+        statuses.push(Box::pin(bc_authorize_on(state.clone(), &f, hint)).await);
+    }
+    assert_eq!(statuses, [200, 200, 200, 429, 429]);
 }
 
 /// The CIBA grant at the token endpoint is counted by the token endpoint's
@@ -1899,6 +2046,12 @@ async fn a_fapi2_ping_client_needs_a_notification_token_of_128_bits() {
         axiam_db::SurrealCibaRequestRepository::new(f.db.clone(), Some([7u8; 32])),
         SurrealUserRepository::new(f.db.clone()),
         f.auth.jwt_public_key_pem.clone(),
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+                f.db.clone(),
+            )),
+            f.auth.jwt_private_key_pem.as_bytes(),
+        ),
     )
     .with_signed_request_verifier(Arc::new(
         axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(

@@ -27,8 +27,8 @@
 //! 5. A per-client bucket, counted only after authentication so a stranger
 //!    cannot spend a real client's allowance (the route's governor and shared
 //!    counter already counted every request, authenticated or not). The
-//!    per-(client, user) cap on open requests is checked by the service once
-//!    the hint is resolved, before the request is stored or mailed.
+//!    per-(client, hint) cap is checked by the service once the request is
+//!    validated, before the hint is looked up, stored or mailed.
 //! 6. The service resolves the request — the signed `request` JWT for a
 //!    client that registered `backchannel_authentication_request_signing_alg`
 //!    (verified against its registered keys, its `jti` spent), the form for
@@ -42,14 +42,17 @@
 //! Whether the hint named a real user who may sign in (D-63): a request for
 //! nobody is stored and answered like any other, and simply expires.
 //!
-//! One answer does depend on the user (#599, T-424, amended 2026-10-13): a
-//! client that already holds three open requests for the user its hint names is
-//! refused a fourth with `429 slow_down`, the per-client limiter's answer. A
-//! request for nobody has no user to count against and is never refused this
-//! way, so that refusal tells the client — which has itself made the three
-//! requests — that the hint named a user who may sign in. The probe costs four
-//! requests and leaves three open, a mailed prompt among them, per name tried,
-//! all inside `bc_authorize_per_min`; see `ciba::MAX_PENDING_PER_CLIENT_USER`.
+//! The per-(client, hint) cap keeps to this (#599, T-424): a client's fourth
+//! `bc-authorize` for one hint within the cap's window (ten minutes, the longest
+//! a request may live) is refused with `429 slow_down`, the per-client
+//! limiter's answer, whether the hint names a real user or nobody. It counts
+//! calls for the hint as the request carried it, in the shared rate-limit
+//! table, before the hint is looked up, so neither its answer nor its cost
+//! depends on whom the hint names; an approved, denied or expired request still
+//! counts until the window has passed. (Corrected 2026-10-13: as first built
+//! the cap counted the resolved user's open requests, never refused a hint
+//! naming nobody, and so told the client which hints named users.) See
+//! `ciba::MAX_REQUESTS_PER_CLIENT_HINT`.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -84,8 +87,8 @@ pub const USER_NOTIFICATIONS_PER_MIN: u32 = 3;
 pub const CIBA_INITIATED_AUDIT_ACTION: &str = "oauth2.ciba_initiated";
 
 /// The per-client limiter's refusal: `429 slow_down`, uncacheable. The one
-/// shape both the per-minute bucket and the per-(client, user) cap on open
-/// requests (#599) answer with, so a client has one thing to back off from.
+/// shape both the per-minute bucket and the per-(client, hint) cap (#599)
+/// answer with, so a client has one thing to back off from.
 fn slow_down(description: &str) -> HttpResponse {
     HttpResponse::TooManyRequests()
         .append_header(("Cache-Control", "no-store"))
@@ -110,8 +113,9 @@ fn slow_down(description: &str) -> HttpResponse {
          body = BackchannelAuthenticationResponse),
         (status = 400, description = "CIBA Core section 13 error", body = OAuth2ErrorResponse),
         (status = 401, description = "Client authentication failed", body = OAuth2ErrorResponse),
-        (status = 429, description = "Rate limit exceeded, or the client already has the most open \
-                                      requests it may have for this user (`slow_down`)",
+        (status = 429, description = "Rate limit exceeded, or the client has made the most requests \
+                                      it may make for this hint in ten minutes (`slow_down`), \
+                                      whoever the hint names",
          body = OAuth2ErrorResponse),
     ),
 )]
@@ -247,11 +251,11 @@ async fn bc_authorize_inner<C: Connection + Clone>(
         .await
     {
         Ok(initiation) => initiation,
-        // #599 (T-424): the per-(client, user) cap on open requests, answered
-        // as the per-client limiter answers.
+        // #599 (T-424): the per-(client, hint) cap, answered as the
+        // per-client limiter answers — and alike whoever the hint names.
         Err(OAuth2Error::SlowDown) => {
             return slow_down(
-                "this client already has the most open sign-in requests it may have for this user",
+                "this client has made the most sign-in requests it may make for this hint for now",
             );
         }
         Err(e) => return build_oauth2_error_response(&e),

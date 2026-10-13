@@ -48,13 +48,15 @@
 //! sent: answering it would let any registered CIBA client enumerate the
 //! tenant's usernames and e-mail addresses at the endpoint's rate limit.
 //!
-//! One exception, added by #599 (T-424) and recorded as such on 2026-10-13: the
-//! per-(client, user) cap ([`MAX_PENDING_PER_CLIENT_USER`]). A request for
-//! nobody has no user to count against, so only a real user's fourth open
-//! request from one client is refused (`slow_down`); the refusal tells that
-//! client the hint named a user who may sign in. It costs the client four
-//! requests per name, three of them left open, and is bounded by the
-//! per-client limiter.
+//! The per-(client, hint) cap (#599, T-424, [`MAX_REQUESTS_PER_CLIENT_HINT`])
+//! keeps to this. It counts the client's `bc-authorize` calls for the hint as
+//! the request carried it — a `login_hint` as sent, a verified
+//! `id_token_hint`'s subject — in a shared counter, before the hint is looked
+//! up, so a hint that names nobody is refused at exactly the call a real
+//! user's would be. (From 2026-10-13 until its correction the same day the cap
+//! counted the resolved user's open requests, and a request for nobody was
+//! never refused: the fourth call told the client whether the hint named a
+//! user who may sign in.)
 
 use axiam_core::models::ciba::{
     CIBA_GRANT_TYPE, CibaApprovalEvidence, CibaClientMetadata, CibaDeliveryMode,
@@ -779,9 +781,10 @@ pub struct CibaApproval {
 /// ([`CibaPendingPage::total_pending`]).
 pub const MAX_PENDING_LIST: u32 = 50;
 
-/// The most `pending`, unexpired requests one client may have open for one
-/// user (#599, T-424). A fourth is refused at `bc-authorize` before it is
-/// stored or mailed, with the `slow_down` the per-client limiter answers.
+/// The most `bc-authorize` calls one client may make for one hint in any
+/// [`HINT_CAP_WINDOW_SECS`] (#599, T-424). A fourth is refused before the hint
+/// is looked up, stored or mailed, with the `slow_down` the per-client limiter
+/// answers.
 ///
 /// `requested_expiry` is the client's to choose, so without a per-client bound
 /// a client that may address a user could keep the whole list full of
@@ -789,14 +792,161 @@ pub const MAX_PENDING_LIST: u32 = 50;
 /// first is still on the user's phone; a client that needs more is waiting on
 /// a user who has not answered.
 ///
-/// Checked, not enforced by the datastore: two `bc-authorize` calls that both
-/// read two open requests both store one, so a burst can overshoot by up to the
-/// number of calls in flight at once for the same (client, user) pair. The
-/// per-client limiter (`bc_authorize_per_min`) bounds that burst and the
-/// requests expire within [`MAX_REQUESTED_EXPIRY_SECS`], and the next call
-/// reads the true count and is refused — so the overshoot is transient and
-/// never compounds.
-pub const MAX_PENDING_PER_CLIENT_USER: u64 = 3;
+/// **What is counted is calls, not open requests.** The count is keyed on
+/// (tenant, client, a keyed digest of the hint) — never on the user the hint
+/// resolves to — so a hint that names nobody, a user who may not sign in and a
+/// real user are refused at the same call, and the refusal says nothing about
+/// the hint (D-63, T-422). A request that has been approved, denied or has
+/// expired therefore still counts until its window has passed, and a refused
+/// call counts too: a client that keeps calling for a hint stays refused until
+/// it has stopped for a window. The hint is the one the request carried, as
+/// hint resolution normalises it (a `login_hint` trimmed and otherwise exact,
+/// as the username and e-mail lookups match it; an `id_token_hint` reduced to
+/// its verified subject), so one user named by username, by e-mail address
+/// and by ID token is three hints — up to nine calls a window from one client.
+///
+/// Admission requires the calls in this window and the one before it to come
+/// to at most three, so any [`HINT_CAP_WINDOW_SECS`]-long stretch admits at
+/// most three; as no request outlives that, one client never has more than
+/// three open requests for one hint. The price is coarseness: a client that has
+/// made three calls in one window is refused for the whole of the next, so it
+/// waits between one and two windows. The counter is the shared rate-limit
+/// table, incremented atomically in the datastore on every call, so the cap
+/// holds across replicas and under concurrent calls (see [`CibaHintCap`]).
+pub const MAX_REQUESTS_PER_CLIENT_HINT: u64 = 3;
+
+/// The window of [`MAX_REQUESTS_PER_CLIENT_HINT`]: the longest a request may
+/// live ([`MAX_REQUESTED_EXPIRY_SECS`]), not the default
+/// ([`DEFAULT_EXPIRES_IN_SECS`]), so a client that asks for the longest expiry
+/// still cannot hold a fourth open request for one hint.
+pub const HINT_CAP_WINDOW_SECS: u64 = MAX_REQUESTED_EXPIRY_SECS;
+
+/// What a hint names, as the cap counts it and the lookup reads it: a
+/// `login_hint` as sent (already trimmed), or a verified `id_token_hint`'s
+/// subject. Computed without looking anyone up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HintName {
+    /// A username or e-mail address.
+    Login(String),
+    /// The subject of an ID token this deployment signed for this client.
+    Subject(Uuid),
+}
+
+/// The per-(client, hint) cap on `bc-authorize` (#599, T-424): see
+/// [`MAX_REQUESTS_PER_CLIENT_HINT`].
+///
+/// Counted in the deployment's shared rate-limit table (`rate_limit_bucket`)
+/// through [`axiam_db::SharedRateLimitStore::increment_by`], one atomic upsert
+/// per call — not through the write-behind
+/// [`axiam_db::SharedRateLimitCounter`], whose window is the limiters' minute
+/// and whose local buckets are pruned after two of them. Two buckets per
+/// (tenant, client, hint), one for even and one for odd windows, so the table
+/// holds two rows per hint a client has named, however long it keeps naming
+/// it.
+///
+/// The bucket key is `ciba_hint_cap:{tenant}:` followed by an HMAC-SHA256,
+/// under a key only the deployment holds, of the client and the hint: the
+/// table is not a dictionary of hashes of the usernames and addresses clients
+/// have tried.
+#[derive(Clone)]
+pub struct CibaHintCap {
+    store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
+    key: [u8; 32],
+}
+
+impl std::fmt::Debug for CibaHintCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CibaHintCap").finish_non_exhaustive()
+    }
+}
+
+impl CibaHintCap {
+    /// The domain label of [`Self::derived_from`]'s derivation.
+    const KEY_LABEL: &'static [u8] = b"axiam/ciba/hint-cap/v1";
+
+    /// A cap over `store`, keying its buckets with `key`.
+    pub fn new(store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>, key: [u8; 32]) -> Self {
+        Self { store, key }
+    }
+
+    /// A cap whose bucket key is derived from a secret every replica already
+    /// shares — the deployment's token signing key, PEM-encoded — as
+    /// HMAC-SHA256(secret, a fixed label). One-way, so the derived key tells
+    /// nothing about the signing key; a new signing key starts every hint's
+    /// count afresh, which errs lenient for one window and no further.
+    pub fn derived_from(
+        store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
+        deployment_secret: &[u8],
+    ) -> Self {
+        Self::new(store, hmac_sha256(deployment_secret, &[Self::KEY_LABEL]))
+    }
+
+    /// The bucket base for (tenant, client, hint); the window's parity is
+    /// appended.
+    fn bucket(&self, tenant_id: Uuid, client_id: &str, hint: &HintName) -> String {
+        let tenant = tenant_id.to_string();
+        let (kind, value): (&[u8], String) = match hint {
+            HintName::Login(v) => (b"login", v.clone()),
+            HintName::Subject(sub) => (b"sub", sub.to_string()),
+        };
+        // Length-prefixed parts, so no two (tenant, client, kind, value)
+        // tuples encode alike.
+        let mac = hmac_sha256(
+            &self.key,
+            &[
+                tenant.as_bytes(),
+                client_id.as_bytes(),
+                kind,
+                value.as_bytes(),
+            ],
+        );
+        format!("ciba_hint_cap:{tenant_id}:{}", hex::encode(mac))
+    }
+
+    /// Count this call and say whether it is admitted.
+    ///
+    /// Increments this window's bucket and reads the previous window's (an
+    /// upsert of zero, which also resets a bucket left from an older window
+    /// of the same parity), then admits when the two come to at most
+    /// [`MAX_REQUESTS_PER_CLIENT_HINT`]. A refused call is counted too.
+    async fn admit(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        hint: &HintName,
+        now: DateTime<Utc>,
+    ) -> Result<bool, OAuth2Error> {
+        let window = HINT_CAP_WINDOW_SECS as i64;
+        let index = now.timestamp().div_euclid(window);
+        let start = |i: i64| DateTime::<Utc>::from_timestamp(i * window, 0).unwrap_or(now);
+        let base = self.bucket(tenant_id, client_id, hint);
+        let slot = |i: i64| format!("{base}:{}", i.rem_euclid(2));
+        let failed = |e: axiam_db::DbError| OAuth2Error::ServerError(e.to_string());
+        let current = self
+            .store
+            .increment_by(&slot(index), start(index), 1)
+            .await
+            .map_err(failed)?;
+        let previous = self
+            .store
+            .increment_by(&slot(index - 1), start(index - 1), 0)
+            .await
+            .map_err(failed)?;
+        Ok(current.saturating_add(previous) <= MAX_REQUESTS_PER_CLIENT_HINT)
+    }
+}
+
+/// HMAC-SHA256 of the length-prefixed `parts` under `key`.
+fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    use hmac::{KeyInit, Mac};
+    let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key)
+        .expect("HMAC accepts a key of any length");
+    for part in parts {
+        mac.update(&(part.len() as u64).to_be_bytes());
+        mac.update(part);
+    }
+    mac.finalize().into_bytes().into()
+}
 
 /// What the approval page may show (nothing the user's own request does not
 /// already say).
@@ -892,6 +1042,8 @@ pub struct CibaService<CR, UR> {
     /// (T23.8.1 supplies the in-process one) still records the decision, and
     /// the client — which may poll in either mode — still collects the result.
     ping: Option<crate::ciba_ping::PingPublisher>,
+    /// The per-(client, hint) cap on `bc-authorize` (#599, T-424).
+    hint_cap: CibaHintCap,
 }
 
 impl<CR, UR> CibaService<CR, UR>
@@ -899,14 +1051,17 @@ where
     CR: CibaRequestRepository,
     UR: UserRepository,
 {
-    /// Build the service.
-    pub fn new(requests: CR, users: UR, public_key_pem: String) -> Self {
+    /// Build the service. `hint_cap` is required, not a builder option: a
+    /// deployment that forgot it would have no cap on one client's requests
+    /// for one person (T-424).
+    pub fn new(requests: CR, users: UR, public_key_pem: String, hint_cap: CibaHintCap) -> Self {
         Self {
             requests,
             users,
             public_key_pem,
             signed_requests: None,
             ping: None,
+            hint_cap,
         }
     }
 
@@ -1001,42 +1156,52 @@ where
         &self.requests
     }
 
-    /// Resolve a hint to a user who may be the grant's subject, or `None`.
-    async fn resolve_subject(
+    /// What a hint names, without looking anyone up: a `login_hint` as sent,
+    /// or the subject of a verified `id_token_hint` (a signature check, no
+    /// datastore read). The cap counts this, and [`Self::resolve_subject`]
+    /// looks it up.
+    fn name_in_hint(
         &self,
-        tenant_id: Uuid,
         hint: &CibaHint,
         client_id: &str,
         acceptable_issuers: &[String],
+    ) -> Result<HintName, OAuth2Error> {
+        Ok(match hint {
+            CibaHint::LoginHint(value) => HintName::Login(value.clone()),
+            CibaHint::IdTokenHint(token) => HintName::Subject(verify_id_token_hint(
+                token,
+                &self.public_key_pem,
+                client_id,
+                acceptable_issuers,
+            )?),
+        })
+    }
+
+    /// Resolve what a hint names to a user who may be the grant's subject, or
+    /// `None`.
+    async fn resolve_subject(
+        &self,
+        tenant_id: Uuid,
+        name: &HintName,
     ) -> Result<Option<User>, OAuth2Error> {
         use axiam_core::error::AxiamError;
-        let found = match hint {
-            CibaHint::LoginHint(value) => {
-                match self.users.get_by_username(tenant_id, value).await {
-                    Ok(user) => Some(user),
-                    Err(AxiamError::NotFound { .. }) => {
-                        match self.users.get_by_email(tenant_id, value).await {
-                            Ok(user) => Some(user),
-                            Err(AxiamError::NotFound { .. }) => None,
-                            Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
-                        }
+        let found = match name {
+            HintName::Login(value) => match self.users.get_by_username(tenant_id, value).await {
+                Ok(user) => Some(user),
+                Err(AxiamError::NotFound { .. }) => {
+                    match self.users.get_by_email(tenant_id, value).await {
+                        Ok(user) => Some(user),
+                        Err(AxiamError::NotFound { .. }) => None,
+                        Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
                     }
-                    Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
                 }
-            }
-            CibaHint::IdTokenHint(token) => {
-                let sub = verify_id_token_hint(
-                    token,
-                    &self.public_key_pem,
-                    client_id,
-                    acceptable_issuers,
-                )?;
-                match self.users.get_by_id(tenant_id, sub).await {
-                    Ok(user) => Some(user),
-                    Err(AxiamError::NotFound { .. }) => None,
-                    Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
-                }
-            }
+                Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
+            },
+            HintName::Subject(sub) => match self.users.get_by_id(tenant_id, *sub).await {
+                Ok(user) => Some(user),
+                Err(AxiamError::NotFound { .. }) => None,
+                Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
+            },
         };
         // Defence in depth: the lookups are tenant-scoped in SQL.
         Ok(found.filter(|u| u.tenant_id == tenant_id && user_may_be_subject(u)))
@@ -1052,8 +1217,9 @@ where
     /// # Errors
     ///
     /// CIBA Core §13's codes for a malformed request; `slow_down` when the
-    /// client already has [`MAX_PENDING_PER_CLIENT_USER`] open requests for the
-    /// user the hint names (#599); `server_error` for a datastore failure (or a
+    /// client has already made [`MAX_REQUESTS_PER_CLIENT_HINT`] requests for
+    /// this hint in the cap's window (#599), whoever the hint names;
+    /// `server_error` for a datastore failure (or a
     /// ping request with no sealing key).
     pub async fn initiate(
         &self,
@@ -1134,26 +1300,26 @@ where
             }
         };
 
-        // Validation is complete; only now is the hint resolved, so a
-        // malformed request is refused identically whoever it names.
-        let subject = self
-            .resolve_subject(tenant_id, &hint, &client.client_id, acceptable_issuers)
-            .await?;
+        // Validation is complete; only now is the hint read, so a malformed
+        // request is refused identically whoever it names.
+        let named = self.name_in_hint(&hint, &client.client_id, acceptable_issuers)?;
 
-        // #599 (T-424): the per-(client, user) cap, before anything is stored
-        // or mailed. A request for nobody has no user to crowd out and is not
-        // counted. `slow_down` is the answer the per-client limiter gives; the
-        // handler renders it as that limiter's 429.
-        if let Some(user) = &subject
-            && self
-                .requests
-                .count_pending_for_user(tenant_id, user.id, Some(&client.client_id))
-                .await
-                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
-                >= MAX_PENDING_PER_CLIENT_USER
+        // #599 (T-424): the per-(client, hint) cap, before the hint is looked
+        // up and before anything is stored or mailed. It counts the hint, not
+        // the user it names, so it refuses a hint naming nobody at the same
+        // call as a real user's and its answer — and its cost, the same two
+        // counter writes either way — says nothing about the hint (D-63).
+        // `slow_down` is the answer the per-client limiter gives; the handler
+        // renders it as that limiter's 429.
+        if !self
+            .hint_cap
+            .admit(tenant_id, &client.client_id, &named, Utc::now())
+            .await?
         {
             return Err(OAuth2Error::SlowDown);
         }
+
+        let subject = self.resolve_subject(tenant_id, &named).await?;
 
         let expires_at = Utc::now() + Duration::seconds(expires_in as i64);
         let stored = self
@@ -1500,7 +1666,7 @@ mod tests {
         assert!(!page(0, 0).truncated());
         assert!(!page(3, 3).truncated());
         assert!(page(3, 4).truncated());
-        assert_eq!(MAX_PENDING_PER_CLIENT_USER, 3);
+        assert_eq!(MAX_REQUESTS_PER_CLIENT_HINT, 3);
     }
 
     #[test]
@@ -1857,5 +2023,125 @@ mod tests {
         assert_eq!(a.len(), 43, "256 bits, base64url unpadded");
         assert_eq!(hash_auth_req_id(&a).len(), 64);
         assert!(hash_auth_req_id(&a) != a, "the digest is not the id");
+    }
+
+    /// The rate-limit table's windowed upsert, in memory: a new window resets
+    /// the bucket, an older one adds to the stored window (as the datastore's
+    /// `UPSERT` does).
+    #[derive(Default)]
+    struct MemStore(std::sync::Mutex<std::collections::HashMap<String, (DateTime<Utc>, u64)>>);
+
+    impl axiam_db::SharedRateLimitStore for MemStore {
+        fn increment_by<'a>(
+            &'a self,
+            key: &'a str,
+            window_start: DateTime<Utc>,
+            delta: u64,
+        ) -> axiam_db::StoreIncrementFuture<'a> {
+            let mut map = self.0.lock().unwrap();
+            let entry = map.entry(key.to_owned()).or_insert((window_start, 0));
+            if entry.0 < window_start {
+                *entry = (window_start, 0);
+            }
+            entry.1 += delta;
+            let count = entry.1;
+            Box::pin(async move { Ok(count) })
+        }
+    }
+
+    fn cap() -> (CibaHintCap, std::sync::Arc<MemStore>) {
+        let store = std::sync::Arc::new(MemStore::default());
+        (CibaHintCap::derived_from(store.clone(), b"secret"), store)
+    }
+
+    /// A window's start, `offset` seconds into window `index`.
+    fn at(index: i64, offset: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(index * HINT_CAP_WINDOW_SECS as i64 + offset, 0).unwrap()
+    }
+
+    /// #599: the cap counts calls per (tenant, client, hint), whatever the
+    /// hint names, and the fourth in a window is refused.
+    #[tokio::test]
+    async fn the_hint_cap_refuses_the_fourth_call_for_one_hint() {
+        let (cap, _) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("nobody-at-all".into());
+        let t = at(1000, 10);
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &hint, t).await.unwrap());
+        }
+        assert!(!cap.admit(tenant, "oa_a", &hint, t).await.unwrap());
+        // Another client, another hint, another tenant: their own counts.
+        assert!(cap.admit(tenant, "oa_b", &hint, t).await.unwrap());
+        let other = HintName::Login("someone-else".into());
+        assert!(cap.admit(tenant, "oa_a", &other, t).await.unwrap());
+        assert!(cap.admit(Uuid::new_v4(), "oa_a", &hint, t).await.unwrap());
+        // An ID token's subject is a hint of its own, whatever token carries it.
+        let sub = HintName::Subject(Uuid::new_v4());
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &sub, t).await.unwrap());
+        }
+        assert!(!cap.admit(tenant, "oa_a", &sub, t).await.unwrap());
+    }
+
+    /// The window before counts too, so no window-long stretch admits more
+    /// than three; the window after that starts afresh.
+    #[tokio::test]
+    async fn the_hint_cap_bounds_every_window_long_stretch() {
+        let (cap, _) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("alice".into());
+        let late = HINT_CAP_WINDOW_SECS as i64 - 1;
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &hint, at(7, late)).await.unwrap());
+        }
+        // One second later is the next window, but the stretch holds three.
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(8, 0)).await.unwrap());
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(8, late)).await.unwrap());
+        // Window 9's odd bucket held window 7 and starts over; window 8's two
+        // refused calls are the window before it, so one more is admitted.
+        assert!(cap.admit(tenant, "oa_a", &hint, at(9, 0)).await.unwrap());
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(9, 1)).await.unwrap());
+        // A hint left alone for a whole window starts afresh.
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &hint, at(11, 0)).await.unwrap());
+        }
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(11, 1)).await.unwrap());
+
+        // A quiet hint: three in one window, three again two windows on.
+        let quiet = HintName::Login("bob".into());
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &quiet, at(20, 5)).await.unwrap());
+        }
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &quiet, at(22, 5)).await.unwrap());
+        }
+    }
+
+    /// The buckets name neither the hint nor the client, and a different
+    /// deployment secret gives different buckets; two per hint, by parity.
+    #[tokio::test]
+    async fn the_hint_cap_buckets_are_keyed_digests() {
+        let (cap, store) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("alice@example.com".into());
+        let bucket = cap.bucket(tenant, "oa_client", &hint);
+        assert!(bucket.starts_with(&format!("ciba_hint_cap:{tenant}:")));
+        assert!(!bucket.contains("alice") && !bucket.contains("oa_client"));
+        let other = CibaHintCap::derived_from(std::sync::Arc::new(MemStore::default()), b"other");
+        assert!(other.bucket(tenant, "oa_client", &hint) != bucket);
+        // "login" "x" and "sub" "x" never share a bucket.
+        let sub = Uuid::new_v4();
+        assert!(
+            cap.bucket(tenant, "c", &HintName::Login(sub.to_string()))
+                != cap.bucket(tenant, "c", &HintName::Subject(sub))
+        );
+        for i in 0..5 {
+            cap.admit(tenant, "oa_client", &hint, at(i, 0))
+                .await
+                .unwrap();
+        }
+        let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
     }
 }

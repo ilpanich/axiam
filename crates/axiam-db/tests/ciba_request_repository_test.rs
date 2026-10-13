@@ -271,8 +271,7 @@ async fn the_pending_list_is_one_users_open_requests_oldest_first() {
     );
 }
 
-/// #599: the count behind the per-(client, user) cap and the list's
-/// `total_pending` is the same set the list holds — pending, unexpired, the
+/// #599: the count behind the list's `total_pending` is the same set the list holds — pending, unexpired, the
 /// user's, one tenant's — narrowed to one client when asked, and a request for
 /// nobody is in no count.
 #[tokio::test]

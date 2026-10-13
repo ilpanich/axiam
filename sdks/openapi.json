@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:126106a3763301872989674156c3c06d86ab35423e6cc8be86ba7952c71d73da"
+    "x-axiam-spec-digest": "sha256:a9a67b200641443263f87d28d66217d0fc186836f4e1d75fdd3d50526155e9c1"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -13846,7 +13846,7 @@
             }
           },
           "429": {
-            "description": "Rate limit exceeded, or the client already has the most open requests it may have for this user (`slow_down`)",
+            "description": "Rate limit exceeded, or the client has made the most requests it may make for this hint in ten minutes (`slow_down`), whoever the hint names",
             "content": {
               "application/json": {
                 "schema": {

@@ -783,6 +783,12 @@ impl<C: Connection + Clone> AppState<C> {
             axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
             user_repo.clone(),
             auth_config.jwt_public_key_pem.clone(),
+            // #599: the per-(client, hint) cap counts in the shared rate-limit
+            // table, keyed under a key derived from the signing key.
+            axiam_oauth2::ciba::CibaHintCap::derived_from(
+                Arc::new(SurrealRateLimitBucketRepository::new(db.clone())),
+                auth_config.jwt_private_key_pem.as_bytes(),
+            ),
         )
         .with_signed_request_verifier(Arc::new(
             axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(

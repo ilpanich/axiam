@@ -1118,6 +1118,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "hex",
+ "hmac 0.13.0",
  "jsonwebtoken 11.1.0",
  "proptest",
  "rand 0.10.3",

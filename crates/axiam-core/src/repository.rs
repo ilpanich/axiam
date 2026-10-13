@@ -1889,9 +1889,11 @@ pub trait CibaRequestRepository: Send + Sync {
 
     /// How many `pending`, unexpired requests are addressed to `user_id` in
     /// `tenant_id`: those of `client_id` alone when it is given, of every
-    /// client when it is `None`. The count behind the per-(client, user) cap at
-    /// `bc-authorize` (#599) and the list's `total_pending`. A request for
-    /// nobody is never counted.
+    /// client when it is `None`. The count behind the list's `total_pending`
+    /// (#599). A request for nobody is never counted — which is why no answer
+    /// of `bc-authorize` may depend on this count: a refusal keyed on it would
+    /// tell a client which hints name users (T-422; the per-(client, hint) cap
+    /// counts calls per hint instead).
     fn count_pending_for_user(
         &self,
         tenant_id: Uuid,

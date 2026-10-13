@@ -303,8 +303,16 @@ async fn world_with(publisher: RecordingPublisher, endpoint: &str) -> World {
         .unwrap();
     let requests = SurrealCibaRequestRepository::new(db.clone(), Some(sealing()));
     let publisher = Arc::new(publisher);
-    let service = CibaService::new(requests.clone(), users, "unused".into())
-        .with_ping_publisher(publisher.clone());
+    let service = CibaService::new(
+        requests.clone(),
+        users,
+        "unused".into(),
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(db.clone())),
+            b"test",
+        ),
+    )
+    .with_ping_publisher(publisher.clone());
     World {
         db,
         tenant_id: tenant.id,

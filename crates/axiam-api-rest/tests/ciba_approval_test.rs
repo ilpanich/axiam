@@ -1158,8 +1158,9 @@ async fn settled(mail: &RecordingMail) -> Vec<OutboundMailMessage> {
 /// more than the budgeted mails — three a minute — while every request is still
 /// stored and answered like any other, so the throttle reveals nothing about the
 /// user (D-63, D-70). The mail that does go carries the binding message and a
-/// link, and never the `auth_req_id`. Four clients because one client may hold
-/// only three open requests for one user (#599): twelve requests is three each.
+/// link, and never the `auth_req_id`. Four clients because one client may make
+/// only three requests for one hint in ten minutes (#599): twelve requests is
+/// three each.
 #[actix_web::test]
 async fn a_flood_of_requests_for_one_user_sends_at_most_three_mails_a_minute() {
     avoid_the_minute_boundary().await;
@@ -1272,12 +1273,14 @@ async fn open_requests(w: &World, user: Uuid) -> u64 {
         .unwrap()
 }
 
-/// One client may hold three open requests for one user: the fourth is refused
-/// before it is stored, with the per-client limiter's `429 slow_down`. Another
-/// user, another client, and a hint naming nobody are not affected, and a
-/// request that is decided stops counting.
+/// One client may make three `bc-authorize` calls for one hint in the cap's
+/// window: the fourth is refused before it is stored, with the per-client
+/// limiter's `429 slow_down`. Another user, another client and another hint are
+/// not affected; a hint naming nobody is refused at the same call (T-422); and
+/// since the cap counts calls, not open requests, deciding or expiring a
+/// request frees no place — only the window's passing does.
 #[actix_web::test]
-async fn the_fourth_open_request_of_one_client_for_one_user_is_refused() {
+async fn the_fourth_request_of_one_client_for_one_hint_is_refused() {
     let w = world().await;
     let other_client = ciba_client(&w.db, w.tenant_id).await;
     let app = app!(w, limits());
@@ -1300,9 +1303,8 @@ async fn the_fourth_open_request_of_one_client_for_one_user_is_refused() {
     assert_eq!(start_raw(&app, &w, &other_client, "alice").await.0, 200);
     assert_eq!(open_requests(&w, w.alice).await, 4);
 
-    // A hint naming nobody is stored and answered like any other, however
-    // many times: it has no user to count against.
-    for _ in 0..5 {
+    // A hint naming nobody meets the cap at the same call, with the same body.
+    for _ in 0..3 {
         assert_eq!(
             start_raw(&app, &w, &w.client, "nobody-by-this-name")
                 .await
@@ -1310,12 +1312,14 @@ async fn the_fourth_open_request_of_one_client_for_one_user_is_refused() {
             200
         );
     }
+    let (status, nobody) = start_raw(&app, &w, &w.client, "nobody-by-this-name").await;
+    assert_eq!((status, &nobody), (429, &body));
 
-    // Deciding one frees a place; so does expiry.
+    // Deciding a request frees no place, nor does its expiry: the cap counts
+    // calls in the window.
     let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
     let version = row(&w, ids[0]).await.version;
     assert_eq!(decide(&app, ids[0], "deny", version, &alice).await.0, 200);
-    assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 200);
     assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 429);
     w.db.query(format!(
         "UPDATE ciba_request SET expires_at = time::now() - 1m WHERE meta::id(id) = '{}'",
@@ -1323,7 +1327,22 @@ async fn the_fourth_open_request_of_one_client_for_one_user_is_refused() {
     ))
     .await
     .unwrap();
+    assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 429);
+
+    // Once the window, and the one before it, have passed, the hint starts
+    // afresh — for a real user and for nobody alike.
+    w.db.query("UPDATE rate_limit_bucket SET window_start = d'2000-01-01T00:00:00Z'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
     assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 200);
+    assert_eq!(
+        start_raw(&app, &w, &w.client, "nobody-by-this-name")
+            .await
+            .0,
+        200
+    );
 }
 
 /// The list is in creation order whatever each request's expiry, carries the

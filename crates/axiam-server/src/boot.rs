@@ -1313,6 +1313,16 @@ where
         ciba_request_repo.clone(),
         user_repo.clone(),
         config.auth.jwt_public_key_pem.clone(),
+        // #599 (T-424) — the per-(client, hint) cap on `bc-authorize` counts in
+        // the shared rate-limit table every replica writes, so it holds across
+        // replicas; its bucket keys are an HMAC under a key derived from the
+        // signing key every replica already shares.
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+                pool.handle_for_repo(),
+            )),
+            config.auth.jwt_private_key_pem.as_bytes(),
+        ),
     )
     // D-61 — signed authentication requests (CIBA Core §7.1.1, FAPI-CIBA).
     // The keys come through the same federation JWKS cache the

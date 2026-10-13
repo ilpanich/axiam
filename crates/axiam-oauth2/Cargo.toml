@@ -21,6 +21,10 @@ chrono = { workspace = true }
 jsonwebtoken = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+# #599 — the CIBA per-(client, hint) cap keys its buckets with an HMAC of the
+# hint, so the shared rate-limit table is no dictionary of hashed addresses.
+# Already in the workspace graph (axiam-api-rest's webhook signatures).
+hmac = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }

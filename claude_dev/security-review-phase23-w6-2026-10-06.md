@@ -713,6 +713,15 @@ W6 is the phase's last wave. This section is for the project.
   > the PKCE verifier, or the user's bearer token, to whatever `Location` the
   > IdP's endpoint named. They now use `guarded_fetch_no_redirect` and refuse a
   > `3xx` with "redirect not followed"; T-112 carries the same correction.
+  >
+  > **Second correction, 2026-10-13 (R101W2-04).** That correction left one
+  > credential-bearing request outside the rule: OIDC back-channel logout sent
+  > its logout token to the client's `backchannel_logout_uri` with a plain
+  > `reqwest` client, without an address check, following redirects, and with
+  > the URI never validated at registration. It now goes through
+  > `guarded_fetch_no_redirect` with `allow_private = false`, and registration
+  > refuses a URI that is not a public `https` URL. T-112 carries the same
+  > correction.
 * **Two-writer registries.** A registry an administrator and a background worker
   both write is written conditionally on the version the writer read, the worker
   re-reads before a credential leaves, and a credential is bound to every

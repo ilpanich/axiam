@@ -33,6 +33,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL. Discovery, JWKS and metadata fetches carry no credential and still follow
   a redirect. Threat model: T-112 carries a dated correction of its rule (and the
   Phase 23 W6 review's "the one exception left"); totals unchanged.
+- **OIDC back-channel logout no longer delivers its token through an unguarded
+  request, and refuses to register a destination it could not safely reach
+  (R101W2-04).** The logout token — a signed JWT naming the user's session — was
+  POSTed to a client's `backchannel_logout_uri` with a plain HTTP client: no
+  address check, redirects followed, `http` accepted, and the URI was never
+  validated when the client was created or updated, so a tenant administrator who
+  could manage OAuth2 clients could make AXIAM send that request to an internal
+  or link-local address, or to a public URL that redirected there. Delivery now
+  goes through the one-hop SSRF guard (`https` required, a non-public resolved
+  address refused, the validated address pinned) and a `3xx` is a failed attempt,
+  retried like any other and never followed; the retry bound and the failure
+  logging are unchanged. **Behaviour change:** `POST` and `PUT
+  /api/v1/oauth2-clients` now answer `400` for a `backchannel_logout_uri` that is
+  not an absolute `https` URL with a host, carries credentials or a fragment, is
+  a loopback, private, link-local or cloud-metadata IP literal, or is
+  `localhost`, `*.localhost`, `*.local` or `*.internal` (the rule CIBA ping and
+  SSF push endpoints already follow; a loopback `http` URI, which a redirect URI
+  may use, is refused because delivery could never reach it). An empty string on
+  update still clears the URI. Clients registered under 1.0.0 are **not**
+  rewritten (no backfill): a stored value this rule would refuse stays as it is
+  and is refused at send time by the guard, so it cannot reach a private
+  address — the RP is simply not notified, and the log carries the failed
+  attempts. A receiver on a private network is reached by naming its host in
+  `AXIAM__PKI__SSRF_ALLOWED_HOSTS` and registering its `https` URL. Dynamic
+  registration and Client ID Metadata Documents never read the member. The
+  `examples/b5-rp-logout-app` smoke test, whose receiver is plain `http`, now
+  proves the refusal instead of the delivery unless `RP_BACKCHANNEL_URL` is an
+  `https` receiver. Threat model: T-112 carries a second dated correction
+  (back-channel logout was the remaining exception to its rule); totals
+  unchanged.
 - **The authenticated federation flow routes are rate limited (#614).**
   `POST /api/v1/federation/saml/authn-request` had no limiter, and neither had
   its four siblings, `POST /api/v1/federation/saml/acs`,

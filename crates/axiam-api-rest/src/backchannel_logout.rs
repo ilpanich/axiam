@@ -24,11 +24,49 @@
 //! broker being up, which is a stronger coupling than a best-effort side
 //! effect should have. The retry below keeps the property that actually
 //! matters — a briefly-unavailable RP still gets told.
+//!
+//! # The only way out of the process (R101W2-04)
+//!
+//! The logout token is a signed, session-naming credential, and the URI it goes
+//! to was typed by a tenant administrator. Delivery therefore makes **one hop
+//! through `ssrf::guarded_fetch_no_redirect`** with `allow_private = false`: the
+//! name is resolved fresh, every address must be globally routable, the
+//! validated address is pinned into the connection and `https` is required. A
+//! `3xx` comes back as a response and is a failed attempt: the token cannot
+//! reach a host the client never registered. The URI is also validated when the
+//! client is registered (`validate_backchannel_logout_uri`), but a row written
+//! under 1.0.0 may hold anything, so the guard here is the one that counts.
+//!
+//! | The RP answers | Outcome |
+//! |---|---|
+//! | any `2xx` | delivered |
+//! | a `3xx` | failed attempt, retried, never followed |
+//! | anything else, a timeout, a refused address, no connection | failed attempt, retried |
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axiam_core::models::oauth2_client::OAuth2Client;
+use axiam_federation::ssrf;
 use tracing::{debug, warn};
+
+/// Whether delivery may reach a non-public address. `false` unless
+/// [`admit_private_networks_for_tests`] was called, which nothing outside the
+/// test suites does (a source pin below asserts it).
+static ADMIT_PRIVATE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+/// **Test seam, never called by the composition root or any production path.**
+///
+/// Lets the first hop reach a loopback receiver over plain `http`, the way
+/// `WebhookDeliverer::admitting_private_networks_for_tests` and the SSF, SCIM
+/// and CIBA-ping deliverers' seams do. Delivery here is a detached task started
+/// from a handler, so there is no deliverer value to carry the bit; a test
+/// binary that needs a loopback RP calls this once. Redirects stay unfollowed
+/// either way.
+#[doc(hidden)]
+pub fn admit_private_networks_for_tests() {
+    ADMIT_PRIVATE_FOR_TESTS.store(true, Ordering::SeqCst);
+}
 
 /// How many times a single client's endpoint is tried.
 ///
@@ -97,24 +135,33 @@ pub fn select_targets(
 
 /// POST one logout token, retrying a bounded number of times.
 ///
+/// One guarded, non-redirecting hop per attempt (R101W2-04). `allow_private` is
+/// `false` in production; [`deliver_all`] passes the test seam's value.
+///
 /// Returns `true` if some attempt got a 2xx. Never panics and never propagates:
 /// the caller is a detached task whose failure must not affect the logout that
 /// triggered it.
-pub async fn deliver_one(client: &reqwest::Client, delivery: &LogoutDelivery) -> bool {
+pub async fn deliver_one(delivery: &LogoutDelivery, allow_private: bool) -> bool {
     for attempt in 0..MAX_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(BACKOFF[(attempt - 1).min(BACKOFF.len() - 1)]).await;
         }
-        let result = client
-            .post(&delivery.uri)
-            .timeout(ATTEMPT_TIMEOUT)
-            // Back-Channel Logout 1.0 §2.5: form-encoded, one parameter.
-            .form(&[("logout_token", &delivery.logout_token)])
-            .send()
-            .await;
+        // The resolve and the connect are inside the guard, so the timeout
+        // wraps the whole attempt rather than only the request.
+        let result = tokio::time::timeout(
+            ATTEMPT_TIMEOUT,
+            ssrf::guarded_fetch_no_redirect(&delivery.uri, allow_private, |client, target| {
+                client
+                    .post(target)
+                    .timeout(ATTEMPT_TIMEOUT)
+                    // Back-Channel Logout 1.0 §2.5: form-encoded, one parameter.
+                    .form(&[("logout_token", &delivery.logout_token)])
+            }),
+        )
+        .await;
 
         match result {
-            Ok(resp) if resp.status().is_success() => {
+            Ok(Ok(resp)) if resp.status().is_success() => {
                 debug!(
                     client_id = %delivery.client_id,
                     attempt = attempt + 1,
@@ -122,7 +169,17 @@ pub async fn deliver_one(client: &reqwest::Client, delivery: &LogoutDelivery) ->
                 );
                 return true;
             }
-            Ok(resp) => {
+            Ok(Ok(resp)) if resp.status().is_redirection() => {
+                // Not followed: the token goes to the host the client
+                // registered or nowhere.
+                warn!(
+                    client_id = %delivery.client_id,
+                    status = resp.status().as_u16(),
+                    attempt = attempt + 1,
+                    "back-channel logout answered with a redirect, which is not followed"
+                );
+            }
+            Ok(Ok(resp)) => {
                 // Never log the token: it is a session-termination command,
                 // and a log line carrying one is a replayable instruction.
                 warn!(
@@ -132,12 +189,19 @@ pub async fn deliver_one(client: &reqwest::Client, delivery: &LogoutDelivery) ->
                     "back-channel logout rejected by RP"
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     client_id = %delivery.client_id,
                     error = %e,
                     attempt = attempt + 1,
                     "back-channel logout delivery failed"
+                );
+            }
+            Err(_elapsed) => {
+                warn!(
+                    client_id = %delivery.client_id,
+                    attempt = attempt + 1,
+                    "back-channel logout delivery timed out"
                 );
             }
         }
@@ -147,15 +211,12 @@ pub async fn deliver_one(client: &reqwest::Client, delivery: &LogoutDelivery) ->
 
 /// Fan out to every target. Intended to be spawned, not awaited by a handler.
 pub async fn deliver_all(deliveries: Vec<LogoutDelivery>) {
-    let Ok(http) = reqwest::Client::builder().timeout(ATTEMPT_TIMEOUT).build() else {
-        warn!("could not build HTTP client for back-channel logout");
-        return;
-    };
+    let allow_private = ADMIT_PRIVATE_FOR_TESTS.load(Ordering::SeqCst);
     for delivery in &deliveries {
         // Sequential rather than concurrent: the list is one user's RPs, so it
         // is small, and a slow RP delaying the next one costs nothing that
         // matters — the user is already logged out.
-        deliver_one(&http, delivery).await;
+        deliver_one(delivery, allow_private).await;
     }
 }
 
@@ -279,5 +340,171 @@ mod tests {
             // Every retry needs a backoff to read from.
             assert!(BACKOFF.len() >= MAX_ATTEMPTS - 1);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // R101W2-04 — delivery is one guarded, non-redirecting hop
+    // -----------------------------------------------------------------------
+
+    /// The delivery's only way out is the one-hop guard (T-112): pinned against
+    /// the source, as `webhook.rs` does, so a plain `reqwest` client or a
+    /// redirect-following `guarded_fetch` cannot come back beside it without
+    /// this test saying so.
+    #[test]
+    fn delivery_goes_through_the_no_redirect_guarded_fetch_and_nothing_else() {
+        let source = include_str!("backchannel_logout.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the production half of the file");
+        assert_eq!(production.matches("guarded_fetch_no_redirect(").count(), 1);
+        assert_eq!(production.matches("guarded_fetch(").count(), 0);
+        assert_eq!(production.matches("guarded_fetch_with_cap(").count(), 0);
+        assert_eq!(production.matches("reqwest::Client").count(), 0);
+        assert_eq!(production.matches("Client::builder").count(), 0);
+        // The only caller of the test seam's setter is the setter itself.
+        assert_eq!(
+            production.matches("ADMIT_PRIVATE_FOR_TESTS.store(").count(),
+            1
+        );
+    }
+
+    /// The seam that admits loopback is not reachable from the composition
+    /// root: no file of `axiam-server` calls this module's setter. (The boot
+    /// options' own `admit_private_networks_for_tests` flag is a different seam,
+    /// for the deliverers built there.)
+    #[test]
+    fn the_composition_root_never_calls_the_test_seam() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && std::fs::read_to_string(&path)
+                        .unwrap()
+                        .contains("backchannel_logout::admit_private_networks_for_tests")
+                {
+                    hits.push(path.display().to_string());
+                }
+            }
+        }
+        let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../axiam-server/src");
+        let mut hits = Vec::new();
+        walk(&server, &mut hits);
+        assert!(hits.is_empty(), "axiam-server names the seam: {hits:?}");
+    }
+
+    fn delivery_to(uri: String) -> LogoutDelivery {
+        LogoutDelivery {
+            client_id: "rp-a".into(),
+            uri,
+            logout_token: "the-logout-token".into(),
+        }
+    }
+
+    /// A `307` is a failed attempt and its `Location` is never requested: the
+    /// second server, which the first one names, sees nothing.
+    #[tokio::test]
+    async fn a_redirect_from_the_rp_is_not_followed() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let elsewhere = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&elsewhere)
+            .await;
+        let rp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/collect", elsewhere.uri())),
+            )
+            .mount(&rp)
+            .await;
+
+        let delivered = deliver_one(&delivery_to(format!("{}/logout", rp.uri())), true).await;
+
+        assert!(!delivered, "a 3xx is a failed delivery");
+        let attempts = rp.received_requests().await.unwrap().len();
+        assert_eq!(attempts, MAX_ATTEMPTS, "it is retried, not followed");
+        assert!(
+            elsewhere.received_requests().await.unwrap().is_empty(),
+            "the redirect target must see nothing"
+        );
+    }
+
+    /// The same request answered `200` is delivered: the form carries one
+    /// `logout_token` parameter (§2.5), so the refusal above is the redirect
+    /// and not a harness fault.
+    #[tokio::test]
+    async fn a_2xx_delivers_the_token_as_a_form_post() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&rp)
+            .await;
+
+        assert!(deliver_one(&delivery_to(format!("{}/logout", rp.uri())), true).await);
+
+        let requests = rp.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            String::from_utf8(requests[0].body.clone()).unwrap(),
+            "logout_token=the-logout-token"
+        );
+    }
+
+    /// Production posture (`allow_private = false`): a stored URI that points at
+    /// a private, loopback, link-local or metadata address, or speaks plain
+    /// `http`, reaches nothing. A client registered under 1.0.0 may hold such a
+    /// value (registration did not validate it); delivery refuses it.
+    #[tokio::test]
+    async fn a_stored_uri_at_a_non_public_address_reaches_nothing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for uri in [
+            format!("https://127.0.0.1:{port}/logout"),
+            format!("http://127.0.0.1:{port}/logout"),
+            "https://10.0.0.8/logout".to_owned(),
+            "https://192.168.1.10/logout".to_owned(),
+            "https://169.254.169.254/latest/meta-data/".to_owned(),
+            "https://[::1]/logout".to_owned(),
+        ] {
+            // One attempt is enough to show the refusal; the retry loop is
+            // exercised by the redirect test above.
+            let result = tokio::time::timeout(
+                ATTEMPT_TIMEOUT,
+                ssrf::guarded_fetch_no_redirect(&uri, false, |c, u| c.post(u)),
+            )
+            .await
+            .expect("a refusal is immediate");
+            assert!(result.is_err(), "{uri} must be refused by the guard");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the loopback listener must see no connection"
+        );
+        // And through the delivery function itself.
+        let uri = format!("https://127.0.0.1:{port}/logout");
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(10),
+            deliver_one(&delivery_to(uri), false),
+        )
+        .await
+        .expect("three refused attempts finish within the backoff schedule");
+        assert!(!attempt);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the loopback listener must still see no connection"
+        );
     }
 }

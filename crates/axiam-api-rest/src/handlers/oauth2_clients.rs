@@ -48,7 +48,12 @@ pub struct CreateOAuth2ClientRequest {
     #[serde(default)]
     pub post_logout_redirect_uris: Vec<String>,
     /// B5 — where OIDC back-channel logout tokens are delivered. Omit for a
-    /// client that does not participate.
+    /// client that does not participate. Must be an absolute `https` URL with
+    /// no credentials and no fragment, naming a public host: an IP literal that
+    /// is loopback, private, link-local or the cloud metadata address, and the
+    /// names `localhost`, `*.localhost`, `*.local` and `*.internal`, are refused
+    /// with `400`. Delivery is one request that does not follow redirects, and a
+    /// name that resolves to a non-public address is refused when it is sent.
     #[serde(default)]
     pub backchannel_logout_uri: Option<String>,
     /// B5 — require this client to push its authorization parameters to
@@ -187,7 +192,8 @@ pub struct UpdateOAuth2ClientRequest {
     pub scopes: Option<Vec<String>>,
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Pass an empty string to clear a previously registered URI — the one
-    /// edit an operator makes when an RP is decommissioned.
+    /// edit an operator makes when an RP is decommissioned. Any other value
+    /// is held to the same rule as on create.
     pub backchannel_logout_uri: Option<String>,
     pub require_par: Option<bool>,
     /// X5.1 — see [`CreateOAuth2ClientRequest::profile`].
@@ -469,6 +475,36 @@ pub(crate) fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiErro
     Ok(())
 }
 
+/// Registration rule for `backchannel_logout_uri` (R101W2-04).
+///
+/// The URI receives a signed logout token naming a user's session, so it is
+/// held to the outbound-endpoint policy every other credential-bearing target
+/// uses (D-49, `axiam_oauth2::ssf::validate_push_endpoint`, also CIBA's ping
+/// endpoint): absolute `https` with a host, no credentials, no fragment, no IP
+/// literal that is not globally routable (loopback, private, link-local, the
+/// cloud metadata address) and no `localhost`, `*.local` or `*.internal` name.
+///
+/// That is the redirect-URI rule (absolute, host, `https`, no fragment) plus
+/// the address policy, and **without** the redirect-URI rule's `http` exception
+/// for loopback: delivery goes through `guarded_fetch_no_redirect`, which
+/// requires `https` and refuses loopback at connect time, so a loopback `http`
+/// URI would be accepted here and could never be delivered. A name that
+/// *resolves* to a non-public address passes this check and is refused at
+/// delivery, which pins the address it validated.
+///
+/// An empty string is the "clear it" sentinel of the update request and is
+/// never validated; callers filter it first.
+pub(crate) fn validate_backchannel_logout_uri(uri: &str) -> Result<(), AxiamApiError> {
+    axiam_oauth2::ssf::validate_push_endpoint(uri)
+        .map(|_| ())
+        .map_err(|reason| {
+            validation_err(format!(
+                "backchannel_logout_uri: {}",
+                reason.replace("endpoint_url", "the URI")
+            ))
+        })
+}
+
 /// Validate and normalise `allowed_resources` (T21.3 / RFC 8707 §2).
 ///
 /// Returns the list to store, which is the **normalised** form rather than
@@ -633,6 +669,11 @@ pub async fn create<C: Connection + Clone>(
     reject_public_client_grants(req.token_endpoint_auth_method, &req.grant_types)?;
     let allowed_resources = validate_allowed_resources(&req.allowed_resources)?;
     reject_unimplemented_dpop_nonce(Some(req.dpop_require_nonce))?;
+    // R101W2-04 — an empty string on create is "none", as it is on update.
+    let backchannel_logout_uri = req.backchannel_logout_uri.filter(|u| !u.is_empty());
+    if let Some(ref uri) = backchannel_logout_uri {
+        validate_backchannel_logout_uri(uri)?;
+    }
     // redirect_uris are only required when the client uses
     // authorization_code (which involves user-agent redirects).
     // M2M clients (client_credentials only) don't need them.
@@ -661,7 +702,7 @@ pub async fn create<C: Connection + Clone>(
         grant_types: req.grant_types,
         scopes: req.scopes,
         post_logout_redirect_uris: req.post_logout_redirect_uris,
-        backchannel_logout_uri: req.backchannel_logout_uri,
+        backchannel_logout_uri,
         require_par: req.require_par,
         profile: req.profile,
         token_endpoint_auth_method: req.token_endpoint_auth_method,
@@ -824,6 +865,13 @@ pub async fn update<C: Connection + Clone>(
         validate_grant_types(gts)?;
     }
     reject_unimplemented_dpop_nonce(req.dpop_require_nonce)?;
+    // R101W2-04 — an empty string clears the URI and is not validated; any
+    // other value is held to the same rule as on create.
+    if let Some(ref uri) = req.backchannel_logout_uri
+        && !uri.is_empty()
+    {
+        validate_backchannel_logout_uri(uri)?;
+    }
     let allowed_resources = req
         .allowed_resources
         .as_deref()

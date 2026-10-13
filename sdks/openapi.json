@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:fe15d7d658ca0888ca7888c0cf50bbc2edd664aafd92056fa99ee754ad3737bf"
+    "x-axiam-spec-digest": "sha256:eacf3ae2ecb9c0022384c699a547b646f74c2c770d927e9def5cb853cb60ae62"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -17362,7 +17362,7 @@
               "string",
               "null"
             ],
-            "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+            "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate. Must be an absolute `https` URL with\nno credentials and no fragment, naming a public host: an IP literal that\nis loopback, private, link-local or the cloud metadata address, and the\nnames `localhost`, `*.localhost`, `*.local` and `*.internal`, are refused\nwith `400`. Delivery is one request that does not follow redirects, and a\nname that resolves to a non-public address is refused when it is sent."
           },
           "backchannel_token_delivery_mode": {
             "type": [
@@ -27020,7 +27020,7 @@
               "string",
               "null"
             ],
-            "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+            "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned. Any other value\nis held to the same rule as on create."
           },
           "backchannel_token_delivery_mode": {
             "type": [

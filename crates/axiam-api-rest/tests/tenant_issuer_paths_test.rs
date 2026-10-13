@@ -945,6 +945,10 @@ async fn the_rfc_9207_iss_parameter_on_a_tenant_path_is_the_tenant_issuer() {
 /// AXIAM actually sends.
 #[actix_rt::test]
 async fn the_logout_token_iss_is_the_tenant_issuer() {
+    // The wiremock RP is a loopback `http` receiver; delivery is a guarded,
+    // non-redirecting hop (R101W2-04) that refuses it unless this test seam is
+    // on. Nothing but test code calls it.
+    axiam_api_rest::backchannel_logout::admit_private_networks_for_tests();
     let rp = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/backchannel"))

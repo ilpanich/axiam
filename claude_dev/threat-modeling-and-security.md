@@ -251,7 +251,17 @@
 > without its consequence, carries a dated correction. The model is **476
 > threats, 438 mitigated / 17 open / 21 not applicable** (the W1 half of the
 > wave enters its own entry; the copies are reconciled once, at the end of the
-> release).
+> release). The same review's R101W2-04 found that W2.5's rule for **T-112**, "every
+> credential-bearing outbound request uses `guarded_fetch_no_redirect`", was not
+> yet true: OIDC back-channel logout POSTed its logout token — a signed JWT
+> naming the user's session — to a `backchannel_logout_uri` that was never
+> validated at registration, with a plain client that did no address check and
+> followed redirects. It was the remaining exception and is now closed: delivery
+> uses the one-hop guard (a `3xx` is a failed attempt), and registration refuses
+> a URI that is not a public `https` URL (a **behaviour change**; rows written
+> under 1.0.0 are not rewritten, and the guard refuses them at send time). T-112
+> carries a second dated correction; no entry is added, so the counts above do
+> not move.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and

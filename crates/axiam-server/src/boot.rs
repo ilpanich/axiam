@@ -2635,6 +2635,10 @@ where
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
     // after `http_server.run()` returns.
     let audit_shutdown = audit_middleware.clone();
+    // The in-process dispatcher's refused enqueues leave their `delivery_abandoned`
+    // row in this middleware's non-blocking queue rather than writing it on the
+    // producer's path (#596). No-op with the broker.
+    outbound.bind_audit(&audit_middleware);
 
     // Audit retention (T-119). Resolved here, and LOGGED either way: a policy
     // that silently deletes records is worse than one that deletes none, so

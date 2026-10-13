@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads the file sees the new shape, and the replay recipe in the deployment
   guide reads both forms and carries the two fields into the replayed row's
   `metadata` as `occurred_at` and `dead_lettered_reason` (#595).
+- In the minimal profile (`AXIAM__AMQP__ENABLED=false`), an outbound enqueue the
+  in-process queue refuses no longer waits on the datastore on the caller's path.
+  The `<kind>.delivery_abandoned` row is still written, one per refusal, but is
+  handed to the audit middleware's non-blocking queue; if that queue is full the
+  row is counted in `GET /health/jobs` `request_audit.dropped` and written to the
+  dead-letter file as `channel_full`. The `WARN` for a refusal is logged for the
+  first one of a kind and then at most once a minute, with the count suppressed
+  since (#596).
 
 ## [1.0.0] - 2026-10-10
 

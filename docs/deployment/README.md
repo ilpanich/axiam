@@ -1776,6 +1776,14 @@ from `delivery_failed` on purpose: a restart is not a downstream outage, so the
 `delivery_abandoned` separately if a lost delivery matters to you; it is
 written only when the process gets to stop in order (see below).
 
+The row of a refused enqueue is handed to the audit middleware's queue (the one
+request rows use) so the request that produced the event never waits on the
+datastore for it. When that queue is full the row is counted in
+`GET /health/jobs` `request_audit.dropped` and written to the dead-letter file
+as `channel_full`, like any other audit row the middleware cannot queue. The
+producer's log line for a refusal is written for the first refusal of a kind and
+then at most once a minute, with the number suppressed since.
+
 In audit terms, a restart loses the following, and nothing else:
 
 * **A webhook, SSF, outbound SCIM or CIBA-ping delivery that was queued or

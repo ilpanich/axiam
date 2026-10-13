@@ -237,6 +237,35 @@ impl AuditMiddleware {
         }
     }
 
+    /// Hand `entry` to the audit worker without waiting, from code that is not
+    /// an HTTP request and must not write to the datastore on its caller's path
+    /// (#596: the in-process outbound dispatcher's refused enqueues).
+    ///
+    /// The same bounded channel the request rows use, so the same bound
+    /// ([`CHANNEL_CAPACITY`]) and the same accounting: a row the channel refuses
+    /// is counted in [`Self::loss`] (`dropped`) and offered to the dead-letter
+    /// file with reason `channel_full` (or `channel_closed`) — it is never
+    /// awaited and never written on the caller's path. The entry's client-sized
+    /// fields are cut as a request row's are. The row carries no organization
+    /// (nil), which the notification sink does not need for a row it declines.
+    ///
+    /// Returns whether the row was queued; `false` means it was counted as lost.
+    pub fn try_record(&self, entry: CreateAuditLogEntry) -> bool {
+        let mut entry = entry;
+        crate::dead_letter::bound_fields(&mut entry);
+        offer(
+            &self.tx,
+            &self.loss,
+            Queued::Event {
+                event: AuditEvent {
+                    entry,
+                    org_id: Uuid::nil(),
+                },
+                occurred_at: Utc::now(),
+            },
+        )
+    }
+
     /// The counters of request-audit rows that were not recorded (T-108).
     pub fn loss(&self) -> RequestAuditLoss {
         self.loss.clone()
@@ -307,6 +336,23 @@ impl AuditMiddleware {
     pub fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
     }
+}
+
+/// Queue `queued` for the worker without waiting. A row the channel refuses —
+/// full, or closed — is counted and offered to the dead-letter queue, both
+/// non-blocking. Returns whether the row was queued.
+fn offer(tx: &mpsc::Sender<Queued>, loss: &RequestAuditLoss, queued: Queued) -> bool {
+    let Err(refused) = tx.try_send(queued) else {
+        return true;
+    };
+    let (reason, queued) = match refused {
+        TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
+        TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
+    };
+    if let Queued::Event { event, occurred_at } = queued {
+        loss.record_dropped(event.entry, occurred_at, reason);
+    }
+    false
 }
 
 async fn audit_worker<A: AuditLogRepository>(
@@ -519,21 +565,16 @@ where
             crate::dead_letter::bound_fields(&mut entry);
 
             // `try_send`, never `send`: a full channel must not hold the
-            // response. The row it refuses comes back in the error and is
-            // counted and offered to the dead-letter queue — also non-blocking.
-            let queued = Queued::Event {
-                event: AuditEvent { entry, org_id },
-                occurred_at,
-            };
-            if let Err(refused) = tx.try_send(queued) {
-                let (reason, queued) = match refused {
-                    TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
-                    TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
-                };
-                if let Queued::Event { event, occurred_at } = queued {
-                    loss.record_dropped(event.entry, occurred_at, reason);
-                }
-            }
+            // response. The row it refuses is counted and offered to the
+            // dead-letter queue — also non-blocking.
+            offer(
+                &tx,
+                &loss,
+                Queued::Event {
+                    event: AuditEvent { entry, org_id },
+                    occurred_at,
+                },
+            );
 
             result
         })

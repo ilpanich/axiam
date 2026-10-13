@@ -197,6 +197,55 @@ async fn a_full_channel_counts_the_rows_it_drops() {
     assert!(s.last_loss_at.is_some());
 }
 
+/// #596: `try_record` is the request rows' queue for code that is not a request.
+/// A row it queues is appended by the worker; one it is refused is counted as
+/// dropped and written to the dead-letter file as `channel_full`, and the call
+/// never waits on the datastore (the worker here is stuck for an hour).
+#[actix_web::test]
+async fn try_record_queues_without_waiting_and_a_full_channel_is_a_counted_loss() {
+    let path = dlq_path();
+    let store = Datastore::stuck();
+    let mw = AuditMiddleware::spawn_configured(
+        store.clone(),
+        None,
+        DeadLetterWriter::spawn(&path),
+        CAPACITY,
+    );
+    let started = std::time::Instant::now();
+    let queued: Vec<bool> = (0..REQUESTS)
+        .map(|i| mw.try_record(request_row(&format!("outbound {i}"))))
+        .collect();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "try_record never waits on the datastore"
+    );
+    // The worker holds one, the channel holds CAPACITY; the rest are refused.
+    assert!(queued.iter().filter(|q| **q).count() <= CAPACITY + 1);
+    assert!(queued[0], "the first row finds room");
+    assert!(!queued[REQUESTS - 1], "the last finds none");
+    assert_eq!(
+        store.appended(),
+        0,
+        "no append completed on the caller's path"
+    );
+
+    let loss = mw.loss();
+    assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+    let s = loss.snapshot();
+    let refused = queued.iter().filter(|q| !**q).count() as u64;
+    assert_eq!(s.dropped, refused);
+    assert_eq!(s.dead_lettered, refused);
+    let lines = lines_of(&path);
+    assert_eq!(lines.len() as u64, refused);
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.reason.as_deref() == Some("channel_full")
+                && l.entry.action.starts_with("outbound "))
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 #[actix_web::test]
 async fn a_failed_append_counts_the_row() {
     let mw = AuditMiddleware::spawn_configured(

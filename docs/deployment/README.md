@@ -1780,11 +1780,18 @@ written only when the process gets to stop in order (see below).
 
 The row of a refused enqueue is handed to the audit middleware's queue (the one
 request rows use) so the request that produced the event never waits on the
-datastore for it. When that queue is full the row is counted in
-`GET /health/jobs` `request_audit.dropped` and written to the dead-letter file
-as `channel_full`, like any other audit row the middleware cannot queue. The
-producer's log line for a refusal is written for the first refusal of a kind and
-then at most once a minute, with the number suppressed since.
+datastore for it. That queue keeps a quarter of its room (1 024 of 4 096 rows)
+for request rows: a refusal row that finds only that reserve left is shed and
+counted in `GET /health/jobs` `request_audit.outbound_abandoned_dropped`. It is
+not a request row, so it is not counted in `request_audit.dropped`, not written
+to the dead-letter file and does not turn `status` to `degraded`; a rising count
+means an outbound queue is refusing faster than the audit trail records it. A
+bulk run — a SCIM reconciliation, a provisioning fan-out, a linked user's
+groups — stops at its first refused enqueue and records what it held back as
+one more `scim_push.delivery_abandoned` row with `refused_count`; the next run
+offers them again. The producer's log line for a refusal is written for the
+first refusal of a kind and then at most once a minute, with the number
+suppressed since.
 
 In audit terms, a restart loses the following, and nothing else:
 

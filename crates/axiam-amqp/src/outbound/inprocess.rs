@@ -8,7 +8,7 @@
 //!
 //! | Piece | Role |
 //! |---|---|
-//! | [`InProcessOutboundPublisher`] | `OutboundPublisher` over one bounded `tokio::mpsc` channel per kind (capacity [`IN_PROCESS_CAPACITY`]); a full channel is an `OutboundError::Enqueue`, which every producer already treats as best-effort. The refusal's audit row is handed to the audit middleware's non-blocking queue, never awaited on the producer's path (#596) |
+//! | [`InProcessOutboundPublisher`] | `OutboundPublisher` over one bounded `tokio::mpsc` channel per kind (capacity [`IN_PROCESS_CAPACITY`]); a full channel is an `OutboundError::Enqueue`, which every producer already treats as best-effort. The refusal's audit row is handed to the audit middleware's non-blocking queue, never awaited on the producer's path (#596), and a bulk producer's run adds at most one more for what it held back (R101W4-01) |
 //! | [`spawn_in_process_consumer`] | one task per kind: takes a message, asks the kind's deliverer for **one** attempt, and applies `outcome::decide` — the same outcome table, the same retry policy (`AXIAM__<SLUG>__*`), the same audit vocabulary as the AMQP loop |
 //!
 //! # What differs from the broker, and why it is the profile's recorded trade
@@ -183,9 +183,12 @@ struct Queue {
 /// a rate-limited `WARN` and a hand-off to a queue that never waits.
 ///
 /// The `delivery_abandoned` row goes to the audit middleware's bounded channel
-/// with `try_record`. If that channel is full the row is counted as a lost audit
-/// row and offered to the dead-letter file (reason `channel_full`) like every
-/// other refused audit row; nothing here touches the datastore. Only when no
+/// with `try_record`. If that channel is down to the share it keeps for request
+/// rows, the row is shed and counted (`outbound_abandoned_dropped`), never
+/// dead-lettered and never counted as a lost request row (R101W4-01, R101W4-06);
+/// nothing here touches the datastore. A bulk producer stops at its first
+/// refusal and records the rest of its run as one row
+/// ([`OutboundPublisher::record_not_offered`]). Only when no
 /// middleware was bound (a publisher used before the composition root has built
 /// it, or by an embedder with none) does the row fall back to the consumer's
 /// sink, awaited as it always was.
@@ -198,10 +201,19 @@ async fn refuse(queue: &Queue, audit: &AuditSlot, msg: &OutboundMessage, reason:
             refused_total = report.total,
             suppressed_since_last_line = report.suppressed,
             "in-process outbound enqueue refused; the delivery was not accepted (logged at \
-             most once a minute per kind; each refusal still leaves an audit row)"
+             most once a minute per kind; each refusal still hands its audit row to the \
+             audit queue)"
         );
     }
-    let entry = outcome::abandoned_entry(msg, reason);
+    hand_off(queue, audit, outcome::abandoned_entry(msg, reason)).await;
+}
+
+/// Hand a refusal's row to the audit middleware's non-blocking queue, or, when
+/// none was bound, to the consumer's sink. The middleware keeps a quarter of its
+/// channel for request rows and sheds a refusal row rather than take it
+/// (R101W4-01): such a row is counted in its own counter, never in the request
+/// rows' `dropped` and never in the dead-letter file.
+async fn hand_off(queue: &Queue, audit: &AuditSlot, entry: CreateAuditLogEntry) {
     match (audit.get(), queue.recorder.get()) {
         (Some(audit), _) => {
             audit.try_record(entry);
@@ -247,6 +259,41 @@ impl OutboundPublisher for InProcessOutboundPublisher {
             // waiting on the datastore (#596).
             refuse(queue, &self.audit, msg, reason).await;
             Err(OutboundError::Enqueue(error))
+        })
+    }
+
+    /// One `<slug>.delivery_abandoned` row for the `not_offered` messages a bulk
+    /// producer held back after this kind's queue refused one (R101W4-01), with
+    /// `refused_count` and the reason the queue gives now (full, or not
+    /// running). Handed off like a refusal's row: never awaited on the
+    /// datastore once the middleware is bound.
+    fn record_not_offered<'a>(
+        &'a self,
+        kind: OutboundKind,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        not_offered: u64,
+    ) -> OutboundFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(queue) = self.queues.get(&kind).filter(|_| not_offered > 0) else {
+                return;
+            };
+            let reason = if queue.sender.is_closed() {
+                NOT_RUNNING_REASON
+            } else {
+                QUEUE_FULL_REASON
+            };
+            warn!(
+                %kind,
+                %tenant_id,
+                %target_id,
+                reason,
+                not_offered,
+                "a bulk producer stopped at the first refused enqueue of its run; the rest \
+                 were not offered (one audit row records them)"
+            );
+            let entry = outcome::not_offered_entry(kind, tenant_id, target_id, reason, not_offered);
+            hand_off(queue, &self.audit, entry).await;
         })
     }
 }
@@ -1338,11 +1385,11 @@ mod tests {
     }
 
     /// #596: with the audit channel full and the datastore stuck, `enqueue`
-    /// still returns its refusal at once, no datastore write happens on the
-    /// producer's path, and the loss counter moves — the row goes where every
-    /// other dropped audit row goes.
+    /// still returns its refusal at once and no datastore write happens on the
+    /// producer's path. R101W4-06: the shed row is counted in its own counter,
+    /// not as a dropped request row (until R101W4-01 it moved `dropped`).
     #[tokio::test]
-    async fn a_refusal_with_the_audit_channel_full_writes_nothing_and_counts_a_loss() {
+    async fn a_refusal_with_the_audit_channel_full_writes_nothing_and_counts_the_shed_row() {
         let gate = Gated::new(OutboundKind::Webhook);
         let (publisher, sink, _h, hub) =
             started_in(1, OutboundKind::Webhook, gate.clone(), FAST, 8);
@@ -1373,7 +1420,7 @@ mod tests {
         })
         .await;
         assert!(!mw.try_record(filler()), "the audit channel is full");
-        let before = mw.loss().snapshot().dropped;
+        let before = mw.loss().snapshot().outbound_abandoned_dropped;
 
         publisher
             .enqueue(&table::message(OutboundKind::Webhook, 0))
@@ -1395,12 +1442,146 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, OutboundError::Enqueue(_)), "{err:?}");
 
-        assert_eq!(mw.loss().snapshot().dropped, before + 1, "the loss moved");
+        let s = mw.loss().snapshot();
+        assert_eq!(
+            s.outbound_abandoned_dropped,
+            before + 1,
+            "the shed count moved"
+        );
+        assert_eq!(s.dropped, 0, "not counted as a lost request row");
         assert!(store.rows().is_empty(), "no datastore write completed");
         assert!(
             abandoned_rows(&sink, "webhook").is_empty(),
             "and none went through the consumer's sink"
         );
+    }
+
+    /// R101W4-01: what a bulk producer held back after a refusal is one
+    /// `delivery_abandoned` row carrying the count and the queue-full reason;
+    /// zero held back is no row.
+    #[tokio::test]
+    async fn the_messages_a_bulk_producer_held_back_are_one_row_with_the_count() {
+        let gate = Gated::new(OutboundKind::ScimPush);
+        let (publisher, audit, _h, _hub) =
+            started_in(1, OutboundKind::ScimPush, gate.clone(), FAST, 8);
+        let (tenant_id, target_id) = (Uuid::new_v4(), Uuid::new_v4());
+        // The consumer has started (and registered its sink) once it attempts.
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+        wait_for("the first attempt", || {
+            gate.started.load(Ordering::SeqCst) == 1
+        })
+        .await;
+
+        publisher
+            .record_not_offered(OutboundKind::ScimPush, tenant_id, target_id, 0)
+            .await;
+        assert!(abandoned_rows(&audit, "scim_push").is_empty());
+
+        publisher
+            .record_not_offered(OutboundKind::ScimPush, tenant_id, target_id, 8_976)
+            .await;
+        let rows = abandoned_rows(&audit, "scim_push");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tenant_id, tenant_id);
+        assert_eq!(rows[0].resource_id, Some(target_id));
+        assert!(matches!(rows[0].outcome, AuditOutcome::Failure));
+        let metadata = rows[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata["reason"], QUEUE_FULL_REASON);
+        assert_eq!(metadata["refused_count"], 8_976);
+        assert_eq!(metadata["attempts_made"], 0);
+        assert!(metadata.get("delivery_id").is_none(), "it stands for many");
+    }
+
+    /// R101W4-01, the review's probe kept as a regression test: a SCIM queue of
+    /// one slot held by a gated deliverer (a consumer that never keeps up), the
+    /// audit middleware at its production capacity over a datastore that takes
+    /// 1 ms per append, then 10 000 enqueues in a loop that does **not** stop at
+    /// the first refusal (the worst case; the SCIM producers now do stop), then
+    /// 100 request rows through the real middleware. Every enqueue is refused
+    /// and leaves its row to `try_record`, which stops at the request rows'
+    /// reserve: all 100 request rows are queued and nothing is dead-lettered.
+    /// Before the reserve: 4 096 refusal rows queued, 5 904 dropped and
+    /// dead-lettered, then 100 of 100 request rows dropped.
+    #[actix_web::test]
+    async fn a_refusal_burst_leaves_the_audit_reserve_to_request_rows() {
+        use actix_web::{App, HttpResponse, test, web};
+        use axiam_audit::middleware::{CHANNEL_CAPACITY, REQUEST_RESERVE};
+        const ENQUEUES: usize = 10_000;
+        const REQUEST_ROWS: usize = 100;
+
+        let gate = Gated::new(OutboundKind::ScimPush);
+        let (publisher, sink, _h, hub) =
+            started_in(1, OutboundKind::ScimPush, gate.clone(), FAST, 8);
+        let store = Datastore::new(Duration::from_millis(1));
+        let path = std::env::temp_dir().join(format!("axiam-r101w4-01-{}.jsonl", Uuid::new_v4()));
+        let mw = AuditMiddleware::spawn_configured(
+            store.clone(),
+            None,
+            axiam_audit::DeadLetterWriter::spawn(&path),
+            CHANNEL_CAPACITY,
+        );
+        assert!(hub.bind_audit(mw.clone()));
+
+        // The deliverer holds the first message; the second fills the slot.
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+        wait_for("the first attempt", || {
+            gate.started.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+
+        let mut refused = 0usize;
+        for _ in 0..ENQUEUES {
+            if publisher
+                .enqueue(&table::message(OutboundKind::ScimPush, 0))
+                .await
+                .is_err()
+            {
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, ENQUEUES);
+        let s = mw.loss().snapshot();
+        assert_eq!(s.dropped, 0, "no refusal row counts as a request row");
+        assert!(
+            s.outbound_abandoned_dropped
+                >= (ENQUEUES - (CHANNEL_CAPACITY - REQUEST_RESERVE)) as u64,
+            "the refusal rows stopped at the reserve: {} shed",
+            s.outbound_abandoned_dropped
+        );
+
+        let app = test::init_service(App::new().wrap(mw.clone()).route(
+            "/api/thing",
+            web::get().to(|| async { HttpResponse::Ok().finish() }),
+        ))
+        .await;
+        for _ in 0..REQUEST_ROWS {
+            let req = test::TestRequest::get().uri("/api/thing").to_request();
+            assert!(test::call_service(&app, req).await.status().is_success());
+        }
+        let loss = mw.loss();
+        assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+        let s = loss.snapshot();
+        assert_eq!(s.dropped, 0, "all {REQUEST_ROWS} request rows were queued");
+        let lines = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            lines.lines().count() <= 1,
+            "at most one dead-letter line for the run"
+        );
+        assert!(
+            abandoned_rows(&sink, "scim_push").is_empty(),
+            "the consumer's sink was not written on the producer's path"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The first refusal is logged at once; the rest inside the interval are

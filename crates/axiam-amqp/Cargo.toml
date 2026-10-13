@@ -31,6 +31,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# The R101W4-01 probe drives request rows through the real audit middleware.
+actix-web = { workspace = true }
 axiam-test-support = { workspace = true }
 axiam-db = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }

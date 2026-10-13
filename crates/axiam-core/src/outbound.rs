@@ -237,12 +237,44 @@ pub type OutboundFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Implementations route by [`OutboundMessage::kind`] and must enqueue the
 /// message with `attempt` as given (producers pass `0`). The enqueue is
 /// durable: `Ok(())` means the broker confirmed it.
+///
+/// # Bulk producers (R101W4-01)
+///
+/// A producer that enqueues many messages in one run — a SCIM reconciliation
+/// (one reference per in-scope user), a provisioning fan-out, a linked user's
+/// groups — **stops at the first refusal of the run**: the queue that refused
+/// one message will refuse the next, and every refusal costs the transport a
+/// row. It counts the messages it did not offer and hands that count to
+/// [`Self::record_not_offered`] once, at the end of the run. The refused message
+/// keeps its own row, written by `enqueue`; the run adds at most one more.
 pub trait OutboundPublisher: Send + Sync {
     /// Durably enqueue `msg` for its kind's consumer.
     fn enqueue<'a>(
         &'a self,
         msg: &'a OutboundMessage,
     ) -> OutboundFuture<'a, Result<(), OutboundError>>;
+
+    /// A bulk producer stopped offering messages of `kind` after one was
+    /// refused: record the `not_offered` messages of that run it held back, as
+    /// **one** row naming `target_id` of `tenant_id` (the target the run was
+    /// for; for a fan-out over several targets, the target of the refused
+    /// message).
+    ///
+    /// Must not wait on the datastore on the caller's path. Nothing, by
+    /// default: a transport that writes no row for a refused `enqueue` (the
+    /// broker's: its refusal is the producer's log line) writes none for these
+    /// either. The minimal profile's in-process dispatcher writes one
+    /// `<slug>.delivery_abandoned` row carrying `refused_count`.
+    fn record_not_offered<'a>(
+        &'a self,
+        kind: OutboundKind,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        not_offered: u64,
+    ) -> OutboundFuture<'a, ()> {
+        let _ = (kind, tenant_id, target_id, not_offered);
+        Box::pin(async {})
+    }
 }
 
 /// Make one delivery attempt. The protocol side of the dispatcher.

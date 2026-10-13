@@ -26,11 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In the minimal profile (`AXIAM__AMQP__ENABLED=false`), an outbound enqueue the
   in-process queue refuses no longer waits on the datastore on the caller's path.
   The `<kind>.delivery_abandoned` row is still written, one per refusal, but is
-  handed to the audit middleware's non-blocking queue; if that queue is full the
-  row is counted in `GET /health/jobs` `request_audit.dropped` and written to the
-  dead-letter file as `channel_full`. The `WARN` for a refusal is logged for the
-  first one of a kind and then at most once a minute, with the count suppressed
-  since (#596).
+  handed to the audit middleware's non-blocking queue. The `WARN` for a refusal
+  is logged for the first one of a kind and then at most once a minute, with the
+  count suppressed since (#596).
+- Refused outbound enqueues can no longer crowd request rows out of the audit
+  queue. A bulk run — a SCIM reconciliation, a provisioning fan-out, a linked
+  user's groups — now stops at its first refused enqueue and records what it held
+  back as one `scim_push.delivery_abandoned` row with `refused_count` (the next
+  run offers them again), where it used to leave one row per in-scope user and,
+  for a tenant above about five thousand users, fill the queue and drop every
+  tenant's request rows. The audit queue also keeps a quarter of its room (1 024
+  of 4 096 rows) for request rows: a refusal row that finds only that reserve is
+  shed and counted in the new `GET /health/jobs` field
+  `request_audit.outbound_abandoned_dropped`, never in `request_audit.dropped`
+  (which again counts request rows only) and never in the dead-letter file
+  (#596).
 - An orderly stop no longer waits without a bound for the cleanup task: it is
   told to stop before the drains, starts no further sweep, GDPR erasure or
   export, and is given 5 s after the audit drain (2 s after a lost lease) before

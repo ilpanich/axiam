@@ -242,3 +242,43 @@ async fn a_broker_that_is_down_never_fails_the_report() {
     p.membership_changed(w.tenant_id, Uuid::new_v4(), Uuid::new_v4())
         .await;
 }
+
+/// R101W4-01: the first refused reference ends a report's fan-out. Three
+/// targets, a queue with no room: one enqueue is offered (and refused), and the
+/// two references held back are one `record_not_offered` call naming the
+/// refused target, not two more refusals.
+#[actix_rt::test]
+async fn a_refused_reference_ends_the_fan_out_and_the_rest_are_one_record() {
+    let w = World::new().await;
+    let targets = [
+        w.add_target(|_| {}).await.id,
+        w.add_target(|_| {}).await.id,
+        w.add_target(|_| {}).await.id,
+    ];
+    w.queue.clear();
+    w.queue.set_limit(Some(0));
+
+    provisioner(&w)
+        .user_changed(w.tenant_id, Uuid::new_v4())
+        .await;
+    assert_eq!(w.queue.offered(), 1, "nothing is offered after the refusal");
+    let recorded = w.queue.not_offered();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let (kind, tenant_id, target_id, count) = recorded[0];
+    assert_eq!(kind, OutboundKind::ScimPush);
+    assert_eq!(tenant_id, w.tenant_id);
+    assert!(targets.contains(&target_id));
+    assert_eq!(count, 2);
+
+    // One target, one reference: the refusal is the whole record.
+    w.queue.clear();
+    let single = World::new().await;
+    single.add_target(|_| {}).await;
+    single.queue.clear();
+    single.queue.set_limit(Some(0));
+    provisioner(&single)
+        .user_changed(single.tenant_id, Uuid::new_v4())
+        .await;
+    assert_eq!(single.queue.offered(), 1);
+    assert!(single.queue.not_offered().is_empty());
+}

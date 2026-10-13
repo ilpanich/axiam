@@ -198,11 +198,16 @@ async fn a_full_channel_counts_the_rows_it_drops() {
 }
 
 /// #596: `try_record` is the request rows' queue for code that is not a request.
-/// A row it queues is appended by the worker; one it is refused is counted as
-/// dropped and written to the dead-letter file as `channel_full`, and the call
-/// never waits on the datastore (the worker here is stuck for an hour).
+/// A row it queues is appended by the worker, and the call never waits on the
+/// datastore (the worker here is stuck for an hour). R101W4-01 / R101W4-06: a
+/// row it is refused is **shed** — counted in `outbound_abandoned_dropped`, not
+/// in the request rows' `dropped`, and not written to the dead-letter file.
+/// (Until R101W4-01 such a row was a `channel_full` dead-letter line and a
+/// `dropped` count, which is how a refusal burst spent the request rows' file
+/// share and hid among their losses.) A channel of 2 keeps no reserve (a
+/// quarter of 2 is 0), so this is the full-channel case.
 #[actix_web::test]
-async fn try_record_queues_without_waiting_and_a_full_channel_is_a_counted_loss() {
+async fn try_record_queues_without_waiting_and_a_full_channel_sheds_apart_from_request_rows() {
     let path = dlq_path();
     let store = Datastore::stuck();
     let mw = AuditMiddleware::spawn_configured(
@@ -233,15 +238,60 @@ async fn try_record_queues_without_waiting_and_a_full_channel_is_a_counted_loss(
     assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
     let s = loss.snapshot();
     let refused = queued.iter().filter(|q| !**q).count() as u64;
-    assert_eq!(s.dropped, refused);
-    assert_eq!(s.dead_lettered, refused);
-    let lines = lines_of(&path);
-    assert_eq!(lines.len() as u64, refused);
+    assert_eq!(s.outbound_abandoned_dropped, refused);
+    assert_eq!(s.dropped, 0, "not a request row");
+    assert_eq!(s.dead_lettered, 0);
+    assert!(!s.recent_loss, "no request row was lost");
+    assert!(lines_of(&path).is_empty(), "not in the dead-letter file");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// R101W4-01, the review's probe (the audit half; the in-process dispatcher's
+/// test drives the same burst through refused enqueues): the channel at its
+/// production capacity over a datastore that takes 1 ms per append, then
+/// 10 000 outbound refusal rows at CPU speed — a reconciliation of a
+/// 10 000-user tenant against a full queue, had its producer not stopped —
+/// then 100 request rows through the real middleware. The refusal rows stop at
+/// the reserve; every request row is queued; nothing reaches the dead-letter
+/// file. Before the reserve the burst filled the channel (5 904 more were
+/// dropped) and then 100 of 100 request rows were dropped.
+#[actix_web::test]
+async fn a_refusal_burst_leaves_the_request_reserve_and_every_request_row_is_queued() {
+    use axiam_audit::middleware::{CHANNEL_CAPACITY, REQUEST_RESERVE};
+    const REFUSALS: usize = 10_000;
+    const REQUEST_ROWS: usize = 100;
+
+    let path = dlq_path();
+    let store = Datastore {
+        fail: false,
+        delay: Duration::from_millis(1),
+        appended: Arc::default(),
+    };
+    let mw = AuditMiddleware::spawn_configured(
+        store.clone(),
+        None,
+        DeadLetterWriter::spawn(&path),
+        CHANNEL_CAPACITY,
+    );
+    let queued = (0..REFUSALS)
+        .filter(|i| mw.try_record(request_row(&format!("scim_push.delivery_abandoned {i}"))))
+        .count();
+    // The loop never yields, so the worker took none: the refusal rows filled
+    // the channel down to the reserve and not one slot further.
+    assert_eq!(queued, CHANNEL_CAPACITY - REQUEST_RESERVE);
+    let s = mw.loss().snapshot();
+    assert_eq!(s.outbound_abandoned_dropped, (REFUSALS - queued) as u64);
+    assert_eq!(s.dropped, 0);
+
+    requests(&mw, REQUEST_ROWS).await;
+    let loss = mw.loss();
+    assert!(loss.dead_letter().flush(Duration::from_secs(10)).await);
+    let s = loss.snapshot();
+    assert_eq!(s.dropped, 0, "all {REQUEST_ROWS} request rows were queued");
+    assert!(!s.recent_loss);
     assert!(
-        lines
-            .iter()
-            .all(|l| l.reason.as_deref() == Some("channel_full")
-                && l.entry.action.starts_with("outbound "))
+        lines_of(&path).len() <= 1,
+        "at most one dead-letter line for the burst"
     );
     let _ = std::fs::remove_file(&path);
 }

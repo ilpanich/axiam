@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0",
-    "x-axiam-spec-digest": "sha256:2de3fba40cad83f5cfc692405ea841ba3e1a2c3e7d60949076e89ec8f604afd9"
+    "x-axiam-spec-digest": "sha256:80bfb8490aadb0a0a43fa569f0c239aa6d682009df4ba4dd3ba04dcc08da27b0"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -22683,7 +22683,8 @@
           "not_recoverable",
           "dead_letter_configured",
           "dead_letter_full",
-          "recent_loss"
+          "recent_loss",
+          "outbound_abandoned_dropped"
         ],
         "properties": {
           "dead_letter_configured": {
@@ -22723,6 +22724,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Lost rows kept nowhere: no dead-letter file is configured, or it could not\ntake them.",
+            "minimum": 0
+          },
+          "outbound_abandoned_dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not request rows: the minimal profile's outbound\n`<kind>.delivery_abandoned` rows (an enqueue the in-process queue\nrefused) that were shed because the audit queue was down to the quarter\nit keeps for request rows. Counted apart from `dropped`, not written to\nthe dead-letter file, and not a `recent_loss`; a rising count means an\noutbound queue is refusing faster than the audit trail records it.",
             "minimum": 0
           },
           "recent_loss": {

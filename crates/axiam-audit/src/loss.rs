@@ -61,6 +61,11 @@ pub struct RequestAuditLossSnapshot {
     pub dead_letter_full: bool,
     /// When the most recent row was lost, if any was.
     pub last_loss_at: Option<DateTime<Utc>>,
+    /// Outbound `<kind>.delivery_abandoned` rows the middleware's `try_record`
+    /// shed because the channel was down to the share it keeps for request rows
+    /// (or closed), since process start (R101W4-01, R101W4-06). Not request
+    /// rows: not in `dropped`, not dead-lettered, not a `recent_loss`.
+    pub outbound_abandoned_dropped: u64,
     /// Whether a row was lost within [`RECENT_LOSS_WINDOW`].
     pub recent_loss: bool,
 }
@@ -68,6 +73,7 @@ pub struct RequestAuditLossSnapshot {
 struct Inner {
     dropped: AtomicU64,
     failed: AtomicU64,
+    outbound_abandoned_dropped: AtomicU64,
     /// Unix milliseconds of the latest loss; 0 when none.
     last_loss_ms: AtomicI64,
     /// Milliseconds since `base` of the latest ERROR line; [`NEVER`] when none.
@@ -91,6 +97,7 @@ impl RequestAuditLoss {
             inner: Arc::new(Inner {
                 dropped: AtomicU64::new(0),
                 failed: AtomicU64::new(0),
+                outbound_abandoned_dropped: AtomicU64::new(0),
                 last_loss_ms: AtomicI64::new(0),
                 last_report_ms: AtomicU64::new(NEVER),
                 reported_total: AtomicU64::new(0),
@@ -116,6 +123,17 @@ impl RequestAuditLoss {
     ) {
         self.inner.dropped.fetch_add(1, Ordering::Relaxed);
         self.lose(entry, occurred_at, reason, &reason);
+    }
+
+    /// An outbound refusal's row was shed by `try_record` to keep the request
+    /// rows' reserve (or because the channel was closed). Counted apart from the
+    /// request rows (R101W4-06), and not dead-lettered: the dead-letter file's
+    /// request share is for request rows (R101W4-01). Returns the count so far.
+    pub fn record_outbound_abandoned_dropped(&self) -> u64 {
+        self.inner
+            .outbound_abandoned_dropped
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
     }
 
     /// The worker took a row off the channel and the append failed. `occurred_at`
@@ -212,6 +230,10 @@ impl RequestAuditLoss {
             dead_letter_full: dead_letter.is_full(),
             last_loss_at,
             recent_loss,
+            outbound_abandoned_dropped: self
+                .inner
+                .outbound_abandoned_dropped
+                .load(Ordering::Relaxed),
         }
     }
 }

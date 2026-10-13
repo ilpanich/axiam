@@ -125,6 +125,12 @@ pub trait AuditEventSink: Send + Sync {
 /// capacity.
 pub const CHANNEL_CAPACITY: usize = 4096;
 
+/// The free slots of the audit channel that [`AuditMiddleware::try_record`]
+/// never takes: a quarter of it, kept for request rows (R101W4-01). With the
+/// production [`CHANNEL_CAPACITY`] that is 1 024. A middleware spawned with
+/// another capacity keeps a quarter of that (none below four slots).
+pub const REQUEST_RESERVE: usize = CHANNEL_CAPACITY / 4;
+
 /// How often the sink's task calls [`AuditEventSink::flush`].
 pub const SINK_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -152,6 +158,9 @@ enum Queued {
 #[derive(Clone)]
 pub struct AuditMiddleware {
     tx: mpsc::Sender<Queued>,
+    /// Free slots [`Self::try_record`] leaves for request rows: a quarter of
+    /// the channel ([`REQUEST_RESERVE`] at the production capacity).
+    request_reserve: usize,
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
     notifications_dropped: Arc<AtomicU64>,
@@ -231,6 +240,7 @@ impl AuditMiddleware {
         ));
         Self {
             tx,
+            request_reserve: capacity / 4,
             shutting_down,
             loss,
             notifications_dropped,
@@ -241,29 +251,41 @@ impl AuditMiddleware {
     /// an HTTP request and must not write to the datastore on its caller's path
     /// (#596: the in-process outbound dispatcher's refused enqueues).
     ///
-    /// The same bounded channel the request rows use, so the same bound
-    /// ([`CHANNEL_CAPACITY`]) and the same accounting: a row the channel refuses
-    /// is counted in [`Self::loss`] (`dropped`) and offered to the dead-letter
-    /// file with reason `channel_full` (or `channel_closed`) — it is never
+    /// The same bounded channel the request rows use, but never its last
+    /// quarter (R101W4-01): when the channel's free slots are down to that
+    /// reserve ([`REQUEST_RESERVE`] at the production capacity), or the channel
+    /// is closed, the row is **shed** — counted in
+    /// [`RequestAuditLossSnapshot::outbound_abandoned_dropped`], and neither
+    /// counted as a dropped request row nor offered to the dead-letter file
+    /// (R101W4-06). A burst of refusals therefore cannot take the request rows'
+    /// room in the channel nor their share of the dead-letter file. It is never
     /// awaited and never written on the caller's path. The entry's client-sized
     /// fields are cut as a request row's are. The row carries no organization
     /// (nil), which the notification sink does not need for a row it declines.
     ///
-    /// Returns whether the row was queued; `false` means it was counted as lost.
+    /// Returns whether the row was queued; `false` means it was shed.
+    ///
+    /// [`RequestAuditLossSnapshot::outbound_abandoned_dropped`]:
+    ///     crate::loss::RequestAuditLossSnapshot::outbound_abandoned_dropped
     pub fn try_record(&self, entry: CreateAuditLogEntry) -> bool {
-        let mut entry = entry;
-        crate::dead_letter::bound_fields(&mut entry);
-        offer(
-            &self.tx,
-            &self.loss,
-            Queued::Event {
+        if self.tx.capacity() > self.request_reserve {
+            let mut entry = entry;
+            crate::dead_letter::bound_fields(&mut entry);
+            let queued = Queued::Event {
                 event: AuditEvent {
                     entry,
                     org_id: Uuid::nil(),
                 },
                 occurred_at: Utc::now(),
-            },
-        )
+            };
+            // Another sender may have taken the last free slots since the
+            // check; that refusal is shed like the others.
+            if self.tx.try_send(queued).is_ok() {
+                return true;
+            }
+        }
+        self.loss.record_outbound_abandoned_dropped();
+        false
     }
 
     /// The counters of request-audit rows that were not recorded (T-108).

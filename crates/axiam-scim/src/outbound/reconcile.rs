@@ -17,7 +17,14 @@
 //! 1. **Enqueue.** One reference per in-scope user, per pushed group and per
 //!    linked resource, on the shared dispatcher; the deliverer converges each.
 //!    A link left `erase_pending` by a refused erasure `DELETE` is a linked
-//!    resource like any other: this is what retries it.
+//!    resource like any other: this is what retries it. The run **stops
+//!    offering at its first refused reference** (R101W4-01): the queue that
+//!    refused one refuses the next, and in the minimal profile each refusal is
+//!    an audit row. Every later reference of the run, in this step and among
+//!    step 2's repairs, is counted in `enqueue_failed` without being offered,
+//!    and the run ends with one `scim_push.delivery_abandoned` row carrying
+//!    their count (`OutboundPublisher::record_not_offered`). The next run
+//!    offers them again.
 //! 2. **Read the downstream.** `GET /Users` (and `/Groups` when the target
 //!    pushes groups), `startIndex`/`count = 100`, every request through the
 //!    deliverer's own guarded, no-redirect, credential-checked path
@@ -53,6 +60,7 @@ use axiam_core::models::scim_target::{
     NewScimTargetLink, ScimResourceType, ScimTarget, ScimTargetLink, ScimTargetScope,
 };
 use axiam_core::models::user::UserStatus;
+use axiam_core::outbound::OutboundKind;
 use axiam_core::repository::{
     GroupRepository, Pagination, ScimTargetLinkRepository, ScimTargetRepository,
     ScimTargetStateRepository, UserRepository,
@@ -108,7 +116,9 @@ pub struct ReconcileReport {
     /// References queued in step 1 and for repairs (a resource queued twice
     /// counts twice).
     pub enqueued: u64,
-    /// References that could not be queued (a broker outage).
+    /// References that could not be queued (a broker outage, a full queue): the
+    /// one the queue refused, and every later reference of the run, which is
+    /// not offered once one was refused (R101W4-01).
     pub enqueue_failed: u64,
     /// Linked resources left `erase_pending` that were queued for another
     /// `DELETE`.
@@ -324,6 +334,19 @@ where
         let outcome = self
             .run_claimed(target, started_at, deadline, &mut report)
             .await;
+        // R101W4-01: the references held back after the first refusal are one
+        // row for the run, whether or not the run then finished; the refused
+        // reference has its own.
+        if report.enqueue_failed > 1 {
+            self.publisher
+                .record_not_offered(
+                    OutboundKind::ScimPush,
+                    tenant_id,
+                    target_id,
+                    report.enqueue_failed - 1,
+                )
+                .await;
+        }
         match &outcome {
             Ok(()) => tracing::info!(
                 target: "axiam::scim_reconcile",
@@ -537,6 +560,9 @@ where
 
     /// Queue a reference, whether or not this run queued it before: a repair
     /// made after the first reference may have been delivered needs another.
+    ///
+    /// Once the run has had a reference refused, nothing more is offered: the
+    /// reference is counted as failed and left for the next run (R101W4-01).
     async fn queue_again(
         &self,
         target: &ScimTarget,
@@ -544,6 +570,10 @@ where
         axiam_id: Uuid,
         report: &mut ReconcileReport,
     ) {
+        if report.enqueue_failed > 0 {
+            report.enqueue_failed += 1;
+            return;
+        }
         let message = reference_message(target.tenant_id, target.id, resource_type, axiam_id);
         match self.publisher.enqueue(&message).await {
             Ok(()) => report.enqueued += 1,

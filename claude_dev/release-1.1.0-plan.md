@@ -491,6 +491,56 @@ does not wait for tags. Consequences, also decided by the maintainer:
 
 ### 13.1 W1 — what landed, and where the tree overruled the plan
 
+**Head `dd3d3f10`** on `claude/release-1.1.0-w1` (from `3d011573e`), 2026-10-14:
+eleven task commits, the F4 review and three in-wave fixes, all signed. One
+executor per item at the row's model; the §10 gate before each commit (every
+command exit 0 as reported by the tool); `cargo clean` between items (4.7 –
+27.8 GiB each). From W1.5 on executors build with `CARGO_INCREMENTAL=0` and
+line-tables-only debug info (local settings, no tracked file) because W1.4's
+server tests filled 27.8 GiB. The clone was shallow, so
+`check-remediation-evidence.py` failed on cited commits; the orchestrator ran
+`git fetch --unshallow` before W1.3 and it passes since (37 verified).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W1.1 #615 | `b97741b4` | Opus | `thisUpdate` clamped to `epoch.end − 1 s`, entries to `thisUpdate`; no high-water number (it would end #608's byte identity across replicas). The operator rule was derived, not assumed: an interval change stays monotonic at `nextUpdate` iff `I_new ≤ 2·I_old` (module doc, PKI guide, T-102). *Tree:* `list_identity` at `crl.rs:~767`, not `:709`. |
+| W1.2 #616 | `da02b290` | Opus | Each CA's re-sign is one spawned flight behind a `watch` marker in `CaSlot`; joiners wait at most `permit_wait` and share its outcome (a `503` too); a hang-up no longer cancels the re-sign; `AxiamError: Clone`. *Tree:* the "shared flight precedent" was a mutex sharing a success only; the semaphore is at `boot.rs:705`. |
+| W1.3 #617 | `e9a3ecca` | Sonnet | The sweep re-releases a revoked CA's own issuer when Vault refuses its forward as still an issuer (two triggers: the recorded error, or the refusal itself), then forwards; T-470 names the single-mount dependency and the not-adopted `issuer/<child>/revoke`. *Tree:* the sweep is `CertService::forward_pending_ca_revocations` in `axiam-pki/src/cert.rs`, not `cleanup.rs`; `revoke_within` unchanged. |
+| W1.4 #618 | `4bd98bf4` | Sonnet | Step (b4) clears the account's certificate `metadata` (shared "belongs to the account" SQL with the revocation; `user_id` kept as the retry key); new job `certificate_retention` deletes rows eight days past `notAfter` in live tenants (bounded, stop-aware, two-replica safe); one `revocation_grace` definition feeds `KEPT_REVOCATION` and the new grace; T-187 and the GDPR doc: Art. 6(1)(f) / Art. 32, Art. 17(3)(b) withdrawn. *Tree:* (b4) at `cleanup.rs:~1975`; no migration. |
+| W1.5 #619 | `29943ab7` | Sonnet | `sanitise_reason` at both audit appends and both forward logs; `b.` prefix masked; T-470 corrected. The returned reason stays whole (W1.3's matcher reads it). |
+| W1.6 #620 | `843f2e81` | Sonnet | `axiam_auth::secrets::bootstrap_client()` on one no-redirect builder shared with the private-CA client; the redirect test builds through it (mutation-checked); T-476 corrected. *Tree:* the old builder had no timeout or TLS settings to carry. |
+| W1.7 #621 | `4f3cf47b` | Sonnet | (a) "eight days after it expires" in the admin guide and `operate.ts`; (b) `vault_revocation`'s real failure rule; (c) `crates/axiam-server/tests/crl_purge_margin.rs` pins `REVOCATION_GRACE_SECS ≥ MAX_CRL_NEXT_UPDATE_SECS + 1 d` (fails at seven days); (d) `operate.ts` lists all 22 sweeps. *Tree:* `tenant_purge.rs` is in `axiam-db/src/repository/`; "Seventeen" was already stale (five jobs missing before W1.4). |
+| W1.8 #622 | `a8324435` | Opus | (a) an orphan purge claims a tombstoned marker row under the orphan's id **and** re-checks for rows under the claim — each alone fails an interleaving; only the replica whose `DELETE … RETURN BEFORE` removes the marker records; (b) both issuance routes re-read the account after the create and revoke + `400` (nothing returned) when it is gone, and user deletion revokes once more after its tombstone; (c) `DELETE` of an unknown user revokes nothing; (d) the Vault failure record is conditional on the claim's lease (leaf and CA; core trait signature). T-472 corrected, T-336 amended. |
+| W1.9 #653 | `09c76d56` | Sonnet | 20-octet CSPRNG serials (top bit clear) at every local signing site; Vault's `sign-verbatim` picks its own. **v99 taken**: no serial column existed, so v99 adds `serial` and UNIQUE `(issuer_ca_id, serial)` / `(parent_ca_id, serial)`; old rows `NONE` (no collision, safe upgrade), roots not recorded; scope test and newest version 99. *Tree:* no index existed (the plan allowed both); oracle in pki `crl_test.rs`. |
+| W1.10 #651 | `c51a8677` | Sonnet | Ed25519 keys returned (and stored) as RFC 8410 v1; OpenSSL 3.0.13 `pkey` reads v1 (exit 0), refuses ring's v2 (exit 1); the FreeRADIUS re-encoding workaround is gone (W5.2 reads this); spec regenerated (descriptions incl. the CRL `503` sentence of W1.2), registry digest refreshed. *Tree:* `to_pkcs8_pem` is the RSA hand-off; the fix is at the four `serialize_pem` sites. |
+| W1.11 #649 | `28dc3eb6` | Sonnet | The common name refuses control, non-space whitespace, bidi/zero-width/format characters, stray spaces and > 64 characters (characters, not bytes), never echoing the value; T-461 amended. *Tree:* the CSR path (`inspect_csr`) was unchecked and the Vault intermediate default could exceed 64 — both now refused. |
+| W1.12 | `76821676` | Opus | `claude_dev/security-review-release-1.1.0-w1-2026-10-14.md`: R110W1-01 **Medium**, R110W1-02 Low, R110W1-03 … -06 Informational. |
+| fix | `b24e34a1` | Sonnet | **R110W1-01** (Medium): the retention batch reads the live tenants once (`LET $live`); 2 000 + 201-tenant test (old statement 29 s). |
+| fix | `154e0d5e` | Sonnet | **R110W1-02** (Low, fixed in-wave because the wave closes #649): a CSR with two CNs is refused and every subject attribute passes the value rules, local and Vault paths, before any Vault request; T-461 corrected. Value rules rather than refusing O/OU/C: local paths drop them today and client tooling sends them. Spec regenerated (one description). |
+| fix | `dd3d3f10` | Sonnet | **R110W1-03**: registry `spec_digest` refreshed (`gen-management-registry.py --check` exit 0; 190 operations, 28 namespaces). |
+
+Filed on the next patch milestone (named in each body: `1.1.x` does not exist
+yet and the session cannot create milestones): ilpanich/axiam#664 (R110W1-04),
+#665 (R110W1-05), #666 (R110W1-06 (a)–(c); its (d) is W8.4's), and three
+executor follow-ups the review confirmed: #667 (Vault clients without a
+request timeout), #668 (an issuance between the Art. 17 purge's (b4) and its
+anonymization survives), #669 (a unique-serial violation answers `500`). The
+review rejected four others (request-path issuer-release retry; the 256-character
+cut of the stored reason; T-102 citing Art. 17(3)(b); an epoch-premise test —
+`epochs_are_half_the_interval_and_aligned_for_every_replica` exists).
+
+For later waves: **W7.1** — `CONTRACT.md` §35 still names "a datastore clock
+ahead" among the ways the CRL number falls; after W1.1 only the interval change
+and replica-clock straddle remain, and §35 should carry the `I_new ≤ 2·I_old`
+rule (an informative-section text change, not a §12 question). **W8.3** —
+`website/src/threatModel.ts` and `threat-modeling-and-security.md` copies of
+T-102, T-187, T-470, T-476 lag. **W8.4** — upgrade notes: the first
+`certificate_retention` runs delete every row eight days past `notAfter` (up to
+10 000 per tick); keys issued before 1.1.0 stay in the long PKCS#8 form;
+subjects with control characters, two spaces or > 64 characters are now `400`;
+v99 and random serials. `check-sdk-artifact-drift.py` exits 1 until the SDKs
+re-vendor (W7), as expected.
+
 ### 13.2 W2
 
 ### 13.3 W3

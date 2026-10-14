@@ -540,13 +540,13 @@ async fn deleting_a_user_revokes_their_user_certificates_and_no_one_elses() {
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
 
-    for (cert, expected) in [
-        (&bound, CertificateStatus::Revoked),
-        (&legacy, CertificateStatus::Revoked),
-        (&bobs, CertificateStatus::Active),
+    for (label, cert, expected) in [
+        ("bound", &bound, CertificateStatus::Revoked),
+        ("legacy", &legacy, CertificateStatus::Revoked),
+        ("bob's", &bobs, CertificateStatus::Active),
     ] {
         let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
-        assert_eq!(read.status, expected, "certificate {}", cert.id);
+        assert_eq!(read.status, expected, "the {label} certificate");
     }
     let listed: Vec<String> = certs
         .list_revoked_by_issuer(issuer, chrono::Utc::now())

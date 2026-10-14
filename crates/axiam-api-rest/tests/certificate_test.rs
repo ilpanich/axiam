@@ -1139,10 +1139,14 @@ async fn a_user_certificate_carries_the_account_it_was_issued_for() {
         "no binding asked, none stored"
     );
 
-    for (issued, expected) in [
-        (&generated, serde_json::json!(alice.to_string())),
-        (&signed, serde_json::json!(alice.to_string())),
-        (&unbound, serde_json::Value::Null),
+    for (label, issued, expected) in [
+        (
+            "generated",
+            &generated,
+            serde_json::json!(alice.to_string()),
+        ),
+        ("signed", &signed, serde_json::json!(alice.to_string())),
+        ("unbound", &unbound, serde_json::Value::Null),
     ] {
         let id = issued["id"].as_str().unwrap();
         let req = test::TestRequest::get()
@@ -1151,7 +1155,7 @@ async fn a_user_certificate_carries_the_account_it_was_issued_for() {
             .to_request();
         let fetched: serde_json::Value =
             test::read_body_json(test::call_service(&app, req).await).await;
-        assert_eq!(fetched["user_id"], expected, "GET {id}");
+        assert_eq!(fetched["user_id"], expected, "GET the {label} certificate");
     }
 
     let req = test::TestRequest::get()

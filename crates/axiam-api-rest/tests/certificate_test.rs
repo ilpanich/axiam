@@ -1052,16 +1052,6 @@ async fn tenant_user(db: &Surreal<TestDb>, tenant_id: Uuid, name: &str) -> Uuid 
         .id
 }
 
-/// The `message` member of an error answer, for assertion messages. A success
-/// answer from the issuance routes carries the certificate PEM and, for a
-/// generated key pair, the private key (returned once), so the whole body is
-/// never interpolated into a panic message: it would land in CI logs.
-fn message_of(body: &serde_json::Value) -> String {
-    body["message"]
-        .as_str()
-        .map_or_else(|| "no message member".to_owned(), str::to_owned)
-}
-
 /// `POST` `payload` to `uri` as `token`; the status and the JSON body.
 async fn post_json<S, B>(
     app: &S,
@@ -1117,7 +1107,7 @@ async fn a_user_certificate_carries_the_account_it_was_issued_for() {
         }),
     )
     .await;
-    assert_eq!(status, 201, "generate: {}", message_of(&generated));
+    assert_eq!(status, 201, "generate");
     assert_eq!(generated["user_id"], alice.to_string());
 
     let (status, signed) = post_json(
@@ -1130,7 +1120,7 @@ async fn a_user_certificate_carries_the_account_it_was_issued_for() {
         }),
     )
     .await;
-    assert_eq!(status, 201, "sign-csr: {}", message_of(&signed));
+    assert_eq!(status, 201, "sign-csr");
     assert_eq!(signed["user_id"], alice.to_string());
 
     let (status, unbound) = post_json(
@@ -1143,7 +1133,7 @@ async fn a_user_certificate_carries_the_account_it_was_issued_for() {
         }),
     )
     .await;
-    assert_eq!(status, 201, "unbound: {}", message_of(&unbound));
+    assert_eq!(status, 201, "unbound");
     assert!(
         unbound["user_id"].is_null(),
         "no binding asked, none stored"
@@ -1267,7 +1257,7 @@ async fn a_user_binding_that_does_not_hold_is_a_400() {
     ];
     for (what, uri, payload, expected) in cases {
         let (status, body) = post_json(&app, uri, &token, payload).await;
-        assert_eq!(status, 400, "{what} must be a 400: {}", message_of(&body));
+        assert_eq!(status, 400, "{what} must be a 400");
         let message = body["message"].as_str().unwrap_or_default();
         assert!(
             message.contains(expected),

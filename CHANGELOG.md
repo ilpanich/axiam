@@ -7,7 +7,235 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-14
+
+#### Upgrading to 1.0.1 — read before you upgrade
+
+- **The schema moves from v94 to v98.** Migrations v95 – v98 run at startup like
+  every earlier one. Each is additive and none backfills: v95 and v96 add the
+  Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
+  v97 adds `tenant.purge_claimed_at`, and v98 adds `certificate.user_id` and its
+  index. A row written before the upgrade reads as "none attempted, due now" or
+  "not bound", and the first sweep or the name convention covers it.
+
+- **Scopes an administrator added to a self-registered client are no longer
+  served (#613, #636).** The scope ceiling bounds a `managed_by: dcr` or `cimd`
+  client's scopes by the tenant's effective `dcr_allowed_scopes` wherever they
+  are read. 1.0.0 honoured scopes an administrator put on such a client through
+  `PUT /api/v1/oauth2-clients/{id}` even when they were outside that list; after
+  the upgrade they are withheld — `invalid_scope` at authorize, dropped from
+  refreshed and newly minted tokens — while the administrator API still accepts
+  them and `GET` still shows them. To keep serving one, add it to the tenant's
+  `dcr_allowed_scopes` (an empty list offers nothing, as at registration);
+  having the administrator API refuse such a write is #636.
+
+- **Settings that now refuse to start, or refuse a request, where 1.0.0 accepted
+  them.** `AXIAM__PKI__CRL_BASE_URL` carrying credentials (`user@host`) stops
+  the server at boot (#609). A Vault address that answers with a redirect is an
+  error naming the host, not followed: configure its final URL (#611). An OIDC
+  or OAuth2 IdP whose token or userinfo endpoint redirects must be configured
+  with its final URL (#591). `POST` and `PUT /api/v1/oauth2-clients` answer
+  `400` for a `backchannel_logout_uri` that is not a safe absolute `https` URL
+  (R101W2-04). A `vault_pki` deployment's Vault token needs `update` on
+  `pki/revoke` so that a revoked tenant signing CA reaches the parent's list
+  (#612).
+
+- **SAML signatures are held to a narrower set.** A received signature may use
+  only `enveloped-signature` and the c14n family (R101W2-01); with
+  `allow_sha1_signatures` set, only SHA-1 and the SHA-2 algorithms are admitted,
+  not whatever xmlsec verifies (#606); a document with an element named
+  `Signature` outside the XML-DSig namespace is refused. Keycloak, Entra ID,
+  Okta, Shibboleth and samael are unaffected.
+
+- **Rate limits and caps that integrators can meet.** The five federation flow
+  routes share `end_session_per_min` per address, one bucket each (#614), so a
+  backend that relays many people's sign-ins from one address should raise it. A
+  client may make three `bc-authorize` calls for one hint in ten minutes and
+  gets `429 slow_down` after that (#599): a test driver that runs more than
+  three CIBA flows for one user from one client in that window, FAPI-CIBA
+  conformance plans included, will be refused for ten to twenty minutes
+  (R101W3-06).
+
+- **Answers that change.** A tombstoned tenant's clients get `invalid_client`
+  where the grants said `invalid_request` (#601); the device grant refuses a
+  suspended or locked-out account with `invalid_grant` (#604); `DELETE
+  /api/v1/users/{id}` revokes the account's `User` certificates (#533); a tenant
+  purge deletes only the audit rows the export holds and keeps the rest for the
+  retention sweep (#602).
+
+- **Operations.** The audit dead-letter file is created `0600`, an existing one
+  is tightened to `0600` when next opened, and its lines are `{"occurred_at",
+  "reason", "entry"}` (#594, #595); a reader running as another user loses
+  access. An orderly stop now adds up to 37 s inside the 40 s grace period and
+  the dead-component backstop moves from 35 s to 38 s, so the orchestrator's
+  grace period must be at least 40 s (#598). `GET /health/jobs` gains the job
+  `vault_revocation_failing` (#603) and the field
+  `request_audit.outbound_abandoned_dropped` (R101W4-01). The CRL number is
+  larger than any 1.0.0 number, so it keeps rising across the upgrade; its
+  `Cache-Control: max-age` now ends at the refresh, at most half of
+  `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` (#608).
+
+### Added
+
+- **802.1X with an AXIAM-issued Device certificate: a FreeRADIUS recipe, not a
+  RADIUS server (#563, D3 and D5 of the RADIUS spike).**
+  `docs/pki/freeradius.md` is the guide — issue and bind a `Device` certificate,
+  export the tenant signing CA, a FreeRADIUS configuration that trusts that CA
+  only, EAP-TLS over TLS 1.3 only, `require_message_authenticator = yes`, a
+  placement table that rejects a valid certificate nobody listed and is keyed on
+  the certificate serial, never on a subject (a subject of `DEFAULT` would match
+  every key, R101W6-02), RadSec where the NAS allows, and the revocation lag
+  stated as the fetch interval plus `ca_path_reload_interval` (300 s at the
+  smallest) plus the session's `Session-Timeout`.
+  `docker/docker-compose.radius.yml` references the upstream FreeRADIUS image by
+  digest and ships configuration only (`docker/radius/raddb/`); nothing of
+  FreeRADIUS (GPLv2) is in the tree. `radius_e2e.rs`, run by `radius-e2e.yml`
+  (path-filtered, `workflow_dispatch`, gated by `AXIAM_E2E_RADIUS=1`; a missing
+  server is a failure), drives `eapol_test` through issue, bind, accept, a wrong
+  CA, another tenant's device (with its leaf alone, with its signing CA, and
+  with the shared root) and a revoked device that is still admitted until the
+  list reaches FreeRADIUS and refused after; RadSec is documented, not
+  exercised. AXIAM still speaks no RADIUS. The authentik comparison's RADIUS row
+  reads *recipe, not native*. `claude_dev/radius-reply-profile-design.md` is the
+  design note for the reply profile and the network-segment pattern (D5; no
+  code). **What remains of #563 is D4**, the `rlm_rest` authorize endpoint: it
+  needs a contract section and the reply-profile bindings as code, and is
+  scheduled only if the recipe's CRL interval or attribute model proves
+  inadequate; the issue stays open for it. Threat model: T-449
+  (`Message-Authenticator` required), T-454 (the recipe vendors nothing), T-456
+  (EAP-TLS only, TLS 1.3 only) and T-459 (the tenant signing CA is the only
+  anchor) move from Not applicable to Mitigated with that end-to-end as their
+  test; **T-450 and T-462 move to Open** — the recipe exposes an adopter to the
+  EAP-TLS keys travelling under MD5 obfuscation on plain UDP and to a revoked
+  device being admitted until FreeRADIUS has read the list (R101W6-09); the
+  other fifteen RADIUS entries stay Not applicable and each says why. T-449
+  carries a dated correction (`Proxy-State` is returned unmodified, not refused,
+  RFC 2865 §5.33), as do T-453 (RFC 5080 §2.2.2's duplicate key), T-459 (the
+  shared organization root) and T-461 (the placement table's key).
+
 ### Security
+
+- **The CRL distribution point written into a certificate is the URL that was
+  validated (#609, R1W1-11).** `CrlDistribution` checked the parsed URL but
+  stored the operator's text, and the parser drops tabs and newlines, lowercases
+  the host and percent-encodes, so the URI in a certificate could differ from
+  the one that passed the checks. The parser's own serialisation is now stored
+  (without the trailing slash), and a base URL carrying userinfo (`user@host`,
+  `user:pw@host`) is refused — at boot, naming `AXIAM__PKI__CRL_BASE_URL`.
+  Threat model: T-102 amended.
+
+- **The four Vault clients never follow a redirect (#611 (a), R1W1-13).** Every
+  request to Vault carries the operator's token in `X-Vault-Token`, and
+  `reqwest` strips only the standard credential headers on a cross-host
+  redirect, so a Vault address that answered `3xx` would have been followed with
+  the token attached. The PKI-engine client, the CA-key store, the secret
+  provider's private-CA client and the bootstrap client `axiam-server` hands the
+  provider are now built with no redirect policy; a `3xx` is an error naming the
+  host that answered and telling the operator to configure the final address,
+  never repeating the `Location` or the token. The address is
+  operator-configured, so this was not a request-path SSRF, but an unstated
+  exception to the rule that a credential-bearing request never follows a
+  redirect. Threat model: T-476 enters (Mitigated).
+
+- **The CRL route re-signs each CA's list on its own and decides "unchanged"
+  from a light read (#607, R1W1-09; Low).** One process-wide lock covered the
+  cache lookup, the custodian load (a Vault round trip for a non-database
+  custodian), the wait for a permit on the crypto semaphore and the signature,
+  so one slow re-sign stalled every CA's route, cached answers included; and
+  every request, on an unauthenticated route, read the PEM of every revoked
+  certificate of the CA to learn whether anything had changed. The cache is now
+  one slot per CA with its own signing lock; the change check reads fingerprint,
+  `revoked_at` and `not_before` only (the PEMs are read to sign); and a re-sign
+  waits at most 5 s for a crypto permit, then answers `503 service_unavailable`
+  — a cached list needs no permit and is served throughout. The route's OpenAPI
+  document gains that `503`. Threat model: T-102 amended.
+
+- **Every replica serves the same CRL, and its `max-age` runs to the refresh,
+  not to `nextUpdate` (#608, R1W1-10).** Each replica signed and cached its own
+  list with its own clock, so two replicas served different bytes and `ETag`s
+  for one state (a relying party behind a balancer got `200`s where it should
+  get `304`s), and `Cache-Control: public, max-age` ran to `nextUpdate`, so an
+  intermediary could serve the pre-revocation list for up to a day although the
+  origin re-signs at once. A list is now a function of the store and a refresh
+  epoch aligned to the Unix epoch (half of `AXIAM__PKI__CRL_NEXT_UPDATE_SECS`
+  long): `thisUpdate` is the latest of the epoch start, the CA's `notBefore` and
+  the newest revocation on the list; the CRL number is `thisUpdate` in seconds
+  shifted left 24 bits plus the entry count; the signature is deterministic for
+  Ed25519 and for RSA PKCS#1 v1.5, so one state is one set of bytes. `max-age`
+  ends at the refresh, at most half the interval, with `ETag` revalidation as
+  before. An expired certificate leaves a list only at an epoch boundary, as RFC
+  5280 §3.3 expects, so the tenant purge keeps a revoked certificate row until
+  eight days past its `notAfter`. The CRL number is monotone only under the
+  conditions #615 names. Threat model: T-472 and T-102 amended.
+
+- **A Vault revocation that Vault refuses for good no longer starves the sweep
+  (#603, R1W1-05).** The sweep read the oldest hundred unforwarded revocations
+  at every tick and tried each once, so a revocation Vault refused permanently
+  (a serial a `no_store` role never recorded, a mount since reconfigured) was
+  retried forever, a hundred of them kept every later revocation off Vault's
+  list, and every replica made the same calls. A row now backs off (one minute,
+  doubling to six hours), is claimed by a conditional write before the attempt
+  so that replicas that read one row make one call, keeps a sanitised reason (no
+  token, at most 256 characters), and after twelve refusals — about a day —
+  stops failing `vault_revocation` and is reported by a job of its own,
+  `vault_revocation_failing`, on `GET /health/jobs`. Schema migration **v95**.
+  Threat model: T-470 amended.
+
+- **Revoking a `vault_pki` tenant signing CA reaches its parent's list in Vault
+  (#612).** Revoking a tenant signing CA whose parent's key Vault's PKI engine
+  holds deleted the CA's issuer and key from Vault but never revoked its own
+  certificate there, so the list a relying party walking the chain consults did
+  not name it; only AXIAM's own list did. The revocation is now forwarded to the
+  parent's signing issuer after the CA's issuer is deleted (Vault refuses to
+  revoke a serial that is still an issuer in the same mount), retried in the
+  request and then by the same sweep with the same backoff, claim and
+  `vault_revocation_failing` reporting. A forward that is pending writes
+  `ca_certificate.vault_revocation_pending` (outcome Failure) to the
+  organization's audit log, and `DELETE /api/v1/tenants/{id}` adds
+  `signing_ca_vault_revocations_pending` to its system audit record. Schema
+  migration **v96**; a subordinate CA revoked before the upgrade reads as "not
+  forwarded" and is forwarded by the first sweep. **Upgrade note:** the Vault
+  token's policy needs `update` on `pki/revoke`, the revoke path of the mount
+  that signed the CA (`docs/pki/README.md`); a CA signed in AXIAM before its
+  parent's key moved into Vault is refused, since Vault never recorded it, and
+  stays in the failing count. Threat model: T-470 amended.
+
+- **One replica purges a tombstoned tenant; revocation has an endpoint-level
+  test (#610 (a)–(c), R1W1-12; Informational).** (a) Fourteen test files carried
+  a stale comment about the browser rate-limit preset; they now say that it
+  gives a late peer its whole budget (comments only). (b) A real TLS client
+  against the server's own listener, verifier and connection hook shows a
+  revoked leaf and four foreign-anchor leaves refused at `/oauth2/token`, each
+  with a control (`tls_client_auth`). (c) The cleanup job runs on every replica,
+  and two replicas purging one tombstoned tenant wrote two `tenants.purged`
+  records or marked the job failed; a conditional write of
+  `tenant.purge_claimed_at` (one-hour lease) now lets one replica purge, a lost
+  claim is skipped, and "already purged" is success. Schema migration **v97**.
+  The Vault sweep's half is #603's claim; (d) is the OAuth2 client deletion
+  entry below. Threat model: T-102, T-475 and T-472 amended.
+
+- **A `User` certificate names its account, and deleting or erasing the account
+  revokes it (#533; Low, not local).** No certificate row recorded which user it
+  belonged to, so directory linking revoked a user's `User` certificates by
+  convention (`metadata.user_id`, or a subject CN equal to the username or
+  email, ignoring case) — which could revoke another user's certificate whose CN
+  happened to match — and an administrator's `DELETE /api/v1/users/{id}` and the
+  Art. 17 purge revoked no certificate at all. `POST /api/v1/certificates` and
+  `/certificates/sign-csr` take an optional `user_id` (a `User` certificate
+  only, naming a user of the tenant who is neither deleted nor anonymized, and
+  agreeing with `metadata.user_id` when that is present; else `400`), and every
+  read returns it. Deleting an account revokes its certificates before the
+  tombstone overwrites the names the convention needs (one
+  `user.certificates_revoked` audit row with the count, when it is above zero),
+  and so does the Art. 17 purge (the count goes on `gdpr.user_pseudonymized`);
+  erasure revokes and keeps the row. A row with no `user_id` — every certificate
+  issued before the upgrade — is still matched by its name, but only if it is
+  younger than the account and the name is not also held (case-folded, any
+  status) by another account of the tenant, so erasing `Alice` no longer revokes
+  `alice`'s certificate (R101W1-01); an older or ambiguous one is revoked by id.
+  An erased account's revoked certificate rows keep the PEM, subject and
+  `metadata` for the tenant's lifetime (#618). Schema migration **v98**, no
+  backfill. Contract 1.61 §27.11 rule 5. Threat model: T-336 and T-187 amended.
 
 - **SAML single logout is tested against a real service provider (#538,
   P23W4-09).** The Keycloak round trip (`saml_idp_keycloak_roundtrip_test`)
@@ -270,6 +498,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. The grants' answer for a deleted tenant changes from
   `invalid_request` ("unknown tenant") to `invalid_client`.
 
+- **The conformance workflow validates its `axiam_image` input before it reaches
+  `$GITHUB_ENV` (#592, R1W2-05).** The "Select the AXIAM image" step appended
+  the dispatch input unchecked, so a value with a newline (possible through the
+  API) could set any variable for every later step (`BASH_ENV`, `NODE_OPTIONS`)
+  and a leading `::` line would have been read as a workflow command. The step
+  now fails the job unless the value is a digest-pinned reference
+  (`name[:tag]@sha256:<64 hex>`; empty still builds from the checkout), echoes a
+  rejected value escaped on one line, and records its verdict for the report
+  step, which says "(digest-pinned)" only for a value that passed.
+  Release-pipeline only; no product behaviour changes.
+
 ### Fixed
 
 - The console's tenant Settings page no longer writes the organization's
@@ -327,6 +566,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backstop ended the process. The deployment guide says what each stop can cut
   and by how much (#598).
 
+- The conformance gate no longer reads a newly parked module as green (#593,
+  R1W2-06). `gate.py` tolerated `WAITING` whatever the baseline said, so a
+  regression that made a module park instead of fail passed. A second baseline,
+  `conformance/baseline-unattended.json`, records per plan the modules that park
+  on the runner for want of a browser (recorded from run 38317560409: 27 for
+  `mtls`, 27 for `self-signed`, 40 for `private-key-jwt`), and `WAITING` is a
+  regression for any module it does not list; the gate fails closed on a missing
+  or malformed baseline. Green now means the modules that complete unattended
+  passed. Release-pipeline only.
+
+- The SSF streams page no longer reverts a receiver's change, and a stream `PUT`
+  can be made conditional on the version the form read (#590, R1W2-03). The page
+  built its `PUT` from the form's load-time state, so a receiver that paused the
+  stream or narrowed `events_requested` between the form's load and its save was
+  reverted; and when the administrator removed every event the receiver had
+  narrowed to, `events_requested` was omitted, which the API reads as every
+  allowed event — more events about the tenant's users than the receiver asked
+  for. `PUT /api/v1/ssf/streams/{id}` takes an optional `expected_updated_at`: a
+  version that is not the stream's current one is `409` and nothing is written;
+  absent keeps the old behaviour, so an existing client is unchanged. The page
+  sends it, always sends the stored narrowing cut to the new ceiling, and
+  refuses a save that would leave none of the receiver's events; it sends `[]`
+  ("none") only when the receiver's own narrowing already is `[]`. An absent
+  `events_requested` still means every allowed event, so an SDK's update helper
+  must send what it read (contract 1.61 §32; #631). Threat model: T-406 amended.
+
+- The GDPR records' dead letter no longer blocks the request worker, and is
+  durable and owner-only (#594, R1W2-07). `gdpr.data_export_requested` and
+  `gdpr.erasure_requested` reached the dead-letter file
+  (`AXIAM__GDPR_AUDIT_DLQ_FILE`) from request handlers through synchronous file
+  I/O on an actix worker, the file was created under the process umask (`0644`)
+  and it was never synced. The write now runs on the blocking pool and is
+  awaited, so the record is on disk when the handler moves on; the file is
+  created `0600`, and an existing one that group or others can read is tightened
+  to `0600` when it is next opened (a warning if it is another user's, and the
+  record is still written); the data is synced after each GDPR record and each
+  writer batch. **Upgrade note:** a log shipper or sidecar that read the file as
+  another user loses access; run it as the server's user. (The issue's second
+  sub-item, two records sharing a line, did not hold: each record is one
+  `write_all`, and a test now pins it.) Threat model: T-108 amended.
+
 ### Documentation
 
 - **SDK contract 1.61: the 1.0.1 fields.** `sdks/CONTRACT.md` records, in the new **§34.5** and
@@ -344,6 +624,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client or a tenant, and the `400` for an unsafe `backchannel_logout_uri`. No operation is added;
   `openapi.json` and `management-registry.json` are regenerated by the same release, and every
   SDK re-syncs.
+
+- **The open-register prose and T-469 (#597).** The sentence that read "with one
+  exception — T-447" had already been corrected to "with no exception" in model
+  2.40.0, where T-469 is Mitigated; the tree was checked again for 1.0.1 and
+  nothing changed.
+
+- **Threat model 2.41.0: the 1.0.1 release in one model.** The model is **477
+  threats, 443 mitigated / 19 open / 15 not applicable** (2.40.0: 475, 437 / 17
+  / 21). T-476 (a Vault redirect carries `X-Vault-Token` off-host) and T-477 (a
+  received XML signature chooses what the verifier evaluates) enter Mitigated.
+  T-449, T-454, T-456 and T-459 move from Not applicable to Mitigated and T-450
+  and T-462 to Open for the FreeRADIUS recipe (see Added); the RADIUS entries
+  whose elements are the unbuilt native front end's now say so, and the
+  diagram's title says the native listener is not built. Open at High or
+  Critical are now eleven (T-450 joins the ten), none a defect awaiting a fix in
+  AXIAM's code. Entries amended with a dated correction in their own text: T-39,
+  T-55, T-67, T-69, T-102, T-108, T-112, T-118, T-163, T-187, T-275, T-289,
+  T-336, T-406, T-415, T-422, T-424, T-444 (three exceptions to "the next start
+  resumes it", not two), T-445, T-453, T-459, T-461, T-470, T-472, T-474 and
+  T-475. The five copies (`Axiam.json`, `threat-model-stride.md`,
+  `threat-modeling-and-security.md`, the website's generated model and its
+  Security page) are derived from the JSON once. The release's F4 reviews are
+  the `claude_dev/security-review-release-1.0.1-*.md` files, one per wave and
+  one for the combined branch (whose one Medium finding, R101-01, was fixed
+  before the release); their Low and Informational findings are #615 … #656.
+
+- **The eleven client SDKs** carry contract 1.61 in their `[1.0.1]` changelogs;
+  each lists what changed in it. The deployment guide, the Compose and
+  Kubernetes comments and the website's *Operate* page state the same stop
+  arithmetic as `boot.rs` (#598), and the guide's list of what a cut cleanup can
+  leave has three exceptions (R101-03, #655).
+
+### Deferred to 1.0.x
+
+What 1.0.1 does not contain, named so that nobody has to infer it. Each item is
+an open issue on `ilpanich/axiam`.
+
+- **Open past the tag, the maintainer's:** #513 — the OpenID Basic OP and FAPI
+  2.0 certification submissions and the sign-off table in
+  `docs/conformance/REVIEW-JUDGEMENTS.md`.
+- **Benchmark currency:** #561 — run 6 against Keycloak 26.8.0, Zitadel v4.19.4
+  and authentik 2026.8.3. Until it lands, the website's benchmark page states
+  that its numbers are run 5.
+- **RADIUS, the `rlm_rest` authorize endpoint (D4 of #563):** not in 1.0.1; see
+  Added. The issue stays open for it.
+- **Filed from the release's reviews, all on `1.0.x`:** #615 … #622 (wave W1),
+  #623 … #631 (W4), #632 … #634 (W2), #635 … #642 (W3), #643 … #653 (W6) and
+  #654 … #656 (the combined review). Among them, #636 is the administrator-API
+  half of the scope-ceiling upgrade note above, #654 is the unbounded wait of
+  the SAML verifications on the crypto semaphore, #655 the cleanup cut that
+  holds a tenant purge for its lease, and #656 contract §33.3 rule 16's
+  per-address backstop.
 
 ## [1.0.0] - 2026-10-10
 
@@ -538,32 +870,6 @@ and v90 – v94 run at startup like every earlier one.
 ### Added
 
 #### Federation and PKI
-
-- **802.1X with an AXIAM-issued Device certificate: a FreeRADIUS recipe, not a
-  RADIUS server (#563, D3 of the RADIUS spike).** `docs/pki/freeradius.md` is the
-  guide — issue and bind a `Device` certificate, export the tenant signing CA,
-  a FreeRADIUS configuration that trusts that CA only, EAP-TLS over TLS 1.3 only,
-  `require_message_authenticator = yes`, a placement table that rejects a valid
-  certificate nobody listed and is keyed on the certificate serial, never on a
-  subject (a subject of `DEFAULT` would match every key, R101W6-02), RadSec
-  where the NAS allows, and the revocation lag stated as the fetch interval plus
-  `ca_path_reload_interval` (300 s at the smallest) plus the session's
-  `Session-Timeout`.
-  `docker/docker-compose.radius.yml` references the upstream FreeRADIUS image by
-  digest and ships configuration only (`docker/radius/raddb/`); nothing of
-  FreeRADIUS (GPLv2) is in the tree. `radius_e2e.rs`, run by `radius-e2e.yml`
-  (path-filtered, `workflow_dispatch`, gated by `AXIAM_E2E_RADIUS=1`; a missing
-  server is a failure), drives `eapol_test` through issue, bind, accept, a wrong
-  CA, and a revoked device that is still admitted until the list reaches
-  FreeRADIUS and refused after. AXIAM still speaks no RADIUS, and the `rlm_rest`
-  authorize endpoint (D4) is not in 1.0.1; the guide ends on that. The
-  authentik comparison's RADIUS row reads *recipe, not native*.
-  Threat model: T-449 (`Message-Authenticator` required), T-454 (the recipe
-  vendors nothing), T-456 (EAP-TLS only, TLS 1.3 only) and T-459 (the tenant
-  signing CA is the only anchor) move from Not applicable to Mitigated with that
-  end-to-end as their test; the other seventeen RADIUS entries stay Not
-  applicable and each says why. T-449 carries a dated correction: `Proxy-State`
-  is returned unmodified, not refused (RFC 2865 §5.33).
 
 - **A certificate revocation list per issuing CA** (#565, P23W6-10). Each CA
   whose key AXIAM holds publishes a signed RFC 5280 CRL (version 2, DER,
@@ -1759,9 +2065,9 @@ an open issue on `ilpanich/axiam`.
   - #603 — R1W1-05: the Vault revocation sweep can starve.
   - #604 — R1W1-06: device-grant redemption does not ask `account_may_act`.
   - #605 — R1W1-07: the UTF-8 refusal does not see past a byte-order mark.
-    Fixed in `1.0.1` (see `[Unreleased]`).
+    Fixed in `1.0.1` (see `[1.0.1]`).
   - #606 — R1W1-08: the SHA-1 escape hatch admits every algorithm.
-    Fixed in `1.0.1` (see `[Unreleased]`).
+    Fixed in `1.0.1` (see `[1.0.1]`).
   - #607 — R1W1-09: the CRL route's global lock and per-request read.
   - #608 — R1W1-10: CRL consistency across replicas and caches.
   - #609 — R1W1-11: the CRL distribution point is not the URL validated.

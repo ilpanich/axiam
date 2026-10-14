@@ -3429,11 +3429,14 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
 ///
 /// What a cut leaves behind is for the next start to resume: every sweep's
 /// writes are idempotent or a compare-and-set, and every sweep is re-run by the
-/// next tick, with two exceptions listed in T-444 — an erasure cut after the
+/// next tick, with three exceptions listed in T-444 — an erasure cut after the
 /// user row was anonymized and before `gdpr.user_pseudonymized` was written
 /// (the proof exists, the audit row does not, and the next start does not redo
-/// the user), and an export cut after it was marked ready and before its mail
-/// was queued (a download nobody was told about, which expires).
+/// the user), an export cut after it was marked ready and before its mail
+/// was queued (a download nobody was told about, which expires), and a tenant
+/// purge cut mid-way (its one-hour claim is not released, so the next start's
+/// sweep skips the tenant until the lease ends; a cut before `tenants.purged`
+/// was written loses that record).
 async fn join_cleanup<T>(mut handle: tokio::task::JoinHandle<T>, bound: Duration) {
     match tokio::time::timeout(bound, &mut handle).await {
         Ok(Ok(_)) => {}

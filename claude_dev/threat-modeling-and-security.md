@@ -14,9 +14,11 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-10-09 (`main` at `1.0.0-beta19`, model
-> 2.39.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, the
-> contract 1.58 SDK fan-out, and the 1.0.0 release wave's fixes, both halves).** The Phase 23 paragraphs below record the waves;
+> **Status: source current as of 2026-10-14 (the `1.0.1` release branch, model
+> 2.41.0 — the 1.0.1 release's four waves, its RADIUS recipe and the
+> reconciliation pass recorded below, on top of Phase 23, the competitor-gap
+> closure of `1.0.0-beta18`, the contract 1.58 SDK fan-out, and the 1.0.0
+> release wave's fixes, both halves).** The Phase 23 paragraphs below record the waves;
 > this plan
 > ([`phase23-closeout-threat-model-and-docs-plan-2026-10-09.md`](phase23-closeout-threat-model-and-docs-plan-2026-10-09.md))
 > records the close-out. The website's Security section mirrors this text and
@@ -3651,8 +3653,8 @@ by who does it.
   no internal review had, and the model records it as the Critical it was
   rather than as a conformance detail.
 
-Everything in this document was last re-derived from source at `main` at
-**`1.0.0-beta19`** (model 2.37.0) on 2026-10-09; the handoff block at the top of this file says
+Everything in this document was last re-derived from source at the
+**`1.0.1`** release branch (model 2.41.0) on 2026-10-14; the handoff block at the top of this file says
 what that pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

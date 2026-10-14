@@ -21,6 +21,34 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 3.3.4 / surrealdb-core 3.3.4 / surrealkv 0.21.4
+
+**Taken:** 2026-10-14, for the Dependabot update in PR #662. It moved `surrealdb` and
+`surrealdb-core` from 3.3.0 to 3.3.4; `surrealkv` stayed at 0.21.4 and the in-memory
+engine `surrealmx` stayed at 0.27.0.
+**Host:** Linux x86_64, 4 vCPU, embedded engines, multi-threaded tokio, otherwise
+idle. Each `surrealkv` run used its own fresh `PROBE_DIR`, as CI does.
+**Probe commit:** the one that re-pinned this lockfile to `=3.3.4`.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 14 548 / 40 000 (36%)       |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  |
+| `kv-mem`       | `tx`      | 1200 × 8, ×2    | **0** in each run     | 0                     | 3 376–3 483 / 9 600 (35–36%) |
+| `kv-mem`       | `nonce`   | 1200 × 8        | **0**                 | 0                     | 0 / 9 600                   |
+
+`rocksdb` was not re-measured. It is not part of the CI gate.
+
+### What changed against 3.3.0
+
+Nothing in the property AXIAM depends on. `surrealkv` still gives zero double
+winners and zero burned rounds over 40 000 contended attempts in both shapes, and
+its `tx` abort rate (36%) matches the 3.3.0 run on the same class of host.
+`kv-mem` stayed clean in this smaller run as well; as in the 3.3.0 section, that is
+an observation only, and `kv-mem` stays excluded and attested against.
+
+---
+
 ## surrealdb 3.3.0 / surrealdb-core 3.3.0 / surrealkv 0.21.4
 
 **Taken:** 2026-09-25, for the dependency update in PR #501. It moved `surrealdb` and

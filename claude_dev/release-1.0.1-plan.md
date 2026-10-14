@@ -470,6 +470,50 @@ lines and `FINDINGS.md:37`). -14 (the workflow has never run): D-7 —
 `radius-e2e.yml` runs on a pull request to `main` that touches
 `radius_e2e.rs`, so the release pull request is its first CI run.
 
+### 11.7 W7 — release readiness
+
+On `claude/release-1.0.1-w7` (worktree cut from the plan branch at `27ad555`),
+fast-forwarded into the plan branch as `52d4219`. Every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W7.1 | — | orchestrator | the merges W1 … W6 are §11.5 and §11.6; the regression gate is below |
+| W7.2 | `27ad555` | Opus 5.5 | [`security-review-release-1.0.1-2026-10-14.md`](security-review-release-1.0.1-2026-10-14.md): one Medium (R101-01, from `a234f32`, the R101W4-01 fix no wave review saw), two Low, two Informational. Filed: #654 (R101-02), #655 (R101-03), #656 (R101-04 and R101-05 b) |
+| R101-01 | `78da6eb` | Opus 5.5 | `OutboundPublisher::enqueue_paced` (waits for room up to the run's deadline, leaves a quarter of the queue free for live changes — the executor's addition, so a paced run never starves a live erasure); links, `erase_pending` first, are offered before users; a refusal stops only its own step. The new test fails on `27ad555` (4 enqueued, 19 refused) and passes after. Plan vs tree: the provisioner fan-out (request path) and `converge_groups_of` (the SCIM consumer's own task) do not pace and keep stop-at-first-refusal. T-415 amended, T-445 corrected, dated |
+| W7.3 | `fe7b9d2` | Sonnet 5.5 | threat model **2.41.0**: 477 threats, 443 Mitigated, 19 Open, 15 Not applicable, the five copies agreeing (checked by script). **T-450 and T-462 Not applicable → Open** for the operator-run FreeRADIUS recipe (R101W6-09; the executor's judgement, put to the maintainer on the PR); open High/Critical ten → eleven. Also: T-453's RFC 5080 correction (R101W6-10), T-472 and T-444 (R101-05 a, c), T-102 (#609 amendment the 2.40.0 text lacked), T-476's model number, T-39's stray blockquote markers, R101W6-16, the GDPR record's #601 sentence, R101W4-09's stop arithmetic in the compose files, k8s and the Operate page |
+| W7.4 | `52d4219` | Sonnet 5.5 | `CHANGELOG.md` `[1.0.1] - 2026-10-14` (upgrade notes, Added, Security, Fixed, Documentation, Deferred); version 1.0.1 in the 1.0.0 bump's set; spec and registry regenerated (only `info.version` and the digest moved); the 1.0.1 news post. Plan vs tree: the W6 merge had put the RADIUS entry under the released `[1.0.0]` — moved to `[1.0.1]`; `security.ts` has no deferred-items list, so the list is in the news post; the write-up's two handoff stamps restamped (the 1.0.0 bump left them; `version.ts` says they move together); `DOCS_VERIFIED_RELEASE` stays 1.0.0 |
+| SDK re-vendor | eleven commits on `claude/contract-1.61-sync` | Sonnet 5.5 | `openapi.json` and `management-registry.json` re-vendored at `52d4219` (version and digest only; no generated file changed); every SDK's §27 check green and every PR's CI green on the new head: rust `9f191a8`, typescript `f3c2e1a`, python `f80289f`, go `bdb3b07`, java `b9975c1`, php `ac0ac25`, kotlin `e7ef0d7`, csharp `f34bab2`, c `59d501a`, cplusplus `d0b3847`, swift `7f69acf` |
+
+**Regression gate (W7.1).** Every exit code is the tool's own;
+`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_{DEV,TEST}_DEBUG=0`, default features
+(SAML on), a local SurrealDB container as in CI.
+
+*Part 1, on `70d5902`* (all waves merged; before W7.2 – W7.4): 204 steps, every
+one exit 0 — `cargo fmt --all --check`; `cargo clippy --workspace --all-targets
+-D warnings`; the SAML-off `cargo check`; every crate's tests (`axiam-db` and
+`axiam-api-rest` one test binary at a time: 74 and 107 binaries, plus their
+`--lib` and `--doc`); the three `client`-feature gRPC tests; the
+tenant-issuer-path conformance pair with `AXIAM__AUTH__TENANT_ISSUER_PATHS=true`.
+**6 925 passed, 0 failed, 38 ignored** (the live-service and soak tests the CI
+job also ignores).
+
+*Part 2, on `52d4219`* (after the R101-01 fix, 2.41.0 and the version bump):
+38 steps, every one exit 0 — `fmt`, workspace `clippy -D warnings`, the
+SAML-off check; the tests of the crates the three commits touch (`axiam-core`
+521, `axiam-amqp` 281 + 11 ignored, `axiam-scim` 227, `axiam-server` 305); the
+ten `scripts/check-*.py` checks and seven `--self-test`s,
+`gen-management-registry.py --check` / `--self-test`, `check-doc-links.sh`
+(503 links), `unittest` of `scripts/` (94) and `conformance/scripts/` (29); the
+frontend `npm ci`, `lint`, `tsc -b`, `typecheck:e2e`, `vitest --coverage`
+(117 files, 2 293 tests; lines 96.56 %, above the 96.1 threshold) and `build`;
+the website `npm ci`, `lint`, `tsc -b` and `build`. `cargo clean` afterwards.
+
+Not run: the CI `e2e` (Playwright) job, cargo-audit / cargo-deny, Trivy,
+coverage.yml's `cargo llvm-cov`, `check-sdk-artifact-drift.py` (red until the
+SDK PRs merge, by construction), `check-website-links.py` (the sandbox proxy
+refuses external hosts), `check-remediation-evidence.py` (shallow clone). The
+PR's CI runs them.
+
 ---
 
 ## 12. Kickoff prompts

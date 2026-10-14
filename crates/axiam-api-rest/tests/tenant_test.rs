@@ -1524,6 +1524,16 @@ async fn post_oauth2_form(
     )
 }
 
+/// The `error` member of an OAuth2 endpoint's JSON answer, for assertion
+/// messages. A success answer from these endpoints carries `access_token` (or a
+/// client secret echo), so the whole body is never interpolated into a panic
+/// message: it would land in CI logs.
+fn oauth_error(answer: &serde_json::Value) -> String {
+    answer["error"]
+        .as_str()
+        .map_or_else(|| "no error member".to_owned(), str::to_owned)
+}
+
 /// Every endpoint at which a client authenticates, called with the tenant's
 /// client: `client_credentials`, `bc-authorize`, introspection, revocation, PAR,
 /// the UMA ticket grant and token exchange (R1W1-03, T-472). Returns
@@ -1707,20 +1717,21 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
         ),
     )
     .await;
-    assert_eq!(status, 200, "{minted}");
+    assert_eq!(status, 200, "token endpoint: {}", oauth_error(&minted));
     let client_token = minted["access_token"].as_str().unwrap().to_owned();
     for (endpoint, status, answer) in
         client_authenticated_calls(&app, doomed, &doomed_client, &client_token).await
     {
         assert!(
             (200..300).contains(&status) || answer["error"] != "invalid_client",
-            "{endpoint} before the delete: {status} {answer}"
+            "{endpoint} before the delete: {status} {}",
+            oauth_error(&answer)
         );
         if endpoint == "introspection" {
             assert_eq!(answer["active"], true, "the client's own token is active");
         }
         if endpoint == "bc-authorize" {
-            assert_eq!(status, 200, "{answer}");
+            assert_eq!(status, 200, "bc-authorize: {}", oauth_error(&answer));
         }
     }
     assert_eq!(
@@ -1762,10 +1773,17 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
     let refused = client_authenticated_calls(&app, doomed, &doomed_client, &client_token).await;
     assert_eq!(refused.len(), 7);
     for (endpoint, status, answer) in refused {
-        assert_eq!(status, 401, "{endpoint} after the delete: {answer}");
         assert_eq!(
-            answer["error"], "invalid_client",
-            "{endpoint} after the delete: {answer}"
+            status,
+            401,
+            "{endpoint} after the delete: {}",
+            oauth_error(&answer)
+        );
+        assert_eq!(
+            answer["error"],
+            "invalid_client",
+            "{endpoint} after the delete: {}",
+            oauth_error(&answer)
         );
     }
     assert_eq!(

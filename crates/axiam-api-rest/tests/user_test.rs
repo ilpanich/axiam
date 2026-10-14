@@ -546,7 +546,7 @@ async fn deleting_a_user_revokes_their_user_certificates_and_no_one_elses() {
         (&bobs, CertificateStatus::Active),
     ] {
         let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
-        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+        assert_eq!(read.status, expected, "certificate {}", cert.id);
     }
     let listed: Vec<String> = certs
         .list_revoked_by_issuer(issuer, chrono::Utc::now())
@@ -558,7 +558,7 @@ async fn deleting_a_user_revokes_their_user_certificates_and_no_one_elses() {
             entry.fingerprint
         })
         .collect();
-    assert_eq!(listed.len(), 2, "both on the issuer's list: {listed:?}");
+    assert_eq!(listed.len(), 2, "both on the issuer's list");
 
     let rows = SurrealAuditLogRepository::new(db.clone())
         .list(

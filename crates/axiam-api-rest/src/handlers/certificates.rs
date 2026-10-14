@@ -323,7 +323,9 @@ pub async fn generate<C: Connection + Clone>(
 /// able to disagree. No key is returned, so there is no key field anywhere on
 /// this exchange. The CSR's common name meets the rules of `subject` on
 /// `POST /api/v1/certificates` (printable, at most 64 characters) and is
-/// refused, not rewritten, when it does not.
+/// refused, not rewritten, when it does not. So does the value of every other
+/// attribute of the CSR's subject, and a subject with more than one common
+/// name is refused.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignCertificateCsrRequest {
     pub issuer_ca_id: Uuid,

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:b7d07550328436b9b1024567efc8ba6770485c10206d7d13439e42c7cc383e49"
+    "x-axiam-spec-digest": "sha256:3f79943312766ed3304d0059c0d991bac0ec2a691b46a66cec50dc32cdf155df"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -24963,7 +24963,7 @@
       },
       "SignCertificateCsrRequest": {
         "type": "object",
-        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange. The CSR's common name meets the rules of `subject` on\n`POST /api/v1/certificates` (printable, at most 64 characters) and is\nrefused, not rewritten, when it does not.",
+        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange. The CSR's common name meets the rules of `subject` on\n`POST /api/v1/certificates` (printable, at most 64 characters) and is\nrefused, not rewritten, when it does not. So does the value of every other\nattribute of the CSR's subject, and a subject with more than one common\nname is refused.",
         "required": [
           "issuer_ca_id",
           "csr_pem",

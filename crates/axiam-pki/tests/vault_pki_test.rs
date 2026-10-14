@@ -1141,6 +1141,109 @@ async fn a_caller_csr_asking_for_a_key_usage_never_reaches_vault() {
     );
 }
 
+/// A CSR whose subject is exactly `attributes`, in order. A repeated common
+/// name needs the second one spelt as a custom DN type (OID 2.5.4.3), because
+/// rcgen keys a distinguished name by type and would replace the first.
+fn csr_with_subject(attributes: &[(DnType, &str)]) -> String {
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    for (kind, value) in attributes {
+        params.distinguished_name.push(kind.clone(), *value);
+    }
+    params.serialize_request(&key).unwrap().pem().unwrap()
+}
+
+/// Sign `csr_pem` under a `vault_pki` CA whose `sign-verbatim` endpoint is
+/// mounted to expect **no** request, and return the refusal.
+async fn a_csr_vault_must_never_see(csr_pem: String) -> axiam_core::error::AxiamError {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+
+    // Verified when the server drops: a single request to it fails the test.
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-verbatim"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+
+    CertService::new(
+        SurrealCaCertificateRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    )
+    .sign_csr(
+        org,
+        IssuingScope::Organization,
+        axiam_core::models::certificate::SignCertificateCsr {
+            tenant_id: Uuid::new_v4(),
+            issuer_ca_id: ca.certificate.id,
+            csr_pem,
+            cert_type: CertificateType::Device,
+            validity_days: 30,
+            metadata: None,
+            subject_alt_names: vec![],
+            user_id: None,
+        },
+        Some(90),
+        &[],
+    )
+    .await
+    .expect_err("the CSR is refused before Vault is asked")
+}
+
+#[tokio::test]
+async fn a_csr_with_two_common_names_never_reaches_vault() {
+    // R110W1-02. `sign-verbatim` copies the CSR's whole subject, and a relying
+    // party that reads the last common name sees a name the row (which records
+    // the first) does not show. The first name is clean here, so only a rule
+    // about the count can refuse it.
+    let csr = csr_with_subject(&[
+        (DnType::CommonName, "byok-device"),
+        (DnType::CustomDnType(vec![2, 5, 4, 3]), "second-name"),
+    ]);
+    let err = a_csr_vault_must_never_see(csr).await;
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Validation { message }
+            if message.contains("more than one common name")),
+        "a validation error (a 400) naming the second common name: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_csr_attribute_holding_a_bidi_override_never_reaches_vault() {
+    // R110W1-02. The common name is clean and single; the hazard is in an
+    // `OU`, which the common-name rules used to ignore and `sign-verbatim`
+    // writes into the issued subject as given.
+    let csr = csr_with_subject(&[
+        (DnType::CommonName, "byok-device"),
+        (DnType::OrganizationalUnitName, "evil \u{202E}gnp.exe"),
+    ]);
+    let err = a_csr_vault_must_never_see(csr).await;
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Validation { message }
+            if message.contains("subject attribute") && message.contains("printable")),
+        "a validation error (a 400) naming the attribute, not repeating its value: {err:?}"
+    );
+    if let axiam_core::error::AxiamError::Validation { message } = &err {
+        assert!(
+            !message.contains('\u{202E}'),
+            "the refusal does not repeat the value"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // S-7 — Server certificates and the name fence under `vault_pki` custody
 // ---------------------------------------------------------------------------

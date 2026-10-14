@@ -1483,9 +1483,19 @@ pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
             .into(),
     })?;
 
-    let common_name = csr
-        .certification_request_info
-        .subject
+    let subject = &csr.certification_request_info.subject;
+    // R110W1-02 — the name is single-valued. A `vault_pki` CA sends this very
+    // CSR to `sign-verbatim`, which copies the whole subject, and a relying
+    // party that reads the *last* common name (Go's `crypto/x509` overwrites
+    // `Subject.CommonName` with each in turn) would authenticate the holder
+    // under a name the row, which records the first, does not show.
+    if subject.iter_common_name().nth(1).is_some() {
+        return Err(AxiamError::Validation {
+            message: "the certificate signing request's subject has more than one common name"
+                .into(),
+        });
+    }
+    let common_name = subject
         .iter_common_name()
         .next()
         .and_then(|cn| cn.as_str().ok())
@@ -1501,6 +1511,29 @@ pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
         &common_name,
         "the certificate signing request's common name",
     )?;
+    // R110W1-02 — and so is every other attribute of the subject. The local
+    // signing paths keep nothing of the subject but the common name (the DN is
+    // rebuilt from it), so an `O=`/`OU=` is dropped there; but `sign-verbatim`
+    // writes them into the certificate as given, so a newline or a bidi
+    // override in an `OU` would reach an issued subject exactly as #649 closed
+    // for the CN. Refused on every custodian, so the same CSR is not accepted
+    // on one and refused on another, by the same value rules and not by a
+    // narrower list: an ordinary `openssl req -subj /C=…/O=…/CN=…` request,
+    // which is signed today, keeps being signed. A value that is not a string
+    // type cannot be checked and is refused (fail closed).
+    for attr in subject.iter().flat_map(|rdn| rdn.iter()) {
+        if attr.attr_type() == &x509_parser::oid_registry::OID_X509_COMMON_NAME {
+            continue;
+        }
+        let what = format!(
+            "the certificate signing request's subject attribute {}",
+            attr.attr_type().to_id_string()
+        );
+        let value = attr.as_str().map_err(|_| AxiamError::Validation {
+            message: format!("{what} is not a text string"),
+        })?;
+        crate::subject::check_common_name_value(value, &what)?;
+    }
 
     let spki = &csr.certification_request_info.subject_pki;
     let (key_algorithm, rsa_modulus_bits) = match spki.algorithm.algorithm.to_id_string().as_str() {

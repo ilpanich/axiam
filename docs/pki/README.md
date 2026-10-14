@@ -58,7 +58,13 @@ certificate in that organization chains to.
 >
 > The refusal says which rule applied and does not repeat the value. The same
 > rules apply to the common name of a CSR you submit to `sign-csr`, which AXIAM
-> refuses rather than rewrites. A `vault_pki` root with no `intermediate_subject`
+> refuses rather than rewrites — and, since the 1.1.0 review (R110W1-02), to the
+> value of **every other attribute** of the CSR's subject (`O`, `OU`, `C` and
+> the rest), and a subject with **more than one** common name is refused. A
+> `vault_pki` CA signs the CSR's subject as given, so what AXIAM would not let
+> through in a name it must not let through in an `OU` either; a CA whose key
+> AXIAM holds keeps only the common name, so the other attributes are checked
+> and then dropped. A `vault_pki` root with no `intermediate_subject`
 > takes `<subject> Intermediate Authority`; if that would pass 64 characters the
 > request is refused and asks for `intermediate_subject`.
 >

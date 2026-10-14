@@ -256,10 +256,14 @@ A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
    revocations, refusals until the purge — are in no export, so they are
    kept under the tenant id until the audit retention window
    (`AXIAM__AUDIT_RETENTION_DAYS`) removes them, like any other entry (#602).
-   A revoked certificate or CA that has not yet expired is **kept** (its
-   `metadata` and a CA's sealed key cleared), because its issuer's revocation
+   A revoked certificate or CA is **kept** (its `metadata` and a CA's sealed key
+   cleared) until eight days after it expires, because its issuer's revocation
    list is read from it: removing it would make it valid again to every relying
-   party outside AXIAM. The same sweep removes it once it expires. It then writes a
+   party outside AXIAM, and the list keeps an expired entry for up to its
+   `nextUpdate` interval (at most seven days) plus a day of margin for clock
+   skew. The same sweep removes it then (in a live tenant the `certificate_retention`
+   job, listed on `GET /health/jobs`, deletes certificate rows by the same rule).
+   It then writes a
    `tenants.purged` entry to the system audit log, beside `tenants.deleted`
    (which records the export's `exported_through` as `audit_exported_through`),
    with the number of audit entries deleted and kept; neither entry is ever

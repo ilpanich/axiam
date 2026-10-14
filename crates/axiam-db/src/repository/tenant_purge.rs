@@ -192,19 +192,29 @@ pub enum Retain {
     CoveringKeptEntries,
 }
 
-/// How long after its `notAfter` a revoked certificate's row is kept: the
-/// longest an issuer's list can keep an expired entry (seven days, #608) and a
-/// day's margin for the datastore's clock. A macro because the one spelling
-/// feeds two `concat!`ed SurrealQL conditions, [`KEPT_REVOCATION`] and
-/// [`PAST_REVOCATION_GRACE`].
-macro_rules! revocation_grace {
+/// How many days after its `notAfter` a revoked certificate's row is kept: the
+/// longest an issuer's list can keep an expired entry (one `nextUpdate`
+/// interval, at most seven days, #608) and a day's margin for the datastore's
+/// clock. One spelling, a macro, because it feeds [`REVOCATION_GRACE_SECS`] and
+/// the two `concat!`ed SurrealQL conditions [`KEPT_REVOCATION`] and
+/// [`PAST_REVOCATION_GRACE`], so the number and the queries cannot drift apart.
+/// The `axiam-server` test `kept_revocation_covers_the_longest_crl_interval`
+/// ties it to `axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS` (#621).
+macro_rules! revocation_grace_days {
     () => {
-        "8d"
+        8
     };
 }
 
+/// [`KEPT_REVOCATION`]'s grace in seconds: eight days past `notAfter`.
+///
+/// Public so a test in a crate that sees both this one and `axiam-pki` can
+/// check it against the longest list interval instead of repeating the number
+/// (#621).
+pub const REVOCATION_GRACE_SECS: u64 = revocation_grace_days!() * 86_400;
+
 /// The condition a row the purge keeps satisfies: revoked, and expired for
-/// less than eight days.
+/// less than eight days ([`REVOCATION_GRACE_SECS`]).
 ///
 /// Not "unexpired" (#608). An issuing CA's list keeps an expired entry until it
 /// has appeared on a list issued after the expiry — RFC 5280 §3.3 requires
@@ -214,9 +224,13 @@ macro_rules! revocation_grace {
 /// epoch, which changes the list without moving its `thisUpdate` and so breaks
 /// the CRL number every replica derives from them. The eighth day is margin
 /// for the datastore's clock against the replicas'.
-const KEPT_REVOCATION: &str = concat!(
+///
+/// Public, with [`PAST_REVOCATION_GRACE`], for the same test (#621); the text
+/// is SurrealQL for this crate's own queries, not an API.
+pub const KEPT_REVOCATION: &str = concat!(
     "status = 'Revoked' AND not_after > time::now() - ",
-    revocation_grace!()
+    revocation_grace_days!(),
+    "d"
 );
 
 /// A certificate row no revocation list names any more and no relying party
@@ -225,9 +239,9 @@ const KEPT_REVOCATION: &str = concat!(
 /// retention sweep deletes in a live tenant — and what the tenant purge's
 /// orphan scan has always waited for, now for every certificate rather than
 /// only for the kept ones of a deleted tenant. The grace is spelled once, in
-/// `revocation_grace!`, so the two cannot drift apart.
-pub(crate) const PAST_REVOCATION_GRACE: &str =
-    concat!("not_after <= time::now() - ", revocation_grace!());
+/// `revocation_grace_days!`, so the two cannot drift apart.
+pub const PAST_REVOCATION_GRACE: &str =
+    concat!("not_after <= time::now() - ", revocation_grace_days!(), "d");
 
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]

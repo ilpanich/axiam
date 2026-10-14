@@ -412,6 +412,48 @@ async fn linking_a_user_converges_the_groups_that_were_pushed_before_it_existed_
     );
 }
 
+/// R101W4-01: linking a user converges its groups, and the first group the
+/// queue refuses ends that loop; the groups held back are one
+/// `record_not_offered` call for the target, not one refusal each.
+#[actix_rt::test]
+async fn a_refused_group_ends_the_convergence_and_the_rest_are_one_record() {
+    let w = World::new().await;
+    let target = w.add_target(|t| t.push_groups = true).await;
+    let alice = w.active_user("alice").await;
+    for name in ["staff", "ops", "audit"] {
+        let group = w.group(name).await;
+        w.groups
+            .add_member(w.tenant_id, alice.id, group)
+            .await
+            .unwrap();
+    }
+    w.queue.clear();
+    use axiam_core::outbound::OutboundPublisher;
+    w.queue
+        .enqueue(&reference_message(
+            w.tenant_id,
+            target.id,
+            ScimResourceType::User,
+            alice.id,
+        ))
+        .await
+        .unwrap();
+    // No room once the user's own reference is taken off the queue.
+    w.queue.set_limit(Some(0));
+    let results = w.sync().await;
+    assert_eq!(results.len(), 1, "the user, and no group was queued");
+    assert!(all_delivered(&results));
+    assert_eq!(
+        w.queue.offered(),
+        2,
+        "the user's reference, then the one group refused; nothing after"
+    );
+    assert_eq!(
+        w.queue.not_offered(),
+        vec![(OutboundKind::ScimPush, w.tenant_id, target.id, 2)]
+    );
+}
+
 #[actix_rt::test]
 async fn a_user_entering_and_leaving_a_groups_scope_is_created_and_deprovisioned() {
     let w = World::new().await;

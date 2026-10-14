@@ -347,11 +347,19 @@ async fn world(endpoint: &str) -> World {
         CibaPingDeliverer::new(requests.clone(), clients).admitting_private_networks_for_tests(),
     );
     let auth = auth_config();
-    let service = CibaService::new(requests, users, auth.jwt_public_key_pem.clone())
-        .with_ping_publisher(Arc::new(InlineDispatcher {
-            deliverer,
-            outcomes: outcomes.clone(),
-        }));
+    let service = CibaService::new(
+        requests,
+        users,
+        auth.jwt_public_key_pem.clone(),
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(db.clone())),
+            auth.jwt_private_key_pem.as_bytes(),
+        ),
+    )
+    .with_ping_publisher(Arc::new(InlineDispatcher {
+        deliverer,
+        outcomes: outcomes.clone(),
+    }));
     let mut state = AppState::for_test(db.clone(), auth.clone());
     state.rate_limit_cfg = limits();
     state.oauth2.ciba_service = service;

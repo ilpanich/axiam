@@ -397,9 +397,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ammonia"
-version = "4.2.0"
+version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f7ed3ac4252be4d3e36fb589ed5659356842587b21a31596a9dc89d3b2f5e2a"
+checksum = "061e83b03c2681c18a6787d956e355c74e0b98ba7ba3d69b0822ade1e6f1d716"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -772,8 +772,9 @@ dependencies = [
 
 [[package]]
 name = "axiam-amqp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
+ "actix-web",
  "axiam-audit",
  "axiam-authz",
  "axiam-core",
@@ -801,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-grpc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-amqp",
  "axiam-auth",
@@ -840,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-rest"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "actix-cors",
  "actix-governor",
@@ -864,6 +865,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.4.3",
+ "governor",
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 11.1.0",
@@ -899,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-audit"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "actix-web",
  "axiam-auth",
@@ -915,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-auth"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2 0.6.0",
@@ -958,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-authz"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-core",
  "axiam-db",
@@ -978,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -994,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-db"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "arc-swap",
@@ -1023,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-directory"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-auth",
  "axiam-authz",
@@ -1054,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-email"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-core",
  "axiam-pki",
@@ -1074,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-federation"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1109,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-oauth2"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1118,6 +1120,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "hex",
+ "hmac 0.13.0",
  "jsonwebtoken 11.1.0",
  "proptest",
  "rand 0.10.3",
@@ -1141,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "argon2 0.6.0",
  "getrandom 0.4.3",
@@ -1156,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque-ffi"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axiam-opaque",
  "getrandom 0.4.3",
@@ -1164,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-pki"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "axiam-core",
@@ -1199,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-scim"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1230,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1287,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-test-support"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "uuid",
 ]

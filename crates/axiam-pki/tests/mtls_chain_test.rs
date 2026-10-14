@@ -115,6 +115,7 @@ async fn mtls_chain_accept_leaf_signed_by_tenant_ca() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -221,6 +222,7 @@ async fn mtls_chain_reject_leaf_from_ca_that_is_not_a_trust_anchor() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -331,6 +333,7 @@ async fn mtls_chain_reject_forged_leaf_with_matching_fingerprint() {
             not_before: now,
             not_after: now + Duration::days(30),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .expect("storing forged cert in DB must succeed");
@@ -391,6 +394,7 @@ async fn mtls_chain_reject_when_no_ca_cert_found() {
             not_before: now,
             not_after: now + Duration::days(30),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .expect("storing cert with missing CA must succeed");
@@ -466,6 +470,7 @@ async fn mtls_rejects_revoked_issuing_ca() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -567,6 +572,7 @@ async fn mtls_rejects_expired_issuing_ca() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -711,6 +717,7 @@ async fn a_leaf_beneath_an_intermediate(
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -913,6 +920,7 @@ async fn mtls_refuses_a_ca_row_whose_parent_chain_is_a_cycle() {
             not_before: now,
             not_after: now + Duration::days(30),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .expect("storing the leaf must succeed");

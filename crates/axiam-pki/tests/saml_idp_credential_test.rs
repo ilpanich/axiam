@@ -676,6 +676,7 @@ async fn the_generic_issuance_paths_and_the_certificate_store_refuse_saml_signin
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -704,6 +705,7 @@ async fn the_generic_issuance_paths_and_the_certificate_store_refuse_saml_signin
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -726,6 +728,7 @@ async fn the_generic_issuance_paths_and_the_certificate_store_refuse_saml_signin
             not_before: now,
             not_after: now + Duration::days(1),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await;
     // Refused by the datastore's `cert_type` assertion (D-21: v72 does not widen it).

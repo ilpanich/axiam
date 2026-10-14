@@ -396,7 +396,10 @@ the account's *own* username (you name only the account), the account is marked,
 its password hash is replaced by one nobody holds, and everything it held that
 authenticates without the directory deciding is retired — its passkeys and
 security keys are deleted, its federation links (a social or upstream-IdP
-identity bound to it) deleted, its `User`-type certificates revoked, and all its
+identity bound to it) deleted, its `User`-type certificates revoked (those
+issued for it with `user_id`, and those without that binding which the 1.0.0
+name convention ties to it — see
+[PKI](../pki/README.md#a-user-certificate-names-its-account-user_id-101)), and all its
 sessions and OAuth2 refresh tokens revoked. TOTP is kept. **The owner is signed
 out everywhere.** Linking an account that is already linked to that entry is `200`
 with `was_already_linked: true` and repeats the revocations (the way an
@@ -859,7 +862,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | Max `POST /api/v1/auth/device` (device mTLS login) requests per minute per IP (default `60`). The route carried no limiter at all before 1.0.0-beta17, although a TLS handshake bearing a client certificate is the most expensive thing an unauthenticated caller can ask of the server. Sized from the honest traffic rather than from capacity: a device re-authenticates once per access-token lifetime (900 s by default), so 60/min holds a fleet of nine hundred devices on one address. Part of the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it — which is what a fleet behind a single NAT should reach for. |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | Max CIBA backchannel authentication requests (`POST /oauth2/bc-authorize`) per minute (default `60`), in a bucket of its own keyed like `/oauth2/token` (`AXIAM__RATE_LIMIT__KEY` applies), plus a per-client bucket of the same size after authentication. Scaled by `AXIAM__RATE_LIMIT__PROFILE` (`gateway` 600, `mesh` 6000). Each user is sent at most three CIBA notifications a minute whatever this is set to. |
-| `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` | The browser-endpoint preset, per IP (default `30`): `/oauth2/end_session`, the `/oauth2/authorize/logout` hop, `GET /oauth2/authorize` on both the bare and the per-tenant mount (bucket `oauth2_authorize`, #532) and the SAML identity provider's browser routes, each route in a bucket of its own. Never moved by a profile; raise it where many people start sign-ins from one address. |
+| `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` | The browser-endpoint preset, per IP (default `30`): `/oauth2/end_session`, the `/oauth2/authorize/logout` hop, `GET /oauth2/authorize` on both the bare and the per-tenant mount (bucket `oauth2_authorize`, #532), the SAML identity provider's browser routes, and the five authenticated federation flow routes (`POST /api/v1/federation/saml/authn-request`, `POST .../saml/acs`, `GET .../saml/metadata`, `POST .../oidc/authorize`, `POST .../oidc/callback`; buckets `federation_saml_authn_request`, `federation_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`, `federation_oidc_callback`, #614), each route in a bucket of its own. Never moved by a profile; raise it where many people start sign-ins from one address, or where one backend relays many people's federated sign-ins to these routes from one address. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
 | `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
@@ -1703,7 +1706,9 @@ its volumes can never be the dev or prod stack's.
 Both ports are published on the loopback interface only: put a TLS-terminating
 proxy in front of the REST port. The compose file also gives the server a
 **40 s stop grace period** and a named volume for the audit dead-letter file
-(below).
+(below). An instance that loses its lease has 15 s, not 40, and cuts requests
+still in flight after 5 s; [the grace period](#stopping-and-the-grace-period)
+says what each stop can cut and by how much.
 
 **On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
 `AXIAM__AMQP__*` URL, TLS or signing-key settings, no RabbitMQ, **`replicas: 1`**
@@ -1776,6 +1781,37 @@ from `delivery_failed` on purpose: a restart is not a downstream outage, so the
 `delivery_abandoned` separately if a lost delivery matters to you; it is
 written only when the process gets to stop in order (see below).
 
+The row of a refused enqueue is handed to the audit middleware's queue (the one
+request rows use) so the request that produced the event never waits on the
+datastore for it. That queue keeps a quarter of its room (1 024 of 4 096 rows)
+for request rows: a refusal row that finds only that reserve left is shed and
+counted in `GET /health/jobs` `request_audit.outbound_abandoned_dropped`. It is
+not a request row, so it is not counted in `request_audit.dropped`, not written
+to the dead-letter file and does not turn `status` to `degraded`; a rising count
+means an outbound queue is refusing faster than the audit trail records it.
+
+A SCIM reconciliation is not refused for a full queue: it runs in the cleanup
+task (or, on demand, on a task of its own), so it **waits for room** instead,
+and sends only while more than a quarter of the 1 024-message queue is free, so
+that live changes reported meanwhile are not refused behind it. It offers the
+target's links first — the refused erasure `DELETE`s, then every other linked
+account (what deprovisions an account that left scope, was disabled or erased) —
+then the in-scope users and groups, and after reading the downstream, its
+repairs. A large target therefore takes longer to reconcile (the queue drains at
+the downstream's pace) but every run reaches its links. Its offers end only
+when the queue is closed (the process is stopping), the run's five-minute
+deadline has passed or a stop is requested; then the rest of that step is not
+offered and is recorded as one more `scim_push.delivery_abandoned` row with
+`refused_count`, and `scim_reconcile` turns red on `GET /health/jobs`. A run
+that keeps hitting its deadline is a downstream slower than the target's size
+allows in five minutes: the links, which come first, are the part that gets
+done. A provisioning fan-out and a linked user's groups never wait (one runs on
+the request that made the change, the other on the queue's own consumer): they
+stop at their first refused enqueue and record the rest as one such row, and
+reconciliation converges them. The producer's log line for a refusal is written for the
+first refusal of a kind and then at most once a minute, with the number
+suppressed since.
+
 In audit terms, a restart loses the following, and nothing else:
 
 * **A webhook, SSF, outbound SCIM or CIBA-ping delivery that was queued or
@@ -1800,32 +1836,75 @@ In audit terms, a restart loses the following, and nothing else:
 ### Stopping, and the grace period
 
 An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
-finishes the requests in flight, finishes the cleanup tick it is in (so a GDPR
-erasure and its audit row stay together) and then **writes the audit rows the
-audit middleware still holds, waiting up to 5 s for it**, before the process
-exits. Before that drain, in the minimal profile, each in-process outbound
-queue is closed and one `<kind>.delivery_abandoned` row is written for every
-delivery still queued or waiting for a retry. A `SIGKILL` or an out-of-memory
-kill does none of that and loses what is queued.
+finishes the requests in flight, tells the cleanup task to stop (it starts no
+further sweep, GDPR erasure or export) and then **writes the audit rows the
+audit middleware still holds**, before the process exits. Before that drain, in
+the minimal profile, each in-process outbound queue is closed and one
+`<kind>.delivery_abandoned` row is written for every delivery still queued or
+waiting for a retry. A `SIGKILL` or an out-of-memory kill does none of that and
+loses what is queued.
 
-**Give the container a termination grace period of at least 40 s.** The stop
-has four bounded steps. The REST listener waits up to **20 s** for requests in
-flight (`shutdown_timeout`, set explicitly in `boot.rs`; actix's own default is
-30 s). The gRPC server then gets up to **5 s** to finish its calls, the
-in-process outbound queues up to **2 s** (`OUTBOUND_DRAIN_DEADLINE`) to account
-for what they hold, and the audit queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`)
-to be written. That is 32 s, and 40 s leaves a margin. A shorter grace period lets the orchestrator kill the process
-during the drain, which loses exactly the audit rows the orderly stop exists to
-keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
+**Give the container a termination grace period of at least 40 s.** A
+`SIGTERM` stop has five bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
+arithmetic is checked when the server is built). The REST listener waits up to
+**20 s** for requests in flight (`shutdown_timeout`, set explicitly; actix's own
+default is 30 s). The gRPC server then gets up to **5 s** to finish its calls,
+the in-process outbound queues up to **2 s** to account for what they hold, the
+audit queue up to **5 s** to be written, and the cleanup task up to **5 s** to
+finish the sweep it was in. That is 37 s, and 40 s leaves a 3 s margin. A
+shorter grace period lets the orchestrator kill the process during the drain,
+which loses exactly the audit rows the orderly stop exists to keep. Compose's
+default is 10 s and Kubernetes' is 30 s, so both are set:
 `stop_grace_period: 40s` in `docker-compose.prod.yml` and
 `docker-compose.minimal.yml`, and `terminationGracePeriodSeconds: 40` in
-`k8s/server/deployment.yml`. If you change the shutdown timeout, move the grace
-period with it. An instance that loses its lease, or whose consumer or gRPC
-server dies, stops accepting at once, finishes in-flight requests and exits
-non-zero. A backstop ends the process regardless if the stop overruns: 15 s
-after it began for a lost lease (which must not run beside its successor for
-longer), 35 s — the four steps and a margin, inside the grace period — for a
-dead consumer or gRPC server.
+`k8s/server/deployment.yml`. If you change a bound, move the grace period with
+it.
+
+**What a stop can cut, and by how much.** Two steps end work that has not
+finished rather than wait for it:
+
+* **The cleanup task, in every stop.** A sweep still running at its bound (5 s
+  after the audit drain for `SIGTERM`, 2 s after a lost lease) is cut where it
+  is. Every sweep is re-run by the next tick, so the next start resumes it,
+  with three exceptions: a GDPR erasure cut after the user row was anonymized and
+  before `gdpr.user_pseudonymized` was written leaves the erasure and its proof
+  without that audit row (the user is no longer due, so nothing writes it
+  later); a data export cut after it was marked ready and before its mail
+  was queued leaves a download nobody was told about, which expires after 24 h;
+  and a tenant purge cut mid-way is claimed for a one-hour lease that a cut does
+  not release, so the next start's sweep skips that tenant until the lease ends
+  (every step of the purge is idempotent, so it resumes then, and a deployment
+  that restarts more often than hourly can keep pushing it back), and one cut
+  while the tenant row's final `DELETE` is in flight, or before the system log's
+  `tenants.purged` record is written, leaves no tenant row for a later sweep to
+  find, so that record — the export time the purge used and how many audit
+  entries it deleted and kept — is never written (corrected 2026-10-14, R101-03,
+  #655; before then this list had two exceptions). (A SCIM target whose
+  reconciliation is cut mid-run is reconciled again at its next daily run.)
+  All three need a sweep that was already running when the cleanup task was told
+  to stop and is still running when its bound runs out — 5 to 12 s later for
+  `SIGTERM` (the drains before the join take up to 7 s), 2 to 6 s after a lost
+  lease. The log says `the cleanup task's sweep did not finish in time` when it
+  happens.
+* **The requests in flight, after a lost lease.** An instance that loses its
+  lease must not run beside its successor for longer than **15 s**
+  (`LeaseTiming::lost_stop_deadline`), so its stop has a budget of its own
+  (`LEASE_LOSS_STOP`): requests in flight **5 s**, gRPC 2 s, outbound queues
+  1 s, audit drain 3 s, cleanup 2 s — 13 s. actix's drain is fixed at 20 s when
+  the listener is bound and cannot be shortened for one stop, so a request still
+  running 5 s after the loss is **cut** (the connection is closed without a
+  response) and the teardown runs on; the log says `requests still in flight
+  after a lost minimal-profile lease were cut`. Without the cut, a slow request
+  held the drain until the backstop ended the process and the audit drain never
+  ran. A `SIGTERM` stop never cuts a request before its 20 s.
+
+An instance that loses its lease, or whose consumer or gRPC server dies, exits
+non-zero after the stop. A backstop ends the process regardless if the stop
+overruns: 15 s after it began for a lost lease, 38 s — the whole `SIGTERM`
+budget and 1 s, inside the grace period — for a dead consumer or gRPC server.
+A lease lost while a `SIGTERM` stop is already past its REST drain keeps the
+`SIGTERM` bounds for the steps left, so its 15 s backstop can end that stop up
+to 2 s early; the exit is non-zero either way.
 
 ### Audit durability
 
@@ -1852,9 +1931,29 @@ The records written by the sweep and by the GDPR handlers also go to a second
 sink, a structured log event on the target `axiam.audit.dlq`.
 
 1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
-   per record, the fields of an audit entry (`tenant_id`, `actor_id`,
-   `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
-   the server opens it for append and never rewrites or truncates it. It is
+   per record, `{"occurred_at", "reason", "entry"}`: `entry` holds the fields of
+   an audit entry (`tenant_id`, `actor_id`, `actor_type`, `action`,
+   `resource_id`, `outcome`, `ip_address`, `metadata`); `occurred_at` is when
+   the event happened (RFC 3339, UTC) and `reason` is why the row is here
+   (`channel_full`, `channel_closed` or `datastore_error`, never an error's
+   text). For a request-audit row `occurred_at` is the moment the response
+   finished, whatever the writer's queue or the datastore then took; for a GDPR
+   record it is the moment the record was handed to the audit path, right after
+   the action it records and before the datastore write that was refused. Files
+   written before 1.0.1 hold the bare entry on each line, with neither field;
+   the recipe below reads both. The server opens the file for append and never
+   rewrites or truncates it. Each
+   record is one write of the line and its newline, and the server syncs the
+   file's data to the device before it counts the record as written (the GDPR
+   records, per record; the request-audit rows, per batch), so a host crash does
+   not take back a record the server reported. The directory entry is not synced
+   separately: a crash moments after the file was first created can lose the
+   file. The file is created with mode `0600`, and an existing file that group or
+   others can read is restricted to `0600` when the server opens it (a server
+   that cannot, because the file belongs to another user, logs a warning and
+   writes anyway); the lines carry user and tenant identifiers, so keep a copy
+   you make owner-only too. The GDPR request records are written on the
+   runtime's blocking pool, not on a request worker. It is
    configured in every shipped deployment, always at
    `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`:
 
@@ -1877,7 +1976,8 @@ sink, a structured log event on the target `axiam.audit.dlq`.
    one batch of rows. Each line's client-sized fields are cut with a
    `...[truncated]` marker: `action` (the request's method and path) to 512
    bytes and `ip_address` (the forwarded client address) to 64, which bounds a
-   request row's line to about a kilobyte; the audit row in the datastore is cut
+   request row's line, envelope included, to about a kilobyte (the budget counts
+   each line's bytes as written); the audit row in the datastore is cut
    the same way. Every shipped deployment states the budget: the ConfigMap key in
    `k8s/server/configmap.yml`, `AXIAM_GDPR_AUDIT_DLQ_MAX_BYTES` in both Compose
    files.
@@ -1931,7 +2031,7 @@ source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '"CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
+jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
@@ -1957,10 +2057,14 @@ id (`rand::uuid::v7()`); an earlier form of this recipe let SurrealDB generate
 the id, and AXIAM's audit list fails for the whole tenant while such a row is in
 it (`invalid UUID`). Rows replayed with that form have to be removed with the
 datastore's root account, which the table's append-only permission does not bind,
-and replayed again with this one. The replayed row's `timestamp` is the moment of
-replay — when the original write failed is in the `axiam.audit.dlq` log event, so keep the log
-with the file — and, like every audit row, it can neither be updated nor
-deleted afterwards, so **replay each line once**. Note how many lines you
+and replayed again with this one. The replayed row's `timestamp` is still the
+moment of replay — the statement does not set it — but the event's own time is
+recoverable: the recipe carries the line's `occurred_at` and `reason` into the
+row's `metadata` as `occurred_at` and `dead_lettered_reason`, so the trail can
+be read in the order things happened (a line from before 1.0.1 has neither, and
+its replayed row carries neither; the `axiam.audit.dlq` log event then dates a
+GDPR record, so keep the log with the file). Like every audit row, it can
+neither be updated nor deleted afterwards, so **replay each line once**. Note how many lines you
 replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
 (`tail -n +N`). Do not rename or delete the file while the server runs: the
 request-audit writer keeps its handle open and would keep appending to the
@@ -2002,8 +2106,9 @@ records, in the same one-JSON-line form, and replayed with the same statement as
 above. The write is queued to a writer task (up to 1 024 rows), so the request
 path does no file I/O; a row the writer cannot keep — its queue is full, the
 file is at its budget, or the file cannot be written — is counted in
-`not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
-lines give the former, and the replayed row's `timestamp` is the replay's. With
+`not_recoverable`. Each line carries the time the request finished and the
+reason (`channel_full`, `channel_closed` or `datastore_error`); the
+`axiam.audit.loss` log lines name the error itself. With
 the variable unset the server logs one warning at start (it covers these rows
 and the GDPR records alike) and lost rows are counted and logged only. Both
 Compose files and the Kubernetes manifests set the variable; set it, on a

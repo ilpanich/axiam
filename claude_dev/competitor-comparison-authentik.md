@@ -61,7 +61,7 @@ would turn it into an application-portal product.
 | SAML 2.0 | IdP (G-2, Phase 23) **and** SP | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
 | SCIM 2.0 | Inbound endpoint (RFC 7643/7644) **and** outbound SCIM client (G-6, Phase 23: per-tenant targets, users and groups, reconciliation). *Limit: one delivery attempt at a time per replica, with a per-target breaker since #550 (item 4 below)* | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
 | LDAP / Kerberos as user source | LDAP/AD yes (G-3, Phase 23; nested groups, sync); Kerberos no (D-1) | Yes | [A16] |
-| LDAP / RADIUS / proxy / RAC outposts | **No.** RADIUS is a gap AXIAM chooses not to close natively for now (G-11, D-77, 2026-10-06): no RADIUS front end today; a FreeRADIUS-backend route when a named adopter asks, per [the decision record](radius-eap-tls-spike-2026-10-06.md). No CRL is published either (T-102), so a RADIUS server trusting the AXIAM CA has no revocation channel today. No LDAP server, proxy or RAC outpost by design | Yes (RADIUS EAP-TLS enterprise) | [A2] |
+| LDAP / RADIUS / proxy / RAC outposts | **RADIUS: recipe, not native.** AXIAM runs no RADIUS server and chooses not to build one for now (G-11, D-77, 2026-10-06, [the decision record](radius-eap-tls-spike-2026-10-06.md)). What ships in 1.0.1 (D3) is [a guide](../docs/pki/freeradius.md), a compose recipe and an `eapol_test` end-to-end for 802.1X with an AXIAM-issued Device certificate behind FreeRADIUS: EAP-TLS over TLS 1.3, the tenant signing CA as the trust anchor, AXIAM's published CRL as the revocation channel, so a revoked device keeps its port until the list reaches FreeRADIUS (about the fetch interval plus 300 s) and its session ends; no real-time check (the `rlm_rest` authorize endpoint, D4, is not in 1.0.1) and no password protocols. No LDAP server, proxy or RAC outpost by design | Yes (RADIUS EAP-TLS enterprise) | [A2] |
 | MFA | TOTP, WebAuthn passkeys and security keys, attestation policy (FIDO MDS) | TOTP, WebAuthn (AAGUID allowlist via FIDO MDS), Duo, SMS, email OTP, recovery codes, device trust | [A19][A20] |
 | Augmented PAKE (OPAQUE, RFC 9807) | **Yes** (opt-in per org/tenant) | No | — |
 | X.509 / mTLS user and device authentication | **Yes**, open source, with an integrated per-org CA | mTLS stage, **enterprise-only**; no CA | [A21] |
@@ -132,11 +132,15 @@ not authentik's.
    EAP-TLS implementation, with AXIAM as the CA and policy source (§5.2 of the
    record). **Reopen** when an adopter needs 802.1X, VPN or network-device
    login against AXIAM and will not run FreeRADIUS, or when that route has
-   shipped with a documented shortfall (§1.4). Today AXIAM has **no RADIUS
-   support** and **publishes no certificate revocation list** (T-102 is
-   reopened at threat model 2.36.0): a FreeRADIUS deployment trusting the
-   AXIAM CA has no revocation channel until publishing a CRL per issuing CA,
-   which the decision commits to regardless, ships.
+   shipped with a documented shortfall (§1.4). **Update (1.0.1, D-2 = yes):
+   the FreeRADIUS route is shipped as a recipe, not native.** AXIAM still has **no
+   RADIUS support**; `docs/pki/freeradius.md` configures FreeRADIUS to admit
+   devices on certificates AXIAM issues, and `radius-e2e.yml` proves it with
+   `eapol_test` (accept, wrong CA, revoked after the CRL refresh). The CRL it
+   consumes has been published since 1.0.0 (#565), so the earlier "no revocation
+   channel" caveat is gone; what remains is the lag the guide states (the fetch
+   interval, `ca_path_reload_interval` of at least 300 s, and the session's
+   `Session-Timeout`). The real-time check (D4) is not scheduled.
 
 **P3 — watch, do not chase**
 
@@ -196,6 +200,7 @@ measurement, not an expectation, will settle it. The numbers follow the run.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-13 | RADIUS: the FreeRADIUS-backend route ships as a recipe (1.0.1, W6.2, D3; maintainer decision D-2): the "outposts" row now reads *recipe, not native*, and gap item 6 says what the recipe does and does not do. The "no CRL is published" caveat of the 2026-10-06 entry is removed: the CRL has been published since 1.0.0. | — |
 | 2026-10-09 | Outbound SCIM limit restated (1.0.0, #550, documentation only): the per-target breaker shipped — a target with five consecutive failures is not called again until its backoff has passed — so an unresponsive downstream no longer holds a replica's other targets back for every queued reference; more than one delivery in flight per replica is deferred to 1.0.x. | — |
 | 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-11 (RADIUS)** decided (D-77): the native RADIUS front end is declined for now, the FreeRADIUS-backend route applies when a named adopter asks, and a CRL is to be published regardless; the "outposts" row and gap item 6 now say that AXIAM has no RADIUS today, link the decision record and its reopen condition, and say that no CRL is published yet (T-102 reopened at threat model 2.36.0). **G-10 (benchmark currency)**: authentik now has a benchmark target (`benchmarks/targets/authentik/`) and run 6 will measure authentik 2026.8.3, Keycloak 26.8.0 and Zitadel v4.19.4 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps; the no-performance-claim paragraph keeps its claim and gives the new reason, and no number is added before the run. **Not-do statement:** outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. | [A2] |
 | 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: a tenant registers downstream SCIM 2.0 service providers (bearer token or OAuth 2.0 client credentials, sealed and write-only, bound to its URL; scope of every user or the members of chosen groups; deactivate or delete on leaving scope), AXIAM pushes user and group lifecycle changes as `POST` / `PATCH` / `DELETE` through the outbound address guard with retry and dead-lettering, a GDPR erasure always deletes downstream, reconciliation repairs drift nightly and on demand and never touches an account the downstream's own application made, and a dead letter can notify the tenant's administrators; management API (contract §31) and console page. The authentik row and gap item 4 now read as closed. | [A18] |

@@ -390,3 +390,56 @@ async fn an_unreachable_vault_names_the_operation_that_failed() {
         assert!(!msg.contains(PEM), "{label} leaked the key: {msg}");
     }
 }
+
+/// T-476: a `307` from Vault is an error naming the host, on every verb the
+/// store uses, and the host it points at sees nothing — reqwest would otherwise
+/// carry `X-Vault-Token` across, since it strips only the standard credential
+/// headers on a cross-host redirect.
+#[tokio::test]
+async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
+    let vault = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/steal", elsewhere.uri()).as_str()),
+        )
+        .mount(&vault)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+
+    let store = store_for(&vault);
+    let (org, ca) = (Uuid::new_v4(), Uuid::new_v4());
+    let host = reqwest::Url::parse(&vault.uri()).unwrap();
+    let host = host.host_str().unwrap();
+
+    let errors = [
+        store.store(org, ca, PEM).await.unwrap_err().to_string(),
+        store
+            .load(&key_ref(org, ca), None)
+            .await
+            .unwrap_err()
+            .to_string(),
+        store
+            .delete(&key_ref(org, ca))
+            .await
+            .unwrap_err()
+            .to_string(),
+    ];
+    for err in &errors {
+        assert!(
+            err.contains("redirect") && err.contains(host),
+            "the refusal names the host that redirected: {err}"
+        );
+        assert!(!err.contains(TOKEN), "{err}");
+    }
+    assert_eq!(vault.received_requests().await.unwrap().len(), 3);
+    assert!(
+        elsewhere.received_requests().await.unwrap().is_empty(),
+        "the second host must see no request, and so no X-Vault-Token"
+    );
+}

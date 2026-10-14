@@ -23,11 +23,10 @@
 //! 4. [`PurgeStage::Authorization`] — groups, roles, permissions, scopes,
 //!    resources and service accounts; their graph edges go with the records
 //!    (step (b3)).
-//! 5. [`PurgeStage::AuditTrail`] — the tenant's own audit entries and their
-//!    signatures (step (d)). The deletion was refused until the trail had been
-//!    exported (T-118), so the purge destroys nothing the operator does not hold
-//!    a copy of; the `tenant.deleted` record is written to the system log (the
-//!    nil tenant) and is never touched here.
+//! 5. [`PurgeStage::AuditTrail`] — the tenant's own audit entries **the
+//!    export covered**, and the signatures over nothing but those entries (step
+//!    (d); see "The audit trail" below). The `tenant.deleted` record is written
+//!    to the system log (the nil tenant) and is never touched here.
 //! 6. [`PurgeStage::Records`] — consents, deletion requests, export jobs and
 //!    erasure proofs (steps (f) and (g)).
 //! 7. [`PurgeStage::Accounts`] — the user rows themselves (step (e); an erasure
@@ -39,10 +38,50 @@
 //! fails part-way stops there, leaves the tenant tombstoned, and is resumed by
 //! the next sweep; the tenant row goes only after every step succeeded.
 //!
+//! # The audit trail: only what the export holds (R1W1-04, #602, D-5)
+//!
+//! The deletion is refused until the tenant's audit trail has been exported
+//! (T-118), and the receipt it accepts may be up to six hours old. The export
+//! covers the rows written up to the moment it started — its receipt's
+//! `exported_through`, which the deletion copies into its `tenants.deleted`
+//! system-log record as `audit_exported_through` — and nothing written after
+//! it: the receipt itself, what the tenant did in the hours before the
+//! deletion, and what the deletion and the time until the purge produced (its
+//! revocations, refused sign-ins, refused client calls).
+//!
+//! So the purge deletes the tenant's `audit_log` rows with `timestamp` **at or
+//! before** that export time and no others: the operator holds a copy of every
+//! row it destroys. A later row stays under the tenant id, which no tenant row
+//! names any more, as the rows of an orphaned tenant id do
+//! ([`PurgeScope::Orphan`]); the audit retention sweep (T-119) deletes it once
+//! it is older than the deployment's retention window, as it does every audit
+//! row, whatever tenant it names. Nothing is copied to the system log. An
+//! `audit_signature` row goes when **none** of its `entry_ids` is still in the
+//! log — every entry it signs went with the purge; one that also signs a kept
+//! entry stays, and the retention sweep removes it by its `signed_at`.
+//!
+//! The export time is read from the newest `tenants.deleted` record naming the
+//! tenant (`resource_id`). A record written before this rule existed carries
+//! only the receipt id, and the time is then read from that receipt's own
+//! `exported_through`, which every receipt has carried; the receipt is a row
+//! after the export, so the purge never deletes it. When neither yields a time
+//! — no deletion record (its write was dead-lettered, or the purge ran before
+//! it landed), or a record without one — the purge deletes **no** audit row
+//! and no signature of the tenant: it keeps everything, as for an orphan, and
+//! leaves it to the retention sweep. `tenants.purged` records the export time
+//! used (or `null`) and how many audit rows were deleted and kept
+//! ([`TenantPurgeReport`]).
+//!
+//! The audit log is append-only (`super::audit`): the purge's audit stage is a
+//! documented exception, and it deletes only what an export holds or what
+//! signs nothing still in the log; it updates no audit row.
+//!
 //! # Revocation evidence outlives the tenant (R1W1-01)
 //!
 //! Two tables are not emptied: `certificate` and `ca_certificate` keep every
-//! **revoked, unexpired** row ([`Retain::RevokedUntilExpiry`]). An issuing CA's
+//! **revoked** row that is unexpired or expired less than eight days ago
+//! ([`Retain::RevokedUntilExpiry`]; the grace is the longest time a list keeps
+//! an expired entry, #608). An issuing CA's
 //! revocation list (`axiam_pki::crl`, T-102) is read from those rows, across
 //! tenants, by issuer; deleting them took a revoked leaf off its organization
 //! CA's list and made it valid again to every relying party outside AXIAM. The
@@ -55,9 +94,9 @@
 //! What is kept is what the list needs and no more: the step clears a
 //! certificate's free-form `metadata` and a CA's sealed private key. The rows
 //! name a tenant id with no tenant row, which is what the orphan scan looks
-//! for; it ignores a kept row until it expires, and then the orphan purge
-//! removes it — the cleanup job deletes the evidence once no relying party can
-//! need it.
+//! for; it ignores a kept row until eight days after it expires, and then the
+//! orphan purge removes it — the cleanup job deletes the evidence once no list
+//! names it and no relying party can need it.
 //!
 //! # Completeness is pinned
 //!
@@ -68,12 +107,32 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::CountRow;
+
+/// The action of the **system**-log record a tenant deletion writes
+/// (`resource_id` = the tenant). The purge reads the export time from it.
+pub const TENANT_DELETED_ACTION: &str = "tenants.deleted";
+
+/// The action of the export receipt in the tenant's own audit log (T-118).
+pub const AUDIT_EXPORT_ACTION: &str = "tenants.audit_exported";
+
+/// The key of [`TENANT_DELETED_ACTION`]'s metadata holding the time the
+/// accepted export covered up to (its receipt's [`RECEIPT_EXPORTED_THROUGH`]).
+pub const DELETION_EXPORTED_THROUGH: &str = "audit_exported_through";
+
+/// The key of [`TENANT_DELETED_ACTION`]'s metadata naming the receipt.
+pub const DELETION_RECEIPT_ID: &str = "audit_export_receipt_id";
+
+/// The key of an export receipt's metadata holding the instant the export
+/// started: it holds every row with a `timestamp` at or before it.
+pub const RECEIPT_EXPORTED_THROUGH: &str = "exported_through";
 
 /// How a table names the tenant a row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,19 +172,38 @@ pub enum PurgeStage {
 pub enum Retain {
     /// None: every row of the tenant goes.
     Nothing,
-    /// A revoked certificate whose `not_after` is still ahead — the evidence
-    /// its issuer's revocation list is read from (R1W1-01; see the module
-    /// documentation). Every other row goes; an unrevoked, unexpired row is
+    /// A revoked certificate whose `not_after` is still ahead, or passed less
+    /// than eight days ago — the evidence its issuer's revocation list is read
+    /// from (R1W1-01, #608; see the module documentation). Every other row goes; an unrevoked, unexpired row is
     /// revoked first, and a kept row has `strip` applied (an `UPDATE … SET`
     /// clause clearing what the list does not need).
     RevokedUntilExpiry {
         /// The `SET` clause applied to a kept row.
         strip: &'static str,
     },
+    /// `audit_log`: a row written after the export the deletion required
+    /// (R1W1-04; see the module documentation). Rows with a `timestamp` at or
+    /// before the export time go; the purge skips the step, keeping every row,
+    /// when it knows no export time.
+    AfterExport,
+    /// `audit_signature`: a signature over at least one entry still in
+    /// `audit_log` once [`Retain::AfterExport`] has run. A signature whose every
+    /// entry is gone goes.
+    CoveringKeptEntries,
 }
 
-/// The condition a row the purge keeps satisfies.
-const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now()";
+/// The condition a row the purge keeps satisfies: revoked, and expired for
+/// less than eight days.
+///
+/// Not "unexpired" (#608). An issuing CA's list keeps an expired entry until it
+/// has appeared on a list issued after the expiry — RFC 5280 §3.3 requires
+/// that — which is up to one `nextUpdate` interval past `notAfter`, at most
+/// seven days (`axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS`). A row the purge
+/// deleted inside that window would leave the list mid-way through a refresh
+/// epoch, which changes the list without moving its `thisUpdate` and so breaks
+/// the CRL number every replica derives from them. The eighth day is margin
+/// for the datastore's clock against the replicas'.
+const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now() - 8d";
 
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]
@@ -150,6 +228,16 @@ impl PurgeStep {
         }
     }
 
+    /// An audit table: keyed by `tenant_id`, keeping what no export holds.
+    const fn audit(table: &'static str, retain: Retain) -> Self {
+        Self {
+            table,
+            key: TenantKey::TenantId,
+            stage: AuditTrail,
+            retain,
+        }
+    }
+
     const fn by_scope(table: &'static str, stage: PurgeStage) -> Self {
         Self {
             table,
@@ -160,7 +248,7 @@ impl PurgeStep {
     }
 
     /// A certificate table: keyed by `tenant_id`, keeping revocation evidence
-    /// until it expires.
+    /// until eight days after it expires.
     const fn keeping_revocations(
         table: &'static str,
         strip: &'static str,
@@ -191,6 +279,14 @@ impl PurgeStep {
                  UPDATE {table} SET {strip} WHERE tenant_id = $id AND {KEPT_REVOCATION}; \
                  DELETE {table} WHERE tenant_id = $id AND NOT ({KEPT_REVOCATION});"
             ),
+            (TenantKey::TenantId, Retain::AfterExport) => {
+                format!("DELETE {table} WHERE tenant_id = $id AND timestamp <= $exported_through")
+            }
+            (TenantKey::TenantId, Retain::CoveringKeptEntries) => format!(
+                "LET $kept = (SELECT VALUE meta::id(id) FROM audit_log WHERE tenant_id = $id); \
+                 DELETE {table} WHERE tenant_id = $id \
+                     AND array::len(array::intersect(entry_ids, $kept)) = 0;"
+            ),
             (TenantKey::Scope, _) => {
                 format!("DELETE {table} WHERE scope = 'tenant' AND scope_id = $id")
             }
@@ -203,6 +299,9 @@ impl PurgeStep {
         match self.retain {
             Retain::Nothing => "true".into(),
             Retain::RevokedUntilExpiry { .. } => format!("NOT ({KEPT_REVOCATION})"),
+            // The audit trail is never read by the orphan scan (see
+            // `orphaned_tenant_ids`); the retention sweep governs what is kept.
+            Retain::AfterExport | Retain::CoveringKeptEntries => "false".into(),
         }
     }
 }
@@ -251,9 +350,10 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("scope", Authorization),
     PurgeStep::by_tenant("resource", Authorization),
     PurgeStep::by_tenant("service_account", Authorization),
-    // (d) The tenant's own audit trail, exported before the deletion (T-118).
-    PurgeStep::by_tenant("audit_log", AuditTrail),
-    PurgeStep::by_tenant("audit_signature", AuditTrail),
+    // (d) The tenant's own audit trail, as far as the export the deletion
+    // required holds it (T-118, R1W1-04); see the module documentation.
+    PurgeStep::audit("audit_log", Retain::AfterExport),
+    PurgeStep::audit("audit_signature", Retain::CoveringKeptEntries),
     // (f)/(g) GDPR records.
     PurgeStep::by_tenant("consent", Records),
     PurgeStep::by_tenant("account_deletion", Records),
@@ -272,8 +372,8 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("notification_rule", Configuration),
     PurgeStep::by_tenant("reactor", Configuration),
     PurgeStep::by_tenant("oauth2_client", Configuration),
-    // R1W1-01: revocation evidence stays until it expires; see the module
-    // documentation.
+    // R1W1-01, #608: revocation evidence stays until eight days after it
+    // expires; see the module documentation.
     PurgeStep::keeping_revocations("certificate", "metadata = {}", Configuration),
     PurgeStep::keeping_revocations(
         "ca_certificate",
@@ -298,8 +398,11 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
 /// Whose rows a purge removes, and whether it may take the audit trail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PurgeScope {
-    /// A tombstoned tenant: everything, its audit trail included (it was
-    /// exported before the deletion was allowed, T-118).
+    /// A tombstoned tenant: everything, and of its audit trail the rows the
+    /// export the deletion required holds (T-118, R1W1-04) — the rows at or
+    /// before the export time its `tenants.deleted` record names. Later rows,
+    /// or every row when no export time can be read, stay for the retention
+    /// sweep.
     Tombstoned,
     /// A tenant id that has rows but no tenant row — left by a deletion made
     /// before the tombstone existed. Everything **but** the audit trail: no
@@ -309,6 +412,23 @@ pub(crate) enum PurgeScope {
     Orphan,
 }
 
+/// What a tenant purge did with the tenant's audit trail — what the cleanup
+/// job records in `tenants.purged` (R1W1-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenantPurgeReport {
+    /// The time the export the deletion required covered up to; the purge
+    /// deleted the tenant's audit rows at or before it. `None` when no export
+    /// time could be read (an orphan, or a deletion record without one): no
+    /// audit row was deleted.
+    pub audit_exported_through: Option<DateTime<Utc>>,
+    /// Audit rows of the tenant this purge deleted. A purge resumed after a
+    /// failure counts only what the resuming pass deleted.
+    pub audit_rows_deleted: u64,
+    /// Audit rows of the tenant left for the retention sweep (T-119): those
+    /// written after the export, or all of them when there is no export time.
+    pub audit_rows_kept: u64,
+}
+
 /// Remove `tenant_id`'s rows from every table of [`TENANT_PURGE_ORDER`], in
 /// order, stopping at the first failure (every step is idempotent, so the next
 /// sweep resumes).
@@ -316,27 +436,145 @@ pub(crate) async fn purge_rows<C: Connection>(
     db: &DbHandle<C>,
     tenant_id: Uuid,
     scope: PurgeScope,
-) -> Result<(), DbError> {
+) -> Result<TenantPurgeReport, DbError> {
     let id = tenant_id.to_string();
+    let exported_through = match scope {
+        PurgeScope::Tombstoned => audit_export_cutoff(db, tenant_id).await?,
+        PurgeScope::Orphan => None,
+    };
+    let mut report = TenantPurgeReport {
+        audit_exported_through: exported_through,
+        ..TenantPurgeReport::default()
+    };
     for step in TENANT_PURGE_ORDER {
-        if scope == PurgeScope::Orphan && step.stage == AuditTrail {
-            continue;
+        let conn = db.current();
+        let mut query = conn.query(step.delete_statement());
+        if step.stage == AuditTrail {
+            // No export time, no audit deletion: the trail stays whole for the
+            // retention sweep, as an orphan's does.
+            let Some(cutoff) = exported_through else {
+                continue;
+            };
+            if step.retain == Retain::AfterExport {
+                report.audit_rows_deleted = count(
+                    db,
+                    &format!(
+                        "SELECT count() AS total FROM {} WHERE tenant_id = $id \
+                         AND timestamp <= $exported_through GROUP ALL",
+                        step.table
+                    ),
+                    &id,
+                    Some(cutoff),
+                )
+                .await?;
+            }
+            query = query.bind(("exported_through", cutoff));
         }
-        db.current()
-            .query(step.delete_statement())
+        query
             .bind(("id", id.clone()))
             .await?
             .check()
             .map_err(|e| DbError::Migration(format!("purging {}: {e}", step.table)))?;
     }
-    Ok(())
+    report.audit_rows_kept = count(
+        db,
+        "SELECT count() AS total FROM audit_log WHERE tenant_id = $id GROUP ALL",
+        &id,
+        None,
+    )
+    .await?;
+    Ok(report)
+}
+
+/// One `count()` over `statement`, with `$id` (and `$exported_through`).
+async fn count<C: Connection>(
+    db: &DbHandle<C>,
+    statement: &str,
+    id: &str,
+    exported_through: Option<DateTime<Utc>>,
+) -> Result<u64, DbError> {
+    let conn = db.current();
+    let mut query = conn.query(statement).bind(("id", id.to_owned()));
+    if let Some(cutoff) = exported_through {
+        query = query.bind(("exported_through", cutoff));
+    }
+    let mut result = query.await?.check()?;
+    let rows: Vec<CountRow> = result.take(0)?;
+    Ok(rows.first().map_or(0, |r| r.total))
+}
+
+/// The time the export a tombstoned tenant's deletion accepted covered up to,
+/// or `None` when it cannot be read (see the module documentation).
+///
+/// Read from the newest [`TENANT_DELETED_ACTION`] record in the system log
+/// naming the tenant: its [`DELETION_EXPORTED_THROUGH`], or, for a record
+/// written before that key existed, the [`RECEIPT_EXPORTED_THROUGH`] of the
+/// receipt it names ([`DELETION_RECEIPT_ID`]), which is in the tenant's own log
+/// and after the export, so still there. A value that is not an RFC 3339 time
+/// counts as absent: the purge then keeps the whole trail.
+async fn audit_export_cutoff<C: Connection>(
+    db: &DbHandle<C>,
+    tenant_id: Uuid,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    #[derive(Debug, SurrealValue)]
+    struct MetadataRow {
+        #[surreal(default)]
+        metadata: Option<serde_json::Value>,
+    }
+    fn time_at(metadata: Option<&serde_json::Value>, key: &str) -> Option<DateTime<Utc>> {
+        let raw = metadata?.get(key)?.as_str()?;
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|t| t.with_timezone(&Utc))
+    }
+
+    let mut result = db
+        .current()
+        .query(
+            "SELECT metadata, timestamp FROM audit_log \
+             WHERE tenant_id = $system AND action = $action AND resource_id = $id \
+             ORDER BY timestamp DESC LIMIT 1",
+        )
+        .bind(("system", Uuid::nil().to_string()))
+        .bind(("action", TENANT_DELETED_ACTION.to_owned()))
+        .bind(("id", tenant_id.to_string()))
+        .await?
+        .check()?;
+    let rows: Vec<MetadataRow> = result.take(0)?;
+    let Some(deletion) = rows.into_iter().next().and_then(|r| r.metadata) else {
+        return Ok(None);
+    };
+    if let Some(at) = time_at(Some(&deletion), DELETION_EXPORTED_THROUGH) {
+        return Ok(Some(at));
+    }
+    // A deletion recorded before `audit_exported_through` existed: ask the
+    // receipt it names, in the tenant's own log.
+    let Some(receipt_id) = deletion.get(DELETION_RECEIPT_ID).and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let mut result = db
+        .current()
+        .query(
+            "SELECT metadata FROM type::record('audit_log', $receipt) \
+             WHERE tenant_id = $id AND action = $action",
+        )
+        .bind(("receipt", receipt_id.to_owned()))
+        .bind(("id", tenant_id.to_string()))
+        .bind(("action", AUDIT_EXPORT_ACTION.to_owned()))
+        .await?
+        .check()?;
+    let rows: Vec<MetadataRow> = result.take(0)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|r| time_at(r.metadata.as_ref(), RECEIPT_EXPORTED_THROUGH)))
 }
 
 /// Tenant ids that own rows in a tenant-scoped table (the audit trail aside,
 /// see [`PurgeScope::Orphan`]) but have no tenant row — tombstoned or live.
 ///
 /// A row a purge keeps ([`Retain::RevokedUntilExpiry`]) is not counted until
-/// it expires; then it is, and the orphan purge removes it.
+/// eight days after it expires; then it is, and the orphan purge removes it.
 ///
 /// The tables are read **before** the tenant set: a tenant row is written
 /// before any row naming it, so a tenant created while this runs is either

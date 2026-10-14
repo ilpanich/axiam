@@ -143,6 +143,14 @@ fn gdpr_audit_dlq_on_db_failure() {
     }
 
     // --- Sink 1: append-only dead-letter file --------------------------
+    // The seed file was created under the process umask; opening it for the
+    // record restricts it to its owner (#594).
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&dlq_path),
+        0o600,
+        "an existing dead-letter file is tightened to owner-only"
+    );
     let contents = std::fs::read_to_string(&dlq_path).expect("read dead-letter file");
     let lines: Vec<&str> = contents.lines().collect();
     let _ = std::fs::remove_file(&dlq_path);
@@ -269,6 +277,12 @@ async fn refuse_audit_appends(db: &Surreal<TestDb>) {
     .unwrap();
 }
 
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 fn dead_letter_file(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "axiam-gdpr-request-dlq-{tag}-{}-{}.jsonl",
@@ -334,6 +348,13 @@ async fn post_with_failing_audit(uri: &str, tag: &str) -> (Fixture, Vec<Value>) 
         "the request itself must succeed"
     );
 
+    // The handler created the file: owner-only, not the process umask's mode.
+    #[cfg(unix)]
+    assert_eq!(
+        mode_of(&path),
+        0o600,
+        "a dead-letter file the handler created is owner-only"
+    );
     let contents = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     let lines = contents
@@ -343,17 +364,40 @@ async fn post_with_failing_audit(uri: &str, tag: &str) -> (Fixture, Vec<Value>) 
     (f, lines)
 }
 
+/// A GDPR request record's line carries when the event happened and why the row
+/// is in the file (#595): the time is the request's — between the fixture's
+/// set-up and now — and the reason a fixed name, not the datastore's error.
+fn assert_when_and_why(line: &Value) {
+    let at: chrono::DateTime<chrono::Utc> = line["occurred_at"]
+        .as_str()
+        .expect("occurred_at")
+        .parse()
+        .expect("RFC 3339");
+    let now = chrono::Utc::now();
+    assert!(
+        at <= now && now - at < chrono::Duration::minutes(5),
+        "occurred_at {at} is the request's, now is {now}"
+    );
+    assert_eq!(line["reason"], json!("datastore_error"));
+    assert!(
+        !line.to_string().contains("audit store down"),
+        "the line carries no error text: {line}"
+    );
+}
+
 #[actix_web::test]
 async fn export_request_audit_failure_is_dead_lettered() {
     let (f, lines) = post_with_failing_audit("/api/v1/account/export", "export").await;
 
     assert_eq!(lines.len(), 1, "exactly one record, got: {lines:?}");
-    assert_eq!(lines[0]["action"], json!("gdpr.data_export_requested"));
-    assert_eq!(lines[0]["tenant_id"], json!(f.tenant_id.to_string()));
-    assert_eq!(lines[0]["actor_id"], json!(f.user_id.to_string()));
-    assert_eq!(lines[0]["resource_id"], json!(f.user_id.to_string()));
+    let entry = &lines[0]["entry"];
+    assert_eq!(entry["action"], json!("gdpr.data_export_requested"));
+    assert_eq!(entry["tenant_id"], json!(f.tenant_id.to_string()));
+    assert_eq!(entry["actor_id"], json!(f.user_id.to_string()));
+    assert_eq!(entry["resource_id"], json!(f.user_id.to_string()));
+    assert_when_and_why(&lines[0]);
     // The line is the replayable form: it parses back into the entry.
-    serde_json::from_value::<CreateAuditLogEntry>(lines[0].clone())
+    serde_json::from_value::<CreateAuditLogEntry>(entry.clone())
         .expect("replayable as a CreateAuditLogEntry");
 }
 
@@ -362,16 +406,18 @@ async fn erasure_request_audit_failure_is_dead_lettered() {
     let (f, lines) = post_with_failing_audit("/api/v1/account/delete", "erasure").await;
 
     assert_eq!(lines.len(), 1, "exactly one record, got: {lines:?}");
-    assert_eq!(lines[0]["action"], json!("gdpr.erasure_requested"));
-    assert_eq!(lines[0]["tenant_id"], json!(f.tenant_id.to_string()));
-    assert_eq!(lines[0]["actor_id"], json!(f.user_id.to_string()));
-    assert_eq!(lines[0]["resource_id"], json!(f.user_id.to_string()));
+    let entry = &lines[0]["entry"];
+    assert_eq!(entry["action"], json!("gdpr.erasure_requested"));
+    assert_eq!(entry["tenant_id"], json!(f.tenant_id.to_string()));
+    assert_eq!(entry["actor_id"], json!(f.user_id.to_string()));
+    assert_eq!(entry["resource_id"], json!(f.user_id.to_string()));
     assert!(
-        lines[0]["metadata"]["scheduled_purge_at"].is_string(),
+        entry["metadata"]["scheduled_purge_at"].is_string(),
         "the purge date is in the record: {:?}",
         lines[0]
     );
-    serde_json::from_value::<CreateAuditLogEntry>(lines[0].clone())
+    assert_when_and_why(&lines[0]);
+    serde_json::from_value::<CreateAuditLogEntry>(entry.clone())
         .expect("replayable as a CreateAuditLogEntry");
 }
 
@@ -441,13 +487,31 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         metadata: None,
     };
 
-    // The file as the writer leaves it: `encode_line` per record.
+    // The file as the writer leaves it: `encode_line` per record, each with its
+    // own time and reason; and a line as 1.0.0 left it, the bare entry, which
+    // the recipe must still replay (without a time or a reason to carry).
+    let happened = [
+        chrono::Utc::now() - chrono::Duration::hours(3),
+        chrono::Utc::now() - chrono::Duration::minutes(7),
+    ];
+    let reasons = [
+        axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
+        axiam_audit::dead_letter::DeadLetterReason::ChannelFull,
+    ];
+    let bare_form = CreateAuditLogEntry {
+        action: "request.audit.bare".into(),
+        ..without_resource.clone()
+    };
     let file = dead_letter_file("recipe");
     let mut contents = String::new();
-    for entry in [&with_resource, &without_resource] {
-        contents.push_str(&axiam_audit::dead_letter::encode_line(entry).unwrap());
+    for (i, entry) in [&with_resource, &without_resource].into_iter().enumerate() {
+        let record =
+            axiam_audit::dead_letter::DeadLetterRecord::new(entry.clone(), happened[i], reasons[i]);
+        contents.push_str(&axiam_audit::dead_letter::encode_line(&record).unwrap());
         contents.push('\n');
     }
+    contents.push_str(&serde_json::to_string(&bare_form).unwrap());
+    contents.push('\n');
     std::fs::write(&file, contents).unwrap();
 
     let out = std::process::Command::new("jq")
@@ -463,7 +527,7 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         String::from_utf8_lossy(&out.stderr)
     );
     let statements = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(statements.lines().count(), 2, "one statement per line");
+    assert_eq!(statements.lines().count(), 3, "one statement per line");
 
     f.db.query(statements)
         .await
@@ -481,7 +545,19 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         .await
         .unwrap()
         .items;
-    for want in [&with_resource, &without_resource] {
+    let want_meta = |entry: &CreateAuditLogEntry, i: Option<usize>| {
+        let mut m = entry.metadata.clone().unwrap_or_else(|| json!({}));
+        if let Some(i) = i {
+            m["occurred_at"] = json!(happened[i]);
+            m["dead_lettered_reason"] = json!(reasons[i].as_str());
+        }
+        m
+    };
+    for (want, i) in [
+        (&with_resource, Some(0)),
+        (&without_resource, Some(1)),
+        (&bare_form, None),
+    ] {
         let got = rows
             .iter()
             .find(|r| r.action == want.action)
@@ -492,9 +568,8 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         assert_eq!(got.resource_id, want.resource_id);
         assert_eq!(got.outcome, want.outcome);
         assert_eq!(got.ip_address, want.ip_address);
-        assert_eq!(
-            got.metadata,
-            want.metadata.clone().unwrap_or_else(|| json!({}))
-        );
+        // The row carries when the event happened and why it was dead-lettered;
+        // a bare line has neither to carry.
+        assert_eq!(got.metadata, want_meta(want, i), "{}", want.action);
     }
 }

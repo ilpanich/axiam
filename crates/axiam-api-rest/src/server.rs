@@ -19,6 +19,12 @@ use crate::middleware::rate_limit_shared::RateLimitShared;
 use crate::middleware::tenant_path::TenantPathScope;
 use crate::openapi::api_doc;
 
+/// R101W3-04: how many times the per-user allowance of the CIBA pending list
+/// (`ciba_approval_per_min`) its per-address backstop admits. The backstop only
+/// has to stop an unauthenticated flood, so it is sized for an office behind
+/// one NAT.
+const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -816,12 +822,31 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // caller's own answers 404.
             // The list is for the account the approval mail never reaches
             // (D-74, #566), and a bucket of its own under the same allowance.
+            // D-4 (#599): that bucket is the signed-in user's, not the
+            // address's, and an IP-keyed layer would put thirty tabs behind one
+            // egress address back into one bucket — so the route carries no
+            // `RateLimitShared` and no per-address governor at the route's own
+            // size: the principal exists only once the handler's extractor has
+            // authenticated it, and the handler spends
+            // `ciba_approval_list:{tenant}:{user}` from the shared counter
+            // (or, with `AXIAM__RATE_LIMIT__SHARED=off`, which admits
+            // everything, from an in-process keyed limiter in `AppState`)
+            // before anything is read.
+            // R101W3-04: the per-user check is unreachable for a request whose
+            // token fails authentication, and the route must carry a limiter
+            // from its first commit, so a per-address governor ten times the
+            // per-user allowance stays as the backstop — NAT-sized, so thirty
+            // tabs (and an office of them) behind one address never meet it,
+            // while a burst of calls with a token that does not authenticate
+            // does. (A call with no credential at all never gets this far:
+            // the scope's `AuthzMiddleware` answers it `401` for the price of a
+            // header lookup.)
             .service(
                 web::resource("/ciba/requests")
-                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
-                    .wrap(RateLimitShared::<C>::new(
-                        "ciba_approval_list",
-                        rate_limit_cfg.ciba_approval_per_min,
+                    .wrap(build_governor(
+                        rate_limit_cfg
+                            .ciba_approval_per_min
+                            .saturating_mul(CIBA_LIST_BACKSTOP_FACTOR),
                     ))
                     .route(web::get().to(handlers::ciba_approval::list_requests::<C>)),
             )
@@ -1387,14 +1412,36 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ),
             )
             // --- Federation OIDC Flow ---
+            //
+            // #614 (D-3): the five authenticated federation flow routes — these
+            // two and the three SAML ones registered at the end — carry the
+            // browser-endpoint preset (`end_session_per_min`, per IP), each
+            // under a bucket of its own (`federation_oidc_authorize`,
+            // `federation_oidc_callback`, `federation_saml_authn_request`,
+            // `federation_saml_acs`, `federation_saml_metadata`), so one
+            // route's exhaustion never spends another's allowance. A person's
+            // sign-in drives them, relayed by the application that holds the
+            // bearer token; none is an IdP back-channel (the IdP sends the
+            // *browser* to the application, which then calls these). No new
+            // knob, so `rl_prod_check.py` needs no row.
             .service(
                 web::resource("/federation/oidc/authorize")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::browser_preset(
+                        "federation_oidc_authorize",
+                        rate_limit_cfg,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_authorize::<C>),
                     ),
             )
             .service(
                 web::resource("/federation/oidc/callback")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::browser_preset(
+                        "federation_oidc_callback",
+                        rate_limit_cfg,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
@@ -1816,16 +1863,33 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
     // Authenticated SAML SP routes — only when the `saml` feature is on.
     #[cfg(feature = "saml")]
     let api_scope = api_scope
+        // #614 (D-3): the browser-endpoint preset, a bucket per route — see the
+        // note on the OIDC flow routes above.
         .service(
             web::resource("/federation/saml/authn-request")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_authn_request",
+                    rate_limit_cfg,
+                ))
                 .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
         )
         .service(
             web::resource("/federation/saml/acs")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_acs",
+                    rate_limit_cfg,
+                ))
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),
         )
         .service(
             web::resource("/federation/saml/metadata")
+                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(RateLimitShared::<C>::browser_preset(
+                    "federation_saml_metadata",
+                    rate_limit_cfg,
+                ))
                 .route(web::get().to(handlers::federation::saml_metadata::<C>)),
         );
     cfg.service(api_scope);

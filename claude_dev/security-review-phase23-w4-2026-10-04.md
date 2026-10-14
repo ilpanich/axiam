@@ -74,7 +74,7 @@ issuance held against token confusion at every verifier AXIAM runs, now pinned
 | **P23W4-06** | Five older cleanup jobs (`sso_handoff_code`, `revocation_feed`, `dcr_unused_clients`, `cimd_unused_clients`, `dcr_registration_tokens`) record into `/health/jobs` but are not registered at start, so one that never runs is never reported stalled (found by T23.2.4). | Low | `/health/jobs`; T-129 | **Reported** (ilpanich/axiam#535) (pre-existing) |
 | **P23W4-07** | The console has no control for `saml_idp_enabled` or `ssf_enabled` and no SSF stream page: an administrator cannot see from the console which third parties receive security events about the tenant's users, nor switch either surface off there. | Informational | console; §29, §32 | **Reported** (ilpanich/axiam#536) (gap; the settings API and `get_idp` cover it) |
 | **P23W4-08** | The server's consumer supervisor loop is copied per outbound kind (webhook, `ssf_push`); G-6 would add a third copy. | Informational | `axiam-server` `main.rs`; D-36 | **Reported** (ilpanich/axiam#537) (maintainability) |
-| **P23W4-09** | Untested: a Keycloak-initiated logout towards AXIAM, and AXIAM's front-channel SLO towards a real SP's `SingleLogoutService`. All SLO tests use a synthetic SP or samael. | Informational | SLO; T-370 … T-380 | **Reported** (ilpanich/axiam#538) (coverage) |
+| **P23W4-09** | Untested: a Keycloak-initiated logout towards AXIAM, and AXIAM's front-channel SLO towards a real SP's `SingleLogoutService`. All SLO tests use a synthetic SP or samael. | Informational | SLO; T-370 … T-380 | **Reported** (ilpanich/axiam#538) (coverage); **closed 2026-10-13** by the four single-logout tests of `saml_idp_keycloak_roundtrip_test` (1.0.1 W2.6, §14) |
 | **P23W4-10** | SSF residuals: an erased subject can stay in the buffer or the push DLQ up to seven days (T-402); a receiver token outlives its OAuth2 client's deletion by up to 15 minutes; the primary and retry `ssf_push` queues have no TTL. | Low | SSF; T-402, T-385 | **Accepted** (§10) |
 | **P23W4-11** | Audience squatting is not harmless everywhere D-47 says it is: without per-tenant issuers every tenant's SETs share `iss` and the key, so a receiver that adopts a conventional audience before its stream exists and accepts unauthenticated pushes would accept SETs a squatting tenant pushes, about subjects it chooses (an email subject included). | Low | SSF; T-390, D-45, D-47 | **Fixed** — `f4bdaad` (D-55, maintainer decision on ilpanich/axiam#539) — reported as ilpanich/axiam#539, the maintainer chose option (b): SSF requires per-tenant issuers in a deployment of more than one tenant (T-390 amended, model 2.31.0) |
 
@@ -741,6 +741,23 @@ receiving AXIAM's signed `LogoutRequest` and answering with its
 CI's compose job like the sign-on tests. Tests: each direction on both bindings
 Keycloak supports, the AXIAM session gone from `/oauth2/revocations`, and
 Keycloak's session gone.
+
+**Closed (2026-10-13, release 1.0.1 W2.6).** `crates/axiam-api-rest/tests/saml_idp_keycloak_roundtrip_test.rs`
+gains `keycloak_initiated_single_logout_over_http_post`,
+`::keycloak_initiated_single_logout_over_http_redirect`,
+`::axiam_initiated_single_logout_over_http_post` and
+`::axiam_initiated_single_logout_over_http_redirect`, run by the existing
+T23.2.7 step of CI's `e2e` job (`--ignored --test-threads=1`; no wiring change).
+Each brokers a session to Keycloak 26.7.0 and ends it from one side: Keycloak's
+own signed `LogoutRequest` (its `NameID`, the `SessionIndex` AXIAM asserted) is
+accepted by `/slo` and answered with a signed `LogoutResponse` Keycloak verifies
+before finishing the logout; AXIAM's signed `LogoutRequest` from `/sso/logout` is
+verified by Keycloak, which ends its session by the `SessionIndex` and answers
+with a signed `Success` that AXIAM counts as confirmed (run not partial). Each
+also checks the session in `/oauth2/revocations`, its access token refused, no
+participant row left and Keycloak's admin API listing no session, and that
+Keycloak refuses the same AXIAM message with its signature broken. No AXIAM
+code changed: no interoperability defect was found.
 
 ### P23W4-11 (Low) — SSF audience squatting where SETs share one issuer (decision first)
 

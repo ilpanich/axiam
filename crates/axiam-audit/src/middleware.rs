@@ -16,13 +16,14 @@ use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
+use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::dead_letter::DeadLetterWriter;
+use crate::dead_letter::{DeadLetterReason, DeadLetterWriter};
 use crate::loss::RequestAuditLoss;
 
 /// Paths that should not generate audit entries.
@@ -124,6 +125,12 @@ pub trait AuditEventSink: Send + Sync {
 /// capacity.
 pub const CHANNEL_CAPACITY: usize = 4096;
 
+/// The free slots of the audit channel that [`AuditMiddleware::try_record`]
+/// never takes: a quarter of it, kept for request rows (R101W4-01). With the
+/// production [`CHANNEL_CAPACITY`] that is 1 024. A middleware spawned with
+/// another capacity keeps a quarter of that (none below four slots).
+pub const REQUEST_RESERVE: usize = CHANNEL_CAPACITY / 4;
+
 /// How often the sink's task calls [`AuditEventSink::flush`].
 pub const SINK_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -133,7 +140,13 @@ const NOTIFICATION_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// What travels on the worker's channel: an entry, or [`AuditMiddleware::drain`]'s
 /// barrier, acknowledged once every entry queued before it has been written.
 enum Queued {
-    Event(AuditEvent),
+    /// An entry and the moment the request finished — carried beside it, as the
+    /// organization is, so a dead-letter line can say when the event happened
+    /// however long the append then waited (#595).
+    Event {
+        event: AuditEvent,
+        occurred_at: DateTime<Utc>,
+    },
     Barrier(oneshot::Sender<()>),
 }
 
@@ -145,6 +158,9 @@ enum Queued {
 #[derive(Clone)]
 pub struct AuditMiddleware {
     tx: mpsc::Sender<Queued>,
+    /// Free slots [`Self::try_record`] leaves for request rows: a quarter of
+    /// the channel ([`REQUEST_RESERVE`] at the production capacity).
+    request_reserve: usize,
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
     notifications_dropped: Arc<AtomicU64>,
@@ -224,10 +240,52 @@ impl AuditMiddleware {
         ));
         Self {
             tx,
+            request_reserve: capacity / 4,
             shutting_down,
             loss,
             notifications_dropped,
         }
+    }
+
+    /// Hand `entry` to the audit worker without waiting, from code that is not
+    /// an HTTP request and must not write to the datastore on its caller's path
+    /// (#596: the in-process outbound dispatcher's refused enqueues).
+    ///
+    /// The same bounded channel the request rows use, but never its last
+    /// quarter (R101W4-01): when the channel's free slots are down to that
+    /// reserve ([`REQUEST_RESERVE`] at the production capacity), or the channel
+    /// is closed, the row is **shed** — counted in
+    /// [`RequestAuditLossSnapshot::outbound_abandoned_dropped`], and neither
+    /// counted as a dropped request row nor offered to the dead-letter file
+    /// (R101W4-06). A burst of refusals therefore cannot take the request rows'
+    /// room in the channel nor their share of the dead-letter file. It is never
+    /// awaited and never written on the caller's path. The entry's client-sized
+    /// fields are cut as a request row's are. The row carries no organization
+    /// (nil), which the notification sink does not need for a row it declines.
+    ///
+    /// Returns whether the row was queued; `false` means it was shed.
+    ///
+    /// [`RequestAuditLossSnapshot::outbound_abandoned_dropped`]:
+    ///     crate::loss::RequestAuditLossSnapshot::outbound_abandoned_dropped
+    pub fn try_record(&self, entry: CreateAuditLogEntry) -> bool {
+        if self.tx.capacity() > self.request_reserve {
+            let mut entry = entry;
+            crate::dead_letter::bound_fields(&mut entry);
+            let queued = Queued::Event {
+                event: AuditEvent {
+                    entry,
+                    org_id: Uuid::nil(),
+                },
+                occurred_at: Utc::now(),
+            };
+            // Another sender may have taken the last free slots since the
+            // check; that refusal is shed like the others.
+            if self.tx.try_send(queued).is_ok() {
+                return true;
+            }
+        }
+        self.loss.record_outbound_abandoned_dropped();
+        false
     }
 
     /// The counters of request-audit rows that were not recorded (T-108).
@@ -302,6 +360,23 @@ impl AuditMiddleware {
     }
 }
 
+/// Queue `queued` for the worker without waiting. A row the channel refuses —
+/// full, or closed — is counted and offered to the dead-letter queue, both
+/// non-blocking. Returns whether the row was queued.
+fn offer(tx: &mpsc::Sender<Queued>, loss: &RequestAuditLoss, queued: Queued) -> bool {
+    let Err(refused) = tx.try_send(queued) else {
+        return true;
+    };
+    let (reason, queued) = match refused {
+        TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
+        TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
+    };
+    if let Queued::Event { event, occurred_at } = queued {
+        loss.record_dropped(event.entry, occurred_at, reason);
+    }
+    false
+}
+
 async fn audit_worker<A: AuditLogRepository>(
     mut rx: mpsc::Receiver<Queued>,
     repo: A,
@@ -312,8 +387,8 @@ async fn audit_worker<A: AuditLogRepository>(
     let mut written: u64 = 0;
     let mut last_drop_report: Option<Instant> = None;
     while let Some(queued) = rx.recv().await {
-        let event = match queued {
-            Queued::Event(event) => event,
+        let (event, occurred_at) = match queued {
+            Queued::Event { event, occurred_at } => (event, occurred_at),
             Queued::Barrier(reached) => {
                 // Everything queued before the barrier has been appended (or
                 // failed and been logged). The caller may have given up.
@@ -327,7 +402,7 @@ async fn audit_worker<A: AuditLogRepository>(
         if let Err(e) = repo.append(event.entry.clone()).await {
             // Counted, logged (rate-limited) and sent to the dead-letter file
             // when there is one — see `RequestAuditLoss`.
-            loss.record_failed(event.entry.clone(), &e);
+            loss.record_failed(event.entry.clone(), occurred_at, &e);
         }
 
         written += 1;
@@ -490,6 +565,9 @@ where
                 },
             };
 
+            // When the event happened: the response is complete. Carried to the
+            // worker, so the dead-letter line keeps it (#595).
+            let occurred_at = Utc::now();
             let mut entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
@@ -509,17 +587,16 @@ where
             crate::dead_letter::bound_fields(&mut entry);
 
             // `try_send`, never `send`: a full channel must not hold the
-            // response. The row it refuses comes back in the error and is
-            // counted and offered to the dead-letter queue — also non-blocking.
-            if let Err(refused) = tx.try_send(Queued::Event(AuditEvent { entry, org_id })) {
-                let (reason, queued) = match refused {
-                    TrySendError::Full(q) => ("audit channel full", q),
-                    TrySendError::Closed(q) => ("audit channel closed", q),
-                };
-                if let Queued::Event(event) = queued {
-                    loss.record_dropped(event.entry, reason);
-                }
-            }
+            // response. The row it refuses is counted and offered to the
+            // dead-letter queue — also non-blocking.
+            offer(
+                &tx,
+                &loss,
+                Queued::Event {
+                    event: AuditEvent { entry, org_id },
+                    occurred_at,
+                },
+            );
 
             result
         })

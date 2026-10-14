@@ -61,7 +61,7 @@ use samael::metadata::{
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use super::request::{refuse_markup_declarations, refuse_other_encodings};
+use super::request::{receiver_parser_options, refuse_markup_declarations, refuse_other_encodings};
 
 /// The largest metadata document accepted, in bytes — the cap the SP side's
 /// `fetch_idp_metadata` already uses.
@@ -230,20 +230,15 @@ pub fn parse_sp_metadata(document: &[u8]) -> Result<SpMetadataDraft, MetadataErr
         return Err(refused);
     }
     let text = std::str::from_utf8(document).map_err(|_| refused)?;
+    // R101W2-02: from here on `text` is the document without its one leading
+    // byte-order mark, and it is what every reader below takes — libxml
+    // included, never the raw `document` bytes.
+    let text = refuse_other_encodings(text).map_err(|_| refused)?;
     refuse_markup_declarations(text).map_err(|_| refused)?;
-    refuse_other_encodings(text).map_err(|_| refused)?;
 
     // libxml first: well-formedness, a bounded depth, and the root's identity.
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        no_net: true,
-        no_def_dtd: true,
-        ignore_enc: true,
-        encoding: Some("UTF-8"),
-        ..Default::default()
-    };
     let doc = libxml::parser::Parser::default()
-        .parse_string_with_options(document, options)
+        .parse_string_with_options(text.as_bytes(), receiver_parser_options())
         .map_err(|_| refused)?;
     let root = doc.get_root_element().ok_or(refused)?;
     if root.get_name() != "EntityDescriptor"
@@ -803,6 +798,16 @@ mod tests {
         assert_eq!(parse(&bare_entity), Err(MetadataError::NotSpMetadata));
         let utf16_declaration = base.replace("encoding=\"UTF-8\"", "encoding=\"UTF-16\"");
         assert_eq!(parse(&utf16_declaration), Err(MetadataError::NotSpMetadata));
+        // #605: a byte-order mark no longer hides the declaration.
+        let bom_utf16 = format!("\u{feff}{utf16_declaration}");
+        assert_eq!(parse(&bom_utf16), Err(MetadataError::NotSpMetadata));
+        // R101W2-02: one leading BOM is stripped — libxml, too, reads the
+        // stripped text — and a second is refused.
+        let bom = format!("\u{feff}{base}");
+        assert_eq!(parse(&bom), parse(&base));
+        assert!(parse(&bom).is_ok());
+        let two_boms = format!("\u{feff}\u{feff}{base}");
+        assert_eq!(parse(&two_boms), Err(MetadataError::NotSpMetadata));
         // UTF-16 on the wire: a NUL after every ASCII byte, not UTF-8 at all.
         let utf16: Vec<u8> = base.encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(parse_sp_metadata(&utf16), Err(MetadataError::NotSpMetadata));

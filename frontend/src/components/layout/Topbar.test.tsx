@@ -330,6 +330,25 @@ describe("Topbar", () => {
     ).toBeInTheDocument();
   });
 
+  it("counts the requests the server left out of a truncated list (#599)", async () => {
+    const ids = [1, 2, 3, 4, 5, 6].map((n) => `0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6${n}`);
+    apiMock.get.mockResolvedValue(
+      res({
+        requests: ids.map((id, i) => pendingRequest(id, `Client ${i}`)),
+        total_pending: 53,
+        truncated: true,
+      }),
+    );
+    renderTopbar();
+
+    expect(await screen.findByTestId("pending-sign-ins-badge")).toHaveTextContent("53");
+    expect(
+      screen.getByRole("button", { name: "User menu, 53 sign-in requests waiting" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /User menu/ }));
+    expect(await screen.findByText("and 48 more")).toBeInTheDocument();
+  });
+
   it("shows no badge when nothing is waiting, or when the list is refused", async () => {
     apiMock.get.mockResolvedValue(res({ requests: [] }));
     const { unmount } = renderTopbar();

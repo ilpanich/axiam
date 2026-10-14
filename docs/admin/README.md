@@ -249,14 +249,21 @@ A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
    tenant-scoped table — users and their credentials, sessions and grants,
    OAuth2 clients, federation and e-mail configuration, webhooks, expired
    certificates and CA material, roles, groups, permissions, resources,
-   consents, and the tenant's own audit entries you exported above — in the
-   order the GDPR user erasure uses, and removes the tenant record last. A
-   revoked certificate or CA that has not yet expired is **kept** (its
+   consents, and the tenant's own audit entries the export above holds — in the
+   order the GDPR user erasure uses, and removes the tenant record last. Audit
+   entries written **after** the export's `exported_through` — the receipt,
+   anything between the export and the delete, the deletion's own
+   revocations, refusals until the purge — are in no export, so they are
+   kept under the tenant id until the audit retention window
+   (`AXIAM__AUDIT_RETENTION_DAYS`) removes them, like any other entry (#602).
+   A revoked certificate or CA that has not yet expired is **kept** (its
    `metadata` and a CA's sealed key cleared), because its issuer's revocation
    list is read from it: removing it would make it valid again to every relying
    party outside AXIAM. The same sweep removes it once it expires. It then writes a
-   `tenants.purged` entry to the system audit log, beside `tenants.deleted`;
-   neither is ever purged. The sweep is listed on `GET /health/jobs`: alert on
+   `tenants.purged` entry to the system audit log, beside `tenants.deleted`
+   (which records the export's `exported_through` as `audit_exported_through`),
+   with the number of audit entries deleted and kept; neither entry is ever
+   purged. The sweep is listed on `GET /health/jobs`: alert on
    it there, as on the GDPR erasure sweep.
 
 Until the purge has run, the deleted tenant's **slug stays taken**: creating a

@@ -3,7 +3,8 @@
 use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::certificate::{
-    CaCertificate, CertificateStatus, KeyAlgorithm, RevokedCertificate, StoreCaCertificate,
+    CaCertificate, CaVaultForwardCandidate, CertificateStatus, KeyAlgorithm, RevocationStamp,
+    RevokedCertificate, StoreCaCertificate,
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -13,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, paginate};
+use crate::helpers::{CountRow, classify_write_error, paginate, retry_hot_row};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -87,6 +88,82 @@ struct CaCertificateRowWithId {
     mtls_trust_anchor: Option<bool>,
     created_at: DateTime<Utc>,
 }
+
+/// A pending Vault forward of a revoked subordinate CA: the row and the
+/// sweep's bookkeeping on it (#612).
+#[derive(Debug, SurrealValue)]
+struct CaVaultForwardRow {
+    record_id: String,
+    organization_id: String,
+    tenant_id: Option<String>,
+    parent_ca_id: Option<String>,
+    subject: String,
+    public_cert_pem: String,
+    chain_pem: Option<String>,
+    fingerprint: String,
+    key_algorithm: String,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+    status: String,
+    encrypted_private_key: Option<surrealdb_types::Bytes>,
+    key_custody: Option<String>,
+    key_locator: Option<String>,
+    mtls_trust_anchor: Option<bool>,
+    created_at: DateTime<Utc>,
+    vault_forward_attempts: Option<i64>,
+    vault_forward_last_error: Option<String>,
+    vault_next_attempt_at: Option<DateTime<Utc>>,
+}
+
+impl CaVaultForwardRow {
+    fn try_into_candidate(self) -> Result<CaVaultForwardCandidate, DbError> {
+        let attempts = self.vault_forward_attempts;
+        let last_error = self.vault_forward_last_error;
+        let next_attempt_at = self.vault_next_attempt_at;
+        let ca = CaCertificateRowWithId {
+            record_id: self.record_id,
+            organization_id: self.organization_id,
+            tenant_id: self.tenant_id,
+            parent_ca_id: self.parent_ca_id,
+            subject: self.subject,
+            public_cert_pem: self.public_cert_pem,
+            chain_pem: self.chain_pem,
+            fingerprint: self.fingerprint,
+            key_algorithm: self.key_algorithm,
+            not_before: self.not_before,
+            not_after: self.not_after,
+            status: self.status,
+            encrypted_private_key: self.encrypted_private_key,
+            key_custody: self.key_custody,
+            key_locator: self.key_locator,
+            mtls_trust_anchor: self.mtls_trust_anchor,
+            created_at: self.created_at,
+        }
+        .try_into_entry()?;
+        Ok(CaVaultForwardCandidate {
+            ca,
+            // Rows from before v96 carry no count: none attempted, due now (D-6).
+            attempts: attempts.map_or(0, |n| u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
+            next_attempt_at,
+            last_error,
+        })
+    }
+}
+
+/// The longest error text a row keeps (#612), as on the leaf table.
+const MAX_FORWARD_ERROR_CHARS: usize = 256;
+
+/// The revoked, unexpired subordinate CAs whose parent's list Vault keeps and
+/// has not been told of (#612): the parent is an active `vault_pki` CA, and the
+/// row was signed there (`vault_pki`, or `external` — a caller's CSR the parent
+/// signed). One definition for the due list and the count.
+const UNFORWARDED_WHERE: &str = "status = 'Revoked' \
+       AND vault_revoked_at = NONE \
+       AND not_after > time::now() \
+       AND key_custody IN ['vault_pki', 'external'] \
+       AND parent_ca_id IN (SELECT VALUE meta::id(id) FROM ca_certificate \
+                            WHERE key_custody = 'vault_pki' \
+                              AND status = 'Active')";
 
 // ---------------------------------------------------------------------------
 // Enum helpers
@@ -574,6 +651,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
     async fn list_revoked_children(
         &self,
         parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
     ) -> AxiamResult<Vec<RevokedCertificate>> {
         let result = self
             .db
@@ -582,10 +660,11 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM ca_certificate \
                  WHERE parent_ca_id = $parent_ca_id \
                    AND status = 'Revoked' \
-                   AND not_after > time::now() \
+                   AND not_after > $expiring_after \
                  ORDER BY fingerprint",
             )
             .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
             .await
             .map_err(DbError::from)?;
         let mut result = result
@@ -601,6 +680,34 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                 not_before: row.not_before,
             })
             .collect())
+    }
+
+    async fn list_revoked_children_stamps(
+        &self,
+        parent_ca_id: Uuid,
+        expiring_after: DateTime<Utc>,
+    ) -> AxiamResult<Vec<RevocationStamp>> {
+        // The same rows as `list_revoked_children`, without the PEMs (#607).
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT fingerprint, revoked_at, not_before FROM ca_certificate \
+                 WHERE parent_ca_id = $parent_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > $expiring_after \
+                 ORDER BY fingerprint",
+            )
+            .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .bind(("expiring_after", expiring_after))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<super::certificate::RevocationStampRow> =
+            result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     async fn list_mtls_trust_anchors(&self) -> AxiamResult<Vec<CaCertificate>> {
@@ -659,5 +766,160 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
         rows.into_iter()
             .map(|row| row.try_into_entry().map_err(Into::into))
             .collect()
+    }
+
+    async fn list_due_vault_forwards(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> AxiamResult<Vec<CaVaultForwardCandidate>> {
+        // The leaf table's order: a row never attempted first, then the
+        // soonest due, then the oldest revocation.
+        let query = format!(
+            "SELECT meta::id(id) AS record_id, * FROM ca_certificate \
+             WHERE {UNFORWARDED_WHERE} \
+               AND (vault_next_attempt_at = NONE OR vault_next_attempt_at <= $now) \
+             ORDER BY vault_next_attempt_at, revoked_at \
+             LIMIT $limit"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("now", now))
+            .bind(("limit", limit))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaVaultForwardRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_candidate().map_err(Into::into))
+            .collect()
+    }
+
+    async fn claim_vault_forward(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        seen_next_attempt_at: Option<DateTime<Utc>>,
+        lease_until: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        // The leaf table's claim (#603): the value read is the write's
+        // precondition, so of two replicas that read one row exactly one write
+        // matches. A forwarded row, or another organization's, matches nothing.
+        let seen = if seen_next_attempt_at.is_some() {
+            "vault_next_attempt_at = $seen"
+        } else {
+            "vault_next_attempt_at = NONE"
+        };
+        let query = format!(
+            "UPDATE type::record('ca_certificate', $id) SET vault_next_attempt_at = $lease \
+             WHERE organization_id = $org_id \
+               AND status = 'Revoked' \
+               AND vault_revoked_at = NONE \
+               AND {seen} \
+             RETURN VALUE meta::id(id)"
+        );
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.clone())
+                .bind(("id", id.to_string()))
+                .bind(("org_id", organization_id.to_string()))
+                .bind(("seen", seen_next_attempt_at))
+                .bind(("lease", lease_until))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "ca_certificate"))?;
+            let claimed: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!claimed.is_empty())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn record_vault_forward_failure(
+        &self,
+        organization_id: Uuid,
+        id: Uuid,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> AxiamResult<()> {
+        let error: String = error.chars().take(MAX_FORWARD_ERROR_CHARS).collect();
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('ca_certificate', $id) SET \
+                   vault_forward_attempts = $attempts, \
+                   vault_forward_last_error = $error, \
+                   vault_next_attempt_at = $next \
+                 WHERE organization_id = $org_id AND vault_revoked_at = NONE",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("org_id", organization_id.to_string()))
+            .bind(("attempts", i64::from(attempts)))
+            .bind(("error", error))
+            .bind(("next", next_attempt_at))
+            .await
+            .map_err(DbError::from)?;
+        result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn count_vault_forwards_failing(&self, min_attempts: u32) -> AxiamResult<u64> {
+        let query = format!(
+            "SELECT count() AS total FROM ca_certificate \
+             WHERE {UNFORWARDED_WHERE} AND vault_forward_attempts >= $min \
+             GROUP ALL"
+        );
+        let result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("min", i64::from(min_attempts)))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let row: Option<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(row.map_or(0, |r| r.total))
+    }
+
+    async fn mark_revocation_forwarded(&self, organization_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        let result = self
+            .db
+            .current()
+            .query(
+                // The first forwarding's time stands, as the revocation's does.
+                "UPDATE type::record('ca_certificate', $id) SET \
+                 vault_revoked_at = vault_revoked_at ?? time::now() \
+                 WHERE organization_id = $org_id AND status = 'Revoked' \
+                 RETURN VALUE meta::id(id)",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("org_id", organization_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let marked: Vec<String> = result.take(0).map_err(DbError::from)?;
+        if marked.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "ca_certificate".into(),
+                id: id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
     }
 }

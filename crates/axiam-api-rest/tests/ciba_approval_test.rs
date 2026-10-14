@@ -43,6 +43,7 @@ use axiam_db::repository::{
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
+use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use axiam_oauth2::ciba::hash_auth_req_id;
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -204,6 +205,14 @@ fn shared_state(db: &Surreal<TestDb>, auth: &AuthConfig) -> web::Data<AppState<T
     let mut state = AppState::for_test(db.clone(), auth.clone());
     state.rate_limit_cfg = limits();
     web::Data::new(state)
+}
+
+/// `w` with a state whose limits are `cfg`: the list's bucket is spent by its
+/// handler from the state's configuration (D-4), not from the routes' argument.
+fn with_limits(w: &mut World, cfg: RateLimitConfig) {
+    let mut state = AppState::for_test(w.db.clone(), w.auth.clone());
+    state.rate_limit_cfg = cfg;
+    w.state = web::Data::new(state);
 }
 
 /// A state whose notifier is the production one, over `mail`.
@@ -1072,11 +1081,12 @@ async fn a_token_minted_for_a_client_cannot_list_requests() {
 /// moves neither the page's nor the decisions'.
 #[actix_web::test]
 async fn the_pending_list_has_a_rate_limit_bucket_of_its_own() {
-    let w = world().await;
+    let mut w = world().await;
     let tight = RateLimitConfig {
         ciba_approval_per_min: 2,
         ..limits()
     };
+    with_limits(&mut w, tight.clone());
     let app = app!(w, tight);
     let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
     let mut seen = Vec::new();
@@ -1145,34 +1155,33 @@ async fn settled(mail: &RecordingMail) -> Vec<OutboundMailMessage> {
     mail.sent.lock().unwrap().clone()
 }
 
-/// A flood of `bc-authorize` for one user, from two clients, cannot produce more
-/// than the budgeted mails — three a minute — while every request is still
+/// A flood of `bc-authorize` for one user, from four clients, cannot produce
+/// more than the budgeted mails — three a minute — while every request is still
 /// stored and answered like any other, so the throttle reveals nothing about the
 /// user (D-63, D-70). The mail that does go carries the binding message and a
-/// link, and never the `auth_req_id`.
+/// link, and never the `auth_req_id`. Four clients because one client may make
+/// only three requests for one hint in ten minutes (#599): twelve requests is
+/// three each.
 #[actix_web::test]
 async fn a_flood_of_requests_for_one_user_sends_at_most_three_mails_a_minute() {
     avoid_the_minute_boundary().await;
     let mut w = world().await;
     let mail = RecordingMail::default();
     w.state = mailing_state(&w.db, &w.auth, mail.clone());
-    let second_client = ciba_client(&w.db, w.tenant_id).await;
+    let extra_clients = [
+        ciba_client(&w.db, w.tenant_id).await,
+        ciba_client(&w.db, w.tenant_id).await,
+        ciba_client(&w.db, w.tenant_id).await,
+    ];
     let app = app!(w, limits());
 
     let mut auth_req_ids = Vec::new();
     for i in 0..12 {
-        let (id, _) = start_as(
-            &app,
-            &w,
-            if i % 2 == 0 {
-                &w.client
-            } else {
-                &second_client
-            },
-            "alice",
-            "",
-        )
-        .await;
+        let client = match i % 4 {
+            0 => &w.client,
+            n => &extra_clients[n - 1],
+        };
+        let (id, _) = start_as(&app, &w, client, "alice", "").await;
         auth_req_ids.push(id);
     }
     assert_eq!(
@@ -1224,4 +1233,350 @@ async fn a_request_for_nobody_sends_no_mail() {
     let app = app!(w, limits());
     let _ = start(&app, &w, "nobody-by-this-name", "").await;
     assert!(settled(&mail).await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// #599 (R1W2-13, T-424): the pending list's bounds
+// ---------------------------------------------------------------------------
+
+/// `bc-authorize` as `client`, status and body as they came.
+async fn start_raw(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    w: &World,
+    client: &CibaClient,
+    login_hint: &str,
+) -> (u16, Value) {
+    form_post(
+        app,
+        &format!("/oauth2/bc-authorize?tenant_id={}", w.tenant_id),
+        format!(
+            "client_id={}&client_secret={}&scope=openid%20profile&login_hint={login_hint}\
+             &binding_message={}",
+            client.client_id,
+            client.secret,
+            enc(BINDING)
+        ),
+    )
+    .await
+}
+
+async fn open_requests(w: &World, user: Uuid) -> u64 {
+    w.state
+        .oauth2
+        .ciba_service
+        .requests()
+        .count_pending_for_user(w.tenant_id, user, None)
+        .await
+        .unwrap()
+}
+
+/// One client may make three `bc-authorize` calls for one hint in the cap's
+/// window: the fourth is refused before it is stored, with the per-client
+/// limiter's `429 slow_down`. Another user, another client and another hint are
+/// not affected; a hint naming nobody is refused at the same call (T-422); and
+/// since the cap counts calls, not open requests, deciding or expiring a
+/// request frees no place — only the window's passing does.
+#[actix_web::test]
+async fn the_fourth_request_of_one_client_for_one_hint_is_refused() {
+    let w = world().await;
+    let other_client = ciba_client(&w.db, w.tenant_id).await;
+    let app = app!(w, limits());
+
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(start(&app, &w, "alice", "").await.1);
+    }
+    let (status, body) = start_raw(&app, &w, &w.client, "alice").await;
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(body["error"], "slow_down");
+    assert_eq!(
+        open_requests(&w, w.alice).await,
+        3,
+        "the fourth was not stored"
+    );
+
+    // Another user of the same client, and another client of the same user.
+    assert_eq!(start_raw(&app, &w, &w.client, "bob").await.0, 200);
+    assert_eq!(start_raw(&app, &w, &other_client, "alice").await.0, 200);
+    assert_eq!(open_requests(&w, w.alice).await, 4);
+
+    // A hint naming nobody meets the cap at the same call, with the same body.
+    for _ in 0..3 {
+        assert_eq!(
+            start_raw(&app, &w, &w.client, "nobody-by-this-name")
+                .await
+                .0,
+            200
+        );
+    }
+    let (status, nobody) = start_raw(&app, &w, &w.client, "nobody-by-this-name").await;
+    assert_eq!((status, &nobody), (429, &body));
+
+    // Deciding a request frees no place, nor does its expiry: the cap counts
+    // calls in the window.
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let version = row(&w, ids[0]).await.version;
+    assert_eq!(decide(&app, ids[0], "deny", version, &alice).await.0, 200);
+    assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 429);
+    w.db.query(format!(
+        "UPDATE ciba_request SET expires_at = time::now() - 1m WHERE meta::id(id) = '{}'",
+        ids[1]
+    ))
+    .await
+    .unwrap();
+    assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 429);
+
+    // Once the window, and the one before it, have passed, the hint starts
+    // afresh — for a real user and for nobody alike.
+    w.db.query("UPDATE rate_limit_bucket SET window_start = d'2000-01-01T00:00:00Z'")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(start_raw(&app, &w, &w.client, "alice").await.0, 200);
+    assert_eq!(
+        start_raw(&app, &w, &w.client, "nobody-by-this-name")
+            .await
+            .0,
+        200
+    );
+}
+
+/// The list is in creation order whatever each request's expiry, carries the
+/// count of every open request, and says when it left some out.
+#[actix_web::test]
+async fn the_list_is_in_creation_order_and_says_when_it_is_truncated() {
+    let w = world().await;
+    let app = app!(w, limits());
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+
+    // The first request has the longest life: the old order put it last.
+    let (_, first) = start(&app, &w, "alice", "&requested_expiry=600").await;
+    let (_, second) = start(&app, &w, "alice", "&requested_expiry=60").await;
+    let (status, list) = get_list(&app, "", &alice).await;
+    assert_eq!(status, 200);
+    let ids: Vec<&str> = list["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["request_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [first.to_string(), second.to_string()]);
+    assert_eq!(list["total_pending"], 2);
+    assert_eq!(list["truncated"], false);
+
+    // Fifty more, from clients of their own (a client may hold three).
+    let repo = w.state.oauth2.ciba_service.requests();
+    for i in 0..50 {
+        repo.create(axiam_core::models::ciba::CreateCibaRequest {
+            tenant_id: w.tenant_id,
+            client_id: format!("flood-{}", i % 25),
+            auth_req_id_hash: hash_auth_req_id(&format!("flood-{i}")),
+            user_id: Some(w.alice),
+            scopes: vec!["openid".into()],
+            binding_message: None,
+            acr_values: Vec::new(),
+            resource: None,
+            delivery_mode: CibaDeliveryMode::Poll,
+            ping: None,
+            interval_secs: 5,
+            expires_at: Utc::now() + Duration::seconds(30),
+        })
+        .await
+        .unwrap();
+    }
+    let (status, list) = get_list(&app, "", &alice).await;
+    assert_eq!(status, 200);
+    let requests = list["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 50);
+    assert_eq!(list["total_pending"], 52);
+    assert_eq!(list["truncated"], true);
+    assert_eq!(requests[0]["request_id"], first.to_string());
+    assert_eq!(requests[1]["request_id"], second.to_string());
+    // A client that cannot be read is named by its id.
+    assert_eq!(requests[2]["client_name"], requests[2]["client_id"]);
+    // The registered client is named once, however many entries carry it.
+    assert_eq!(requests[0]["client_name"], "Call Centre");
+}
+
+async fn get_list_from(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    jwt: &str,
+    from: &str,
+) -> u16 {
+    let req = test::TestRequest::get()
+        .peer_addr(from.parse().unwrap())
+        .uri("/api/v1/ciba/requests")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// D-4 (#599): the list's bucket is the signed-in user's. Two users behind one
+/// address do not share it; one user's tabs behind two addresses do.
+#[actix_web::test]
+async fn the_list_bucket_is_the_signed_in_users_not_the_address() {
+    let mut w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    with_limits(&mut w, tight.clone());
+    let app = app!(w, tight);
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let bob = session_token(&w, w.bob, vec![Amr::Pwd]).await;
+    let office = "203.0.113.7:40000";
+    let home = "198.51.100.9:40000";
+
+    // Alice spends her two from the office address and is refused a third.
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    assert_eq!(get_list_from(&app, &alice, office).await, 429);
+    // Bob, behind the same address, has his own.
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 429);
+    // Alice from another address is the same bucket.
+    assert_eq!(get_list_from(&app, &alice, home).await, 429);
+    // A token AXIAM minted for a client does not spend the user's bucket.
+    let (auth_req_id, id) = start(&app, &w, "alice", "").await;
+    let version = row(&w, id).await.version;
+    let fresh = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    assert_eq!(decide(&app, id, "approve", version, &fresh).await.0, 200);
+    let (status, issued) = poll(&app, &w, &auth_req_id).await;
+    assert_eq!(status, 200);
+    let client_held = issued["access_token"].as_str().unwrap().to_owned();
+    for _ in 0..4 {
+        assert_eq!(get_list_from(&app, &client_held, home).await, 403);
+    }
+}
+
+/// R101W3-04: with the shared counter switched off
+/// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything, the list still
+/// carries the signed-in user's allowance — an in-process limiter in the state
+/// — and the user is still the key, not the address.
+#[actix_web::test]
+async fn the_list_keeps_its_per_user_limit_when_the_shared_counter_is_off() {
+    let mut w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    with_limits(&mut w, tight.clone());
+    let mut state = AppState::for_test(w.db.clone(), w.auth.clone());
+    state.rate_limit_cfg = tight.clone();
+    state.shared_rate_limit = SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+    assert!(!state.shared_rate_limit.is_enabled());
+    w.state = web::Data::new(state);
+    let app = app!(w, tight);
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let bob = session_token(&w, w.bob, vec![Amr::Pwd]).await;
+    let office = "203.0.113.7:40000";
+    let home = "198.51.100.9:40000";
+
+    // Alice spends her two and is refused a third, in the limiter's shape.
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    assert_eq!(get_list_from(&app, &alice, office).await, 200);
+    let req = test::TestRequest::get()
+        .peer_addr(office.parse().unwrap())
+        .uri("/api/v1/ciba/requests")
+        .insert_header(("Authorization", format!("Bearer {alice}")))
+        .to_request();
+    let refused = test::call_service(&app, req).await;
+    assert_eq!(refused.status().as_u16(), 429);
+    assert_eq!(
+        refused.headers().get("retry-after").map(|v| v.as_bytes()),
+        Some(&b"60"[..])
+    );
+    let body = test::read_body(refused).await;
+    assert_eq!(&body[..], br#"{"error":"rate_limit_exceeded"}"#);
+    // Bob, behind the same address, is not refused.
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 200);
+    assert_eq!(get_list_from(&app, &bob, office).await, 429);
+    // Alice from another address is the same bucket.
+    assert_eq!(get_list_from(&app, &alice, home).await, 429);
+    // The in-process map holds the two users it has seen, nothing else.
+    assert_eq!(w.state.ciba_list_limiter.len(), 2);
+}
+
+/// With the shared counter on, the in-process limiter is not consulted: the
+/// shared bucket decides, as before.
+#[actix_web::test]
+async fn the_in_process_list_limiter_is_not_spent_while_the_shared_counter_is_on() {
+    let mut w = world().await;
+    let tight = RateLimitConfig {
+        ciba_approval_per_min: 2,
+        ..limits()
+    };
+    with_limits(&mut w, tight.clone());
+    assert!(w.state.shared_rate_limit.is_enabled());
+    let app = app!(w, tight);
+    let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    for expected in [200, 200, 429] {
+        assert_eq!(
+            get_list_from(&app, &alice, "203.0.113.7:40000").await,
+            expected
+        );
+    }
+    assert!(w.state.ciba_list_limiter.is_empty());
+}
+
+/// R101W3-04: the route's per-address backstop. A request that never reaches
+/// the handler's per-user check (a token that does not authenticate) is counted
+/// by address: ten times `ciba_approval_per_min`, so an office behind one NAT
+/// never meets it, while a burst without a valid token is refused past it — in
+/// both modes of the shared counter — and another address is not. (A request
+/// with no credential at all is `401`ed by the scope's middleware before any
+/// resource layer, at the cost of a header lookup.)
+#[actix_web::test]
+async fn the_list_route_has_a_nat_sized_per_address_backstop() {
+    for shared_on in [true, false] {
+        let mut w = world().await;
+        let tight = RateLimitConfig {
+            ciba_approval_per_min: 2,
+            ..limits()
+        };
+        let mut state = AppState::for_test(w.db.clone(), w.auth.clone());
+        state.rate_limit_cfg = tight.clone();
+        if !shared_on {
+            state.shared_rate_limit =
+                SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+        }
+        w.state = web::Data::new(state);
+        let app = app!(w, tight);
+        let attacker = "192.0.2.50:40000";
+        let mut seen = Vec::new();
+        for _ in 0..25 {
+            // A credential that does not authenticate: the scope's middleware
+            // lets it through (it only checks that one is present), and the
+            // handler's extractor refuses it, so only the route's own
+            // per-address layer can count it.
+            let req = test::TestRequest::get()
+                .peer_addr(attacker.parse().unwrap())
+                .uri("/api/v1/ciba/requests")
+                .insert_header(("Authorization", "Bearer not-a-jwt"))
+                .to_request();
+            seen.push(test::call_service(&app, req).await.status().as_u16());
+        }
+        assert!(
+            seen[..20].iter().all(|s| *s == 401),
+            "shared={shared_on}: ten times the per-user allowance is admitted to the handler: {seen:?}"
+        );
+        assert!(
+            seen[20..].iter().all(|s| *s == 429),
+            "shared={shared_on}: past the backstop the address is refused: {seen:?}"
+        );
+        // Another address is not refused, and a signed-in user behind it works.
+        let alice = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+        assert_eq!(get_list_from(&app, &alice, "203.0.113.7:40000").await, 200);
+    }
 }

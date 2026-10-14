@@ -133,6 +133,7 @@ impl Fixture {
                     validity_days: 30,
                     metadata: None,
                     subject_alt_names: vec![],
+                    user_id: None,
                 },
                 None,
                 &[],
@@ -197,7 +198,9 @@ async fn the_crl_route_serves_the_list_to_anyone_with_caching_headers() {
         .expect("public, max-age")
         .parse()
         .unwrap();
-    assert!(max_age > 0 && max_age <= axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS);
+    // #608: until the next scheduled re-sign — at most half the nextUpdate
+    // interval — and never until nextUpdate.
+    assert!(max_age > 0 && max_age <= axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS / 2);
     assert!(headers.get(header::LAST_MODIFIED).is_some());
     let etag = headers
         .get(header::ETAG)
@@ -267,6 +270,115 @@ async fn the_crl_route_is_rate_limited_per_ip() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "the bucket is per address");
+}
+
+/// #608: two replicas over one datastore — each with its own state and CRL
+/// cache — serve the same list, so a relying party behind a load balancer that
+/// revalidates at the other replica gets a `304`, not a fresh `200`.
+///
+/// Both requests fall in one refresh epoch (half a day by default) unless they
+/// straddle its boundary, a window of the test's own few milliseconds; the
+/// service-level test `two_replicas_sign_the_same_state_to_the_same_bytes`
+/// pins the same property at chosen instants.
+#[actix_web::test]
+async fn a_list_from_one_replica_revalidates_at_another() {
+    let f = Fixture::new().await;
+    let ca = f.ca().await;
+    let revoked = f.leaf(ca, "svc-replicated").await;
+    f.state
+        .pki
+        .cert_service
+        .revoke(f.tenant, revoked.id)
+        .await
+        .unwrap();
+    let other = AppState::for_test(f.db.clone(), auth_config());
+    let first = build_app!(f.state, RateLimitConfig::default());
+    let second = build_app!(other, RateLimitConfig::default());
+
+    let resp = test::call_service(
+        &first,
+        crl_request(f.org, ca, "203.0.113.34:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp.headers().get(header::ETAG).unwrap().clone();
+    let body = test::read_body(resp).await;
+
+    let resp = test::call_service(
+        &second,
+        crl_request(f.org, ca, "203.0.113.34:4000")
+            .insert_header((header::IF_NONE_MATCH, etag.clone()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_MODIFIED,
+        "the other replica's list is the same list"
+    );
+    let resp = test::call_service(
+        &second,
+        crl_request(f.org, ca, "203.0.113.34:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.headers().get(header::ETAG).unwrap(), &etag);
+    assert_eq!(test::read_body(resp).await, body, "byte for byte");
+}
+
+/// #607: past the permit wait a re-sign answers `503` in the API's error
+/// shape, and a list the cache holds is still served — it needs no permit.
+/// Deterministic: the test holds every permit of the crypto gate throughout.
+#[actix_web::test]
+async fn the_crl_route_answers_503_when_the_crypto_gate_is_saturated() {
+    let mut f = Fixture::new().await;
+    let cached = f.ca().await;
+    let unsigned = f.ca().await;
+    f.state.pki.crl_service = f
+        .state
+        .pki
+        .crl_service
+        .clone()
+        .with_permit_wait(std::time::Duration::from_millis(50));
+    let app = build_app!(f.state, RateLimitConfig::default());
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, cached, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let gate = f.state.crypto_semaphore.clone();
+    let permits = u32::try_from(gate.available_permits()).unwrap();
+    let held = gate.acquire_many_owned(permits).await.unwrap();
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, unsigned, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "service_unavailable");
+
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, cached, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a cached list is served while the gate is saturated"
+    );
+
+    drop(held);
+    let resp = test::call_service(
+        &app,
+        crl_request(f.org, unsigned, "203.0.113.33:4000").to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 /// The issue's first test: a leaf AXIAM issued authenticates its

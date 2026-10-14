@@ -43,14 +43,25 @@ pub struct CrlPath {
 ///
 /// Unauthenticated, because a relying party fetches the list before it can
 /// validate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).
-/// `Cache-Control: public, max-age` runs to the list's `nextUpdate`, `ETag` is
-/// the list's digest and `Last-Modified` its `thisUpdate`; a matching
-/// `If-None-Match` answers `304`.
+/// `ETag` is the list's digest and `Last-Modified` its `thisUpdate`; a matching
+/// `If-None-Match` answers `304`. `Cache-Control: public, max-age` runs to the
+/// origin's next scheduled re-sign — at most half the `nextUpdate` interval —
+/// and not to `nextUpdate` (#608): a shared cache revalidates with the `ETag`
+/// that often rather than serving a list from before a revocation for the
+/// whole interval. Every replica signs the same state in the same refresh
+/// epoch to the same bytes, CRL number and `ETag`, so revalidating behind a
+/// load balancer answers `304` wherever it lands.
 ///
 /// `404` for a CA that does not exist in that organization and, alike, for one
 /// that publishes no list: a revoked or expired CA (its status is on its
 /// parent's list), an imported trust anchor AXIAM holds no key for, and a CA
 /// whose key Vault's PKI engine holds.
+///
+/// `503` when the list has to be re-signed and no permit of the crypto
+/// semaphore — shared with issuance and password hashing — came free within
+/// five seconds (#607). A list that has not changed is served from the cache
+/// and needs no permit, so the route keeps answering relying parties that
+/// already hold the current list while the gate is saturated.
 #[utoipa::path(
     get,
     path = "/pki/v1/{org_id}/ca/{ca_id}/crl",
@@ -61,13 +72,16 @@ pub struct CrlPath {
     ),
     responses(
         (status = 200, description = "The CA's current certificate revocation list, DER \
-             (RFC 5280 §5). `Cache-Control: public, max-age` until its nextUpdate, `ETag`, \
-             `Last-Modified`", content_type = "application/pkix-crl", body = DerCrl),
+             (RFC 5280 §5). `Cache-Control: public, max-age` until the next scheduled \
+             re-sign (at most half the nextUpdate interval), `ETag`, `Last-Modified`",
+             content_type = "application/pkix-crl", body = DerCrl),
         (status = 304, description = "The `If-None-Match` tag names the current list"),
         (status = 404, description = "No such CA in this organization, or a CA that \
              publishes no list (revoked, expired, keyless trust anchor, or a key held by \
              Vault's PKI engine)"),
         (status = 429, description = "Rate limit exceeded (`AXIAM__RATE_LIMIT__CRL_PER_MIN`)"),
+        (status = 503, description = "The list has to be re-signed and the crypto gate is \
+             saturated; retry shortly"),
     ),
 )]
 pub async fn get_crl<C: Connection + Clone>(

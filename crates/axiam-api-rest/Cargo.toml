@@ -42,6 +42,10 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 actix-cors = { workspace = true }
 actix-governor = { workspace = true }
+# ciba_list_limiter.rs — the in-process keyed limiter the CIBA pending list
+# falls back to when the shared counter is off (R101W3-04). Workspace-pinned,
+# already in the graph through actix-governor.
+governor = { workspace = true }
 tracing-actix-web = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
@@ -61,7 +65,7 @@ zeroize = { workspace = true }
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
-axiam-opaque = { version = "1.0.0", path = "../axiam-opaque" }
+axiam-opaque = { version = "1.0.1", path = "../axiam-opaque" }
 
 [features]
 # SAML SP endpoints + DTOs. Forwards to axiam-federation/saml (→ samael).

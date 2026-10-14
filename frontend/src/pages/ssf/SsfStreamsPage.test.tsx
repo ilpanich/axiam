@@ -206,12 +206,43 @@ describe("SsfStreamsPage — edit", () => {
     expect(body).not.toHaveProperty("clear_authorization_header");
     // An omitted `events_requested` would widen what the receiver narrowed.
     expect(body.events_requested).toEqual([REVOKED, CREDENTIAL]);
+    // The version the form was opened from: a receiver's write since is a 409.
+    expect(body.expected_updated_at).toBe("2026-10-01T00:00:00Z");
     expect(body).toMatchObject({
       receiver_client_id: "siem-receiver",
       delivery_method: "push",
       endpoint_url: "https://siem.example.com/events",
       status_reason: "maintenance",
     });
+  });
+
+  it("removing every narrowed event does not widen: the save is refused and nothing is sent", async () => {
+    const dialog = await openEdit();
+    // The receiver narrowed to REVOKED and CREDENTIAL; the ceiling keeps only
+    // the third event, so none of what the receiver asked for would remain.
+    await userEvent.click(within(dialog).getByLabelText("Session revoked"));
+    await userEvent.click(within(dialog).getByLabelText("Credential change"));
+    fireEvent.submit(dialog.querySelector("form")!);
+    expect(await within(dialog).findByText(/Every event this receiver asked for/)).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("removing some narrowed events sends the rest, never an empty or omitted narrowing", async () => {
+    const dialog = await openEdit();
+    apiMock.put.mockResolvedValue(res(stream()));
+    await userEvent.click(within(dialog).getByLabelText("Session revoked"));
+    fireEvent.submit(dialog.querySelector("form")!);
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].events_requested).toEqual([CREDENTIAL]);
+  });
+
+  it("a receiver's empty narrowing is sent back as it is, never omitted", async () => {
+    const dialog = await openEdit([stream({ events_requested: [], events_delivered: [] })]);
+    apiMock.put.mockResolvedValue(res(stream()));
+    await userEvent.type(within(dialog).getByLabelText("Status reason"), "x");
+    fireEvent.submit(dialog.querySelector("form")!);
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].events_requested).toEqual([]);
   });
 
   it("says moving the endpoint to another origin needs the header again, and sends it once entered", async () => {

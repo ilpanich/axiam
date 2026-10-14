@@ -443,4 +443,31 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         let deleted: Vec<IdOnly> = result.take(1).unwrap_or_default();
         Ok(deleted.len() as u64)
     }
+
+    async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        // Every status, expired or not: an approved grant is the one that
+        // matters (it redeems against a re-materialised client), but a
+        // pending one could still be approved and a redeemed row is of no
+        // further use. Tenant AND client id, as `client_id` is unique only
+        // within its tenant.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS c FROM (DELETE device_grant \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 RETURN BEFORE) GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        #[derive(Debug, SurrealValue)]
+        struct CountRow {
+            c: i64,
+        }
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.c.max(0) as u64).unwrap_or(0))
+    }
 }

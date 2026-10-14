@@ -112,7 +112,8 @@ where
         if client.tenant_id != tenant_id {
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
-        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
+        let tenant = self
+            .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
         if !holds_ciba_grant(&client.grant_types) {
@@ -178,12 +179,24 @@ where
             CibaRequestStatus::Approved => {}
         }
 
+        // #613 (T-289) — the tenant's current `dcr_allowed_scopes`, for an
+        // externally registered client. Read before the request is spent, so
+        // a failed read refuses without burning the user's approval; `None`,
+        // and no read, for an administrator's client.
+        let ceiling =
+            crate::scope_ceiling::ceiling_for(self.scope_policy.as_ref(), &client).await?;
+
         // --- 6. single use, on the X6 arbiter ------------------------------
-        let redeemed = requests
+        let mut redeemed = requests
             .redeem(tenant_id, &hash, &client.client_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
             .ok_or_else(|| OAuth2Error::InvalidGrant("auth_req_id has already been used".into()))?;
+        // A scope the tenant withdrew while the request waited for the user is
+        // not minted, as it would not be at the request's first refresh.
+        if let Some(ceiling) = &ceiling {
+            crate::scope_ceiling::narrow(&mut redeemed.scopes, ceiling);
+        }
         let (Some(user_id), Some(approval)) = (redeemed.user_id, redeemed.approval.clone()) else {
             // An approved request with no subject or no evidence is a datastore
             // inconsistency: refuse rather than mint a token for nobody.
@@ -213,14 +226,7 @@ where
         }
 
         // --- 8. issuance ---------------------------------------------------
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
+        // `tenant` is the one client authentication read (R1W1-03).
         let cnf = self.certificate_binding_for(&client, ctx)?;
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
         let ext = self

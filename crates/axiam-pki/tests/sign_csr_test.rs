@@ -91,6 +91,7 @@ impl Fixture {
             validity_days: 30,
             metadata: None,
             subject_alt_names: vec![],
+            user_id: None,
         }
     }
 }
@@ -199,6 +200,7 @@ async fn a_csr_signed_leaf_is_the_same_shape_as_a_generated_one() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],

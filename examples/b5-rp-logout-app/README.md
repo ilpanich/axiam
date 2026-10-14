@@ -60,16 +60,20 @@ curl -sS -X POST http://localhost:8090/api/v1/oauth2-clients \
     "grant_types": ["authorization_code", "refresh_token"],
     "scopes": ["openid", "profile"],
     "post_logout_redirect_uris": ["http://localhost:9999/"],
-    "backchannel_logout_uri": "http://host.docker.internal:9999/backchannel-logout"
+    "backchannel_logout_uri": "https://rp.example.com/backchannel-logout"
   }'
-# ^ NOT localhost, and this is the one URI where that matters. The first three
-#   are dialled by your browser, which is on this host. `backchannel_logout_uri`
-#   is dialled by AXIAM, which is in a container — where `localhost` is the
-#   container itself and nothing listens on 9999, so every delivery attempt is
-#   refused and the back-channel half of this example silently does nothing.
-#   `docker-compose.host-gateway.override.yml` above is what makes
-#   `host.docker.internal` resolve on Linux. If you run AXIAM directly on this
-#   host instead (`just run`), use `http://localhost:9999/backchannel-logout`.
+# ^ Since 1.0.1 (R101W2-04) AXIAM registers this URI only if it is an absolute
+#   `https` URL naming a public host, and delivers the logout token through the
+#   same no-redirect SSRF guard its webhooks use: a plain-`http` URI, a
+#   loopback or private address (`localhost`, `host.docker.internal`, `10.x`),
+#   `169.254.169.254` and `*.internal` names are refused with a `400`, and a
+#   redirect from the receiver is never followed. This app serves plain `http`
+#   on `localhost:9999`, so it cannot receive a back-channel logout from AXIAM
+#   as it stands: put it behind a TLS-terminating proxy on a public name (and,
+#   for a receiver on your own network, name that host in
+#   `AXIAM__PKI__SSRF_ALLOWED_HOSTS` — the address exception is per host, and
+#   `https` is still required) and register that URL. Leave the member out to
+#   run the login and RP-Initiated Logout halves only.
 #   See docs/api/logout.md, "The URI is resolved from AXIAM's network position".
 # (see examples/b1-deny-override/walkthrough.sh for the full login/CSRF dance
 # this curl call assumes — admin-cookies.txt + $CSRF come from the same
@@ -125,3 +129,13 @@ back-channel `POST` is the only leg AXIAM dials outward, so it is the only
 one for which "localhost" means AXIAM's host rather than this app's. See
 `RP_BACKCHANNEL_URL` in [`smoke-test.sh`](smoke-test.sh) and
 [`docker-compose.host-gateway.override.yml`](docker-compose.host-gateway.override.yml).
+
+**Since 1.0.1 the delivery leg needs an `https` receiver.** AXIAM now registers
+only an `https` `backchannel_logout_uri` that names a public host and delivers
+it through the SSRF guard (R101W2-04), so the plain-`http` receiver this app
+serves is refused at registration. By default `smoke-test.sh` therefore proves
+that refusal and skips the delivery check; set `RP_BACKCHANNEL_URL` to an
+`https://` receiver AXIAM can reach and it runs the delivery check as before.
+The delivery path itself is covered by the unit tests in
+`crates/axiam-api-rest/src/backchannel_logout.rs` and the SAML SLO and
+tenant-issuer integration tests.

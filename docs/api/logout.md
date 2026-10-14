@@ -171,10 +171,47 @@ sustained outage: such an RP keeps its own session until it expires, and
 queueing indefinitely would mean holding a session-termination command for an
 unbounded time.
 
+Delivery is one request per attempt, made through the same SSRF guard as
+webhook deliveries (`guarded_fetch_no_redirect`): the host name is resolved
+fresh, every address must be globally routable, the validated address is pinned
+into the connection, and `https` is required. **A redirect is never followed**:
+a `3xx` answer counts as a failed attempt, so the logout token cannot be sent to
+a host the client did not register. A URI that resolves to a loopback, private,
+link-local or cloud-metadata address is refused at send time.
+
 There is **no HMAC signature header**. The signed JWT is the authentication;
 adding a second, cheaper check would invite an RP to verify that one instead.
 This is the one deliberate difference from AXIAM's webhook deliveries, which
 *are* HMAC-signed (see CONTRACT.md §13).
+
+### What may be registered
+
+`backchannel_logout_uri` is held to the outbound-endpoint rules every
+credential-bearing destination in AXIAM follows (the CIBA ping endpoint, SSF
+push endpoints, webhooks). The admin API (`POST` and `PUT
+/api/v1/oauth2-clients`) answers `400` unless it is:
+
+- an absolute `https` URL with a host — `http` is refused, **including
+  `http://localhost`**, which a redirect URI may use but which delivery could
+  never reach;
+- without credentials (`user:pass@`) and without a fragment;
+- not an IP literal that is loopback, private, link-local, unique-local or the
+  cloud metadata address (`169.254.169.254`, `[fd00:ec2::254]`, and their
+  IPv4-mapped spellings);
+- not `localhost`, `*.localhost`, `*.local` or `*.internal`.
+
+An empty string on update clears the URI. Dynamic Client Registration
+(RFC 7591) and Client ID Metadata Documents do not read this member at all, so a
+self-registered client never has one.
+
+A name that *resolves* to a non-public address passes registration and is
+refused when the token is sent. A client registered under 1.0.0 may hold a value
+this rule would now refuse: **existing rows are not rewritten** (there is no
+backfill), and the delivery guard keeps them from reaching a private address; an
+edit that does not touch the field leaves the stored value as it is. To keep
+notifying an RP on your own network, name its host in
+`AXIAM__PKI__SSRF_ALLOWED_HOSTS` (an exact host match, first hop only, never a
+metadata address) and register its `https` URL.
 
 ### The URI is resolved from AXIAM's network position
 
@@ -184,10 +221,11 @@ the user's browser; this one is dialled by the server, from wherever the server
 runs.
 
 That distinction matters whenever those are different places — AXIAM in a
-container or a pod, the RP outside it, or the reverse. `http://localhost:9000`
-registered by an RP running next to your browser names *AXIAM's* loopback, not
-the RP's, and every delivery to it is refused. The registration succeeds and the
-logout succeeds; only the notification is lost.
+container or a pod, the RP outside it, or the reverse. A name that resolves,
+from AXIAM, to a private or loopback address is refused at send time (see "What
+may be registered"); a public name that the RP's own network resolves
+differently reaches whatever AXIAM's resolver says it is. The registration
+succeeds and the logout succeeds; only the notification is lost.
 
 There is **no error surfaced to anyone** when this happens, by design: delivery
 is best-effort and never blocks the logout. The only evidence is in AXIAM's own

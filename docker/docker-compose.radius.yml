@@ -1,0 +1,69 @@
+# The 802.1X / EAP-TLS e2e stack (W6.2, D3): a real FreeRADIUS trusting the tenant
+# signing CA that a real AXIAM issued, driven by a real `eapol_test`.
+#
+# What this file is, and is not
+# -----------------------------
+# It REFERENCES the upstream FreeRADIUS image and ships CONFIGURATION ONLY:
+# docker/radius/raddb/ holds files written for this recipe, mounted over the
+# image's own. Nothing of FreeRADIUS (GPLv2, with LGPLv2 in src/lib) is copied
+# into this repository, and nothing is built or redistributed from here.
+# docs/pki/freeradius.md is the guide; docker/radius/README.md runs this.
+#
+# The image is pinned by digest, as docker/docker-compose.directory.yml pins its
+# servers. The tag is there for a human; the digest is what is pulled. That
+# digest is the manifest of the 3.2.8 tag on Docker Hub (linux/amd64).
+#
+# Usage, from the repository root. The test writes the run's CA, CRL, server
+# certificate and shared secret into docker/.secrets/radius/ (gitignored) and
+# then brings this file up itself, because the trust material does not exist
+# until AXIAM has issued it:
+#
+#   AXIAM_E2E_RADIUS=1 cargo test -p axiam-server --no-default-features \
+#       --test radius_e2e -- --nocapture
+#
+# Address
+# -------
+# FreeRADIUS has a FIXED address on a network of its own, so that clients.conf
+# can name the subnet the host's `eapol_test` reaches it from (the bridge
+# gateway). Nothing is published on the host.
+
+name: axiam-radius-e2e
+
+services:
+  freeradius:
+    image: freeradius/freeradius-server:3.2.8@sha256:af6fd34a5b7826b6245008732f43fbc0432eb23d23e5de7106371b2941e70a4b
+    container_name: axiam-radius-e2e-freeradius
+    # -X: debug to stdout, so a failure shows OpenSSL's own reason ("certificate
+    # revoked", "unable to get local issuer certificate"). In production run
+    # `freeradius -f -l stdout` and read the logs as personal data (the guide).
+    command: ["freeradius", "-f", "-X"]
+    environment:
+      RADIUS_SHARED_SECRET: "${RADIUS_E2E_SHARED_SECRET:?the test writes docker/.secrets/radius/env; pass --env-file}"
+    volumes:
+      - ./radius/raddb/clients.conf:/etc/freeradius/clients.conf:ro
+      # mods-enabled/eap is a symlink to mods-available/eap; the file is replaced
+      # at the target.
+      - ./radius/raddb/eap:/etc/freeradius/mods-available/eap:ro
+      - ./radius/raddb/default:/etc/freeradius/sites-available/default:ro
+      - ./radius/raddb/check-eap-tls:/etc/freeradius/sites-enabled/check-eap-tls:ro
+      - ./radius/raddb/axiam_placement:/etc/freeradius/mods-enabled/axiam_placement:ro
+      # The run's material: server.pem, server.key, ca.pem, capath/, placement.
+      - ./.secrets/radius/trust:/etc/freeradius/axiam:ro
+    networks:
+      radius:
+        ipv4_address: "${RADIUS_E2E_IP:-172.28.78.10}"
+    healthcheck:
+      # Listening on the authentication port (UDP 1812) with the config loaded.
+      test: ["CMD-SHELL", "grep -q ':0714 ' /proc/net/udp"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 2s
+    restart: "no"
+
+networks:
+  radius:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${RADIUS_E2E_SUBNET:-172.28.78.0/24}"

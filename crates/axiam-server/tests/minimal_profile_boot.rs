@@ -41,7 +41,8 @@ use axiam_db::{
     SurrealSettingsRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebhookRepository, seed_default_roles, seed_permissions,
 };
-use axiam_server::boot::{AppConfig, ServeOptions, serve};
+use axiam_server::boot::{AppConfig, LEASE_LOSS_STOP, ServeOptions, serve};
+use axiam_server::cleanup::CleanupStepForTests;
 use axiam_server::profile::LeaseTiming;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use surrealdb::Surreal;
@@ -153,7 +154,10 @@ fn short_lease() -> LeaseTiming {
         renew_every: Duration::from_millis(100),
         boot_wait: Duration::from_millis(300),
         boot_poll: Duration::from_millis(20),
-        lost_stop_deadline: Duration::from_secs(10),
+        // The production backstop: the stop after a lost lease is budgeted to
+        // fit inside it (`LEASE_LOSS_STOP`, #598), and the tests that lose a
+        // lease check that it does.
+        lost_stop_deadline: LeaseTiming::PRODUCTION.lost_stop_deadline,
     }
 }
 
@@ -879,6 +883,96 @@ async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_row
             .unwrap()
             .holder,
         "the-usurper"
+    );
+}
+
+/// #598: a cleanup tick still running when the instance stops — a GDPR erasure
+/// against a slow datastore, a long tenant purge — used to hold the stop for as
+/// long as it ran: the teardown awaited the cleanup task without a bound, past
+/// every budget, until the backstop (or the orchestrator's `SIGKILL`) ended the
+/// process. The join is now bounded (`ShutdownBudget::cleanup`), so a tick that
+/// sleeps for an hour is cut at the bound and the instance exits in order,
+/// inside the lease's backstop, with the backstop never run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cleanup_tick_that_sleeps_past_the_bound_does_not_delay_the_exit_past_the_grace() {
+    let db = fresh_db().await;
+    let mut config = minimal_config();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("the client-secret hasher installs");
+    config
+        .auth
+        .resolve_keys()
+        .expect("the Ed25519 keys parse (CQ-B14)");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rest_port = listener.local_addr().unwrap().port();
+    config.server.port = rest_port;
+
+    // The first tick runs at once; its first step says so and then sleeps far
+    // past any stop's bound.
+    let (entered_tx, mut entered) = tokio::sync::watch::channel(false);
+    let step: CleanupStepForTests = Arc::new(move || {
+        let entered_tx = entered_tx.clone();
+        Box::pin(async move {
+            entered_tx.send_replace(true);
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+        })
+    });
+    let backstop_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&backstop_ran);
+    let (pool, health) = pool_over(&db);
+    let opts = ServeOptions {
+        rest_listener: Some(listener),
+        lease_timing: short_lease(),
+        lease_lost_backstop: Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst)
+        }),
+        cleanup_step_for_tests: Some(step),
+        ..ServeOptions::default()
+    };
+    let stopped = serve_on_big_stack(config, pool, health, opts);
+
+    tokio::time::timeout(Duration::from_secs(30), entered.wait_for(|on| *on))
+        .await
+        .expect("the cleanup task starts its first tick")
+        .expect("the step's sender lives as long as the task");
+
+    // Stop the instance while that tick is asleep: another instance takes the
+    // lease over (retried on a write conflict with the renewal, as above).
+    axiam_db::helpers::retry_on_write_conflict(|| async {
+        db.query(
+            "UPDATE type::record('minimal_profile_lease', 'instance') \
+             SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
+        )
+        .await?
+        .check()
+        .map(drop)
+    })
+    .await
+    .expect("the takeover is written");
+    let taken_over = std::time::Instant::now();
+
+    let grace = short_lease().lost_stop_deadline;
+    let result = tokio::time::timeout(grace + Duration::from_secs(5), stopped)
+        .await
+        .expect("a cleanup tick that never ends does not hold the stop")
+        .expect("the server thread reported");
+    let took = taken_over.elapsed();
+    let message = result
+        .expect_err("a lost lease is a non-zero exit")
+        .to_string();
+    assert!(message.contains("lease"), "{message}");
+    assert!(
+        took >= LEASE_LOSS_STOP.cleanup,
+        "the join waited its bound for the sleeping tick ({took:?})"
+    );
+    assert!(
+        took < grace,
+        "the instance exited inside the lease's backstop deadline ({took:?} >= {grace:?})"
+    );
+    assert!(
+        !backstop_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the orderly stop finished — the cut tick included — before the backstop was needed"
     );
 }
 

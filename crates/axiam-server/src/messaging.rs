@@ -61,6 +61,18 @@ impl OutboundTransport {
         }
     }
 
+    /// Give the in-process publishers the audit middleware's non-blocking queue,
+    /// so that the row of an enqueue they refuse is never written on the
+    /// producer's path (#596). The broker transport has no such refusal: nothing
+    /// to bind. Call it once the middleware exists; publishers already handed
+    /// out follow.
+    pub fn bind_audit(&self, audit: &axiam_audit::AuditMiddleware) {
+        if let Self::InProcess(hub) = self {
+            let first = hub.bind_audit(audit.clone());
+            debug_assert!(first, "the audit queue is bound exactly once");
+        }
+    }
+
     /// The publisher producers of `kind` hold. Call it once per kind, before
     /// [`Self::spawn_consumer`]: with AMQP it opens that kind's confirm-enabled
     /// publisher channel (a failure here is a boot failure, as it always was).

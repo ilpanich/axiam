@@ -1,6 +1,6 @@
 # Release 1.0.1 plan — closing the open issues after the 1.0.0 tag
 
-> **Status: PLAN — not started.** Written on 2026-10-12 against `main` at
+> **Status: IN PROGRESS — W1 … W4 landed 2026-10-13 (§11).** Written on 2026-10-12 against `main` at
 > `0a90de0` (`chore(release): prepare axiam 1.0.0`). It covers **28 of the 30
 > open issues** on `ilpanich/axiam`: the twenty-five Low and Informational
 > findings of the 1.0.0 F4 review (#590 … #614), the two deferred non-local
@@ -322,13 +322,197 @@ code. W6.2's guide ends with the paragraph that says so.
 
 | Wave | Branch / head | Review document | Closes | Left to the next wave / to 1.0.x |
 |---|---|---|---|---|
-| W1 | | | | |
-| W2 | | | | |
-| W3 | | | | |
-| W4 | | | | |
+| W1 | `claude/release-1.0.1-w1` @ `08c4c38` — cut from the tag `v1.0.0` (`0a90de0`), see §11.0 | [`security-review-release-1.0.1-w1-2026-10-13.md`](security-review-release-1.0.1-w1-2026-10-13.md) (`37582a3`): 1 Medium (R101W1-01, fixed in-wave `08c4c38`), 4 Low, 4 Informational | #603, #607, #608, #609, #612, #533; the (a) half of #611 and the (c) half of #610 | Low/Informational filed on `1.0.x`: #615 … #622 (R101W1-02 … -09). To W5: §27.11 `user_id` (W5.1), CRL §35 rule 4 (W5.7), CA-revoke pending outcome and audit names (W5.8). To W7.3: T-472 dated corrections (W1.4, W1.7), T-102, T-470, T-336, T-187, new T-476 |
+| W2 | `claude/release-1.0.1-w2` @ `e55e5c9` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w2-2026-10-13.md`](security-review-release-1.0.1-w2-2026-10-13.md) (`79d11a7`): **1 High** (R101W2-01), 2 Medium (R101W2-02, -04), 1 Low, 3 Informational — High and Medium fixed in-wave, plus two libxml defects found while fixing the High | #605, #606, #614, #591, #538; the (b) half of #611 | Low/Informational filed on `1.0.x`: #632, #633, #634 (R101W2-03, -05, -06; -07's text drift landed with the fixes and #632). New threat entry **T-477** (W1 holds T-476). To W5: note 6 (SHA-1 adds SHA-1 only), note 7 (`federation.idp_signing_cert_changed`/`_cleared`), the `backchannel_logout_uri` `400` on client registration; `sdks/openapi.json` regenerated on this branch too. To the maintainer: the libxml-rs 0.3.3 use-after-free (§11.2) is not reported upstream |
+| W3 | `claude/release-1.0.1-w3` @ `6298b50` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w3-2026-10-13.md`](security-review-release-1.0.1-w3-2026-10-13.md) (`3741745`): no Medium or higher; 4 Low, 5 Informational. R101W3-04 (Low) fixed in-wave because it broke a §9 rule | #601, #602, #604, #613, #599; the (a), (b) and (d) halves of #610 (#610 closes with W1.7's (c)) | Low/Informational filed on `1.0.x`: #635 … #642 (R101W3-01 … -03, -05 … -09). To W5: §33.3 rule 16 (the hint cap's `429 slow_down`, creation order, `total_pending` / `truncated`, the user-keyed list bucket), the DCR/CIMD scope ceiling sentence (W5.6); `sdks/openapi.json` regenerated on this branch too. To W7.4: the upgrade note of R101W3-02 (#636) |
+| W4 | `claude/release-1.0.1-w4` @ `a234f32` — cut from the tag `v1.0.0` (§11.0) | [`security-review-release-1.0.1-w4-2026-10-13.md`](security-review-release-1.0.1-w4-2026-10-13.md) (`a3f917c`): 1 Medium (R101W4-01, fixed in-wave `a234f32` with R101W4-06), 5 Low, 5 Informational | #590, #592, #593, #594, #595, #596, #597 (no commit, W4.1), #598, #600 | Low/Informational filed on `1.0.x`: #623 … #631 (R101W4-02 … -05, -07 … -11). To W5: §32 `expected_updated_at` and the `PUT` semantics of `events_requested` (absent = all allowed, `[]` = none; #631: SDK update helpers send what they read); `request_audit.outbound_abandoned_dropped` on `/health/jobs`. To W7: `sdks/openapi.json` is regenerated on W1 and on W4 — the merge conflict is resolved by regenerating. To W7.3: T-406, T-108, T-445, T-444 amendments; R101W4-09's stale stop arithmetic |
 | W5 | | | | |
 | W6 | | | | |
 | W7 | | | | |
+
+### 11.0 Base commit (D-1)
+
+`v1.0.0` was on `origin` when W1 started (2026-10-12; tag object `9b2e6f5` →
+`0a90de0`), so W1 … W4 are cut from the tag, as D-1 directs. The plan branch
+`claude/release-1.0.1` is cut from `main` at `c6f916e` (the tag plus this plan),
+and it carries this section.
+
+### 11.1 W1 — what landed, and where the tree overruled the plan
+
+Ten commits on `v1.0.0`, every one signed. Each item ran as one executor at the
+model its row names; none was re-sized.
+
+| Task | Commit | Model | Plan vs tree (from the commit body) |
+|---|---|---|---|
+| W1.1 #609 | `9637c64` | Sonnet 5.5 | the callers go through `CrlDistribution::resolve`; no caller edit |
+| W1.2 #611(a) | `b8f2985` | Sonnet 5.5 | T-476 added (Mitigated; model 476 = 438 / 17 / 21, still 2.40.0). The `main.rs` bootstrap client is reviewed, not tested (R101W1-07, #620) |
+| W1.3 #607 | `0df1c7c` | Opus 5.5 | the revocation read already ran outside the lock; the lock covered `load`, the permit wait and the signature. `503` after a 5 s permit wait |
+| W1.4 #608 | `fe77681` | Opus 5.5 | **not in the row:** the tenant purge keeps revoked certificate rows until `notAfter` + 8 days (a list keeps an expired entry at most one interval, ≤ 7 days by `boot.rs`'s bound); the four revocation reads take the cut-off from the caller. T-472 correction |
+| W1.5 #603 | `f05bd40` | Sonnet 5.5 | v95. The due read is a second method; the "distinct job-health error" is a second job, `vault_revocation_failing`, so `JobStatus` (an OpenAPI schema) is unchanged |
+| W1.6 #612 | `363b40d` | Opus 5.5 | v96 also carries the three backoff columns on `ca_certificate`. **The forward runs after `store.delete`, not before:** Vault refuses `/revoke` of a serial that is still an issuer in the same mount (confirmed by the F4 review; residual R101W1-04, #617) |
+| W1.7 #610(c) | `5844249` | Opus 5.5 | v97. `purge_tombstoned`'s final delete now counts what it removed so that `NotFound` means "already purged"; lease 1 h |
+| W1.8 #533 | `2b6607a` | Opus 5.5 | v98; no backfill (D-6). `sdks/openapi.json` and `sdks/management-registry.json` regenerated (they also carry W1.3/W1.4/W1.6's route text). The name fallback applies to every `user_id = NONE` row |
+| W1.9 | `37582a3` | Opus 5.5 | the F4 review; one Medium |
+| R101W1-01 | `08c4c38` | Opus 5.5 | revoke-by-name skips certificates older than the account and names another account of the tenant shares; checked inside the query, not through `identity_collision`. Linking no longer revokes an unbound certificate whose name a case-variant sibling also holds (deliberate; revocable by id) |
+
+Residual recorded, not fixed: an erased account's revoked certificate rows keep
+the PEM, subject and `metadata` for the tenant's lifetime (T-187; R101W1-05,
+#618).
+
+### 11.2 W2 — what landed, and where the tree overruled the plan
+
+Twelve commits on `v1.0.0`, every one signed; no item was re-sized. Builds ran
+with `saml` on and CI's SAML-off `cargo check` before every commit. The Keycloak
+image was pulled through `mirror.gcr.io` (quay.io is blocked from the session,
+Docker Hub rate-limited) and tagged locally.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W2.1 #605 | `ab01a52` | Opus 5.5 | the five parse sites all sit in `axiam-federation`; no crate edge. The row's "a BOM is refused" was overruled by R101W2-02 |
+| W2.2 #606 | `20cfb1d` | Opus 5.5 | the residual sentence the row placed in T-67 is T-69's; the linked xmlsec cannot sign `rsa-md5`, so that fixture is a URI swap (refused before verification) and a validly signed RSA-SHA224 response shows the hole |
+| W2.3 #611(b) | `8cd2dd8` | Sonnet 5.5 | the plan's names (`federation.idp_signing_cert_changed` / `_cleared`) over the issue's; `_cleared` is reachable on update |
+| W2.4 #614 | `50cbb6e` | Sonnet 5.5 | **D-3: the four sibling routes wrapped in the same commit**, five buckets on `end_session_per_min`. Two names collide with existing public buckets (R101W2-03, #632) |
+| W2.5 #591 | `272629e` | Sonnet 5.5 | every `guarded_fetch` caller classified; only the four named calls carried credentials |
+| W2.6 #538 | `d9584f0` | Opus 5.5 | four Keycloak single-logout tests, both directions, both bindings, each with a broken-signature control Keycloak refuses; 6/6 locally against Keycloak 26.7.0; no CI change, no AXIAM defect |
+| W2.7 | `79d11a7` | Opus 5.5 | the F4 review |
+| R101W2-02 | `032c344` | Opus 5.5 | **overrules W2.1's row on the review's evidence:** Microsoft Entra ID's metadata starts with a UTF-8 BOM (fetched); exactly one leading BOM is now stripped and every consumer reads the stripped text. ADFS not verified |
+| R101W2-01 | `7055077` | Opus 5.5 | **High, pre-existing:** a received signature may use only enveloped-signature and the c14n family (XSLT/XPath were evaluated before the signature value); ACS, metadata and IdP-receiver verification moved into `spawn_blocking` under the crypto semaphore; **T-477** added |
+| — | `21025c7` | Opus 5.5 | found while fixing R101W2-01: libxml-rs 0.3.3's `no_def_dtd` is `XML_PARSE_DTDLOAD` for the XML parser; W2.1 had spread it to five sites. Removed |
+| — | `7eec4ae` | Opus 5.5 | found while fixing R101W2-01: an intermittent federation test failure (about 1 in 10, also at `v1.0.0`) is a **use-after-free in libxml-rs 0.3.3** (`parse_string_with_options` frees the encoding name before `xmlReadMemory` reads it; valgrind: 21 invalid reads). AXIAM now passes no encoding name (`ignore_enc` keeps UTF-8); 50/50 runs and valgrind clean. When the lookup misfired, `verify_post_signature` failed **open** past the T-477 allow-list; every signature check now fails closed by local name |
+| R101W2-04 | `e55e5c9` | Sonnet 5.5 | **Medium, pre-existing:** back-channel logout delivered through `guarded_fetch_no_redirect`; `backchannel_logout_uri` validated with the D-49 push-endpoint rule rather than the redirect-URI rule the brief named (that rule admits private IP literals). Examples Smoke dispatched on the branch: run 38404923036 **green** |
+
+### 11.3 W3 — what landed, and where the tree overruled the plan
+
+Eleven commits on `v1.0.0`, every one signed; no schema change.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W3.1 #604 | `7f5330c` | Sonnet 5.5 | `user_may_be_subject` was already public; T-39 and T-163 amended. The device flow mints no ID token |
+| W3.2 #601 | `7be5e80` | Sonnet 5.5 | the tenant read lives in `authenticate_client_credential`, reached by every client-authenticating endpoint; a deleted tenant's grants now answer `invalid_client` (was `invalid_request`). **The quick-bench token cell was not run:** it needs a server image built next to the build directory, which the box's disk cannot hold (R101W3-09 (e), #642); the cell does the same two reads before and after |
+| W3.3 #610(d) | `0807a95` | Sonnet 5.5 | the device poll authenticates no client at all, so a plain delete already left a redeemable grant (R101W3-01, #635) |
+| W3.4 #613 | `796c905` | Opus 5.5 | one scope-ceiling port used at every read point; fail closed; the tree has no "unset" policy, so an empty `dcr_allowed_scopes` narrows to nothing (consistent with 1.0.0 registration; administrator-added scopes are withheld, #636) |
+| W3.5 #602 | `6e15611` | Opus 5.5 | **D-5.** The plan's bound (`audit_exported_at`) is the receipt's own time; the export covers up to `exported_through`, which is now the bound; no bound → nothing deleted. A forged AMQP receipt can set it (R101W3-03, #637) |
+| W3.6 #599 | `67be511` | Sonnet 5.5 | **D-4** as a handler-level per-(tenant, user) bucket (the rate limiter has no per-user key mode). The per-(client, user) cap it added told a client whether a hint names a user (against D-63 / T-422) |
+| W3.6 follow-up | `3c6e951` | Opus 5.5 | **orchestrator's decision, re-modelled under §1.1:** the cap counts `bc-authorize` calls per (tenant, client, HMAC of the hint) before the hint is resolved — at most 3 in any ten-minute stretch, the same answer for every hint; no schema |
+| W3.7 #610(a) | `3a53922` | Sonnet 5.5 | fourteen test files carried the stale comment, not three |
+| W3.8 #610(b) | `eac374d` | Opus 5.5 | a real TLS client against the server's own listener, verifier and connection hook; revoked leaf and four foreign-anchor leaves refused at `/oauth2/token`, with controls. T-102 and T-475 amended (the plan named T-263) |
+| W3.9 | `3741745` | Opus 5.5 | the F4 review |
+| R101W3-04 | `6298b50` | Sonnet 5.5 | the list route had no limiter with the shared counter off: an in-process per-user limiter for that mode and a per-address backstop on the route |
+
+### 11.4 W4 — what landed, and where the tree overruled the plan
+
+Twelve commits on `v1.0.0`, every one signed; no item was re-sized.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W4.1 #597 | — | orchestrator | the tree verified again; comment issuecomment-6131477654; on the `Closes` line |
+| W4.2 #592 | `4156b80` | Sonnet 5.5 | the report step's `env:` block removed rather than edited. D-7: run 38300274398 (tag-only image) failed at "Select the AXIAM image", later steps skipped — the oracle holds |
+| W4.3 #593 | `ba562d8`, `b34a0d0` | Sonnet 5.5 | first commit seeded `baseline-unattended.json` from the tree; the second records it from run 38317560409 (`module_timeout` 30; run 38300842144 at the default 180 s hit the job's 150-minute cap), transcribed from the gate log because the session cannot fetch artifacts (R101W4-10, #630). The seed's one error (`…nbf-8-seconds-in-the-future-is-accepted` parks: a success path) is corrected. Confirmation run 38327426158: **green** |
+| W4.4 #600 | `31ca687` | Sonnet 5.5 | two existing assertions pinned the always-send and changed. Turning a surface on under an organization `false` now saves silently (R101W4-07, #627) |
+| W4.5 #590 | `11de0b3` | Sonnet 5.5 | **accepted deviation:** the page sends `[]` only when the receiver's stored narrowing already is `[]` (sending it back does not widen; refusing would block pausing such a stream). OpenAPI regenerated |
+| W4.6 #594 | `7bbdfa5` | Sonnet 5.5 | the interleave sub-item dropped, as §0.1 said (one `write_all` per record, now pinned by a test); an existing 0644 file is tightened to 0600 at open |
+| W4.7 #595 | `94c2747` | Sonnet 5.5 | `crates/axiam-audit/src/loss.rs` and `axiam-server/src/job_health.rs` changed for the new signatures |
+| W4.8 #596 | `82e580e` | Sonnet 5.5 | only the producer's refusal goes through the non-blocking path; the consumer's stop paths still await. Introduced R101W4-01 |
+| W4.9 #598 | `334943a` | Opus 5.5 | **the lease-loss REST cut is 5 s, not 6:** the cleanup join (2 s) is on that path too, 5 + 2 + 1 + 3 + 2 = 13 < 15; `ORDERLY_STOP` 37, backstop 38, grace 40. The REST cut drops the actix `Server` (actix reads one stop command only). A cut can leave an erasure without its audit row (R101W4-03, #624) |
+| W4.10 | `a3f917c` | Opus 5.5 | the F4 review (a first attempt was lost to a container restart before it committed anything) |
+| R101W4-01 | `a234f32` | Opus 5.5 | bulk SCIM producers stop at the first refusal and the publisher writes one summary row (`OutboundPublisher::record_not_offered`, since `axiam-scim` has no audit sink) — so a run meeting a full queue leaves at most two rows; `try_record` keeps a quarter of the audit channel for request rows and counts what it sheds in `request_audit.outbound_abandoned_dropped` (closes R101W4-06). OpenAPI regenerated |
+
+
+### 11.5 W5 — the merges, the contract and the eleven SDKs
+
+On `claude/release-1.0.1` (cut from `main` at `c6f916e`), W1, W2, W3 and W4
+merged in that order, then the contract; every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| merge W1 | `abcd020` | orchestrator | clean |
+| merge W2 | `9071207` | orchestrator | threat-model conflicts only: `threatTop` 477, STRIDE table re-totalled |
+| merge W3 | `76f841c` | orchestrator | `tenant.rs` purge keeps W1's NotFound check and returns W3's `TenantPurgeReport`; both purge tests kept; T-472 / T-102 amendments of the two waves both kept |
+| merge W4 | `0570b34` | orchestrator | W1's `vault_revocation_failing` job and the #612 comment ported into W4's `CleanupTask::tick()`; the GDPR loop takes W4's stop check; a semantic conflict (`CreateCertificate` without `user_id` in `server_leaf_profile.rs`) fixed; `cargo check --workspace --all-targets`, the SAML-off check and `fmt` pass |
+| W5.9 | `55c3e30` | orchestrator | run before the contract text rather than after it, as part of resolving the merges: each wave's spec was regenerated on its own base, and only the merged tree's spec is the drift job's (190 operations). The contract commit changes no route, so no second regeneration was needed |
+| W5.1–W5.8 | `058d8e0` | Sonnet 5.5 | contract **1.61**; §34.5 is the record. The orchestrator's review corrected one sentence before commit: the CRL number is monotone only under the conditions #615 (R101W1-02) names, not "never falls"; §35 rule 4 says so |
+| W5.10 | eleven branches `claude/contract-1.61-sync` | Sonnet 5.5 (three sessions) | vendored byte-identical from `058d8e0`; fields REST-only in all eleven (no gRPC or AMQP message carries these models); `CibaPendingList` modelled by none (no registry operation reaches it — Q1). Go's first draft dropped `[]` through `omitempty` and was fixed before push. Draft PRs, all CI green on their first head: [rust#126](https://github.com/ilpanich/axiam-rust-sdk/pull/126) `d69294f`, [typescript#136](https://github.com/ilpanich/axiam-typescript-sdk/pull/136) `7567064`, [python#96](https://github.com/ilpanich/axiam-python-sdk/pull/96) `7d84d76`, [go#97](https://github.com/ilpanich/axiam-go-sdk/pull/97) `fae4b2c`, [java#113](https://github.com/ilpanich/axiam-java-sdk/pull/113) `1bc7c55`, [php#81](https://github.com/ilpanich/axiam-php-sdk/pull/81) `2382b91`, [kotlin#75](https://github.com/ilpanich/axiam-kotlin-sdk/pull/75) `5c434f6`, [csharp#105](https://github.com/ilpanich/axiam-csharp-sdk/pull/105) `fd8e5bd`, [c#72](https://github.com/ilpanich/axiam-c-sdk/pull/72) `d706d8f`, [cplusplus#74](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/74) `cd1b904`, [swift#73](https://github.com/ilpanich/axiam-swift-sdk/pull/73) `f99692c`. Each merges after the `axiam` release PR (its drift check compares with `main`) |
+| W5.11 | `7007f04` | Sonnet 5.5 | [`sdk-contract-1.61-conformance-review.md`](sdk-contract-1.61-conformance-review.md): no wire defect. Two SDK fixes on the same branches: Java `35ed4d7` (the mTLS provisioning example had not compiled since 1.0.0; a test now compiles it; the helper's Javadoc says it re-renders the instant), Python `a034e2f` (a test for the dropped `null` on `ScimTargetInput.expected_updated_at`). Suites not run here: PHP (composer blocked; a probe instead), Swift (no toolchain) |
+
+**Questions for the `axiam` PR** (review §5, never worked around): Q1 is
+`CibaPendingList` SDK work when no registry operation reaches it; Q2 does the
+`events_allowed` cut bind a converter; Q3 an assigned `null` on a request
+member (TypeScript sends it); Q4 Java and Kotlin re-render `updated_at` to the
+same instant; Q5 the new members are not source-compatible in Rust (struct
+literals), Java (record constructors), Kotlin and PHP (positional parameters) —
+which bears on tagging those SDKs 1.0.1; Q6 the three meanings at the
+`update_stream` call site; Q7 a typed UUID as a client-side judgement. Plus the
+orchestrator's: §33.3 rule 13 says the per-client CIBA bucket answers
+`rate_limit_exceeded`, while the code answers `slow_down` since 1.0.0.
+
+
+### 11.6 W6 — RADIUS option B (D-2 "yes": D3 and D5 in 1.0.1)
+
+On `claude/release-1.0.1-w6`, cut from the plan branch at `55c3e30`; merged
+into the plan branch as `236822c` (clean). Every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W6.1 (D5) | `9b8b4dc` | Opus 5.5 | the eleven RFC claims re-read from the FreeRADIUS repository's RFC copies; two corrections: T-449 (a `Proxy-State` is echoed, not refused) and T-453 (RFC 5080's duplicate-detection key). Residual: the `roles:assign` delegation gap |
+| W6.2 (D3) | `3f9f820`, `b8fa66f` | Sonnet 5.5 | the e2e is a Rust integration test gated by `AXIAM_E2E_RADIUS=1` (the `directory_e2e.rs` pattern, no `#[ignore]`), and it brings the compose stack up itself because the trust material exists only once AXIAM has issued it. RadSec documented, not exercised (`eapol_test` speaks UDP only). The spike's short `crl_next_update_secs` was not needed: AXIAM serves a revocation at once, and the lag is FreeRADIUS's `ca_path_reload_interval` (≥ 300 s; measured: refused 284 s after revocation). Ed25519 leaf keys come as PKCS#8 v2, which OpenSSL 3.0 cannot read; the guide re-encodes them (#651). Second commit: T-449, T-454, T-456, T-459 Not applicable → Mitigated with the e2e as their test; the other seventeen RADIUS entries stay Not applicable and say why |
+| W6.3 | `085cfc6` | Opus 5.5 | [`security-review-release-1.0.1-w6-2026-10-13.md`](security-review-release-1.0.1-w6-2026-10-13.md): three Medium, nine Low, five Informational |
+| R101W6-03 | `ba79a20` | Sonnet 5.5 | the note's §5.3 bounds certificate binding as well as role assignment. Plan vs tree: `certificates:generate` binds nothing; only the bind route writes the edge, so the rule attaches there |
+| R101W6-02 | `f3c6a68` | Opus 5.5 | confirmed on the live stack first (a bound `DEFAULT` certificate admitted an unbound one). The placement table is keyed on `TLS-Client-Cert-Serial`; the e2e binds `DEFAULT` and `lamp-04\nDEFAULT` subjects and asserts the unbound device is still refused. T-461 amended, dated |
+| R101W6-01 | `1213719` | Opus 5.5 | both tenants' signing CAs now chain to one organization root; the other-tenant device is refused with its leaf alone, with its signing CA, and with the shared root; the positive control with a full chain is admitted. The shipped configuration needed no change. T-459 correction, dated |
+
+Filed on `1.0.x`: #643 (R101W6-04), #644 (-05), #645 (-06), #646 (-07), #647
+(-08), #648 (-11), #649 (-12), #650 (-13), #651 (-15), #652 (-17), and #653
+(serials derived from the public key: two certificates on one key share a
+serial, found while fixing -02). Carried to W7.3: -09 (the four Mitigated
+entries sit on elements still flagged out of scope; T-450 and T-462), -10
+(T-453's correction to be dated in its own text), -16 (stale `security.ts`
+lines and `FINDINGS.md:37`). -14 (the workflow has never run): D-7 —
+`radius-e2e.yml` runs on a pull request to `main` that touches
+`radius_e2e.rs`, so the release pull request is its first CI run.
+
+### 11.7 W7 — release readiness
+
+On `claude/release-1.0.1-w7` (worktree cut from the plan branch at `27ad555`),
+fast-forwarded into the plan branch as `52d4219`. Every commit signed.
+
+| Task | Commit | Model | Plan vs tree / note |
+|---|---|---|---|
+| W7.1 | — | orchestrator | the merges W1 … W6 are §11.5 and §11.6; the regression gate is below |
+| W7.2 | `27ad555` | Opus 5.5 | [`security-review-release-1.0.1-2026-10-14.md`](security-review-release-1.0.1-2026-10-14.md): one Medium (R101-01, from `a234f32`, the R101W4-01 fix no wave review saw), two Low, two Informational. Filed: #654 (R101-02), #655 (R101-03), #656 (R101-04 and R101-05 b) |
+| R101-01 | `78da6eb` | Opus 5.5 | `OutboundPublisher::enqueue_paced` (waits for room up to the run's deadline, leaves a quarter of the queue free for live changes — the executor's addition, so a paced run never starves a live erasure); links, `erase_pending` first, are offered before users; a refusal stops only its own step. The new test fails on `27ad555` (4 enqueued, 19 refused) and passes after. Plan vs tree: the provisioner fan-out (request path) and `converge_groups_of` (the SCIM consumer's own task) do not pace and keep stop-at-first-refusal. T-415 amended, T-445 corrected, dated |
+| W7.3 | `fe7b9d2` | Sonnet 5.5 | threat model **2.41.0**: 477 threats, 443 Mitigated, 19 Open, 15 Not applicable, the five copies agreeing (checked by script). **T-450 and T-462 Not applicable → Open** for the operator-run FreeRADIUS recipe (R101W6-09; the executor's judgement, put to the maintainer on the PR); open High/Critical ten → eleven. Also: T-453's RFC 5080 correction (R101W6-10), T-472 and T-444 (R101-05 a, c), T-102 (#609 amendment the 2.40.0 text lacked), T-476's model number, T-39's stray blockquote markers, R101W6-16, the GDPR record's #601 sentence, R101W4-09's stop arithmetic in the compose files, k8s and the Operate page |
+| W7.4 | `52d4219` | Sonnet 5.5 | `CHANGELOG.md` `[1.0.1] - 2026-10-14` (upgrade notes, Added, Security, Fixed, Documentation, Deferred); version 1.0.1 in the 1.0.0 bump's set; spec and registry regenerated (only `info.version` and the digest moved); the 1.0.1 news post. Plan vs tree: the W6 merge had put the RADIUS entry under the released `[1.0.0]` — moved to `[1.0.1]`; `security.ts` has no deferred-items list, so the list is in the news post; the write-up's two handoff stamps restamped (the 1.0.0 bump left them; `version.ts` says they move together); `DOCS_VERIFIED_RELEASE` stays 1.0.0 |
+| SDK re-vendor | eleven commits on `claude/contract-1.61-sync` | Sonnet 5.5 | `openapi.json` and `management-registry.json` re-vendored at `52d4219` (version and digest only; no generated file changed); every SDK's §27 check green and every PR's CI green on the new head: rust `9f191a8`, typescript `f3c2e1a`, python `f80289f`, go `bdb3b07`, java `b9975c1`, php `ac0ac25`, kotlin `e7ef0d7`, csharp `f34bab2`, c `59d501a`, cplusplus `d0b3847`, swift `7f69acf` |
+
+**Regression gate (W7.1).** Every exit code is the tool's own;
+`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_{DEV,TEST}_DEBUG=0`, default features
+(SAML on), a local SurrealDB container as in CI.
+
+*Part 1, on `70d5902`* (all waves merged; before W7.2 – W7.4): 204 steps, every
+one exit 0 — `cargo fmt --all --check`; `cargo clippy --workspace --all-targets
+-D warnings`; the SAML-off `cargo check`; every crate's tests (`axiam-db` and
+`axiam-api-rest` one test binary at a time: 74 and 107 binaries, plus their
+`--lib` and `--doc`); the three `client`-feature gRPC tests; the
+tenant-issuer-path conformance pair with `AXIAM__AUTH__TENANT_ISSUER_PATHS=true`.
+**6 925 passed, 0 failed, 38 ignored** (the live-service and soak tests the CI
+job also ignores).
+
+*Part 2, on `52d4219`* (after the R101-01 fix, 2.41.0 and the version bump):
+38 steps, every one exit 0 — `fmt`, workspace `clippy -D warnings`, the
+SAML-off check; the tests of the crates the three commits touch (`axiam-core`
+521, `axiam-amqp` 281 + 11 ignored, `axiam-scim` 227, `axiam-server` 305); the
+ten `scripts/check-*.py` checks and seven `--self-test`s,
+`gen-management-registry.py --check` / `--self-test`, `check-doc-links.sh`
+(503 links), `unittest` of `scripts/` (94) and `conformance/scripts/` (29); the
+frontend `npm ci`, `lint`, `tsc -b`, `typecheck:e2e`, `vitest --coverage`
+(117 files, 2 293 tests; lines 96.56 %, above the 96.1 threshold) and `build`;
+the website `npm ci`, `lint`, `tsc -b` and `build`. `cargo clean` afterwards.
+
+Not run: the CI `e2e` (Playwright) job, cargo-audit / cargo-deny, Trivy,
+coverage.yml's `cargo llvm-cov`, `check-sdk-artifact-drift.py` (red until the
+SDK PRs merge, by construction), `check-website-links.py` (the sandbox proxy
+refuses external hosts), `check-remediation-evidence.py` (shallow clone). The
+PR's CI runs them.
 
 ---
 

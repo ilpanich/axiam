@@ -40,7 +40,11 @@
 //! caller's **own** pending, unexpired requests so the console can show them (a
 //! badge on the user menu) and open the page above by the `request_id` each
 //! carries. It is the same surface under the same rules: a console sign-in only,
-//! a bucket of its own in `ciba_approval_per_min`, and no oracle — the list holds
+//! a bucket of its own in `ciba_approval_per_min` that is the signed-in user's
+//! (D-4, #599 — not the address's, which thirty tabs behind one egress address
+//! would share; on the shared counter, or on an in-process keyed limiter when
+//! `AXIAM__RATE_LIMIT__SHARED=off` — R101W3-04 — and a per-address backstop
+//! sized for NAT on the route), and no oracle — the list holds
 //! only the caller's rows, so another user's, a decided and an expired request
 //! are simply absent. `status=pending` is the one filter; any other value is a
 //! `400`, and an absent one means the same. The `auth_req_id` is not stored in
@@ -66,6 +70,8 @@
 //! ("confirm the transfer to J. Doe") can be personal data that has no business
 //! in an append-only log. The reader who needs it has the request row for as
 //! long as the row lives.
+
+use std::collections::HashMap;
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -255,9 +261,15 @@ pub struct CibaListQuery {
 /// The signed-in user's pending requests.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CibaPendingList {
-    /// Soonest expiry first, at most 50. Each entry is what
+    /// Oldest first (by creation), at most 50. Each entry is what
     /// `GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`.
     pub requests: Vec<CibaApprovalPage>,
+    /// How many pending, unexpired requests the caller has in all, the ones
+    /// `requests` leaves out included. Never less than `requests.len()`.
+    pub total_pending: u64,
+    /// `true` when `total_pending` is more than `requests` holds: the list is
+    /// the oldest 50 and the rest are waiting behind them.
+    pub truncated: bool,
 }
 
 /// List the signed-in user's own pending CIBA sign-in requests.
@@ -276,7 +288,7 @@ pub struct CibaPendingList {
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "The token is not a console sign-in's: no session row behind it, \
                                       or AXIAM minted it for an OAuth2 client"),
-        (status = 429, description = "The `ciba_approval_per_min` allowance of this route is spent"),
+        (status = 429, description = "The signed-in user's `ciba_approval_per_min` allowance of this route is spent"),
     ),
     security(("session" = [])),
 )]
@@ -286,6 +298,34 @@ pub async fn list_requests<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = user.principal_tenant_id;
+    // D-4 (#599): the bucket is the signed-in user's, not the address's, so
+    // thirty console tabs behind one egress address do not silence each
+    // other's badges and one user's tabs, wherever they sit, share the one
+    // allowance. Counted only for a console sign-in: a token AXIAM minted for
+    // a client names the same user, and must not be able to spend their bucket.
+    if user.minted_for_client() {
+        return session_required();
+    }
+    // R101W3-04: the shared counter admits everything when it is switched off
+    // (`AXIAM__RATE_LIMIT__SHARED=off`), and the route carries no per-address
+    // governor of the old kind, so the same allowance is spent from an
+    // in-process per-(tenant, user) limiter instead. The route's own per-address
+    // backstop (`server.rs`) covers what never reaches this line.
+    let per_min = state.rate_limit_cfg.ciba_approval_per_min;
+    let admitted = if state.shared_rate_limit.is_enabled() {
+        state.shared_rate_limit.check_at_human(
+            &list_bucket_key(tenant_id, user.user_id),
+            Utc::now(),
+            per_min,
+        )
+    } else {
+        state
+            .ciba_list_limiter
+            .check(tenant_id, user.user_id, per_min)
+    };
+    if !admitted {
+        return too_many_requests();
+    }
     let Ok(evidence) = session_evidence(&state, &user).await else {
         return server_error();
     };
@@ -298,25 +338,73 @@ pub async fn list_requests<C: Connection + Clone>(
             "message": "Only status=pending is supported.",
         }));
     }
-    let views = match state
+    let page = match state
         .oauth2
         .ciba_service
         .list_pending_for_approval(tenant_id, user.user_id)
         .await
     {
-        Ok(views) => views,
+        Ok(page) => page,
         Err(e) => {
             tracing::error!(error = %e, "the CIBA pending-request list failed");
             return server_error();
         }
     };
-    let mut requests = Vec::with_capacity(views.len());
-    for view in views {
-        requests.push(approval_page(&state, tenant_id, view, &amr).await);
+    let truncated = page.truncated();
+    let total_pending = page.total_pending;
+    // One lookup per distinct client, not one per entry (#599).
+    let mut names: HashMap<String, String> = HashMap::new();
+    for view in &page.requests {
+        if !names.contains_key(&view.client_id) {
+            let name = client_name(&state, tenant_id, &view.client_id).await;
+            names.insert(view.client_id.clone(), name);
+        }
     }
+    let requests = page
+        .requests
+        .into_iter()
+        .map(|view| {
+            let name = names
+                .get(&view.client_id)
+                .cloned()
+                .unwrap_or_else(|| view.client_id.clone());
+            approval_page_named(view, name, &amr)
+        })
+        .collect();
     HttpResponse::Ok()
         .append_header(("Cache-Control", "no-store"))
-        .json(CibaPendingList { requests })
+        .json(CibaPendingList {
+            requests,
+            total_pending,
+            truncated,
+        })
+}
+
+/// The list's bucket: one per (tenant, signed-in user).
+fn list_bucket_key(tenant_id: Uuid, user_id: Uuid) -> String {
+    format!("ciba_approval_list:{tenant_id}:{user_id}")
+}
+
+/// The `429` the neighbouring routes' limiters answer, so the list refuses in
+/// the shape they do.
+fn too_many_requests() -> HttpResponse {
+    HttpResponse::TooManyRequests()
+        .content_type(actix_web::http::header::ContentType::json())
+        .insert_header((actix_web::http::header::RETRY_AFTER, "60"))
+        .body(r#"{"error":"rate_limit_exceeded"}"#)
+}
+
+/// A client's display name; its `client_id` when it can no longer be read.
+async fn client_name<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    client_id: &str,
+) -> String {
+    state
+        .oauth2_client_repo
+        .get_by_client_id(tenant_id, client_id)
+        .await
+        .map_or_else(|_| client_id.to_owned(), |client| client.name)
 }
 
 /// What the page shows for `view`, given the authentication behind the
@@ -328,11 +416,18 @@ async fn approval_page<C: Connection + Clone>(
     view: CibaApprovalView,
     amr: &[Amr],
 ) -> CibaApprovalPage {
-    let client_name = state
-        .oauth2_client_repo
-        .get_by_client_id(tenant_id, &view.client_id)
-        .await
-        .map_or_else(|_| view.client_id.clone(), |client| client.name);
+    let name = client_name(state, tenant_id, &view.client_id).await;
+    approval_page_named(view, name, amr)
+}
+
+/// [`approval_page`] with the client's name already resolved — what the list
+/// uses, so that a client is looked up once per call however many of its
+/// requests are listed.
+fn approval_page_named(
+    view: CibaApprovalView,
+    client_name: String,
+    amr: &[Amr],
+) -> CibaApprovalPage {
     let requested_acr = view
         .acr_values
         .iter()

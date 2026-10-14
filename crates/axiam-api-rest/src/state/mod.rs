@@ -388,6 +388,11 @@ pub struct AppState<C: Connection + Clone> {
     /// Absence of the whole `AppState` (a misconfigured harness) makes the
     /// middleware fail open, exactly as a missing DB handle did before.
     pub shared_rate_limit: SharedRateLimitCounter,
+    /// R101W3-04: the in-process per-(tenant, user) limiter the CIBA pending
+    /// list spends when the shared counter is switched off
+    /// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything. One per
+    /// process, like the counter. See [`crate::ciba_list_limiter`].
+    pub ciba_list_limiter: Arc<crate::ciba_list_limiter::CibaListLimiter>,
     /// B3: the token endpoint serves every grant behind one route, so a
     /// per-grant limit cannot be route middleware — the grant is not knowable
     /// until the body has been read. The exchange arm reads its ceiling from
@@ -718,8 +723,20 @@ impl<C: Connection + Clone> AppState<C> {
         let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_cert_repo.clone());
         let service_account_repo = SurrealServiceAccountRepository::new(db.clone());
         let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), None);
+        // #613 (T-289): one tenant scope policy, shared by every service that
+        // reads a client's scopes, over the same `tenant_id -> org` cache the
+        // state below holds.
+        let tenant_org_cache: Arc<crate::tenant_org_cache::TenantOrgCache> =
+            Arc::new(Default::default());
+        let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
+            Arc::new(crate::scope_policy::SettingsScopePolicy::new(
+                tenant_repo.clone(),
+                SurrealSettingsRepository::new(db.clone()),
+                Arc::clone(&tenant_org_cache),
+            ));
         let authorize_service =
-            AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600);
+            AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600)
+                .with_scope_policy(Arc::clone(&scope_policy));
         let token_service = TokenService::new(
             oauth2_client_repo.clone(),
             service_account_repo.clone(),
@@ -743,7 +760,8 @@ impl<C: Connection + Clone> AppState<C> {
                 cert_repo.clone(),
                 ca_cert_repo.clone(),
             )),
-        );
+        )
+        .with_scope_policy(Arc::clone(&scope_policy));
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
         // different origin from the issuer is a phishing shape, and deriving
@@ -770,6 +788,12 @@ impl<C: Connection + Clone> AppState<C> {
             axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
             user_repo.clone(),
             auth_config.jwt_public_key_pem.clone(),
+            // #599: the per-(client, hint) cap counts in the shared rate-limit
+            // table, keyed under a key derived from the signing key.
+            axiam_oauth2::ciba::CibaHintCap::derived_from(
+                Arc::new(SurrealRateLimitBucketRepository::new(db.clone())),
+                auth_config.jwt_private_key_pem.as_bytes(),
+            ),
         )
         .with_signed_request_verifier(Arc::new(
             axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(
@@ -787,7 +811,8 @@ impl<C: Connection + Clone> AppState<C> {
             auth_config.clone(),
             2_592_000,
             verification_uri,
-        );
+        )
+        .with_scope_policy(Arc::clone(&scope_policy));
         // B3: the exchanged-token ceiling. The ordinary access-token lifetime
         // is the right default — an exchange is a narrowing, so it has no
         // business producing something longer-lived than a normal token — and
@@ -824,7 +849,7 @@ impl<C: Connection + Clone> AppState<C> {
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
-            tenant_org_cache: Arc::new(Default::default()),
+            tenant_org_cache,
             client_managed_by_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),
@@ -850,7 +875,7 @@ impl<C: Connection + Clone> AppState<C> {
             opaque_server: opaque_keys.map(OpaqueServer::new),
             http_client: reqwest::Client::new(),
             jwks_cache,
-            crypto_semaphore,
+            crypto_semaphore: Arc::clone(&crypto_semaphore),
             // Tests get a real, env-configured counter over the same
             // in-memory DB, so the shared-store layer behaves in tests
             // exactly as it does in production. A test that wants
@@ -858,6 +883,7 @@ impl<C: Connection + Clone> AppState<C> {
             // `SharedRateLimitCounter::without_flusher(..)` and drive
             // `flush_once()` itself.
             rate_limit_cfg: crate::config::rate_limit::RateLimitConfig::default(),
+            ciba_list_limiter: Arc::new(Default::default()),
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),
@@ -942,13 +968,16 @@ impl<C: Connection + Clone> AppState<C> {
                 assertion_replay_repo: assertion_replay_repo.clone(),
                 oidc_federation_service: None,
                 #[cfg(feature = "saml")]
+                // R101W2-01: signature verification under the same gate as
+                // every other CPU-heavy operation, as the composition root does.
                 saml_federation_service: SamlFederationService::new(
                     federation_config_repo,
                     federation_link_repo,
                     user_repo,
                     assertion_replay_repo,
                     reqwest::Client::new(),
-                ),
+                )
+                .with_crypto_semaphore(Arc::clone(&crypto_semaphore)),
             },
             // No encryption key in a test harness: the feature is then
             // unavailable, exactly as on a deployment without one, and a test

@@ -1019,7 +1019,7 @@ describe("SettingsPage — SAML IdP and SSF switches", () => {
     expect(await screen.findByText(/Disabled by the organization/)).toBeInTheDocument();
   });
 
-  it("switching a surface off sends it, with the other carried through at its effective value", async () => {
+  it("switching a surface off sends it, and leaves the one it did not touch out", async () => {
     withSurfaces(true, true, {});
     renderWithProviders(<SettingsPage />);
     await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
@@ -1029,7 +1029,68 @@ describe("SettingsPage — SAML IdP and SSF switches", () => {
     await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
     const [url, body] = apiMock.put.mock.calls[0];
     expect(url).toBe("/api/v1/settings");
-    expect(body).toMatchObject({ saml_idp_enabled: true, ssf_enabled: false });
+    expect(body.ssf_enabled).toBe(false);
+    // Untouched and not in the tenant's override: omitted, so it keeps inheriting.
+    expect(body).not.toHaveProperty("saml_idp_enabled");
+  });
+
+  it.each([
+    ["has no override of its own", null],
+    ["has an override that does not carry the switches", {}],
+  ])(
+    "an unrelated save while the organization has both surfaces off writes no `false` (tenant %s)",
+    async (_name, override) => {
+      withSurfaces(false, false, override as TenantSettingsOverride | null);
+      renderWithProviders(<SettingsPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+      await screen.findAllByText(/Disabled by the organization/);
+      await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+      await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+      const body = apiMock.put.mock.calls[0][1];
+      expect(body).not.toHaveProperty("saml_idp_enabled");
+      expect(body).not.toHaveProperty("ssf_enabled");
+    }
+  );
+
+  it("switching a surface back on removes the tenant's own 'off' instead of pinning 'on'", async () => {
+    withSurfaces(false, true, { saml_idp_enabled: false });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await screen.findByText(/Turned off for this tenant/);
+    await userEvent.click(screen.getByLabelText(SAML, { exact: false }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    // `true` is the inherited value: omitting it is what makes it follow the
+    // organization from here on.
+    const body = apiMock.put.mock.calls[0][1];
+    expect(body).not.toHaveProperty("saml_idp_enabled");
+    expect(body).not.toHaveProperty("ssf_enabled");
+  });
+
+  it("a switch toggled and toggled back is not treated as changed", async () => {
+    withSurfaces(true, true, null);
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByLabelText(SSF, { exact: false }));
+    await userEvent.click(screen.getByLabelText(SSF, { exact: false }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).not.toHaveProperty("ssf_enabled");
+  });
+
+  it("an override that already carries 'true' keeps it", async () => {
+    withSurfaces(true, true, { ssf_enabled: true });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const body = apiMock.put.mock.calls[0][1];
+    expect(body.ssf_enabled).toBe(true);
+    expect(body).not.toHaveProperty("saml_idp_enabled");
   });
 
   it("a save that touches neither switch still carries a tenant's own 'off' through", async () => {
@@ -1041,10 +1102,10 @@ describe("SettingsPage — SAML IdP and SSF switches", () => {
 
     await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
     // Omitted, this would mean "inherit" and put the organization's `true` back.
-    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
-      saml_idp_enabled: false,
-      ssf_enabled: true,
-    });
+    const body = apiMock.put.mock.calls[0][1];
+    expect(body.saml_idp_enabled).toBe(false);
+    // The tenant's override does not carry SSF, so it keeps inheriting.
+    expect(body).not.toHaveProperty("ssf_enabled");
   });
 
   it("cannot enable a surface the organization disabled", async () => {
@@ -1057,9 +1118,32 @@ describe("SettingsPage — SAML IdP and SSF switches", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
 
     await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
-    expect(apiMock.put.mock.calls[0][1]).toMatchObject({
-      saml_idp_enabled: false,
-      ssf_enabled: false,
+    // The organization's `false` is not copied into the tenant's override.
+    const body = apiMock.put.mock.calls[0][1];
+    expect(body).not.toHaveProperty("saml_idp_enabled");
+    expect(body).not.toHaveProperty("ssf_enabled");
+  });
+
+  it("while the tenant's override is unreadable, an effective 'off' is still sent rather than dropped", async () => {
+    withSurfaces(false, true, null);
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === "/api/v1/settings")
+        return Promise.resolve(
+          res({
+            ...settings,
+            oidc: { ...settings.oidc, saml_idp_enabled: false, ssf_enabled: true },
+          } as SecuritySettings)
+        );
+      return Promise.reject({ response: { status: 500 } });
     });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    const body = apiMock.put.mock.calls[0][1];
+    // Could be the tenant's own `false`; dropping it would switch the surface back on.
+    expect(body.saml_idp_enabled).toBe(false);
+    expect(body).not.toHaveProperty("ssf_enabled");
   });
 });

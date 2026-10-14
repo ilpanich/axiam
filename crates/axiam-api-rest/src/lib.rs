@@ -3,6 +3,7 @@
 
 pub mod authz;
 pub mod backchannel_logout;
+pub mod ciba_list_limiter;
 pub mod cimd;
 pub mod client_managed_by_cache;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod middleware;
 pub mod openapi;
 pub mod permissions;
 pub mod reactor_hooks;
+pub mod scope_policy;
 pub mod server;
 pub mod ssf_emitter;
 pub mod state;

@@ -33,18 +33,21 @@ issue closed — every finding in this register is now Fixed.
 
 **No open deferred finding of any severity. 1.0.0 ships with no known High security holes in this register (D-04).**
 
-**Re-verified 2026-10-10 against threat model 2.40.0, after the 1.0.0 waves**
-(`ThreatDragonModels/Axiam/Axiam.json`, 475 threats, 437 mitigated / 17 open /
-21 not applicable; the Security section of the website
+**Re-verified 2026-10-10 against threat model 2.40.0, after the 1.0.0 waves, and
+again 2026-10-14 against 2.41.0, after the 1.0.1 waves**
+(`ThreatDragonModels/Axiam/Axiam.json`, 477 threats, 443 mitigated / 19 open /
+15 not applicable; the Security section of the website
 publishes the same list). This register records findings: defects with a fix
 owed, and there are none open. The threat model is the wider list, and it is
-not empty of High: ten entries are still `Open` at High or Critical severity —
-T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216 (High), and T-148 and
-T-306 (Critical). None is a defect awaiting a fix in AXIAM's code. Eight are
+not empty of High: eleven entries are still `Open` at High or Critical severity —
+T-18, T-94, T-124, T-133, T-135, T-146, T-180, T-216 and T-450 (High), and T-148
+and T-306 (Critical). None is a defect awaiting a fix in AXIAM's code. Eight are
 residual risks the model assigns outside the application boundary — backups and
 snapshots (T-18, T-133), operator credentials on the cluster (T-124), the Vault
 and its unseal key (T-180, T-216), a key extracted from device firmware (T-94),
-a client secret committed to an integrator's repository (T-146); two sit in the
+a client secret committed to an integrator's repository (T-146), and, since 1.0.1,
+the EAP-TLS keys of the operator-run FreeRADIUS recipe, which travel under MD5
+obfuscation on plain UDP unless the operator uses RadSec (T-450); two sit in the
 SDK supply chain, where registry settings and two-factor publishing are outside
 this repository (T-135, T-148); and T-306, a leaked SAML signing key, is
 partly mitigated, with its exposure bounded by the two-year credential
@@ -52,7 +55,11 @@ lifetime. The shared-responsibility checklist is how an operator takes those
 over. The two High entries that were open when the 1.0.0 work began — T-102
 (a revoked certificate stays valid to a relying party that does not terminate at
 AXIAM; #565) and T-108 (an action succeeds while its audit write fails; #553) —
-are Mitigated.
+are Mitigated. The 2.41.0 count differs from the 2.40.0 one (475 threats, 437 /
+17 / 21) by T-476 and T-477, which entered Mitigated, by the four RADIUS entries
+the recipe moved from Not applicable to Mitigated (T-449, T-454, T-456, T-459),
+and by two more (T-450, T-462), which are Open for the recipe: the 1.0.1 review
+history is in `claude_dev/security-review-release-1.0.1-2026-10-14.md`.
 
 ---
 

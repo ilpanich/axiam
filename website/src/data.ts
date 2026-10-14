@@ -491,9 +491,80 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-0-1",
+    date: "2026-10-14",
+    dateShort: "Oct 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.0.1",
+    excerpt:
+      "AXIAM 1.0.1 is the first `1.0.x` patch: it closes the twenty-five Low and Informational findings of the 1.0.0 reviews and the two deferred items, adds a FreeRADIUS recipe for 802.1X with AXIAM-issued device certificates, and carries SDK contract 1.61. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "First 1.0.x patch. Twenty-seven issues closed, the threat model at 2.41.0, contract 1.61 in all eleven SDKs, and a FreeRADIUS recipe. No change breaks REST, gRPC, AMQP or the SDK contract. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.0.1 is" },
+      {
+        type: "p",
+        text: "1.0.0 promised that security fixes ship as `1.0.x` patches, and this is the first. It closes the twenty-five Low and Informational findings the 1.0.0 security reviews filed ([#590](https://github.com/ilpanich/axiam/issues/590) … [#614](https://github.com/ilpanich/axiam/issues/614)), and the two items 1.0.0 deferred by name: certificates bound to users ([#533](https://github.com/ilpanich/axiam/issues/533)) and SAML single logout tested against a real service provider ([#538](https://github.com/ilpanich/axiam/issues/538)). The release was four waves of fixes, a wave for the RADIUS recipe and one for the SDK contract, each wave ending in a security review of its own diff and the whole branch in a last one. Those reviews found one High and eight Medium findings in the release's own diff or in code it touched, and every one was fixed before the release; the High (a received SAML signature could name transforms that the verifier evaluated before it checked the signature) was in 1.0.0 too.",
+      },
+      { type: "h", text: "PKI, the revocation list and Vault" },
+      {
+        type: "p",
+        text: "The CRL route re-signs each CA's list on its own, decides whether anything changed from a light read and answers `503` rather than wait without a bound for a crypto permit ([#607](https://github.com/ilpanich/axiam/issues/607)). Every replica now serves the same bytes for the same state, and the list's `max-age` runs to its refresh, not to `nextUpdate`, so an intermediary can no longer keep the pre-revocation list for a day ([#608](https://github.com/ilpanich/axiam/issues/608)). The distribution point written into a certificate is the URL that was validated, and a base URL with credentials is refused ([#609](https://github.com/ilpanich/axiam/issues/609)). The four Vault clients never follow a redirect with the token attached ([#611](https://github.com/ilpanich/axiam/issues/611)); a revocation Vault refuses for good backs off instead of starving the sweep ([#603](https://github.com/ilpanich/axiam/issues/603)); and revoking a tenant signing CA under Vault custody reaches its parent's list there ([#612](https://github.com/ilpanich/axiam/issues/612)). One replica purges a tombstoned tenant, and endpoint-level revocation is tested over a real TLS connection ([#610](https://github.com/ilpanich/axiam/issues/610)). A `User` certificate now names its account, and deleting or erasing the account revokes it ([#533](https://github.com/ilpanich/axiam/issues/533)).",
+      },
+      { type: "h", text: "SAML and federation" },
+      {
+        type: "p",
+        text: "A byte-order mark no longer hides an XML declaration from the SP's plain-UTF-8 refusal ([#605](https://github.com/ilpanich/axiam/issues/605)), though a single leading mark is still accepted because Microsoft Entra ID's metadata starts with one. The SHA-1 escape hatch admits SHA-1 and the SHA-2 family, not every algorithm xmlsec knows ([#606](https://github.com/ilpanich/axiam/issues/606)); a received signature may use only `enveloped-signature` and the canonicalisation family; and the verifications run off the request workers. The federation flow routes are rate limited ([#614](https://github.com/ilpanich/axiam/issues/614)), federation no longer sends a client secret or an access token through a redirect ([#591](https://github.com/ilpanich/axiam/issues/591)), and replacing a SAML configuration's assertion certificate is audited ([#611](https://github.com/ilpanich/axiam/issues/611)). OIDC back-channel logout is delivered through the one-hop SSRF guard. Single logout is now tested in both directions on both bindings against Keycloak, with no AXIAM defect found ([#538](https://github.com/ilpanich/axiam/issues/538)). The wave also found a use-after-free in `libxml-rs` 0.3.3 that made valid documents fail intermittently; AXIAM no longer passes the encoding name that triggers it.",
+      },
+      { type: "h", text: "OAuth2 and tenant lifecycle" },
+      {
+        type: "p",
+        text: "The device grant asks whether the account may still sign in before it mints ([#604](https://github.com/ilpanich/axiam/issues/604)). A tombstoned tenant's clients no longer authenticate ([#601](https://github.com/ilpanich/axiam/issues/601)). A scope a tenant withdraws from `dcr_allowed_scopes` is gone from its self-registered clients at their next request ([#613](https://github.com/ilpanich/axiam/issues/613)), which also withholds scopes an administrator put on such a client; the CHANGELOG has the upgrade note. A tenant purge deletes only the audit rows the export holds ([#602](https://github.com/ilpanich/axiam/issues/602)), and a client may make three CIBA requests for one hint in ten minutes ([#599](https://github.com/ilpanich/axiam/issues/599)). Deleting a client voids its device grants and CIBA requests.",
+      },
+      { type: "h", text: "Durability, operations, the console and CI" },
+      {
+        type: "p",
+        text: "The GDPR records' dead letter is off the request worker, durable and owner-only ([#594](https://github.com/ilpanich/axiam/issues/594)), and its lines carry the time and the reason ([#595](https://github.com/ilpanich/axiam/issues/595)). A refused in-process enqueue no longer writes on the producer's path ([#596](https://github.com/ilpanich/axiam/issues/596)), and SCIM reconciliation paces itself and reaches a target's links before its users in the minimal profile. An orderly stop no longer waits without a bound for the cleanup task, and the stop after a lost lease fits its backstop ([#598](https://github.com/ilpanich/axiam/issues/598)). The console's tenant settings page stops writing an inherited `false` into an override ([#600](https://github.com/ilpanich/axiam/issues/600)), and the SSF streams page stops reverting a receiver's change ([#590](https://github.com/ilpanich/axiam/issues/590)). The conformance workflow validates its image input ([#592](https://github.com/ilpanich/axiam/issues/592)) and its gate sees a newly parked module ([#593](https://github.com/ilpanich/axiam/issues/593)). The open-register wording [#597](https://github.com/ilpanich/axiam/issues/597) asked for was already correct in the 1.0.0 model; it was checked again.",
+      },
+      { type: "h", text: "A FreeRADIUS recipe, not a RADIUS server" },
+      {
+        type: "p",
+        text: "AXIAM still speaks no RADIUS. What 1.0.1 ships is a guide, a Compose file that references the upstream FreeRADIUS image and carries only configuration, and an end-to-end test that drives `eapol_test` through issuing a `Device` certificate, binding it, an accepted device, a wrong CA, another tenant's device and a revoked certificate ([#563](https://github.com/ilpanich/axiam/issues/563)). FreeRADIUS terminates RADIUS and EAP-TLS; AXIAM is the CA and publishes the list the recipe consumes. The guide states what it costs: on plain UDP the EAP-TLS keys travel under MD5 obfuscation unless RadSec is used, and a revoked device is admitted until FreeRADIUS has read the new list, at least 300 seconds in the shipped configuration. Those two are recorded as open threats (T-450 and T-462), not hidden as not applicable. The `rlm_rest` authorize endpoint stays unscheduled.",
+      },
+      { type: "h", text: "Contract 1.61 and the SDKs" },
+      {
+        type: "p",
+        text: "Contract 1.61 is additive. It records `Certificate.user_id` and the optional `user_id` on certificate issue and CSR signing, `expected_updated_at` on the SSF stream update with the `409` it carries and the three meanings of `events_requested`, and `total_pending` and `truncated` on the CIBA pending list, plus informative notes on what else 1.0.1 changed. No operation is added. All eleven SDKs port it; each lists what changed in its own `[1.0.1]` changelog entry. Check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "The threat model" },
+      {
+        type: "p",
+        text: "Model 2.41.0 holds **477 threats: 443 mitigated, 19 open, 15 not applicable**. T-476 (a Vault redirect carries the token off-host) and T-477 (a received signature chooses what the verifier evaluates) are new and mitigated; four RADIUS entries move from not applicable to mitigated with the end-to-end test as their evidence, two to open; and more than twenty entries carry dated corrections in their own text.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.0.1]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v94 to v98 at startup, additively. The behaviour changes it calls out: scopes an administrator added to a self-registered client outside `dcr_allowed_scopes` are no longer served; `AXIAM__PKI__CRL_BASE_URL` with credentials, and a Vault address or an IdP endpoint that redirects, are refused; a SAML signature may use only `enveloped-signature` and the canonicalisation family; the federation flow routes share the browser rate-limit bucket; the dead-letter file is `0600`; the Vault token needs `update` on `pki/revoke`; and the stop adds up to 37 seconds inside a 40-second grace period, which an orchestrator that sets its own must match.",
+      },
+      { type: "h", text: "What is not in 1.0.1" },
+      {
+        type: "p",
+        text: "The OpenID Foundation submissions for Basic OP and FAPI 2.0 ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open: AXIAM is not certified, and every conformance figure on this site is a self-run. Benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) is not done; the Benchmarks page's numbers are run 5. The FreeRADIUS-backed `rlm_rest` authorize endpoint (D4 of [#563](https://github.com/ilpanich/axiam/issues/563)) is not built, and that issue stays open for it. The reviews filed their Low and Informational findings as [#615](https://github.com/ilpanich/axiam/issues/615) … [#656](https://github.com/ilpanich/axiam/issues/656), all on `1.0.x`; among them are the unbounded wait of the SAML verifications on the crypto semaphore ([#654](https://github.com/ilpanich/axiam/issues/654)), a cleanup cut that holds a tenant purge for an hour ([#655](https://github.com/ilpanich/axiam/issues/655)) and a contract sentence on the CIBA list's per-address backstop ([#656](https://github.com/ilpanich/axiam/issues/656)).",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.0.1 is a patch of the first stable release: REST, gRPC, AMQP and the SDK contract are under semantic versioning, and security fixes ship in `1.0.x`. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "axiam-1-0-0",
     date: "2026-10-10",
-    dateShort: "2026-MM",
+    dateShort: "Oct 2026",
     tag: "Release",
     author: "The AXIAM team",
     title: "AXIAM 1.0.0",

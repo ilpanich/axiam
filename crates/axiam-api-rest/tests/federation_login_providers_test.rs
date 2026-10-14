@@ -1479,6 +1479,106 @@ async fn a_token_response_that_is_not_json_is_a_failure() {
     out.assert_no_session();
 }
 
+// ---------------------------------------------------------------------------
+// A credential-bearing call never follows a redirect (R1W2-04, T-112)
+// ---------------------------------------------------------------------------
+
+/// A second loopback server standing for "any public HTTPS host the IdP's
+/// endpoint redirects to". It answers 200 to everything, so a redirect that
+/// *was* followed would complete a login rather than fail.
+async fn redirect_target() -> MockServer {
+    let elsewhere = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "stolen", "sub": "u", "email": "e@example.test",
+            "email_verified": true,
+        })))
+        .mount(&elsewhere)
+        .await;
+    elsewhere
+}
+
+async fn assert_nothing_arrived(elsewhere: &MockServer) {
+    let seen = elsewhere
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert!(
+        seen.is_empty(),
+        "the redirect target received {} request(s): the client secret, the code, the \
+         PKCE verifier or the bearer followed the redirect",
+        seen.len()
+    );
+}
+
+#[actix_rt::test]
+async fn a_token_endpoint_that_redirects_is_refused_and_the_target_sees_nothing() {
+    let elsewhere = redirect_target().await;
+    let target = elsewhere.uri();
+    let out = oauth2_login_against("oa2-tok-307", "generic_oauth2", async |idp| {
+        mount_token(
+            idp,
+            ResponseTemplate::new(307).insert_header("location", format!("{target}/collect")),
+        )
+        .await;
+    })
+    .await;
+    out.assert_no_session();
+    assert!(
+        out.body.to_string().contains("redirect not followed"),
+        "the refusal must say why, or an operator chases the wrong thing"
+    );
+    assert_nothing_arrived(&elsewhere).await;
+}
+
+#[actix_rt::test]
+async fn a_userinfo_endpoint_that_redirects_is_refused_and_the_target_sees_nothing() {
+    let elsewhere = redirect_target().await;
+    let target = elsewhere.uri();
+    let out = oauth2_login_against("oa2-ui-307", "generic_oauth2", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", format!("{target}/collect")),
+            )
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+    assert!(out.body.to_string().contains("redirect not followed"));
+    assert_nothing_arrived(&elsewhere).await;
+}
+
+#[actix_rt::test]
+async fn a_github_email_endpoint_that_redirects_is_refused_and_the_target_sees_nothing() {
+    let elsewhere = redirect_target().await;
+    let target = elsewhere.uri();
+    let out = oauth2_login_against("oa2-gh-307", "github", async |idp| {
+        mount_ok_token(idp).await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": 1, "login": "octocat", "email": Value::Null})),
+            )
+            .mount(idp)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/emails"))
+            .respond_with(
+                ResponseTemplate::new(301).insert_header("location", format!("{target}/collect")),
+            )
+            .mount(idp)
+            .await;
+    })
+    .await;
+    out.assert_no_session();
+    assert!(out.body.to_string().contains("redirect not followed"));
+    assert_nothing_arrived(&elsewhere).await;
+}
+
 /// An access token of spaces is not an access token. Catching it here is the
 /// difference between one clear failure and an unauthenticated userinfo call.
 #[actix_rt::test]

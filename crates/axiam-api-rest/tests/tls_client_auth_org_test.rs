@@ -325,6 +325,7 @@ async fn an_axiam_issued_leaf_from_another_tenant_is_refused_for_tls_client_auth
                         validity_days: 30,
                         metadata: None,
                         subject_alt_names: vec![],
+                        user_id: None,
                     },
                     None,
                     &[],

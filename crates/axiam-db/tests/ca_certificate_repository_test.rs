@@ -11,6 +11,8 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
 
+mod common;
+
 type Db = Surreal<surrealdb::engine::local::Db>;
 
 async fn setup() -> (Db, Uuid) {
@@ -355,4 +357,206 @@ async fn flagging_a_missing_ca_is_not_found() {
             .await
             .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// #612 — a revoked subordinate CA forwarded to its parent's list in Vault
+// ---------------------------------------------------------------------------
+
+/// A CA row of `custody` under `parent`, with a fingerprint of its own.
+fn child_ca(
+    organization_id: Uuid,
+    parent: Option<Uuid>,
+    custody: axiam_core::ca_keys::CaKeyCustody,
+) -> StoreCaCertificate {
+    let id = Uuid::new_v4();
+    StoreCaCertificate {
+        id,
+        tenant_id: Some(Uuid::new_v4()),
+        parent_ca_id: parent,
+        fingerprint: format!("sha256:{id}"),
+        encrypted_private_key: None,
+        key_custody: custody,
+        ..sample_ca(organization_id)
+    }
+}
+
+/// The CA rows due at `now`, by id.
+async fn due_ids(
+    repo: &SurrealCaCertificateRepository<surrealdb::engine::local::Db>,
+    now: chrono::DateTime<Utc>,
+) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = repo
+        .list_due_vault_forwards(now, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.ca.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn a_revoked_ca_vault_signed_is_due_until_it_is_forwarded() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    let (db, org_id) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+
+    let parent = repo
+        .create(child_ca(org_id, None, CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    let vault_child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    let csr_child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::External))
+        .await
+        .unwrap();
+    // Signed in AXIAM before the parent's key moved into Vault: Vault never
+    // recorded it, so there is nothing to forward.
+    let local_child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::Database))
+        .await
+        .unwrap();
+    let active_child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    let mut expired = child_ca(org_id, Some(parent.id), CaKeyCustody::VaultPki);
+    expired.not_before = Utc::now() - Duration::days(30);
+    expired.not_after = Utc::now() - Duration::days(1);
+    let expired_child = repo.create(expired).await.unwrap();
+    // A revoked organization CA has no parent whose list could name it.
+    let root = repo
+        .create(child_ca(org_id, None, CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    for ca in [
+        &vault_child,
+        &csr_child,
+        &local_child,
+        &expired_child,
+        &root,
+    ] {
+        repo.revoke(org_id, ca.id).await.unwrap();
+    }
+
+    let mut expected = vec![vault_child.id, csr_child.id];
+    expected.sort();
+    assert_eq!(due_ids(&repo, Utc::now()).await, expected);
+    let _ = active_child;
+
+    // Forwarded: out of the list, and the first time stands on a repeat.
+    repo.mark_revocation_forwarded(org_id, vault_child.id)
+        .await
+        .unwrap();
+    repo.mark_revocation_forwarded(org_id, vault_child.id)
+        .await
+        .unwrap();
+    assert_eq!(due_ids(&repo, Utc::now()).await, [csr_child.id]);
+    // Only a revoked CA of the organization can be marked.
+    assert!(
+        repo.mark_revocation_forwarded(org_id, active_child.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        repo.mark_revocation_forwarded(Uuid::new_v4(), csr_child.id)
+            .await
+            .is_err()
+    );
+
+    // A revoked parent's issuers are gone from Vault: nothing left to tell.
+    repo.revoke(org_id, parent.id).await.unwrap();
+    assert!(due_ids(&repo, Utc::now()).await.is_empty());
+}
+
+#[tokio::test]
+async fn of_concurrent_ca_claims_exactly_one_wins_and_a_refusal_backs_the_row_off() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    // The engine production runs: `kv-mem` may admit two winners (common/).
+    let db = common::serialising_db().await;
+    let org_id = Uuid::new_v4();
+    let repo = SurrealCaCertificateRepository::new(db.handle());
+    let parent = repo
+        .create(child_ca(org_id, None, CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    let child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    repo.revoke(org_id, child.id).await.unwrap();
+
+    let due = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!((due[0].attempts, due[0].next_attempt_at), (0, None));
+
+    // Another organization's claim matches nothing.
+    let lease = Utc::now() + Duration::minutes(2);
+    assert!(
+        !repo
+            .claim_vault_forward(Uuid::new_v4(), child.id, None, lease)
+            .await
+            .unwrap()
+    );
+    // Eight replicas that read the same row: one claim wins.
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let repo = repo.clone();
+        let id = child.id;
+        tasks.push(tokio::spawn(async move {
+            repo.claim_vault_forward(org_id, id, None, lease)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut won = 0;
+    for task in tasks {
+        won += usize::from(task.await.unwrap());
+    }
+    assert_eq!(won, 1, "exactly one of eight concurrent claims wins");
+    // A stale read wins nothing, and the claimed row is not due during the lease.
+    assert!(
+        !repo
+            .claim_vault_forward(org_id, child.id, None, lease)
+            .await
+            .unwrap()
+    );
+    assert!(due_ids(&repo, Utc::now()).await.is_empty());
+
+    // A refusal: one attempt, a bounded reason, due again after its backoff.
+    let next = Utc::now() + Duration::minutes(1);
+    repo.record_vault_forward_failure(org_id, child.id, 1, next, &"x".repeat(1_000))
+        .await
+        .unwrap();
+    // Another organization's write changes nothing.
+    repo.record_vault_forward_failure(Uuid::new_v4(), child.id, 99, Utc::now(), "no")
+        .await
+        .unwrap();
+    assert!(due_ids(&repo, Utc::now()).await.is_empty());
+    let later = repo
+        .list_due_vault_forwards(Utc::now() + Duration::minutes(5), 10)
+        .await
+        .unwrap();
+    assert_eq!(later.len(), 1);
+    assert_eq!(later[0].attempts, 1);
+    assert_eq!(later[0].last_error.as_deref().map(str::len), Some(256));
+    assert_eq!(repo.count_vault_forwards_failing(1).await.unwrap(), 1);
+    assert_eq!(repo.count_vault_forwards_failing(2).await.unwrap(), 0);
+
+    // A forwarded row is neither claimable nor counted.
+    repo.mark_revocation_forwarded(org_id, child.id)
+        .await
+        .unwrap();
+    assert!(
+        !repo
+            .claim_vault_forward(org_id, child.id, later[0].next_attempt_at, lease)
+            .await
+            .unwrap()
+    );
+    assert_eq!(repo.count_vault_forwards_failing(1).await.unwrap(), 0);
 }

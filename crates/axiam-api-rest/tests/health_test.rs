@@ -207,6 +207,7 @@ fn request_audit(recent_loss: bool) -> RequestAuditHealth {
         dead_letter_full: false,
         last_loss_at: Some("2026-10-09T12:00:00+00:00".into()),
         recent_loss,
+        outbound_abandoned_dropped: 5,
     }
 }
 
@@ -229,6 +230,8 @@ async fn jobs_reports_the_request_audit_counters() {
     assert_eq!(a["dead_letter_configured"], true);
     assert_eq!(a["dead_letter_full"], false);
     assert_eq!(a["recent_loss"], false);
+    // R101W4-06: shed outbound refusal rows are reported apart from `dropped`.
+    assert_eq!(a["outbound_abandoned_dropped"], 5);
     assert_eq!(body["status"], "ok", "a past loss alone is not degraded");
 }
 

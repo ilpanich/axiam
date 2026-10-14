@@ -483,6 +483,273 @@ async fn deleting_a_client_revokes_its_refresh_tokens() {
     );
 }
 
+/// Seed a device grant for `client_id`, approved by `user_id`, and return the
+/// raw device code. `interval_secs: 0` so a test may poll straight away.
+async fn approved_device_grant(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    client_id: &str,
+    user_id: Uuid,
+) -> String {
+    use axiam_core::models::oauth2_client::CreateDeviceGrant;
+    use axiam_core::repository::DeviceGrantRepository;
+    use axiam_oauth2::device::{generate_user_code, hash_device_code, normalize_user_code};
+
+    let repo = axiam_db::repository::SurrealDeviceGrantRepository::new(db.clone());
+    let device_code = format!("dc-{}", Uuid::new_v4().simple());
+    let user_code = normalize_user_code(&generate_user_code());
+    repo.create(CreateDeviceGrant {
+        tenant_id,
+        client_id: client_id.to_owned(),
+        device_code_hash: hash_device_code(&device_code),
+        user_code: user_code.clone(),
+        scopes: vec!["openid".into()],
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        interval_secs: 0,
+        resource: None,
+    })
+    .await
+    .unwrap();
+    assert!(
+        repo.decide(tenant_id, &user_code, true, user_id)
+            .await
+            .unwrap()
+    );
+    device_code
+}
+
+/// Poll the token endpoint with a device code: `(status, body)`.
+macro_rules! poll_device {
+    ($app:expr, $tenant_id:expr, $device_code:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr("127.0.0.1:12345".parse().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code\
+                 &device_code={}",
+                $device_code
+            ))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+/// **#610 (d).** Deleting a client voids its device grants and CIBA requests.
+///
+/// The device poll authenticates nothing but the device code, so an approved
+/// grant outlives its client — and, for a `managed_by: cimd` client whose
+/// `client_id` names its metadata document, redeems again once the next request
+/// re-materialises the row. The pending CIBA request would meanwhile stay
+/// listed for its user naming a client that is gone.
+///
+/// A grant of another client in the same tenant is the control: it still
+/// redeems, so the poll below is refused for the right reason.
+#[actix_rt::test]
+async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
+    use axiam_core::models::ciba::{CibaDeliveryMode, CreateCibaRequest};
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    };
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+    use axiam_core::repository::{
+        CibaRequestRepository, DeviceGrantRepository, OAuth2ClientRepository,
+    };
+
+    const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Two device-grant clients, made through the API.
+    let mut ids = Vec::new();
+    for name in ["Doomed TV", "Surviving TV"] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oauth2-clients")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({
+                "name": name,
+                "redirect_uris": [],
+                "grant_types": [DEVICE_GRANT],
+                "scopes": ["openid"]
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        ids.push((
+            body["id"].as_str().unwrap().to_owned(),
+            body["client_id"].as_str().unwrap().to_owned(),
+        ));
+    }
+    let (doomed_id, doomed_client) = ids[0].clone();
+    let (_, surviving_client) = ids[1].clone();
+
+    let doomed_code = approved_device_grant(&db, tenant_id, &doomed_client, user_id).await;
+    let surviving_code = approved_device_grant(&db, tenant_id, &surviving_client, user_id).await;
+
+    let ciba_repo = axiam_db::repository::SurrealCibaRequestRepository::new(db.clone(), None);
+    let pending = ciba_repo
+        .create(CreateCibaRequest {
+            tenant_id,
+            client_id: doomed_client.clone(),
+            auth_req_id_hash: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            binding_message: None,
+            acr_values: Vec::new(),
+            resource: None,
+            delivery_mode: CibaDeliveryMode::Poll,
+            ping: None,
+            interval_secs: 5,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ciba_repo
+            .list_pending_for_user(tenant_id, user_id, 10)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the request is on the approval surface before the delete"
+    );
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/oauth2-clients/{doomed_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    // The pending CIBA request is gone, and the approval surface lists nothing.
+    assert!(
+        ciba_repo
+            .get_by_id(tenant_id, pending.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a deleted client's CIBA request is deleted"
+    );
+    assert!(
+        ciba_repo
+            .list_pending_for_user(tenant_id, user_id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        axiam_db::repository::SurrealDeviceGrantRepository::new(db.clone())
+            .get_by_device_code_hash(
+                tenant_id,
+                &axiam_oauth2::device::hash_device_code(&doomed_code)
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a deleted client's device grant is deleted"
+    );
+
+    // Even before anything is re-materialised the poll authenticates no client,
+    // so the grant is what refuses it.
+    let before_refresh = refresh_token_count(&db).await;
+    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "{body}"
+    );
+
+    // The client's metadata document is fetched again: the same `client_id`
+    // names a row once more (the CIMD upsert is what the authorize path calls).
+    let rematerialised = axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .upsert_cimd_client(
+            &doomed_client,
+            CreateOAuth2Client {
+                tenant_id,
+                name: "Doomed TV".into(),
+                redirect_uris: vec![],
+                grant_types: vec![DEVICE_GRANT.into()],
+                scopes: vec!["openid".into()],
+                post_logout_redirect_uris: Vec::new(),
+                backchannel_logout_uri: None,
+                require_par: false,
+                profile: ClientProfile::Standard,
+                token_endpoint_auth_method: ClientAuthMethod::None,
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                self_signed_tls_client_auth_thumbprints: vec![],
+                tls_client_certificate_bound_access_tokens: false,
+                jwks: None,
+                jwks_uri: None,
+                dpop_bound_access_tokens: false,
+                dpop_require_nonce: false,
+                authn_request_params: AuthnRequestParamsMode::Ignore,
+                browser_sso: false,
+                allowed_resources: Vec::new(),
+                managed_by: ManagedBy::Cimd,
+                ciba: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rematerialised.client_id, doomed_client);
+    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "an approved grant must not redeem against the re-materialised client: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "{body}");
+    assert_eq!(
+        refresh_token_count(&db).await,
+        before_refresh,
+        "no tokens were minted"
+    );
+
+    // The control: another client's approved grant is untouched.
+    let (status, body) = poll_device!(app, tenant_id, surviving_code);
+    assert_eq!(status, 200, "{body}");
+    assert!(body["access_token"].as_str().is_some_and(|t| !t.is_empty()));
+}
+
+/// Rows in `oauth2_refresh_token`: "nothing minted" is asserted against it.
+async fn refresh_token_count(db: &Surreal<TestDb>) -> u64 {
+    use surrealdb::types::SurrealValue;
+
+    let mut result = db
+        .query("SELECT count() AS c FROM oauth2_refresh_token GROUP ALL")
+        .await
+        .unwrap();
+    #[derive(SurrealValue)]
+    struct Count {
+        c: i64,
+    }
+    let rows: Vec<Count> = result.take(0).unwrap();
+    rows.first().map_or(0, |r| r.c as u64)
+}
+
 #[actix_rt::test]
 async fn create_oauth2_client_rejects_empty_redirect_uris() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -1367,5 +1634,242 @@ async fn a_patch_cannot_make_a_client_fapi2_and_client_secret_basic_at_once() {
         test::call_service(&app, req).await.status().as_u16(),
         400,
         "switching a fapi2 client to client_secret_basic must be refused"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R101W2-04 — `backchannel_logout_uri` is registered against the outbound
+// endpoint rules. The logout token it receives is a signed, session-naming
+// credential, delivered through `guarded_fetch_no_redirect`.
+// ---------------------------------------------------------------------------
+
+/// Addresses and shapes the registration must refuse. `http://localhost/…`
+/// and `http://127.0.0.1/…` are admitted by the redirect-URI rule but could
+/// never be delivered (delivery requires `https` and refuses loopback), so they
+/// are refused here too.
+const REFUSED_BACKCHANNEL_URIS: &[&str] = &[
+    "https://10.0.0.8/logout",
+    "https://172.16.4.2/logout",
+    "https://192.168.1.10/logout",
+    "https://127.0.0.1/logout",
+    "https://[::1]/logout",
+    "https://localhost/logout",
+    "https://rp.internal/logout",
+    "https://169.254.169.254/latest/meta-data/",
+    "https://[fd00:ec2::254]/logout",
+    "https://[::ffff:169.254.169.254]/logout",
+    "http://rp.example.com/logout",
+    "http://localhost:3000/logout",
+    "http://127.0.0.1:8080/logout",
+    "/relative/logout",
+    "not a url",
+    "https://rp.example.com/logout#frag",
+    "https://user:pw@rp.example.com/logout",
+];
+
+async fn post_client_with_backchannel(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    uri: &str,
+) -> actix_web::dev::ServiceResponse {
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "RP",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "backchannel_logout_uri": uri,
+        }))
+        .to_request();
+    test::call_service(app, req).await
+}
+
+async fn put_backchannel(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    id: &str,
+    uri: &str,
+) -> actix_web::dev::ServiceResponse {
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "backchannel_logout_uri": uri }))
+        .to_request();
+    test::call_service(app, req).await
+}
+
+async fn stored_backchannel_uri(db: &Surreal<TestDb>, tenant_id: Uuid, id: &str) -> Option<String> {
+    use axiam_core::repository::OAuth2ClientRepository;
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_id(tenant_id, id.parse().unwrap())
+        .await
+        .unwrap()
+        .backchannel_logout_uri
+}
+
+#[actix_rt::test]
+async fn create_refuses_a_backchannel_logout_uri_at_a_non_public_address_or_with_a_bad_shape() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for uri in REFUSED_BACKCHANNEL_URIS {
+        let resp = post_client_with_backchannel(&app, &token, uri).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "{uri} must be refused on create"
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(
+            body.to_string().contains("backchannel_logout_uri"),
+            "the refusal names the field for {uri}: {body}"
+        );
+    }
+}
+
+#[actix_rt::test]
+async fn create_accepts_a_public_https_backchannel_logout_uri_and_treats_empty_as_none() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let resp =
+        post_client_with_backchannel(&app, &token, "https://rp.example.com/logout?x=1").await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        stored_backchannel_uri(&db, tenant_id, body["id"].as_str().unwrap())
+            .await
+            .as_deref(),
+        Some("https://rp.example.com/logout?x=1")
+    );
+
+    let resp = post_client_with_backchannel(&app, &token, "").await;
+    assert_eq!(resp.status().as_u16(), 201, "an empty string is `none`");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        stored_backchannel_uri(&db, tenant_id, body["id"].as_str().unwrap()).await,
+        None
+    );
+}
+
+#[actix_rt::test]
+async fn update_refuses_a_backchannel_logout_uri_at_a_non_public_address_and_keeps_the_stored_one()
+{
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let resp = post_client_with_backchannel(&app, &token, "https://rp.example.com/logout").await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    for uri in REFUSED_BACKCHANNEL_URIS {
+        let resp = put_backchannel(&app, &token, id, uri).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "{uri} must be refused on update"
+        );
+    }
+    assert_eq!(
+        stored_backchannel_uri(&db, tenant_id, id).await.as_deref(),
+        Some("https://rp.example.com/logout"),
+        "a refused update changes nothing"
+    );
+
+    // A valid replacement is accepted, and an empty string clears it.
+    let resp = put_backchannel(&app, &token, id, "https://rp2.example.com/logout").await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        stored_backchannel_uri(&db, tenant_id, id).await.as_deref(),
+        Some("https://rp2.example.com/logout")
+    );
+    let resp = put_backchannel(&app, &token, id, "").await;
+    assert_eq!(resp.status().as_u16(), 200, "clearing is not validated");
+    assert_eq!(stored_backchannel_uri(&db, tenant_id, id).await, None);
+}
+
+/// A row registered under 1.0.0 may hold any value. An update that does not
+/// touch the field leaves it as it is (no backfill, no re-validation); delivery
+/// is what refuses it (`backchannel_logout`'s unit tests).
+#[actix_rt::test]
+async fn an_update_that_does_not_touch_the_backchannel_logout_uri_leaves_a_legacy_value_alone() {
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    };
+    use axiam_core::repository::OAuth2ClientRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (legacy, _) = axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .create(CreateOAuth2Client {
+            tenant_id,
+            name: "legacy".into(),
+            redirect_uris: vec!["https://app.example.com/callback".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: Some("http://169.254.169.254/latest".into()),
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
+            ciba: Default::default(),
+        })
+        .await
+        .unwrap();
+    let id = legacy.id.to_string();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "name": "renamed" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+    assert_eq!(
+        stored_backchannel_uri(&db, tenant_id, &id).await.as_deref(),
+        Some("http://169.254.169.254/latest"),
+        "no backfill: the stored row is not rewritten"
     );
 }

@@ -14,6 +14,10 @@
 #      this app's own /backchannel-logout receiver as a side effect of
 #      ending the session; proven via the debug endpoint
 #      /internal/backchannel-log (AXIAM_ENABLE_DEBUG_ENDPOINT=true).
+#      ONLY when RP_BACKCHANNEL_URL is `https://` (see below): AXIAM delivers
+#      through its SSRF guard, which requires https and refuses loopback and
+#      private addresses, and this app serves plain http. Otherwise this step is
+#      replaced by the registration-time proof that AXIAM refuses the URI.
 #
 # Usage: AXIAM_URL=http://localhost:8090 ./smoke-test.sh
 # (run from this directory, after `npm ci && npm run build`)
@@ -55,6 +59,16 @@ RP_URL="http://localhost:${RP_PORT}"
 # share a network namespace (running the server with `just run`, or any
 # non-containerised local repro).
 RP_BACKCHANNEL_URL="${RP_BACKCHANNEL_URL:-${RP_URL}}"
+# Since R101W2-04 (1.0.1) AXIAM refuses to register a `backchannel_logout_uri`
+# that is not an https URL naming a public host, and delivers through the same
+# no-redirect SSRF guard its webhooks use. This app serves plain http on a
+# loopback/host-gateway address, so by default the delivery leg cannot run: the
+# script proves the refusal instead, and runs the delivery leg only when the
+# operator supplies an https receiver AXIAM can reach.
+BACKCHANNEL_DELIVERY=""
+case "${RP_BACKCHANNEL_URL}" in
+  https://*) BACKCHANNEL_DELIVERY=1 ;;
+esac
 
 RUN_ID="$(date +%s)-$$"
 JAR="$(mktemp)"
@@ -130,10 +144,24 @@ rm -f "${HEADERS}"
 TENANT_ID=$(printf '%s' "${LOGIN_BODY}" | jq -r '.user.tenant_id')
 [ "${TENANT_ID}" != "null" ] || fail "login did not return a tenant_id"
 
-log "registering this app as an AXIAM OAuth2 client (back-channel uri: ${RP_BACKCHANNEL_URL}/backchannel-logout)"
-CLIENT_JSON=$(api_expect POST "${ADMIN_CSRF}" /api/v1/oauth2-clients \
-  "{\"name\":\"b5-rp-logout-app-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scopes\":[\"openid\",\"profile\"],\"post_logout_redirect_uris\":[\"${RP_URL}/\"],\"backchannel_logout_uri\":\"${RP_BACKCHANNEL_URL}/backchannel-logout\"}" \
-  201)
+if [ -n "${BACKCHANNEL_DELIVERY}" ]; then
+  log "registering this app as an AXIAM OAuth2 client (back-channel uri: ${RP_BACKCHANNEL_URL}/backchannel-logout)"
+  CLIENT_JSON=$(api_expect POST "${ADMIN_CSRF}" /api/v1/oauth2-clients \
+    "{\"name\":\"b5-rp-logout-app-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scopes\":[\"openid\",\"profile\"],\"post_logout_redirect_uris\":[\"${RP_URL}/\"],\"backchannel_logout_uri\":\"${RP_BACKCHANNEL_URL}/backchannel-logout\"}" \
+    201)
+else
+  log "AXIAM must refuse the plain-http back-channel uri ${RP_BACKCHANNEL_URL}/backchannel-logout (R101W2-04)"
+  REFUSAL=$(api_expect POST "${ADMIN_CSRF}" /api/v1/oauth2-clients \
+    "{\"name\":\"b5-rp-logout-app-refused-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\"],\"scopes\":[\"openid\"],\"backchannel_logout_uri\":\"${RP_BACKCHANNEL_URL}/backchannel-logout\"}" \
+    400)
+  printf '%s' "${REFUSAL}" | grep -q "backchannel_logout_uri" \
+    || fail "the refusal does not name backchannel_logout_uri: ${REFUSAL}"
+  ok "a plain-http back-channel uri is refused at registration"
+  log "registering this app as an AXIAM OAuth2 client (no back-channel uri; the delivery leg needs an https receiver)"
+  CLIENT_JSON=$(api_expect POST "${ADMIN_CSRF}" /api/v1/oauth2-clients \
+    "{\"name\":\"b5-rp-logout-app-${RUN_ID}\",\"redirect_uris\":[\"${RP_URL}/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"scopes\":[\"openid\",\"profile\"],\"post_logout_redirect_uris\":[\"${RP_URL}/\"]}" \
+    201)
+fi
 CLIENT_ID=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_id')
 CLIENT_SECRET=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_secret')
 
@@ -217,6 +245,11 @@ ok "RP-Initiated Logout complete: session ended, redirected back with no session
 #    "Delivery" — up to 3 attempts, 500ms/2s backoff), so poll briefly
 #    rather than asserting instantaneously.
 # ---------------------------------------------------------------------------
+if [ -z "${BACKCHANNEL_DELIVERY}" ]; then
+  log "SKIPPED: back-channel delivery needs an https receiver (set RP_BACKCHANNEL_URL=https://...); the refusal of plain http was proved at registration"
+  log "RP-Initiated Logout and login proved end to end; Back-Channel Logout proved at registration only."
+  exit 0
+fi
 log "polling ${RP_URL}/internal/backchannel-log for the logout token AXIAM should have delivered"
 BACKCHANNEL_OK=""
 for i in $(seq 1 10); do

@@ -6,7 +6,8 @@
 //! - `find_identity_collision` folds case, compares both columns with every
 //!   name, and counts every status;
 //! - `revoke_user_certificates` revokes active `User` certificates that belong
-//!   to the account by the two conventions the model has, and nothing else.
+//!   to the account — by the binding (`certificate.user_id`, #533), and, for a
+//!   row without one, by the two older conventions — and nothing else.
 //!
 //! No assertion message formats a password, a hash or an identifier.
 
@@ -320,7 +321,14 @@ fn certificate(
         not_before: Utc::now() - Duration::minutes(1),
         not_after: Utc::now() + Duration::days(30),
         metadata,
+        user_id: None,
     }
+}
+
+/// An account `created_at` older than every certificate a test makes, for the
+/// tests that pass a bare id with no account row behind it.
+fn an_hour_ago() -> chrono::DateTime<Utc> {
+    Utc::now() - Duration::hours(1)
 }
 
 #[tokio::test]
@@ -406,7 +414,7 @@ async fn only_the_accounts_active_user_certificates_are_revoked() {
     certs.revoke(tenant, already.id).await.unwrap();
 
     let revoked = certs
-        .revoke_user_certificates(tenant, user, "alice", "alice@example.com")
+        .revoke_user_certificates(tenant, user, "alice", "alice@example.com", an_hour_ago())
         .await
         .unwrap();
     assert_eq!(
@@ -433,9 +441,391 @@ async fn only_the_accounts_active_user_certificates_are_revoked() {
     // Idempotent: a second run has nothing left to revoke.
     assert_eq!(
         certs
-            .revoke_user_certificates(tenant, user, "alice", "alice@example.com")
+            .revoke_user_certificates(tenant, user, "alice", "alice@example.com", an_hour_ago())
             .await
             .unwrap(),
         0
     );
+}
+
+/// #533 — linking (and deletion, and erasure, which call the same method)
+/// revokes the account's certificates by their binding, and leaves alone a
+/// certificate bound to another account even when its common name is the
+/// account's username or email, or its `metadata.user_id` names the account:
+/// the convention is consulted only for a row with no binding (D-6: rows from
+/// before v98 are not backfilled).
+#[tokio::test]
+async fn linking_revokes_by_user_id_and_leaves_another_users_same_cn_certificate_alone() {
+    let db = setup().await;
+    let certs = SurrealCertificateRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    let bound = |fingerprint: &str, subject: &str, owner: Uuid, metadata: serde_json::Value| {
+        StoreCertificate {
+            user_id: Some(owner),
+            ..certificate(
+                tenant,
+                fingerprint,
+                subject,
+                CertificateType::User,
+                metadata,
+            )
+        }
+    };
+
+    // Alice's by the binding, under a name no convention would match.
+    let alices = certs
+        .create(bound("fp-alice", "laptop-17", alice, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(alices.user_id, Some(alice), "the binding is stored");
+    // Bob's, whose common name is Alice's username — and one whose CN is her
+    // email and whose metadata even names her: the binding decides.
+    let bobs_same_cn = certs
+        .create(bound("fp-bob-cn", "alice", bob, serde_json::json!({})))
+        .await
+        .unwrap();
+    let bobs_same_mail = certs
+        .create(bound(
+            "fp-bob-mail",
+            "ALICE@example.com",
+            bob,
+            serde_json::json!({ "user_id": alice.to_string() }),
+        ))
+        .await
+        .unwrap();
+    // A row from before the binding (NONE): still matched by the convention.
+    let legacy = certs
+        .create(certificate(
+            tenant,
+            "fp-legacy",
+            "Alice",
+            CertificateType::User,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legacy.user_id, None);
+
+    let revoked = certs
+        .revoke_user_certificates(tenant, alice, "alice", "alice@example.com", an_hour_ago())
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked, 2,
+        "her bound certificate and the unbound legacy one"
+    );
+
+    for (cert, expected) in [
+        (&alices, CertificateStatus::Revoked),
+        (&legacy, CertificateStatus::Revoked),
+        (&bobs_same_cn, CertificateStatus::Active),
+        (&bobs_same_mail, CertificateStatus::Active),
+    ] {
+        let read = certs.get_by_id(tenant, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+        assert_eq!(read.user_id, cert.user_id, "the binding reads back");
+    }
+
+    // Each revocation is dated, so it is on its issuer's list.
+    for cert in [&alices, &legacy] {
+        let entries = certs
+            .list_revoked_by_issuer(cert.issuer_ca_id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].revoked_at.is_some());
+    }
+
+    // Bob's own revocation finds both of his by the binding.
+    assert_eq!(
+        certs
+            .revoke_user_certificates(tenant, bob, "bob", "bob@example.com", an_hour_ago())
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+/// R101W1-01, the review's probe — `Alice`, created after `alice`'s unbound
+/// CN-`alice` certificate, does not revoke it by name, though the names fold
+/// together (here both bounds hold: the certificate is older than `Alice`, and
+/// `alice` makes the name ambiguous; the next tests take each alone). Her own
+/// certificates — bound, named by `metadata.user_id`, or unbound under her
+/// address and issued after her — are still revoked.
+#[tokio::test]
+async fn a_certificate_older_than_the_account_is_not_revoked_by_its_name() {
+    let db = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let none = serde_json::json!({});
+
+    let alice = local_user(&users, tenant, "alice").await;
+    let alices = certs
+        .create(certificate(
+            tenant,
+            "fp-alice",
+            "alice",
+            CertificateType::User,
+            none.clone(),
+        ))
+        .await
+        .unwrap();
+
+    // Created afterwards, under names that fold to alice's certificate's CN.
+    let upper = users
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: "Alice".into(),
+            email: "ALICE-2@example.com".into(),
+            password: local_password(),
+            metadata: None,
+        })
+        .await
+        .expect("case variants coexist: the unique indexes are case-sensitive");
+    let by_metadata = certs
+        .create(certificate(
+            tenant,
+            "fp-upper-meta",
+            "laptop",
+            CertificateType::User,
+            serde_json::json!({ "user_id": upper.id.to_string() }),
+        ))
+        .await
+        .unwrap();
+    let by_mail = certs
+        .create(certificate(
+            tenant,
+            "fp-upper-mail",
+            "alice-2@example.com",
+            CertificateType::User,
+            none,
+        ))
+        .await
+        .unwrap();
+
+    let revoked = certs
+        .revoke_user_certificates(
+            tenant,
+            upper.id,
+            &upper.username,
+            &upper.email,
+            upper.created_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked, 2, "her metadata-named and her address certificate");
+    for (cert, expected) in [
+        (&alices, CertificateStatus::Active),
+        (&by_metadata, CertificateStatus::Revoked),
+        (&by_mail, CertificateStatus::Revoked),
+    ] {
+        let read = certs.get_by_id(tenant, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+    }
+
+    // `alice` — created before her certificate — still revokes it by name
+    // once `Alice` is gone (a deleted account's names are overwritten, so they
+    // no longer make "alice" ambiguous).
+    users.delete(tenant, upper.id).await.unwrap();
+    let alice_row = users.get_by_id(tenant, alice).await.unwrap();
+    assert_eq!(
+        certs
+            .revoke_user_certificates(
+                tenant,
+                alice,
+                &alice_row.username,
+                &alice_row.email,
+                alice_row.created_at,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        certs.get_by_id(tenant, alices.id).await.unwrap().status,
+        CertificateStatus::Revoked
+    );
+}
+
+/// R101W1-01 — a name another account of the tenant also holds, ignoring case
+/// and in either column, is no evidence: with `alice` and `Alice` both present
+/// an unbound CN-`alice` certificate issued after both is revoked by neither.
+/// So is a CN equal to the account's username that is another account's
+/// address. The binding still revokes.
+#[tokio::test]
+async fn an_ambiguous_name_revokes_nothing_by_name() {
+    let db = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let none = serde_json::json!({});
+
+    let lower = users
+        .get_by_id(tenant, local_user(&users, tenant, "alice").await)
+        .await
+        .unwrap();
+    let upper = users
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: "Alice".into(),
+            email: "alice-upper@example.com".into(),
+            password: local_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    // `dave`'s username is `Erin@Example.com`'s address, in another case.
+    let dave = users
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: "dave".into(),
+            email: "dave@example.com".into(),
+            password: local_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    users
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: "erin".into(),
+            email: "DAVE".into(),
+            password: local_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let shared = certs
+        .create(certificate(
+            tenant,
+            "fp-shared",
+            "ALICE",
+            CertificateType::User,
+            none.clone(),
+        ))
+        .await
+        .unwrap();
+    let daves_name = certs
+        .create(certificate(
+            tenant,
+            "fp-dave",
+            "dave",
+            CertificateType::User,
+            none.clone(),
+        ))
+        .await
+        .unwrap();
+    let uppers_bound = certs
+        .create(StoreCertificate {
+            user_id: Some(upper.id),
+            ..certificate(
+                tenant,
+                "fp-upper-bound",
+                "alice",
+                CertificateType::User,
+                none,
+            )
+        })
+        .await
+        .unwrap();
+
+    for account in [&lower, &upper] {
+        certs
+            .revoke_user_certificates(
+                tenant,
+                account.id,
+                &account.username,
+                &account.email,
+                account.created_at,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        certs
+            .revoke_user_certificates(
+                tenant,
+                dave.id,
+                &dave.username,
+                &dave.email,
+                dave.created_at
+            )
+            .await
+            .unwrap(),
+        0,
+        "dave's username is erin's address"
+    );
+
+    for (cert, expected) in [
+        (&shared, CertificateStatus::Active),
+        (&daves_name, CertificateStatus::Active),
+        (&uppers_bound, CertificateStatus::Revoked),
+    ] {
+        let read = certs.get_by_id(tenant, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+    }
+}
+
+/// R101W1-01 — the age bound on its own, with no other account to make the
+/// name ambiguous: a certificate issued for a CN no account held, and an
+/// account created later under that name (an administrator, SCIM, or a
+/// federation JIT whose username is the IdP's address), which therefore cannot
+/// revoke it by erasing or deleting itself. A certificate issued under the
+/// name after the account exists is still revoked by it.
+#[tokio::test]
+async fn an_account_named_after_an_existing_certificate_does_not_revoke_it() {
+    let db = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let certs = SurrealCertificateRepository::new(db);
+    let tenant = Uuid::new_v4();
+
+    let older = certs
+        .create(certificate(
+            tenant,
+            "fp-older",
+            "Zoe@Example.com",
+            CertificateType::User,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let zoe = users
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: "zoe@example.com".into(),
+            email: "zoe@example.com".into(),
+            password: local_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let younger = certs
+        .create(certificate(
+            tenant,
+            "fp-younger",
+            "zoe@example.com",
+            CertificateType::User,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        certs
+            .revoke_user_certificates(tenant, zoe.id, &zoe.username, &zoe.email, zoe.created_at)
+            .await
+            .unwrap(),
+        1
+    );
+    for (cert, expected) in [
+        (&older, CertificateStatus::Active),
+        (&younger, CertificateStatus::Revoked),
+    ] {
+        let read = certs.get_by_id(tenant, cert.id).await.unwrap();
+        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+    }
 }

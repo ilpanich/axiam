@@ -273,6 +273,136 @@ fn a_document_in_another_encoding_is_refused() {
     assert!(parse_authn_request(&utf8, Utc::now()).is_ok());
 }
 
+/// #605 (R1W1-07): a byte-order mark does not hide the declaration. libxml2
+/// skips a leading U+FEFF and honours the encoding the declaration after it
+/// names; `trim_start` does not remove one, so the check used to skip the
+/// declaration altogether.
+///
+/// R101W2-02 (correcting #605's "refused, not skipped"): exactly one leading
+/// BOM is stripped, and the rules then apply to the true start — so a
+/// declaration behind it naming another encoding is read and refused, a second
+/// BOM is refused, and so is any other leading text. A BOM in front of a UTF-8
+/// declaration, or of no declaration, is what .NET writes (Entra ID's
+/// metadata) and is accepted, as 1.0.0 accepted it.
+#[test]
+fn r101w2_02_one_leading_byte_order_mark_is_stripped_anything_else_refused() {
+    let bom = '\u{feff}';
+    for declared in [
+        r#"<?xml version="1.0" encoding="UTF-16"?>"#,
+        r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
+    ] {
+        let document = format!("{bom}{declared}{}", request("_e"));
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "BOM + {declared:?}"
+        );
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed),
+            "BOM + {declared:?}"
+        );
+    }
+    for declared in [
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        "",
+    ] {
+        let unprefixed = format!("{declared}{}", request("_e"));
+        let document = format!("{bom}{unprefixed}");
+        // Exactly the BOM is gone, nothing else.
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Ok(unprefixed.as_str()),
+            "BOM + {declared:?}"
+        );
+        let parsed = parse_authn_request(&document, Utc::now())
+            .unwrap_or_else(|e| panic!("BOM + {declared:?}: {e:?}"));
+        assert_eq!(parsed.id, "_e");
+    }
+    // Stripped once, not repeatedly, and only at the very start.
+    for document in [
+        format!("{bom}{bom}{}", request("_e")),
+        format!(" {bom}{}", request("_e")),
+        format!("{bom} {bom}{}", request("_e")),
+    ] {
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "{:?}",
+            document.chars().take(3).collect::<String>()
+        );
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed)
+        );
+    }
+    // Any other text before the markup is refused; XML whitespace — and only
+    // XML whitespace — is not, before or after the BOM.
+    for lead in ["x", "\u{a0}", "\u{3000}", "\u{c}", "\u{fffe}", "\u{200b}"] {
+        let document = format!("{lead}{}", request("_e"));
+        assert_eq!(
+            refuse_other_encodings(&document),
+            Err(RequestError::Malformed),
+            "{lead:?}"
+        );
+    }
+    assert_eq!(refuse_other_encodings(""), Err(RequestError::Malformed));
+    assert_eq!(
+        refuse_other_encodings(&bom.to_string()),
+        Err(RequestError::Malformed)
+    );
+    assert_eq!(
+        refuse_other_encodings(" \r\n\t"),
+        Err(RequestError::Malformed)
+    );
+    let spaced = format!(" \r\n\t{}", request("_e"));
+    assert_eq!(refuse_other_encodings(&spaced), Ok(spaced.as_str()));
+    assert!(parse_authn_request(&spaced, Utc::now()).is_ok());
+    let bom_spaced = format!("{bom}{spaced}");
+    assert_eq!(refuse_other_encodings(&bom_spaced), Ok(spaced.as_str()));
+    assert!(parse_authn_request(&bom_spaced, Utc::now()).is_ok());
+}
+
+/// R101W2-02: a BOM-prefixed signed POST `AuthnRequest` verifies — the
+/// signature covers the element (canonicalised from the parsed tree), never
+/// the BOM — and every check still bites behind one: the wrong key, a changed
+/// attribute, a BOM in front of another encoding's declaration.
+#[test]
+fn r101w2_02_a_bom_prefixed_signed_post_request_verifies() {
+    let signed = signed_with("_pbom", sp_key());
+    let document = format!("\u{feff}{signed}");
+    let parsed = parse_authn_request(&document, Utc::now()).expect("parses");
+    assert!(parsed.enveloped_signature);
+    assert_eq!(verify_post_signature(&document, &sp_key().cert_der), Ok(()));
+    // The signature is over the same characters with or without the BOM.
+    assert_eq!(verify_post_signature(&signed, &sp_key().cert_der), Ok(()));
+    assert_eq!(
+        verify_post_signature(&document, &other_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "the wrong key"
+    );
+    let tampered = document.replace(DESTINATION, "https://axiam.example.test/saml/v2/u/sso");
+    assert_eq!(
+        verify_post_signature(&tampered, &sp_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "a changed attribute"
+    );
+    for refused in [
+        format!("\u{feff}\u{feff}{signed}"),
+        format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-16\"?>{signed}"),
+    ] {
+        assert_eq!(
+            parse_authn_request(&refused, Utc::now()).map(|_| ()),
+            Err(RequestError::Malformed)
+        );
+        assert_eq!(
+            verify_post_signature(&refused, &sp_key().cert_der),
+            Err(RequestError::SignatureInvalid)
+        );
+    }
+}
+
 #[test]
 fn malformed_xml_is_refused_not_repaired() {
     for broken in [
@@ -506,6 +636,49 @@ fn a_signature_anywhere_else_refuses_the_request() {
     }
 }
 
+/// Fail closed: an element locally named `Signature` that does not read as an
+/// XML-DSig one — a foreign namespace here; a misread namespace to this reader
+/// — refuses the request at the parse and at `verify_post_signature`, rather
+/// than reading as unsigned (the parse) or leaving the signature xmlsec finds
+/// unchecked (`verify_post_signature`). A document with no signature at all
+/// is refused by `verify_post_signature` before xmlsec.
+#[test]
+fn a_signature_outside_the_xml_dsig_namespace_fails_closed() {
+    let foreign = r#"<x:Signature xmlns:x="urn:example:not-xmldsig"/>"#;
+    let signed = signed_with("_f1", sp_key());
+    let unsigned = request("_f2");
+    let with_foreign = |document: &str| {
+        swapped(
+            document,
+            "</samlp:AuthnRequest>",
+            &format!("{foreign}</samlp:AuthnRequest>"),
+        )
+    };
+    for (label, document) in [
+        ("signed, plus a foreign Signature", with_foreign(&signed)),
+        (
+            "unsigned, plus a foreign Signature",
+            with_foreign(&unsigned),
+        ),
+    ] {
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::SignaturePlacement),
+            "{label}: parse"
+        );
+        assert_eq!(
+            verify_post_signature(&document, &sp_key().cert_der),
+            Err(RequestError::SignaturePlacement),
+            "{label}: verify_post_signature"
+        );
+    }
+    assert_eq!(
+        verify_post_signature(&unsigned, &sp_key().cert_der),
+        Err(RequestError::SignatureInvalid),
+        "no signature at all"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // HTTP-Redirect: the query signature over the exact octets
 // ---------------------------------------------------------------------------
@@ -639,4 +812,275 @@ fn a_repeated_redirect_parameter_is_refused() {
     );
     // Unrelated parameters are ignored.
     assert!(RedirectQuery::parse(&format!("{query}&utm_source=x")).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// R101W2-01: a signature may name only enveloped-signature and the c14n family
+// ---------------------------------------------------------------------------
+
+/// Exclusive c14n, as AXIAM's signature template names it.
+const EXC_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
+/// The template's second transform, which most variants replace.
+const EXC_TRANSFORM: &str =
+    r#"<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>"#;
+/// The template's canonicalization method.
+const EXC_CANONICALIZATION: &str =
+    r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>"#;
+
+/// `document` with the first `from` replaced by `to`; panics when `from` is not
+/// there, so a variant can never silently be the unchanged document.
+fn swapped(document: &str, from: &str, to: &str) -> String {
+    assert!(document.contains(from), "{from} not in the document");
+    document.replacen(from, to, 1)
+}
+
+/// R101W2-01: every shape of signature the transform allow-list refuses,
+/// applied to `document` — one carrying AXIAM's signature template
+/// (`enveloped-signature` then exclusive c14n, exclusive c14n as the
+/// canonicalization method), signed or not. Applied to a signed document, the
+/// digest and signature values go stale, so none of these would verify: a
+/// refusal that is the placement error, not a signature error, was made before
+/// xmlsec ran.
+///
+/// Shared with the SP's ACS and metadata tests (`saml_idp::tests`).
+pub(crate) fn hostile_transform_variants(document: &str) -> Vec<(&'static str, String)> {
+    let transform = |to: &str| swapped(document, EXC_TRANSFORM, to);
+    vec![
+        (
+            "an XSLT transform",
+            transform(concat!(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116">"#,
+                r#"<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">"#,
+                r#"<xsl:template match="/"><xsl:copy-of select="."/></xsl:template>"#,
+                r#"</xsl:stylesheet></ds:Transform>"#
+            )),
+        ),
+        (
+            "an XPath transform",
+            transform(concat!(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116">"#,
+                r#"<ds:XPath>not(ancestor-or-self::*[local-name()='Signature'])</ds:XPath>"#,
+                r#"</ds:Transform>"#
+            )),
+        ),
+        (
+            "an XPath Filter 2 transform",
+            transform(concat!(
+                r#"<ds:Transform Algorithm="http://www.w3.org/2002/06/xmldsig-filter2">"#,
+                r#"<f:XPath xmlns:f="http://www.w3.org/2002/06/xmldsig-filter2" Filter="union">/</f:XPath>"#,
+                r#"</ds:Transform>"#
+            )),
+        ),
+        (
+            "an XPointer transform",
+            transform(concat!(
+                r#"<ds:Transform Algorithm="http://www.w3.org/2001/04/xmldsig-more/xptr">"#,
+                r#"<p:XPointer xmlns:p="http://www.w3.org/2001/04/xmldsig-more/xptr">xpointer(/)</p:XPointer>"#,
+                r#"</ds:Transform>"#
+            )),
+        ),
+        (
+            "an XPath transform with no expression",
+            transform(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116"/>"#,
+            ),
+        ),
+        (
+            "exclusive c14n with comments as the canonicalization method",
+            swapped(
+                document,
+                EXC_CANONICALIZATION,
+                r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#WithComments"/>"#,
+            ),
+        ),
+        (
+            "c14n 1.0 with comments as a transform",
+            transform(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"/>"#,
+            ),
+        ),
+        (
+            "c14n 1.1 with comments as a transform",
+            transform(
+                r#"<ds:Transform Algorithm="http://www.w3.org/2006/12/xml-c14n11#WithComments"/>"#,
+            ),
+        ),
+        (
+            "a third transform",
+            transform(&format!(
+                r#"{EXC_TRANSFORM}<ds:Transform Algorithm="http://www.w3.org/2006/12/xml-c14n11"/>"#
+            )),
+        ),
+        (
+            "an unknown element under a transform",
+            transform(&format!(
+                r#"<ds:Transform Algorithm="{EXC_C14N}"><ds:Unknown/></ds:Transform>"#
+            )),
+        ),
+        (
+            "an XPath element under the canonicalization method",
+            swapped(
+                document,
+                EXC_CANONICALIZATION,
+                &format!(
+                    r#"<ds:CanonicalizationMethod Algorithm="{EXC_C14N}"><ds:XPath>/</ds:XPath></ds:CanonicalizationMethod>"#
+                ),
+            ),
+        ),
+        (
+            "InclusiveNamespaces under c14n 1.0",
+            transform(&format!(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"><ec:InclusiveNamespaces xmlns:ec="{EXC_C14N}" PrefixList="xs"/></ds:Transform>"#
+            )),
+        ),
+        (
+            "InclusiveNamespaces with a second attribute",
+            transform(&format!(
+                r#"<ds:Transform Algorithm="{EXC_C14N}"><ec:InclusiveNamespaces xmlns:ec="{EXC_C14N}" PrefixList="xs" Other="1"/></ds:Transform>"#
+            )),
+        ),
+        (
+            "two InclusiveNamespaces",
+            transform(&format!(
+                r#"<ds:Transform Algorithm="{EXC_C14N}"><ec:InclusiveNamespaces xmlns:ec="{EXC_C14N}" PrefixList="xs"/><ec:InclusiveNamespaces xmlns:ec="{EXC_C14N}" PrefixList="xs"/></ds:Transform>"#
+            )),
+        ),
+        (
+            "a second Algorithm attribute in another namespace",
+            transform(&format!(
+                r#"<ds:Transform xmlns:x="urn:example:x" x:Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116" Algorithm="{EXC_C14N}"/>"#
+            )),
+        ),
+        (
+            "a transform with no Algorithm",
+            transform("<ds:Transform/>"),
+        ),
+        (
+            "a space-padded algorithm URI",
+            transform(&format!(r#"<ds:Transform Algorithm="{EXC_C14N} "/>"#)),
+        ),
+        (
+            "two Transforms in one Reference",
+            swapped(
+                document,
+                "</ds:Transforms>",
+                &format!("</ds:Transforms><ds:Transforms>{EXC_TRANSFORM}</ds:Transforms>"),
+            ),
+        ),
+        (
+            "an element other than Transform inside Transforms",
+            transform(&format!("{EXC_TRANSFORM}<ds:XPath>/</ds:XPath>")),
+        ),
+        (
+            "a transform in a KeyInfo RetrievalMethod",
+            swapped(
+                document,
+                "<ds:KeyInfo>",
+                concat!(
+                    r##"<ds:KeyInfo><ds:RetrievalMethod URI="#x"><ds:Transforms>"##,
+                    r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116"/>"#,
+                    r#"</ds:Transforms></ds:RetrievalMethod>"#
+                ),
+            ),
+        ),
+        (
+            // Fail closed: a `Transform` outside every container the walk
+            // reads as XML-DSig — what a misread namespace looks like to it —
+            // still counts against the transforms it judged.
+            "a Transform outside the XML-DSig namespace",
+            swapped(
+                document,
+                "</ds:Transforms>",
+                concat!(
+                    "</ds:Transforms>",
+                    r#"<x:Steps xmlns:x="urn:example:not-xmldsig">"#,
+                    r#"<x:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116"/>"#,
+                    "</x:Steps>"
+                ),
+            ),
+        ),
+    ]
+}
+
+/// R101W2-01: the shapes the allow-list admits, each a valid signature over
+/// the same content — so a test can show every one of them verifies end to
+/// end. `sign` signs a document carrying the (blank) template.
+pub(crate) fn admitted_transform_variants(document: &str) -> Vec<(&'static str, String)> {
+    let transform = |to: &str| swapped(document, EXC_TRANSFORM, to);
+    vec![
+        ("the template as it is", document.to_owned()),
+        (
+            "c14n 1.0 as the transform",
+            transform(
+                r#"<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>"#,
+            ),
+        ),
+        (
+            "c14n 1.1 as the canonicalization method",
+            swapped(
+                document,
+                EXC_CANONICALIZATION,
+                r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2006/12/xml-c14n11"/>"#,
+            ),
+        ),
+        (
+            "exclusive c14n with InclusiveNamespaces (Okta, Shibboleth)",
+            transform(&format!(
+                r#"<ds:Transform Algorithm="{EXC_C14N}"><ec:InclusiveNamespaces xmlns:ec="{EXC_C14N}" PrefixList="xs saml"/></ds:Transform>"#
+            )),
+        ),
+        ("enveloped-signature alone", transform("")),
+    ]
+}
+
+/// The request with the signature template after `Issuer`, before signing.
+fn template_request(id: &str) -> String {
+    let template = super::super::sign::signature_template(id, &sp_key().cert_der);
+    request_with(id, &instant(0), "", &template)
+}
+
+fn sign_request(document: &str) -> String {
+    let signed = <XmlSec as CryptoProvider>::sign_xml(document.as_bytes(), &sp_key().key_der)
+        .expect("signing");
+    super::super::xml::strip_declaration(&signed).to_owned()
+}
+
+/// R101W2-01 at the IdP receiver: every hostile shape is refused by the
+/// placement rule — at the parse the SSO and SLO endpoints run first, and again
+/// by `verify_post_signature` itself, before xmlsec — though the rest of the
+/// signature is in place. The values are stale, so a refusal from xmlsec would
+/// have been `SignatureInvalid`.
+#[test]
+fn r101w2_01_the_receiver_refuses_every_transform_outside_the_allow_list() {
+    let signed = signed_with("_t1", sp_key());
+    assert_eq!(verify_post_signature(&signed, &sp_key().cert_der), Ok(()));
+    for (label, document) in hostile_transform_variants(&signed) {
+        assert_eq!(
+            parse_authn_request(&document, Utc::now()).map(|_| ()),
+            Err(RequestError::SignaturePlacement),
+            "{label}: parse"
+        );
+        assert_eq!(
+            verify_post_signature(&document, &sp_key().cert_der),
+            Err(RequestError::SignaturePlacement),
+            "{label}: verify_post_signature"
+        );
+    }
+}
+
+/// R101W2-01: what real signers send stays accepted — each admitted shape,
+/// validly signed, parses and verifies.
+#[test]
+fn r101w2_01_the_receiver_admits_enveloped_and_the_c14n_family() {
+    for (label, template) in admitted_transform_variants(&template_request("_t3")) {
+        let document = sign_request(&template);
+        let parsed =
+            parse_authn_request(&document, Utc::now()).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(parsed.enveloped_signature, "{label}");
+        assert_eq!(
+            verify_post_signature(&document, &sp_key().cert_der),
+            Ok(()),
+            "{label}"
+        );
+    }
 }

@@ -23,7 +23,7 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0";
+export const API_VERSION = "1.0.1";
 export const API_OPERATION_COUNT = 278;
 export const API_PATH_COUNT = 191;
 
@@ -710,7 +710,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "DELETE",
     "path": "/api/v1/users/{user_id}",
-    "summary": ""
+    "summary": "Revokes the account's sessions and its still-active `User` certificates — those issued for it (`user_id`), and, for a certificate issued without that binding, those its `metadata.user_id` or subject common name ties to it — before the account is tombstoned."
    },
    {
     "method": "GET",
@@ -1226,7 +1226,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/organizations/{org_id}/ca-certificates/{id}/revoke",
-    "summary": ""
+    "summary": "A subordinate CA its parent signed through Vault's PKI engine is revoked on the parent's list in Vault as well (#612)."
    },
    {
     "method": "POST",

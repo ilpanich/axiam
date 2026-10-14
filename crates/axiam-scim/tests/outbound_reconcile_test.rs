@@ -907,3 +907,214 @@ async fn reconciliation_queues_references_only() {
     // One reference per resource (the user and the group), each queued once.
     assert_eq!(queued.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// R101W4-01: a full queue stops the run's enqueues
+// ---------------------------------------------------------------------------
+
+/// A run that meets a full queue offers nothing after the first refusal: the
+/// queue sees the references it took plus the one it refused, the rest are
+/// counted in `enqueue_failed`, and the run records them as **one** row
+/// (`record_not_offered`, which the in-process dispatcher writes as a
+/// `scim_push.delivery_abandoned` row with `refused_count`) — not a row per
+/// in-scope user, which is what filled the audit channel (R101W4-01).
+#[actix_rt::test]
+async fn a_run_that_meets_a_full_queue_stops_and_records_one_row_with_the_count() {
+    const USERS: usize = 7;
+    const ROOM: usize = 2;
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    for i in 0..USERS {
+        w.active_user(&format!("user{i}")).await;
+    }
+    // Nothing synced: no links, so the run's references are the users.
+    w.queue.clear();
+    w.queue.set_limit(Some(ROOM));
+
+    let report = ran(&w, &target).await;
+    assert_eq!(report.enqueued, ROOM as u64);
+    assert_eq!(report.enqueue_failed, (USERS - ROOM) as u64);
+    assert!(report.is_failure(), "a refused reference fails the run");
+    assert_eq!(
+        w.queue.offered(),
+        ROOM + 1,
+        "the queue saw what it took and the one it refused, nothing after"
+    );
+    assert_eq!(
+        w.queue.not_offered(),
+        vec![(
+            axiam_core::outbound::OutboundKind::ScimPush,
+            w.tenant_id,
+            target.id,
+            (USERS - ROOM - 1) as u64
+        )],
+        "one row for the run, carrying the count held back"
+    );
+
+    // The next run, with room again, offers every reference.
+    w.queue.set_limit(None);
+    w.queue.clear();
+    expire_claim(&w, &target).await;
+    let report = ran(&w, &target).await;
+    assert_eq!(report.enqueue_failed, 0);
+    assert_eq!(report.enqueued, USERS as u64);
+    assert!(w.queue.not_offered().is_empty());
+}
+
+/// A single refusal — the last reference of a run — is the refused message's
+/// own row and nothing more: `record_not_offered` is not called for zero.
+#[actix_rt::test]
+async fn a_run_refused_only_at_its_last_reference_adds_no_row() {
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    w.active_user("alice").await;
+    w.active_user("bob").await;
+    w.queue.clear();
+    w.queue.set_limit(Some(1));
+
+    let report = ran(&w, &target).await;
+    assert_eq!((report.enqueued, report.enqueue_failed), (1, 1));
+    assert_eq!(w.queue.offered(), 2);
+    assert!(w.queue.not_offered().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// R101-01: a run paces its offers and reaches the links before the users
+// ---------------------------------------------------------------------------
+
+/// The references of `axiam_id` the queue accepted, in order.
+fn accepted_for(w: &World, axiam_id: Uuid) -> usize {
+    w.queue
+        .all()
+        .iter()
+        .filter(|m| m.payload["axiam_id"] == axiam_id.to_string())
+        .count()
+}
+
+/// R101-01: in the minimal profile a run meets a queue far smaller than the
+/// tenant, drained by a consumer that frees one slot per tick. The run waits
+/// for room instead of stopping at the first full queue, and it offers the
+/// target's links — the pending erasure first — before the in-scope users, so
+/// the erasure's retry and step 2's adoption of a disabled user's account are
+/// both accepted, and nothing is refused. Before the fix the run offered the
+/// users first, stopped at the first refusal and offered neither.
+#[actix_rt::test]
+async fn a_run_behind_a_slow_queue_reaches_the_pending_erasure_and_the_adoption() {
+    const CAPACITY: usize = 4;
+    const IN_SCOPE: usize = 20;
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+
+    // An erased user whose erasure `DELETE` the downstream refused: its link is
+    // left `erase_pending`.
+    let erased = w.active_user("erased").await;
+    assert!(all_delivered(&w.sync().await));
+    w.users
+        .anonymize_user(
+            w.tenant_id,
+            erased.id,
+            &Uuid::new_v4().simple().to_string(),
+            "DELETED_USER_x",
+        )
+        .await
+        .unwrap();
+    w.server.fail_next_on("DELETE", "/scim/v2/Users/", 1, 403);
+    assert!(matches!(
+        only(w.sync().await),
+        DeliveryOutcome::DeadLetter { .. }
+    ));
+    assert!(
+        link_of(&w, &target, ScimResourceType::User, erased.id)
+            .await
+            .expect("the link survives the refused erasure")
+            .erase_pending
+    );
+
+    // Twenty in-scope users, never delivered.
+    for i in 0..IN_SCOPE {
+        w.active_user(&format!("user{i}")).await;
+    }
+    // A disabled user whose account somebody made downstream by hand, with our
+    // id: unlinked, and to be adopted and deactivated by step 2.
+    let disabled = w.active_user("dora").await;
+    w.set_status(disabled.id, UserStatus::Inactive).await;
+    let downstream_id = seed_foreign(&w.server, Some(&disabled.id.to_string()), "dora");
+    w.queue.clear();
+
+    w.queue.set_limit(Some(CAPACITY));
+    w.queue.set_pacing(true);
+    let consumer = w
+        .queue
+        .free_one_slot_per_tick(std::time::Duration::from_millis(2));
+    let report = ran(&w, &target).await;
+    consumer.abort();
+
+    assert_eq!(report.enqueue_failed, 0, "nothing was refused: {report:?}");
+    assert!(!report.is_failure());
+    assert_eq!(report.erase_retried, 1);
+    assert_eq!(report.deprovisioned, 1);
+    assert!(w.queue.not_offered().is_empty());
+    // The pending erasure is the run's first reference.
+    let first = w.queue.all().first().cloned().expect("references accepted");
+    assert_eq!(first.payload["axiam_id"], erased.id.to_string());
+    assert_eq!(accepted_for(&w, erased.id), 1, "the erasure's retry");
+    // The disabled user: step 1's reference and the adoption's.
+    assert_eq!(accepted_for(&w, disabled.id), 2, "the adoption's reference");
+    let adopted = link_of(&w, &target, ScimResourceType::User, disabled.id)
+        .await
+        .expect("adopted");
+    assert_eq!(adopted.downstream_id, downstream_id);
+    // The erasure, every user (the twenty and the disabled one) and the repair.
+    assert_eq!(report.enqueued, (1 + IN_SCOPE + 1 + 1) as u64);
+}
+
+/// #598: the scheduled run waits for room in the cleanup task, so a stop
+/// request must end that wait promptly — not at the run's five-minute
+/// deadline — and the run then reads nothing from the downstream.
+#[actix_rt::test]
+async fn a_stop_request_ends_a_paced_run_promptly() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let w = World::new().await;
+    let _target = w.add_target(|_| {}).await;
+    for i in 0..3 {
+        w.active_user(&format!("user{i}")).await;
+    }
+    w.queue.clear();
+    // One slot and no consumer: the second offer waits.
+    w.queue.set_limit(Some(1));
+    w.queue.set_pacing(true);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+    let should_stop = {
+        let stop = Arc::clone(&stop);
+        move || stop.load(Ordering::SeqCst)
+    };
+    let began = std::time::Instant::now();
+    let sweep = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        w.deliverer.run_due(&should_stop),
+    )
+    .await
+    .expect("the stop ended the paced wait")
+    .unwrap();
+    assert!(began.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(sweep.reconciled, 1);
+    assert_eq!(
+        sweep.failed, 1,
+        "a refused reference makes the run incomplete"
+    );
+    assert_eq!(w.queue.all().len(), 1, "the one slot was taken");
+    assert!(
+        w.server.requests().is_empty(),
+        "a stopped run does not read the downstream"
+    );
+}

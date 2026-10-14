@@ -114,6 +114,7 @@ async fn mtls_authenticate_valid_cert_returns_device_identity() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -229,6 +230,7 @@ async fn mtls_rejects_unknown_fingerprint() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -342,6 +344,7 @@ async fn mtls_rejects_expired_cert() {
             not_before: now - Duration::days(10),
             not_after: now - Duration::days(1),
             metadata: serde_json::json!({}),
+            user_id: None,
         })
         .await
         .expect("storing expired cert must succeed");
@@ -416,6 +419,7 @@ async fn mtls_rejects_revoked_cert() {
                 validity_days: 30,
                 metadata: None,
                 subject_alt_names: vec![],
+                user_id: None,
             },
             None,
             &[],
@@ -524,6 +528,7 @@ async fn a_csr_signed_certificate_binds_and_authenticates_like_a_generated_one()
             validity_days: 30,
             metadata: None,
             subject_alt_names: vec![],
+            user_id: None,
         },
         None,
         &[],
@@ -614,6 +619,7 @@ async fn a_server_certificate_cannot_log_in_as_a_device() {
             validity_days: 30,
             metadata: None,
             subject_alt_names: sans,
+            user_id: None,
         };
     let allowed = vec![".lakeside.internal".to_string()];
     let server = certs
@@ -727,6 +733,7 @@ async fn a_saml_signing_certificate_cannot_log_in_as_a_device() {
         validity_days: 30,
         metadata: None,
         subject_alt_names: vec![],
+        user_id: None,
     };
     let retyped = certs
         .generate(

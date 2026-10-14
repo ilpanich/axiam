@@ -45,6 +45,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::credentialed_fetch::redirect_refusal;
 use crate::error::FederationError;
 use crate::oidc::{AuthorizationUrl, FederationCallbackResult, OidcFederationService};
 use crate::secrets::decrypt_client_secret_or_legacy;
@@ -331,14 +332,21 @@ where
         // token endpoint answers `application/x-www-form-urlencoded` by default
         // and only returns JSON when asked. Without it the parse below fails on
         // a response that was perfectly successful.
-        let response = crate::ssrf::guarded_fetch(token_endpoint, allow_private, |c, u| {
-            c.post(u)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
-                .form(&form)
-        })
-        .await
-        .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
+        //
+        // One hop, no redirect (R1W2-04, T-112): this request carries the
+        // client secret, the code and the PKCE verifier.
+        let response =
+            crate::ssrf::guarded_fetch_no_redirect(token_endpoint, allow_private, |c, u| {
+                c.post(u)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
+                    .form(&form)
+            })
+            .await
+            .map_err(|e| FederationError::TokenExchangeFailed(e.to_string()))?;
+        if let Some(reason) = redirect_refusal("token endpoint", token_endpoint, &response) {
+            return Err(FederationError::TokenExchangeFailed(reason));
+        }
 
         let status = response.status();
         let body = crate::ssrf::read_capped_body(response, MAX_RESPONSE_SIZE)
@@ -391,14 +399,20 @@ where
         allow_private: bool,
     ) -> Result<serde_json::Value, FederationError> {
         let bearer = format!("Bearer {access_token}");
-        let response = crate::ssrf::guarded_fetch(userinfo_endpoint, allow_private, |c, u| {
-            c.get(u)
-                .header(reqwest::header::AUTHORIZATION, &bearer)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
-        })
-        .await
-        .map_err(|e| FederationError::UserinfoUnusable(e.to_string()))?;
+        // One hop, no redirect (R1W2-04, T-112): the bearer must not follow a
+        // `Location`.
+        let response =
+            crate::ssrf::guarded_fetch_no_redirect(userinfo_endpoint, allow_private, |c, u| {
+                c.get(u)
+                    .header(reqwest::header::AUTHORIZATION, &bearer)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
+            })
+            .await
+            .map_err(|e| FederationError::UserinfoUnusable(e.to_string()))?;
+        if let Some(reason) = redirect_refusal("userinfo endpoint", userinfo_endpoint, &response) {
+            return Err(FederationError::UserinfoUnusable(reason));
+        }
 
         let status = response.status();
         let body = crate::ssrf::read_capped_body(response, MAX_RESPONSE_SIZE)
@@ -435,14 +449,23 @@ where
         allow_private: bool,
     ) -> Result<(), FederationError> {
         let bearer = format!("Bearer {access_token}");
-        let response = crate::ssrf::guarded_fetch(emails_endpoint, allow_private, |c, u| {
-            c.get(u)
-                .header(reqwest::header::AUTHORIZATION, &bearer)
-                .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-                .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
-        })
-        .await
-        .map_err(|e| FederationError::UserinfoUnusable(format!("GitHub email lookup: {e}")))?;
+        // One hop, no redirect (R1W2-04, T-112), as for the userinfo call.
+        let response =
+            crate::ssrf::guarded_fetch_no_redirect(emails_endpoint, allow_private, |c, u| {
+                c.get(u)
+                    .header(reqwest::header::AUTHORIZATION, &bearer)
+                    .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+                    .header(reqwest::header::USER_AGENT, GITHUB_USER_AGENT)
+            })
+            .await
+            .map_err(|e| FederationError::UserinfoUnusable(format!("GitHub email lookup: {e}")))?;
+        if let Some(reason) =
+            redirect_refusal("verified-email endpoint", emails_endpoint, &response)
+        {
+            return Err(FederationError::UserinfoUnusable(format!(
+                "GitHub email lookup: {reason}"
+            )));
+        }
 
         let status = response.status();
         let body = crate::ssrf::read_capped_body(response, MAX_RESPONSE_SIZE)
@@ -527,6 +550,35 @@ mod tests {
             allow_sha1_signatures: false,
             idp_metadata_signing_cert_pem: None,
         }
+    }
+
+    /// The three credential-bearing calls on this path — the token exchange, the
+    /// userinfo call and GitHub's verified-email call — go through the one-hop
+    /// guard and nothing else (R1W2-04, T-112). Pinned against the source as
+    /// the webhook deliverer is. The behaviour is exercised end to end in
+    /// `axiam-api-rest`'s `federation_login_providers_test`.
+    #[test]
+    fn the_credential_bearing_calls_use_the_no_redirect_guarded_fetch() {
+        let source = include_str!("oauth2.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the production half of the file");
+        assert_eq!(production.matches("guarded_fetch_no_redirect(").count(), 3);
+        for endpoint in ["token_endpoint", "userinfo_endpoint", "emails_endpoint"] {
+            assert_eq!(
+                production
+                    .matches(&format!(
+                        "crate::ssrf::guarded_fetch_no_redirect({endpoint}"
+                    ))
+                    .count(),
+                1,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(production.matches("guarded_fetch(").count(), 0);
+        assert_eq!(production.matches("guarded_fetch_with_cap(").count(), 0);
+        assert_eq!(production.matches("redirect_refusal(").count(), 3);
     }
 
     #[test]

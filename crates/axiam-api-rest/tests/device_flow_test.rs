@@ -483,6 +483,134 @@ async fn an_approved_grant_mints_tokens_exactly_once() {
     );
 }
 
+/// Rows in `oauth2_refresh_token`: "nothing minted" is asserted against the
+/// store, not only against the response body.
+async fn refresh_token_rows(f: &Fixture) -> u64 {
+    use surrealdb::types::SurrealValue;
+
+    #[derive(SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+    let mut res =
+        f.db.query("SELECT count() AS total FROM oauth2_refresh_token GROUP ALL")
+            .await
+            .unwrap();
+    let rows: Vec<CountRow> = res.take(0).unwrap();
+    rows.first().map(|r| r.total).unwrap_or(0)
+}
+
+/// Approve a device grant, let `change` happen to the approving user, then
+/// poll twice. R1W1-06 / #604: the account is asked `account_may_act` and
+/// the lockout question (CIBA's `user_may_be_subject`) after the approval is
+/// spent, so a user who stopped being a valid subject between approval and
+/// the device's next poll gets `invalid_grant`, no access token and no
+/// refresh-token row, and the grant stays consumed.
+async fn assert_redemption_refused_after<F, Fut>(change: F)
+where
+    F: FnOnce(SurrealUserRepository<TestDb>, Uuid, Uuid) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    change(
+        SurrealUserRepository::new(f.db.clone()),
+        f.tenant_id,
+        f.user_id,
+    )
+    .await;
+
+    let body_str = format!(
+        "grant_type={}&device_code={device_code}",
+        urlencoding(DEVICE_CODE_GRANT_TYPE)
+    );
+    let (status, body) = post_token!(app, f.tenant_id, body_str);
+    assert_eq!(status, 400, "poll after the change returned {body:?}");
+    assert_eq!(body["error"], "invalid_grant", "{body:?}");
+    assert!(body.get("access_token").is_none(), "minted: {body:?}");
+    assert!(body.get("refresh_token").is_none(), "minted: {body:?}");
+    assert_eq!(
+        refresh_token_rows(&f).await,
+        0,
+        "a refused redemption must leave no refresh-token row"
+    );
+
+    // The approval is spent: the grant is consumed, so a further poll is
+    // refused as a used code and still mints nothing.
+    let stored = SurrealDeviceGrantRepository::new(f.db.clone())
+        .get_by_device_code_hash(f.tenant_id, &hash_device_code(&device_code))
+        .await
+        .unwrap()
+        .expect("the grant row survives");
+    assert_eq!(stored.status, DeviceGrantStatus::Redeemed);
+    let (status2, body2) = post_token!(app, f.tenant_id, body_str);
+    assert_eq!(status2, 400, "second poll returned {body2:?}");
+    // `slow_down` is as good an answer as `invalid_grant` here: interval
+    // enforcement runs before the grant's state is read (see
+    // `an_approved_grant_mints_tokens_exactly_once`). The `Redeemed` status
+    // above is what proves consumption; this proves nothing was minted.
+    assert!(
+        matches!(
+            body2["error"].as_str(),
+            Some("invalid_grant") | Some("slow_down")
+        ),
+        "unexpected refusal for a consumed code: {body2:?}"
+    );
+    assert!(body2.get("access_token").is_none(), "minted: {body2:?}");
+    assert_eq!(refresh_token_rows(&f).await, 0);
+}
+
+/// Approve, suspend, poll: `invalid_grant`, nothing minted.
+#[actix_web::test]
+async fn a_user_suspended_after_approval_gets_no_tokens() {
+    assert_redemption_refused_after(|users, tenant_id, user_id| async move {
+        users
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(UserStatus::Inactive),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+/// The lockout half of the predicate: brute-force lockout is read by the
+/// device grant exactly as it is by CIBA (`ciba_test.rs`,
+/// `a_lockout_after_approval_refuses_the_redemption`).
+#[actix_web::test]
+async fn a_user_locked_out_after_approval_gets_no_tokens() {
+    assert_redemption_refused_after(|users, tenant_id, user_id| async move {
+        users
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    locked_until: Some(Some(Utc::now() + Duration::minutes(15))),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+/// A deleted user is a tombstone row (`status = Deleted`), which the re-read
+/// returns; it must not be a subject either.
+#[actix_web::test]
+async fn a_user_deleted_after_approval_gets_no_tokens() {
+    assert_redemption_refused_after(|users, tenant_id, user_id| async move {
+        users.delete(tenant_id, user_id).await.unwrap();
+    })
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // The verification endpoints
 // ---------------------------------------------------------------------------

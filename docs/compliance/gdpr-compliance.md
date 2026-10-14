@@ -188,6 +188,44 @@ or its dead-letter queue. Deleting a *target* removes its links and delivery
 state and does **not** deprovision the downstream. Proved end to end by
 [`crates/axiam-server/tests/scim_erasure_propagation_test.rs`](../../crates/axiam-server/tests/scim_erasure_propagation_test.rs).
 
+**What the erasure keeps: the account's certificates, revoked (#533, 1.0.1).**
+Before `anonymize_user` runs, the purge revokes the account's still-active
+`User` certificates (`cleanup.rs::revoke_erased_users_certificates`, step (b4)):
+those issued for it — `certificate.user_id`, set at issuance since schema v98 —
+and, for a certificate issued without that binding (every certificate from
+before 1.0.1), those whose `metadata.user_id` names the account or whose
+subject common name equals its username or email, ignoring case. The name
+match is bounded (R101W1-01): it reaches only certificates issued since the
+account was created, and no name another account of the tenant also holds,
+ignoring case — the erasure is the data subject's to start, and without the
+bounds an account named after a case variant of another's username, or after
+an older certificate's common name, would revoke that certificate by erasing
+itself. An unbound certificate of the account outside the bounds stays active
+and is an administrator's to revoke by id. It runs first
+because that convention reads the names the anonymization overwrites; it is
+fail-closed, so a failure leaves the account due and the next sweep retries.
+The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
+its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
+from the `vault_revocation` sweep — under the same legal-obligation and security
+retention (Art. 17(3)(b), Art. 32) the tenant deletion below records: deleting
+a revoked, unexpired certificate's row would make the certificate valid again to
+every relying party outside AXIAM. What such a row still holds about the person:
+the certificate as issued (its subject DN, which may be a name or an address),
+the `subject` column (the common name), the free-form `metadata`, and `user_id`,
+which names the anonymized account by its internal id. **Residual, not closed
+by 1.0.1:** the per-user erasure does not clear the row's `subject` or `metadata`
+(the tenant purge clears `metadata`), and in a live tenant no job deletes an
+expired certificate row, so that retention is bounded by the tenant's lifetime
+rather than by the certificate's `notAfter`. Recorded in threat T-187. The
+`gdpr.user_pseudonymized` audit row carries `certificates_revoked`. Proved by
+[`cleanup_task.rs::the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes`](../../crates/axiam-server/tests/cleanup_task.rs)
+and
+[`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs);
+the bounds by
+[`cleanup_task.rs::erasing_an_account_leaves_an_older_namesakes_certificate_alone`](../../crates/axiam-server/tests/cleanup_task.rs)
+and the repository tests in
+[`directory_provisioning_repo_test.rs`](../../crates/axiam-db/tests/directory_provisioning_repo_test.rs).
+
 **Executable proof:** `deletion_pseudonymization` — seeds a user with audit
 entries, runs the full purge pipeline (pseudonymize → anonymize → pseudonymize
 audit → write erasure proof), then asserts: pseudonym format, `Anonymized`
@@ -233,9 +271,15 @@ that keeps a new column from escaping both — and what this path adds to it is
 its own: the `Deleted` status, and the reset of `totp_last_used_step`,
 `failed_login_attempts` and `email_verified_at`, none of which the Art. 17
 pipeline performs. The
-handler additionally revokes all sessions **before** the row is touched, then
-deletes the user's WebAuthn credentials, federation identity links and password
-history, and strips their group memberships and role assignments.
+handler additionally revokes all sessions and the user's still-active `User`
+certificates **before** the row is touched (the certificates by the same rule
+as the purge above, #533, and kept revoked on their issuers' lists; one
+`user.certificates_revoked` audit row carries the count — proved by
+`user_test.rs::deleting_a_user_revokes_their_user_certificates_and_no_one_elses`,
+and the name match's bounds by
+`user_test.rs::deleting_an_account_leaves_an_older_namesakes_certificate_alone`),
+then deletes the user's WebAuthn credentials, federation identity links and
+password history, and strips their group memberships and role assignments.
 
 The row itself survives, holding its id and nothing identifying. Audit entries
 are append-only and reference their actor by id; dropping the row would leave
@@ -270,42 +314,64 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 - **In the request** the tenant's sessions, OAuth2 refresh tokens, and
   unexpired certificates and signing CAs are revoked (a leaf of a Vault-held CA
   forwarded to Vault) and `tenant.deleted_at` is set; the tenant is gone from
-  every read of it, sign-in, token issuance and refresh from the `204` on. Until
-  the purge, the tenant's OAuth2 clients still authenticate on the endpoints that
-  issue nothing — a CIBA request, introspection, revocation, PAR (#601, filed for
-  `1.0.x`); the purge removes them.
+  every read of it, sign-in, token issuance and refresh from the `204` on. The
+  tenant's OAuth2 clients authenticate nowhere from then on — client
+  authentication reads the tenant, and a tombstoned one answers `invalid_client`
+  at every endpoint, including a CIBA request, introspection, revocation and PAR
+  (#601, fixed in 1.0.1; before it, a client of a tombstoned tenant was served on
+  those endpoints until the purge). The purge removes the client rows.
 - **The cleanup job's `tenant_purge` sweep** then deletes every row of every
   tenant-scoped table, in the order the purge pipeline above uses — grants and
   sessions, federation links, credentials, the authorization graph, the
-  tenant's audit trail, GDPR records (consents, deletion requests, export jobs,
-  erasure proofs), the accounts, the configuration — and the tenant row last.
-  Unlike the per-user pipeline it **deletes** the accounts and the audit
-  entries rather than pseudonymizing them: nothing of the tenant is left for an
-  entry to resolve to, and the deletion is refused until the tenant's audit
-  trail has been exported (T-118), so the controller holds that copy under its
-  own retention obligations. The export may be up to six hours old, and rows
-  the tenant writes after it — until the purge — are deleted without being in
-  it (#602, filed for `1.0.x`).
+  tenant's audit entries the export holds, GDPR records (consents, deletion
+  requests, export jobs, erasure proofs), the accounts, the configuration — and
+  the tenant row last. Unlike the per-user pipeline it **deletes** the accounts
+  and those audit entries rather than pseudonymizing them: nothing of the tenant
+  is left for an entry to resolve to, and the deletion is refused until the
+  tenant's audit trail has been exported (T-118), so the controller holds that
+  copy under its own retention obligations.
+- **Audit entries no export holds stay until the retention window ends**
+  (R1W1-04, #602, decision D-5). The export the deletion accepts may be up to
+  six hours old, and the tenant keeps producing entries after it — the receipt
+  itself, activity before the deletion, the deletion's own revocations and the
+  refusals until the purge. The purge deletes only the entries with a timestamp
+  at or before the instant the export started (its `exported_through`, which
+  the deletion copies into `tenants.deleted` as `audit_exported_through`), and
+  a signature only when every entry it signs is gone. Later entries stay under
+  the tenant id, read by no API, and the audit retention sweep (§2a,
+  `AXIAM__AUDIT_RETENTION_DAYS`, 730 days by default) deletes them when they
+  reach the window, as it deletes every entry; nothing is copied to the system
+  log. If the purge cannot read an export time (the deletion record is
+  missing), it deletes no audit entry at all and leaves the whole trail to the
+  retention sweep. This is the same storage-limitation basis as the rest of
+  the audit log (Art. 5(1)(e), Art. 17(3)(b)/(e)): the entries are kept for
+  the retention window and no longer.
 - **One retention, until expiry:** a revoked certificate or signing CA whose
   validity has not ended is kept — the certificate as issued, its issuer, serial
   and dates, with its free-form `metadata` and a CA's sealed key cleared —
   because its issuer's published revocation list is computed from it, and
   deleting it would make the certificate valid again to relying parties outside
   AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
-  17(3)(b), Art. 32), bounded by the certificate's own `notAfter`; the cleanup
-  job deletes the row then.
-- The system audit log keeps `tenants.deleted` (who deleted it, and the export
-  receipt that authorised it) and gains `tenants.purged` when the sweep is done —
-  the tenant-level counterpart of an erasure proof.
+  17(3)(b), Art. 32), bounded by the certificate's own `notAfter` plus eight days
+  (an issuing CA's list keeps an expired entry for up to seven days, plus a day
+  for clock skew; #608); the cleanup job deletes the row then.
+- The system audit log keeps `tenants.deleted` (who deleted it, the export
+  receipt that authorised it, and the time that export covered up to) and gains
+  `tenants.purged` when the sweep is done — the tenant-level counterpart of an
+  erasure proof, recording the export time used and how many audit entries were
+  deleted and how many were kept for the retention sweep.
 
 Completeness is a test, not a list someone maintains:
 `schema.rs::every_tenant_scoped_table_is_purged` fails when a table with a
 `tenant_id` field (or a tenant `scope_id`) is missing from the purge; the two
-certificate tables are its one named exemption, for the retention above. Rows left
+certificate tables and the two audit tables are its named exemptions, for the
+retentions above. Rows left
 by deletions made before 1.0.0 are found and purged by the same sweep at
 start-up and daily, except their audit entries, which the retention window
 (§2a) governs. Proven by
-`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`
+`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`;
+for the audit entries, by `tenant_purge_test.rs::a_row_written_after_the_export_survives_the_purge`
+and `tenant_test.rs::an_audit_row_written_after_the_export_survives_the_purge`;
 and, for the certificate retention,
 `crl_test.rs::a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire`.
 

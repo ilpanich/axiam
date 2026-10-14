@@ -16,6 +16,7 @@ use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events,
 };
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
+use axiam_core::models::tenant::Tenant;
 use axiam_core::models::uma::RptPermission;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
@@ -653,6 +654,15 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// deployment without reactors holds the no-op gate, so every grant runs
     /// the same code.
     reactor_gate: SharedReactorGate,
+    /// #613 (T-289) — the tenant's effective `dcr_allowed_scopes`, the ceiling
+    /// on what an externally registered client may obtain. Read only for a
+    /// `dcr` or `cimd` client; see [`crate::scope_ceiling`].
+    ///
+    /// Builder-installed like the reactor gate, but **not** silent when left
+    /// out: the default refuses every read, so an unwired composition root
+    /// answers every external client's grant with `server_error` rather than
+    /// quietly trusting the client row.
+    scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
 impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
@@ -694,6 +704,7 @@ where
             auth_config,
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
+            scope_policy: crate::scope_ceiling::unwired(),
         }
     }
 
@@ -986,6 +997,34 @@ where
         self
     }
 
+    /// Install the tenant scope policy (#613). See the `scope_policy`
+    /// field documentation for why the default refuses.
+    #[must_use]
+    pub fn with_scope_policy(mut self, policy: crate::scope_ceiling::SharedScopePolicy) -> Self {
+        self.scope_policy = policy;
+        self
+    }
+
+    /// Narrow an authenticated client's scopes to its tenant's current
+    /// `dcr_allowed_scopes` (#613), for the endpoints that authenticate a
+    /// client through [`Self::authenticate_client`] and then hand it to
+    /// another service — `/oauth2/bc-authorize` and the token-exchange grant.
+    ///
+    /// Separate from [`Self::authenticate_client`] on purpose: revocation,
+    /// introspection and PAR authenticate through it too and decide nothing
+    /// from the client's scopes, so they should not pay the policy read.
+    ///
+    /// A no-op for an administrator's client.
+    ///
+    /// # Errors
+    ///
+    /// `server_error` when an external client's policy cannot be read.
+    pub async fn apply_scope_ceiling(&self, client: &mut OAuth2Client) -> Result<(), OAuth2Error> {
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), client)
+            .await
+            .map(|_| ())
+    }
+
     /// Run `token.pre_issue` and return the `ext` claims to mint with.
     ///
     /// Every grant that mints an access token goes through here, which is the
@@ -1167,7 +1206,65 @@ where
         client: &OAuth2Client,
         presented_secret: Option<&str>,
         ctx: &TokenRequestContext,
-    ) -> Result<(), OAuth2Error> {
+    ) -> Result<Tenant, OAuth2Error> {
+        // R1W1-03 (#601, T-472): a credential proves the client is who it says
+        // it is; it says nothing about whether the tenant the client belongs to
+        // is still there. The client row survives a tenant tombstone until the
+        // purge, so without this read a tombstoned tenant's clients kept
+        // authenticating at every endpoint that is not itself a minting path:
+        // `bc-authorize` stored a request and mailed the user, introspection
+        // reported the tenant's unexpired access tokens `active`, revocation
+        // and PAR wrote rows.
+        //
+        // After the credential, not before: a caller who has not proven
+        // possession of anything costs no extra read (the SEC-086 ordering —
+        // one answer, one cost, whatever was wrong), and the refusal is the
+        // same `invalid_client` a wrong secret gets, so it is not an oracle for
+        // "this tenant was deleted". The read is `get_by_id`, which already
+        // filters `deleted_at = NONE`, so the tombstone is seen the instant the
+        // `204` returns; there is no cache on this path to lag behind it.
+        //
+        // The tenant is returned so the grants, which need it for `org_id`,
+        // do not read it a second time.
+        let read_by_tls = self
+            .verify_client_credential(tenant_id, client, presented_secret, ctx)
+            .await?;
+        match read_by_tls {
+            Some(tenant) => Ok(tenant),
+            None => self.live_tenant(client.tenant_id).await,
+        }
+    }
+
+    /// The tenant, if it is still there; `invalid_client` if it is not.
+    ///
+    /// `NotFound` is a tombstoned or purged tenant (`get_by_id` filters
+    /// `deleted_at = NONE`) and reads as the same `invalid_client` a wrong
+    /// credential does. Any other error is a datastore fault and stays a
+    /// `server_error`, never masquerading as bad client credentials.
+    async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
+        self.tenant_repo
+            .get_by_id(tenant_id)
+            .await
+            .map_err(|e| match e {
+                AxiamError::NotFound { .. } => {
+                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
+                }
+                other => OAuth2Error::ServerError(other.to_string()),
+            })
+    }
+
+    /// The credential check proper, split out of
+    /// [`Self::authenticate_client_credential`] so that method can add the
+    /// tenant's liveness without every early `return Ok(())` below having to
+    /// remember it. Returns the tenant only when this check already had to read
+    /// it (`tls_client_auth`), so the wrapper does not read it twice.
+    async fn verify_client_credential(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        presented_secret: Option<&str>,
+        ctx: &TokenRequestContext,
+    ) -> Result<Option<Tenant>, OAuth2Error> {
         // T21.2 — the public-client arm, first, because it is the one arm
         // that may succeed with no credential at all and the reader should
         // not have to establish that the other five cannot.
@@ -1195,7 +1292,7 @@ where
                 );
                 return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if client.token_endpoint_auth_method.is_mtls() {
@@ -1218,39 +1315,32 @@ where
             // through a chain its organization's anchor ends. The tenant is
             // read for its organization; a deleted one authenticates nothing.
             if client.token_endpoint_auth_method == ClientAuthMethod::TlsClientAuth {
-                let organization = self
-                    .tenant_repo
-                    .get_by_id(client.tenant_id)
-                    .await
-                    .map_err(|e| match e {
-                        AxiamError::NotFound { .. } => {
-                            OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
-                        }
-                        other => OAuth2Error::ServerError(other.to_string()),
-                    })?
-                    .organization_id;
+                let tenant = self.live_tenant(client.tenant_id).await?;
                 crate::mtls::refuse_a_certificate_from_outside_the_clients_organization(
                     client,
-                    organization,
+                    tenant.organization_id,
                     cert,
                     standing,
                     self.issued_certificates.as_ref(),
                 )
                 .await?;
+                return Ok(Some(tenant));
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if client.token_endpoint_auth_method.is_private_key_jwt() {
             return self
                 .authenticate_client_assertion(tenant_id, client, ctx)
-                .await;
+                .await
+                .map(|()| None);
         }
 
         if client.token_endpoint_auth_method == ClientAuthMethod::ClientSecretBasic {
             return self
                 .authenticate_client_secret_basic(tenant_id, client, presented_secret, ctx)
-                .await;
+                .await
+                .map(|()| None);
         }
 
         // `client_secret_post`. W8: a Basic header on this client is **not** a
@@ -1271,7 +1361,9 @@ where
 
         let secret = presented_secret
             .ok_or_else(|| OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()))?;
-        self.verify_client_secret(tenant_id, client, secret).await
+        self.verify_client_secret(tenant_id, client, secret)
+            .await
+            .map(|()| None)
     }
 
     /// `client_secret_basic` client authentication (W8, RFC 6749 §2.3.1).
@@ -1838,7 +1930,8 @@ where
         // registration (its profile, its auth method), and reporting that to a
         // caller who has not proven possession of a credential would be a new
         // oracle on a path that just spent three comment blocks closing one.
-        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
+        let tenant = self
+            .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
@@ -1975,6 +2068,19 @@ where
             }
         }
 
+        // #613 (T-289) — a code is the scopes `/oauth2/authorize` admitted, and
+        // for an externally registered client those were bounded by the
+        // tenant's `dcr_allowed_scopes` *then*. A scope withdrawn while the
+        // code was in flight is dropped here, before the code is spent, so a
+        // policy read that fails refuses without burning it. No read at all
+        // for an administrator's client.
+        let mut auth_code = auth_code;
+        if let Some(ceiling) =
+            crate::scope_ceiling::ceiling_for(self.scope_policy.as_ref(), &client).await?
+        {
+            crate::scope_ceiling::narrow(&mut auth_code.scopes, &ceiling);
+        }
+
         // Now atomically consume (mark as used) the code.
         if self
             .code_repo
@@ -2001,16 +2107,8 @@ where
         self.ensure_account_may_act(tenant_id, auth_code.user_id)
             .await?;
 
-        // Resolve org_id from tenant
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-
+        // `org_id` comes from the tenant `authenticate_client_credential` already
+        // read (and found live); a second read would be a second round trip.
         // Issue access token (include scopes from the authorization code).
         // OAuth2 auth-code flow has no persistent session row — use random jti.
         //
@@ -2338,7 +2436,7 @@ where
             .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await;
         let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
-        secret_result?;
+        let tenant = secret_result?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
         // Verify grant type is allowed
@@ -2347,6 +2445,13 @@ where
                 "client not authorized for client_credentials grant".into(),
             ));
         }
+
+        // #613 (T-289) — for an externally registered client, "the client's
+        // scopes" are the row's scopes within the tenant's current
+        // `dcr_allowed_scopes`. A no-op, and no read, for an administrator's
+        // client.
+        let mut client = client;
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
 
         // Resolve scopes: use requested scope if provided, else client's.
         // Validate requested scopes are a subset of the client's allowed
@@ -2370,17 +2475,14 @@ where
             None => client.scopes.clone(),
         };
 
-        // Stage 3 — tenant lookup (DB round-trip #2), for the `org_id` claim.
-        let t_tenant_lookup = std::time::Instant::now();
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-        let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
+        // Stage 3 — tenant lookup, for the `org_id` claim. R1W1-03 (#601): the
+        // read now happens inside client authentication (a tombstoned tenant's
+        // client must not authenticate), so its cost is part of
+        // `secret_verify_us` and this stage is reported as 0. The field stays so
+        // that dashboards and the run-5 runbook's breakdown keep their shape;
+        // `client_lookup_us + secret_verify_us` is the figure to compare with
+        // runs that predate this change.
+        let tenant_lookup_us = 0u64;
 
         // Stage 4 — token mint + EdDSA (Ed25519) signature. No refresh token is
         // issued for client_credentials, so there is no persist stage.
@@ -2515,7 +2617,8 @@ where
             return Err(no_credential_error());
         }
 
-        self.authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
+        let tenant = self
+            .authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
             .await?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
@@ -2608,6 +2711,17 @@ where
         // user about it (the rule `resolve_bound` applies to the resource
         // below). Everything minted from here — the access token, the rotated
         // refresh token, the ID token and the response's `scope` — uses this.
+        //
+        // #613 (T-289) — and for an externally registered client "the client's
+        // scopes" are bounded by the tenant's `dcr_allowed_scopes` as it is
+        // *now*, not as it was when the row was last written. A tenant that
+        // withdraws a scope from the list therefore narrows every outstanding
+        // refresh grant of every `dcr`/`cimd` client at its next use, without
+        // waiting for the client to re-register. Read before the predecessor
+        // is rotated, so a failed read refuses without spending it; no read at
+        // all for an administrator's client.
+        let mut client = client;
+        crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
         let scopes: Vec<String> = stored
             .scopes
             .iter()
@@ -2624,16 +2738,8 @@ where
             );
         }
 
-        // Resolve org_id from tenant
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-
+        // `org_id` comes from the tenant `authenticate_client_credential` already
+        // read (and found live); a second read would be a second round trip.
         // Issue new access token.
         // OAuth2 refresh flow has no persistent session row — use random jti.
         //
@@ -3181,6 +3287,15 @@ where
     /// second copy of this rule is how the two drifted apart in the first
     /// place. `client_secret` is `Option` because a client registered for a
     /// strong method has none to present.
+    ///
+    /// # R1W1-03 — the tenant must still be there
+    ///
+    /// A credential that checks out is not enough: the client row outlives a
+    /// tenant tombstone until the purge, so the tenant is read too (inside
+    /// [`Self::authenticate_client_credential`]) and one that is gone is the
+    /// `invalid_client` a wrong credential gets. Revocation, introspection, PAR,
+    /// `bc-authorize`, token exchange and the UMA ticket grant therefore stop
+    /// at the `204` that deletes the tenant (T-472).
     pub async fn authenticate_client(
         &self,
         tenant_id: Uuid,

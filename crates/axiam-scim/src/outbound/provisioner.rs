@@ -73,6 +73,10 @@ pub fn group_in_scope(target: &ScimTarget, group_id: Uuid) -> bool {
 /// A failure to list the targets or to enqueue is logged once per report and
 /// never reaches the repository that reported: the write it follows has
 /// committed, and the next change of the resource (or reconciliation) converges.
+/// The first refused enqueue ends the report's fan-out; what it held back is
+/// one `record_not_offered` call (R101W4-01). It does not pace
+/// (`OutboundPublisher::enqueue_paced`, R101-01): it runs on the path of the
+/// write that reported the change, which must not wait for a queue to drain.
 pub struct ScimProvisioner<T> {
     targets: T,
     publisher: Arc<dyn OutboundPublisher>,
@@ -102,16 +106,26 @@ impl<T: ScimTargetRepository + 'static> ScimProvisioner<T> {
                 return;
             }
         };
-        let mut failed = 0usize;
+        // R101W4-01: the first refused reference ends the report's fan-out. The
+        // queue that refused it refuses the next, and in the minimal profile
+        // every refusal is an audit row; the rest are counted, recorded as one
+        // row, and converged by the next change or reconciliation.
+        let mut failed = 0u64;
+        let mut refused_target: Option<Uuid> = None;
         for target in &targets {
             for (resource_type, axiam_id) in wanted(target) {
+                if refused_target.is_some() {
+                    failed += 1;
+                    continue;
+                }
                 let message = reference_message(tenant_id, target.id, resource_type, axiam_id);
                 if self.publisher.enqueue(&message).await.is_err() {
                     failed += 1;
+                    refused_target = Some(target.id);
                 }
             }
         }
-        if failed > 0 {
+        if let Some(target_id) = refused_target {
             // Once per report, not once per message: a broker outage must not
             // write a line for every target of every change.
             tracing::warn!(
@@ -120,6 +134,11 @@ impl<T: ScimTargetRepository + 'static> ScimProvisioner<T> {
                 failed,
                 "SCIM provisioning references could not be enqueued"
             );
+            if failed > 1 {
+                self.publisher
+                    .record_not_offered(OutboundKind::ScimPush, tenant_id, target_id, failed - 1)
+                    .await;
+            }
         }
     }
 }

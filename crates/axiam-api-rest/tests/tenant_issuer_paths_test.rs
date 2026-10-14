@@ -247,10 +247,12 @@ async fn setup() -> Fixture {
 }
 
 /// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
-/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
-/// counter pro-rates a peer first seen partway through a minute, so at the
-/// shipped 30 a test that starts late in the minute is refused after as few as
-/// three authorization requests (#532). The limit is pinned by
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The preset
+/// gives a peer first seen partway through a minute its whole budget (the
+/// counter's cold-entry seed is not applied to the browser-endpoint buckets),
+/// so the lift is not for timing; it is because 30 a minute is a count a test
+/// driving many authorizations from one peer can meet across a run (#532). The
+/// limit is pinned by
 /// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
 fn permissive_rate_limits() -> RateLimitConfig {
     RateLimitConfig {
@@ -945,6 +947,10 @@ async fn the_rfc_9207_iss_parameter_on_a_tenant_path_is_the_tenant_issuer() {
 /// AXIAM actually sends.
 #[actix_rt::test]
 async fn the_logout_token_iss_is_the_tenant_issuer() {
+    // The wiremock RP is a loopback `http` receiver; delivery is a guarded,
+    // non-redirecting hop (R101W2-04) that refuses it unless this test seam is
+    // on. Nothing but test code calls it.
+    axiam_api_rest::backchannel_logout::admit_private_networks_for_tests();
     let rp = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/backchannel"))

@@ -72,12 +72,13 @@ pub fn sanitise_reason(raw: &str) -> String {
 }
 
 /// A Vault token as Vault spells one: `hvs.`, `hvb.` or `hvr.` and a body, or
-/// the older `s.` followed by a long run of token characters.
+/// the older `s.` (service) and `b.` (batch) followed by a long run of token
+/// characters.
 fn looks_like_a_token(word: &str) -> bool {
     let word =
         word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_' && c != '-');
     let body = |prefix: &str| word.strip_prefix(prefix).filter(|rest| rest.len() >= 8);
-    ["hvs.", "hvb.", "hvr.", "s."]
+    ["hvs.", "hvb.", "hvr.", "s.", "b."]
         .iter()
         .any(|prefix| body(prefix).is_some_and(|rest| rest.chars().all(is_token_char)))
 }
@@ -120,5 +121,30 @@ mod tests {
         assert_eq!(wide.chars().count(), MAX_REASON_CHARS);
         // Ordinary words that merely start like a prefix are left alone.
         assert_eq!(sanitise_reason("s.o.s. hvs.x"), "s.o.s. hvs.x");
+        assert_eq!(sanitise_reason("b.c. b.short"), "b.c. b.short");
+    }
+
+    /// R101W1-06: a legacy batch token (`b.` and a body) is masked as `s.` is.
+    #[test]
+    fn a_legacy_batch_token_is_masked() {
+        let reason =
+            sanitise_reason("denied for b.AAAAAQJ0aGlzX2lzX2Ff and \"b.AAAAAQJ0aGlzX2Ff\"");
+        assert!(!reason.contains("b.AAAA"), "{reason}");
+        assert_eq!(reason.matches("[redacted]").count(), 2, "{reason}");
+        assert!(reason.starts_with("denied for "));
+    }
+
+    /// The row, the audit append and the log each apply the sanitiser to what
+    /// the sweep or the handler already sanitised: a second pass changes nothing.
+    #[test]
+    fn sanitising_is_idempotent() {
+        for raw in [
+            "denied for hvs.CAESIAbcdefghijklmnop012345 b.AAAAAQJ0aGlzX2Ff",
+            &"y ".repeat(5_000),
+            &"é".repeat(1_000),
+        ] {
+            let once = sanitise_reason(raw);
+            assert_eq!(sanitise_reason(&once), once);
+        }
     }
 }

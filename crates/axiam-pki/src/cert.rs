@@ -1300,7 +1300,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 certificate_id = %certificate.id,
                 tenant_id = %certificate.tenant_id,
                 issuer_ca_id = %certificate.issuer_ca_id,
-                reason = %reason,
+                reason = %vault_forward::sanitise_reason(&reason),
                 "certificate revoked in AXIAM but not yet in Vault, whose revocation list \
                  therefore does not name it; the cleanup job retries"
             );

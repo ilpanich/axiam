@@ -393,7 +393,7 @@ pub async fn revoke<C: Connection + Clone>(
                 metadata: Some(serde_json::json!({
                     "organization_id": org_id,
                     "ca_certificate_id": id,
-                    "reason": reason,
+                    "reason": axiam_pki::vault_forward::sanitise_reason(&reason),
                 })),
             })
             .await

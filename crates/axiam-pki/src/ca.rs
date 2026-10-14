@@ -1117,7 +1117,7 @@ pub(crate) async fn forward_ca_revocation<R: CaCertificateRepository>(
             ca_id = %revoked.id,
             organization_id = %revoked.organization_id,
             parent_ca_id = ?revoked.parent_ca_id,
-            reason = %reason,
+            reason = %crate::vault_forward::sanitise_reason(&reason),
             "CA revoked in AXIAM but not yet on its parent's revocation list in Vault, which \
              therefore does not name it; the cleanup job retries"
         );

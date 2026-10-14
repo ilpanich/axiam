@@ -2557,3 +2557,226 @@ async fn erasing_an_account_leaves_an_older_namesakes_certificate_alone() {
         "alice's certificate is not Alice's"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R101W1-05 (#618) — the certificate retention sweep
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::certificate::{
+    CertificateType as RetentionType, KeyAlgorithm as RetentionAlgorithm,
+    StoreCertificate as RetentionLeaf,
+};
+use axiam_core::repository::CertificateRepository as _;
+use axiam_db::SurrealCertificateRepository;
+use axiam_server::cleanup::{CERTIFICATE_RETENTION_BATCH, sweep_certificate_retention};
+
+/// A `User` certificate of `tenant` under `issuer`, whose `notAfter` is `days`
+/// days ago (negative: ahead), revoked or not.
+async fn leaf_expired_days_ago(
+    certs: &SurrealCertificateRepository<surrealdb::engine::local::Db>,
+    tenant: Uuid,
+    issuer: Uuid,
+    fingerprint: &str,
+    days: i64,
+    revoked: bool,
+) -> Uuid {
+    let cert = certs
+        .create(RetentionLeaf {
+            tenant_id: tenant,
+            issuer_ca_id: issuer,
+            subject: format!("holder-{fingerprint}"),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: fingerprint.into(),
+            cert_type: RetentionType::User,
+            key_algorithm: RetentionAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::days(days + 365),
+            not_after: Utc::now() - chrono::Duration::days(days),
+            metadata: serde_json::json!({ "note": "a person" }),
+            user_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .unwrap();
+    if revoked {
+        certs.revoke(tenant, cert.id).await.unwrap();
+    }
+    cert.id
+}
+
+/// The sweep deletes a certificate row more than eight days past `notAfter` —
+/// revoked, or expired without ever being revoked — and its binding edge, and
+/// leaves one seven days past, one still valid, and one of a tenant that is
+/// being deleted (the tenant purge's). The issuer's revocation list is the
+/// same before and after: it stopped naming the deleted row at seven days at
+/// the latest. It touches no audit row, and a second run finds nothing.
+#[tokio::test]
+async fn the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_change() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "cert-retention".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let live = tenant_with_a_user(&db, org, "cert-live").await;
+    let dying = tenant_with_a_user(&db, org, "cert-dying").await;
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+
+    let nine = leaf_expired_days_ago(&certs, live, issuer, "fp-nine", 9, true).await;
+    let nine_unrevoked = leaf_expired_days_ago(&certs, live, issuer, "fp-nine-u", 9, false).await;
+    let seven = leaf_expired_days_ago(&certs, live, issuer, "fp-seven", 7, true).await;
+    let ahead = leaf_expired_days_ago(&certs, live, issuer, "fp-ahead", -30, true).await;
+    let dying_nine = leaf_expired_days_ago(&certs, dying, issuer, "fp-dying", 9, true).await;
+    tenants.delete(dying).await.unwrap();
+
+    // The nine-day row is bound to a service account; its edge must go too.
+    db.query(format!(
+        "RELATE certificate:`{nine}`->cert_bound_to->service_account:`{}`",
+        Uuid::new_v4()
+    ))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let edges = |db: &Surreal<surrealdb::engine::local::Db>| {
+        let db = db.clone();
+        async move {
+            #[derive(SurrealValue)]
+            struct C {
+                total: i64,
+            }
+            let mut r = db
+                .query("SELECT count() AS total FROM cert_bound_to GROUP ALL")
+                .await
+                .unwrap();
+            let rows: Vec<C> = r.take(0).unwrap();
+            rows.first().map_or(0, |c| c.total)
+        }
+    };
+    assert_eq!(edges(&db).await, 1);
+
+    // The widest window a list can keep an expired entry for (seven days), and
+    // a minute more: the seven-day row is on it, the nine-day one never is.
+    let widest = Utc::now() - chrono::Duration::days(7) - chrono::Duration::minutes(1);
+    let list = || async {
+        let mut fingerprints: Vec<String> = certs
+            .list_revoked_by_issuer(issuer, widest)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.fingerprint)
+            .collect();
+        fingerprints.sort();
+        fingerprints
+    };
+    let before = list().await;
+    assert_eq!(
+        before,
+        vec!["fp-ahead", "fp-seven"],
+        "the nine-day rows are not on the list: it dropped them already"
+    );
+    let audit_before = SurrealAuditLogRepository::new(db.clone())
+        .list_system(AuditLogFilter::default(), Pagination::default())
+        .await
+        .unwrap()
+        .total;
+
+    let (_stop, shutdown) = watch::channel(false);
+    let removed = sweep_certificate_retention(&certs, &shutdown)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2, "the revoked and the unrevoked nine-day rows");
+
+    for gone in [nine, nine_unrevoked] {
+        assert!(certs.get_by_id(live, gone).await.is_err(), "{gone} is gone");
+    }
+    for kept in [(live, seven), (live, ahead), (dying, dying_nine)] {
+        assert!(certs.get_by_id(kept.0, kept.1).await.is_ok(), "{kept:?}");
+    }
+    assert_eq!(edges(&db).await, 0, "the binding went with its row");
+    assert_eq!(list().await, before, "the list is unchanged");
+    assert_eq!(
+        SurrealAuditLogRepository::new(db.clone())
+            .list_system(AuditLogFilter::default(), Pagination::default())
+            .await
+            .unwrap()
+            .total,
+        audit_before,
+        "no audit row is touched"
+    );
+    assert_eq!(
+        sweep_certificate_retention(&certs, &shutdown)
+            .await
+            .unwrap(),
+        0,
+        "a second run finds nothing"
+    );
+}
+
+/// Bounded: a batch removes at most its limit, the sweep takes batches until
+/// one comes back short, and two replicas sweeping at once between them remove
+/// each row exactly once, neither failing.
+#[tokio::test]
+async fn the_certificate_sweep_is_bounded_and_two_replicas_remove_each_row_once() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "cert-retention-2".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenant = tenant_with_a_user(&db, org, "cert-batches").await;
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    for n in 0..7 {
+        leaf_expired_days_ago(
+            &certs,
+            tenant,
+            issuer,
+            &format!("fp-{n}"),
+            10 + n,
+            n % 2 == 0,
+        )
+        .await;
+    }
+
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 3);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 3);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 1);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 0);
+
+    for n in 0..40 {
+        leaf_expired_days_ago(&certs, tenant, issuer, &format!("fq-{n}"), 10, true).await;
+    }
+    let (_stop, shutdown) = watch::channel(false);
+    let a = SurrealCertificateRepository::new(db.clone());
+    let b = SurrealCertificateRepository::new(db.clone());
+    let (ra, rb) = tokio::join!(
+        sweep_certificate_retention(&a, &shutdown),
+        sweep_certificate_retention(&b, &shutdown)
+    );
+    assert_eq!(ra.unwrap() + rb.unwrap(), 40);
+    assert!(u32::try_from(40).unwrap() < CERTIFICATE_RETENTION_BATCH);
+
+    // A stop request ends the sweep before its first batch.
+    leaf_expired_days_ago(&certs, tenant, issuer, "fp-stop", 10, true).await;
+    let (stop, stopped) = watch::channel(false);
+    stop.send(true).unwrap();
+    assert_eq!(
+        sweep_certificate_retention(&certs, &stopped).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        sweep_certificate_retention(&certs, &shutdown)
+            .await
+            .unwrap(),
+        1
+    );
+}

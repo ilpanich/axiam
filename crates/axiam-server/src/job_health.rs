@@ -63,6 +63,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "dcr_registration_tokens",
     // #523 (D-4): deleted tenants' data, purged in user-erasure order.
     "tenant_purge",
+    // R101W1-05 (#618): certificate rows more than eight days past `notAfter`.
+    "certificate_retention",
     // T-470: `vault_pki` revocations Vault does not have yet.
     "vault_revocation",
     // #603: revocations Vault has refused for about a day. Its own job, so the
@@ -252,6 +254,8 @@ mod tests {
             "ciba_request",
             // #523 (D-4): the deleted tenants' purge.
             "tenant_purge",
+            // R101W1-05 (#618): the certificate rows no list names any more.
+            "certificate_retention",
             // T-470: revocations forwarded to Vault, and (#603) the ones it
             // keeps refusing, reported apart from the pass.
             "vault_revocation",

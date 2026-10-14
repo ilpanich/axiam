@@ -206,21 +206,44 @@ because that convention reads the names the anonymization overwrites; it is
 fail-closed, so a failure leaves the account due and the next sweep retries.
 The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
 its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
-from the `vault_revocation` sweep — under the same legal-obligation and security
-retention (Art. 17(3)(b), Art. 32) the tenant deletion below records: deleting
+from the `vault_revocation` sweep — under the same security retention the tenant deletion below records
+(Art. 6(1)(f), Art. 32 - not Art. 17(3)(b), see below): deleting
 a revoked, unexpired certificate's row would make the certificate valid again to
-every relying party outside AXIAM. What such a row still holds about the person:
-the certificate as issued (its subject DN, which may be a name or an address),
-the `subject` column (the common name), the free-form `metadata`, and `user_id`,
-which names the anonymized account by its internal id. **Residual, not closed
-by 1.0.1:** the per-user erasure does not clear the row's `subject` or `metadata`
-(the tenant purge clears `metadata`), and in a live tenant no job deletes an
-expired certificate row, so that retention is bounded by the tenant's lifetime
-rather than by the certificate's `notAfter`. Recorded in threat T-187. The
+every relying party outside AXIAM. The purge also **clears the rows' free-form
+`metadata`** (set to `{}`, as the tenant purge does; R101W1-05, 1.1.0), on every
+`User` certificate of the account in any status, by the same match as the
+revocation and after it. What such a row still holds about the person, until it
+is deleted: the certificate as issued (its subject DN, which may be a name or an
+address), the `subject` column (the common name), and `user_id`, which names the
+anonymized account by its internal id and is kept on purpose - it is a random id
+of a row that `anonymize_user` overwrites in place, so it names nobody once the
+purge has run, and it is how a retried purge finds the rows again. **Retention,
+not erasure, and for how long:** a cleanup job, `certificate_retention`
+(`cleanup.rs::sweep_certificate_retention`, on `/health/jobs`), deletes every
+certificate row of a live tenant more than eight days past its `notAfter`,
+revoked or not, with its service-account binding, in batches of 500 (at most
+twenty a tick, safe on two replicas at once, no audit row touched). The eight
+days are the grace the tenant purge uses (`KEPT_REVOCATION`: an issuing CA's list
+keeps an expired entry for at most seven days, plus a day for clock skew; #608),
+so no revocation list names a row at the moment it goes and the list is the same
+without it. **Residual:** until `notAfter` plus eight days the row holds the
+certificate as issued and the `subject` column; clearing those would change what
+a list entry is matched against. **Legal basis:** the retention is a security
+retention - the controller's legitimate interest, and relying parties', in a
+revocation that stays published (Art. 6(1)(f)), as part of the security of
+processing (Art. 32). Art. 17(3)(b) (a legal obligation, or a task in the public
+interest) is not the basis: no provision obliges AXIAM to publish the list, and
+the exemption fits a security retention poorly. Recorded in threat T-187. The
 `gdpr.user_pseudonymized` audit row carries `certificates_revoked`. Proved by
 [`cleanup_task.rs::the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes`](../../crates/axiam-server/tests/cleanup_task.rs)
 and
 [`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs);
+the `metadata` clearing by
+[`req14_gdpr_test.rs::the_purge_clears_the_metadata_of_the_erased_accounts_certificates`](../../crates/axiam-server/tests/req14_gdpr_test.rs),
+the retention sweep by
+[`cleanup_task.rs::the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_change`](../../crates/axiam-server/tests/cleanup_task.rs)
+and
+[`cleanup_task.rs::the_certificate_sweep_is_bounded_and_two_replicas_remove_each_row_once`](../../crates/axiam-server/tests/cleanup_task.rs);
 the bounds by
 [`cleanup_task.rs::erasing_an_account_leaves_an_older_namesakes_certificate_alone`](../../crates/axiam-server/tests/cleanup_task.rs)
 and the repository tests in
@@ -351,10 +374,11 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
   and dates, with its free-form `metadata` and a CA's sealed key cleared —
   because its issuer's published revocation list is computed from it, and
   deleting it would make the certificate valid again to relying parties outside
-  AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
-  17(3)(b), Art. 32), bounded by the certificate's own `notAfter` plus eight days
-  (an issuing CA's list keeps an expired entry for up to seven days, plus a day
-  for clock skew; #608); the cleanup job deletes the row then.
+  AXIAM (R1W1-01). That is a security retention (Art. 6(1)(f), Art. 32; not
+  Art. 17(3)(b), R101W1-05), bounded by the certificate's own `notAfter` plus
+  eight days (an issuing CA's list keeps an expired entry for up to seven days,
+  plus a day for clock skew; #608); the orphan purge deletes the row then, and in
+  a live tenant the `certificate_retention` job does the same.
 - The system audit log keeps `tenants.deleted` (who deleted it, the export
   receipt that authorised it, and the time that export covered up to) and gains
   `tenants.purged` when the sweep is done — the tenant-level counterpart of an

@@ -192,6 +192,17 @@ pub enum Retain {
     CoveringKeptEntries,
 }
 
+/// How long after its `notAfter` a revoked certificate's row is kept: the
+/// longest an issuer's list can keep an expired entry (seven days, #608) and a
+/// day's margin for the datastore's clock. A macro because the one spelling
+/// feeds two `concat!`ed SurrealQL conditions, [`KEPT_REVOCATION`] and
+/// [`PAST_REVOCATION_GRACE`].
+macro_rules! revocation_grace {
+    () => {
+        "8d"
+    };
+}
+
 /// The condition a row the purge keeps satisfies: revoked, and expired for
 /// less than eight days.
 ///
@@ -203,7 +214,20 @@ pub enum Retain {
 /// epoch, which changes the list without moving its `thisUpdate` and so breaks
 /// the CRL number every replica derives from them. The eighth day is margin
 /// for the datastore's clock against the replicas'.
-const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now() - 8d";
+const KEPT_REVOCATION: &str = concat!(
+    "status = 'Revoked' AND not_after > time::now() - ",
+    revocation_grace!()
+);
+
+/// A certificate row no revocation list names any more and no relying party
+/// can need: `notAfter` passed more than [`KEPT_REVOCATION`]'s grace ago,
+/// whatever its status (W1.4, #618). What the cleanup job's certificate
+/// retention sweep deletes in a live tenant — and what the tenant purge's
+/// orphan scan has always waited for, now for every certificate rather than
+/// only for the kept ones of a deleted tenant. The grace is spelled once, in
+/// `revocation_grace!`, so the two cannot drift apart.
+pub(crate) const PAST_REVOCATION_GRACE: &str =
+    concat!("not_after <= time::now() - ", revocation_grace!());
 
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]

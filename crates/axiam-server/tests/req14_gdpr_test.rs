@@ -249,3 +249,116 @@ async fn a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate() {
     assert_eq!(kept.status, CertificateStatus::Revoked);
     assert_eq!(kept.user_id, Some(user.id));
 }
+
+/// R101W1-05 (#618): the purge's step (b4) clears the free-form `metadata` of
+/// the account's certificates — the bound row, the legacy row found by the
+/// account's name, and one an operator had revoked before the erasure — and
+/// nobody else's, keeps every row with its binding, its PEM and its place on
+/// the issuer's list, and a retried purge rewrites nothing.
+#[tokio::test]
+async fn the_purge_clears_the_metadata_of_the_erased_accounts_certificates() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::models::user::CreateUser;
+    use axiam_core::repository::{CertificateRepository, UserRepository};
+    use axiam_db::{SurrealCertificateRepository, SurrealUserRepository};
+    use axiam_server::cleanup::revoke_erased_users_certificates;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "erin".into(),
+            email: "erin@example.com".into(),
+            password: axiam_test_support::test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    let note = serde_json::json!({ "owner": "Erin Example", "phone": "+1 555 0100" });
+    let leaf = |fingerprint: &str, subject: &str, user_id: Option<Uuid>| StoreCertificate {
+        tenant_id,
+        issuer_ca_id: issuer,
+        subject: subject.into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - chrono::Duration::minutes(1),
+        not_after: Utc::now() + chrono::Duration::days(30),
+        metadata: note.clone(),
+        user_id,
+    };
+    let bound = certs
+        .create(leaf("fp-bound", "erin-phone", Some(user.id)))
+        .await
+        .unwrap();
+    let legacy = certs
+        .create(leaf("fp-legacy", "Erin@Example.com", None))
+        .await
+        .unwrap();
+    let earlier = certs
+        .create(leaf("fp-earlier", "erin-old", Some(user.id)))
+        .await
+        .unwrap();
+    certs.revoke(tenant_id, earlier.id).await.unwrap();
+    let someone_elses = certs
+        .create(leaf("fp-other", "frank", Some(Uuid::new_v4())))
+        .await
+        .unwrap();
+
+    let revoked = revoke_erased_users_certificates(&certs, &user)
+        .await
+        .unwrap();
+    assert_eq!(revoked, 2, "the bound and the legacy row; one was revoked");
+
+    for cert in [&bound, &legacy, &earlier] {
+        let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
+        assert_eq!(read.metadata, serde_json::json!({}), "{}", cert.fingerprint);
+        assert_eq!(read.status, CertificateStatus::Revoked);
+        assert_eq!(read.public_cert_pem, cert.public_cert_pem, "the PEM stays");
+        assert_eq!(read.subject, cert.subject, "the subject stays");
+    }
+    assert_eq!(
+        certs.get_by_id(tenant_id, bound.id).await.unwrap().user_id,
+        Some(user.id),
+        "the binding is an internal id of an account that is anonymized in place"
+    );
+    let other = certs.get_by_id(tenant_id, someone_elses.id).await.unwrap();
+    assert_eq!(other.metadata, note, "another account's row is untouched");
+    assert_eq!(other.status, CertificateStatus::Active);
+    assert_eq!(
+        certs
+            .list_revoked_by_issuer(issuer, Utc::now())
+            .await
+            .unwrap()
+            .len(),
+        3,
+        "the list still names every revoked row"
+    );
+
+    // A retried purge matches nothing: nothing revoked, nothing rewritten.
+    assert_eq!(
+        revoke_erased_users_certificates(&certs, &user)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        certs
+            .clear_user_certificates_metadata(
+                tenant_id,
+                user.id,
+                &user.username,
+                &user.email,
+                user.created_at
+            )
+            .await
+            .unwrap(),
+        0
+    );
+}

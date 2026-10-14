@@ -3172,6 +3172,57 @@ pub trait CertificateRepository: Send + Sync {
         email: &str,
         user_created_at: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Clear the free-form `metadata` (set it to `{}`) of every `User`-type
+    /// certificate that belongs to `user_id`, in **any** status, and return how
+    /// many rows it matched (R101W1-05, #618) — the Art. 17 purge's scrub of
+    /// what the revocation list does not need.
+    ///
+    /// Matches exactly the rows [`Self::revoke_user_certificates`] matches —
+    /// the binding, then the convention with its two bounds — except that it
+    /// does not require the row to be active, so a certificate an operator had
+    /// revoked before the erasure is scrubbed too. Rows are kept, with their
+    /// PEM, `subject`, `user_id` and `revoked_at`: the revocation list is
+    /// computed from them. A row whose `metadata` is already empty is not
+    /// written (and not counted), which makes a retried purge a no-op.
+    ///
+    /// Called **after** `revoke_user_certificates` and before the account's
+    /// names are overwritten, for the same reason that is: the convention
+    /// reads them, and `metadata.user_id` is one of the things it reads, which
+    /// this call removes.
+    ///
+    /// Required, with no default, for the reason `revoke_user_certificates` is.
+    fn clear_user_certificates_metadata(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+        user_created_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete up to `limit` certificate rows of **live** tenants whose
+    /// `notAfter` passed more than eight days ago, in any status, and return
+    /// how many *this call* removed (R101W1-05, #618).
+    ///
+    /// The retention end of a certificate row. A revoked row is the evidence
+    /// its issuer's revocation list is computed from, and a list keeps an
+    /// expired entry for at most seven days (`axiam_pki::crl`, #608); the
+    /// eighth day is the margin for the datastore's clock against the
+    /// replicas'. Past it no list names the row and no relying party can need
+    /// it, so the CRL is the same with the row as without. An expired
+    /// certificate that was never revoked is on no list and goes with them.
+    /// A row's `cert_bound_to` edge goes with it.
+    ///
+    /// "Live" is a tenant row without a `deleted_at`: a deleted tenant's rows
+    /// belong to the tenant purge, which keeps them for the same eight days and
+    /// whose orphan scan then removes them. Touches no audit row.
+    ///
+    /// Bounded by `limit` so one pass cannot hold a long write; the caller
+    /// repeats while a full batch comes back. Safe for two replicas at once:
+    /// deleting a row the other has just deleted removes nothing and counts
+    /// nothing.
+    fn delete_past_retention(&self, limit: u32) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,

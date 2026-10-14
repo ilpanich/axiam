@@ -1866,15 +1866,23 @@ finished rather than wait for it:
 * **The cleanup task, in every stop.** A sweep still running at its bound (5 s
   after the audit drain for `SIGTERM`, 2 s after a lost lease) is cut where it
   is. Every sweep is re-run by the next tick, so the next start resumes it,
-  with two exceptions: a GDPR erasure cut after the user row was anonymized and
+  with three exceptions: a GDPR erasure cut after the user row was anonymized and
   before `gdpr.user_pseudonymized` was written leaves the erasure and its proof
   without that audit row (the user is no longer due, so nothing writes it
-  later), and a data export cut after it was marked ready and before its mail
-  was queued leaves a download nobody was told about, which expires after 24 h.
-  (A SCIM target whose reconciliation is cut mid-run is reconciled again at its
-  next daily run.)
-  Both need a sweep that was already running when the cleanup task was told to
-  stop and is still running when its bound runs out — 5 to 12 s later for
+  later); a data export cut after it was marked ready and before its mail
+  was queued leaves a download nobody was told about, which expires after 24 h;
+  and a tenant purge cut mid-way is claimed for a one-hour lease that a cut does
+  not release, so the next start's sweep skips that tenant until the lease ends
+  (every step of the purge is idempotent, so it resumes then, and a deployment
+  that restarts more often than hourly can keep pushing it back), and one cut
+  while the tenant row's final `DELETE` is in flight, or before the system log's
+  `tenants.purged` record is written, leaves no tenant row for a later sweep to
+  find, so that record — the export time the purge used and how many audit
+  entries it deleted and kept — is never written (corrected 2026-10-14, R101-03,
+  #655; before then this list had two exceptions). (A SCIM target whose
+  reconciliation is cut mid-run is reconciled again at its next daily run.)
+  All three need a sweep that was already running when the cleanup task was told
+  to stop and is still running when its bound runs out — 5 to 12 s later for
   `SIGTERM` (the drains before the join take up to 7 s), 2 to 6 s after a lost
   lease. The log says `the cleanup task's sweep did not finish in time` when it
   happens.

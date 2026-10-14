@@ -314,10 +314,12 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 - **In the request** the tenant's sessions, OAuth2 refresh tokens, and
   unexpired certificates and signing CAs are revoked (a leaf of a Vault-held CA
   forwarded to Vault) and `tenant.deleted_at` is set; the tenant is gone from
-  every read of it, sign-in, token issuance and refresh from the `204` on. Until
-  the purge, the tenant's OAuth2 clients still authenticate on the endpoints that
-  issue nothing — a CIBA request, introspection, revocation, PAR (#601, filed for
-  `1.0.x`); the purge removes them.
+  every read of it, sign-in, token issuance and refresh from the `204` on. The
+  tenant's OAuth2 clients authenticate nowhere from then on — client
+  authentication reads the tenant, and a tombstoned one answers `invalid_client`
+  at every endpoint, including a CIBA request, introspection, revocation and PAR
+  (#601, fixed in 1.0.1; before it, a client of a tombstoned tenant was served on
+  those endpoints until the purge). The purge removes the client rows.
 - **The cleanup job's `tenant_purge` sweep** then deletes every row of every
   tenant-scoped table, in the order the purge pipeline above uses — grants and
   sessions, federation links, credentials, the authorization graph, the
@@ -350,8 +352,9 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
   because its issuer's published revocation list is computed from it, and
   deleting it would make the certificate valid again to relying parties outside
   AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
-  17(3)(b), Art. 32), bounded by the certificate's own `notAfter`; the cleanup
-  job deletes the row then.
+  17(3)(b), Art. 32), bounded by the certificate's own `notAfter` plus eight days
+  (an issuing CA's list keeps an expired entry for up to seven days, plus a day
+  for clock skew; #608); the cleanup job deletes the row then.
 - The system audit log keeps `tenants.deleted` (who deleted it, the export
   receipt that authorised it, and the time that export covered up to) and gains
   `tenants.purged` when the sweep is done — the tenant-level counterpart of an

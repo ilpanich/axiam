@@ -542,9 +542,13 @@ them are mitigated by this recipe's configuration, with the end-to-end test abov
 as their test: **T-449** (`Message-Authenticator` required), **T-456** (EAP-TLS
 only, TLS 1.3 only), **T-459** (one tenant's signing CA as the only anchor) and
 **T-454** (the recipe references an upstream image by digest and vendors
-nothing). The remaining seventeen stay *not applicable*, each saying why: they
-are about code AXIAM would have to write, about a FreeRADIUS control this recipe
-does not test, or, for **T-462**, about the revocation lag this page states.
+nothing). Two are **open** for the recipe, as residuals the operator carries
+(model 2.41.0, 2026-10-14): **T-450** (on plain UDP the EAP-TLS keys travel under
+MD5 obfuscation; use [RadSec](#radsec-where-the-nas-allows)) and **T-462** (the
+[revocation lag](#the-revocation-lag) above, and no way to end a session already
+admitted). The remaining fifteen stay *not applicable*, each saying why: they
+are about code AXIAM would have to write, or about a FreeRADIUS control this
+recipe does not test.
 
 ## Operating notes
 

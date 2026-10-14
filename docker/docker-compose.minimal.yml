@@ -187,11 +187,14 @@ services:
     # An orderly stop lets in-flight requests finish (up to 20 s, the REST
     # listener's shutdown timeout), stops gRPC (up to 5 s), writes a
     # `delivery_abandoned` audit row for each outbound delivery still queued
-    # in-process (up to 2 s) and the audit rows the middleware still holds (up
-    # to 5 s) before the process exits;
-    # SIGKILL does none of it. Compose's default grace period is 10 s, which is
-    # shorter than a slow stop needs, so give it 40 s: 20 + 5 + 2 + 5 and a margin
-    # (#569; docs/deployment/README.md, "Stopping, and the grace period").
+    # in-process (up to 2 s), the audit rows the middleware still holds (up to
+    # 5 s) and lets the cleanup task finish the sweep it was in (up to 5 s)
+    # before the process exits; SIGKILL does none of it. Compose's default grace
+    # period is 10 s, which is shorter than a slow stop needs, so give it 40 s:
+    # 20 + 5 + 2 + 5 + 5 = 37 s (`ORDERLY_STOP`, `boot.rs`) and a 3 s margin. A
+    # stop after a lost lease is shorter on purpose, 5 + 2 + 1 + 3 + 2 = 13 s,
+    # inside the lease's 15 s (`LEASE_LOSS_STOP`). What either can cut is listed
+    # in docs/deployment/README.md, "Stopping, and the grace period" (#569, #598).
     stop_grace_period: 40s
     healthcheck:
       # Distroless has no shell; the binary carries its own healthcheck subcommand.

@@ -238,21 +238,54 @@ pub type OutboundFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// message with `attempt` as given (producers pass `0`). The enqueue is
 /// durable: `Ok(())` means the broker confirmed it.
 ///
-/// # Bulk producers (R101W4-01)
+/// # Bulk producers (R101W4-01, R101-01)
 ///
 /// A producer that enqueues many messages in one run — a SCIM reconciliation
 /// (one reference per in-scope user), a provisioning fan-out, a linked user's
-/// groups — **stops at the first refusal of the run**: the queue that refused
-/// one message will refuse the next, and every refusal costs the transport a
-/// row. It counts the messages it did not offer and hands that count to
+/// groups — **stops at the first refusal of the run** (of the step, for a
+/// reconciliation): every refusal costs the transport a row. It counts the
+/// messages it did not offer and hands that count to
 /// [`Self::record_not_offered`] once, at the end of the run. The refused message
 /// keeps its own row, written by `enqueue`; the run adds at most one more.
+///
+/// A bulk producer that runs **off every request path** — the reconciliation,
+/// which runs in the cleanup task or on a task of its own — offers through
+/// [`Self::enqueue_paced`] instead, which waits for room rather than refusing a
+/// queue that is only full for now. Its refusals are then the ones that end the
+/// run's offers anyway: a closed queue, a passed deadline, a stop. A producer on
+/// a request path (the provisioning fan-out) or on the consumer's own task (a
+/// linked user's groups, enqueued by the deliverer — which would wait for
+/// itself) does not pace.
 pub trait OutboundPublisher: Send + Sync {
     /// Durably enqueue `msg` for its kind's consumer.
     fn enqueue<'a>(
         &'a self,
         msg: &'a OutboundMessage,
     ) -> OutboundFuture<'a, Result<(), OutboundError>>;
+
+    /// Enqueue `msg` for a bulk producer that may wait (R101-01): where the
+    /// transport's queue is full for now, wait for room until `deadline`, and
+    /// give up at once when `should_stop` says so (it is polled while waiting,
+    /// so a stop ends the wait promptly) or the queue is closed.
+    ///
+    /// An `Err` therefore means the transport will not take more of this run's
+    /// messages before its deadline: the producer stops offering. It writes the
+    /// refused message's row exactly as a refused [`Self::enqueue`] does.
+    ///
+    /// Never call it on a request path, nor from a deliverer (the consumer that
+    /// would make room is the caller). By default it is [`Self::enqueue`]: a
+    /// transport whose enqueue does not refuse for being momentarily full (the
+    /// broker's, whose refusal is a lost connection or an unconfirmed publish)
+    /// has nothing to wait for.
+    fn enqueue_paced<'a>(
+        &'a self,
+        msg: &'a OutboundMessage,
+        deadline: std::time::Instant,
+        should_stop: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> OutboundFuture<'a, Result<(), OutboundError>> {
+        let _ = (deadline, should_stop);
+        self.enqueue(msg)
+    }
 
     /// A bulk producer stopped offering messages of `kind` after one was
     /// refused: record the `not_offered` messages of that run it held back, as
@@ -462,6 +495,10 @@ mod tests {
         let p: Arc<dyn OutboundPublisher> = Arc::new(P);
         let d: Arc<dyn OutboundDeliverer> = Arc::new(D);
         p.enqueue(&msg).await.unwrap();
+        // R101-01: a transport that does not pace inherits `enqueue`.
+        p.enqueue_paced(&msg, std::time::Instant::now(), &|| true)
+            .await
+            .unwrap();
         assert_eq!(d.kind(), OutboundKind::Webhook);
         assert_eq!(
             d.deliver_attempt(&msg).await.unwrap(),

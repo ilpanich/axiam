@@ -74,7 +74,9 @@ pub fn group_in_scope(target: &ScimTarget, group_id: Uuid) -> bool {
 /// never reaches the repository that reported: the write it follows has
 /// committed, and the next change of the resource (or reconciliation) converges.
 /// The first refused enqueue ends the report's fan-out; what it held back is
-/// one `record_not_offered` call (R101W4-01).
+/// one `record_not_offered` call (R101W4-01). It does not pace
+/// (`OutboundPublisher::enqueue_paced`, R101-01): it runs on the path of the
+/// write that reported the change, which must not wait for a queue to drain.
 pub struct ScimProvisioner<T> {
     targets: T,
     publisher: Arc<dyn OutboundPublisher>,

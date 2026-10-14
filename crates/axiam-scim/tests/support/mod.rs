@@ -12,8 +12,9 @@
 pub mod scim_server;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::scim_target::{
@@ -76,12 +77,34 @@ pub struct Queue {
     offered: AtomicUsize,
     /// Every `record_not_offered` call: (kind, tenant, target, count).
     not_offered: Mutex<Vec<(OutboundKind, Uuid, Uuid, u64)>>,
+    /// When set, `enqueue_paced` waits for room under the limit (until its
+    /// deadline or a stop), like the in-process dispatcher's paced send; when
+    /// not, it is `enqueue`, like a transport that does not pace.
+    paced: AtomicBool,
 }
 
 impl Queue {
     /// Refuse an enqueue once `limit` messages are pending (`None`: never).
     pub fn set_limit(&self, limit: Option<usize>) {
         *self.limit.lock().unwrap() = limit;
+    }
+
+    /// Make `enqueue_paced` wait for room instead of refusing (R101-01).
+    pub fn set_pacing(&self, paced: bool) {
+        self.paced.store(paced, Ordering::SeqCst);
+    }
+
+    /// A consumer that keeps no pace with the producer: every `tick` it takes
+    /// one pending message off the queue (without attempting it), freeing one
+    /// slot. Abort the handle to stop it.
+    pub fn free_one_slot_per_tick(self: &Arc<Self>, tick: Duration) -> tokio::task::JoinHandle<()> {
+        let queue = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tick).await;
+                queue.pending.lock().unwrap().pop_front();
+            }
+        })
     }
 
     /// How many enqueues were attempted, refused ones included.
@@ -143,6 +166,39 @@ impl OutboundPublisher for Queue {
             pending.push_back(msg.clone());
             self.all.lock().unwrap().push(msg.clone());
             Ok(())
+        })
+    }
+
+    /// Paced (R101-01) once [`Queue::set_pacing`] said so: wait for a pending
+    /// count under the limit, looking every millisecond, until `deadline` or a
+    /// stop; then refused, as a full queue refuses. Otherwise `enqueue`.
+    fn enqueue_paced<'a>(
+        &'a self,
+        msg: &'a OutboundMessage,
+        deadline: std::time::Instant,
+        should_stop: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> OutboundFuture<'a, Result<(), OutboundError>> {
+        if !self.paced.load(Ordering::SeqCst) {
+            return self.enqueue(msg);
+        }
+        Box::pin(async move {
+            loop {
+                let room = {
+                    let limit = *self.limit.lock().unwrap();
+                    let pending = self.pending.lock().unwrap();
+                    limit.is_none_or(|limit| pending.len() < limit)
+                };
+                if room {
+                    return self.enqueue(msg).await;
+                }
+                if std::time::Instant::now() >= deadline || should_stop() {
+                    self.offered.fetch_add(1, Ordering::SeqCst);
+                    return Err(OutboundError::Enqueue(
+                        "the test queue stayed full until the deadline or a stop".into(),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         })
     }
 

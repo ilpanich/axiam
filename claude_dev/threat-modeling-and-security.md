@@ -417,6 +417,23 @@
 > root, while the tenant's own device with its whole chain is admitted. T-459
 > carries a dated correction and stays Mitigated; no count moves.
 >
+> **The 1.0.1 combined F4 review (2026-10-14; T-415 amended, T-445
+> corrected).** The review of the merged release branch
+> ([`security-review-release-1.0.1-2026-10-14.md`](security-review-release-1.0.1-2026-10-14.md),
+> R101-01) found that the W4 fix which stopped a SCIM reconciliation at its
+> first refused enqueue — so that its refusal rows no longer flooded the audit
+> queue — had turned a deferral into a loss: a run offered the target's users
+> first and its links last, so in the minimal profile a target larger than the
+> 1 024-message queue stopped at the same user every night, and the retry of a
+> refused erasure `DELETE`, the deprovisioning of accounts that left and the
+> repairs found by reading the downstream were never offered. A reconciliation
+> now waits for room instead of being refused (it runs off every request path,
+> and leaves a quarter of the queue to live changes), offers the links —
+> pending erasures first — before the users, and stops only at a closed queue,
+> its deadline or a stop request, one step at a time; a stop ends the wait
+> within a poll. **T-415** carries the dated amendment and **T-445** a dated
+> correction of its earlier amendment; no status or count moves.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

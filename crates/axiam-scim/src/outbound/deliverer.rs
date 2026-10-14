@@ -931,6 +931,8 @@ where
                 return;
             }
         };
+        // Not paced (R101-01): this runs on the SCIM consumer's own task, the
+        // one that makes room in the queue, so a wait would wait for itself.
         // R101W4-01: the first refused group ends the loop; the rest are counted
         // and recorded as one row, not offered one by one to a queue that just
         // refused.

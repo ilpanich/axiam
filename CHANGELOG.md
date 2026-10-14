@@ -293,12 +293,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is logged for the first one of a kind and then at most once a minute, with the
   count suppressed since (#596).
 - Refused outbound enqueues can no longer crowd request rows out of the audit
-  queue. A bulk run — a SCIM reconciliation, a provisioning fan-out, a linked
-  user's groups — now stops at its first refused enqueue and records what it held
-  back as one `scim_push.delivery_abandoned` row with `refused_count` (the next
-  run offers them again), where it used to leave one row per in-scope user and,
+  queue, where a SCIM reconciliation used to leave one row per in-scope user and,
   for a tenant above about five thousand users, fill the queue and drop every
-  tenant's request rows. The audit queue also keeps a quarter of its room (1 024
+  tenant's request rows. In the minimal profile a reconciliation now **waits for
+  room** in the in-process queue instead of being refused — it runs in the
+  cleanup task, so no request waits — leaving a quarter of the queue to live
+  changes, and it offers the target's links (refused erasure `DELETE`s first,
+  then every other linked account, which is what deprovisions) before its
+  in-scope users. Only a closed queue, the run's five-minute deadline or a stop
+  ends its offers, for the rest of that step: what it held back is one
+  `scim_push.delivery_abandoned` row with `refused_count`, and the repairs of the
+  downstream read are still offered after it. A provisioning fan-out and a
+  linked user's groups do not wait (one runs on the request, the other on the
+  queue's own consumer): they stop at their first refused enqueue and record
+  the rest as one such row. (An earlier revision of this entry had every bulk
+  run stop at its first refusal, "the next run offers them again"; for a target
+  larger than the queue every run stopped at the same user, so its links and
+  repairs were never offered — R101-01.) The audit queue also keeps a quarter of its room (1 024
   of 4 096 rows) for request rows: a refusal row that finds only that reserve is
   shed and counted in the new `GET /health/jobs` field
   `request_audit.outbound_abandoned_dropped`, never in `request_audit.dropped`

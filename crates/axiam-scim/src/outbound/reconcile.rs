@@ -14,17 +14,27 @@
 //!    and stamps the start of the run. There is no completion write. The
 //!    scheduled job passes [`RECONCILE_INTERVAL`] (24 h); the on-demand entry
 //!    passes [`RECONCILE_WALL_CLOCK`], the longest a run may take.
-//! 1. **Enqueue.** One reference per in-scope user, per pushed group and per
-//!    linked resource, on the shared dispatcher; the deliverer converges each.
-//!    A link left `erase_pending` by a refused erasure `DELETE` is a linked
-//!    resource like any other: this is what retries it. The run **stops
-//!    offering at its first refused reference** (R101W4-01): the queue that
+//! 1. **Enqueue.** One reference per linked resource, per in-scope user and
+//!    per pushed group — **in that order**, the links left `erase_pending` by a
+//!    refused erasure `DELETE` first (R101-01) — on the shared dispatcher; the
+//!    deliverer converges each. The links are what retries a refused erasure
+//!    and what removes an account that left scope, was disabled or was erased,
+//!    so a run cut short spends what it had on them, not on accounts that are
+//!    already in step.
+//!
+//!    Offers are **paced** (`OutboundPublisher::enqueue_paced`): where the
+//!    queue is full for now — the minimal profile's in-process queue of 1 024,
+//!    behind one consumer — the run waits for room rather than being refused.
+//!    It runs in the cleanup task (or a task of its own, on demand), so the
+//!    wait costs no request. A paced offer is refused only when the queue is
+//!    closed, the run's [`RECONCILE_WALL_CLOCK`] has passed or a stop was
+//!    requested; then the **step** stops offering (R101W4-01: the queue that
 //!    refused one refuses the next, and in the minimal profile each refusal is
-//!    an audit row. Every later reference of the run, in this step and among
-//!    step 2's repairs, is counted in `enqueue_failed` without being offered,
-//!    and the run ends with one `scim_push.delivery_abandoned` row carrying
-//!    their count (`OutboundPublisher::record_not_offered`). The next run
-//!    offers them again.
+//!    an audit row). Every later reference of that step is counted in
+//!    `enqueue_failed` without being offered, and the run ends with one
+//!    `scim_push.delivery_abandoned` row carrying their count
+//!    (`OutboundPublisher::record_not_offered`). Step 2 offers its repairs
+//!    afresh. A stop ends the run.
 //! 2. **Read the downstream.** `GET /Users` (and `/Groups` when the target
 //!    pushes groups), `startIndex`/`count = 100`, every request through the
 //!    deliverer's own guarded, no-redirect, credential-checked path
@@ -103,8 +113,8 @@ const AXIAM_PAGE: u64 = 100;
 pub enum Listing {
     /// Every collection was read to its end.
     Complete,
-    /// A budget (pages or wall clock) stopped the listing: what was read was
-    /// audited, nothing was concluded from what was not.
+    /// A budget (pages or wall clock) or a stop request stopped the listing:
+    /// what was read was audited, nothing was concluded from what was not.
     BudgetExhausted,
     /// The downstream could not be read; the reason is a fixed phrase.
     Failed(String),
@@ -116,9 +126,10 @@ pub struct ReconcileReport {
     /// References queued in step 1 and for repairs (a resource queued twice
     /// counts twice).
     pub enqueued: u64,
-    /// References that could not be queued (a broker outage, a full queue): the
-    /// one the queue refused, and every later reference of the run, which is
-    /// not offered once one was refused (R101W4-01).
+    /// References that could not be queued: the one the queue refused (closed,
+    /// the run's deadline passed, a stop, a broker outage), and every later
+    /// reference of the same step, which is not offered once one was refused
+    /// (R101W4-01, R101-01).
     pub enqueue_failed: u64,
     /// Linked resources left `erase_pending` that were queued for another
     /// `DELETE`.
@@ -226,6 +237,48 @@ fn reason_of(exit: Exit) -> String {
     }
 }
 
+/// The stop of a run that nobody can stop but its deadline and the
+/// dispatcher's (an on-demand run).
+fn never() -> bool {
+    false
+}
+
+/// How one run offers its references (R101-01): paced up to its deadline,
+/// ended by a stop, and stopped per step at a refusal.
+struct Offers<'s> {
+    /// The run's [`RECONCILE_WALL_CLOCK`] deadline.
+    deadline: Instant,
+    /// The cleanup task's stop signal (`never` for an on-demand run).
+    should_stop: &'s (dyn Fn() -> bool + Send + Sync),
+    /// Whether the current step has had a reference refused: the rest of the
+    /// step is counted, not offered.
+    step_refused: bool,
+    /// References the queue refused (each wrote its own row); the rest of
+    /// `enqueue_failed` were not offered and are the run's one summary row.
+    refused: u64,
+}
+
+impl<'s> Offers<'s> {
+    fn new(deadline: Instant, should_stop: &'s (dyn Fn() -> bool + Send + Sync)) -> Self {
+        Self {
+            deadline,
+            should_stop,
+            step_refused: false,
+            refused: 0,
+        }
+    }
+
+    /// A new step offers again.
+    fn next_step(&mut self) {
+        self.step_refused = false;
+    }
+
+    /// Whether the run was asked to stop.
+    fn stopping(&self) -> bool {
+        (self.should_stop)()
+    }
+}
+
 impl<T, L, S, U, G> ScimPushDeliverer<T, L, S, U, G>
 where
     T: ScimTargetRepository + 'static,
@@ -248,7 +301,7 @@ where
         tenant_id: Uuid,
         target_id: Uuid,
     ) -> Result<ReconcileOutcome, AxiamError> {
-        self.reconcile(tenant_id, target_id, RECONCILE_WALL_CLOCK)
+        self.reconcile(tenant_id, target_id, RECONCILE_WALL_CLOCK, &never)
             .await
     }
 
@@ -275,7 +328,9 @@ where
                 let this = Arc::clone(self);
                 tokio::spawn(async move {
                     // Findings are logged inside; there is nobody to return them to.
-                    let _ = this.run_and_log(target, started_at).await;
+                    // Nothing signals this task to stop; the dispatcher's stop
+                    // closes the queue, which ends a paced offer.
+                    let _ = this.run_and_log(target, started_at, &never).await;
                 });
                 Ok(ReconcileStart::Started)
             }
@@ -288,12 +343,13 @@ where
         tenant_id: Uuid,
         target_id: Uuid,
         min_interval: Duration,
+        should_stop: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<ReconcileOutcome, AxiamError> {
         let seconds = i64::try_from(min_interval.as_secs()).unwrap_or(i64::MAX);
         match self.claim(tenant_id, target_id, seconds).await? {
             Err(refused) => Ok(refused),
             Ok((target, started_at)) => self
-                .run_and_log(target, started_at)
+                .run_and_log(target, started_at, should_stop)
                 .await
                 .map(ReconcileOutcome::Ran),
         }
@@ -327,24 +383,21 @@ where
         &self,
         target: ScimTarget,
         started_at: DateTime<Utc>,
+        should_stop: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<ReconcileReport, AxiamError> {
         let (tenant_id, target_id) = (target.tenant_id, target.id);
-        let deadline = Instant::now() + RECONCILE_WALL_CLOCK;
+        let mut offers = Offers::new(Instant::now() + RECONCILE_WALL_CLOCK, should_stop);
         let mut report = ReconcileReport::new();
         let outcome = self
-            .run_claimed(target, started_at, deadline, &mut report)
+            .run_claimed(target, started_at, &mut offers, &mut report)
             .await;
-        // R101W4-01: the references held back after the first refusal are one
-        // row for the run, whether or not the run then finished; the refused
-        // reference has its own.
-        if report.enqueue_failed > 1 {
+        // R101W4-01: the references held back after a refusal are one row for
+        // the run, whether or not the run then finished; each refused reference
+        // has its own.
+        let not_offered = report.enqueue_failed.saturating_sub(offers.refused);
+        if not_offered > 0 {
             self.publisher
-                .record_not_offered(
-                    OutboundKind::ScimPush,
-                    tenant_id,
-                    target_id,
-                    report.enqueue_failed - 1,
-                )
+                .record_not_offered(OutboundKind::ScimPush, tenant_id, target_id, not_offered)
                 .await;
         }
         match &outcome {
@@ -380,13 +433,22 @@ where
         &self,
         target: ScimTarget,
         started_at: DateTime<Utc>,
-        deadline: Instant,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<(), AxiamError> {
         let mut queued = HashSet::new();
-        self.enqueue_everything(&target, &mut queued, report)
+        self.enqueue_everything(&target, &mut queued, offers, report)
             .await?;
+        if offers.stopping() {
+            // The downstream is not read for a run that was asked to stop.
+            report.listing = Listing::BudgetExhausted;
+            return Ok(());
+        }
 
+        // Step 2 offers its repairs whatever step 1 met (R101-01). A deadline
+        // that ended step 1 ends step 2 at its first budget check; a closed
+        // queue refuses its first repair (one row) and is offered nothing more.
+        offers.next_step();
         let mut run = Run::new(target);
         let mut worst = Listing::Complete;
         let mut collections = vec![ScimResourceType::User];
@@ -395,7 +457,7 @@ where
         }
         for resource_type in collections {
             let listing = self
-                .audit_collection(&mut run, resource_type, started_at, deadline, report)
+                .audit_collection(&mut run, resource_type, started_at, offers, report)
                 .await?;
             // A failure outranks a budget, which outranks completeness.
             worst = match (worst, listing) {
@@ -419,22 +481,61 @@ where
     // Step 1: references
     // -----------------------------------------------------------------------
 
-    /// One reference per in-scope user, per pushed group and per linked
-    /// resource, each queued once.
+    /// One reference per linked resource (the pending erasures first), per
+    /// in-scope user and per pushed group, each queued once (R101-01: the links
+    /// before the users). A stop request ends the step between pages.
     async fn enqueue_everything(
         &self,
         target: &ScimTarget,
         queued: &mut HashSet<(ScimResourceType, Uuid)>,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<(), AxiamError> {
         let tenant_id = target.tenant_id;
 
-        // Users in scope. An erased or deleted account with a link is queued
-        // below with the links; one without a link has nothing to remove.
+        // Everything already linked, wherever it stands now: this is what
+        // removes a resource that left scope, was erased or was deleted, and
+        // what retries an erasure `DELETE` that was refused. Every link is read
+        // before any is offered (an offer may wait, and a link a delivery
+        // removes meanwhile would shift the pages), the pending erasures first.
+        let mut pending_erasures = Vec::new();
+        let mut linked = Vec::new();
+        let mut offset = 0;
+        loop {
+            if offers.stopping() {
+                return Ok(());
+            }
+            let page = self
+                .links
+                .list_by_target(tenant_id, target.id, None, axiam_page(offset))
+                .await?;
+            for link in &page.items {
+                if link.erase_pending {
+                    pending_erasures.push((link.resource_type, link.axiam_id));
+                } else {
+                    linked.push((link.resource_type, link.axiam_id));
+                }
+            }
+            offset += page.items.len() as u64;
+            if page.items.is_empty() || offset >= page.total {
+                break;
+            }
+        }
+        report.erase_retried += pending_erasures.len() as u64;
+        for (resource_type, axiam_id) in pending_erasures.into_iter().chain(linked) {
+            self.queue_once(target, resource_type, axiam_id, queued, offers, report)
+                .await;
+        }
+
+        // Users in scope. An erased or deleted account with a link was queued
+        // above with the links; one without a link has nothing to remove.
         match &target.scope {
             ScimTargetScope::AllUsers => {
                 let mut offset = 0;
                 loop {
+                    if offers.stopping() {
+                        return Ok(());
+                    }
                     let page = self.users.list(tenant_id, axiam_page(offset)).await?;
                     for user in &page.items {
                         if !matches!(user.status, UserStatus::Deleted | UserStatus::Anonymized) {
@@ -443,6 +544,7 @@ where
                                 ScimResourceType::User,
                                 user.id,
                                 queued,
+                                offers,
                                 report,
                             )
                             .await;
@@ -458,6 +560,9 @@ where
                 for group_id in listed {
                     let mut offset = 0;
                     loop {
+                        if offers.stopping() {
+                            return Ok(());
+                        }
                         let page = match self
                             .groups
                             .get_members(tenant_id, *group_id, axiam_page(offset))
@@ -474,6 +579,7 @@ where
                                 ScimResourceType::User,
                                 user.id,
                                 queued,
+                                offers,
                                 report,
                             )
                             .await;
@@ -493,6 +599,9 @@ where
                 ScimTargetScope::AllUsers => {
                     let mut offset = 0;
                     loop {
+                        if offers.stopping() {
+                            return Ok(());
+                        }
                         let page = self.groups.list(tenant_id, axiam_page(offset)).await?;
                         for group in &page.items {
                             self.queue_once(
@@ -500,6 +609,7 @@ where
                                 ScimResourceType::Group,
                                 group.id,
                                 queued,
+                                offers,
                                 report,
                             )
                             .await;
@@ -512,32 +622,17 @@ where
                 }
                 ScimTargetScope::Groups(listed) => {
                     for group_id in listed {
-                        self.queue_once(target, ScimResourceType::Group, *group_id, queued, report)
-                            .await;
+                        self.queue_once(
+                            target,
+                            ScimResourceType::Group,
+                            *group_id,
+                            queued,
+                            offers,
+                            report,
+                        )
+                        .await;
                     }
                 }
-            }
-        }
-
-        // Everything already linked, wherever it stands now: this is what
-        // removes a resource that left scope, was erased or was deleted, and
-        // what retries an erasure `DELETE` that was refused.
-        let mut offset = 0;
-        loop {
-            let page = self
-                .links
-                .list_by_target(tenant_id, target.id, None, axiam_page(offset))
-                .await?;
-            for link in &page.items {
-                if link.erase_pending {
-                    report.erase_retried += 1;
-                }
-                self.queue_once(target, link.resource_type, link.axiam_id, queued, report)
-                    .await;
-            }
-            offset += page.items.len() as u64;
-            if page.items.is_empty() || offset >= page.total {
-                break;
             }
         }
         Ok(())
@@ -550,10 +645,11 @@ where
         resource_type: ScimResourceType,
         axiam_id: Uuid,
         queued: &mut HashSet<(ScimResourceType, Uuid)>,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) {
         if queued.insert((resource_type, axiam_id)) {
-            self.queue_again(target, resource_type, axiam_id, report)
+            self.queue_again(target, resource_type, axiam_id, offers, report)
                 .await;
         }
     }
@@ -561,23 +657,35 @@ where
     /// Queue a reference, whether or not this run queued it before: a repair
     /// made after the first reference may have been delivered needs another.
     ///
-    /// Once the run has had a reference refused, nothing more is offered: the
-    /// reference is counted as failed and left for the next run (R101W4-01).
+    /// The offer is paced (R101-01): it waits for room until the run's
+    /// deadline, and is refused only for a closed queue, a passed deadline or a
+    /// stop. Once the step has had a reference refused, nothing more of the
+    /// step is offered: the reference is counted as failed and left for the
+    /// next run (R101W4-01).
     async fn queue_again(
         &self,
         target: &ScimTarget,
         resource_type: ScimResourceType,
         axiam_id: Uuid,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) {
-        if report.enqueue_failed > 0 {
+        if offers.step_refused {
             report.enqueue_failed += 1;
             return;
         }
         let message = reference_message(target.tenant_id, target.id, resource_type, axiam_id);
-        match self.publisher.enqueue(&message).await {
+        match self
+            .publisher
+            .enqueue_paced(&message, offers.deadline, offers.should_stop)
+            .await
+        {
             Ok(()) => report.enqueued += 1,
-            Err(_) => report.enqueue_failed += 1,
+            Err(_) => {
+                report.enqueue_failed += 1;
+                offers.refused += 1;
+                offers.step_refused = true;
+            }
         }
     }
 
@@ -593,7 +701,7 @@ where
         run: &mut Run,
         resource_type: ScimResourceType,
         started_at: DateTime<Utc>,
-        deadline: Instant,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<Listing, AxiamError> {
         let target = run.target.clone();
@@ -601,7 +709,10 @@ where
         let mut start_index: u64 = 1;
         let mut pages = 0u32;
         loop {
-            if pages >= RECONCILE_MAX_PAGES || Instant::now() >= deadline {
+            if pages >= RECONCILE_MAX_PAGES
+                || Instant::now() >= offers.deadline
+                || offers.stopping()
+            {
                 return Ok(Listing::BudgetExhausted);
             }
             let url = list_url(&target.base_url, resource_type, start_index).map_err(datastore)?;
@@ -630,7 +741,7 @@ where
                 .and_then(Value::as_array)
                 .map_or(&[][..], Vec::as_slice);
             for resource in resources {
-                self.audit_resource(run, resource_type, resource, &mut seen, report)
+                self.audit_resource(run, resource_type, resource, &mut seen, offers, report)
                     .await?;
             }
 
@@ -651,7 +762,7 @@ where
 
         // Only a listing that reached its end may conclude that a link's
         // resource is gone: every early exit above returned.
-        self.drop_missing_links(&target, resource_type, &seen, started_at, report)
+        self.drop_missing_links(&target, resource_type, &seen, started_at, offers, report)
             .await?;
         Ok(Listing::Complete)
     }
@@ -663,6 +774,7 @@ where
         resource_type: ScimResourceType,
         resource: &Value,
         seen: &mut HashSet<String>,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<(), AxiamError> {
         let target = &run.target;
@@ -680,7 +792,9 @@ where
             .get_by_downstream_id(target.tenant_id, target.id, resource_type, downstream_id)
             .await?;
         if let Some(link) = linked {
-            return self.audit_linked(target, &link, resource, report).await;
+            return self
+                .audit_linked(target, &link, resource, offers, report)
+                .await;
         }
 
         // Not ours to touch unless `externalId` is the id of an AXIAM resource
@@ -712,7 +826,7 @@ where
         match adopted {
             Ok(_) => {
                 report.deprovisioned += 1;
-                self.queue_again(target, resource_type, axiam_id, report)
+                self.queue_again(target, resource_type, axiam_id, offers, report)
                     .await;
                 Ok(())
             }
@@ -730,6 +844,7 @@ where
         target: &ScimTarget,
         link: &ScimTargetLink,
         resource: &Value,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<(), AxiamError> {
         let drifted = match link.resource_type {
@@ -775,7 +890,7 @@ where
         report.drift_cleared += 1;
         // The reference queued in step 1 may already have been delivered, with
         // the digest still set: queue another, behind the clearing.
-        self.queue_again(target, link.resource_type, link.axiam_id, report)
+        self.queue_again(target, link.resource_type, link.axiam_id, offers, report)
             .await;
         Ok(())
     }
@@ -836,6 +951,7 @@ where
         resource_type: ScimResourceType,
         seen: &HashSet<String>,
         started_at: DateTime<Utc>,
+        offers: &mut Offers<'_>,
         report: &mut ReconcileReport,
     ) -> Result<(), AxiamError> {
         let mut missing: Vec<ScimTargetLink> = Vec::new();
@@ -875,7 +991,7 @@ where
                 .await?;
             if removed {
                 report.links_dropped += 1;
-                self.queue_again(target, link.resource_type, link.axiam_id, report)
+                self.queue_again(target, link.resource_type, link.axiam_id, offers, report)
                     .await;
             }
         }
@@ -903,7 +1019,7 @@ where
                     break;
                 }
                 match self
-                    .reconcile(target.tenant_id, target.id, RECONCILE_INTERVAL)
+                    .reconcile(target.tenant_id, target.id, RECONCILE_INTERVAL, should_stop)
                     .await
                 {
                     Ok(ReconcileOutcome::Ran(report)) => {

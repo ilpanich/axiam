@@ -1788,11 +1788,27 @@ for request rows: a refusal row that finds only that reserve left is shed and
 counted in `GET /health/jobs` `request_audit.outbound_abandoned_dropped`. It is
 not a request row, so it is not counted in `request_audit.dropped`, not written
 to the dead-letter file and does not turn `status` to `degraded`; a rising count
-means an outbound queue is refusing faster than the audit trail records it. A
-bulk run — a SCIM reconciliation, a provisioning fan-out, a linked user's
-groups — stops at its first refused enqueue and records what it held back as
-one more `scim_push.delivery_abandoned` row with `refused_count`; the next run
-offers them again. The producer's log line for a refusal is written for the
+means an outbound queue is refusing faster than the audit trail records it.
+
+A SCIM reconciliation is not refused for a full queue: it runs in the cleanup
+task (or, on demand, on a task of its own), so it **waits for room** instead,
+and sends only while more than a quarter of the 1 024-message queue is free, so
+that live changes reported meanwhile are not refused behind it. It offers the
+target's links first — the refused erasure `DELETE`s, then every other linked
+account (what deprovisions an account that left scope, was disabled or erased) —
+then the in-scope users and groups, and after reading the downstream, its
+repairs. A large target therefore takes longer to reconcile (the queue drains at
+the downstream's pace) but every run reaches its links. Its offers end only
+when the queue is closed (the process is stopping), the run's five-minute
+deadline has passed or a stop is requested; then the rest of that step is not
+offered and is recorded as one more `scim_push.delivery_abandoned` row with
+`refused_count`, and `scim_reconcile` turns red on `GET /health/jobs`. A run
+that keeps hitting its deadline is a downstream slower than the target's size
+allows in five minutes: the links, which come first, are the part that gets
+done. A provisioning fan-out and a linked user's groups never wait (one runs on
+the request that made the change, the other on the queue's own consumer): they
+stop at their first refused enqueue and record the rest as one such row, and
+reconciliation converges them. The producer's log line for a refusal is written for the
 first refusal of a kind and then at most once a minute, with the number
 suppressed since.
 

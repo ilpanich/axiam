@@ -8,7 +8,7 @@
 //!
 //! | Piece | Role |
 //! |---|---|
-//! | [`InProcessOutboundPublisher`] | `OutboundPublisher` over one bounded `tokio::mpsc` channel per kind (capacity [`IN_PROCESS_CAPACITY`]); a full channel is an `OutboundError::Enqueue`, which every producer already treats as best-effort. The refusal's audit row is handed to the audit middleware's non-blocking queue, never awaited on the producer's path (#596), and a bulk producer's run adds at most one more for what it held back (R101W4-01) |
+//! | [`InProcessOutboundPublisher`] | `OutboundPublisher` over one bounded `tokio::mpsc` channel per kind (capacity [`IN_PROCESS_CAPACITY`]); a full channel is an `OutboundError::Enqueue`, which every producer already treats as best-effort. The refusal's audit row is handed to the audit middleware's non-blocking queue, never awaited on the producer's path (#596), and a bulk producer's run adds at most one more for what it held back (R101W4-01). A bulk producer off every request path (SCIM reconciliation) offers through `enqueue_paced`, which waits for room — leaving [`PACED_RESERVE_DIVISOR`]'s share of the channel to producers that do not wait — until its deadline, a stop or a closed channel (R101-01) |
 //! | [`spawn_in_process_consumer`] | one task per kind: takes a message, asks the kind's deliverer for **one** attempt, and applies `outcome::decide` — the same outcome table, the same retry policy (`AXIAM__<SLUG>__*`), the same audit vocabulary as the AMQP loop |
 //!
 //! # What differs from the broker, and why it is the profile's recorded trade
@@ -81,6 +81,19 @@ pub const QUEUE_FULL_REASON: &str = "in-process queue full; the delivery was not
 /// kind's consumer is gone (stopped, or never started).
 pub const NOT_RUNNING_REASON: &str =
     "in-process dispatcher not running; the delivery was not accepted";
+
+/// A paced producer (`enqueue_paced`, R101-01) sends only while more than
+/// `capacity / PACED_RESERVE_DIVISOR` slots of the channel are free: a quarter
+/// is left to the producers that do not wait — a change reported on a request
+/// path, a linked user's groups enqueued by the deliverer, a retry re-entering
+/// the channel — so that a reconciliation that keeps the queue busy for minutes
+/// does not get every live change of the tenant refused meanwhile.
+pub const PACED_RESERVE_DIVISOR: usize = 4;
+
+/// How often a paced producer looks for room, a stop and its deadline while it
+/// waits. Small beside a delivery (an HTTP round trip) and beside the cleanup
+/// task's stop bound (`ORDERLY_STOP.cleanup`, 5 s).
+pub const PACE_POLL: Duration = Duration::from_millis(10);
 
 /// How long an attempt already in flight is given to finish once a stop is
 /// signalled. A healthy receiver answers well inside it and the delivery gets its
@@ -230,6 +243,32 @@ pub struct InProcessOutboundPublisher {
     audit: AuditSlot,
 }
 
+impl InProcessOutboundPublisher {
+    /// The refusal of `msg` by `queue` — full, or `closed` — and its trail.
+    async fn refused(&self, queue: &Queue, msg: &OutboundMessage, closed: bool) -> OutboundError {
+        let (reason, error) = if closed {
+            (
+                NOT_RUNNING_REASON,
+                format!("in-process `{}` dispatcher is not running", msg.kind),
+            )
+        } else {
+            (
+                QUEUE_FULL_REASON,
+                format!(
+                    "in-process `{}` queue is full ({} messages)",
+                    msg.kind,
+                    queue.sender.max_capacity()
+                ),
+            )
+        };
+        // Every producer treats a refusal as best-effort and only logs it, so
+        // the refusal is the delivery's whole trail: record it, without waiting
+        // on the datastore (#596).
+        refuse(queue, &self.audit, msg, reason).await;
+        OutboundError::Enqueue(error)
+    }
+}
+
 impl OutboundPublisher for InProcessOutboundPublisher {
     fn enqueue<'a>(
         &'a self,
@@ -239,26 +278,54 @@ impl OutboundPublisher for InProcessOutboundPublisher {
             let queue = self.queues.get(&msg.kind).ok_or_else(|| {
                 OutboundError::Enqueue(format!("no in-process queue for kind `{}`", msg.kind))
             })?;
-            let (reason, error) = match queue.sender.try_send(msg.clone()) {
+            let closed = match queue.sender.try_send(msg.clone()) {
                 Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(_)) => (
-                    QUEUE_FULL_REASON,
-                    format!(
-                        "in-process `{}` queue is full ({} messages)",
-                        msg.kind,
-                        queue.sender.max_capacity()
-                    ),
-                ),
-                Err(mpsc::error::TrySendError::Closed(_)) => (
-                    NOT_RUNNING_REASON,
-                    format!("in-process `{}` dispatcher is not running", msg.kind),
-                ),
+                Err(mpsc::error::TrySendError::Full(_)) => false,
+                Err(mpsc::error::TrySendError::Closed(_)) => true,
             };
-            // Every producer treats a refusal as best-effort and only logs it,
-            // so the refusal is the delivery's whole trail: record it, without
-            // waiting on the datastore (#596).
-            refuse(queue, &self.audit, msg, reason).await;
-            Err(OutboundError::Enqueue(error))
+            Err(self.refused(queue, msg, closed).await)
+        })
+    }
+
+    /// R101-01: wait for room instead of refusing a channel that is only full
+    /// for now. The message is sent once more than
+    /// `capacity / PACED_RESERVE_DIVISOR` slots are free (the rest is left to
+    /// producers that do not wait); the wait looks every [`PACE_POLL`] for room,
+    /// for `should_stop` and for `deadline`, and ends at once on a closed
+    /// channel. A wait that ends without room is refused exactly as `enqueue`
+    /// refuses — one row, the reason the queue gives now — and the producer
+    /// stops offering.
+    fn enqueue_paced<'a>(
+        &'a self,
+        msg: &'a OutboundMessage,
+        deadline: std::time::Instant,
+        should_stop: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> OutboundFuture<'a, Result<(), OutboundError>> {
+        Box::pin(async move {
+            let queue = self.queues.get(&msg.kind).ok_or_else(|| {
+                OutboundError::Enqueue(format!("no in-process queue for kind `{}`", msg.kind))
+            })?;
+            let deadline = Instant::from_std(deadline);
+            let reserve = queue.sender.max_capacity() / PACED_RESERVE_DIVISOR;
+            let closed = loop {
+                if queue.sender.is_closed() {
+                    break true;
+                }
+                if queue.sender.capacity() > reserve {
+                    match queue.sender.try_send(msg.clone()) {
+                        Ok(()) => return Ok(()),
+                        // Taken meanwhile by a producer that does not wait.
+                        Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => break true,
+                    }
+                }
+                let now = Instant::now();
+                if now >= deadline || should_stop() {
+                    break false;
+                }
+                tokio::time::sleep_until((now + PACE_POLL).min(deadline)).await;
+            };
+            Err(self.refused(queue, msg, closed).await)
         })
     }
 
@@ -289,7 +356,7 @@ impl OutboundPublisher for InProcessOutboundPublisher {
                 %target_id,
                 reason,
                 not_offered,
-                "a bulk producer stopped at the first refused enqueue of its run; the rest \
+                "a bulk producer stopped offering at a refused enqueue; the rest of its run \
                  were not offered (one audit row records them)"
             );
             let entry = outcome::not_offered_entry(kind, tenant_id, target_id, reason, not_offered);
@@ -1661,6 +1728,199 @@ mod tests {
                 .enqueue(&table::message(OutboundKind::Webhook, 0))
                 .await
                 .is_err()
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // R101-01: the paced enqueue of a bulk producer off the request path
+    // -------------------------------------------------------------------
+
+    fn never_stop() -> bool {
+        false
+    }
+
+    /// A paced offer is taken while more than a quarter of the channel is free,
+    /// then waits — leaving that quarter to producers that do not wait — and is
+    /// taken as soon as the consumer makes room.
+    #[tokio::test]
+    async fn a_paced_enqueue_leaves_the_reserve_and_waits_for_room() {
+        let mut hub = InProcessOutbound::with_capacity(4);
+        let publisher = hub.publisher();
+        let mut end = hub.take_consumer_end(OutboundKind::ScimPush).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        for _ in 0..3 {
+            publisher
+                .enqueue_paced(
+                    &table::message(OutboundKind::ScimPush, 0),
+                    deadline,
+                    &never_stop,
+                )
+                .await
+                .unwrap();
+        }
+
+        let waiting = {
+            let publisher = publisher.clone();
+            tokio::spawn(async move {
+                publisher
+                    .enqueue_paced(
+                        &table::message(OutboundKind::ScimPush, 0),
+                        deadline,
+                        &never_stop,
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the fourth paced offer waits");
+        // The reserve is a producer's that does not wait.
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+
+        // The consumer takes two: two slots free, more than the reserve.
+        end.receiver.recv().await.unwrap();
+        end.receiver.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("taken once there is room")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// #598: a stop request ends a paced wait within a poll, far inside the
+    /// cleanup task's stop bound, and the offer is refused as a full queue's.
+    #[tokio::test]
+    async fn a_stop_request_ends_a_paced_wait_promptly() {
+        let gate = Gated::new(OutboundKind::ScimPush);
+        let (publisher, audit, _h, _hub) =
+            started_in(1, OutboundKind::ScimPush, gate.clone(), FAST, 8);
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+        wait_for("the first attempt", || {
+            gate.started.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                stop.store(true, Ordering::SeqCst);
+            });
+        }
+        let should_stop = {
+            let stop = Arc::clone(&stop);
+            move || stop.load(Ordering::SeqCst)
+        };
+        let refused = table::message(OutboundKind::ScimPush, 0);
+        let began = Instant::now();
+        let err = publisher
+            .enqueue_paced(
+                &refused,
+                std::time::Instant::now() + Duration::from_secs(60),
+                &should_stop,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OutboundError::Enqueue(_)), "{err:?}");
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "the wait ended at the stop, not at its deadline: {:?}",
+            began.elapsed()
+        );
+        let rows = abandoned_rows(&audit, "scim_push");
+        assert_eq!(rows.len(), 1, "one row, as a refused enqueue writes");
+        assert_eq!(
+            rows[0].metadata.as_ref().unwrap()["delivery_id"],
+            serde_json::json!(refused.delivery_id)
+        );
+        assert_eq!(
+            rows[0].metadata.as_ref().unwrap()["reason"],
+            QUEUE_FULL_REASON
+        );
+        gate.release.add_permits(8);
+    }
+
+    /// A paced wait ends at its deadline; and the dispatcher's own stop, which
+    /// closes the channel, ends one at once with the not-running reason.
+    #[tokio::test]
+    async fn a_paced_wait_ends_at_its_deadline_and_when_the_dispatcher_stops() {
+        let gate = Gated::new(OutboundKind::ScimPush);
+        let (publisher, audit, _h, mut hub) =
+            started_in(1, OutboundKind::ScimPush, gate.clone(), FAST, 8);
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+        wait_for("the first attempt", || {
+            gate.started.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        publisher
+            .enqueue(&table::message(OutboundKind::ScimPush, 0))
+            .await
+            .unwrap();
+
+        let began = Instant::now();
+        assert!(
+            publisher
+                .enqueue_paced(
+                    &table::message(OutboundKind::ScimPush, 0),
+                    std::time::Instant::now() + Duration::from_millis(100),
+                    &never_stop,
+                )
+                .await
+                .is_err()
+        );
+        let waited = began.elapsed();
+        assert!(
+            waited >= Duration::from_millis(90) && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
+
+        let waiting = {
+            let publisher = publisher.clone();
+            tokio::spawn(async move {
+                publisher
+                    .enqueue_paced(
+                        &table::message(OutboundKind::ScimPush, 0),
+                        std::time::Instant::now() + Duration::from_secs(60),
+                        &never_stop,
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!waiting.is_finished());
+        let began = Instant::now();
+        // The attempt in flight is abandoned after the grace; the channel closes.
+        assert!(hub.shutdown().stop(Duration::from_secs(5)).await.is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .expect("ended by the closed channel")
+                .unwrap()
+                .is_err()
+        );
+        assert!(began.elapsed() < IN_FLIGHT_STOP_GRACE + Duration::from_secs(1));
+        let reasons: Vec<_> = abandoned_rows(&audit, "scim_push")
+            .into_iter()
+            .map(|row| row.metadata.unwrap()["reason"].clone())
+            .collect();
+        assert_eq!(reasons.first().unwrap(), QUEUE_FULL_REASON, "the deadline");
+        assert_eq!(
+            reasons.iter().filter(|r| *r == NOT_RUNNING_REASON).count(),
+            1,
+            "the wait the stop ended: {reasons:?}"
         );
     }
 

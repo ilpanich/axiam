@@ -255,7 +255,12 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// others skip it for [`TENANT_PURGE_LEASE`]. A tenant the purge finds already
 /// purged — gone before the claim, or removed by an overlapping purge after a
 /// lease ran out — is success, not a failure, and is not recorded again: only
-/// the purge that removed the tenant row writes `tenants.purged`.
+/// the purge that removed the tenant row writes `tenants.purged`. An orphaned
+/// id is claimed the same way, by a marker row
+/// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): replicas
+/// whose daily scans coincide purge and record it once, and a scan that
+/// predates another replica's finished purge finds nothing left and records
+/// nothing.
 ///
 /// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
@@ -298,7 +303,13 @@ where
     let (mut purged, mut failed) = (0u64, 0u64);
     for (tenant_id, orphan) in due {
         let outcome = if orphan {
-            tenant_repo.purge_orphan(tenant_id).await
+            match tenant_repo.purge_orphan(tenant_id).await {
+                // Claimed by another replica, or purged by one since this
+                // replica's scan (R101W1-09 (a)): recorded by that purge.
+                Ok(None) => continue,
+                Ok(Some(report)) => Ok(report),
+                Err(e) => Err(e),
+            }
         } else {
             let claimed_at = Utc::now();
             match tenant_repo.claim_purge(tenant_id, claimed_at, lease).await {
@@ -353,7 +364,9 @@ where
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: Some(serde_json::json!({
-                    "orphan": orphan,
+                    // An orphan's claim marker taken over after its claimant
+                    // died is purged as a tombstoned row, and is still an orphan.
+                    "orphan": orphan || report.orphan,
                     "audit_exported_through": report.audit_exported_through,
                     "audit_rows_deleted": report.audit_rows_deleted,
                     "audit_rows_kept": report.audit_rows_kept,
@@ -363,7 +376,7 @@ where
         .await;
         tracing::info!(
             %tenant_id,
-            orphan,
+            orphan = orphan || report.orphan,
             audit_rows_deleted = report.audit_rows_deleted,
             audit_rows_kept = report.audit_rows_kept,
             "deleted tenant's data purged"

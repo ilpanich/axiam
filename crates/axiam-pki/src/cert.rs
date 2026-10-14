@@ -1132,24 +1132,33 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     let attempts = candidate.attempts.saturating_add(1);
                     let wait = chrono::Duration::from_std(vault_forward::backoff(attempts))
                         .unwrap_or_else(|_| chrono::Duration::hours(6));
-                    if let Err(e) = self
+                    match self
                         .cert_repo
                         .record_vault_forward_failure(
                             certificate.tenant_id,
                             certificate.id,
+                            lease_until,
                             attempts,
                             Utc::now() + wait,
                             &vault_forward::sanitise_reason(&reason),
                         )
                         .await
                     {
+                        Ok(true) => {}
+                        // R101W1-09 (d): the attempt outlived its lease and
+                        // the row is another replica's now (or forwarded);
+                        // that replica records its own outcome.
+                        Ok(false) => tracing::debug!(
+                            certificate_id = %certificate.id,
+                            "the claim on a refused Vault forward lapsed; its failure is not recorded"
+                        ),
                         // The claim's lease still holds the row back; it is
                         // attempted again when that runs out.
-                        tracing::warn!(
+                        Err(e) => tracing::warn!(
                             certificate_id = %certificate.id,
                             error = %e,
                             "the failed Vault forward could not be recorded"
-                        );
+                        ),
                     }
                     // A row past the threshold is `failing_revocations`' to
                     // report; failing the pass for it too would keep this job
@@ -1241,22 +1250,28 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     let attempts = candidate.attempts.saturating_add(1);
                     let wait = chrono::Duration::from_std(vault_forward::backoff(attempts))
                         .unwrap_or_else(|_| chrono::Duration::hours(6));
-                    if let Err(e) = self
+                    match self
                         .ca_repo
                         .record_vault_forward_failure(
                             revoked.organization_id,
                             revoked.id,
+                            lease_until,
                             attempts,
                             Utc::now() + wait,
                             &vault_forward::sanitise_reason(&reason),
                         )
                         .await
                     {
-                        tracing::warn!(
+                        Ok(true) => {}
+                        Ok(false) => tracing::debug!(
+                            ca_id = %revoked.id,
+                            "the claim on a refused Vault forward of a CA lapsed; its failure is not recorded"
+                        ),
+                        Err(e) => tracing::warn!(
                             ca_id = %revoked.id,
                             error = %e,
                             "the failed Vault forward of a CA could not be recorded"
-                        );
+                        ),
                     }
                     if attempts < vault_forward::FAILING_AFTER_ATTEMPTS {
                         *failed += 1;

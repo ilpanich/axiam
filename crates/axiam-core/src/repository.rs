@@ -2955,15 +2955,18 @@ pub trait CaCertificateRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// Record that Vault refused a claimed CA row (#612), on the terms of
-    /// [`CertificateRepository::record_vault_forward_failure`].
+    /// [`CertificateRepository::record_vault_forward_failure`]: written only
+    /// while the row still holds `claimed_until`, the lease this caller's
+    /// claim wrote.
     fn record_vault_forward_failure(
         &self,
         organization_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// How many pending CA revocations have failed at least `min_attempts`
     /// times (#612): counted with the leaves' in `vault_revocation_failing`.
@@ -3082,14 +3085,23 @@ pub trait CertificateRepository: Send + Sync {
     /// truncated — a status and a short message, never a token or a response
     /// body) and when it is next due (#603). A row already forwarded is left
     /// alone.
+    ///
+    /// Conditional on the claim it follows (R101W1-09 (d)): written only while
+    /// the row's `vault_next_attempt_at` is still `claimed_until`, the
+    /// `lease_until` this caller's [`Self::claim_vault_forward`] wrote. An
+    /// attempt that outlived its lease, the row since claimed by another
+    /// replica, writes nothing, so it can neither move the new holder's lease
+    /// nor overwrite the count and reason that holder records. `true` when the
+    /// record was written.
     fn record_vault_forward_failure(
         &self,
         tenant_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// How many unforwarded revocations of an active `vault_pki` CA have
     /// failed at least `min_attempts` times (#603): the rows the sweep has all

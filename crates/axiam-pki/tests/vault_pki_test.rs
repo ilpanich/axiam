@@ -1381,6 +1381,82 @@ async fn under_vault_an_empty_allow_list_refuses_server_and_nothing_else() {
 // pending; and that the cleanup sweep forwards what is pending.
 
 /// A `vault_pki` CA with one leaf issued under it, and the means to revoke it.
+/// A pending leaf brought to "refused `attempts` times and due now", as the
+/// sweep writes it (#603): claimed on the date the due list reads, then the
+/// refusal recorded on that claim's lease (R101W1-09 (d)), with a next attempt
+/// that has already passed.
+async fn refused_and_due(
+    repo: &SurrealCertificateRepository<TestDb>,
+    tenant: Uuid,
+    id: Uuid,
+    attempts: u32,
+    reason: &str,
+) {
+    let seen = repo
+        .list_due_vault_forwards(Utc::now() + Duration::days(1), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.certificate.id == id)
+        .expect("a pending forward")
+        .next_attempt_at;
+    let lease = Utc::now() + vault_forward::CLAIM_LEASE;
+    assert!(
+        repo.claim_vault_forward(tenant, id, seen, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.record_vault_forward_failure(
+            tenant,
+            id,
+            lease,
+            attempts,
+            Utc::now() - Duration::seconds(1),
+            reason,
+        )
+        .await
+        .unwrap()
+    );
+}
+
+/// [`refused_and_due`] for a revoked CA's forward (#612).
+async fn ca_refused_and_due(
+    repo: &SurrealCaCertificateRepository<TestDb>,
+    org: Uuid,
+    id: Uuid,
+    attempts: u32,
+    reason: &str,
+) {
+    use axiam_core::repository::CaCertificateRepository;
+    let seen = repo
+        .list_due_vault_forwards(Utc::now() + Duration::days(1), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.ca.id == id)
+        .expect("a pending CA forward")
+        .next_attempt_at;
+    let lease = Utc::now() + vault_forward::CLAIM_LEASE;
+    assert!(
+        repo.claim_vault_forward(org, id, seen, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.record_vault_forward_failure(
+            org,
+            id,
+            lease,
+            attempts,
+            Utc::now() - Duration::seconds(1),
+            reason,
+        )
+        .await
+        .unwrap()
+    );
+}
+
 struct RevocationFixture {
     certs:
         CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>,
@@ -1603,10 +1679,7 @@ async fn a_vault_that_refuses_leaves_the_leaf_revoked_and_the_sweep_forwards_it_
     f.server.reset().await;
 
     // The backoff runs out.
-    f.cert_repo
-        .record_vault_forward_failure(f.tenant, f.leaf, 1, Utc::now() - Duration::seconds(1), "")
-        .await
-        .unwrap();
+    refused_and_due(&f.cert_repo, f.tenant, f.leaf, 1, "").await;
     let seen = mount_revoke(&f.server, 200, 1).await;
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
@@ -1747,16 +1820,14 @@ async fn a_permanently_refused_serial_does_not_block_a_later_one() {
     // Brought to one refusal short of the threshold and due, the next failed
     // attempt crosses it: the pass no longer fails for the row, which is
     // reported on its own instead.
-    f.cert_repo
-        .record_vault_forward_failure(
-            f.tenant,
-            refused_id,
-            vault_forward::FAILING_AFTER_ATTEMPTS - 1,
-            Utc::now() - Duration::seconds(1),
-            "refused",
-        )
-        .await
-        .unwrap();
+    refused_and_due(
+        &f.cert_repo,
+        f.tenant,
+        refused_id,
+        vault_forward::FAILING_AFTER_ATTEMPTS - 1,
+        "refused",
+    )
+    .await;
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
     assert_eq!(
         seen.lock().unwrap().len(),
@@ -1987,19 +2058,7 @@ async fn a_refused_ca_forward_is_retried_by_the_sweep() {
     f.server.reset().await;
 
     // The backoff runs out, and Vault accepts.
-    {
-        use axiam_core::repository::CaCertificateRepository;
-        f.ca_repo
-            .record_vault_forward_failure(
-                f.org,
-                f.tenant_ca,
-                1,
-                Utc::now() - Duration::seconds(1),
-                "",
-            )
-            .await
-            .unwrap();
-    }
+    ca_refused_and_due(&f.ca_repo, f.org, f.tenant_ca, 1, "").await;
     let seen = mount_revoke_on(&f.server, "pki", 200, 1).await;
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
@@ -2137,7 +2196,6 @@ async fn the_sweep_releases_a_revoked_ca_vault_refuses_as_still_an_issuer_and_th
 /// success, which is what makes the retry safe to repeat.
 #[tokio::test]
 async fn a_row_that_recorded_the_issuer_refusal_is_released_before_the_next_forward() {
-    use axiam_core::repository::CaCertificateRepository;
     let f = tenant_ca_fixture_with(false).await;
     // The release fails in the request; every later one finds nothing to delete
     // for the key and succeeds for the issuer.
@@ -2146,17 +2204,15 @@ async fn a_row_that_recorded_the_issuer_refusal_is_released_before_the_next_forw
         f.cas.revoke(f.org, f.tenant_ca).await.unwrap(),
         CustodianRevocation::Pending { .. }
     ));
-    f.ca_repo
-        .record_vault_forward_failure(
-            f.org,
-            f.tenant_ca,
-            1,
-            Utc::now() - Duration::seconds(1),
-            "vault pki: https://vault/v1/pki/revoke answered 400 Bad Request: adding issuer \
-             (id: tenant-issuer-id) to its own CRL is not allowed",
-        )
-        .await
-        .unwrap();
+    ca_refused_and_due(
+        &f.ca_repo,
+        f.org,
+        f.tenant_ca,
+        1,
+        "vault pki: https://vault/v1/pki/revoke answered 400 Bad Request: adding issuer \
+         (id: tenant-issuer-id) to its own CRL is not allowed",
+    )
+    .await;
     let before = f.server.received_requests().await.unwrap().len();
 
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
@@ -2180,7 +2236,6 @@ async fn a_row_that_recorded_the_issuer_refusal_is_released_before_the_next_forw
 /// the row is forwarded.
 #[tokio::test]
 async fn a_release_that_fails_again_leaves_the_forward_pending_and_backed_off() {
-    use axiam_core::repository::CaCertificateRepository;
     let f = tenant_ca_fixture_with(false).await;
     // The request's release and the sweep's first both fail.
     let vault = mount_single_mount_vault(&f.server, 2).await;
@@ -2209,16 +2264,14 @@ async fn a_release_that_fails_again_leaves_the_forward_pending_and_backed_off() 
     assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);
 
     // The backoff runs out; this time the release goes through.
-    f.ca_repo
-        .record_vault_forward_failure(
-            f.org,
-            f.tenant_ca,
-            1,
-            Utc::now() - Duration::seconds(1),
-            "vault pki: adding issuer (id: tenant-issuer-id) to its own CRL is not allowed",
-        )
-        .await
-        .unwrap();
+    ca_refused_and_due(
+        &f.ca_repo,
+        f.org,
+        f.tenant_ca,
+        1,
+        "vault pki: adding issuer (id: tenant-issuer-id) to its own CRL is not allowed",
+    )
+    .await;
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
     assert!(vault.released.load(std::sync::atomic::Ordering::SeqCst));
     assert!(pending_ca_forwards(&f).await.is_empty());
@@ -2262,19 +2315,14 @@ async fn a_tenant_deletion_counts_a_pending_ca_forward_and_a_stuck_one_is_failin
     assert_eq!(refused.lock().unwrap().len(), 1, "one attempt per CA");
 
     // One refusal short of the threshold, and due: the next refusal crosses it.
-    {
-        use axiam_core::repository::CaCertificateRepository;
-        f.ca_repo
-            .record_vault_forward_failure(
-                f.org,
-                f.tenant_ca,
-                vault_forward::FAILING_AFTER_ATTEMPTS - 1,
-                Utc::now() - Duration::seconds(1),
-                "refused",
-            )
-            .await
-            .unwrap();
-    }
+    ca_refused_and_due(
+        &f.ca_repo,
+        f.org,
+        f.tenant_ca,
+        vault_forward::FAILING_AFTER_ATTEMPTS - 1,
+        "refused",
+    )
+    .await;
     assert_eq!(f.certs.failing_revocations().await.unwrap(), 0);
     assert_eq!(
         f.certs.forward_pending_revocations().await.unwrap(),

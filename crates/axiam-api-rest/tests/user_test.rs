@@ -632,3 +632,67 @@ async fn deleting_an_account_leaves_an_older_namesakes_certificate_alone() {
         "alice's certificate is not Alice's"
     );
 }
+
+/// R101W1-09 (c): `DELETE` of an id no account of the tenant has answers `404`
+/// and revokes nothing — not even a certificate whose `metadata.user_id` names
+/// that id, which the deletion of a real account would revoke. Before the fix
+/// the revocation ran by the id alone, ahead of the `404`.
+#[actix_rt::test]
+async fn deleting_an_unknown_user_revokes_nothing() {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+    use axiam_core::repository::{
+        AuditLogFilter, AuditLogRepository, CertificateRepository, Pagination,
+    };
+    use axiam_db::repository::{SurrealAuditLogRepository, SurrealCertificateRepository};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let unknown = Uuid::new_v4();
+
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let named = certs
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "someones-laptop".into(),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: "fp-named-by-metadata".into(),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: chrono::Utc::now() - chrono::Duration::minutes(1),
+            not_after: chrono::Utc::now() + chrono::Duration::days(30),
+            metadata: serde_json::json!({ "user_id": unknown.to_string() }),
+            user_id: None,
+        })
+        .await
+        .unwrap();
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::delete()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{unknown}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+
+    let read = certs.get_by_id(tenant_id, named.id).await.unwrap();
+    assert_eq!(read.status, CertificateStatus::Active, "nothing revoked");
+    let rows = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some("user.certificates_revoked".into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert!(rows.items.is_empty(), "and no revocation recorded");
+}

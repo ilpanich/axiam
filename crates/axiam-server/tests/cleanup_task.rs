@@ -2340,6 +2340,140 @@ async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
     assert_eq!(records_of(&purged_records(&db).await, held), 1);
 }
 
+/// R101W1-09 (a): every replica also scans for orphaned tenant ids. Two
+/// replicas' sweeps over one store, both looking for orphans at once, purge an
+/// orphaned id once between them: one `tenants.purged {orphan: true}` record,
+/// and both sweeps `Ok`. A replica whose scan predates the other's finished
+/// purge finds nothing left and records nothing. And a claim left by a replica
+/// that died mid-purge holds the id for the lease, then the tombstoned-tenant
+/// sweep takes it over and records it — once, and as the orphan it is.
+#[tokio::test]
+async fn two_replicas_whose_orphan_scans_coincide_record_its_purge_once() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "orphan-race".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let (tenants_a, audit_a) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let (tenants_b, audit_b) = (
+        SurrealTenantRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let records_of = |records: &[AuditLogEntry], id: Uuid| {
+        records
+            .iter()
+            .filter(|e| e.resource_id == Some(id))
+            .map(|e| e.metadata.clone())
+            .collect::<Vec<_>>()
+    };
+    // What a deletion made before the tombstone left behind.
+    let orphaned = |slug: &'static str| {
+        let db = db.clone();
+        async move {
+            let id = tenant_with_a_user(&db, org, slug).await;
+            db.query("DELETE type::record('tenant', $id)")
+                .bind(("id", id.to_string()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            id
+        }
+    };
+
+    // Both replicas' scans find the orphan at once: one purge, one record.
+    let orphan = orphaned("orphan").await;
+    let (a, b) = tokio::join!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true),
+        sweep_tenant_purge(&tenants_b, &audit_b, true)
+    );
+    let (a, b) = (a.expect("replica A's sweep"), b.expect("replica B's sweep"));
+    assert_eq!(a + b, 1, "one replica purged the orphan");
+    assert_eq!(users_in(&db, orphan).await, 0);
+    let records = records_of(&purged_records(&db).await, orphan);
+    assert_eq!(records.len(), 1, "one tenants.purged record");
+    assert_eq!(records[0]["orphan"], true);
+    assert!(
+        tenants_a.list_tombstoned().await.unwrap().is_empty(),
+        "the claim marker went with the purge"
+    );
+    assert!(tenants_a.orphaned_tenant_ids().await.unwrap().is_empty());
+
+    // Replica B scanned before A purged: by the time B gets to the id there is
+    // nothing left, and B records nothing.
+    let stale = orphaned("stale").await;
+    let scanned = tenants_b.orphaned_tenant_ids().await.unwrap();
+    assert_eq!(scanned, vec![stale]);
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true)
+            .await
+            .unwrap(),
+        1
+    );
+    for id in scanned {
+        assert!(
+            tenants_b.purge_orphan(id).await.unwrap().is_none(),
+            "a stale scan purges and records nothing"
+        );
+    }
+    assert_eq!(records_of(&purged_records(&db).await, stale).len(), 1);
+    assert!(
+        tenants_a.list_tombstoned().await.unwrap().is_empty(),
+        "the stale claim's marker is dropped"
+    );
+
+    // B claims an orphan and dies before purging it. During the lease the id
+    // is neither an orphan to A's scan nor a tombstone A may claim.
+    let held = orphaned("held").await;
+    assert!(
+        tenants_b
+            .claim_orphan_purge(held, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(users_in(&db, held).await, 1);
+    // Once the lease has run out (the claim is dated back past it), A's
+    // tombstoned-tenant pass takes the marker over and purges the id as an
+    // orphan: its audit trail kept, and recorded once.
+    let lease = chrono::TimeDelta::from_std(axiam_server::cleanup::TENANT_PURGE_LEASE).unwrap();
+    db.query("UPDATE type::record('tenant', $id) SET purge_claimed_at = $at")
+        .bind(("id", held.to_string()))
+        .bind(("at", Utc::now() - lease - chrono::TimeDelta::minutes(1)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(users_in(&db, held).await, 0);
+    let records = records_of(&purged_records(&db).await, held);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["orphan"], true);
+    assert_eq!(
+        records[0]["audit_exported_through"],
+        serde_json::Value::Null
+    );
+    assert!(tenants_a.list_tombstoned().await.unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // #533 — the Art. 17 purge revokes the erased account's certificates
 // ---------------------------------------------------------------------------

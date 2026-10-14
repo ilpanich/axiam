@@ -846,32 +846,46 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
         &self,
         organization_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
+        // R101W1-09 (d): conditional on the lease the caller's claim wrote, as
+        // the claim is on the value it read. A replica whose attempt outlived
+        // its lease finds another replica's lease (or a forwarded row) and
+        // writes nothing; a write conflict with that replica's claim is
+        // retried and then finds the new lease.
         let error: String = error.chars().take(MAX_FORWARD_ERROR_CHARS).collect();
-        let result = self
-            .db
-            .current()
-            .query(
-                "UPDATE type::record('ca_certificate', $id) SET \
-                   vault_forward_attempts = $attempts, \
-                   vault_forward_last_error = $error, \
-                   vault_next_attempt_at = $next \
-                 WHERE organization_id = $org_id AND vault_revoked_at = NONE",
-            )
-            .bind(("id", id.to_string()))
-            .bind(("org_id", organization_id.to_string()))
-            .bind(("attempts", i64::from(attempts)))
-            .bind(("error", error))
-            .bind(("next", next_attempt_at))
-            .await
-            .map_err(DbError::from)?;
-        result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        Ok(())
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "UPDATE type::record('ca_certificate', $id) SET \
+                       vault_forward_attempts = $attempts, \
+                       vault_forward_last_error = $error, \
+                       vault_next_attempt_at = $next \
+                     WHERE organization_id = $org_id \
+                       AND vault_revoked_at = NONE \
+                       AND vault_next_attempt_at = $lease \
+                     RETURN VALUE meta::id(id)",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("org_id", organization_id.to_string()))
+                .bind(("lease", claimed_until))
+                .bind(("attempts", i64::from(attempts)))
+                .bind(("error", error.clone()))
+                .bind(("next", next_attempt_at))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "ca_certificate"))?;
+            let written: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!written.is_empty())
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn count_vault_forwards_failing(&self, min_attempts: u32) -> AxiamResult<u64> {

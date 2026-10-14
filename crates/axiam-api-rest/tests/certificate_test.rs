@@ -1296,3 +1296,92 @@ async fn a_user_binding_that_does_not_hold_is_a_400() {
         .unwrap();
     assert_eq!(issued.total, 0, "a refused request issues nothing");
 }
+
+/// R101W1-09 (b): an administrator's deletion that lands between the binding
+/// check and the certificate's row leaves no active certificate behind. The
+/// race is made deterministic with a datastore event, the fault-injection seam
+/// these tests already use: the account is marked deleted inside the very
+/// transaction that stores the certificate, which is the last moment a
+/// deletion could land and still precede the row. Both issuance paths then
+/// read the account back, revoke what they made, and answer the binding's own
+/// `400` — without the certificate, and without the private key `generate`
+/// made for it. Before the fix both answered `201` and the rows stayed
+/// `Active`, bound to a deleted account.
+#[actix_rt::test]
+async fn an_account_deleted_during_issuance_leaves_no_active_certificate() {
+    use axiam_core::models::certificate::CertificateStatus;
+    use axiam_core::repository::{CertificateRepository as _, Pagination};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let alice = tenant_user(&db, tenant_id, "alice").await;
+    let bob = tenant_user(&db, tenant_id, "bob").await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db.clone(), auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
+
+    // The deletion, landing as the bound certificate's row is written.
+    db.query(
+        "DEFINE EVENT deleted_during_issuance ON TABLE certificate \
+         WHEN $event = 'CREATE' AND $after.user_id != NONE \
+         THEN (UPDATE type::record('user', $after.user_id) SET status = 'Deleted')",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let cases = [
+        (
+            "generate",
+            "/api/v1/certificates",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "subject": "alice-laptop", "cert_type": "User",
+                "key_algorithm": "Ed25519", "validity_days": 30, "user_id": alice,
+            }),
+        ),
+        (
+            "sign-csr",
+            "/api/v1/certificates/sign-csr",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr("bob-token"),
+                "cert_type": "User", "validity_days": 30, "user_id": bob,
+            }),
+        ),
+    ];
+    for (label, uri, payload) in cases {
+        let (status, body) = post_json(&app, uri, &token, payload).await;
+        assert_eq!(status, 400, "{label}: the binding's refusal");
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("does not name a user of this tenant"),
+            "{label}: {message:?}"
+        );
+        assert!(
+            body.get("private_key_pem").is_none() && body.get("id").is_none(),
+            "{label}: nothing of the issuance is returned"
+        );
+    }
+
+    let issued = SurrealCertificateRepository::new(db.clone())
+        .list(tenant_id, Pagination::default())
+        .await
+        .unwrap();
+    assert_eq!(issued.total, 2, "both certificates were made");
+    for certificate in &issued.items {
+        assert_eq!(
+            certificate.status,
+            CertificateStatus::Revoked,
+            "{}: revoked, not left active",
+            certificate.subject
+        );
+    }
+    let listed = SurrealCertificateRepository::new(db)
+        .list_revoked_by_issuer(ca_id.parse().unwrap(), chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2, "both dated, on the issuer's list");
+}

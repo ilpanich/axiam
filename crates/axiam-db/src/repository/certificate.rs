@@ -382,12 +382,20 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                  not_after = $not_after, \
                  status = $status, \
                  metadata = $metadata, \
-                 user_id = $user_id",
+                 user_id = $user_id, \
+                 serial = $serial",
             )
             .bind(("id", id_str))
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("issuer_ca_id", input.issuer_ca_id.to_string()))
             .bind(("subject", input.subject))
+            // #653: the serial the certificate carries, recorded so the unique
+            // index on `(issuer_ca_id, serial)` refuses a repeat under one
+            // issuer. `None` for text that is not a parseable certificate.
+            .bind((
+                "serial",
+                axiam_pki::certificate_serial_hex(&input.public_cert_pem),
+            ))
             .bind(("public_cert_pem", input.public_cert_pem))
             .bind(("fingerprint", input.fingerprint))
             .bind(("cert_type", cert_type_str(&input.cert_type)))

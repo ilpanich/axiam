@@ -178,6 +178,8 @@ impl<R: CaCertificateRepository> CaService<R> {
                     .map_err(|e| AxiamError::Certificate(e.to_string()))?;
                 params.distinguished_name.push(DnType::CommonName, &subject);
                 params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+                // #653: rcgen's default is a hash of the public key.
+                params.serial_number = Some(crate::serial::random_serial());
                 params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
                     .expect("valid timestamp");
                 params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
@@ -1320,6 +1322,9 @@ fn intermediate_params(
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    // #653: rcgen's default is a hash of the public key, so two intermediates on
+    // one key would share a serial.
+    params.serial_number = Some(crate::serial::random_serial());
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
         .map_err(|e| AxiamError::Certificate(format!("invalid notBefore: {e}")))?;

@@ -347,9 +347,20 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
                  encrypted_private_key = $encrypted_private_key, \
                  key_custody = $key_custody, \
                  key_locator = $key_locator, \
+                 serial = $serial, \
                  mtls_trust_anchor = false",
             )
             .bind(("id", id_str))
+            // #653: recorded only for a CA with a parent in AXIAM, whose serial
+            // that parent chose; the unique index is `(parent_ca_id, serial)`.
+            // A root's serial is its (possibly foreign) issuer's choice and is
+            // not unique across roots, so it is left unrecorded.
+            .bind((
+                "serial",
+                input
+                    .parent_ca_id
+                    .and_then(|_| axiam_pki::certificate_serial_hex(&input.public_cert_pem)),
+            ))
             .bind(("org_id", input.organization_id.to_string()))
             .bind(("tenant_id", input.tenant_id.map(|t| t.to_string())))
             .bind(("parent_ca_id", input.parent_ca_id.map(|p| p.to_string())))

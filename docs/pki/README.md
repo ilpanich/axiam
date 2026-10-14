@@ -599,6 +599,33 @@ the signer returned. A tenant may cap `validity_days` via its
 `max_certificate_validity_days` metadata setting; requests exceeding that cap
 are rejected.
 
+### Serial numbers (1.1.0)
+
+Every certificate AXIAM signs itself — a generated leaf, a CSR-signed leaf, a
+root CA, an intermediate CA — carries a fresh serial of 20 random octets from
+the operating system's CSPRNG, top bit clear (positive, and within the 20 octets
+RFC 5280 §4.1.2.2 allows). A certificate Vault's PKI engine signs carries the
+random serial Vault chose. The serial is therefore never a function of the key:
+the same CSR signed twice yields two certificates with two serials, and
+revoking one leaves the other off the CRL.
+
+**Correction (2026-10-14, #653).** Before 1.1.0 AXIAM left the serial to
+`rcgen`, which wrote the first 20 bytes of SHA-256 over the subject public key.
+Two certificates one CA issued on one key (a CSR signed twice, a re-issue on a
+retained key) carried the same serial, contrary to RFC 5280 §4.1.2.2, and a CRL
+entry for one revoked both. Certificates issued before the upgrade keep the
+serial they were issued with; a pair that already shares one stays a pair, and
+revoking one still lists both until both are revoked or expired. Re-issue the
+pair on fresh serials if that matters to you.
+
+The database records each certificate's serial (lower-case hex of the serial's
+big-endian magnitude, the bytes a CRL entry carries) and refuses a second
+certificate under the same issuing CA with the same serial (schema v99, unique
+on `(issuer_ca_id, serial)`; a CA is keyed on `(parent_ca_id, serial)`, and a root
+CA, whose serial is its own issuer's choice, is not recorded). Rows written
+before v99 have no recorded serial and are not indexed, so the upgrade cannot
+fail on a pair that already shares one.
+
 ### A user certificate names its account (`user_id`, 1.0.1)
 
 A `User` certificate can say which account it was issued for: send `user_id`

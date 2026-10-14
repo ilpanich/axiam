@@ -512,6 +512,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_user_binding",
         sql: SCHEMA_V98,
     },
+    Migration {
+        version: 99,
+        name: "certificate_serial_index",
+        sql: SCHEMA_V99,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4799,6 +4804,38 @@ DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
     FIELDS tenant_id, user_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v99 — a certificate's serial is stored, and unique under its issuer (#653)
+// -----------------------------------------------------------------------
+//
+// No column held a serial: it lived only inside `public_cert_pem`, so nothing
+// could refuse two certificates one CA issued under the same serial. Until
+// #653 that was easy to cause — rcgen derived the serial from the public key,
+// so a CSR signed twice produced two certificates with one serial (RFC 5280
+// §4.1.2.2 forbids it, and a CRL entry revokes both). Issuance now draws 20
+// CSPRNG octets, and the repositories record the serial of the certificate
+// they are given (lower-case hex of its big-endian magnitude, the bytes a CRL
+// entry carries) so this index refuses a repeat under one issuer.
+//
+// Additive: one optional column per table, and a UNIQUE index per table, no row
+// rewritten and no backfill. Every row that exists reads `serial = NONE`, and
+// SurrealDB does not index a row whose indexed field is NONE as a value that can
+// collide, so rows written before the fix — including the pairs that already
+// share a serial — cannot make the index fail to build, and the upgrade
+// cannot be broken by them (`certificate_repository_test.rs` pins both facts).
+// `ca_certificate` is keyed on `parent_ca_id`: a root CA has no parent in
+// AXIAM, is self-signed or imported, and an imported root's serial is its
+// foreign issuer's choice (many roots are serial 1), so a root's serial is
+// left unrecorded and a root can never collide.
+const SCHEMA_V99: &str = "\
+DEFINE FIELD IF NOT EXISTS serial ON TABLE certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_issuer_serial ON TABLE certificate \
+    FIELDS issuer_ca_id, serial UNIQUE;
+DEFINE FIELD IF NOT EXISTS serial ON TABLE ca_certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE ca_certificate \
+    FIELDS parent_ca_id, serial UNIQUE;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4953,6 +4990,35 @@ mod tests {
             assert!(
                 !SCHEMA_V98.contains(forbidden),
                 "v98 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #653 — v99 records each certificate's serial and makes it unique under
+    /// its issuer, and rewrites no row (no backfill: pairs that already share a
+    /// serial keep `serial = NONE` and cannot fail the index build).
+    #[test]
+    fn v99_adds_only_the_certificate_serial_and_its_unique_indexes() {
+        let statements: Vec<&str> = SCHEMA_V99
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS serial ON TABLE certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_issuer_serial ON TABLE certificate \
+                 FIELDS issuer_ca_id, serial UNIQUE",
+                "DEFINE FIELD IF NOT EXISTS serial ON TABLE ca_certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE \
+                 ca_certificate FIELDS parent_ca_id, serial UNIQUE",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V99.contains(forbidden),
+                "v99 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6438,8 +6504,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&98),
-            "v98 is the newest migration (#533 — `certificate.user_id` and its index, the \
+            Some(&99),
+            "v99 is the newest migration (#653 — `certificate.serial` and \
+             `ca_certificate.serial`, each with a UNIQUE index under the issuer, so a serial is \
+             never issued twice by one CA; v98 was #533 — `certificate.user_id` and its index, the \
              account a `User` certificate was issued for, so revoking a user's certificates \
              matches the binding rather than a name; v97 was #610 — `tenant.purge_claimed_at`, \
              the claim one replica writes before it purges a tombstoned tenant, so two replicas \

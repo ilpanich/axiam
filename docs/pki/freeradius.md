@@ -314,12 +314,17 @@ the first of which is the one that matters:
   not, listed or not — and, if that entry comes first, move every device onto
   its VLAN; a subject with a newline breaks the file or writes an entry of its
   own. A serial is hex: it cannot spell `DEFAULT` or `NONE`, and holds no space.
-- **AXIAM assigns the serial; the requester does not choose it.** AXIAM derives
-  it from the certificate's public key, so an entry places whoever holds the key
-  of the certificate AXIAM listed as bound, and nobody else (a second certificate
-  over the same key, from a CSR signed again, carries the same serial). Keyed on
-  a name, whoever can obtain a certificate from the tenant signing CA with
-  `press-07` as its subject gets `press-07`'s VLAN.
+- **AXIAM assigns the serial; the requester does not choose it.** AXIAM draws
+  it from 20 random octets for every certificate it signs, so an entry places
+  the one certificate AXIAM listed as bound, and no other (a second certificate
+  over the same key, from a CSR signed again, carries a serial of its own).
+  Keyed on a name, whoever can obtain a certificate from the tenant signing CA
+  with `press-07` as its subject gets `press-07`'s VLAN.
+  *Correction (2026-10-14, #653):* up to 1.0.1 the serial was derived from the
+  public key, so a second certificate over the same key carried the same serial
+  and an entry placed both. Certificates issued before 1.1.0 keep that serial; a
+  pair that already shares one is still placed together, and both belong to the
+  holder of one key.
 - **This server trusts one issuing CA** (section 2), so the serial needs no
   issuer beside it.
 

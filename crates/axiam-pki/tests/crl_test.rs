@@ -489,6 +489,104 @@ async fn a_newly_issued_certificate_carries_the_crl_distribution_point() {
     );
 }
 
+/// #653 — a serial is drawn per certificate, not derived from the key. The same
+/// CSR (one public key) signed twice yields two serials, so revoking one leaves
+/// the other off the list; every issuance path draws at most 20 octets with the
+/// top bit clear (RFC 5280 §4.1.2.2); and the value in the database is the one
+/// the list encodes.
+#[tokio::test]
+async fn the_same_csr_signed_twice_gets_two_serials_and_one_revocation_lists_one() {
+    let f = Fixture::new().await;
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "same-key");
+    let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+    let mut signed = Vec::new();
+    for _ in 0..2 {
+        signed.push(
+            f.certs
+                .sign_csr(
+                    f.org,
+                    IssuingScope::Organization,
+                    SignCertificateCsr {
+                        tenant_id: f.tenant,
+                        issuer_ca_id: root.certificate.id,
+                        csr_pem: csr_pem.clone(),
+                        cert_type: CertificateType::Device,
+                        validity_days: 30,
+                        metadata: None,
+                        subject_alt_names: vec![],
+                        user_id: None,
+                    },
+                    None,
+                    &[],
+                )
+                .await
+                .expect("the same CSR may be signed twice"),
+        );
+    }
+    let (first, second) = (&signed[0], &signed[1]);
+    assert_ne!(
+        serial_of(&first.public_cert_pem),
+        serial_of(&second.public_cert_pem),
+        "two certificates on one key must not share a serial"
+    );
+
+    // Every local issuance path: leaf (generated and CSR-signed), root,
+    // intermediate.
+    let tenant_ca = f.tenant_ca(root.certificate.id).await;
+    let generated = f.leaf(tenant_ca.certificate.id, "device-generated").await;
+    for pem in [
+        &first.public_cert_pem,
+        &second.public_cert_pem,
+        &generated.public_cert_pem,
+        &root.certificate.public_cert_pem,
+        &tenant_ca.certificate.public_cert_pem,
+    ] {
+        let der = der_of(pem);
+        let (_, cert) = X509Certificate::from_der(&der).unwrap();
+        let raw = cert.raw_serial();
+        assert!(raw.len() <= 20, "at most 20 octets, got {}", raw.len());
+        assert_eq!(raw[0] & 0x80, 0, "positive: the top bit is clear");
+        assert!(raw.iter().any(|b| *b != 0), "non-zero");
+    }
+
+    // The column the unique index is on holds what the list encodes.
+    let mut rows =
+        f.db.query("SELECT VALUE serial FROM certificate WHERE issuer_ca_id = $ca")
+            .bind(("ca", root.certificate.id.to_string()))
+            .await
+            .unwrap();
+    let mut stored: Vec<Option<String>> = rows.take(0).unwrap();
+    stored.sort();
+    let mut expected: Vec<Option<String>> = [first, second]
+        .iter()
+        .map(|c| Some(hex::encode(serial_of(&c.public_cert_pem))))
+        .collect();
+    expected.sort();
+    assert_eq!(stored, expected);
+
+    f.certs
+        .revoke(f.tenant, first.id)
+        .await
+        .expect("revoke one of the two");
+    let crl = f
+        .crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS)
+        .current(f.org, root.certificate.id)
+        .await
+        .expect("the CA publishes a list");
+    let serials = verified_serials(&crl, &root.certificate.public_cert_pem);
+    assert_eq!(serials, vec![serial_of(&first.public_cert_pem)]);
+    assert!(
+        !serials.contains(&serial_of(&second.public_cert_pem)),
+        "revoking one certificate must not revoke its same-key twin"
+    );
+}
+
 /// R1W1-01: deleting a tenant revokes its certificates and signing CAs, and
 /// the purge keeps every revoked, unexpired one — so each stays on its
 /// issuer's list after the tombstone, after the purge, and until it expires.

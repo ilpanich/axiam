@@ -1503,6 +1503,9 @@ fn leaf_params(
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::NoCa;
+    // #653: 20 CSPRNG octets. Unset, rcgen hashes the public key, and two leaves
+    // on one key (a CSR signed twice) would share a serial — and a CRL entry.
+    params.serial_number = Some(crate::serial::random_serial());
     params.subject_alt_names = san_types(sans)?;
     params.crl_distribution_points = crl_point.into_iter().collect();
     params.key_usages = profile

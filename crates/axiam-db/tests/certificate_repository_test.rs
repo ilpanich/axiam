@@ -797,3 +797,209 @@ async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_
     assert_eq!(listed.len(), 1);
     assert!(listed[0].revoked_at.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// #653 — serials are stored and unique under their issuer (migration v99)
+// ---------------------------------------------------------------------------
+
+/// A real self-signed certificate carrying exactly `serial`, as PEM.
+fn pem_with_serial(serial: &[u8], cn: &str) -> String {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(serial));
+    params.self_signed(&key).unwrap().pem()
+}
+
+fn sample_ca(
+    org: Uuid,
+    parent: Option<Uuid>,
+    pem: String,
+    fingerprint: &str,
+) -> StoreCaCertificate {
+    StoreCaCertificate {
+        id: Uuid::new_v4(),
+        organization_id: org,
+        tenant_id: None,
+        parent_ca_id: parent,
+        subject: "CN=CA".into(),
+        public_cert_pem: pem,
+        chain_pem: None,
+        fingerprint: fingerprint.into(),
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - Duration::minutes(1),
+        not_after: Utc::now() + Duration::days(3650),
+        encrypted_private_key: None,
+        key_custody: CaKeyCustody::VaultPki,
+        key_locator: Some("{}".into()),
+    }
+}
+
+/// Rows whose certificate cannot be read carry `serial = NONE`, and NONE does
+/// not collide in the unique index: this is what lets the index build over
+/// rows written before the fix (none of them has a serial column), including
+/// pairs that already share a serial inside their PEM.
+#[tokio::test]
+async fn rows_without_a_recorded_serial_do_not_collide() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealCertificateRepository::new(db);
+    let issuer = Uuid::new_v4();
+    for i in 0..3 {
+        repo.create(sample_cert(tenant_id, issuer, &format!("fp-none-{i}")))
+            .await
+            .unwrap();
+    }
+}
+
+/// The same serial under one issuer is refused; under another issuer it is a
+/// different certificate and is accepted.
+#[tokio::test]
+async fn one_issuer_cannot_issue_a_serial_twice() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealCertificateRepository::new(db);
+    let issuer = Uuid::new_v4();
+    let other_issuer = Uuid::new_v4();
+    let serial = [0x11u8; 20];
+
+    let first = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "first"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-1")
+    };
+    repo.create(first).await.unwrap();
+
+    let twin = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "second"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-2")
+    };
+    assert!(
+        repo.create(twin).await.is_err(),
+        "the same serial under the same issuer must be refused"
+    );
+
+    let elsewhere = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "third"),
+        ..sample_cert(tenant_id, other_issuer, "fp-serial-3")
+    };
+    repo.create(elsewhere).await.unwrap();
+
+    let distinct = StoreCertificate {
+        public_cert_pem: pem_with_serial(&[0x22u8; 20], "fourth"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-4")
+    };
+    repo.create(distinct).await.unwrap();
+}
+
+/// A CA is keyed on its parent: two intermediates under one parent may not
+/// share a serial; roots (no parent) never collide, whatever their serial.
+#[tokio::test]
+async fn ca_serials_are_unique_under_a_parent_and_free_among_roots() {
+    let (db, org, _tenant) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let serial = [0x33u8; 20];
+
+    let root_a = repo
+        .create(sample_ca(
+            org,
+            None,
+            pem_with_serial(&serial, "a"),
+            "fp-root-a",
+        ))
+        .await
+        .unwrap();
+    repo.create(sample_ca(
+        org,
+        None,
+        pem_with_serial(&serial, "b"),
+        "fp-root-b",
+    ))
+    .await
+    .expect("two roots may share a serial: it is their issuers' choice");
+
+    repo.create(sample_ca(
+        org,
+        Some(root_a.id),
+        pem_with_serial(&serial, "c"),
+        "fp-int-c",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        repo.create(sample_ca(
+            org,
+            Some(root_a.id),
+            pem_with_serial(&serial, "d"),
+            "fp-int-d",
+        ))
+        .await
+        .is_err(),
+        "two intermediates under one parent must not share a serial"
+    );
+}
+
+/// The upgrade path: an existing database holds certificates issued under one
+/// serial (the pre-fix same-key twins) and has no `serial` column. Migration v99
+/// must apply over them — `NONE` is not a collision — and afterwards enforce
+/// the index on what is written next. v99 is un-applied by hand (its DDL
+/// removed, its `_migration` record deleted) so the real runner re-applies it.
+#[tokio::test]
+async fn v99_applies_over_rows_that_already_share_a_serial() {
+    let (db, _org, tenant_id) = setup().await;
+    let issuer = Uuid::new_v4();
+
+    db.query(
+        "REMOVE INDEX idx_certificate_issuer_serial ON TABLE certificate; \
+         REMOVE INDEX idx_ca_certificate_parent_serial ON TABLE ca_certificate; \
+         REMOVE FIELD serial ON TABLE certificate; \
+         REMOVE FIELD serial ON TABLE ca_certificate; \
+         DELETE _migration WHERE version = 99;",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    // Two certificates, one serial, one issuer: what a CSR signed twice made.
+    let serial = [0x44u8; 20];
+    for (i, cn) in ["twin-a", "twin-b"].into_iter().enumerate() {
+        db.query(
+            "CREATE type::record('certificate', $id) SET \
+             tenant_id = $tenant_id, issuer_ca_id = $issuer, subject = $cn, \
+             public_cert_pem = $pem, fingerprint = $fp, cert_type = 'Device', \
+             key_algorithm = 'Ed25519', not_before = time::now(), \
+             not_after = time::now() + 30d, status = 'Active'",
+        )
+        .bind(("id", Uuid::new_v4().to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("issuer", issuer.to_string()))
+        .bind(("cn", cn))
+        .bind(("pem", pem_with_serial(&serial, cn)))
+        .bind(("fp", format!("fp-twin-{i}")))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    }
+
+    axiam_db::run_migrations(&db)
+        .await
+        .expect("v99 must apply over rows that share a serial");
+
+    let repo = SurrealCertificateRepository::new(db);
+    repo.create(StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "after-a"),
+        ..sample_cert(tenant_id, issuer, "fp-after-a")
+    })
+    .await
+    .expect("the old twins have no recorded serial, so the next one is the first");
+    assert!(
+        repo.create(StoreCertificate {
+            public_cert_pem: pem_with_serial(&serial, "after-b"),
+            ..sample_cert(tenant_id, issuer, "fp-after-b")
+        })
+        .await
+        .is_err(),
+        "from here on a repeat is refused"
+    );
+}

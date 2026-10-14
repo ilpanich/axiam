@@ -54,6 +54,28 @@ Kubernetes deployment, seed it into `AXIAM__AUTH__PKI_ENCRYPTION_KEY`-protected
 storage per your operational process) — AXIAM itself never persists the
 plaintext key.
 
+### The form of a returned private key
+
+Every private key AXIAM generates and returns — a CA's here, a leaf's under
+[Issue a leaf certificate](#issue-a-leaf-certificate) — is an unencrypted
+PKCS#8 `-----BEGIN PRIVATE KEY-----` block.
+
+- **Ed25519** is returned in RFC 8410 **version 1** form: the PKCS#8
+  `PrivateKeyInfo` with `version` INTEGER 0 holding the 32-byte seed and
+  nothing else (48 bytes of DER). The longer form, RFC 5958's `OneAsymmetricKey`
+  **v2** (`version` INTEGER 1, the seed plus a `[1] publicKey` attribute, 83
+  bytes), is what the cryptographic library underneath AXIAM serialises by
+  default, and OpenSSL 3.0 — Ubuntu 24.04's `wpa_supplicant` and `eapol_test`,
+  and many device images — refuses it (`DECODER routines::unsupported`). The
+  seed fixes the public key, so the shorter form loses nothing, and the
+  readers that take the long form (OpenSSL 3.2+ among them) take this one too. There is no request option to choose: `openssl pkey -in key.pem -noout`
+  succeeds on what you receive.
+- **RSA-4096** is the ordinary PKCS#8 `RSAPrivateKey`, unchanged.
+
+A key issued before 1.1.0 is in the longer form; a stored CA key keeps working
+in either, and a device that cannot read an older key is re-issued rather than
+converted (the key is returned once and is not retained to convert).
+
 ## Import a CA you already have (BYOK)
 
 Generation makes a key AXIAM chose. Import takes one your organization already

@@ -60,7 +60,9 @@ pub struct CreateCaCertificateRequest {
 /// deliberately not on the request:
 ///
 /// * Under `database` or `vault` custody, AXIAM generates a self-signed root
-///   and returns its private key once, in `private_key_pem`.
+///   and returns its private key once, in `private_key_pem`: an unencrypted
+///   PKCS#8 `PRIVATE KEY` block, which for Ed25519 is RFC 8410 version 1 (the
+///   seed alone, no public-key attribute) so that OpenSSL 3.0 can read it.
 /// * Under `vault_pki` custody, Vault generates a root and a signing
 ///   intermediate beneath it, and the response has **no** `private_key_pem`
 ///   because the key never existed outside Vault. The root's certificate comes

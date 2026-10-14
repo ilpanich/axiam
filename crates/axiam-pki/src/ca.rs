@@ -34,7 +34,7 @@ use crate::cert::{
     serial_hex,
 };
 use crate::crl::CrlDistribution;
-use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::crypto::{compute_fingerprint, generate_keypair, private_key_pem};
 use crate::subject::subject_common_name;
 
 pub use crate::config::PkiConfig;
@@ -172,7 +172,7 @@ impl<R: CaCertificateRepository> CaService<R> {
         let (private_key_pem, public_cert_pem, fingerprint) =
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
                 let key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&key_pair)?;
 
                 let mut params = CertificateParams::new(Vec::<String>::new())
                     .map_err(|e| AxiamError::Certificate(e.to_string()))?;
@@ -495,7 +495,7 @@ impl<R: CaCertificateRepository> CaService<R> {
                     })?;
 
                 let key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&key_pair)?;
 
                 let mut params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
                 params.use_authority_key_identifier_extension = true;

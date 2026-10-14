@@ -27,7 +27,7 @@ use crate::PkiConfig;
 use crate::ca::{self, CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crl::CrlDistribution;
-use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::crypto::{compute_fingerprint, generate_keypair, private_key_pem};
 use crate::subject::subject_common_name;
 use crate::vault_forward;
 
@@ -542,7 +542,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
 
                 // Generate end-entity key pair.
                 let ee_key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = ee_key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&ee_key_pair)?;
 
                 // Build end-entity certificate request — from the same
                 // function `sign_csr` overwrites a caller's parameters with, so
@@ -608,7 +608,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             let key_algorithm = input.key_algorithm.clone();
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
                 let ee_key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = ee_key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&ee_key_pair)?;
 
                 let mut params = CertificateParams::new(Vec::<String>::new())
                     .map_err(|e| AxiamError::Certificate(e.to_string()))?;

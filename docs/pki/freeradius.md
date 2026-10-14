@@ -98,24 +98,15 @@ What each choice does for this recipe:
   being fresh. A device that is replaced every month cannot be admitted for
   longer than a month by a missed revocation.
 - **Ed25519 or RSA-4096** both authenticate: the end-to-end test uses Ed25519
-  for the signing CA, the leaves and the lists. There is one catch on the
-  device's side. AXIAM returns an Ed25519 private key as PKCS#8 *version 2*
-  (RFC 5958: the seed followed by the public key), and OpenSSL 3.0 — the library
-  behind `wpa_supplicant` on Ubuntu 24.04, and so behind `eapol_test` — cannot
-  read it (`DECODER routines::unsupported`, and the supplicant then asks for a
-  passphrase that does not exist). Either issue RSA-4096 leaves for such
-  devices (not what the test runs), or re-encode the key to version 1, which is the same seed without the
-  public key and changes no key material (the test does exactly this):
-
-  ```sh
-  # The 32-byte seed follows the `04 20` tag of the version-2 encoding.
-  sed '/^-----/d' press-07.key.pem | base64 -d | tail -c +17 | head -c 32 > seed.bin
-  { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20'; cat seed.bin; } \
-    | openssl pkey -inform DER -out press-07.key
-  ```
-
-  Check your supplicant's TLS library before choosing; some older ones do not
-  support Ed25519 certificates at all.
+  for the signing CA, the leaves and the lists. AXIAM returns an Ed25519 private
+  key as PKCS#8 **version 1** (RFC 8410: the seed alone), which is the form
+  OpenSSL 3.0 — the library behind `wpa_supplicant` on Ubuntu 24.04, and so
+  behind `eapol_test` — reads, so the returned `private_key_pem` is written to
+  the key file as it is, with no re-encoding ([why](README.md#the-form-of-a-returned-private-key)).
+  A key issued by AXIAM before 1.1.0 is in the longer RFC 5958 form, which that
+  library refuses (`DECODER routines::unsupported`); re-issue the certificate
+  rather than converting the key. Check your supplicant's TLS library before
+  choosing; some older ones do not support Ed25519 certificates at all.
 - **Binding** is how AXIAM knows which service account a device is. FreeRADIUS
   does not read it. It matters for two things: it is the list you build the
   placement table from (below), and revoking the certificate in AXIAM ends the

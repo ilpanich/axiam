@@ -268,8 +268,8 @@ async fn from_values_serves_without_any_network() {
 /// points at sees nothing. reqwest strips only the standard credential headers
 /// on a cross-host redirect, so `X-Vault-Token` would otherwise have followed.
 ///
-/// Two paths build the client that reaches Vault: the composition root's
-/// bootstrap client, and the one `build` makes when a private CA is named.
+/// Two paths build the client that reaches Vault: the bootstrap client
+/// (`axiam_auth::secrets::bootstrap_client`, which `main.rs` calls), and the one `build` makes when a private CA is named.
 /// Both are exercised.
 async fn assert_redirect_refused(vault: &MockServer, elsewhere: &MockServer, err: String) {
     let host = reqwest::Url::parse(&vault.uri()).unwrap();
@@ -306,11 +306,9 @@ async fn redirecting_vault() -> (MockServer, MockServer) {
 #[tokio::test]
 async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
     let (vault, elsewhere) = redirecting_vault().await;
-    // The client the composition root hands the provider.
-    let bootstrap = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
+    // The client the composition root hands the provider: the very function
+    // `main.rs` calls, so what is pinned here is what runs at startup.
+    let bootstrap = axiam_auth::secrets::bootstrap_client().unwrap();
 
     let err = VaultSecretProvider::fetch(&bootstrap, &config(&vault), KEYS, SECRETS)
         .await

@@ -886,6 +886,10 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         // replica that lost the race for a row deletes nothing and counts
         // nothing. Live tenants only (a tenant row without `deleted_at`).
         //
+        // The live tenants are read once into `$live`: written inline as
+        // `tenant_id IN (SELECT …)` the subquery is evaluated again for every
+        // candidate row (36 s for 3 000 rows and 301 tenants, R110W1-01).
+        //
         // Two replicas choosing overlapping batches conflict on the rows they
         // both delete, and the datastore aborts one transaction having
         // committed nothing; replaying it re-chooses its batch from what is
@@ -895,10 +899,11 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                 .db
                 .current()
                 .query(format!(
-                    "LET $doomed = (SELECT VALUE id FROM certificate \
+                    "LET $live = (SELECT VALUE meta::id(id) FROM tenant \
+                                  WHERE deleted_at = NONE); \
+                     LET $doomed = (SELECT VALUE id FROM certificate \
                          WHERE {PAST_REVOCATION_GRACE} \
-                           AND tenant_id IN (SELECT VALUE meta::id(id) FROM tenant \
-                                             WHERE deleted_at = NONE) \
+                           AND tenant_id IN $live \
                          LIMIT $limit); \
                      DELETE cert_bound_to WHERE in IN $doomed; \
                      LET $removed = (DELETE $doomed RETURN BEFORE); \
@@ -909,8 +914,8 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                 .map_err(DbError::from)?
                 .check()
                 .map_err(|e| DbError::Migration(e.to_string()))?;
-            // LET, DELETE, LET, SELECT.
-            let rows: Vec<RevokedCertificateRow> = result.take(3).map_err(DbError::from)?;
+            // LET, LET, DELETE, LET, SELECT.
+            let rows: Vec<RevokedCertificateRow> = result.take(4).map_err(DbError::from)?;
             Ok::<_, DbError>(rows.len() as u64)
         })
         .await?;

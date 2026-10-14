@@ -1003,3 +1003,97 @@ async fn v99_applies_over_rows_that_already_share_a_serial() {
         "from here on a repeat is refused"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R110W1-01: the retention batch reads the tenant table once
+// ---------------------------------------------------------------------------
+
+/// `delete_past_retention` used to write the live-tenant set as an inline
+/// `tenant_id IN (SELECT … FROM tenant …)`, which the datastore evaluates again
+/// for every candidate row: 3 000 candidate rows and 301 tenants took 36 s for
+/// one call. Here 2 000 rows past the grace sit in a tombstoned tenant (so every
+/// one is a candidate and none is deletable) beside 200 live tenants; the call
+/// must come back with nothing removed in seconds, and a past-grace row of a
+/// live tenant among them must still go.
+#[tokio::test]
+async fn the_retention_batch_reads_the_tenant_table_once() {
+    let (db, org, live_tenant) = setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    for n in 0..200 {
+        tenants
+            .create(CreateTenant {
+                organization_id: org,
+                kind: TenantKind::Standard,
+                name: format!("Extra {n}"),
+                slug: format!("extra-{n}"),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+    }
+    let dying = tenants
+        .create(CreateTenant {
+            organization_id: org,
+            kind: TenantKind::Standard,
+            name: "Dying".into(),
+            slug: "dying".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    tenants.delete(dying).await.unwrap();
+
+    db.query(
+        "FOR $n IN 0..2000 { \
+             CREATE certificate SET \
+                 tenant_id = $tenant_id, issuer_ca_id = $issuer, subject = 'CN=old', \
+                 public_cert_pem = 'not-a-parsed-certificate', \
+                 fingerprint = string::concat('fp-old-', <string> $n), \
+                 cert_type = 'Device', key_algorithm = 'Ed25519', \
+                 not_before = time::now() - 400d, not_after = time::now() - 30d, \
+                 status = 'Active'; \
+         }",
+    )
+    .bind(("tenant_id", dying.to_string()))
+    .bind(("issuer", Uuid::new_v4().to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let repo = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    let past_grace = repo
+        .create(StoreCertificate {
+            not_before: Utc::now() - Duration::days(400),
+            not_after: Utc::now() - Duration::days(30),
+            ..sample_cert(live_tenant, issuer, "fp-live-past-grace")
+        })
+        .await
+        .unwrap();
+    let fresh = repo
+        .create(sample_cert(live_tenant, issuer, "fp-live-valid"))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let removed = repo.delete_past_retention(500).await.unwrap();
+    let took = started.elapsed();
+    assert_eq!(
+        removed, 1,
+        "only the live tenant's past-grace row is deletable; the tombstoned \
+         tenant's rows are the tenant purge's"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "one batch took {took:?}: the tenant table is being read per candidate row"
+    );
+    assert!(repo.get_by_id(live_tenant, past_grace.id).await.is_err());
+    assert!(repo.get_by_id(live_tenant, fresh.id).await.is_ok());
+    assert_eq!(
+        repo.delete_past_retention(500).await.unwrap(),
+        0,
+        "a second batch finds nothing deletable"
+    );
+}

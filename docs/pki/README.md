@@ -1232,13 +1232,58 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   half the `nextUpdate` interval long and aligned to the Unix epoch, so every
   replica cuts at the same instants. `thisUpdate` is the start of the epoch the
   list was signed in, or the newest revocation on the list if that is later
-  (never before the CA's own `notBefore`); the CRL number is that `thisUpdate`
-  in seconds, shifted left 24 bits, plus the number of entries. Both are
-  functions of the revocations and the epoch alone, and both CA key types sign
-  deterministically, so every replica signs the same state in the same epoch
-  to the same bytes, CRL number and `ETag`: a relying party behind a load
-  balancer revalidates to `304` wherever its request lands. The number grows
-  with every change of the list, an entry leaving included (RFC 5280 §5.2.3).
+  (never before the CA's own `notBefore`, and never past the epoch's last
+  second); the CRL number is that `thisUpdate` in seconds, shifted left 24
+  bits, plus the number of entries. Both are functions of the revocations and
+  the epoch alone, and both CA key types sign deterministically, so every
+  replica signs the same state in the same epoch to the same bytes, CRL number
+  and `ETag`: a relying party behind a load balancer revalidates to `304`
+  wherever its request lands.
+- **When the CRL number only grows.** RFC 5280 §5.2.3 asks for a number that
+  increases with every list, and some relying parties discard a list whose
+  number is lower than the one they hold. AXIAM's number grows with every
+  change of the list, an entry leaving included, on two conditions:
+  - **the interval is unchanged** — see *Changing the interval* below;
+  - **the replicas' clocks agree within half a refresh epoch** (a quarter of the
+    interval; keep them NTP-synchronised, which is far tighter). For as long as
+    two replicas disagree about which side of an epoch boundary they are on, a
+    relying party alternating between them can be handed the previous epoch's
+    list again — never an older one, and never when it fetches again at its
+    list's `nextUpdate`.
+
+  The datastore's clock is not a condition. It writes the revocation date, and
+  a date ahead of the signing replica's clock could otherwise lie past the end
+  of the epoch; `thisUpdate` is never later than the epoch's last second and
+  no entry states a date later than `thisUpdate`, so the next epoch's list
+  always has a greater number (#615). What remains is that `thisUpdate` can be
+  ahead of the replica's clock, and of a strict relying party's, by as much as
+  the datastore's clock leads — never past the epoch's end — and a strict
+  relying party refuses the list as "not yet valid" for that long. Keep the
+  datastore's clock synchronised with the replicas'.
+- **Changing the interval** (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`). Epochs are
+  cut from it, so a new value cuts new epochs, and the number can step back
+  once: raising the interval moves the current epoch's start back, and
+  lowering it ends an expired entry's stay sooner while `thisUpdate` may stay
+  put. Nothing a relying party trusted is withdrawn by the step — a lower
+  number never lacks a revocation the higher one carried, only entries that
+  expired. A relying party that keeps its list until `nextUpdate`, refuses a
+  lower number, and fetches again at `nextUpdate` is offered a greater number
+  then, as long as the new value is at most twice every value its list may
+  have been signed under. So:
+  - **lowering** the interval is safe, in one step;
+  - **raising** it goes at most to twice the current value at a time, with one
+    old interval between two raises (one day to seven: two days, then four
+    after a day, then seven after two more);
+  - **during a rolling restart**, while some replicas run the old value and
+    some the new, keep the two within a factor of two of each other (the
+    steps above do), or finish the restart within the new interval.
+
+  Raised in one larger step, the number stays below the last one served for
+  up to half the new interval, and a relying party of that kind can find its
+  list past `nextUpdate` with nothing newer it accepts until then. OpenSSL's
+  own CRL check does not compare numbers; a fetch job that refuses a lower
+  one, as the [FreeRADIUS recipe](freeradius.md) advises, is a relying party
+  of this kind.
 - **Entries**: every certificate the CA signed and revoked that has not yet
   expired, or expired during the current or the previous refresh epoch — so an
   entry appears on a list issued after its expiry, as RFC 5280 §3.3 requires,

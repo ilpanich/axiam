@@ -1112,3 +1112,117 @@ async fn the_crl_number_grows_across_revocations_epochs_and_an_expiry() {
         .unwrap();
     assert_eq!(other.der, fourth.der);
 }
+
+/// #615, the issue's test: a revocation dated past the end of the epoch — the
+/// datastore's clock ahead of the replica's — beside an entry that expires at
+/// the boundary. The list signed before the boundary states its epoch's last
+/// second as `thisUpdate` and no entry later than that; the list signed after
+/// it, one entry fewer, has a greater number. Before the fix the first list
+/// stated the future date as `thisUpdate` and the second, with the same
+/// `thisUpdate` and one entry fewer, a lower number.
+#[tokio::test]
+async fn a_revocation_dated_past_the_epoch_cannot_lower_the_number_across_the_boundary() {
+    const SECS: u64 = 3_600;
+    let half = Duration::seconds(1_800);
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let expiring = f
+        .leaf(ca.certificate.id, "device-expiring-at-boundary")
+        .await;
+    let ahead = f.leaf(ca.certificate.id, "device-revoked-ahead").await;
+    f.certs.revoke(f.tenant, expiring.id).await.unwrap();
+    f.certs.revoke(f.tenant, ahead.id).await.unwrap();
+
+    let start = next_epoch_start(i64::try_from(SECS).unwrap());
+    let end = start + half;
+    let set = |field: &'static str, fp: String, t: chrono::DateTime<Utc>| {
+        let db = f.db.clone();
+        async move {
+            db.query(format!(
+                "UPDATE certificate SET {field} = $t WHERE fingerprint = $fp"
+            ))
+            .bind(("t", t))
+            .bind(("fp", fp))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        }
+    };
+    // Expired a second before the epoch began: listed in it (RFC 5280 §3.3),
+    // gone from the next.
+    set(
+        "not_after",
+        expiring.fingerprint.clone(),
+        start - Duration::seconds(1),
+    )
+    .await;
+    // Revoked, by the datastore's clock, ten seconds past the epoch's end.
+    let revoked_at = end + Duration::seconds(10);
+    set("revoked_at", ahead.fingerprint.clone(), revoked_at).await;
+
+    let crls = f.crl_service(SECS);
+    let before = crls
+        .current_at(f.org, ca.certificate.id, end - Duration::seconds(12))
+        .await
+        .unwrap();
+    assert!(
+        before.this_update < end,
+        "thisUpdate stays inside its epoch"
+    );
+    assert_eq!(before.this_update, end - Duration::seconds(1));
+    assert_eq!(
+        before.next_update - before.this_update,
+        Duration::seconds(i64::try_from(SECS).unwrap())
+    );
+    let (_, list) = CertificateRevocationList::from_der(&before.der).unwrap();
+    assert_eq!(
+        list.last_update().timestamp(),
+        before.this_update.timestamp()
+    );
+    let dates: Vec<i64> = list
+        .iter_revoked_certificates()
+        .map(|e| e.revocation_date.timestamp())
+        .collect();
+    assert_eq!(
+        dates.len(),
+        2,
+        "both entries are listed before the boundary"
+    );
+    assert!(
+        dates.iter().all(|d| *d <= before.this_update.timestamp()),
+        "no entry is stated later than the list itself: {dates:?}"
+    );
+    verified_serials(&before, &ca.certificate.public_cert_pem);
+
+    // Another replica, earlier in the same epoch, signs the same bytes.
+    let early = f
+        .crl_service(SECS)
+        .current_at(f.org, ca.certificate.id, start + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        early.der, before.der,
+        "the clamp is a function of the epoch"
+    );
+
+    let after = crls
+        .current_at(f.org, ca.certificate.id, end + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        verified_serials(&after, &ca.certificate.public_cert_pem),
+        vec![serial_of(&ahead.public_cert_pem)],
+        "the expired entry left at the boundary"
+    );
+    assert_eq!(
+        after.this_update, revoked_at,
+        "its own date, inside this epoch"
+    );
+    assert!(
+        after.crl_number > before.crl_number,
+        "the number grows across the boundary: {} then {}",
+        before.crl_number,
+        after.crl_number
+    );
+}

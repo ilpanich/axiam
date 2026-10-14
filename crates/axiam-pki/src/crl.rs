@@ -81,15 +81,46 @@
 //! aligned to the Unix epoch, so every replica cuts at the same instants. What
 //! a list says is a function of the revocations in the store and of the epoch
 //! alone — `thisUpdate` is the epoch's start or the newest revocation date on
-//! the list, whichever is later, and the CRL number is that `thisUpdate`, in
-//! seconds, above the entry count (`list_identity` argues why it only grows,
-//! as RFC 5280 §5.2.3 asks). Both CA key types sign deterministically (Ed25519,
-//! and RSA PKCS#1 v1.5), so two replicas signing the same state in the same
-//! epoch produce the same bytes and the same `ETag`, and a relying party behind
-//! a load balancer revalidates to `304`s wherever its request lands. No replica
-//! keeps serving an earlier epoch's list once its clock has passed the
-//! boundary, so none answers with a lower number than another has served. A
-//! list served at the end of its epoch still has half its interval left.
+//! the list, whichever is later, but never past the epoch's last second, and
+//! the CRL number is that `thisUpdate`, in seconds, above the entry count. Both
+//! CA key types sign deterministically (Ed25519, and RSA PKCS#1 v1.5), so two
+//! replicas signing the same state in the same epoch produce the same bytes and
+//! the same `ETag`, and a relying party behind a load balancer revalidates to
+//! `304`s wherever its request lands. A list served at the end of its epoch
+//! still has half its interval left.
+//!
+//! # When the number only grows (#615)
+//!
+//! RFC 5280 §5.2.3 asks for a CRL number that increases. The derivation gives
+//! one — `list_identity` argues each step — on two conditions, and the
+//! datastore's clock is not among them:
+//!
+//! - **The interval is unchanged.** Epochs are cut from it, so another
+//!   `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` cuts other epochs: raising it moves the
+//!   current epoch's start back, and lowering it ends an expired entry's stay
+//!   sooner, while `thisUpdate` may stay put. Either can step the number back
+//!   once. A relying party that keeps its list until `nextUpdate` and refuses a
+//!   lower number is offered a greater one when it fetches again at
+//!   `nextUpdate` as long as the new interval is at most twice every interval
+//!   its list may have been signed under: lowering is safe once every replica
+//!   runs the new value, and raising goes in steps of at most a doubling, an
+//!   old interval apart. The PKI guide (`docs/pki/README.md`) gives the
+//!   operator the procedure.
+//! - **The replicas' clocks agree within half an epoch.** A replica whose clock
+//!   has passed a boundary serves the new epoch's list and one that has not
+//!   still serves the old, so a relying party alternating between the two can
+//!   see the previous epoch's number again for as long as the clocks disagree —
+//!   never an older epoch's, and never at its own `nextUpdate`, by which time
+//!   every such replica is past the boundary.
+//!
+//! A revocation date is written by the datastore's clock, which can be ahead of
+//! the signing replica's and so lie past the end of the epoch. `thisUpdate` is
+//! clamped to the epoch's last second and every entry's stated date to
+//! `thisUpdate`, so no list states a time outside its epoch and the next
+//! epoch's list, starting after every second of this one, has a greater number
+//! whatever left it (#615). What remains is that `thisUpdate` can be ahead of
+//! the replica's clock — and a strict relying party's — by as much as the
+//! datastore's clock leads, never past the epoch's end.
 //!
 //! The route's `Cache-Control: max-age` runs to the end of the epoch — at most
 //! half the interval — not to `nextUpdate`, so a shared cache revalidates with
@@ -515,9 +546,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
             .collect();
         // Never before the CA itself: a CA created mid-epoch states its own
         // notBefore, a constant of the CA, so the derivation stays the same on
-        // every replica.
-        let (this_update, crl_number) =
-            list_identity(epoch.start.max(ca.not_before), &revocation_times);
+        // every replica. Never past the epoch's last second (#615).
+        let (this_update, crl_number) = list_identity(
+            epoch.start.max(ca.not_before),
+            epoch.last_second(),
+            &revocation_times,
+        );
         let next_update = (this_update + self.next_update).min(ca.not_after);
         if next_update <= this_update {
             tracing::debug!(%organization_id, %ca_id, "no CRL is published: the CA expires now");
@@ -650,6 +684,15 @@ fn revocation_time(revoked_at: Option<DateTime<Utc>>, not_before: DateTime<Utc>)
     revoked_at.unwrap_or(not_before)
 }
 
+/// The date a list whose `thisUpdate` is `this_update` states for an entry
+/// revoked at `revoked` (#615): never later than the list itself. Only a
+/// revocation date past the epoch's end — written by a datastore clock ahead of
+/// the replica's — is moved, to the epoch's last second, and it states its own
+/// date again on the next epoch's list.
+fn stated_revocation_time(revoked: DateTime<Utc>, this_update: DateTime<Utc>) -> DateTime<Utc> {
+    revoked.min(this_update)
+}
+
 /// A slice of time half a `nextUpdate` interval long, aligned to the Unix
 /// epoch, so that every replica cuts time at the same instants (#608).
 struct RefreshEpoch {
@@ -665,6 +708,12 @@ struct RefreshEpoch {
 }
 
 impl RefreshEpoch {
+    /// Its last second: the latest `thisUpdate` a list signed in it states
+    /// (#615), so that every list of the next epoch states a later one.
+    fn last_second(&self) -> DateTime<Utc> {
+        self.end - Duration::seconds(1)
+    }
+
     /// The epoch `now` falls in, for lists valid for `next_update`.
     fn of(next_update: Duration, now: DateTime<Utc>) -> Self {
         let half = (next_update.num_seconds() / 2).max(1);
@@ -683,7 +732,8 @@ const CRL_NUMBER_COUNT_BITS: u32 = 24;
 
 /// The `thisUpdate` and CRL number of a list of entries with these revocation
 /// dates, signed in the refresh epoch starting at `floor` — or, for a CA whose
-/// own `notBefore` is later, starting at that (#608).
+/// own `notBefore` is later, starting at that — and ending after `ceiling`, its
+/// last second (#608, #615).
 ///
 /// Both are functions of the list's contents and its epoch alone, so every
 /// replica signing the same state in the same epoch states the same ones — and,
@@ -692,25 +742,39 @@ const CRL_NUMBER_COUNT_BITS: u32 = 24;
 ///
 /// - `thisUpdate` is the later of `floor` and the newest revocation date on
 ///   the list, in whole seconds — the moment the list's contents were last
-///   made true, never before the epoch began nor before the CA existed;
+///   made true, never before the epoch began nor before the CA existed — but
+///   never later than `ceiling`. A revocation date is written by the
+///   datastore's clock, which may be ahead of the replica's; one past the
+///   epoch's end would otherwise carry `thisUpdate` out of its epoch, and the
+///   next epoch's first list could then state the same `thisUpdate` with fewer
+///   entries — a lower number (#615). [`sign_crl`] states no entry's date later
+///   than `thisUpdate`;
 /// - the CRL number is `thisUpdate` in seconds since the Unix epoch, shifted
 ///   left 24 bits, plus the number of entries.
 ///
-/// The number grows with every change of a CA's list. Within an epoch the set
-/// of entries only grows: a revocation is never undone, an expired entry stays
-/// until the epoch ends (see [`RefreshEpoch::expiring_after`]), and the tenant
-/// purge keeps a revoked row for longer than that. A new entry raises
-/// `thisUpdate` or, when its date is not the newest (a revocation committed
-/// late, two in one second), the count. When the epoch moves on, `thisUpdate`
-/// is at least the new epoch's start, later than every second of the old one —
-/// so even a list that lost entries, because they expired, has a greater
-/// number. The count saturates at 2^24 − 1 entries, past which two lists
-/// stating the same `thisUpdate` would share a number.
-fn list_identity(floor: DateTime<Utc>, revocation_times: &[DateTime<Utc>]) -> (DateTime<Utc>, u64) {
+/// Under one interval the number grows with every change of a CA's list,
+/// whatever the datastore's clock says. Within an epoch the set of entries
+/// only grows: a revocation is never undone, an expired entry stays until the
+/// epoch ends (see [`RefreshEpoch::expiring_after`]), and the tenant purge
+/// keeps a revoked row for longer than that. A new entry raises `thisUpdate`
+/// or, when its date is not the newest (a revocation committed late, two in one
+/// second) or `thisUpdate` is already at `ceiling`, the count. When the epoch
+/// moves on, `thisUpdate` is at least the new epoch's start, later than
+/// `ceiling` and so than every `thisUpdate` the old epoch stated — so even a
+/// list that lost entries, because they expired, has a greater number. The
+/// count saturates at 2^24 − 1 entries, past which two lists stating the same
+/// `thisUpdate` would share a number. What the derivation cannot see — another
+/// interval, another replica's clock — is in the module docs.
+fn list_identity(
+    floor: DateTime<Utc>,
+    ceiling: DateTime<Utc>,
+    revocation_times: &[DateTime<Utc>],
+) -> (DateTime<Utc>, u64) {
     let secs = revocation_times
         .iter()
         .map(DateTime::timestamp)
-        .fold(floor.timestamp(), i64::max);
+        .fold(floor.timestamp(), i64::max)
+        .min(ceiling.timestamp());
     let this_update = DateTime::from_timestamp(secs, 0).unwrap_or(floor);
     let count = u64::try_from(revocation_times.len())
         .unwrap_or(u64::MAX)
@@ -782,7 +846,10 @@ pub(crate) fn sign_crl(
             })?;
             Ok(RevokedCertParams {
                 serial_number: SerialNumber::from_slice(&cert.serial.to_bytes_be()),
-                revocation_time: to_offset(revocation_time(entry.revoked_at, entry.not_before))?,
+                revocation_time: to_offset(stated_revocation_time(
+                    revocation_time(entry.revoked_at, entry.not_before),
+                    this_update,
+                ))?,
                 reason_code: None,
                 invalidity_date: None,
             })
@@ -935,48 +1002,96 @@ mod tests {
         DateTime::from_timestamp(secs, 0).unwrap()
     }
 
+    /// The last second of the one-day-interval epoch starting at `start`.
+    fn last_of(start: DateTime<Utc>) -> DateTime<Utc> {
+        start + Duration::seconds(43_199)
+    }
+
     /// #608: `thisUpdate` is the later of the epoch's start and the newest
     /// revocation date; the number is `thisUpdate` above the entry count.
     #[test]
     fn this_update_and_the_number_are_derived_from_the_list_and_its_epoch() {
         let start = at(1_800_000_000);
-        assert_eq!(list_identity(start, &[]), (start, 1_800_000_000 << 24));
+        let last = last_of(start);
+        assert_eq!(
+            list_identity(start, last, &[]),
+            (start, 1_800_000_000 << 24)
+        );
         let older = at(1_799_999_000);
         assert_eq!(
-            list_identity(start, &[older]),
+            list_identity(start, last, &[older]),
             (start, (1_800_000_000 << 24) | 1),
             "an entry older than the epoch leaves thisUpdate at its start"
         );
         let newer = DateTime::from_timestamp(1_800_000_123, 900_000_000).unwrap();
         assert_eq!(
-            list_identity(start, &[older, newer]),
+            list_identity(start, last, &[older, newer]),
             (at(1_800_000_123), (1_800_000_123 << 24) | 2),
             "the newest revocation, in whole seconds"
         );
+    }
+
+    /// #615: a revocation dated past the epoch's end — a datastore clock ahead
+    /// of the replica's — leaves `thisUpdate` at the epoch's last second and is
+    /// stated no later than it; the next epoch's list, which no longer names an
+    /// entry that expired at the boundary, still has a greater number.
+    #[test]
+    fn a_revocation_dated_past_the_epoch_is_stated_at_its_last_second() {
+        let start = at(1_800_000_000);
+        let last = last_of(start);
+        let ahead = last + Duration::seconds(11);
+        let older = at(1_799_999_000);
+        let (this_update, number) = list_identity(start, last, &[older, ahead]);
+        assert_eq!(this_update, last, "thisUpdate stays in its epoch");
+        assert_eq!(number, (u64::try_from(last.timestamp()).unwrap() << 24) | 2);
+        assert_eq!(stated_revocation_time(ahead, this_update), last);
+        assert_eq!(
+            stated_revocation_time(older, this_update),
+            older,
+            "a date inside the list's time is stated as recorded"
+        );
+        // The next epoch: the older entry expired at the boundary and left, and
+        // the one dated ahead now states its own date.
+        let next = last + Duration::seconds(1);
+        let (next_update, next_number) = list_identity(next, last_of(next), &[ahead]);
+        assert_eq!(next_update, ahead);
+        assert!(next_number > number, "fewer entries, a greater number");
+        // Before #615 the first list stated `ahead` as its thisUpdate, and the
+        // second — the same thisUpdate, one entry fewer — a lower number.
+        let unclamped = (u64::try_from(ahead.timestamp()).unwrap() << 24) | 2;
+        assert!(next_number < unclamped);
     }
 
     /// #608: every change a CA's list can undergo raises its number.
     #[test]
     fn the_number_grows_with_every_change_of_the_list() {
         let epoch = at(1_800_000_000);
-        let (_, empty) = list_identity(epoch, &[]);
+        let last = last_of(epoch);
+        let (_, empty) = list_identity(epoch, last, &[]);
         // A revocation, dated in the epoch.
         let first = at(1_800_000_100);
-        let (_, one) = list_identity(epoch, &[first]);
+        let (_, one) = list_identity(epoch, last, &[first]);
         assert!(one > empty);
         // A second one in the same second: thisUpdate stays, the count grows.
-        let (_, two) = list_identity(epoch, &[first, first]);
+        let (_, two) = list_identity(epoch, last, &[first, first]);
         assert!(two > one);
         // A revocation committed late, dated before the newest: the count.
-        let (_, late) = list_identity(epoch, &[first, first, at(1_800_000_050)]);
+        let (_, late) = list_identity(epoch, last, &[first, first, at(1_800_000_050)]);
         assert!(late > two);
+        // One dated past the epoch's end (#615): thisUpdate stops at the last
+        // second, and the next one dated past it raises the count.
+        let ahead = last + Duration::seconds(30);
+        let (_, clamped) = list_identity(epoch, last, &[first, first, first, ahead]);
+        assert!(clamped > late);
+        let (_, clamped_again) = list_identity(epoch, last, &[first, first, first, ahead, ahead]);
+        assert!(clamped_again > clamped);
         // The next epoch, after both earlier entries expired and left: fewer
         // entries, a greater number, because thisUpdate is the new epoch's
         // start.
         let next = at(1_800_000_000 + 43_200);
-        let (this_update, emptied) = list_identity(next, &[]);
+        let (this_update, emptied) = list_identity(next, last_of(next), &[]);
         assert_eq!(this_update, next);
-        assert!(emptied > late);
+        assert!(emptied > clamped_again);
     }
 
     /// #608: epochs are half the interval long and aligned to the Unix epoch,

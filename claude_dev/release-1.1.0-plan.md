@@ -1,6 +1,6 @@
 # Release 1.1.0 plan — the 1.0.1 review findings, contract 1.62 and RADIUS D4
 
-> **Status: DRAFT, 2026-10-14.** Written against `main` at `c6eebd1` (after
+> **Status: READY — D-1 … D-6 answered 2026-10-14 (§11).** Written against `main` at `c6eebd1` (after
 > release 1.0.1, ilpanich/axiam#657, and the dependabot merges that followed).
 > It covers **43 of the 45 open issues** on `ilpanich/axiam`: the forty-two Low
 > and Informational findings the 1.0.1 reviews filed on `1.0.x` (#615 … #656,
@@ -422,12 +422,12 @@ Closes: #631, #656.
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D-1 | **The version.** 1.1.0 with D4 (W6), or 1.0.2 without it? W6 is the only wave that adds routes and the only one besides W1 that adds migrations, so dropping it changes nothing else. | 1.1.0, as answered on 2026-10-14; if W6's first session re-sizes it past XL, ship 1.0.2 from W1 … W5 + W7 + W8 and keep W6 for 1.1.0. |
-| D-2 | **Tag order.** Run PR #657's hand-off (steps 2 … 5: `v1.0.1` on the platform; `1.1.0` on Rust, Java, Kotlin, PHP; `1.0.1` on the other seven) **before** W7 starts, so the 1.62 SDK change logs follow a released version. | Yes. The `mass-tag.sh` dry run from #657's step 4, then two real runs: `--tag v1.0.1` for the platform and the seven, `--tag v1.1.0` for the four. |
-| D-3 | **W2.3's key.** Principal `(tenant, sub)` alone, or the pair `(address, sub)`? | The executor's call on the tree's evidence (§3); the commit body records it. Ask only if it finds both wanting. |
-| D-4 | **Runs the agent cannot start.** W4.5 and W4.6 need a `workflow_dispatch` of `fapi-conformance.yml`; W5.3 and W6.5 need `radius-e2e` to run on the PR. Who dispatches? | The orchestrator, through the GitHub Actions tool where the session has it; else the maintainer, once per item, on the orchestrator's request in §13. |
-| D-5 | **W6.1's resource subtree.** `/network/<site>/<segment>` reserved in the existing resource tree (the note's §4.1), or a table of its own joined to resources? | The note's §4.1: a reserved subtree. Deny-override and inheritance come for free, and quarantine is a deny (§4.4). |
-| D-6 | **The decision route's limiter preset.** Machine preset keyed on the authenticated caller (the note's §6.3), at what allowance? | `network_decide_per_min` in the machine presets at 6 000 (a hundred a second: a power-restore storm at one site), keyed on the caller's `sub`. |
+| D-1 | **The version.** 1.1.0 with D4 (W6), or 1.0.2 without it? W6 is the only wave that adds routes and the only one besides W1 that adds migrations, so dropping it changes nothing else. | **Answered 2026-10-14: 1.1.0.** if W6's first session re-sizes it past XL, ship 1.0.2 from W1 … W5 + W7 + W8 and keep W6 for 1.1.0. |
+| D-2 | **Tag order.** Run PR #657's hand-off (steps 2 … 5: `v1.0.1` on the platform; `1.1.0` on Rust, Java, Kotlin, PHP; `1.0.1` on the other seven) **before** W7 starts, so the 1.62 SDK change logs follow a released version. | **Answered 2026-10-14: yes.** The `mass-tag.sh` dry run from #657's step 4, then two real runs: `--tag v1.0.1` for the platform and the seven, `--tag v1.1.0` for the four. The orchestrator checks `git ls-remote --tags` before W7 and asks if the tags are not there. |
+| D-3 | **W2.3's key.** Principal `(tenant, sub)` alone, or the pair `(address, sub)`? | **Answered 2026-10-14: as recommended.** The executor's call on the tree's evidence (§3); the commit body records it. Ask only if it finds both wanting. |
+| D-4 | **Runs the agent cannot start.** W4.5 and W4.6 need a `workflow_dispatch` of `fapi-conformance.yml`; W5.3 and W6.5 need `radius-e2e` to run on the PR. Who dispatches? | **Answered 2026-10-14: as recommended.** The orchestrator, through the GitHub Actions tool where the session has it; else the maintainer, once per item, on the orchestrator's request in §13. |
+| D-5 | **W6.1's resource subtree.** `/network/<site>/<segment>` reserved in the existing resource tree (the note's §4.1), or a table of its own joined to resources? | **Answered 2026-10-14: as recommended.** The note's §4.1: a reserved subtree. Deny-override and inheritance come for free, and quarantine is a deny (§4.4). |
+| D-6 | **The decision route's limiter preset.** Machine preset keyed on the authenticated caller (the note's §6.3), at what allowance? | **Answered 2026-10-14: as recommended.** `network_decide_per_min` in the machine presets at 6 000 (a hundred a second: a power-restore storm at one site), keyed on the caller's `sub`. |
 
 ---
 
@@ -483,7 +483,7 @@ carries it.
 > 1.0.1 review documents its issues cite
 > (`claude_dev/security-review-release-1.0.1-w1-2026-10-13.md`, `…-w2-…`,
 > `…-w3-…`, `…-w4-…`, `…-w6-…`, `claude_dev/security-review-release-1.0.1-2026-10-14.md`).
-> Confirm D-1 … D-6 are answered in §11; ask for any that is not before W1.
+> D-1 … D-6 are answered in §11 (2026-10-14): do not ask them again.
 > §12 is settled: never re-open a question it answers. Run W1 … W6 as
 > independent branches from `main`, each item by one executor at the model
 > its row names, each wave ending with its F4 review; then W7 on the merged

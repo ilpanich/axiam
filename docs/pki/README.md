@@ -1317,6 +1317,12 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   holds up only its own CA's changed list. Whether a list changed is decided
   from each revoked certificate's fingerprint and revocation date; the
   certificates are read only when the list is signed.
+  One re-sign per CA runs at a time and its outcome is shared: a request that
+  finds one in flight waits for it at most the same five seconds, then
+  answers `503`, and is handed the re-sign's own `503` when it fails — so
+  callers queued on a saturated gate all answer within about five seconds,
+  not five seconds each in turn. A re-sign is not abandoned when the caller
+  that started it hangs up; its list is served to the next request.
 
 **The distribution point.** Every certificate AXIAM signs in-process from
 1.0.0 on — leaves issued by `POST /api/v1/certificates` and by

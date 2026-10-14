@@ -66,14 +66,24 @@
 //! date its entry states, never the certificate. The PEMs — what an entry's
 //! serial is read from — are read only when the list is actually signed.
 //!
-//! Each CA is re-signed on its own (#607). One request at a time re-signs a
+//! Each CA is re-signed on its own (#607). One flight at a time re-signs a
 //! given CA's list, through the custodian `load`, the crypto permit and the
 //! signature; requests for the same CA's changed list wait for it, and nothing
 //! else does. A cached list is answered without waiting on any re-sign, this
 //! CA's or another's. The permit comes from the semaphore issuance and password
-//! hashing share, and a re-sign waits for one at most
-//! [`DEFAULT_CRL_PERMIT_WAIT`]; past that the route answers `503` rather than
-//! queueing an unauthenticated caller without bound.
+//! hashing share, and a flight waits for one at most
+//! [`DEFAULT_CRL_PERMIT_WAIT`]; past that it fails with `503`.
+//!
+//! The flight's outcome is shared (#616). A request that finds one in flight
+//! waits for it at most the same permit wait, then answers `503`, and is handed
+//! what the flight ended with — its `503` included — instead of starting a
+//! re-sign of its own behind it. So callers queued on a saturated gate all
+//! answer within about one permit wait, not one wait each in turn, and an
+//! unauthenticated caller is never queued without bound. A waiter that read a
+//! later state than the flight signed (a revocation committed meanwhile)
+//! starts the next flight rather than take a list without it. A flight runs as
+//! a task of its own, so a caller hanging up does not abandon it: its list is
+//! cached for the next request.
 //!
 //! # The same list from every replica (#608)
 //!
@@ -150,7 +160,7 @@ use rcgen::{
     RevokedCertParams, SerialNumber,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Semaphore, watch};
 use uuid::Uuid;
 use x509_parser::extensions::ParsedExtension;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -330,20 +340,68 @@ struct CachedCrl {
     refresh_at: DateTime<Utc>,
 }
 
-/// One CA's place in the cache: its last list, and the right to re-sign it
-/// (#607).
+/// One CA's place in the cache: its last list, and the re-sign of it in flight
+/// (#607, #616).
 ///
-/// Two locks, so that reading never waits on signing. `published` is held only
-/// to look at or replace the cached list — never across an `await` — and
-/// `signing` is held by the one request re-signing this CA's list, through the
-/// custodian `load`, the crypto permit and the signature. A request for an
-/// unchanged list takes only the first; a request for a changed list queues on
-/// the second behind the re-sign already in flight for the same CA, and on
-/// nothing any other CA is doing.
+/// Two locks, both `std` and neither held across an `await`, so that reading
+/// never waits on signing. `published` is held only to look at or replace the
+/// cached list; `flight` only to see whether a re-sign of this CA's list is in
+/// flight, and to claim it when none is. A request for an unchanged list takes
+/// only the first; a request for a changed list joins the flight already under
+/// way for the same CA, and waits on nothing any other CA is doing.
 #[derive(Default)]
 struct CaSlot {
     published: StdMutex<Option<CachedCrl>>,
-    signing: Mutex<()>,
+    /// The outcome of the re-sign in flight, if one is: `None` in the channel
+    /// until it lands. Set only by [`Self::join_or_lead`] when unset, and
+    /// cleared only by the flight's own [`Landing`], so while a flight runs the
+    /// marker is that flight's.
+    flight: StdMutex<Option<watch::Receiver<Option<FlightOutcome>>>>,
+}
+
+/// What a re-sign ends with, as every request waiting on it receives it.
+type FlightOutcome = AxiamResult<PublishedCrl>;
+
+/// A request's part in a CA's re-sign (#616).
+enum Turn {
+    /// Another request's flight is under way: wait for its outcome.
+    Join(watch::Receiver<Option<FlightOutcome>>),
+    /// None was: this request starts one, and lands it.
+    Lead(Landing),
+}
+
+/// The claim on a CA's one flight, held by whatever runs it. Landing it hands
+/// every waiter the outcome; dropping it unlanded — a cancelled or panicking
+/// flight — clears the claim all the same, and the waiters, finding the channel
+/// closed with nothing in it, look again.
+struct Landing {
+    slot: Arc<CaSlot>,
+    outcome: watch::Sender<Option<FlightOutcome>>,
+    landed: bool,
+}
+
+impl Landing {
+    fn subscribe(&self) -> watch::Receiver<Option<FlightOutcome>> {
+        self.outcome.subscribe()
+    }
+
+    /// End the flight with `outcome`. The claim is cleared before the outcome
+    /// is sent: a request arriving in between finds no flight and the cache as
+    /// the flight left it, and one already waiting receives the outcome.
+    fn land(mut self, outcome: FlightOutcome) {
+        self.slot.end_flight();
+        self.landed = true;
+        self.outcome.send_replace(Some(outcome));
+    }
+}
+
+impl Drop for Landing {
+    fn drop(&mut self) {
+        // Not after `land`: by then another flight may hold the claim.
+        if !self.landed {
+            self.slot.end_flight();
+        }
+    }
 }
 
 impl CaSlot {
@@ -366,11 +424,34 @@ impl CaSlot {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(cached);
     }
+
+    /// Join the flight under way for this CA, or claim it.
+    fn join_or_lead(self: &Arc<Self>) -> Turn {
+        let mut flight = self.flight.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(outcome) = flight.as_ref() {
+            return Turn::Join(outcome.clone());
+        }
+        let (outcome, waiting) = watch::channel(None);
+        *flight = Some(waiting);
+        Turn::Lead(Landing {
+            slot: Arc::clone(self),
+            outcome,
+            landed: false,
+        })
+    }
+
+    fn end_flight(&self) {
+        self.flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
 }
 
 /// How long a re-sign waits for a permit of the shared crypto semaphore before
 /// the route answers `503` (#607): five seconds, the default wait of the
-/// password-hash gate the semaphore also serves.
+/// password-hash gate the semaphore also serves. It also bounds how long a
+/// request waits on a re-sign of the same CA's list already in flight (#616).
 ///
 /// The semaphore is shared with issuance and with every Argon2id hash and
 /// verify. Without a bound a saturated gate would queue unauthenticated CRL
@@ -385,7 +466,8 @@ pub struct CrlService<CA, CR> {
     cert_repo: CR,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
-    /// How long a re-sign waits for a crypto permit ([`DEFAULT_CRL_PERMIT_WAIT`]).
+    /// How long a re-sign waits for a crypto permit, and a request for a
+    /// re-sign in flight ([`DEFAULT_CRL_PERMIT_WAIT`]).
     permit_wait: std::time::Duration,
     /// Who holds the CA signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
@@ -435,7 +517,16 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
     ///
     /// `ServiceUnavailable` when the list has to be signed and no crypto permit
     /// came free within the permit wait ([`Self::with_permit_wait`]).
-    pub async fn current(&self, organization_id: Uuid, ca_id: Uuid) -> AxiamResult<PublishedCrl> {
+    ///
+    /// When the list has to be re-signed and a re-sign of the same CA's list is
+    /// already in flight, the request waits for that one's outcome — at most the
+    /// permit wait, then `ServiceUnavailable` — and receives it, a
+    /// `ServiceUnavailable` included (#616).
+    pub async fn current(&self, organization_id: Uuid, ca_id: Uuid) -> AxiamResult<PublishedCrl>
+    where
+        CA: Clone + 'static,
+        CR: Clone + 'static,
+    {
         self.current_at(organization_id, ca_id, Utc::now()).await
     }
 
@@ -451,11 +542,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         organization_id: Uuid,
         ca_id: Uuid,
         now: DateTime<Utc>,
-    ) -> AxiamResult<PublishedCrl> {
-        let not_published = || AxiamError::NotFound {
-            entity: "certificate revocation list".into(),
-            id: ca_id.to_string(),
-        };
+    ) -> AxiamResult<PublishedCrl>
+    where
+        CA: Clone + 'static,
+        CR: Clone + 'static,
+    {
+        let not_published = || not_published(ca_id);
 
         // Organization-scoped, as every CA lookup is (T-98): a CA id under the
         // wrong organization is not found, not served.
@@ -506,19 +598,106 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         if let Some(crl) = slot.fresh(&digest, now) {
             return Ok(crl);
         }
+        self.resign(slot, ca, digest, now).await
+    }
 
-        // One re-sign per CA at a time. A request that waited here finds the
-        // list the one ahead of it signed, when that list is of the state this
-        // request read.
-        let _flight = slot.signing.lock().await;
-        // Never earlier than the clock: a request that queued across an epoch
-        // boundary signs the new epoch's list, not one older than the list the
-        // flight ahead of it may just have cached.
-        let now = now.max(Utc::now());
-        if let Some(crl) = slot.fresh(&digest, now) {
-            return Ok(crl);
+    /// The list of `ca` as of a state whose entries digest is `digest`, which
+    /// the cache does not hold: from the re-sign of this CA's list already in
+    /// flight, or from one this request starts (#607, #616).
+    ///
+    /// One re-sign per CA at a time, and its outcome is shared. A request that
+    /// finds one in flight waits for it, at most the permit wait from when it
+    /// began waiting, then answers `ServiceUnavailable`; it is handed the
+    /// flight's failure, a `ServiceUnavailable` included, rather than starting
+    /// a re-sign of its own behind it, so callers queued on a saturated gate all
+    /// answer within about one permit wait instead of one each in turn. A
+    /// flight that signed a list leaves it in the cache, and a waiter takes it
+    /// from there only if it is of the state the waiter read; one that read a
+    /// later state — a revocation committed while the flight ran — starts the
+    /// next flight, so a revocation is still in the next response.
+    ///
+    /// The flight runs as a task of its own, so it ends — and its list is
+    /// cached — even when the request that started it is gone (an
+    /// unauthenticated caller can hang up at will). That request waits for it
+    /// without the waiters' bound: the flight bounds its own wait for a crypto
+    /// permit, and the custodian its own key read.
+    async fn resign(
+        &self,
+        slot: Arc<CaSlot>,
+        ca: CaCertificate,
+        digest: [u8; 32],
+        now: DateTime<Utc>,
+    ) -> AxiamResult<PublishedCrl>
+    where
+        CA: Clone + 'static,
+        CR: Clone + 'static,
+    {
+        let deadline = tokio::time::Instant::now() + self.permit_wait;
+        loop {
+            // Never earlier than the clock: a request that waited across an
+            // epoch boundary takes, or signs, the new epoch's list, not one
+            // older than the list a flight ahead of it may just have cached.
+            let now = now.max(Utc::now());
+            match slot.join_or_lead() {
+                Turn::Lead(landing) => {
+                    // A flight that landed between this request's look at the
+                    // cache and its claim may have left exactly this list.
+                    if let Some(crl) = slot.fresh(&digest, now) {
+                        landing.land(Ok(crl.clone()));
+                        return Ok(crl);
+                    }
+                    let mut outcome = landing.subscribe();
+                    let flight = self.clone();
+                    let flight_slot = Arc::clone(&slot);
+                    tokio::spawn(async move {
+                        let signed = flight.sign(&flight_slot, &ca, now).await;
+                        landing.land(signed);
+                    });
+                    return match outcome.wait_for(Option::is_some).await {
+                        Ok(landed) => landed.clone().unwrap_or_else(|| Err(interrupted())),
+                        Err(_dropped) => Err(interrupted()),
+                    };
+                }
+                Turn::Join(mut outcome) => {
+                    let landed =
+                        match tokio::time::timeout_at(deadline, outcome.wait_for(Option::is_some))
+                            .await
+                        {
+                            Ok(Ok(landed)) => landed.clone(),
+                            // The flight ended without an outcome: look again.
+                            Ok(Err(_dropped)) => None,
+                            Err(_elapsed) => {
+                                tracing::debug!(
+                                    organization_id = %ca.organization_id,
+                                    ca_id = %ca.id,
+                                    "the CRL re-sign in flight did not land within the permit wait"
+                                );
+                                return Err(busy());
+                            }
+                        };
+                    if let Some(Err(failed)) = landed {
+                        return Err(failed);
+                    }
+                    if let Some(crl) = slot.fresh(&digest, now.max(Utc::now())) {
+                        return Ok(crl);
+                    }
+                    // Signed over another state than this request read: the
+                    // next flight is this request's, or one it joins.
+                }
+            }
         }
+    }
 
+    /// Sign `ca`'s list as of the store now, and cache it — the body of one
+    /// flight (#616).
+    async fn sign(
+        &self,
+        slot: &CaSlot,
+        ca: &CaCertificate,
+        now: DateTime<Utc>,
+    ) -> AxiamResult<PublishedCrl> {
+        let (organization_id, ca_id) = (ca.organization_id, ca.id);
+        let store = self.custodians.store_for(ca.key_custody)?;
         // The certificates, read only to sign — and read again rather than
         // trusted from the stamps, so the list is of the state as it is now.
         let epoch = self.epoch_of(now);
@@ -555,10 +734,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         let next_update = (this_update + self.next_update).min(ca.not_after);
         if next_update <= this_update {
             tracing::debug!(%organization_id, %ca_id, "no CRL is published: the CA expires now");
-            return Err(not_published());
+            return Err(not_published(ca_id));
         }
 
-        let key_ref = CaService::<CA>::key_ref(&ca);
+        let key_ref = CaService::<CA>::key_ref(ca);
         let ca_key_pem = store
             .load(&key_ref, ca.encrypted_private_key.as_deref())
             .await?
@@ -617,10 +796,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                     wait_ms = u64::try_from(self.permit_wait.as_millis()).unwrap_or(u64::MAX),
                     "the CRL could not be re-signed: no crypto permit came free in time"
                 );
-                Err(AxiamError::ServiceUnavailable(
-                    "the certificate revocation list cannot be signed right now; retry shortly"
-                        .into(),
-                ))
+                Err(busy())
             }
         }
     }
@@ -662,6 +838,28 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         }
         None
     }
+}
+
+/// The `404` of a CA that publishes no list, alike for one that does not exist.
+fn not_published(ca_id: Uuid) -> AxiamError {
+    AxiamError::NotFound {
+        entity: "certificate revocation list".into(),
+        id: ca_id.to_string(),
+    }
+}
+
+/// The route's `503`: the list has to be re-signed and was not, within the
+/// permit wait.
+fn busy() -> AxiamError {
+    AxiamError::ServiceUnavailable(
+        "the certificate revocation list cannot be signed right now; retry shortly".into(),
+    )
+}
+
+/// A flight that ended without an outcome: its task was cancelled or panicked
+/// (the runtime shutting down, say).
+fn interrupted() -> AxiamError {
+    AxiamError::Internal("the certificate revocation list re-sign was interrupted".into())
 }
 
 /// A digest that changes exactly when the list's entries would: over each

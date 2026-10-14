@@ -457,6 +457,25 @@ carries it.
 
 *(the `main` commit each W1 … W6 branch is cut from, and the date)*
 
+**`3d011573e`** (`main` after the dependabot merge #662, which follows the plan
+commits `e82e451` and `0233203`), 2026-10-14. All six wave branches
+(`claude/release-1.1.0-w1` … `-w6`) and the plan branch `claude/release-1.1.0`
+were pushed from it before the first executor started.
+
+Orchestrator's environment, measured at the start: 4 cores, 15 GB RAM, about
+30 GB of free disk, no `protoc`, no libxml2 headers, docker daemon stopped.
+`protobuf-compiler`, `libxml2-dev` and `libxmlsec1-dev` were installed and
+`dockerd` started. Because one Rust build fills most of the machine, the waves
+run **one Rust executor at a time** (with `cargo clean` between items) rather
+than six branches at once; non-Rust items (issue comments, console, text) may
+overlap. SAGE is not connected in this session either.
+
+**D-2 measured before any wave:** `git ls-remote --tags` shows **no `v1.0.1`**
+on `ilpanich/axiam` (latest `v1.0.0-beta18`) and **no 1.61 tag** on any of the
+eleven SDK repositories (latest `v1.0.0-beta17` each). W1 … W6 do not depend on
+the tags; W7 does not start until they exist (D-2), and the maintainer was
+asked for them at the start of W1.
+
 ### 13.1 W1 — what landed, and where the tree overruled the plan
 
 ### 13.2 W2

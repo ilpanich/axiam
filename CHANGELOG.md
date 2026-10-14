@@ -509,6 +509,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step, which says "(digest-pinned)" only for a value that passed.
   Release-pipeline only; no product behaviour changes.
 
+- **`ammonia` moves from 4.2.0 to 4.2.3 (RUSTSEC-2021-0157,
+  RUSTSEC-2021-0158).** The HTML sanitiser arrives only through
+  `surrealdb-runtime`, which uses it for SurrealQL's `string::html::encode` and
+  `sanitize`; AXIAM calls neither and has no direct dependency on it. The advisories
+  were published after 1.0.0 was cut, and `cargo audit` in the Security Scan job
+  failed on them. A `Cargo.lock` change only; no source or behaviour changes.
+
 ### Fixed
 
 - The console's tenant Settings page no longer writes the organization's

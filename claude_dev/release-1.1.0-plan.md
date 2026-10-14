@@ -476,6 +476,19 @@ eleven SDK repositories (latest `v1.0.0-beta17` each). W1 … W6 do not depend o
 the tags; W7 does not start until they exist (D-2), and the maintainer was
 asked for them at the start of W1.
 
+**D-2 amended by the maintainer, 2026-10-14 (during W1).** 1.0.1 is **not
+tagged**: the platform and the SDKs move straight to **1.1.0**. W7 therefore
+does not wait for tags. Consequences, also decided by the maintainer:
+- **Every SDK's contract-1.62 PR carries 1.1.0** (§8's version rule is
+  superseded): Rust, Java, Kotlin and PHP fold 1.62 into their unreleased
+  `[1.1.0]`; the other seven fold their unreleased `[1.0.1]` into `[1.1.0]`.
+  The hand-off tags after merge are `v1.1.0` everywhere (§14 W8 superseded).
+- **The never-tagged `[1.0.1]` sections are merged into `[1.1.0]`** and the
+  `[1.0.1]` heading removed — in the platform `CHANGELOG.md` (W8.4) and in each
+  SDK's change log (W7.2 … W7.12). The source-breaking notes of the four SDKs
+  stay, under `[1.1.0]`.
+- W7.1 (j)'s amended change-log line reads "released as 1.1.0" for all eleven.
+
 ### 13.1 W1 — what landed, and where the tree overruled the plan
 
 ### 13.2 W2
@@ -483,6 +496,16 @@ asked for them at the start of W1.
 ### 13.3 W3
 
 ### 13.4 W4
+
+**W4.1 (#626, #629) — done 2026-10-14, no code.** Comments:
+ilpanich/axiam#626 (issuecomment-6171974235) and ilpanich/axiam#629
+(issuecomment-6171975861), verified on `main` @ `3d011573e`. Tree vs plan:
+#626's two entries start one line earlier than §0.1 says (`CHANGELOG.md:586`
+and `:602`, added by `52d4219`); #629's text was taken by `fe7b9d2` (1.0.1's
+threat-model reconciliation commit, not a separate W7.3 commit), the prod
+compose file and the k8s manifest name only `ORDERLY_STOP`, and `operate.ts:122`
+names neither constant but links the guide's "Stopping, and the grace period" —
+the five steps, 37 s and the 3 s lease-loss drain are in all four.
 
 ### 13.5 W5
 

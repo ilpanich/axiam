@@ -512,6 +512,23 @@ CSR (`external` custody) is forwarded the same way; one signed in AXIAM before
 its parent's key moved into Vault is not, since Vault never recorded it, and
 AXIAM's own list for the parent names it either way.
 
+**One mount for parent and children.** The order above is a dependency, not a
+courtesy, wherever a parent signs from the mount that also holds its
+subordinates' issuers (an organization CA whose key locator records no root):
+while the revoked CA's issuer is still in that mount, Vault refuses the
+forward with `adding issuer (id: …) to its own CRL is not allowed`. The issuer
+is deleted after AXIAM's revocation is written, and a delete that failed (it is
+logged and does not undo the revocation) or a process that died in between
+would leave the CA refused at every forward. The `vault_revocation` sweep
+therefore recognises that refusal and deletes the CA's own issuer and key again
+before it forwards — before the forward when the row has already recorded the
+refusal, else right after the refused forward and with one more forward in the
+same attempt. Deleting what is already gone is not an error, and only the
+revoked CA's own issuer and key are ever deleted. With a root and an
+intermediate mount (the usual layout) the refusal does not arise. Vault's
+`POST <mount>/issuer/<child>/revoke`, which would put the issuer on its
+signer's list without deleting it, is not used: it needs Vault 1.11 or later.
+
 Everything that applies to a leaf applies here: AXIAM's revocation stands
 whatever Vault answers, the request tries twice within ten seconds (a tenant
 deletion once per CA, within one ten-second budget for all of them), a refusal

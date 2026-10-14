@@ -1817,6 +1817,13 @@ struct TenantCaFixture {
 }
 
 async fn tenant_ca_fixture() -> TenantCaFixture {
+    tenant_ca_fixture_with(true).await
+}
+
+/// [`tenant_ca_fixture`]; `release_mocks` mounts the two `DELETE`s that release
+/// the tenant CA's issuer and key, expected once each. A test that scripts the
+/// release itself passes `false`.
+async fn tenant_ca_fixture_with(release_mocks: bool) -> TenantCaFixture {
     let server = MockServer::start().await;
     let root = ca_pair("Acme Root", None);
     let int = ca_pair("Acme Intermediate", Some(&root));
@@ -1852,6 +1859,9 @@ async fn tenant_ca_fixture() -> TenantCaFixture {
     // Revoking the tenant CA releases its issuer and key from `pki_int`; the
     // organization's root and intermediate are not touched.
     for (kind, id) in [("issuer", "tenant-issuer-id"), ("key", "tenant-key-id")] {
+        if !release_mocks {
+            break;
+        }
         Mock::given(method("DELETE"))
             .and(path(format!("/v1/pki_int/{kind}/{id}")))
             .respond_with(ResponseTemplate::new(204))
@@ -1995,6 +2005,246 @@ async fn a_refused_ca_forward_is_retried_by_the_sweep() {
     assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
     assert!(pending_ca_forwards(&f).await.is_empty());
     assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    f.server.verify().await;
+}
+
+/// Vault in the single-mount layout, as far as R101W1-04 goes: the tenant CA's
+/// issuer is still in the mount its serial is revoked in, so `revoke` answers
+/// 400 with Vault's own text until the issuer is deleted, and 200 after.
+///
+/// The first `release_failures` deletions of the issuer answer 500; later ones
+/// 204 and release it. `released` says whether the issuer is gone.
+struct SingleMountVault {
+    deletions: Arc<std::sync::atomic::AtomicUsize>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn mount_single_mount_vault(
+    server: &MockServer,
+    release_failures: usize,
+) -> SingleMountVault {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct DeleteIssuer {
+        failures: usize,
+        deletions: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+    }
+    impl Respond for DeleteIssuer {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            if self.deletions.fetch_add(1, Ordering::SeqCst) < self.failures {
+                return ResponseTemplate::new(500)
+                    .set_body_json(json!({ "errors": ["storage unavailable"] }));
+            }
+            self.released.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(204)
+        }
+    }
+    struct Revoke(Arc<AtomicBool>);
+    impl Respond for Revoke {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            if self.0.load(Ordering::SeqCst) {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "revocation_time": 1_700_000_000, "state": "revoked" }
+                }))
+            } else {
+                ResponseTemplate::new(400).set_body_json(json!({
+                    "errors": ["adding issuer (id: tenant-issuer-id) to its own CRL is not allowed"]
+                }))
+            }
+        }
+    }
+    let deletions = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicBool::new(false));
+    Mock::given(method("DELETE"))
+        .and(path("/v1/pki_int/issuer/tenant-issuer-id"))
+        .respond_with(DeleteIssuer {
+            failures: release_failures,
+            deletions: Arc::clone(&deletions),
+            released: Arc::clone(&released),
+        })
+        .mount(server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/pki_int/key/tenant-key-id"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pki/revoke"))
+        .respond_with(Revoke(Arc::clone(&released)))
+        .mount(server)
+        .await;
+    SingleMountVault {
+        deletions,
+        released,
+    }
+}
+
+/// The method and path of every request the mock Vault has seen since the
+/// `from`th, in order.
+async fn requests_since(server: &MockServer, from: usize) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .skip(from)
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect()
+}
+
+/// R101W1-04: a revocation whose issuer release failed leaves the CA an issuer
+/// in its parent's mount, and Vault refuses to forward it. The request that
+/// revoked it recorded nothing on the row, so the sweep's first attempt finds
+/// the refusal in the answer, deletes the CA's own issuer and key again, and
+/// forwards once more — inside the one claim — to a Vault that now accepts.
+#[tokio::test]
+async fn the_sweep_releases_a_revoked_ca_vault_refuses_as_still_an_issuer_and_then_forwards_it() {
+    let f = tenant_ca_fixture_with(false).await;
+    let vault = mount_single_mount_vault(&f.server, 1).await;
+
+    let outcome = f.cas.revoke(f.org, f.tenant_ca).await.unwrap();
+    assert!(
+        matches!(&outcome, CustodianRevocation::Pending { reason } if reason.contains("to its own CRL is not allowed")),
+        "Vault's refusal is the pending reason: {outcome:?}"
+    );
+    assert!(!vault.released.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);
+    let before = f.server.received_requests().await.unwrap().len();
+
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+
+    assert_eq!(
+        requests_since(&f.server, before).await,
+        [
+            "POST /v1/pki/revoke",
+            "DELETE /v1/pki_int/issuer/tenant-issuer-id",
+            "DELETE /v1/pki_int/key/tenant-key-id",
+            "POST /v1/pki/revoke",
+        ],
+        "refused, released, forwarded: the child's own issuer and key and nothing else"
+    );
+    assert!(pending_ca_forwards(&f).await.is_empty());
+    // Forwarded: the next pass asks Vault nothing.
+    let after = f.server.received_requests().await.unwrap().len();
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    assert!(requests_since(&f.server, after).await.is_empty());
+}
+
+/// R101W1-04: a row that already recorded Vault's refusal is released **before**
+/// the sweep's next forward, so that forward is the first request to the
+/// parent's mount. A release that finds the issuer already gone (`404`) is a
+/// success, which is what makes the retry safe to repeat.
+#[tokio::test]
+async fn a_row_that_recorded_the_issuer_refusal_is_released_before_the_next_forward() {
+    use axiam_core::repository::CaCertificateRepository;
+    let f = tenant_ca_fixture_with(false).await;
+    // The release fails in the request; every later one finds nothing to delete
+    // for the key and succeeds for the issuer.
+    let vault = mount_single_mount_vault(&f.server, 1).await;
+    assert!(matches!(
+        f.cas.revoke(f.org, f.tenant_ca).await.unwrap(),
+        CustodianRevocation::Pending { .. }
+    ));
+    f.ca_repo
+        .record_vault_forward_failure(
+            f.org,
+            f.tenant_ca,
+            1,
+            Utc::now() - Duration::seconds(1),
+            "vault pki: https://vault/v1/pki/revoke answered 400 Bad Request: adding issuer \
+             (id: tenant-issuer-id) to its own CRL is not allowed",
+        )
+        .await
+        .unwrap();
+    let before = f.server.received_requests().await.unwrap().len();
+
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+
+    assert_eq!(
+        requests_since(&f.server, before).await,
+        [
+            "DELETE /v1/pki_int/issuer/tenant-issuer-id",
+            "DELETE /v1/pki_int/key/tenant-key-id",
+            "POST /v1/pki/revoke",
+        ],
+        "the release comes first, the one forward second"
+    );
+    assert_eq!(vault.deletions.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(pending_ca_forwards(&f).await.is_empty());
+}
+
+/// R101W1-04: a release that fails again does not turn the sweep's attempt into
+/// anything but a refused forward: the row backs off as before, nothing but the
+/// child's own issuer was asked for, and once Vault lets the release through
+/// the row is forwarded.
+#[tokio::test]
+async fn a_release_that_fails_again_leaves_the_forward_pending_and_backed_off() {
+    use axiam_core::repository::CaCertificateRepository;
+    let f = tenant_ca_fixture_with(false).await;
+    // The request's release and the sweep's first both fail.
+    let vault = mount_single_mount_vault(&f.server, 2).await;
+    assert!(matches!(
+        f.cas.revoke(f.org, f.tenant_ca).await.unwrap(),
+        CustodianRevocation::Pending { .. }
+    ));
+    let before = f.server.received_requests().await.unwrap().len();
+
+    assert!(
+        f.certs.forward_pending_revocations().await.is_err(),
+        "a forward Vault still refuses fails the pass"
+    );
+    assert_eq!(
+        requests_since(&f.server, before).await,
+        [
+            "POST /v1/pki/revoke",
+            "DELETE /v1/pki_int/issuer/tenant-issuer-id",
+        ],
+        "refused, release attempted and failed: no second forward, no key delete"
+    );
+    // Backed off: the next tick asks Vault nothing.
+    let after = f.server.received_requests().await.unwrap().len();
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+    assert!(requests_since(&f.server, after).await.is_empty());
+    assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);
+
+    // The backoff runs out; this time the release goes through.
+    f.ca_repo
+        .record_vault_forward_failure(
+            f.org,
+            f.tenant_ca,
+            1,
+            Utc::now() - Duration::seconds(1),
+            "vault pki: adding issuer (id: tenant-issuer-id) to its own CRL is not allowed",
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+    assert!(vault.released.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(pending_ca_forwards(&f).await.is_empty());
+}
+
+/// R101W1-04: a refusal that is not the issuer's own does not release anything:
+/// the sweep's `DELETE`s are for Vault's one named refusal only. (The 503 case
+/// of `a_refused_ca_forward_is_retried_by_the_sweep` pins it through the
+/// `.expect(1)` on the deletions; this pins the same for a 400 with other text.)
+#[tokio::test]
+async fn another_400_from_vault_releases_nothing() {
+    let f = tenant_ca_fixture().await;
+    let refused = mount_revoke_on(
+        &f.server,
+        "pki",
+        400,
+        u64::from(CUSTODIAN_REVOKE_ATTEMPTS) + 1,
+    )
+    .await;
+    assert!(matches!(
+        f.cas.revoke(f.org, f.tenant_ca).await.unwrap(),
+        CustodianRevocation::Pending { .. }
+    ));
+    assert!(f.certs.forward_pending_revocations().await.is_err());
+    assert_eq!(refused.lock().unwrap().len(), 3);
+    // `.expect(1)` on each release mock: the request's deletions only.
     f.server.verify().await;
 }
 

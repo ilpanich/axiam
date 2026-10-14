@@ -1173,6 +1173,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     /// revoked subordinate CAs whose parent's list in Vault does not name them
     /// yet, claimed, attempted once each and backed off on a refusal exactly
     /// as the leaves are.
+    ///
+    /// A CA Vault refuses because it is still an issuer in its parent's mount
+    /// ("adding issuer … to its own CRL is not allowed") has its issuer removed
+    /// again before the forward (R101W1-04, [`ca::forward_ca_revocation_releasing`]).
     async fn forward_pending_ca_revocations(
         &self,
         deadline: tokio::time::Instant,
@@ -1221,8 +1225,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     continue;
                 }
             }
-            match ca::forward_ca_revocation(&self.ca_repo, &self.custodians, revoked, 1, deadline)
-                .await
+            match ca::forward_ca_revocation_releasing(
+                &self.ca_repo,
+                &self.custodians,
+                revoked,
+                candidate.last_error.as_deref(),
+                1,
+                deadline,
+            )
+            .await
             {
                 CustodianRevocation::Forwarded => *forwarded += 1,
                 CustodianRevocation::NotNeeded => {}

@@ -92,8 +92,10 @@ What each choice does for this recipe:
 - **`cert_type: Device`** gives the leaf `clientAuth` and `digitalSignature`
   ([what every leaf may be used for](README.md#what-every-leaf-may-be-used-for)),
   which is what an EAP-TLS peer certificate needs. Its subject is the common
-  name; choose one that is unique in the tenant (`press-07`). The placement
-  table does **not** key on it ([below](#the-key-is-the-serial)).
+  name; choose one that is unique in the tenant (`press-07`) and matches
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (AXIAM refuses control characters and more
+  than 64 characters; this narrower pattern is the recommendation, not a check).
+  The placement table does **not** key on it ([below](#the-key-is-the-serial)).
 - **A short `validity_days`** is the only bound that does not depend on a list
   being fresh. A device that is replaced every month cannot be admitted for
   longer than a month by a missed revocation.
@@ -299,7 +301,13 @@ the first of which is the one that matters:
 - **A subject is chosen by whoever requests the certificate, and the `files`
   module reads some names as something else.** An entry named `DEFAULT` matches
   **every** key, and a certificate whose name is missing is looked up as `NONE`.
-  AXIAM accepts `DEFAULT` as a subject, and a subject with spaces or a newline.
+  AXIAM accepts `DEFAULT` as a subject, and a subject with spaces. Until 1.1.0 it
+  also accepted a newline or a tab; since #649 a control character, other
+  whitespace, a bidirectional or zero-width character, or more than 64
+  characters is a `400` ([the rules](README.md#issue-an-organization-ca-certificate)),
+  which closes the newline but not `DEFAULT`, `NONE` or a space: certificates
+  issued before 1.1.0 keep the names they have, and the narrower pattern below
+  is still yours to enforce.
   A table keyed on the subject therefore lets one bound certificate named
   `DEFAULT` place every certificate the tenant signing CA ever issued — bound or
   not, listed or not — and, if that entry comes first, move every device onto

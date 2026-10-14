@@ -248,15 +248,38 @@ impl<R: CaCertificateRepository> CaService<R> {
         input: CreateCaCertificate,
     ) -> AxiamResult<GeneratedCaCertificate> {
         let store = self.custodians.default_store()?;
-        let intermediate = (!input.issue_from_root).then(|| IntermediateSpec {
-            subject: input
-                .intermediate_subject
-                .clone()
-                .unwrap_or_else(|| format!("{} Intermediate Authority", input.subject)),
-            validity_days: input
-                .intermediate_validity_days
-                .unwrap_or(input.validity_days),
-        });
+        let intermediate = if input.issue_from_root {
+            None
+        } else {
+            let subject = match &input.intermediate_subject {
+                // Already through `subject_common_name` in `generate`.
+                Some(given) => given.clone(),
+                None => {
+                    // #649 — the one name AXIAM composes itself. The root's
+                    // subject passed the 64-character bound; the root's subject
+                    // plus this suffix might not, and would otherwise reach the
+                    // custodian (and the row) as an over-long common name.
+                    let derived = format!("{} Intermediate Authority", input.subject);
+                    if derived.chars().count() > crate::subject::MAX_COMMON_NAME_CHARS {
+                        return Err(AxiamError::Validation {
+                            message: format!(
+                                "the default intermediate subject (the subject plus \" \
+                                 Intermediate Authority\") would exceed {} characters; give \
+                                 intermediate_subject",
+                                crate::subject::MAX_COMMON_NAME_CHARS
+                            ),
+                        });
+                    }
+                    derived
+                }
+            };
+            Some(IntermediateSpec {
+                subject,
+                validity_days: input
+                    .intermediate_validity_days
+                    .unwrap_or(input.validity_days),
+            })
+        };
 
         let generated = store
             .generate_ca(&CaGenerationRequest {
@@ -1471,6 +1494,13 @@ pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
         .ok_or_else(|| AxiamError::Validation {
             message: "the certificate signing request has no common name in its subject".into(),
         })?;
+    // #649 — the other way a name reaches a certificate. The name is the CSR's
+    // and is not rewritten (a remote signer signs these very bytes), so it is
+    // refused, not repaired, by the rules a request's `subject` meets.
+    crate::subject::check_common_name_value(
+        &common_name,
+        "the certificate signing request's common name",
+    )?;
 
     let spki = &csr.certification_request_info.subject_pki;
     let (key_algorithm, rsa_modulus_bits) = match spki.algorithm.algorithm.to_id_string().as_str() {

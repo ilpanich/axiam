@@ -1118,8 +1118,9 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     // table keyed on the subject would read as something else (R101W6-02):
     // `DEFAULT`, which `rlm_files` matches for every key, and a subject that
     // carries a newline and a second entry. AXIAM issues the first. The second
-    // it issues today (R101W6-12); if a later release refuses it, there is
-    // nothing to inject and the case still holds.
+    // it refused from 1.1.0 (R101W6-12, #649: a control character is a `400`),
+    // so there is nothing to inject; the branch below keeps the case honest
+    // for a build that issues it again.
     let default_named = issue_device(&api, &plant_a, 0, &line1, "DEFAULT", &work).await;
     let injected_subject = "lamp-04\nDEFAULT";
     let (status, injected) = try_issue_device(&api, &plant_a, 0, &line1, injected_subject).await;

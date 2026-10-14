@@ -37,6 +37,39 @@ certificate in that organization chains to.
 > refused with `400`: the certificate has one CN, and silently discarding the
 > components you asked for would be worse than saying so. The stored `subject`
 > is the normalised value, so the row and the certificate always agree.
+>
+> **The name must be printable and short (1.1.0, #649).** A common name ends up
+> in log lines, FreeRADIUS `files` entries, ACLs and terminals, so AXIAM refuses
+> with `400` a `subject` that:
+>
+> - is longer than **64 characters** — characters (Unicode scalar values), not
+>   bytes, which is how RFC 5280 states `ub-common-name` (`SIZE (1..64)`): 64
+>   two-byte letters are accepted, 65 characters are not;
+> - holds a **control character** (`char::is_control`: a newline, a tab, NUL,
+>   DEL, the C1 range) or any **whitespace other than a single space** between
+>   words — a trailing newline is refused, not trimmed away;
+> - holds an **invisible or reordering format character**: the bidirectional
+>   controls (U+202A–U+202E, U+2066–U+2069, U+200E/U+200F, U+061C), the
+>   zero-width characters (U+200B–U+200D, U+2060, U+FEFF), the line and
+>   paragraph separators (U+2028/U+2029) and the soft hyphen — a name that
+>   *reads* `press-07` while being something else defeats the operator who reads
+>   it; or
+> - starts or ends with a space, or has **two spaces in a row**.
+>
+> The refusal says which rule applied and does not repeat the value. The same
+> rules apply to the common name of a CSR you submit to `sign-csr`, which AXIAM
+> refuses rather than rewrites. A `vault_pki` root with no `intermediate_subject`
+> takes `<subject> Intermediate Authority`; if that would pass 64 characters the
+> request is refused and asks for `intermediate_subject`.
+>
+> **Recommended for a `Device` or `Service` name that another system reads:**
+> match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` — letters, digits, `.`, `_` and
+> `-`, starting with a letter or digit, at most 64 characters (the
+> [FreeRADIUS recipe](freeradius.md#the-key-is-the-serial) tells its table
+> writer to refuse anything else). AXIAM does not enforce this narrower
+> pattern: `ACME Corp Root CA`, `jdoe@example.com` and non-Latin names are
+> legitimate common names. Certificates issued before 1.1.0 keep the names they
+> have; the rules apply to a request, not retroactively.
 
 ```
 POST /api/v1/organizations/{org_id}/ca-certificates

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:b671db545a09be9081d3ef82a03265a047e25c3d763c2ba6bb6a5becefc03b44"
+    "x-axiam-spec-digest": "sha256:b7d07550328436b9b1024567efc8ba6770485c10206d7d13439e42c7cc383e49"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -16931,7 +16931,7 @@
           },
           "subject": {
             "type": "string",
-            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`."
+            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`, as is a name of more than\n64 characters (RFC 5280 `ub-common-name`) or one holding a control\ncharacter, a tab or line break, an invisible or bidirectional formatting\ncharacter, or two spaces in a row."
           },
           "validity_days": {
             "type": "integer",
@@ -17016,7 +17016,8 @@
           },
           "metadata": {},
           "subject": {
-            "type": "string"
+            "type": "string",
+            "description": "The certificate's common name, e.g. `device-001`: a bare name or one\n`CN=` component, at most 64 characters (RFC 5280 `ub-common-name`),\nprintable — a control character, tab or line break, an invisible or\nbidirectional formatting character, or two spaces in a row is refused\nwith `400`. A name that is to be written into another system's\nconfiguration (a FreeRADIUS table, an ACL) should match\n`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`."
           },
           "subject_alt_names": {
             "type": [
@@ -24962,7 +24963,7 @@
       },
       "SignCertificateCsrRequest": {
         "type": "object",
-        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange.",
+        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange. The CSR's common name meets the rules of `subject` on\n`POST /api/v1/certificates` (printable, at most 64 characters) and is\nrefused, not rewritten, when it does not.",
         "required": [
           "issuer_ca_id",
           "csr_pem",

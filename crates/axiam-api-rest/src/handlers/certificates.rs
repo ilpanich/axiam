@@ -29,6 +29,13 @@ use axiam_pki::{CustodianRevocation, IssuingScope};
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificateRequest {
     pub issuer_ca_id: Uuid,
+    /// The certificate's common name, e.g. `device-001`: a bare name or one
+    /// `CN=` component, at most 64 characters (RFC 5280 `ub-common-name`),
+    /// printable — a control character, tab or line break, an invisible or
+    /// bidirectional formatting character, or two spaces in a row is refused
+    /// with `400`. A name that is to be written into another system's
+    /// configuration (a FreeRADIUS table, an ACL) should match
+    /// `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
     pub subject: String,
     pub cert_type: CertificateType,
     pub key_algorithm: KeyAlgorithm,
@@ -314,7 +321,9 @@ pub async fn generate<C: Connection + Clone>(
 /// No `subject` and no `key_algorithm`: both are read out of the CSR, which is
 /// the only place they can be stated without the row and the certificate being
 /// able to disagree. No key is returned, so there is no key field anywhere on
-/// this exchange.
+/// this exchange. The CSR's common name meets the rules of `subject` on
+/// `POST /api/v1/certificates` (printable, at most 64 characters) and is
+/// refused, not rewritten, when it does not.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignCertificateCsrRequest {
     pub issuer_ca_id: Uuid,

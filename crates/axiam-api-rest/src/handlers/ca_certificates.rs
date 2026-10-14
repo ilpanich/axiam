@@ -28,7 +28,10 @@ pub struct CreateCaCertificateRequest {
     ///
     /// A **common name**, not a distinguished name. A single `CN=` prefix is
     /// accepted and stripped; anything else containing `=` — `O=Acme,
-    /// CN=ACME Corp Root CA` — is refused with `400`.
+    /// CN=ACME Corp Root CA` — is refused with `400`, as is a name of more than
+    /// 64 characters (RFC 5280 `ub-common-name`) or one holding a control
+    /// character, a tab or line break, an invisible or bidirectional formatting
+    /// character, or two spaces in a row.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.

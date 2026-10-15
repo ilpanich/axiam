@@ -719,6 +719,28 @@ pub const NETWORK_ADMIN: &str = "network:admin";
 /// Read segments and profiles.
 pub const NETWORK_READ: &str = "network:read";
 /// Write the tree and each segment's envelope.
+///
+/// It also guards the tenant's network policy, the `Session-Timeout` cap
+/// (`network.session_timeout_max_secs`): the write gate asks for it at the
+/// `/network` root when `PUT /api/v1/network/policy` is called, and there is
+/// no separate constant for the cap.
+///
+/// The maintainer's correction of 2026-10-15 (plan section 13.6). The first
+/// reading guarded the cap with `network:admin`, which is administrative login
+/// to a segment's NAS devices and is not grantable under option B (it is in
+/// [`NETWORK_ADMIN_CLASS_ACTIONS`]; the grant gate refuses an allow of it and
+/// the seeder withholds it), so the cap was writable by nobody. The cap is the
+/// `Session-Timeout` envelope every reply profile is clamped to, envelopes are
+/// this permission's ("each segment's envelope"), and H3 keeps envelope writers
+/// apart from profile writers ([`NETWORK_PROFILES_WRITE`]). A holder of the
+/// profile permission alone therefore cannot write the cap.
+///
+/// Unlike `network:admin` it can be held: it is grantable and delegable under
+/// the section 5.3 bound ("you delegate only what you hold", it is in
+/// [`NETWORK_META_ACTIONS`]) and the seeded super-admin holds it
+/// ([`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`]). Only a grant **at the `/network`
+/// root** counts for the cap: one at a site below it does not, and a deny of it
+/// at the root refuses the write (deny-override).
 pub const NETWORK_SEGMENTS_WRITE: &str = "network:segments_write";
 /// Write a segment's reply profile.
 pub const NETWORK_PROFILES_WRITE: &str = "network:profiles_write";
@@ -730,17 +752,6 @@ pub const NETWORK_GRANT_ADMIN: &str = "network:grant_admin";
 pub const NETWORK_DECIDE: &str = "network:decide";
 /// Read the rendered export for a site.
 pub const NETWORK_EXPORT: &str = "network:export";
-
-/// The permission that writes the tenant's network policy (the
-/// `Session-Timeout` cap), checked by the write gate at the `/network` root.
-///
-/// The maintainer's decision of 2026-10-15 (plan section 13.6): `network:admin`.
-/// Note that `network:admin` is **defined and not grantable** under option B
-/// (it is in [`NETWORK_ADMIN_CLASS_ACTIONS`]; the grant gate refuses an allow of
-/// it, `4.2:not-grantable`, and the seeded super-admin does not hold it), so on
-/// a deployment that runs the gate as shipped nobody holds it. Changing the
-/// permission that guards the cap is this one constant.
-pub const NETWORK_POLICY_WRITE: &str = NETWORK_ADMIN;
 
 /// The meta permissions of design note §5.3: assigning a role that carries one
 /// of these at a node needs the assigner to hold it there ("you delegate only

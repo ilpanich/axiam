@@ -1349,9 +1349,9 @@ async fn an_unknown_role_or_permission_is_left_to_the_repository() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_policy_write_needs_network_admin_at_the_root_and_carries_a_matching_token() {
+async fn a_policy_write_needs_segments_write_at_the_root_and_carries_a_matching_token() {
     let w = World::new();
-    let oracle = Oracle::default().allow(w.writer, NETWORK_ADMIN, w.root());
+    let oracle = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, w.root());
     let c = cleared(
         w.decide(
             &oracle,
@@ -1369,14 +1369,17 @@ async fn a_policy_write_needs_network_admin_at_the_root_and_carries_a_matching_t
 }
 
 #[tokio::test]
-async fn a_policy_write_without_network_admin_is_403_naming_it_with_the_values() {
+async fn a_policy_write_without_segments_write_is_403_naming_it_with_the_values() {
     let w = World::new();
-    // Everything a profile writer holds, and every meta permission: none of
-    // it writes the cap.
+    // Everything a profile writer holds, the other meta permissions and the
+    // administrative class: none of it writes the cap (H3 keeps the envelope's
+    // writers apart from the profile's; `network:admin` is not the cap's).
     let oracle = Oracle::default()
         .allow(w.writer, NETWORK_PROFILES_WRITE, w.root())
         .allow(w.writer, NETWORK_GRANT, w.root())
-        .allow(w.writer, NETWORK_SEGMENTS_WRITE, w.root());
+        .allow(w.writer, NETWORK_DECIDE, w.root())
+        .allow(w.writer, NETWORK_READ, w.root())
+        .allow(w.writer, NETWORK_ADMIN, w.root());
     let r = refused(
         w.decide(
             &oracle,
@@ -1392,7 +1395,7 @@ async fn a_policy_write_without_network_admin_is_403_naming_it_with_the_values()
     let missing = r.missing.expect("a 403 names the permission");
     assert_eq!(
         (missing.action.as_str(), missing.node),
-        (NETWORK_ADMIN, w.root())
+        (NETWORK_SEGMENTS_WRITE, w.root())
     );
     // The audit row can show the cap and which way the write meant to move it.
     assert!(
@@ -1414,7 +1417,7 @@ async fn a_policy_write_without_network_admin_is_403_naming_it_with_the_values()
 #[tokio::test]
 async fn a_raise_asks_no_more_than_a_lowering() {
     let w = World::new();
-    let oracle = Oracle::default().allow(w.writer, NETWORK_ADMIN, w.root());
+    let oracle = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, w.root());
     for cap in [300, 3600, 86_400] {
         passes(
             w.decide(
@@ -1426,18 +1429,18 @@ async fn a_raise_asks_no_more_than_a_lowering() {
             .await,
         );
     }
-    // And the only thing asked, at any of them, is network:admin at /network.
+    // And the only thing asked, at any of them, is segments_write at /network.
     let asked = oracle.asked.lock().unwrap();
     assert!(
         asked
             .iter()
-            .all(|(_, action, node)| action == NETWORK_ADMIN && *node == w.root()),
+            .all(|(_, action, node)| action == NETWORK_SEGMENTS_WRITE && *node == w.root()),
         "{asked:?}"
     );
 }
 
 #[tokio::test]
-async fn a_deny_of_network_admin_at_the_root_refuses_the_policy_write() {
+async fn a_deny_of_segments_write_at_the_root_refuses_the_policy_write() {
     // The oracle answers deny for anything not listed, which is what
     // deny-override gives a writer with an explicit deny: "does not hold".
     let w = World::new();
@@ -1452,4 +1455,35 @@ async fn a_deny_of_network_admin_at_the_root_refuses_the_policy_write() {
         "4.2:policy_write",
     );
     assert!(r.after.contains(&("direction", "lowered".to_owned())));
+}
+
+/// Only the root counts: the gate asks the oracle for `network:segments_write`
+/// at the `/network` root and nowhere else, so an allow at a site below it
+/// (which is what the oracle holds here) is not asked about and the write is
+/// refused.
+#[tokio::test]
+async fn a_segments_write_below_the_root_does_not_write_the_cap() {
+    let w = World::new();
+    let site = Uuid::new_v4();
+    let oracle = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, site);
+    let r = refused(
+        w.decide(
+            &oracle,
+            NetworkWrite::PolicyWrite {
+                session_timeout_max_secs: 1800,
+            },
+        )
+        .await,
+        "4.2:policy_write",
+    );
+    let missing = r.missing.expect("a 403 names the permission");
+    assert_eq!(
+        (missing.action.as_str(), missing.node),
+        (NETWORK_SEGMENTS_WRITE, w.root())
+    );
+    let asked = oracle.asked.lock().unwrap();
+    assert!(
+        asked.iter().all(|(_, _, node)| *node == w.root()),
+        "{asked:?}"
+    );
 }

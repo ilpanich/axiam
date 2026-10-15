@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:9228c706b28f1285245ccfb07e0a3e3762266718a901c2431d9b64336b52468a"
+    "x-axiam-spec-digest": "sha256:9ab7b413a948749a7b74a74406f77b756193aba79039769117210abf083b1423"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4428,7 +4428,7 @@
           "network"
         ],
         "summary": "`PUT /api/v1/network/policy`",
-        "description": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on\n`version`.",
+        "description": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on\n`version`. Needs `network:segments_write` at the `/network` root (the cap is\nthe envelope every profile is clamped to); `network:profiles_write` alone\ndoes not suffice, nor does a grant at a site below the root.",
         "operationId": "replace_policy",
         "requestBody": {
           "content": {
@@ -4458,7 +4458,7 @@
             "description": "Not authenticated, or a service-account token"
           },
           "403": {
-            "description": "The caller lacks `network:admin` on `/network` (the response names the permission and the node)"
+            "description": "The caller lacks `network:segments_write` on `/network` (the response names the permission and the node)"
           },
           "409": {
             "description": "The policy changed since `version` was read"

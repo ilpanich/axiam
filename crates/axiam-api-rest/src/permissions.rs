@@ -153,7 +153,7 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "network:segments_write",
-        "Create, change and delete network segments: the tree and each segment's envelope (kind, VLAN, filter ids, rank, enabled)",
+        "Create, change and delete network segments: the tree and each segment's envelope (kind, VLAN, filter ids, rank, enabled), and, at the /network root, the tenant's Session-Timeout cap",
     ),
     (
         "network:profiles_write",
@@ -1415,10 +1415,11 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "network:profiles_write",
     ),
     // The tenant's `Session-Timeout` cap (plan 13.6, W6.3b): read at the
-    // `/network` root; written with `network:admin` there, which the write gate
-    // asks for itself (`NetworkWrite::PolicyWrite`).
+    // `/network` root; written with `network:segments_write` there (the cap is
+    // the envelope every profile is clamped to), which the write gate asks for
+    // itself (`NetworkWrite::PolicyWrite`).
     ("GET", "/api/v1/network/policy", "network:read"),
-    ("PUT", "/api/v1/network/policy", "network:admin"),
+    ("PUT", "/api/v1/network/policy", "network:segments_write"),
     // The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
     // node the decision reads, inside the handler. Its caller is a machine, by
     // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.

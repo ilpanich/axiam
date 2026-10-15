@@ -15,7 +15,7 @@
 //! * a certificate **bind** to a service account, against §5.3's binding rows
 //!   and H6 (correction R101W6-03 of the note);
 //! * a write of the tenant's network policy, the `Session-Timeout` cap that H3
-//!   reads as the envelope (`network:admin` at `/network`; see
+//!   reads as the envelope (`network:segments_write` at `/network`; see
 //!   [`NetworkWrite::PolicyWrite`] for why a raise asks no more than a lowering);
 //! * a write of the generic surfaces that could reach into the reserved
 //!   namespace: a permission whose action is in `network:` (create, rename,
@@ -62,11 +62,10 @@ use std::future::Future;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::network::{
     CapChange, NETWORK_ADMIN, NETWORK_ADMIN_CLASS_ACTIONS, NETWORK_GRANT, NETWORK_GRANT_ADMIN,
-    NETWORK_JOIN, NETWORK_META_ACTIONS, NETWORK_POLICY_WRITE, NETWORK_PROFILES_WRITE,
-    NETWORK_SEGMENTS_WRITE, NetworkSegment, NetworkSegmentKind, NetworkSegmentPath,
-    NetworkSegmentUpdate, NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment,
-    ReplyProfile, branch_node_id, is_network_action, is_reserved_resource_type, network_root_id,
-    site_node_id,
+    NETWORK_JOIN, NETWORK_META_ACTIONS, NETWORK_PROFILES_WRITE, NETWORK_SEGMENTS_WRITE,
+    NetworkSegment, NetworkSegmentKind, NetworkSegmentPath, NetworkSegmentUpdate,
+    NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment, ReplyProfile, branch_node_id,
+    is_network_action, is_reserved_resource_type, network_root_id, site_node_id,
 };
 use axiam_core::models::permission::{Permission, PermissionEffect, PermissionGrant};
 use axiam_core::models::radius_reply::ReplyProfileInput;
@@ -476,8 +475,11 @@ pub enum NetworkWrite<'a> {
     /// Write the tenant's network policy: the `Session-Timeout` cap
     /// (`network.session_timeout_max_secs`, §3.4).
     ///
-    /// Needs [`NETWORK_POLICY_WRITE`] (`network:admin`) at the `/network` root,
-    /// the writer's own, uncached, deny-override in force. **A raise asks
+    /// Needs [`NETWORK_SEGMENTS_WRITE`] at the `/network` root (the maintainer's
+    /// correction of 2026-10-15, plan §13.6: `network:admin` is administrative
+    /// login to a segment's NAS devices and is not grantable, so it cannot guard
+    /// this), the writer's own, uncached, deny-override in force. A grant at a
+    /// site below the root does not count; a deny at the root refuses. **A raise asks
     /// nothing more than a lowering does**, and the reasoning is the point of
     /// this variant:
     ///
@@ -494,7 +496,9 @@ pub enum NetworkWrite<'a> {
     ///   duties from profile writing on purpose (§5.2 H3: "a tenant can split
     ///   the two duties between two people"), so asking the raiser to hold
     ///   `network:profiles_write` or `network:grant` as well would undo the
-    ///   split. `network:admin` is the one permission above all of them.
+    ///   split. Writing the cap is an envelope duty, and envelopes are
+    ///   `network:segments_write`'s; a holder of `network:profiles_write` alone
+    ///   cannot write it.
     /// * H6's reading (a subject placeable on a segment may not shape what
     ///   joining gives) has no subject to bite on today: the route is
     ///   human-only and a user is not a device until D6 binds certificates to
@@ -1245,7 +1249,7 @@ where
     async fn policy_write(&self, new_cap: u32) -> AxiamResult<GateVerdict> {
         if let Some(mut r) = self
             .require_all(
-                &[NETWORK_POLICY_WRITE],
+                &[NETWORK_SEGMENTS_WRITE],
                 self.root(),
                 "4.2:policy_write",
                 AUDIT_POLICY_WRITE_REFUSED,

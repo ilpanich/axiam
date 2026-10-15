@@ -27,8 +27,8 @@ use axiam_auth::token::{issue_access_token, issue_service_account_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::audit::{AuditLogEntry, AuditOutcome};
 use axiam_core::models::network::{
-    NETWORK_ADMIN, NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ,
-    NETWORK_SEGMENTS_WRITE,
+    NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ, NETWORK_SEGMENTS_WRITE,
+    NetworkSegmentKind, network_root_id, site_node_id,
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::PermissionEffect;
@@ -1427,12 +1427,53 @@ async fn another_tenants_segments_and_profiles_are_invisible() {
 
 impl World {
     /// The token of a user of the default tenant who may read the network and
-    /// write the cap: `network:read` and `network:admin`, tenant-wide. Granted
-    /// directly: `network:admin` is not grantable through the API (the grant
-    /// gate refuses it, `4.2:not-grantable`), which `the_cap_cannot_be_written_by_the_roles_the_api_can_make`
-    /// pins.
+    /// write the cap: `network:read` and `network:segments_write`, tenant-wide
+    /// (the maintainer's correction of 2026-10-15: the cap is an envelope, and
+    /// envelopes are `segments_write`'s). Granted directly; the tests that make
+    /// such a holder through the API are `the_cap_is_written_by_the_super_admin_and_by_a_role_made_through_the_api`
+    /// and its neighbours.
     async fn cap_writer(&self) -> String {
-        self.user_with(&[NETWORK_READ, NETWORK_ADMIN]).await
+        self.user_with(&[NETWORK_READ, NETWORK_SEGMENTS_WRITE])
+            .await
+    }
+
+    /// The token of the tenant's seeded super-admin.
+    async fn super_admin_token(&self) -> String {
+        let seeded = SurrealRoleRepository::new(self.db.clone())
+            .list(self.tenant, page())
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|r| r.name == "super-admin")
+            .expect("the seeded super-admin");
+        let user = self.user(self.tenant, &[(seeded.id, None)]).await;
+        self.token(self.tenant, user)
+    }
+
+    /// A non-global role of the default tenant whose only grant is a **deny**
+    /// of `action`, made directly (test setup).
+    async fn deny_role(&self, name: &str, action: &str) -> Uuid {
+        let role = SurrealRoleRepository::new(self.db.clone())
+            .create(CreateRole {
+                tenant_id: self.tenant,
+                name: name.into(),
+                description: String::new(),
+                is_global: false,
+            })
+            .await
+            .unwrap();
+        SurrealPermissionRepository::new(self.db.clone())
+            .grant_to_role_with_effect(
+                self.tenant,
+                role.id,
+                self.permission_id(self.tenant, action).await,
+                vec![],
+                PermissionEffect::Deny,
+            )
+            .await
+            .unwrap();
+        role.id
     }
 }
 
@@ -1509,10 +1550,10 @@ async fn lowering_the_cap_then_reading_it() {
     assert!(w.audit("network_policy.write_refused").await.is_empty());
 }
 
-/// Raising is allowed with nothing beyond `network:admin`, and is audited as a
-/// raise: from the default as well as from a value the tenant wrote. The holder
-/// here has `network:read` and `network:admin` only: not `profiles_write`, not
-/// `grant`, not `segments_write` (the gate's decision, recorded in
+/// Raising is allowed with nothing beyond `network:segments_write`, and is
+/// audited as a raise: from the default as well as from a value the tenant
+/// wrote. The holder here has `network:read` and `network:segments_write` only:
+/// not `profiles_write`, not `grant` (the gate's decision, recorded in
 /// `NetworkWrite::PolicyWrite`).
 #[actix_rt::test]
 async fn raising_the_cap_is_allowed_and_audited_as_raised() {
@@ -1664,22 +1705,34 @@ async fn a_stale_version_is_409_and_changes_nothing() {
     assert!(w.audit("network_policy.raised").await.is_empty());
 }
 
-/// Without `network:admin` at `/network` the write is `403` naming it, changes
-/// nothing and leaves a refusal row carrying the rule, the permission, the
-/// node and the cap before and after, whatever else the caller holds.
+/// Without `network:segments_write` at `/network` the write is `403` naming
+/// it, changes nothing and leaves a refusal row carrying the rule, the
+/// permission, the node and the cap before and after. A holder of
+/// `network:profiles_write` (and `network:grant` and `network:read`) is still
+/// refused: H3 keeps the envelope's writers apart from the profile's.
 #[actix_rt::test]
-async fn writing_the_cap_without_network_admin_is_403_with_a_refusal_row() {
+async fn writing_the_cap_without_network_segments_write_is_403_with_a_refusal_row() {
     let w = World::new().await;
     let app = app!(w);
-    // Everything a network administrator can be made with through the API.
-    let netadmin = w.netadmin(w.tenant).await;
-    let (status, err) = call(&app, &netadmin, "PUT", POLICY, Some(policy_body(7200, 0))).await;
+    // Everything a profile writer can be made with, and not the envelope.
+    let profile_writer = w
+        .user_with(&[NETWORK_READ, NETWORK_PROFILES_WRITE, NETWORK_GRANT])
+        .await;
+    let (status, err) = call(
+        &app,
+        &profile_writer,
+        "PUT",
+        POLICY,
+        Some(policy_body(7200, 0)),
+    )
+    .await;
     assert_eq!(status, 403, "{err}");
-    assert_eq!(err["action"], NETWORK_ADMIN);
+    assert_eq!(err["action"], NETWORK_SEGMENTS_WRITE);
 
     let reader = w.user_with(&[NETWORK_READ]).await;
-    let (status, _) = call(&app, &reader, "PUT", POLICY, Some(policy_body(300, 0))).await;
-    assert_eq!(status, 403);
+    let (status, err) = call(&app, &reader, "PUT", POLICY, Some(policy_body(300, 0))).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_SEGMENTS_WRITE);
 
     let rows = w.audit("network_policy.write_refused").await;
     assert_eq!(rows.len(), 2, "{rows:?}");
@@ -1691,10 +1744,10 @@ async fn writing_the_cap_without_network_admin_is_403_with_a_refusal_row() {
     assert_eq!(raise.metadata["rule"], "4.2:policy_write");
     assert_eq!(raise.metadata["write"], "policy_write");
     assert_eq!(raise.metadata["status"], 403);
-    assert_eq!(raise.metadata["missing_permission"], NETWORK_ADMIN);
+    assert_eq!(raise.metadata["missing_permission"], NETWORK_SEGMENTS_WRITE);
     assert_eq!(
         raise.metadata["node"],
-        axiam_core::models::network::network_root_id(w.tenant).to_string()
+        network_root_id(w.tenant).to_string()
     );
     assert_eq!(raise.metadata["before"]["session_timeout_max_secs"], "3600");
     assert_eq!(raise.metadata["after"]["direction"], "raised");
@@ -1704,7 +1757,7 @@ async fn writing_the_cap_without_network_admin_is_403_with_a_refusal_row() {
         .expect("the refused lowering");
     assert_eq!(lower.metadata["after"]["direction"], "lowered");
 
-    let (_, got) = call(&app, &netadmin, "GET", POLICY, None).await;
+    let (_, got) = call(&app, &profile_writer, "GET", POLICY, None).await;
     assert_eq!(
         (
             got["session_timeout_max_secs"].clone(),
@@ -1716,31 +1769,21 @@ async fn writing_the_cap_without_network_admin_is_403_with_a_refusal_row() {
     assert!(w.audit("network_policy.lowered").await.is_empty());
 }
 
-/// What is true of the shipped permission model today, pinned so that a change
-/// is a decision: `network:admin` is not grantable (the grant gate refuses an
-/// allow of it) and the seeded super-admin does not hold it, so no role the API
-/// can make writes the cap. The route's permission is the maintainer's choice of
-/// 2026-10-15; this test is the evidence for the contract question the commit
-/// records.
+/// The maintainer's correction of 2026-10-15 (plan 13.6): the cap is written
+/// with `network:segments_write` at `/network`, which can be held. The seeded
+/// super-admin holds it; and a role made **through the API** under the 5.3
+/// bound (the super-admin creates a non-global role, grants it
+/// `network:segments_write`, assigns it at the `/network` root) writes the cap
+/// too. This is the opposite of what W6.3b first pinned, when the cap was
+/// guarded by `network:admin` and was writable by nobody.
 #[actix_rt::test]
-async fn the_cap_cannot_be_written_by_the_roles_the_api_can_make() {
+async fn the_cap_is_written_by_the_super_admin_and_by_a_role_made_through_the_api() {
     let w = World::new().await;
     let app = app!(w);
-    let seeded = SurrealRoleRepository::new(w.db.clone())
-        .list(w.tenant, page())
-        .await
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|r| r.name == "super-admin")
-        .expect("the seeded super-admin");
-    let user = w.user(w.tenant, &[(seeded.id, None)]).await;
-    let super_admin = w.token(w.tenant, user);
-    // It holds the meta permissions: it can read the cap...
-    let (status, _) = call(&app, &super_admin, "GET", POLICY, None).await;
-    assert_eq!(status, 200);
-    // ...and cannot write it.
-    let (status, err) = call(
+    let super_admin = w.super_admin_token().await;
+
+    // The seeded super-admin writes it (and reads it).
+    let (status, put) = call(
         &app,
         &super_admin,
         "PUT",
@@ -1748,15 +1791,150 @@ async fn the_cap_cannot_be_written_by_the_roles_the_api_can_make() {
         Some(policy_body(1800, 0)),
     )
     .await;
-    assert_eq!(status, 403, "{err}");
-    assert_eq!(err["action"], NETWORK_ADMIN);
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["session_timeout_max_secs"], 1800);
+    assert_eq!(put["version"], 1);
+    let rows = w.audit("network_policy.lowered").await;
+    assert_eq!(the_row(&rows).outcome, AuditOutcome::Success);
 
-    // And the API refuses to make a role that could: an allow of network:admin
-    // is not grantable (4.2:not-grantable). (The grant route itself is covered
-    // by the gate's tests; here the permission registry shows the shape.)
-    assert!(
-        axiam_core::models::network::NETWORK_ADMIN_CLASS_ACTIONS.contains(&NETWORK_ADMIN),
-        "network:admin is in the administrative class"
+    // A role made through the API: create, grant segments_write, assign at /network.
+    let root = network_root_id(w.tenant);
+    let (status, role) = call(
+        &app,
+        &super_admin,
+        "POST",
+        "/api/v1/roles",
+        Some(json!({ "name": "cap-writer", "description": "", "is_global": false })),
+    )
+    .await;
+    assert_eq!(status, 201, "{role}");
+    let role_id = role["id"].as_str().unwrap().to_owned();
+    let perm = w.permission_id(w.tenant, NETWORK_SEGMENTS_WRITE).await;
+    let (status, err) = call(
+        &app,
+        &super_admin,
+        "POST",
+        &format!("/api/v1/roles/{role_id}/permissions"),
+        Some(json!({ "permission_id": perm })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let holder = w.user(w.tenant, &[]).await;
+    let (status, err) = call(
+        &app,
+        &super_admin,
+        "POST",
+        &format!("/api/v1/roles/{role_id}/users"),
+        Some(json!({ "user_id": holder, "resource_id": root })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+
+    let holder = w.token(w.tenant, holder);
+    let (status, put) = call(&app, &holder, "PUT", POLICY, Some(policy_body(7200, 1))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["session_timeout_max_secs"], 7200);
+    assert_eq!(put["version"], 2);
+    assert_eq!(w.audit("network_policy.raised").await.len(), 1);
+    assert!(w.audit("network_policy.write_refused").await.is_empty());
+}
+
+/// Only a grant at the `/network` root counts for the cap: a
+/// `network:segments_write` allow at a site below it is live (the holder may
+/// replace a segment of that site) and does not write the cap.
+#[actix_rt::test]
+async fn a_segments_write_below_the_root_does_not_write_the_cap() {
+    let w = World::new().await;
+    let app = app!(w);
+    let netadmin = w.netadmin(w.tenant).await;
+    let segment = make_segment(&app, &netadmin, "corp", 10, &[]).await;
+    let id = segment["id"].as_str().unwrap().to_owned();
+    let site = site_node_id(w.tenant, NetworkSegmentKind::Access, "hq");
+
+    let role = w
+        .role(
+            w.tenant,
+            "site-envelope",
+            &[NETWORK_READ, NETWORK_SEGMENTS_WRITE],
+        )
+        .await;
+    let user = w.user(w.tenant, &[(role, Some(site))]).await;
+    let at_site = w.token(w.tenant, user);
+
+    // Live at the site: the segment there can be replaced.
+    let (status, replaced) = call(
+        &app,
+        &at_site,
+        "PUT",
+        &format!("{SEGMENTS}/{id}"),
+        Some(json!({
+            "version": 1, "vlan_id": 11, "filter_ids": [], "rank": 10, "enabled": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{replaced}");
+
+    // Not at the root: the cap is refused, naming the permission and the root.
+    let (status, err) = call(&app, &at_site, "PUT", POLICY, Some(policy_body(1800, 0))).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_SEGMENTS_WRITE);
+    let rows = w.audit("network_policy.write_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.metadata["rule"], "4.2:policy_write");
+    assert_eq!(row.metadata["missing_permission"], NETWORK_SEGMENTS_WRITE);
+    assert_eq!(row.metadata["node"], network_root_id(w.tenant).to_string());
+    // (The same grant at the site does not read the root either; the administrator does.)
+    let (_, got) = call(&app, &netadmin, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            got["session_timeout_max_secs"].clone(),
+            got["version"].clone()
+        ),
+        (json!(3600), json!(0))
+    );
+}
+
+/// Deny-override holds for the cap: a `network:segments_write` deny at the
+/// `/network` root refuses the write whatever allow the caller also holds,
+/// while the same allow alone writes it.
+#[actix_rt::test]
+async fn a_deny_of_segments_write_at_the_root_refuses_the_cap() {
+    let w = World::new().await;
+    let app = app!(w);
+    let netadmin = w.netadmin(w.tenant).await;
+    // Nodes exist once a segment does.
+    make_segment(&app, &netadmin, "corp", 10, &[]).await;
+    let root = network_root_id(w.tenant);
+
+    let allow = w
+        .role(
+            w.tenant,
+            "cap-allow",
+            &[NETWORK_READ, NETWORK_SEGMENTS_WRITE],
+        )
+        .await;
+    let deny = w.deny_role("cap-deny", NETWORK_SEGMENTS_WRITE).await;
+    let allowed = w.user(w.tenant, &[(allow, None)]).await;
+    let denied = w.user(w.tenant, &[(allow, None), (deny, Some(root))]).await;
+    let (allowed, denied) = (w.token(w.tenant, allowed), w.token(w.tenant, denied));
+
+    let (status, put) = call(&app, &allowed, "PUT", POLICY, Some(policy_body(1800, 0))).await;
+    assert_eq!(status, 200, "{put}");
+
+    let (status, err) = call(&app, &denied, "PUT", POLICY, Some(policy_body(900, 1))).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_SEGMENTS_WRITE);
+    let rows = w.audit("network_policy.write_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.metadata["rule"], "4.2:policy_write");
+    assert_eq!(row.metadata["before"]["session_timeout_max_secs"], "1800");
+    let (_, got) = call(&app, &allowed, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            got["session_timeout_max_secs"].clone(),
+            got["version"].clone()
+        ),
+        (json!(1800), json!(1))
     );
 }
 
@@ -1840,7 +2018,11 @@ async fn the_cap_is_per_tenant() {
     let app = app!(w);
     let writer = w.cap_writer().await;
     let other_role = w
-        .role(w.other_tenant, "cap", &[NETWORK_READ, NETWORK_ADMIN])
+        .role(
+            w.other_tenant,
+            "cap",
+            &[NETWORK_READ, NETWORK_SEGMENTS_WRITE],
+        )
         .await;
     let other_user = w.user(w.other_tenant, &[(other_role, None)]).await;
     let other = w.token(w.other_tenant, other_user);

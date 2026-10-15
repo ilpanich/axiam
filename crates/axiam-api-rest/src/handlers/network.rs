@@ -69,9 +69,14 @@
 //! | | |
 //! |---|---|
 //! | read | `GET /network/policy` — `network:read` at the `/network` root |
-//! | write | `PUT /network/policy` — [`NETWORK_POLICY_WRITE`](axiam_core::models::network::NETWORK_POLICY_WRITE) (`network:admin`) at the `/network` root, through the write gate |
+//! | write | `PUT /network/policy` — [`NETWORK_SEGMENTS_WRITE`](axiam_core::models::network::NETWORK_SEGMENTS_WRITE) (`network:segments_write`) at the `/network` root, through the write gate |
 //!
-//! The maintainer's decision of 2026-10-15 (plan §13.6). The write is a
+//! The maintainer's decision of 2026-10-15 (plan §13.6), corrected the same day:
+//! the cap is the `Session-Timeout` envelope every profile is clamped to, so its
+//! write is `network:segments_write`'s (envelopes), not `network:admin`'s (which
+//! is administrative login to a NAS device and is not grantable). A holder of
+//! `network:profiles_write` alone cannot write it (H3), and only a grant at the
+//! `/network` root counts. The write is a
 //! replacement conditional on the row's `version` (`0` = never written, the
 //! first write; a stale one is `409`), in a bucket of its own
 //! (`network_policy_replace`). **Lowering is always allowed; raising is allowed
@@ -1536,7 +1541,9 @@ pub async fn get_policy<C: Connection + Clone>(
 /// `PUT /api/v1/network/policy`
 ///
 /// A **replacement** of the tenant's `Session-Timeout` cap, conditional on
-/// `version`.
+/// `version`. Needs `network:segments_write` at the `/network` root (the cap is
+/// the envelope every profile is clamped to); `network:profiles_write` alone
+/// does not suffice, nor does a grant at a site below the root.
 #[utoipa::path(
     put,
     path = "/api/v1/network/policy",
@@ -1555,7 +1562,7 @@ pub async fn get_policy<C: Connection + Clone>(
         (status = 400, description = "`session_timeout_max_secs` outside 300 to 86 400, or an \
                                       unknown field"),
         (status = 401, description = "Not authenticated, or a service-account token"),
-        (status = 403, description = "The caller lacks `network:admin` on `/network` (the \
+        (status = 403, description = "The caller lacks `network:segments_write` on `/network` (the \
                                       response names the permission and the node)"),
         (status = 409, description = "The policy changed since `version` was read"),
         (status = 429, description = "Rate limit"),

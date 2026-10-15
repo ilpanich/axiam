@@ -3179,12 +3179,15 @@ fn federation_flow_request(
             "/api/v1/federation/saml/authn-request",
         )
         .set_json(serde_json::json!({ "config_id": config_id, "acs_url": "" })),
-        "federation_saml_acs" => base(test::TestRequest::post(), "/api/v1/federation/saml/acs")
-            .set_json(serde_json::json!({
-                "config_id": config_id,
-                "saml_response": "",
-                "acs_url": "https://sp.example.com/acs"
-            })),
+        "federation_link_saml_acs" => {
+            base(test::TestRequest::post(), "/api/v1/federation/saml/acs").set_json(
+                serde_json::json!({
+                    "config_id": config_id,
+                    "saml_response": "",
+                    "acs_url": "https://sp.example.com/acs"
+                }),
+            )
+        }
         "federation_saml_metadata" => base(
             test::TestRequest::get(),
             &format!("/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="),
@@ -3199,7 +3202,7 @@ fn federation_flow_request(
             "state": "some-state",
             "nonce": "some-nonce"
         })),
-        "federation_oidc_callback" => base(
+        "federation_link_oidc_callback" => base(
             test::TestRequest::post(),
             "/api/v1/federation/oidc/callback",
         )
@@ -3227,10 +3230,10 @@ async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
     const PER_MIN: u32 = 3;
     const ROUTES: [&str; 5] = [
         "federation_saml_authn_request",
-        "federation_saml_acs",
+        "federation_link_saml_acs",
         "federation_saml_metadata",
         "federation_oidc_authorize",
-        "federation_oidc_callback",
+        "federation_link_oidc_callback",
     ];
     const PEER: &str = "203.0.113.61:4000";
     const OTHER_PEER: &str = "203.0.113.62:4000";

@@ -1417,9 +1417,14 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // two and the three SAML ones registered at the end — carry the
             // browser-endpoint preset (`end_session_per_min`, per IP), each
             // under a bucket of its own (`federation_oidc_authorize`,
-            // `federation_oidc_callback`, `federation_saml_authn_request`,
-            // `federation_saml_acs`, `federation_saml_metadata`), so one
-            // route's exhaustion never spends another's allowance. A person's
+            // `federation_link_oidc_callback`, `federation_saml_authn_request`,
+            // `federation_link_saml_acs`, `federation_saml_metadata`), so one
+            // route's exhaustion never spends another's allowance. The two
+            // callback buckets carry `link` because the public first-time SSO
+            // routes above already own `federation_oidc_callback` and
+            // `federation_saml_acs`; the shared counter keys `{endpoint}:{ip}`,
+            // so a repeated name is one counter with two limits (R101W2-03).
+            // `tests/rate_limit_bucket_names_test.rs` fails on any repeat. A person's
             // sign-in drives them, relayed by the application that holds the
             // bearer token; none is an IdP back-channel (the IdP sends the
             // *browser* to the application, which then calls these). No new
@@ -1439,7 +1444,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/federation/oidc/callback")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
                     .wrap(RateLimitShared::<C>::browser_preset(
-                        "federation_oidc_callback",
+                        "federation_link_oidc_callback",
                         rate_limit_cfg,
                     ))
                     .route(
@@ -1878,7 +1883,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             web::resource("/federation/saml/acs")
                 .wrap(build_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
-                    "federation_saml_acs",
+                    "federation_link_saml_acs",
                     rate_limit_cfg,
                 ))
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),

@@ -723,6 +723,14 @@ audited), conditional on the row's version. Two more management operations
 (the registry reaches **202 / 29**), an executor after W6.4 on this branch,
 and §36 text in W6.6.
 
+**Corrected by the maintainer, 2026-10-15 (after W6.3b, `f479c6530`):** the
+first question named `network:admin`, which the note defines as administrative
+login to a segment's NAS devices and which is **not grantable** under option B,
+so the route as built was writable by nobody. The cap write is guarded by
+**`network:segments_write` at the `/network` root** instead: the cap is the
+`Session-Timeout` envelope every profile is clamped to, and envelopes are
+`segments_write`'s (H3 keeps envelope writers apart from profile writers).
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
 ### 13.8 W8 — release readiness

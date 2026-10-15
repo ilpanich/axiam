@@ -637,6 +637,33 @@ compose file and the k8s manifest name only `ORDERLY_STOP`, and `operate.ts:122`
 names neither constant but links the guide's "Stopping, and the grace period" —
 the five steps, 37 s and the 3 s lease-loss drain are in all four.
 
+**Head `1d6498165`** on `claude/release-1.1.0-w4` (from `3d011573e`), 2026-10-15:
+six task commits and the F4 review, all signed; every Rust gate under
+`RUSTFLAGS=-Dwarnings`. No in-wave fix (nothing Medium or higher).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W4.2 #655, #624 | `fff66606b` | Opus | `cleanup::AuditedWork`: a tenant purge (claim → `tenants.purged`), an orphan purge and a user's whole purge (→ `account_deletion` completion and `gdpr.user_pseudonymized`) each run as a spawned unit; `join_cleanup` waits for the cleanup task and then the running unit against one deadline (`budget.cleanup`) and aborts at it. The stop is checked between tenants; a unit gives up before its point of no return (the anonymization; the tenant row's removal) and never crosses it once stopping. `PurgeClaim` drop guard releases the claim on every exit but success. `purge_tombstoned` split in two (`axiam-db`). *Tree:* the guide, T-444 and `join_cleanup`'s doc already listed the tenant purge (1.0.1 W7.3), so the lists were restated; the unit is waited for inside the cleanup bound, not the slack (kept for W4.4); the erasure unit is the whole user purge (the SSF `with_cause` task-local does not cross a spawn). |
+| W4.3 #625 | `dad34dbe9` | Sonnet | `axiam.audit.dlq` is emitted before the file append; the file's failure has its own event. Not spawned (a detached write would escape the bounded stop join); residual recorded in T-108. |
+| W4.4 #628 | `e0670df5e` | Opus | The cleanup task is told to stop when the REST listener returns (SIGTERM) and at the loss itself (lease-loss stop callback), closing W4.2's 0–7 s gap; the lease release is a budget step (`ShutdownBudget::lease_release`: 1 s orderly, 0 on loss) via `release_lease_within`; a loss seen during a SIGTERM stop now skips the release and exits non-zero (the guide said so; the code returned Ok). **The arithmetic changed:** `ORDERLY_STOP` = 20 + 5 + **1** + 2 + 5 + 5 = **38 s**, `FATAL_STOP_BACKSTOP` **39 s**, grace 40 s, `LEASE_LOSS_STOP` 13 s — guide, both compose files, k8s and `operate.ts` updated. *Tree:* the 1 s could not fit the 1 s backstop margin (37 + 1 = 38), so it became a step; the existing cut test is a lib test (`profile.rs:518`); there is no sleeping route, so the new case holds a sign-in's body. |
+| W4.5 #623 | `1ab46dd50` | Sonnet | `fapi-conformance.yml` validates `plan_name` / `module_timeout` in a first step before checkout (inputs via `env:`, `%q` errors, validated values via `$GITHUB_ENV`); `conf_require_uint` in `lib-env.sh` refuses non-numeric values before any arithmetic in `run-plan.sh` / `run-some.sh` (and `CONFORMANCE_SUITE_WAIT`); `conformance/scripts/tests/validate_inputs_test.sh` (281 checks), wired into CI next to the gate's unittest. |
+| W4.6 #630 | `3b0a540a7` | Sonnet | `gate.py` refuses a plan `baseline.json` does not name unless `--new-plan` (repeatable; refused for a baselined plan or one not also `--plan`); 37 unit tests. *Tree:* the gate's rules live in `claude_dev/fapi-conformance-runbook.md` ("The CI gate"); `docs/conformance/README.md` points to it. **Second half not done:** re-recording `baseline-unattended.json` needs a full `fapi-conformance` dispatch, i.e. running the conformance suites, which the orchestrator does not do — **for the maintainer (D-4):** dispatch on `claude/release-1.1.0-w4` with `axiam_image` empty, `plan_name` default, `module_timeout=30`; then `python3 -I conformance/scripts/gate.py --results <artifact>/conformance/.run/results --record-unattended` and compare `.plans` only with `baseline-unattended.json` (expected empty; then only `source` gains a provenance note naming the run, keeping `38317560409`). |
+| W4.7 #627 | `5445dadc0` | Sonnet | After a save that turned a surface on, the settings page says it stays off while the organization keeps it off (only then; not on a failed read-back). *Tree:* no i18n or toast exists — the page's own alert block; the save handler is at `~:386`. Coverage 96.55 % ≥ 96.1. |
+| W4.8 | `1d6498165` | Opus | `claude_dev/security-review-release-1.1.0-w4-2026-10-15.md`: R110W4-01 … -07, all Informational. |
+
+**D-4 dispatch by the orchestrator** — the bad-input run of W4.5, run
+38737745432 on `3b0a540a7` with `module_timeout = a[$(echo INJECTED >&2)]`:
+"Validate dispatch inputs" failed (exit 1) before checkout; the log carries the
+value only `%q`-escaped, never a bare `INJECTED`. The `always()` steps then ran
+on the empty workspace (noise; R110W4-05).
+
+Filed on `1.1.x`: ilpanich/axiam#687 (R110W4-01), #688 (-02), #689 (-03), #690
+(-04), #691 (-05), #692 (-07); R110W4-06 (T-472 still says #655 is not fixed) is
+**W8.3's**. The review rejected one follow-up: a lease release that commits
+after its 1 s bound cannot remove a successor's lease (`DELETE … WHERE holder =
+$holder`, a per-process UUID). For **W8.4**: the stop is 38 s (was 37) and the
+backstop 39 s (was 38); the grace is unchanged.
+
 ### 13.5 W5
 
 ### 13.6 W6

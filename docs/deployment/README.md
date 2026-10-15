@@ -614,7 +614,7 @@ Argon2id cost parameters themselves are never weakened to gain throughput.
 | Key | Purpose |
 |---|---|
 | `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | Max concurrent Argon2id hash/verify operations. `0` (default) = auto → `min(CPU cores, 4)`. Raise only if the host has spare memory headroom (peak crypto RSS ≈ this value × 19 MiB); lower to harden a tightly memory-capped container. |
-| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. |
+| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. The same wait bounds the SAML signature verifications that share the permits (the SP's ACS, the IdP's SSO/SLO receiver, IdP metadata): past it the ACS answers as for an invalid signature, the IdP receiver answers `503` with `Retry-After`, and the timeout is logged at `warn`. |
 
 The 503 path preserves the SEC-026 username-enumeration defence: the login
 "user not found" branch and the branch that refuses an account serving a

@@ -1433,7 +1433,11 @@ where
         assertion_replay_repo.clone(),
         http_client.clone(),
     )
-    .with_crypto_semaphore(Arc::clone(&crypto_semaphore));
+    // #654: the same bounded wait as Argon2id and the CRL re-sign give it.
+    .with_crypto_gate(axiam_federation::saml_gate::CryptoGate::new(
+        Arc::clone(&crypto_semaphore),
+        std::time::Duration::from_secs(config.auth.hash_acquire_timeout_secs),
+    ));
     // T23.2.3 (G-2) — the SAML IdP: the SP registry, the pending-request store,
     // the tenant signing-credential service (D-21: its keys are sealed through
     // the database custodian of the same custodian set the CAs use) and the

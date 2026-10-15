@@ -592,6 +592,8 @@ impl<C: Connection + Clone> AppState<C> {
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
+        // #654: the SAML verifiers' wait for that semaphore is Argon2id's.
+        let hash_acquire_timeout_secs = auth_config.hash_acquire_timeout_secs;
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,
             ..Default::default()
@@ -977,7 +979,10 @@ impl<C: Connection + Clone> AppState<C> {
                     assertion_replay_repo,
                     reqwest::Client::new(),
                 )
-                .with_crypto_semaphore(Arc::clone(&crypto_semaphore)),
+                .with_crypto_gate(axiam_federation::saml_gate::CryptoGate::new(
+                    Arc::clone(&crypto_semaphore),
+                    std::time::Duration::from_secs(hash_acquire_timeout_secs),
+                )),
             },
             // No encryption key in a test harness: the feature is then
             // unavailable, exactly as on a deployment without one, and a test

@@ -56,11 +56,11 @@ use axiam_core::models::federation::FederationConfig;
 use chrono::{DateTime, Duration, Utc};
 use samael::crypto::{CertificateDer, CryptoProvider, ReduceMode, XmlSec};
 use samael::metadata::{EntityDescriptorType, HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::FederationError;
 use crate::saml::IdpMetadata;
+use crate::saml_gate::{CryptoGate, GateRefusal};
 use crate::saml_idp::request::{
     ALLOWED_XML_SIGNATURE_ALGORITHMS, receiver_parser_options, refuse_markup_declarations,
     refuse_other_encodings, signature_placement,
@@ -273,7 +273,7 @@ pub fn parse_idp_metadata(
 }
 
 /// [`parse_idp_metadata`] on the blocking pool, under `gate` when one is given
-/// (R101W2-01): the signature check canonicalizes and hashes up to
+/// (R101W2-01; the wait for a permit is bounded, #654): the signature check canonicalizes and hashes up to
 /// [`MAX_METADATA_SIZE`] bytes, which must not hold an async worker. A
 /// sign-in's cache miss and the uncached administrative fetch both go through
 /// here.
@@ -286,14 +286,17 @@ pub async fn parse_idp_metadata_off_worker(
     text: String,
     signing_cert_pem: Option<String>,
     now: DateTime<Utc>,
-    gate: Option<Arc<Semaphore>>,
+    gate: Option<CryptoGate>,
 ) -> Result<ParsedIdpMetadata, FederationError> {
     let permit = match gate {
-        Some(gate) => Some(
-            gate.acquire_owned()
-                .await
-                .map_err(|_| metadata_failed("metadata verification is unavailable"))?,
-        ),
+        // #654: the wait is bounded; a busy gate is the refusal this path
+        // already has for a verification that cannot run.
+        Some(gate) => Some(gate.acquire("saml_metadata").await.map_err(|refusal| {
+            metadata_failed(match refusal {
+                GateRefusal::Busy => "metadata verification is busy; retry shortly",
+                GateRefusal::Closed => "metadata verification is unavailable",
+            })
+        })?),
         None => None,
     };
     tokio::task::spawn_blocking(move || {
@@ -458,7 +461,7 @@ pub struct SamlMetadataCache {
     /// R101W2-01: the gate a miss verifies and parses under, on the blocking
     /// pool ([`parse_idp_metadata_off_worker`]). `None`: the blocking pool
     /// only.
-    gate: Option<Arc<Semaphore>>,
+    gate: Option<CryptoGate>,
 }
 
 impl SamlMetadataCache {
@@ -469,9 +472,10 @@ impl SamlMetadataCache {
     }
 
     /// Verify and parse a fetched document under `gate` — the deployment's
-    /// crypto semaphore. Keeps the entries (clones still share them).
+    /// crypto semaphore and the wait for it. Keeps the entries (clones still
+    /// share them).
     #[must_use]
-    pub fn with_crypto_semaphore(mut self, gate: Arc<Semaphore>) -> Self {
+    pub fn with_crypto_gate(mut self, gate: CryptoGate) -> Self {
         self.gate = Some(gate);
         self
     }
@@ -735,6 +739,28 @@ mod tests {
         let utf16 = entra.replace("encoding=\"utf-8\"", "encoding=\"UTF-16\"");
         let err = parse_idp_metadata(&utf16, None, Utc::now()).unwrap_err();
         assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    /// #654 (R101-02): metadata verification waits for the crypto gate only as
+    /// long as the configured bound, then fails as a metadata failure.
+    #[tokio::test]
+    async fn r101_02_metadata_verification_gives_up_when_the_gate_is_held() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = Arc::clone(&sem).acquire_owned().await.unwrap();
+        let wait = std::time::Duration::from_millis(300);
+        let gate = CryptoGate::new(Arc::clone(&sem), wait);
+        let doc = document("https://sso.example.test/sso", "");
+
+        let started = std::time::Instant::now();
+        let err = parse_idp_metadata_off_worker(doc, None, Utc::now(), Some(gate))
+            .await
+            .unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(err, FederationError::SamlMetadataFailed(_)),
+            "{err:?}"
+        );
+        assert!(took >= wait && took < wait + std::time::Duration::from_secs(2));
     }
 
     /// #530: a second sign-in within the document's freshness is served from

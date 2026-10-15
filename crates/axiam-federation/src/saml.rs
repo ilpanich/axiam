@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::error::FederationError;
 use crate::oidc::FederationCallbackResult;
+use crate::saml_gate::CryptoGate;
 use crate::saml_idp::request::{
     ALLOWED_XML_SIGNATURE_ALGORITHMS, receiver_parser_options, refuse_markup_declarations,
     refuse_other_encodings, signature_transforms_admitted, sole_algorithm,
@@ -143,10 +144,17 @@ pub struct SamlFederationService<FC, FL, UR, AR> {
     /// R101W2-01: XML signature verification — the response's at the ACS and
     /// the metadata's — runs on the blocking pool under this gate, never on an
     /// async worker. The composition root passes the deployment's crypto
-    /// semaphore ([`Self::with_crypto_semaphore`]); until then the service
-    /// holds one of its own.
-    crypto_gate: Arc<Semaphore>,
+    /// semaphore and its acquire timeout ([`Self::with_crypto_gate`]); until
+    /// then the service holds a semaphore of its own. The wait is bounded
+    /// (#654), as every other waiter on the semaphore is.
+    crypto_gate: CryptoGate,
 }
+
+/// What a signature that does not verify reads as (xmlsec's verdict as samael
+/// words it). A busy or closed crypto gate (#654) is not a verdict on the
+/// document, but it carries this text too, so the ACS's response says nothing
+/// about which of the two happened.
+const INVALID_SIGNATURE: &str = "Encountered an invalid signature";
 
 /// The permits of a service's own verification gate when none is passed:
 /// the CPU count, at most four — the crypto semaphore's own default.
@@ -169,26 +177,29 @@ where
         replay_repo: AR,
         http_client: reqwest::Client,
     ) -> Self {
-        let crypto_gate = Arc::new(Semaphore::new(default_verification_permits()));
+        let crypto_gate = CryptoGate::new(
+            Arc::new(Semaphore::new(default_verification_permits())),
+            CryptoGate::DEFAULT_WAIT,
+        );
         Self {
             federation_config_repo,
             federation_link_repo,
             user_repo,
             replay_repo,
             http_client,
-            metadata_cache: SamlMetadataCache::new()
-                .with_crypto_semaphore(Arc::clone(&crypto_gate)),
+            metadata_cache: SamlMetadataCache::new().with_crypto_gate(crypto_gate.clone()),
             metadata_fetcher: guarded_metadata_fetcher(),
             crypto_gate,
         }
     }
 
     /// Verify XML signatures under `gate` — the deployment's crypto semaphore,
-    /// which bounds every other CPU-heavy operation too (R101W2-01). Keeps the
-    /// metadata cache's entries.
+    /// which bounds every other CPU-heavy operation too (R101W2-01), with the
+    /// wait the other waiters give it (`hash_acquire_timeout_secs`, #654).
+    /// Keeps the metadata cache's entries.
     #[must_use]
-    pub fn with_crypto_semaphore(mut self, gate: Arc<Semaphore>) -> Self {
-        self.metadata_cache = self.metadata_cache.with_crypto_semaphore(Arc::clone(&gate));
+    pub fn with_crypto_gate(mut self, gate: CryptoGate) -> Self {
+        self.metadata_cache = self.metadata_cache.with_crypto_gate(gate.clone());
         self.crypto_gate = gate;
         self
     }
@@ -203,8 +214,7 @@ where
     #[must_use]
     pub fn with_metadata_fetcher(mut self, fetcher: MetadataFetcher) -> Self {
         self.metadata_fetcher = fetcher;
-        self.metadata_cache =
-            SamlMetadataCache::new().with_crypto_semaphore(Arc::clone(&self.crypto_gate));
+        self.metadata_cache = SamlMetadataCache::new().with_crypto_gate(self.crypto_gate.clone());
         self
     }
 
@@ -224,7 +234,7 @@ where
             text,
             signing_cert_pem.map(str::to_owned),
             Utc::now(),
-            Some(Arc::clone(&self.crypto_gate)),
+            Some(self.crypto_gate.clone()),
         )
         .await
         .map(|parsed| parsed.metadata)
@@ -737,14 +747,16 @@ where
         xml: &str,
         config: &FederationConfig,
     ) -> Result<(), FederationError> {
-        let permit = Arc::clone(&self.crypto_gate)
-            .acquire_owned()
+        // #654: a bounded wait. A busy gate is answered as the invalid
+        // signature the ACS already answers for a verification that cannot run
+        // — the permit is taken before the document is looked at, so the
+        // answer reveals nothing about the signature, and an attacker cannot
+        // tell "invalid" from "busy".
+        let permit = self
+            .crypto_gate
+            .acquire("saml_acs")
             .await
-            .map_err(|_| {
-                FederationError::SamlSignatureInvalid(
-                    "signature verification is unavailable".into(),
-                )
-            })?;
+            .map_err(|_| FederationError::SamlSignatureInvalid(INVALID_SIGNATURE.into()))?;
         let xml = xml.to_owned();
         let config = config.clone();
         tokio::task::spawn_blocking(move || {
@@ -1924,7 +1936,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn r101w2_01_acs_verification_waits_for_the_crypto_gate() {
         let gate = Arc::new(Semaphore::new(0));
-        let svc = make_service().with_crypto_semaphore(Arc::clone(&gate));
+        let svc = make_service().with_crypto_gate(CryptoGate::new(
+            Arc::clone(&gate),
+            std::time::Duration::from_secs(30),
+        ));
         let xml = String::from_utf8(load_fixture("well_signed_response.xml")).unwrap();
         let config = test_federation_config(Some(test_cert_pem()));
         let pending = svc.verify_signature_off_worker(&xml, &config);
@@ -1938,6 +1953,60 @@ pub(crate) mod tests {
         gate.add_permits(1);
         pending.await.expect("verifies once a permit is free");
         assert_eq!(gate.available_permits(), 1, "the permit is returned");
+    }
+
+    /// #654 (R101-02): with every permit held the ACS's verification gives up
+    /// after the configured wait — within it plus a margin — and answers the
+    /// refusal it already has for a signature that did not verify, so a busy
+    /// gate and an invalid signature read alike. A bounded waiter queued behind
+    /// it (the CRL re-sign's shape) then gets the next permit released.
+    #[tokio::test]
+    async fn r101_02_acs_verification_gives_up_when_the_gate_is_held() {
+        let gate = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&gate).acquire_owned().await.unwrap();
+        let wait = std::time::Duration::from_millis(500);
+        let svc = make_service().with_crypto_gate(CryptoGate::new(Arc::clone(&gate), wait));
+        let xml = String::from_utf8(load_fixture("well_signed_response.xml")).unwrap();
+        let config = test_federation_config(Some(test_cert_pem()));
+
+        let started = std::time::Instant::now();
+        let err = svc
+            .verify_signature_off_worker(&xml, &config)
+            .await
+            .expect_err("a held gate refuses");
+        let took = started.elapsed();
+        assert!(
+            matches!(err, FederationError::SamlSignatureInvalid(_)),
+            "the invalid-signature refusal, got {err:?}"
+        );
+        // The refusal reads as the one a signature that does not verify gets,
+        // word for word: the ACS puts the reason in its body.
+        let tampered = load_fixture("tampered_response.xml");
+        let invalid = verify_signature(&tampered, &config).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            invalid.to_string(),
+            "a busy gate reads like an invalid signature"
+        );
+        assert!(took >= wait, "waited the bound ({took:?})");
+        assert!(
+            took < wait + std::time::Duration::from_secs(2),
+            "within the bound plus a margin ({took:?})"
+        );
+
+        // A bounded waiter behind the timed-out ACS is served on release.
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), gate.acquire_owned())
+                    .await
+                    .map(|p| p.is_ok())
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(held);
+        assert_eq!(waiter.await.unwrap(), Ok(true), "the next permit is served");
+        assert_eq!(gate.available_permits(), 1, "no permit leaked");
     }
 
     // -----------------------------------------------------------------------

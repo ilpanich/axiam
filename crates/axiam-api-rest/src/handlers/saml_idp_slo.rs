@@ -89,8 +89,8 @@ use uuid::Uuid;
 
 use crate::extractors::client_info::peer_ip;
 use crate::handlers::saml_idp::{
-    MAX_POST_BODY_BYTES, not_found, post_form_page, request_reason, request_status,
-    tenant_serving_saml,
+    MAX_POST_BODY_BYTES, PostVerifyFailure, not_found, post_form_page, request_reason,
+    request_status, tenant_serving_saml,
 };
 use crate::state::AppState;
 
@@ -408,6 +408,8 @@ enum Refusal {
     Request(RequestError),
     /// A fixed reason of this endpoint's own.
     Reason(Reason),
+    /// The crypto gate stayed saturated for the whole wait (#654): `503`.
+    Busy,
 }
 
 impl Refusal {
@@ -415,6 +417,7 @@ impl Refusal {
         match self {
             Self::Request(e) => request_refused(e, tenant_id),
             Self::Reason(reason) => refusal_page(StatusCode::BAD_REQUEST, reason, tenant_id),
+            Self::Busy => super::saml_idp::busy_page(tenant_id),
         }
     }
 }
@@ -462,13 +465,18 @@ async fn verify<C: Connection + Clone>(
         return Err(Refusal::Request(RequestError::SignatureMissing));
     }
     let outcome = match &incoming.redirect {
-        Some(query) => query.verify_signature(&cert),
+        Some(query) => query
+            .verify_signature(&cert)
+            .map_err(PostVerifyFailure::Request),
         None => {
             super::saml_idp::verify_post_signature_off_worker(state, &incoming.document, &cert)
                 .await
         }
     };
-    outcome.map(|()| true).map_err(Refusal::Request)
+    outcome.map(|()| true).map_err(|failure| match failure {
+        PostVerifyFailure::Request(e) => Refusal::Request(e),
+        PostVerifyFailure::Busy => Refusal::Busy,
+    })
 }
 
 // ---------------------------------------------------------------------------

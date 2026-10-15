@@ -296,18 +296,23 @@ async fn world_org() -> (Surreal<TestDb>, Uuid) {
 async fn world_tenant(
     db: &Surreal<TestDb>,
     org_id: Uuid,
+    auth: AuthConfig,
 ) -> (Uuid, Uuid, web::Data<AppState<TestDb>>) {
     let tenant_id = create_tenant(db, org_id, "saml-a").await;
     let user_id = create_user(db, tenant_id, "alice", UserStatus::Active).await;
-    let auth = auth_config();
     let (state, custodians) = world_state(db, &auth);
     install_credential(db, &custodians, org_id, tenant_id).await;
     (tenant_id, user_id, state)
 }
 
 async fn world() -> World {
+    world_with(auth_config()).await
+}
+
+/// [`world`] under `auth` (a test that needs another `hash_acquire_timeout_secs`).
+async fn world_with(auth: AuthConfig) -> World {
     let (db, org_id) = Box::pin(world_org()).await;
-    let (tenant_id, user_id, state) = Box::pin(world_tenant(&db, org_id)).await;
+    let (tenant_id, user_id, state) = Box::pin(world_tenant(&db, org_id, auth)).await;
     World {
         db,
         org_id,
@@ -1995,4 +2000,96 @@ async fn a_failed_participant_write_yields_no_assertion() {
         vec!["urn:oasis:names:tc:SAML:2.0:status:Responder".to_string()]
     );
     assert!(participants(&w).await.is_empty(), "and no row");
+}
+
+// ---------------------------------------------------------------------------
+// #654 (R101-02): the receiver's wait for the crypto gate is bounded
+// ---------------------------------------------------------------------------
+
+/// Hold every permit of the deployment's crypto semaphore.
+async fn hold_every_permit(w: &World) -> tokio::sync::OwnedSemaphorePermit {
+    let gate = Arc::clone(&w.state.crypto_semaphore);
+    let n = u32::try_from(gate.available_permits()).unwrap();
+    gate.acquire_many_owned(n).await.unwrap()
+}
+
+/// **#654 (R101-02).** With every crypto permit held, a signed `AuthnRequest`
+/// posted to the public SSO endpoint is answered `503` within
+/// `hash_acquire_timeout_secs` plus a margin, instead of queueing ahead of every
+/// login: no assertion, no pending request, no binding cookie. A bounded waiter
+/// (the CRL re-sign's shape) that queued behind the post gets the next permit
+/// once one is released, and the same request is served once the gate is free.
+#[actix_rt::test]
+async fn r101_02_a_signed_sso_post_is_answered_503_when_the_crypto_gate_stays_held() {
+    const WAIT_SECS: u64 = 1;
+    let w = world_with(AuthConfig {
+        hash_acquire_timeout_secs: WAIT_SECS,
+        ..auth_config()
+    })
+    .await;
+    register_sp(&w, signing_sp()).await;
+    let app = app!(w);
+    let held = hold_every_permit(&w).await;
+
+    let mut req = Req::new(w.tenant_id);
+    req.acs_url = Some(ACS.into());
+    let body = post_body(&req.xml(Some(sp_material())), None);
+
+    let gate = Arc::clone(&w.state.crypto_semaphore);
+    let post = async {
+        let started = std::time::Instant::now();
+        let resp = Browser::default()
+            .post_form(&app, &sso_path(w.tenant_id), body.clone())
+            .await;
+        (resp, started.elapsed())
+    };
+    // The CRL re-sign's shape: a waiter with its own bound, arriving after the
+    // post is already queued, served when a permit is released.
+    let waiter = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let permit =
+            axiam_auth::crypto_gate::acquire_hash_permit(&gate, std::time::Duration::from_secs(10))
+                .await
+                .map(|_| ());
+        (permit, started.elapsed())
+    };
+    let release = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1_800)).await;
+        drop(held);
+    };
+    let ((resp, took), (permit, waited), ()) = tokio::join!(post, waiter, release);
+
+    assert_eq!(resp.status().as_u16(), 503, "a saturated gate is a 503");
+    assert!(
+        header(&resp, "retry-after") == "5",
+        "the SP is told to retry"
+    );
+    assert!(
+        took >= std::time::Duration::from_secs(WAIT_SECS),
+        "the post waited the bound ({took:?})"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(WAIT_SECS + 3),
+        "and not much longer ({took:?})"
+    );
+    assert!(!sets_binding_cookie(&resp), "no binding cookie");
+    assert_eq!(pending_rows(&w).await, 0, "no pending request");
+    permit.expect("the queued waiter gets a permit once one is released");
+    assert!(
+        waited >= std::time::Duration::from_millis(1_500),
+        "it was served by the release, not before ({waited:?})"
+    );
+
+    // The gate is free again: the same kind of request is served.
+    let mut again = Req::new(w.tenant_id);
+    again.acs_url = Some(ACS.into());
+    let resp = Browser::default()
+        .post_form(
+            &app,
+            &sso_path(w.tenant_id),
+            post_body(&again.xml(Some(sp_material())), None),
+        )
+        .await;
+    assert_eq!(resp.status().as_u16(), 303, "served once a permit is free");
 }

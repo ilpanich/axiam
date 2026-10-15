@@ -592,7 +592,9 @@ impl<C: Connection + Clone> AppState<C> {
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
-        // #654: the SAML verifiers' wait for that semaphore is Argon2id's.
+        // #654: the SAML verifiers' wait for that semaphore is Argon2id's. Only
+        // the SAML service reads it, so the binding is gated like its consumer.
+        #[cfg(feature = "saml")]
         let hash_acquire_timeout_secs = auth_config.hash_acquire_timeout_secs;
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,

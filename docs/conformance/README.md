@@ -53,6 +53,40 @@ time) and the FAPI `private_key_jwt` plan, which **cannot** run — the registra
 has never provisioned its two clients, though `conformance-run` has always
 driven the plan. That is defect 15, still open.
 
+## The CI gate and the unattended baseline
+
+`fapi-conformance.yml` drives no browser, so its job is judged by
+[`conformance/scripts/gate.py`](../../conformance/scripts/gate.py) over the suite's
+`*.results.json`, not by "every module passed" (unreachable there). It reads two committed
+files: [`baseline.json`](../../conformance/baseline.json), the best verdict each module may
+reach (the browser-driven 2026-09-25 runs), and
+[`baseline-unattended.json`](../../conformance/baseline-unattended.json), per plan the modules
+that park `WAITING` on a browser nobody drives. The rules, one by one, are in the runbook's
+"The CI gate" section (`claude_dev/fapi-conformance-runbook.md`); the two that concern
+which plans the gate will judge:
+
+- **A plan the baseline does not name is refused.** A `--plan` (or a result file) for a plan
+  that is not in `baseline.json` ends the gate red unless `--new-plan <plan>` says it is new.
+  With the flag the plan is checked for outright failures only (nothing is compared and no
+  `WAITING` is checked, so the summary says `NEW PLAN`), and the cure is to record it in both
+  baselines and drop the flag. `--new-plan` is refused for a plan the baseline already names
+  and for one that is not also a `--plan`, so a stale or mistyped flag cannot weaken a check
+  silently. Before this rule (R101W4-10, #630) such a plan was checked for failures only and
+  passed.
+- **Green is "no regression", not "passed".** A listed `WAITING` module was not evaluated by
+  that run at all; its verdict is the maintainer's browser-driven run to decide.
+
+**Provenance of `baseline-unattended.json`.** The file is a recording of one unattended run, and
+its `source` field says which: the workflow run id and URL, the job, branch and commit, the dispatch
+inputs (`axiam_image`, `module_timeout`), when it completed, and whether the lists were produced by
+`gate.py --record-unattended` over the run's artifact (`fapi-conformance-<run id>`) or transcribed
+from the gate step's log. Re-recording over a later run's artifact and comparing only the `plans`
+objects (`diff <(jq -S .plans conformance/baseline-unattended.json) <(jq -S .plans recorded.json)`)
+is the check; an empty diff leaves the lists alone and adds one verification sentence to `source`,
+a non-empty one is explained before it is recorded. The recorder's own `source` text is generic
+and is never committed as is. `python3 -m unittest discover -s conformance/scripts -p 'test_*.py'`
+runs the gate's tests.
+
 ## Reading a report
 
 `report.py` writes failures first and states what each verdict means, because

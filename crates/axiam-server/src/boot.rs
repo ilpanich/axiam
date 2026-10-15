@@ -2814,6 +2814,9 @@ where
     // T-470: `vault_pki` revocations a revoke request could not forward.
     .with_vault_revocations(Arc::new(cert_service.clone()))
     .with_step_for_tests(opts.cleanup_step_for_tests.take());
+    // #655, #624: the tenant purges and erasures run as tasks of their own,
+    // which the teardown joins after the cleanup task (`join_cleanup`).
+    let cleanup_units = cleanup.audited_work();
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -3289,10 +3292,11 @@ where
     }
 
     // Signal the cleanup task first, so it winds down while the queues drain:
-    // it starts no further sweep, erasure or export, and finishes the one it is
-    // in if that ends before the bounded join below (an erasure and its
-    // `gdpr.user_pseudonymized` row are written together unless the join's
-    // bound cuts them apart — #598).
+    // it starts no further sweep, erasure, export or tenant purge, and finishes
+    // the one it is in if that ends before the bounded join below (#598). An
+    // erasure or a tenant purge under way gives itself up here if it has not
+    // reached its point of no return, and otherwise runs on, in a task of its
+    // own, to its audit row (#655, #624).
     let _ = cleanup_shutdown_tx.send(true);
 
     // The minimal profile's in-process outbound queues hold deliveries that die
@@ -3329,8 +3333,9 @@ where
     // nothing new, but a sweep already running — a GDPR erasure, an export, a
     // tenant purge, a statement against a slow datastore — could otherwise hold
     // the stop past the grace period, where the orchestrator's SIGKILL ends it
-    // anyway and the backstops are moot. At the bound it is cut where it is.
-    join_cleanup(cleanup_handle, budget.cleanup).await;
+    // anyway and the backstops are moot. At the bound it is cut where it is,
+    // and so is the erasure or tenant purge it left in flight (#655, #624).
+    join_cleanup(cleanup_handle, &cleanup_units, budget.cleanup).await;
 
     // The teardown is done: disarm the backstops.
     component_died_stop.abort();
@@ -3377,8 +3382,11 @@ pub struct ShutdownBudget {
     pub audit: Duration,
     /// How long the teardown waits for the cleanup task once the audit queue is
     /// drained (#598). The task was told to stop before the outbound drain, and
-    /// starts no sweep (nor erasure, nor export) after that; a sweep still
-    /// running at this bound is cut where it is.
+    /// starts no sweep (nor erasure, nor export, nor tenant purge) after that;
+    /// a sweep still running at this bound is cut where it is. The same bound
+    /// covers the erasure or tenant purge the task leaves in flight, a task of
+    /// its own (`cleanup::AuditedWork`, #655, #624): it is waited for until
+    /// then, and cut at it.
     pub cleanup: Duration,
 }
 
@@ -3425,30 +3433,52 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
 };
 
 /// Wait for the cleanup task for at most `bound` (#598); past it, abort the task
-/// — it is cut at the await it is in — and say so.
+/// — it is cut at the await it is in — and say so. Then wait, until the same
+/// deadline, for the unit of audited work it left in flight (an erasure, a
+/// tenant purge: `cleanup::AuditedWork`, #655, #624), which the abort does not
+/// reach; past the deadline, abort that too, so a replica that lost its lease
+/// writes nothing after its budget.
 ///
 /// What a cut leaves behind is for the next start to resume: every sweep's
 /// writes are idempotent or a compare-and-set, and every sweep is re-run by the
-/// next tick, with three exceptions listed in T-444 — an erasure cut after the
-/// user row was anonymized and before `gdpr.user_pseudonymized` was written
-/// (the proof exists, the audit row does not, and the next start does not redo
-/// the user), an export cut after it was marked ready and before its mail
-/// was queued (a download nobody was told about, which expires), and a tenant
-/// purge cut mid-way (its one-hour claim is not released, so the next start's
-/// sweep skips the tenant until the lease ends; a cut before `tenants.purged`
-/// was written loses that record).
-async fn join_cleanup<T>(mut handle: tokio::task::JoinHandle<T>, bound: Duration) {
-    match tokio::time::timeout(bound, &mut handle).await {
+/// next tick. An erasure or tenant purge that has not reached its point of no
+/// return (the anonymization; the removal of the tenant row) gives itself up at
+/// the stop — the account stays due, the tenant tombstoned and its claim
+/// released — so the next start redoes it at once. The states a cut can still
+/// leave, listed in T-444: an erasure or tenant purge that crossed its point of
+/// no return before the stop and still had not written its audit row
+/// (`gdpr.user_pseudonymized`; `tenants.purged`) when the bound ran out — the
+/// whole teardown window after the stop, for its last statements — and an
+/// export cut after it was marked ready and before its mail was queued (a
+/// download nobody was told about, which expires).
+async fn join_cleanup<T>(
+    mut handle: tokio::task::JoinHandle<T>,
+    units: &cleanup::AuditedWork,
+    bound: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + bound;
+    match tokio::time::timeout_at(deadline, &mut handle).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(error = ?e, "cleanup task join error"),
         Err(_) => {
             handle.abort();
+            // Once the abort has landed the task can no longer hand a unit
+            // over, so the join below sees the last one.
+            let _ = handle.await;
             tracing::error!(
                 deadline_secs = bound.as_secs_f64(),
                 "the cleanup task's sweep did not finish in time — it is cut where it is (the \
-                 next start resumes it; see T-444 for the two steps a cut can leave unfinished)"
+                 next start resumes it; see T-444 for what a cut can leave unfinished)"
             );
         }
+    }
+    if !units.join(deadline).await {
+        tracing::error!(
+            deadline_secs = bound.as_secs_f64(),
+            "an erasure or tenant purge that had passed its point of no return did not reach \
+             its audit row in time — it is cut where it is, and its `gdpr.user_pseudonymized` \
+             or `tenants.purged` row may be missing (see T-444)"
+        );
     }
 }
 

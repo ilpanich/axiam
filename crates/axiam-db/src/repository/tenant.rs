@@ -295,6 +295,27 @@ impl<C: Connection> SurrealTenantRepository<C> {
         &self,
         id: Uuid,
     ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
+        let report = self.purge_tombstoned_rows(id).await?;
+        self.remove_purged_tenant(id).await?;
+        Ok(report)
+    }
+
+    /// The first part of [`Self::purge_tombstoned`]: every tenant-scoped row of
+    /// a **tombstoned** tenant, not its tenant row (#655).
+    ///
+    /// The tenant stays tombstoned, so a purge stopped anywhere in here — a
+    /// failure, or the cleanup task giving the purge up because the process is
+    /// stopping — is resumed by the next call: every step is an idempotent
+    /// `DELETE`. Nothing here is a point of no return.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a tenant that is not tombstoned (live, or already
+    /// purged); a datastore failure otherwise.
+    pub async fn purge_tombstoned_rows(
+        &self,
+        id: Uuid,
+    ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
         if !self.list_tombstoned().await?.contains(&id) {
             return Err(DbError::NotFound {
                 entity: "tombstoned tenant".into(),
@@ -302,15 +323,31 @@ impl<C: Connection> SurrealTenantRepository<C> {
             }
             .into());
         }
-        let report = super::tenant_purge::purge_rows(
+        Ok(super::tenant_purge::purge_rows(
             &self.db,
             id,
             super::tenant_purge::PurgeScope::Tombstoned,
         )
-        .await?;
-        // Last, and only while still tombstoned: the guard is in the statement
-        // too, so nothing here can remove a live tenant's row. `RETURN BEFORE`
-        // says whether this call removed it, or an overlapping purge did.
+        .await?)
+    }
+
+    /// The last part of [`Self::purge_tombstoned`]: remove the tenant row, only
+    /// while it is still tombstoned (#655). Call it only after
+    /// [`Self::purge_tombstoned_rows`] has succeeded for the tenant; a tenant
+    /// row removed before its rows leaves them for the orphan scan.
+    ///
+    /// This is the purge's **point of no return**: once the row is gone, no
+    /// later sweep finds the tenant, so whoever removed it is the only one that
+    /// can write `tenants.purged`. `Ok` means this call removed it.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when the row is not there or not tombstoned — an overlapping
+    /// purge removed it first (#610); a datastore failure otherwise.
+    pub async fn remove_purged_tenant(&self, id: Uuid) -> AxiamResult<()> {
+        // Only while still tombstoned: the guard is in the statement too, so
+        // nothing here can remove a live tenant's row. `RETURN BEFORE` says
+        // whether this call removed it, or an overlapping purge did.
         let mut result = self
             .db
             .current()
@@ -331,7 +368,7 @@ impl<C: Connection> SurrealTenantRepository<C> {
             }
             .into());
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Tenant ids that own rows but have no tenant row at all — the residue of

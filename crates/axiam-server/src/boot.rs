@@ -2783,7 +2783,7 @@ where
             axiam_db::SurrealPushedAuthRequestRepository::new(db_handle.clone()),
             axiam_db::SurrealDeviceGrantRepository::new(db_handle.clone()),
             axiam_db::SurrealCibaRequestRepository::new(db_handle.clone(), None),
-)),
+        )),
         job_health.clone(),
         cleanup_shutdown_rx,
     )

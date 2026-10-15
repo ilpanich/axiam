@@ -1146,7 +1146,7 @@ pub async fn update<C: Connection + Clone>(
     tag = "oauth2-clients",
     params(("id" = Uuid, Path, description = "OAuth2 client ID")),
     responses(
-        (status = 204, description = "OAuth2 client deleted; its refresh tokens, authorization codes and pushed requests are revoked first"),
+        (status = 204, description = "OAuth2 client deleted; its refresh tokens, authorization codes, pushed requests, device grants and CIBA requests are revoked or deleted first"),
         (status = 404, description = "OAuth2 client not found"),
     ),
     security(("bearer" = []))

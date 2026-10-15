@@ -666,6 +666,11 @@ pub async fn update<C: Connection + Clone>(
             sign-in at once, its sessions, refresh tokens, certificates and signing CAs are \
             revoked, and its data is purged by the cleanup job"),
         (status = 404, description = "Tenant not found"),
+        (status = 409, description = "The tenant's audit trail was not exported first: no \
+            audit-export receipt less than 6 hours old exists, or the newest receipt claims \
+            to cover rows written after itself, which no export writes (R101W3-03). Nothing \
+            has changed; export again with POST \
+            /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export and retry"),
     ),
     security(("bearer" = []))
 )]

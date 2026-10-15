@@ -1629,6 +1629,75 @@ async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
     assert_eq!(n.unwrap_or(0), 0);
 }
 
+/// #642 (c) — the scope ceiling can remove `openid` from an external client's
+/// grant while the request waits for the user; the redemption then mints the
+/// access token and no ID token, and the `scope` it reports omits `openid`.
+/// (The same client with `openid` still allowed gets its ID token, so the test
+/// does not pass because the client simply never receives one.)
+#[actix_web::test]
+async fn no_id_token_when_the_scope_ceiling_removed_openid() {
+    use axiam_core::models::settings::{DynamicRegistrationMode, SetOrgSettings, system_defaults};
+    use axiam_core::repository::SettingsRepository;
+
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let settings = axiam_db::repository::SurrealSettingsRepository::new(f.db.clone());
+    let allow = |scopes: &[&str]| SetOrgSettings {
+        dynamic_registration: DynamicRegistrationMode::Anonymous,
+        dcr_allowed_scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+        ..system_defaults()
+    };
+    settings
+        .set_org_settings(f.org_id, allow(&["openid", "profile"]))
+        .await
+        .unwrap();
+
+    // A self-registered (`dcr`) client holding the CIBA grant: the ceiling
+    // applies to it and not to an administrator's.
+    let mut input = create_input(f.tenant_id, "dcr-ciba", &[CIBA_GRANT_TYPE], poll_mode());
+    input.managed_by = ManagedBy::Dcr;
+    let (row, secret) = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    let dcr = CibaClient {
+        client_id: row.client_id,
+        secret,
+    };
+
+    // With `openid` still allowed the ID token is minted.
+    let (status, body) = bc_authorize!(app, f, &dcr, "&login_hint=alice");
+    assert_eq!(status, 200, "{body}");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    age_poll(&f, &id).await;
+    let (status, json) = token!(app, f, &dcr, &id);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["scope"], "openid profile");
+    assert!(json["id_token"].is_string(), "openid survives: {json}");
+
+    // A request made while `openid` was allowed, approved, and then the tenant
+    // withdraws `openid` before the client redeems it.
+    let (status, body) = bc_authorize!(app, f, &dcr, "&login_hint=alice");
+    assert_eq!(status, 200, "{body}");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    settings
+        .set_org_settings(f.org_id, allow(&["profile"]))
+        .await
+        .unwrap();
+    age_poll(&f, &id).await;
+    let (status, json) = token!(app, f, &dcr, &id);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["scope"], "profile", "openid is gone: {json}");
+    assert!(
+        json.get("id_token").is_none_or(Value::is_null),
+        "no ID token without openid: {json}"
+    );
+    assert!(json["access_token"].is_string());
+    assert_eq!(stored(&f, &id).await.status, CibaRequestStatus::Redeemed);
+}
+
 // ---------------------------------------------------------------------------
 // D-61 — signed authentication requests (CIBA Core §7.1.1) and the `fapi2`
 // CIBA client (FAPI-CIBA)

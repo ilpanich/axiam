@@ -1843,9 +1843,11 @@ pub trait DeviceGrantRepository: Send + Sync {
     /// status — pending, approved, denied or redeemed (#517, #610). Returns
     /// the number deleted.
     ///
-    /// Called when the client is removed: a `managed_by: cimd` client is
-    /// re-materialised under the same `client_id`, and an approved grant left
-    /// behind would redeem against the new row. Scoped by tenant **and**
+    /// Called when the client is removed: the poll did not authenticate a
+    /// client before #635 (R101W3-01), so an approved grant left behind
+    /// redeemed whether or not its client existed, and it still must not
+    /// redeem against a row that names the `client_id` again. (A
+    /// `managed_by: cimd` client cannot hold this grant, #642 (a).) Scoped by tenant **and**
     /// client id, never by client id alone — the id is unique only within its
     /// tenant. Idempotent.
     ///
@@ -1992,8 +1994,7 @@ pub trait CibaRequestRepository: Send + Sync {
     ///
     /// Called when the client is removed: a pending request would otherwise
     /// stay listed on the approval surface for a client that no longer exists,
-    /// and an approved one could be redeemed once a `managed_by: cimd` client
-    /// is re-materialised under the same `client_id`. Scoped by tenant **and**
+    /// and an approved one must not outlive its client. Scoped by tenant **and**
     /// client id. Idempotent. A [`Self::redeem`] racing this delete either
     /// wrote first (and minted for the old client) or matches nothing.
     fn delete_all_for_client(

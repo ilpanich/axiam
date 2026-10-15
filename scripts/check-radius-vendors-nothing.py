@@ -22,6 +22,14 @@ This is that test. It fails when
     declares a ``build:`` key, or names no ``image:`` at all (a gate that
     passes because it found nothing to check is not a gate).
 
+It is a tripwire on the recipe's own shape, not a scan for vendored code
+(R110W5-04). It does not look at binary files (anything that is not UTF-8 is
+skipped: an ELF binary, an archive, a ``docker save`` tarball), at FreeRADIUS
+sources as text, at a lower-case ``from`` in a file not named like a Dockerfile,
+at anything outside ``docker/radius/`` and the one compose file (another
+Dockerfile or compose file), or at compose forms its line-by-line parse does not
+read (a flow mapping, ``include:``, a digest inside an environment default).
+
 The crate half of T-454 ("a RADIUS crate enters ``Cargo.lock``") is held by
 ``cargo-deny``'s licence allow-list (``deny.toml``, ``[licenses]``): a GPL
 crate fails unless it is named. The entry cites both as its tests.

@@ -68,6 +68,8 @@ jobs:
       # vendors nothing. radius_e2e.rs pulls the digest and runs; nothing it
       # asserts would fail if a Dockerfile or a FROM line entered docker/radius/,
       # or if the compose file's image: slid back to a movable tag (R101W6-11).
+      # It is a tripwire on that shape, not a scan for vendored code: binaries,
+      # sources and files outside docker/radius/ are not looked at (R110W5-04).
       # The crate half is cargo-deny's licence allow-list (deny.toml).
       - name: RADIUS recipe vendors-nothing self-test (fixtures)
         run: python3 scripts/check-radius-vendors-nothing.py --self-test

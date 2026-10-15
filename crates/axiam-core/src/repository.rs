@@ -4267,6 +4267,155 @@ pub trait ScimTargetStateRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Network segments, reply profiles and the tenant's session cap (tenant-scoped)
+// (RADIUS D4, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
+// ---------------------------------------------------------------------------
+
+/// Storage for network segments: nodes of the reserved `/network` subtree of
+/// the resource tree, with the sidecar row that holds the kind, the VLAN, the
+/// `Filter-Id` envelope and the placement rank. See [`crate::models::network`].
+///
+/// Every method is tenant-scoped: a segment of another tenant is not found,
+/// exactly as one that does not exist. Every write is conditional on the
+/// `version` the writer read.
+///
+/// The repository decides only what the data decides: a path outside
+/// `/network`, a kind that disagrees with its branch, a VLAN or a name outside
+/// its bounds, a VLAN or rank already taken at the site. Who may write is the
+/// authorization function's (design note §5.2).
+pub trait NetworkSegmentRepository: Send + Sync {
+    /// Create a segment at `input.path`, making the `/network`, branch and site
+    /// nodes on first use, in one transaction.
+    ///
+    /// * `Validation` for a path outside `/network/{zones|quarantine}/<site>/<segment>`,
+    ///   a kind that disagrees with the branch, or a field outside its bounds.
+    /// * `AlreadyExists` when the site already has that name, VLAN or rank.
+    fn create(
+        &self,
+        input: crate::models::network::NewNetworkSegment,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One segment. `NotFound` when it does not exist in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One segment by its path. `Validation` for a path outside the reserved
+    /// shape, `NotFound` when no such segment exists in this tenant.
+    fn get_by_path(
+        &self,
+        tenant_id: Uuid,
+        path: &str,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One page of the tenant's segments, by site then rank then name,
+    /// optionally narrowed to one site.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        site_key: Option<&str>,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::NetworkSegment>>> + Send;
+
+    /// Rewrite a segment's envelope.
+    ///
+    /// * `NotFound` when it does not exist in this tenant.
+    /// * `Conflict` when `expected_version` is stale, or when the new
+    ///   `filter_ids` would leave the segment's stored profile outside its
+    ///   envelope.
+    /// * `Validation` / `AlreadyExists` as for [`Self::create`].
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: crate::models::network::NetworkSegmentUpdate,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// Remove a segment **and its profile and its resource node**, in one
+    /// transaction. `NotFound` when it does not exist in this tenant,
+    /// `Conflict` on a stale `expected_version` or when the node has children.
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for the reply profile of a segment (at most one per segment).
+///
+/// A read returns the **effective** profile: `Session-Timeout` clamped to the
+/// tenant's current cap ([`crate::models::network::ReplyProfile`]). A write is
+/// conditional on the profile's own version **and** the owning segment's, and
+/// is validated against the envelope of the very segment row it is written
+/// under (design note §3.5, the T-416 lesson).
+pub trait ReplyProfileRepository: Send + Sync {
+    /// Create the segment's profile.
+    ///
+    /// * `NotFound` when the segment does not exist in this tenant.
+    /// * `Validation` for a value outside the dictionary, above the tenant cap,
+    ///   or a `filter_id` outside the segment's envelope (§5.2 H3).
+    /// * `Conflict` when `expected_segment_version` is stale.
+    /// * `AlreadyExists` when the segment already has a profile.
+    fn create(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: crate::models::network::NewReplyProfile,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// The segment's effective profile. `NotFound` when the segment has none
+    /// in this tenant.
+    fn get_by_segment(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// Replace the segment's profile. Errors as for [`Self::create`], with
+    /// `NotFound` for a segment without a profile and `Conflict` also for a
+    /// stale profile version.
+    fn replace(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: crate::models::network::ReplyProfileReplace,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// Delete the segment's profile (no profile means no candidate, which only
+    /// narrows). `NotFound` when it has none, `Conflict` on a stale version.
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        expected_version: u64,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for the tenant's network policy: the cap on `Session-Timeout`
+/// (`network.session_timeout_max_secs`, design note §3.4).
+pub trait NetworkPolicyRepository: Send + Sync {
+    /// The tenant's policy; the default (a cap of 3600, version 0) when the
+    /// tenant never wrote one. A stored cap outside the settable range reads
+    /// as the nearest bound, so a row edited behind the API cannot widen it.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkPolicy>> + Send;
+
+    /// Write the tenant's policy, conditional on the version read (0 for a
+    /// tenant still on the default). `Validation` for a cap outside the
+    /// settable range, `Conflict` for a stale version.
+    fn set(
+        &self,
+        tenant_id: Uuid,
+        input: crate::models::network::SetNetworkPolicy,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkPolicy>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
 // ---------------------------------------------------------------------------
 

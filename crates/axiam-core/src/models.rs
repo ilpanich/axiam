@@ -20,6 +20,7 @@ pub mod group;
 pub mod mail;
 pub mod mds;
 pub mod mfa_method;
+pub mod network;
 pub mod notification_rule;
 pub mod oauth2_client;
 /// RFC 7591 initial access tokens (T21.4).
@@ -30,6 +31,7 @@ pub mod password_history;
 pub mod password_reset;
 pub mod permission;
 pub mod pgp_key;
+pub mod radius_reply;
 pub mod reactor;
 pub mod resource;
 pub mod role;

@@ -21,6 +21,7 @@ mod federation_login_state;
 mod group;
 mod mds;
 mod minimal_profile_lease;
+mod network;
 mod notification_rule;
 mod notification_window;
 mod oauth2_auth_code;
@@ -87,6 +88,9 @@ pub use federation_login_state::SurrealFederationLoginStateRepository;
 pub use group::SurrealGroupRepository;
 pub use mds::SurrealMdsRepository;
 pub use minimal_profile_lease::{LeaseClaim, LeaseRecord, SurrealMinimalProfileLeaseRepository};
+pub use network::{
+    SurrealNetworkPolicyRepository, SurrealNetworkSegmentRepository, SurrealReplyProfileRepository,
+};
 pub use notification_rule::SurrealNotificationRuleRepository;
 pub use notification_window::SurrealNotificationWindowRepository;
 pub use oauth2_auth_code::SurrealAuthorizationCodeRepository;

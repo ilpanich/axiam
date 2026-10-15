@@ -129,6 +129,52 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("reactors:create", "Register a reactor"),
     ("reactors:update", "Update a reactor registration"),
     ("reactors:delete", "Delete a reactor registration"),
+    // Network segments and RADIUS reply profiles (RADIUS D4,
+    // `claude_dev/radius-reply-profile-design.md` §4.2).
+    //
+    // The whole `network:` namespace is reserved: `permissions:create` must
+    // refuse an action that starts with it, so a tenant cannot mint a look-alike
+    // (W6.2). A role carrying any of these is *network-sensitive* and is bound
+    // by the write-time rules of §4.2 and §5.3. `network:admin` and
+    // `network:grant_admin` are defined and not grantable under option B (the
+    // administrative `Service-Type` class is disabled, §3.3); they exist so that
+    // option A inherits the rule instead of inventing one.
+    (
+        "network:join",
+        "Be placed on a network segment (held by a device's service account; cascades from the site and branch)",
+    ),
+    (
+        "network:admin",
+        "Administrative login to a segment's network devices (defined, not grantable under option B)",
+    ),
+    (
+        "network:read",
+        "Read network segments and their reply profiles",
+    ),
+    (
+        "network:segments_write",
+        "Create, change and delete network segments: the tree and each segment's envelope (kind, VLAN, filter ids, rank, enabled)",
+    ),
+    (
+        "network:profiles_write",
+        "Create, replace and delete the reply profile of a network segment",
+    ),
+    (
+        "network:grant",
+        "Confer network:join on a node: write a reply profile, or assign or unassign a role that carries a network permission",
+    ),
+    (
+        "network:grant_admin",
+        "Confer the administrative class on a network segment (option A only)",
+    ),
+    (
+        "network:decide",
+        "Ask for RADIUS placement decisions for a site (held by the RADIUS server's service account)",
+    ),
+    (
+        "network:export",
+        "Read the rendered RADIUS placement export for a site",
+    ),
     // Webhooks
     ("webhooks:list", "List webhooks"),
     ("webhooks:get", "Retrieve a single webhook"),
@@ -400,6 +446,11 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "webauthn_policy",
     "scim",
     "scim_tokens",
+    // RADIUS D4 (W6.1): a segment's profile decides what VLAN and ACL a device
+    // gets, and writing one is a grant (design note §5.2). A network
+    // administrator is a human's role; the one machine caller, FreeRADIUS's
+    // `network:decide` on the decision route, is W6.4's to place.
+    "network",
 ];
 
 // ---------------------------------------------------------------------------

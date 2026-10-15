@@ -390,6 +390,11 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("scim_target_link", Configuration),
     PurgeStep::by_tenant("scim_target_state", Configuration),
     PurgeStep::by_tenant("scim_target", Configuration),
+    // W6.1 (schema v100): a segment's profile before the segment. The segment's
+    // `resource` node goes with the `resource` step above.
+    PurgeStep::by_tenant("reply_profile", Configuration),
+    PurgeStep::by_tenant("network_segment", Configuration),
+    PurgeStep::by_tenant("network_policy", Configuration),
     PurgeStep::by_tenant("ssf_stream", Configuration),
     PurgeStep::by_tenant("seeder_state", Configuration),
     PurgeStep::by_tenant("organization_scope", Configuration),

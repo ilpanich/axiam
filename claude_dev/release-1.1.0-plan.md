@@ -666,6 +666,41 @@ backstop 39 s (was 38); the grace is unchanged.
 
 ### 13.5 W5
 
+**Head `285b48b1a`** on `claude/release-1.1.0-w5` (from `3d011573e`), 2026-10-15:
+four task commits, the F4 review and four in-wave fixes, all signed. **The
+RADIUS e2e runs on this machine:** `eapol_test` 2.10 from apt
+(`eapoltest`), the pinned FreeRADIUS 3.2.8 image pulled (one Docker Hub 429,
+then fine). Baseline before any change: `AXIAM_E2E_RADIUS=1 cargo test -p
+axiam-server --no-default-features --test radius_e2e` exit 0 (328 s, 285 s
+revocation lag); exit 0 again after W5.1 and W5.4. **D-4, by the orchestrator:**
+`radius-e2e.yml` dispatched on the branch — run 38761953931 on `63fc3d7d2`
+(the workflow's first-ever run) **success**; run 38768034553 on `285b48b1a`
+(compiles and runs the fixes' uncompiled e2e edit and the new script harness)
+**success**.
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W5.1 #643 | `384d2c772` | Sonnet | `docker/radius/fetch-crl.sh`: installs only a 200 that parses, whose `openssl crl -verify` output is exactly `verify OK` (openssl exits 0 on "verify failure"), whose CRL number is not lower than the installed one; sends the stored ETag, treats 304 as unchanged; `mktemp` + `mv`. The guide links it (no second copy); the e2e runs it on the host against a loopback mirror (forged, lower-numbered, 304 cases; each check's removal turns the e2e red). T-462 amended (Open). *Tree:* the snippet sat at `freeradius.md:389-418`, `refresh_crl` at `~:933`; T-450 (MD5 obfuscation) untouched. |
+| W5.2 #644–#647 | `8a91f9c38` | Sonnet | Guide: what the reload re-reads, `ca.pem` replaced atomically and never deleted without a restart, "Error replacing X509 store" means the old trust holds (#644); fetch direct or `no-cache`, the bound "+ any shared cache's `max-age`", the note's §6.3 cell with a dated correction (#645); `require_message_authenticator = yes` on the RadSec client and the NAS's half of Blast-RADIUS (#646); the re-encoding under `umask 077` through a pipe, octal `printf` (the `\x30` form only worked under bash) (#647 — W1.10 removes the workaround; the merge takes W1). *Tree:* the shipped `clients.conf` already had the option. |
+| W5.3 #648, #650 | `d215a644b` | Sonnet | `scripts/check-radius-vendors-nothing.py` (`--self-test`, 18 cases) in Architecture Invariants; T-454 cites it and `cargo-deny`'s licence list; `radius-e2e.yml`'s filter gains `crypto.rs`, `subject.rs`, `server.rs` and the script. *Tree:* the licence list is `deny.toml:~118-136`, run by the `security-scan` job. |
+| W5.4 #652 | `63fc3d7d2` | Sonnet | `:0` tags on the three VLAN attributes in the guide and the e2e's generated table; the e2e pins the Accept's octets. ***Tree overruled the plan:*** FreeRADIUS 3.2.8 encodes `Tunnel-Private-Group-Id:0 = "20"` exactly as untagged (`3230`; RFC 2868 §3.6 allows it); only a non-zero tag adds an octet; the integers always carry `0x00`. So "fail on the untagged form" is impossible; the assertion fails on any non-zero tag (`:1` → red). `docker/radius/raddb/` holds no placement entries (generated per run). The design note's "tag `0x00`" (`radius-reply-profile-design.md:83,178,722`) is wrong for FreeRADIUS — **W6's to correct**, since D4 renders the reply. |
+| W5.5 | `90924ed4c` | Opus | `claude_dev/security-review-release-1.1.0-w5-2026-10-15.md` (no cargo; the e2e evidence above): nothing Medium or higher; R110W5-01 … -04 Low, -05 … -10 Informational; a trial merge with W1. |
+| fix | `507899207` | Sonnet | **R110W5-01**: one well-formed entity-tag only (never `*`), bound to the installed file's SHA-256; a 304 counts only with the tag sent, else one unconditional fetch. |
+| fix | `f0fe8b064` | Sonnet | **R110W5-02**: a lock for the whole run (`flock`, present in the pinned image; `mkdir` fallback with stale-lock breaking); a run that finds it held exits 0 untouched. |
+| fix | `b84d0bcb2` | Sonnet | **R110W5-03**: `curl -q`, scheme pinned, `--max-redirs 0`, `--globoff`, `--url`; `http://` only with `FETCH_CRL_ALLOW_HTTP=1`; the e2e gains the refused-HTTP case. `docker/radius/tests/fetch-crl-test.sh` + `crl-stub.py` (64 checks, dash and bash, each fix's checks red on the previous script) run in `radius-e2e.yml`. |
+| fix | `285b48b1a` | Sonnet | **R110W5-04**: T-454's correction states exactly what the check does and does not catch (status Mitigated on the narrower claim). |
+
+The four Low findings were fixed in-wave because they are in the script and the
+check this wave ships for #643 and #648. Filed on `1.1.x`: ilpanich/axiam#693
+(R110W5-05 — the guide's RadSec block fails `-XC` and its
+`require_message_authenticator` is inert on a RadSec client), #694 … #698
+(R110W5-06 … -10). **For the merge:** the only conflict is the Ed25519 bullet of
+`freeradius.md` — take W1 (W1.10's removal settles #647); after the merge the
+guide's §4 must say a "lower than the installed" refusal is expected once after
+an interval change (W1.1) and link the PKI README's rule. **For W8.3:** the
+STRIDE text and `freeradius.md:618` still say all four Mitigated RADIUS entries
+are tested by the e2e (true of T-449, T-456, T-459 only).
+
 ### 13.6 W6
 
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review

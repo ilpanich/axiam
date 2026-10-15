@@ -79,6 +79,7 @@ pub fn build_governor(
 ///
 /// **Never call this for `/auth/login`** (or any other endpoint without a
 /// client identity) — use [`build_governor`] there instead, unconditionally.
+/// Its one other caller is [`build_principal_governor`] (#633).
 fn build_client_aware_governor(
     requests_per_min: u32,
     key_mode: RateLimitKeyMode,
@@ -97,6 +98,21 @@ fn build_client_aware_governor(
         .finish()
         .expect("valid governor config");
     Governor::new(&config)
+}
+
+/// #633: the in-process governor for a route keyed on its **verified**
+/// principal `(tenant, sub)`, with the address as the pre-authentication
+/// fallback — the five authenticated federation flow routes.
+///
+/// The partner of [`RateLimitShared::keyed_on_principal`] on the same
+/// resource: both derive their key through
+/// `extractors::rate_limit::bucket_key_part` from the identity the audit
+/// middleware verified, so the route keys the same way whether the shared
+/// counter is on or off (`AXIAM__RATE_LIMIT__SHARED`).
+fn build_principal_governor(
+    requests_per_min: u32,
+) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
+    build_client_aware_governor(requests_per_min, RateLimitKeyMode::Principal)
 }
 
 /// Register health and readiness routes.
@@ -1415,7 +1431,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             //
             // #614 (D-3): the five authenticated federation flow routes — these
             // two and the three SAML ones registered at the end — carry the
-            // browser-endpoint preset (`end_session_per_min`, per IP), each
+            // browser-endpoint preset (`end_session_per_min`), each
             // under a bucket of its own (`federation_oidc_authorize`,
             // `federation_link_oidc_callback`, `federation_saml_authn_request`,
             // `federation_link_saml_acs`, `federation_saml_metadata`), so one
@@ -1429,24 +1445,33 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // bearer token; none is an IdP back-channel (the IdP sends the
             // *browser* to the application, which then calls these). No new
             // knob, so `rl_prod_check.py` needs no row.
+            //
+            // #633 (R101W2-05): each bucket is keyed on the caller's verified
+            // principal `(tenant, sub)`, not its address — one token used from
+            // many addresses shares one allowance, and an application relaying
+            // many users gives each their own. A request whose token does not
+            // verify is keyed on its address. Both layers key alike:
+            // `build_principal_governor` and `keyed_on_principal`, through one
+            // key function; neither verifies a signature (the audit middleware
+            // already did, and they read its result).
             .service(
                 web::resource("/federation/oidc/authorize")
-                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                     .wrap(RateLimitShared::<C>::browser_preset(
                         "federation_oidc_authorize",
                         rate_limit_cfg,
-                    ))
+                    ).keyed_on_principal())
                     .route(
                         web::post().to(handlers::federation::oidc_authorize::<C>),
                     ),
             )
             .service(
                 web::resource("/federation/oidc/callback")
-                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                     .wrap(RateLimitShared::<C>::browser_preset(
                         "federation_link_oidc_callback",
                         rate_limit_cfg,
-                    ))
+                    ).keyed_on_principal())
                     .route(
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
@@ -1872,29 +1897,29 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
         // note on the OIDC flow routes above.
         .service(
             web::resource("/federation/saml/authn-request")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
                     "federation_saml_authn_request",
                     rate_limit_cfg,
-                ))
+                ).keyed_on_principal())
                 .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
         )
         .service(
             web::resource("/federation/saml/acs")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
                     "federation_link_saml_acs",
                     rate_limit_cfg,
-                ))
+                ).keyed_on_principal())
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),
         )
         .service(
             web::resource("/federation/saml/metadata")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
                     "federation_saml_metadata",
                     rate_limit_cfg,
-                ))
+                ).keyed_on_principal())
                 .route(web::get().to(handlers::federation::saml_metadata::<C>)),
         );
     cfg.service(api_scope);

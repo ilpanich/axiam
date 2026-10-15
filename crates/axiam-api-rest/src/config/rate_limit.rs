@@ -36,7 +36,9 @@ use serde::Deserialize;
 /// changes login's (or MFA's, or password-reset's, etc.) rate-limit
 /// behavior. See `server.rs` — those resources are wired with the plain
 /// `build_governor`/`RateLimitShared::new` constructors, which never read
-/// this field.
+/// this field. The one other key in the tree, [`Self::Principal`], is wired
+/// per route by `server.rs` (the five authenticated federation flow routes,
+/// #633) and is likewise independent of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKeyMode {
@@ -51,6 +53,29 @@ pub enum RateLimitKeyMode {
     /// from one IP doesn't automatically throttle the same client_id
     /// operating legitimately from a different IP.
     IpClientId,
+    /// Key on the **verified** principal `(tenant, sub)` of an authenticated
+    /// route, with the source IP as the pre-authentication fallback (#633,
+    /// R101W2-05).
+    ///
+    /// **A property of a route, never an operator choice.** It is wired by
+    /// `server.rs` onto the five authenticated federation flow routes
+    /// (`RateLimitShared::keyed_on_principal`) and cannot be selected through
+    /// `AXIAM__RATE_LIMIT__KEY`: the three OAuth2 endpoints that variable
+    /// governs carry no access token to key on. `skip_deserializing` makes
+    /// `principal` an unknown value there, refused at startup like any other.
+    ///
+    /// The principal is read only from the identity the audit middleware
+    /// verified (signature, expiry, issuer) and cached on the request
+    /// (`axiam_auth::token::CachedUserIdentity`), so the limiter adds no
+    /// signature verification of its own, on any path. A request whose token
+    /// does not verify — absent, forged, expired — has no cached identity and
+    /// is keyed on its address, exactly as before; it cannot reach a
+    /// principal's bucket by naming one. A sender-constrained token (one
+    /// carrying `cnf`) is keyed on the `(ip, tenant, sub)` triple instead:
+    /// its proof of possession is checked later, by the extractor, so at
+    /// this layer holding the token is not yet proof of being its principal.
+    #[serde(skip_deserializing)]
+    Principal,
 }
 
 impl RateLimitKeyMode {
@@ -61,6 +86,7 @@ impl RateLimitKeyMode {
             Self::Ip => "ip",
             Self::ClientId => "client_id",
             Self::IpClientId => "ip_client_id",
+            Self::Principal => "principal",
         }
     }
 
@@ -75,6 +101,10 @@ impl RateLimitKeyMode {
             Self::ClientId => KeyMintability::Full,
             // Half the key (`client_id`) is caller-chosen; the IP half is not.
             Self::IpClientId => KeyMintability::Partial,
+            // The principal half comes from a token whose signature verified;
+            // without one the key is the source IP. Neither is caller-chosen:
+            // a new bucket costs a new validly signed token.
+            Self::Principal => KeyMintability::None,
         }
     }
 }
@@ -1851,5 +1881,19 @@ mod tests {
             RateLimitKeyMode::IpClientId.mintability(),
             KeyMintability::Partial
         );
+        assert_eq!(
+            RateLimitKeyMode::Principal.mintability(),
+            KeyMintability::None
+        );
+    }
+
+    /// #633: the principal key is a property of the authenticated routes it
+    /// is wired onto, not an operator setting — `AXIAM__RATE_LIMIT__KEY`
+    /// governs the three OAuth2 endpoints, which carry no access token, so
+    /// `principal` must be refused there rather than silently key nothing.
+    #[test]
+    fn the_principal_key_mode_cannot_be_selected_from_the_environment() {
+        assert!(serde_json::from_str::<RateLimitKeyMode>("\"principal\"").is_err());
+        assert_eq!(RateLimitKeyMode::Principal.as_str(), "principal");
     }
 }

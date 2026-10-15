@@ -3220,10 +3220,15 @@ fn federation_flow_request(
 
 /// #614 (D-3): each of the five authenticated federation flow routes — SAML
 /// `authn-request`, `acs`, `metadata` and OIDC `authorize`, `callback` — is
-/// under the browser-endpoint preset (`end_session_per_min`, per IP) in a bucket
-/// of its own. Past the bucket a route answers `429`; another address still
-/// gets through that route, and the other four routes' buckets are untouched
-/// (each answers its own `400`, not `429`, and then runs out on its own count).
+/// under the browser-endpoint preset (`end_session_per_min`) in a bucket of
+/// its own. Past the bucket a route answers `429`; another address still gets
+/// through that route, and the other four routes' buckets are untouched (each
+/// answers its own `400`, not `429`, and then runs out on its own count).
+///
+/// This app has no audit middleware, so no request carries a verified
+/// identity and the routes key on the address — their pre-authentication
+/// fallback. The principal keying of #633 is proved, with the audit middleware
+/// in place, by `rate_limit_principal_test.rs`.
 #[cfg(feature = "saml")]
 #[actix_rt::test]
 async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
@@ -3266,7 +3271,8 @@ async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
     assert_eq!(resp.status().as_u16(), 429, "{} past its bucket", ROUTES[0]);
     assert!(resp.headers().contains_key("retry-after"));
 
-    // The bucket is per address.
+    // The bucket is per address (the fallback: nothing here verified the
+    // token for the limiter to key on — see the doc comment).
     let status = call(ROUTES[0], OTHER_PEER).await.status().as_u16();
     assert_eq!(status, 400, "another address is not charged");
 

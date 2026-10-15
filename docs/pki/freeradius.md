@@ -1,7 +1,7 @@
 # 802.1X with an AXIAM-issued Device certificate
 
 **Milestone:** `1.0.1`
-**Last verified:** 2026-10-13, against FreeRADIUS 3.2.8 and `eapol_test` from
+**Last verified:** 2026-10-15, against FreeRADIUS 3.2.8 and `eapol_test` from
 `wpa_supplicant` 2.10 (see [What the end-to-end test proves](#what-the-end-to-end-test-proves))
 
 A recipe for admitting devices to a switch port, an access point or a VPN
@@ -108,11 +108,19 @@ What each choice does for this recipe:
   public key and changes no key material (the test does exactly this):
 
   ```sh
-  # The 32-byte seed follows the `04 20` tag of the version-2 encoding.
-  sed '/^-----/d' press-07.key.pem | base64 -d | tail -c +17 | head -c 32 > seed.bin
-  { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20'; cat seed.bin; } \
-    | openssl pkey -inform DER -out press-07.key
+  # The 32-byte seed follows the `04 20` tag of the version-2 encoding. It goes
+  # from the old key to `openssl` through a pipe and is never a file, and the new
+  # key is created `0600`: the private key is returned once, and a scratch copy
+  # of its seed is a second copy of it. (Octal escapes: a POSIX `printf` does not
+  # know `\x`, and `dash` prints it literally.)
+  ( umask 077
+    { printf '\060\056\002\001\000\060\005\006\003\053\145\160\004\042\004\040'
+      sed '/^-----/d' press-07.key.pem | base64 -d | tail -c +17 | head -c 32
+    } | openssl pkey -inform DER -out press-07.key )
   ```
+
+  Once the device holds `press-07.key`, delete the version-2 `press-07.key.pem`:
+  every copy of a private key that AXIAM does not keep is one more to guard.
 
   Check your supplicant's TLS library before choosing; some older ones do not
   support Ed25519 certificates at all.
@@ -152,9 +160,32 @@ The cost is stated plainly: with the signing CA as the trust anchor nothing abov
 it is looked at, so **a revoked signing CA is not noticed by FreeRADIUS**. The
 organization CA's list is what names it, and this configuration does not load
 that list (`check_all_crl = no`). When you revoke a signing CA, remove or
-replace `ca.pem` and restart FreeRADIUS; the devices under it should be
-re-issued under a new one in any case ([Revoke a
+replace `ca.pem` ([as below](#replacing-or-removing-capem)) and restart
+FreeRADIUS, so that the old trust is gone at once and not at the next reload;
+the devices under it should be re-issued under a new one in any case ([Revoke a
 certificate](README.md#revoke-a-certificate)).
+
+### Replacing or removing `ca.pem`
+
+`ca_path_reload_interval` ([below](#4-keep-the-revocation-list-fresh)) makes
+FreeRADIUS build a new certificate store from `ca_file` **and** `ca_path`, so a
+reload re-reads `ca.pem` as well as the lists. Three consequences:
+
+- **Replace `ca.pem` atomically.** Write the new file in the same directory under
+  another name and `mv` it over `ca.pem` (a rename within one filesystem is
+  atomic). A `cp`, or a redirect that truncates the file in place, can be read
+  half written by a reload that fires in between, and that reload then fails.
+- **Never delete `ca.pem`, or leave it unreadable, without restarting
+  FreeRADIUS.** A reload that cannot read it fails, logs `Error replacing X509
+  store`, and **keeps the old store, which still trusts the CA you removed**; it
+  retries at every new EAP conversation until the process restarts. Removing the
+  file does not withdraw the trust.
+- **A logged `Error replacing X509 store` means the old trust is still in force**:
+  the CA, and the lists, that FreeRADIUS last read successfully. It is not a
+  harmless warning, so alert on it. What you do is repair the file (put the
+  intended `ca.pem` back, or the new one) and restart FreeRADIUS, which reads
+  everything at once; after any change to the trusted CA, a restart is the only
+  way to be sure which one is trusted.
 
 ## 3. The FreeRADIUS configuration
 
@@ -209,9 +240,11 @@ eap {
   [monitor the fetch](#the-revocation-lag).
 - **`cache { enable = no }`**: no TLS session cache. A resumed session skips the
   certificate check, so a revoked device could be admitted again from a ticket.
-- **`ca_path_reload_interval = 300`** is how FreeRADIUS re-reads the lists
-  ([below](#4-keep-the-revocation-list-fresh)). FreeRADIUS raises any smaller
-  value to 300.
+- **`ca_path_reload_interval = 300`** is how FreeRADIUS re-reads what it trusts:
+  it rebuilds the store from `ca_file` **and** `ca_path`, so a replaced `ca.pem`
+  and the lists are read afresh ([below](#4-keep-the-revocation-list-fresh); how to
+  replace `ca.pem` is [above](#replacing-or-removing-capem)). FreeRADIUS raises
+  any smaller value to 300.
 
 ### `clients.conf` — who may send requests, and what they must send
 
@@ -235,6 +268,15 @@ client nas-line-1 {
   client whose first packet lacks the attribute). With it set to `yes`,
   `limit_proxy_state` is ignored, which is what you want behind a wireless
   controller that acts as a proxy and adds `Proxy-State`.
+- **The NAS must do its half.** The forgery is of the *response*, so FreeRADIUS
+  requiring and sending the attribute protects nothing on a NAS that does not
+  check it. For each NAS, confirm that its firmware has the Blast-RADIUS fix
+  (CVE-2024-3596): it sends `Message-Authenticator` in every Access-Request and
+  **requires and verifies** it in every Access-Accept, Access-Reject and
+  Access-Challenge. The setting's name differs by vendor. A NAS whose vendor has no
+  such firmware is not protected by anything in this recipe: serve it over
+  [RadSec](#radsec-where-the-nas-allows), or keep an on-path attacker away from
+  the segment between it and FreeRADIUS.
 - **The shared secret** is per NAS, at least 128 bits from a CSPRNG
   (`openssl rand -base64 24`), and not in a file you commit — FreeRADIUS reads
   `$ENV{...}`. The secret keys the MD5 constructs described under
@@ -442,7 +484,15 @@ order:
 
 1. **AXIAM publishes it.** At once: the next response from the CRL route names the
    serial. The test checks this.
-2. **Your job fetches the list.** At most the fetch interval.
+2. **Your job fetches the list.** At most the fetch interval, **provided it
+   fetches AXIAM directly, or through a cache told `no-cache`**. The CRL route
+   answers `Cache-Control: public, max-age=N`, with N running to the next
+   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. A
+   shared cache or CDN on the path may therefore serve the list from before the
+   revocation for that long. Leave one out, or have it revalidate every request;
+   that is cheap, because [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) sends
+   the `ETag` of the list it installed as `If-None-Match`, so a revalidation that
+   finds nothing new costs a `304` and no list body.
 3. **FreeRADIUS reads it.** OpenSSL does not re-read `ca_path` by itself. With
    `ca_path_reload_interval`, FreeRADIUS replaces its certificate store at the
    first *new* EAP conversation after the interval has elapsed, and the new store
@@ -455,9 +505,9 @@ order:
    of it.
 
 So a revoked device can keep its port for as long as **the fetch interval, plus
-300 seconds, plus the `Session-Timeout`** — with the figures above, roughly an
-hour and ten minutes in the worst case, and a few minutes for a device that is not
-connected. The end-to-end test shows the middle of that: it revokes a device,
+300 seconds, plus the `Session-Timeout`, plus any shared cache's `max-age`** — with
+the figures above and no cache on the fetch path, roughly an hour and ten minutes
+in the worst case, and a few minutes for a device that is not connected. The end-to-end test shows the middle of that: it revokes a device,
 shows AXIAM serving the new list, shows FreeRADIUS **still admitting the device**
 because it holds the old one, and then times the refusal after the list is in
 `ca_path`.
@@ -474,8 +524,10 @@ Two ways this goes wrong:
   `allow_expired_crl` is left at its default, `no`. That is fail-closed, and a
   full outage a day later. Alert when the file in `capath` is older than half
   the list's lifetime.
-- **FreeRADIUS is not restarted after you replace `ca.pem`.** The file is read
-  at start-up, and the lists are the only thing the interval re-reads.
+- **`ca.pem` is replaced non-atomically, or deleted without a restart.** The
+  reload re-reads it as well as the lists; a reload that cannot read it logs `Error
+  replacing X509 store` and leaves the old trust in force
+  ([above](#replacing-or-removing-capem)).
 
 ## RadSec, where the NAS allows
 
@@ -505,12 +557,15 @@ clients radsec-nas {
 		ipaddr = 192.0.2.10
 		proto = tls
 		secret = radsec
+		require_message_authenticator = yes
 	}
 }
 ```
 
 This is the shape of the image's own `sites-available/tls`, with TLS 1.3 asked
-for. Three cautions:
+for. `require_message_authenticator = yes` stands on this client as on every
+other, and the NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
+applies to it equally. Three cautions:
 
 - **Not exercised by the end-to-end test.** `eapol_test` speaks UDP only; the
   block above is a starting point to adapt, not a tested configuration.
@@ -550,9 +605,8 @@ Not covered, and said so: RadSec (above); supplicants other than `eapol_test`;
 a NAS that proxies; the lag of step 4 (the session) — the test does not connect a
 session and revoke it under it; and anything about performance. The latency
 figures in [§6.3 of the reply-profile note](../../claude_dev/radius-reply-profile-design.md)
-that compare this recipe with the designs that would replace it are read from the
-defaults (a list valid for a day), not measured; this page's bound, with a
-five-minute fetch, is tighter.
+that compare this recipe with the designs that would replace it are reasoned from
+the mechanism above, not measured.
 
 ## Which threat-model entries this covers
 

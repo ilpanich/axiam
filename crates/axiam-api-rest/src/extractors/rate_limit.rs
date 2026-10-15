@@ -52,10 +52,10 @@ use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::HttpMessage;
-use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
-use actix_web::http::header::{ContentType, RETRY_AFTER};
-use std::net::IpAddr;
+use actix_web::http::header::{ContentType, HeaderMap, RETRY_AFTER};
+use actix_web::{HttpRequest, HttpResponse};
+use std::net::{IpAddr, SocketAddr};
 
 use crate::config::rate_limit::RateLimitKeyMode;
 
@@ -94,41 +94,101 @@ impl XForwardedForKeyExtractor {
     }
 }
 
+/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, or `0` when it is unset or unparseable.
+///
+/// The one reading of the variable every REST limiter keyed on the client's
+/// address uses: the route governors (`server.rs`), the shared counter
+/// (`middleware::rate_limit_shared`) and the token endpoint's public-client
+/// bucket ([`rate_limit_client_ip`]). Read per call, as the shared counter has
+/// always read it, so they cannot disagree about which address a request is.
+pub fn configured_trusted_hops() -> usize {
+    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The address a per-address rate limit keys a request on (SEC-048, T-212).
+///
+/// The **rightmost untrusted** `X-Forwarded-For` hop — `hops[len - 1 -
+/// trusted_hops]` — when the header has more hops than `trusted_hops` and
+/// that entry parses as an address; otherwise `peer`, the transport peer.
+/// Behind `trusted_hops + 1` appending proxies a client cannot choose the
+/// result by writing the header: the entries it writes sit to the LEFT of the
+/// ones the proxies append, and the index counts from the right; and a header
+/// too short to reach past the trusted hops is ignored entirely rather than
+/// indexed from the left (SECHRD-03). A server exposed with no proxy at all
+/// reads whatever the caller wrote — the deployment guide's T-212 caveat,
+/// shared by every limiter that calls this.
+///
+/// The second value is `Some(hops seen)` when the header was discarded
+/// because `trusted_hops >= hops` — the R-4 misconfiguration signal, which
+/// only [`XForwardedForKeyExtractor`] records, once per request.
+fn select_rate_limit_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_hops: usize,
+) -> (Option<IpAddr>, Option<usize>) {
+    let mut discarded_hops = None;
+    if let Some(forwarded_for) = headers.get("X-Forwarded-For")
+        && let Ok(val) = forwarded_for.to_str()
+    {
+        let hops: Vec<&str> = val.split(',').map(str::trim).collect();
+        // Select the rightmost-untrusted hop.
+        // hops = [client, proxy1, ..., trusted_proxy]
+        // trusted_hops=1 → index = len - 1 - 1 = len - 2
+        if trusted_hops < hops.len() {
+            let idx = hops.len() - 1 - trusted_hops;
+            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
+                return (Some(ip), None);
+            }
+        } else {
+            // Fewer hops than trusted_hops requires: the header cannot be
+            // trusted at all (an attacker could otherwise rotate it to get a
+            // fresh bucket per request via the old `hops[0]` fallback —
+            // SECHRD-03). Fall through to the peer instead of indexing into it.
+            discarded_hops = Some(hops.len());
+        }
+    }
+    (peer.map(|addr| addr.ip()), discarded_hops)
+}
+
+/// The address the route limiters key `req` on, under the
+/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS` in force — for a limit a handler applies
+/// itself.
+///
+/// R110W3-01: the token endpoint's public-client bucket keyed on the transport
+/// peer, which behind the shipped reverse proxy is the proxy, so every caller
+/// of one public client shared one allowance that any single address could
+/// fill. This is the same selection [`XForwardedForKeyExtractor`] makes for
+/// the route's governor and shared counter on the same request (one function,
+/// [`select_rate_limit_ip`]), so a handler's bucket can be no easier to mint
+/// and no coarser than the route's. It records no R-4 discard: the route's
+/// extractor has already counted this request.
+///
+/// A rate-limit key, never an audit value: an audit row keeps
+/// [`super::client_info::peer_ip`] (SEC-087).
+pub fn rate_limit_client_ip(req: &HttpRequest) -> Option<IpAddr> {
+    select_rate_limit_ip(req.headers(), req.peer_addr(), configured_trusted_hops()).0
+}
+
 impl KeyExtractor for XForwardedForKeyExtractor {
     type Key = IpAddr;
     type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
 
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        if let Some(forwarded_for) = req.headers().get("X-Forwarded-For")
-            && let Ok(val) = forwarded_for.to_str()
-        {
-            let hops: Vec<&str> = val.split(',').map(str::trim).collect();
-            // Select the rightmost-untrusted hop.
-            // hops = [client, proxy1, ..., trusted_proxy]
-            // trusted_hops=1 → index = len - 1 - 1 = len - 2
-            if self.trusted_hops < hops.len() {
-                let idx = hops.len() - 1 - self.trusted_hops;
-                if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                    return Ok(ip);
-                }
-            }
-            // Fewer hops than trusted_hops requires: the header cannot be
-            // trusted at all (an attacker could otherwise rotate it to get a
-            // fresh bucket per request via the old `hops[0]` fallback — SECHRD-03).
-            // Fall through to peer_addr() below instead of indexing into XFF.
-            //
-            // R-4: no longer silently. Under a `trusted_hops` one too high this
-            // fires on every request and every client shares one bucket keyed on
-            // the proxy — the failure T-212 describes, which went unnoticed
-            // precisely because nothing said so. One WARN per process plus a
-            // counter; see `super::xff_metrics`.
-            if self.trusted_hops >= hops.len() {
-                super::xff_metrics::record_discarded_xff(hops.len(), self.trusted_hops);
-            }
+        let (ip, discarded_hops) =
+            select_rate_limit_ip(req.headers(), req.peer_addr(), self.trusted_hops);
+        // R-4: a header with fewer hops than `trusted_hops` requires is no
+        // longer discarded silently. Under a `trusted_hops` one too high this
+        // fires on every request and every client shares one bucket keyed on
+        // the proxy — the failure T-212 describes, which went unnoticed
+        // precisely because nothing said so. One WARN per process plus a
+        // counter; see `super::xff_metrics`.
+        if let Some(hops_seen) = discarded_hops {
+            super::xff_metrics::record_discarded_xff(hops_seen, self.trusted_hops);
         }
-        req.peer_addr()
-            .map(|addr| addr.ip())
-            .ok_or_else(|| SimpleKeyExtractionError::new("no peer address"))
+        ip.ok_or_else(|| SimpleKeyExtractionError::new("no peer address"))
     }
 
     /// Returns a JSON 429 response with Retry-After header per D-03.
@@ -535,5 +595,94 @@ mod client_aware_tests {
         assert_eq!(extract_form_client_id(b"client_id=&grant_type=x"), None);
         assert_eq!(extract_form_client_id(b"grant_type=x"), None);
         assert_eq!(extract_form_client_id(b""), None);
+    }
+}
+
+/// R110W3-01: the one selection the route limiters and the token endpoint's
+/// public-client bucket share.
+#[cfg(test)]
+mod address_selection_tests {
+    use super::*;
+    use actix_web::test::TestRequest;
+
+    /// The reverse proxy: the transport peer of every request below.
+    const PROXY: &str = "10.0.0.2:443";
+    const A: &str = "198.51.100.9";
+    const B: &str = "203.0.113.7";
+
+    fn headers(xff: Option<&str>) -> HeaderMap {
+        let mut req = TestRequest::get();
+        if let Some(value) = xff {
+            req = req.insert_header(("X-Forwarded-For", value));
+        }
+        req.to_http_request().headers().clone()
+    }
+
+    fn select(xff: Option<&str>, trusted_hops: usize) -> (Option<IpAddr>, Option<usize>) {
+        select_rate_limit_ip(&headers(xff), Some(PROXY.parse().unwrap()), trusted_hops)
+    }
+
+    fn ip(s: &str) -> Option<IpAddr> {
+        Some(s.parse().unwrap())
+    }
+
+    fn proxy() -> Option<IpAddr> {
+        Some(PROXY.parse::<SocketAddr>().unwrap().ip())
+    }
+
+    #[test]
+    fn behind_one_proxy_the_key_is_the_address_the_proxy_appended() {
+        assert_eq!(select(Some(A), 0), (ip(A), None));
+        // An untrusted entry the client wrote itself sits to the LEFT of the
+        // one the proxy appends, so it does not change the key: a caller at A
+        // cannot charge its requests to B's bucket.
+        assert_eq!(select(Some(&format!("{B}, {A}")), 0), (ip(A), None));
+        assert_eq!(select(Some(&format!("{B},{B}, {A}")), 0), (ip(A), None));
+    }
+
+    #[test]
+    fn trusted_hops_at_or_above_the_hop_count_falls_back_to_the_peer() {
+        // The T-212 off-by-one (`1` behind one proxy): the header cannot be
+        // trusted, so the key is the peer, and the discard is reported for
+        // R-4's signal.
+        assert_eq!(select(Some(A), 1), (proxy(), Some(1)));
+        assert_eq!(select(Some(&format!("{B}, {A}")), 2), (proxy(), Some(2)));
+        assert_eq!(select(Some(&format!("{B}, {A}")), 5), (proxy(), Some(2)));
+        // One hop more than trusted reaches the client again.
+        assert_eq!(select(Some(&format!("{B}, {A}")), 1), (ip(B), None));
+    }
+
+    #[test]
+    fn no_header_or_an_unparseable_entry_falls_back_to_the_peer() {
+        assert_eq!(select(None, 0), (proxy(), None));
+        assert_eq!(select(Some("not-an-address"), 0), (proxy(), None));
+        assert_eq!(
+            select_rate_limit_ip(&headers(Some(A)), None, 1),
+            (None, Some(1)),
+            "no peer and nothing trusted is no key"
+        );
+    }
+
+    #[test]
+    fn the_handlers_address_is_the_route_extractors_key() {
+        // `rate_limit_client_ip` reads the configured hops (`0` unless the
+        // environment says otherwise); the governor on the same route reads
+        // the same value. Whatever it is, the two agree on every shape.
+        let hops = configured_trusted_hops();
+        let extractor = XForwardedForKeyExtractor::with_trusted_hops(hops);
+        for xff in [None, Some(A), Some("x"), Some("203.0.113.7, 198.51.100.9")] {
+            let build = || {
+                let mut req = TestRequest::post().peer_addr(PROXY.parse().unwrap());
+                if let Some(value) = xff {
+                    req = req.insert_header(("X-Forwarded-For", value));
+                }
+                req
+            };
+            assert_eq!(
+                rate_limit_client_ip(&build().to_http_request()),
+                extractor.extract(&build().to_srv_request()).ok(),
+                "xff: {xff:?}"
+            );
+        }
     }
 }

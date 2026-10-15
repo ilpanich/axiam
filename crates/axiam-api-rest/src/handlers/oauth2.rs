@@ -38,6 +38,7 @@ use axiam_db::{SurrealAuditLogRepository, SurrealTenantRepository};
 use crate::extractors::auth::{AuthenticatedUser, MaybeAuthenticatedUser};
 use crate::extractors::cert_auth::VerifiedClientCert;
 use crate::extractors::client_info::{client_ip, peer_ip};
+use crate::extractors::rate_limit::rate_limit_client_ip;
 use crate::state::AppState;
 
 /// Cap for the caller-supplied `client_id` recorded in a failed-client-auth
@@ -2179,14 +2180,26 @@ async fn token_inner<C: Connection + Clone>(
     // request shape T21.2 makes reachable: a token request carrying **no
     // client credential at all**.
     //
-    // Keyed on `client_id` AND the transport peer address, never on either
-    // alone. `client_id` alone would be a bucket an unauthenticated caller
-    // mints by rotating a value they choose (`KeyMintability::Full`); the peer
-    // address alone would put every public client behind one NAT gateway —
-    // every developer in an office, every desktop client on one residential
-    // connection — into a single allowance. The pair is what the
-    // `ip_client_id` mode was added for, applied here unconditionally because
-    // for a credential-less request it is the only defensible key.
+    // Keyed on `client_id` AND the client's address, never on either alone.
+    // `client_id` alone would be a bucket an unauthenticated caller mints by
+    // rotating a value they choose (`KeyMintability::Full`); the address alone
+    // would put every public client behind one NAT gateway — every developer
+    // in an office, every desktop client on one residential connection — into
+    // a single allowance. The pair is what the `ip_client_id` mode was added
+    // for, applied here unconditionally because for a credential-less request
+    // it is the only defensible key.
+    //
+    // R110W3-01: the address is the one the route's own limiters key this
+    // request on (`rate_limit_client_ip`: the rightmost untrusted
+    // `X-Forwarded-For` hop under `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, else the
+    // transport peer — T-212's mitigation), not the transport peer. It was the
+    // peer until then, and behind the shipped reverse proxy the peer is the
+    // proxy: every caller of one public client shared one allowance, so one
+    // address sending `token_per_min` credential-less requests a minute — all
+    // of which the route limiter admits — answered every other caller's code
+    // exchange, refresh and, since #635, every device's poll `429 slow_down`.
+    // The audit rows below keep `peer_ip` (SEC-087); this is a key, not a
+    // record.
     //
     // Decidable from the request alone, so it costs no lookup and creates no
     // client-existence oracle: it applies equally to a real public client, an
@@ -2202,7 +2215,7 @@ async fn token_inner<C: Connection + Clone>(
             "oauth2_token_public:{}:{}:{}",
             tenant_id,
             form.client_id.as_deref().unwrap_or("-"),
-            peer_ip(&req).unwrap_or_else(|| "-".into()),
+            rate_limit_client_ip(&req).map_or_else(|| "-".into(), |ip| ip.to_string()),
         );
         if !state.shared_rate_limit.check_at(
             &bucket,

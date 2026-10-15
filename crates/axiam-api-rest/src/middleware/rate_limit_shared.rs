@@ -82,10 +82,7 @@ const WINDOW_SECS: i64 = 60;
 /// (D-01d parity — a rotating XFF must not yield a fresh bucket in either
 /// layer).
 fn trusted_hops() -> usize {
-    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
+    crate::extractors::rate_limit::configured_trusted_hops()
 }
 
 /// Truncates `now` down to the start of the current fixed

@@ -1585,3 +1585,170 @@ async fn discovery_advertises_the_device_endpoint_and_grant() {
 fn urlencoding(s: &str) -> String {
     s.replace(':', "%3A")
 }
+
+// ---------------------------------------------------------------------------
+// The public-client bucket behind a reverse proxy (T21.2, R110W3-01)
+// ---------------------------------------------------------------------------
+
+/// The public-client bucket's allowance in these tests. The route limiters
+/// keep the shipped `token_per_min` (they are built from
+/// `RateLimitConfig::default()` in [`test_app_with_state!`]), so a `429` below
+/// can only be the handler's bucket.
+const PUBLIC_BUCKET_PER_MIN: u32 = 3;
+
+/// A forwarded address the flood comes from, and another a device sits at.
+/// Both reach the server through the same reverse proxy, [`TEST_PEER`].
+const ADDRESS_A: &str = "198.51.100.9";
+const ADDRESS_B: &str = "203.0.113.7";
+
+/// An app whose handler-side `token_per_min` is [`PUBLIC_BUCKET_PER_MIN`].
+macro_rules! public_bucket_app {
+    ($f:expr) => {{
+        let mut state = AppState::for_test($f.db.clone(), $f.auth.clone());
+        state.rate_limit_cfg.token_per_min = PUBLIC_BUCKET_PER_MIN;
+        test_app_with_state!($f, state)
+    }};
+}
+
+/// As [`post_token!`], through the proxy at [`TEST_PEER`], which appended
+/// `xff` (`X-Forwarded-For`, exactly as received by the server).
+macro_rules! post_token_via_proxy {
+    ($app:expr, $tenant_id:expr, $body:expr, $xff:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .insert_header(("X-Forwarded-For", $xff))
+            .set_payload($body.to_string())
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+/// A token request naming the fixture's public client and carrying no
+/// credential: what an unauthenticated caller can send for any public client.
+fn credential_less_body(client_id: &str) -> String {
+    format!("grant_type=authorization_code&code=guess&code_verifier=guess&client_id={client_id}")
+}
+
+/// T21.2: a credential-less flood from one address meets `429 slow_down`
+/// once it has spent the public-client bucket, still, behind a proxy.
+#[actix_web::test]
+async fn a_credential_less_flood_from_one_address_meets_slow_down() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    for _ in 0..PUBLIC_BUCKET_PER_MIN {
+        let (status, _) = post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            ADDRESS_A
+        );
+        assert_eq!(status, 400);
+    }
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
+}
+
+/// R110W3-01: behind one proxy, an address that fills the public client's
+/// bucket fills its own bucket only — another address's device poll and code
+/// exchange for the same client are answered by their grants, not `429`.
+#[actix_web::test]
+async fn a_flood_from_one_address_does_not_slow_down_another_addresss_device() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    for _ in 0..=PUBLIC_BUCKET_PER_MIN {
+        post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            ADDRESS_A
+        );
+    }
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (429, Some("slow_down")),
+        "the flooding address is slowed down"
+    );
+
+    let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        poll_body(&f.client_id, &device_code),
+        ADDRESS_B
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("authorization_pending")),
+        "the device at another address polls through"
+    );
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_B
+    );
+    assert_ne!(
+        status, 429,
+        "a code exchange from another address reaches its grant: {body}"
+    );
+}
+
+/// R110W3-01: under the shipped `trusted_hops = 0`, an `X-Forwarded-For`
+/// entry the caller wrote itself — to the left of the one the proxy appended —
+/// does not choose the bucket. Naming the device's address does not charge
+/// the flood to it.
+#[actix_web::test]
+async fn a_forged_forwarded_entry_does_not_charge_another_addresss_bucket() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    let forged = format!("{ADDRESS_B}, {ADDRESS_A}");
+    for _ in 0..PUBLIC_BUCKET_PER_MIN {
+        let (status, _) = post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            forged.as_str()
+        );
+        assert_eq!(status, 400);
+    }
+
+    let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        poll_body(&f.client_id, &device_code),
+        ADDRESS_B
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("authorization_pending")),
+        "the device whose address was forged polls through"
+    );
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (429, Some("slow_down")),
+        "the forged requests were charged to the address that sent them"
+    );
+}

@@ -714,6 +714,15 @@ are tested by the e2e (true of T-449, T-456, T-459 only).
 
 ### 13.6 W6
 
+**Maintainer decision, 2026-10-15 (asked by the orchestrator after W6.3):** the
+per-tenant cap `network.session_timeout_max_secs` (stored by W6.1, enforced by
+the gate's H3 and at read; the note names no writer) **is exposed under
+`network:admin`**: `GET`/`PUT /api/v1/network/policy`, writable by
+`network:admin` at the `/network` root (lowering always allowed, raising
+audited), conditional on the row's version. Two more management operations
+(the registry reaches **202 / 29**), an executor after W6.4 on this branch,
+and §36 text in W6.6.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
 ### 13.8 W8 — release readiness

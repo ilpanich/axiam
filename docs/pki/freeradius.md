@@ -481,6 +481,19 @@ stderr and leaves the installed list alone:
 and it installs atomically: written beside its destination, then renamed, so
 FreeRADIUS never reads a half-written list.
 
+It runs one at a time per URL. The whole run, from reading the stored tag to
+writing it, holds a lock in `ca_path` (`flock` on `.fetch-crl.*.lock` where
+`flock` exists; otherwise a directory of that name plus `.d`, which a later run
+breaks when its owner is gone or it is older than 120 seconds). A run that finds
+the lock held prints that, exits **0** and touches nothing: it is not a failure,
+so a timer that overlaps its own previous run, a manual run beside the cron entry
+or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. Without
+the lock, two runs that fetch different lists can leave the older one in place
+under the newer one's tag, and a revocation then waits until AXIAM's list next
+changes, up to half its lifetime, with a file fresh enough to silence the
+age alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
+looks it up.
+
 Use HTTPS. The signature check stops a list the CA did not sign, and the number
 check a replay of an older one; neither stops whoever answers the fetch from
 serving the genuine current list again after a newer one exists, which only

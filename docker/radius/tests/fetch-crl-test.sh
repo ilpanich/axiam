@@ -133,5 +133,102 @@ t "01: installed file deleted -> full fetch" '[ $rc -eq 0 ] && [ "$(lastinm)" = 
 newcap; serve 2 '"t2"'; run; touch "$(installed)"; run
 t "01: same content, new mtime -> still a 304" '[ $rc -eq 0 ] && msg | grep -q "unchanged (304)"'
 
+echo "-- R110W5-02"
+# The openssl shim: the run that has FETCH_SLOW=<counter file> in its environment
+# sleeps 3 s after its second `openssl crl -crlnumber` (the installed list's
+# number, read before the comparison and the rename): the window two overlapping
+# runs race in.
+mkdir -p "$T/shim"
+REAL=$(command -v openssl)
+cat >"$T/shim/openssl" <<SH
+#!/bin/sh
+"$REAL" "\$@"; r=\$?
+case " \$* " in
+*" -crlnumber "*)
+	if [ -n "\${FETCH_SLOW:-}" ]; then
+		n=\$(cat "\$FETCH_SLOW" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"\$FETCH_SLOW"
+		[ "\$n" -ne 2 ] || sleep 3
+	fi ;;
+esac
+exit \$r
+SH
+chmod +x "$T/shim/openssl"
+# A PATH without flock, for the directory lock.
+mkdir -p "$T/noflock"
+for f in /usr/bin/* /usr/sbin/*; do b=${f##*/}; [ "$b" = flock ] || [ "$b" = openssl ] || ln -sf "$f" "$T/noflock/$b" 2>/dev/null; done
+cp "$T/shim/openssl" "$T/noflock/openssl"
+NOFLOCK_PATH="$T/noflock"
+FLOCK_PATH="$T/shim:$PATH"
+
+race() { # race <PATH>: list 1 is installed; A (slowed) fetches list 2, B starts 1 s later and fetches list 3
+  newcap; serve 1 '"t1"'; run
+  ctl file "$T/lists/L2.der" etag '"t2"'; rm -f "$T/slow"
+  : >"$T/req.log"
+  env PATH="$1" HOME="$T/home" FETCH_SLOW="$T/slow" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/outA" 2>"$T/errA" & pa=$!
+  sleep 1
+  ctl file "$T/lists/L3.der" etag '"t3"'
+  env PATH="$1" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/outB" 2>"$T/errB"; rcB=$?
+  wait $pa; rcA=$?
+}
+for variant in flock mkdir; do
+  if [ $variant = flock ]; then P=$FLOCK_PATH; else P=$NOFLOCK_PATH; fi
+  race "$P"
+  t "02/$variant: both exit 0" '[ $rcA -eq 0 ] && [ $rcB -eq 0 ]'
+  t "02/$variant: installed list and state agree (sha)" '[ "$(sed -n 3p "$(statefile)")" = "$(sha "$(installed)")" ]'
+  t "02/$variant: no rollback: installed number >= every number a run reported installing" '
+     hi=0; for f in outA outB; do v=$(sed -n "s/.*CRL number 0x\([0-9A-F]*\)).*/\1/p" "$T/$f"); [ -z "$v" ] || [ "$v" -le "$(capnum)" ] || hi=1; done; [ $hi -eq 0 ]'
+  t "02/$variant: the second run said it was busy and touched nothing" 'cat "$T/outB" "$T/errB" | grep -qi "lock"'
+  ctl file "$T/lists/L3.der" etag '"t3"'; : >"$T/req.log"
+  env PATH="$P" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+  t "02/$variant: the next run installs the newest list; state agrees" '[ $rc -eq 0 ] && [ "$(capnum)" = 3 ] && [ "$(sed -n 3p "$(statefile)")" = "$(sha "$(installed)")" ] && [ "$(sed -n 1p "$(statefile)")" = "\"t3\"" ]'
+done
+
+# the lock is released after success and after a refusal
+newcap; serve 1 '"t1"'; run; run2=$rc
+serve 2 '"t2"' ; printf junk >"$T/bad.der"; ctl file "$T/bad.der" etag '"x"'; run
+t "02: a refused list exits 1" '[ $rc -eq 1 ]'
+serve 2 '"t2"'; run
+t "02: the lock was released by the refused run" '[ $rc -eq 0 ] && [ "$(capnum)" = 2 ]'
+
+# mkdir lock: stale handling
+mk_run() { env PATH="$NOFLOCK_PATH" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?; }
+lockdir() { echo "$(statefile).lock.d"; }
+newcap; serve 1 '"t1"'
+mkdir "$(lockdir)"; printf '%s\n%s\n' "$$" "$(date +%s)" >"$(lockdir)/owner"
+mk_run
+t "02/mkdir: a live, fresh holder -> exit 0, nothing installed, lock left alone" '[ $rc -eq 0 ] && [ ! -e "$(installed)" ] && [ -d "$(lockdir)" ] && grep -qi lock "$T/out" "$T/err"'
+rm -rf "$(lockdir)"
+mkdir "$(lockdir)"; env true & dead=$!; wait "$dead" # a process id that is gone now
+printf '%s\n%s\n' "$dead" "$(date +%s)" >"$(lockdir)/owner"
+mk_run
+t "02/mkdir: owner pid gone -> stale lock broken, list installed, lock removed" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ] && [ ! -e "$(lockdir)" ]'
+newcap; serve 1 '"t1"'
+mkdir "$(lockdir)"; printf '%s\n%s\n' "$$" "$(( $(date +%s) - 500 ))" >"$(lockdir)/owner"
+mk_run
+t "02/mkdir: live pid but lock older than 120 s -> stale, broken, installed" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ] && [ ! -e "$(lockdir)" ]'
+newcap; serve 1 '"t1"'
+mkdir "$(lockdir)"
+mk_run
+t "02/mkdir: a lock with no owner file -> stale, broken, installed" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ] && [ ! -e "$(lockdir)" ]'
+newcap; serve 1 '"t1"'
+mkdir "$(lockdir)"; printf 'junk\nnonsense\n' >"$(lockdir)/owner"
+mk_run
+t "02/mkdir: a garbled owner file -> stale, broken, installed" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ] && [ ! -e "$(lockdir)" ]'
+# lock released on SIGTERM
+newcap; serve 1 '"t1"'; ctl file "$T/lists/L1.der" etag '"t1"' delay 3
+env PATH="$NOFLOCK_PATH" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >/dev/null 2>&1 & pk=$!
+sleep 1; held=0; [ -d "$(lockdir)" ] && held=1
+kill -TERM $pk; wait $pk 2>/dev/null; sleep 0.3
+t "02/mkdir: the lock is held while running and removed after SIGTERM" '[ $held -eq 1 ] && [ ! -e "$(lockdir)" ]'
+# flock: held lock -> exit 0
+newcap; serve 1 '"t1"'
+lf=$(statefile).lock
+( trap - EXIT; exec 8>"$lf"; flock -n 8 && sleep 3 ) & fl=$!; sleep 0.5
+env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+t "02/flock: lock held elsewhere -> exit 0, message, nothing installed" '[ $rc -eq 0 ] && [ ! -e "$(installed)" ] && grep -qi lock "$T/out" "$T/err"'
+wait $fl
+env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+t "02/flock: after the holder exits the run proceeds" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ]'
+
 echo "== $passes passed, $fails failed"
 exit $fails

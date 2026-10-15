@@ -39,12 +39,21 @@
 #     with a list it does not name); or
 #   - the server answers 304 with an ETag other than the one sent, or none.
 #
-# Exit 0: installed or unchanged. Exit 1: the list was refused or could not be
-# fetched; the installed list is untouched and the reason is on stderr. Alert on
-# a non-zero exit, and on a list in `capath` older than half its lifetime (the
-# guide says why).
+# One run at a time per URL: the whole run, from reading the state to writing it,
+# holds a lock on `<capath>/.fetch-crl.<key>.lock` (`flock` where it exists; else
+# a directory of that name plus `.d`, which a run breaks when its owner is gone
+# or it is older than 120 s, longer than any run lasts). A run that finds the lock
+# held says so, exits 0 and touches nothing: the run that holds it is doing the
+# same job, and two that overlapped could install the older of two lists and pair
+# it with the newer one's ETag (R110W5-02). The lock file stays in `capath`.
 #
-# Needs: sh, curl, openssl, sed, sort, tr, cut, head, tail, mktemp.
+# Exit 0: installed, unchanged, or another run holds the lock. Exit 1: the list
+# was refused or could not be fetched; the installed list is untouched and the
+# reason is on stderr. Alert on a non-zero exit, and on a list in `capath` older
+# than half its lifetime (the guide says why).
+#
+# Needs: sh, curl, openssl, sed, sort, tr, cut, head, tail, mktemp, date; `flock`
+# is used when it is there.
 
 set -eu
 LC_ALL=C
@@ -66,13 +75,75 @@ capath=$3
 [ -r "$ca_file" ] || fail "refusing to run: cannot read the CA certificate $ca_file"
 [ -d "$capath" ] && [ -w "$capath" ] || fail "refusing to run: $capath is not a writable directory"
 
+# The URL's key names the state and the lock.
+key=$(printf '%s' "$url" | openssl dgst -sha256 -r | cut -c1-16)
+state="$capath/.fetch-crl.$key"
+lock_file="$state.lock"
+lock_dir="$state.lock.d" # the lock where there is no flock
+lock_held=
+
 work=$(mktemp -d)
 stage=
 cleanup() {
 	rm -rf "$work"
 	[ -z "$stage" ] || rm -f "$stage"
+	# Take the directory lock down only if it is still ours: a run that outlived
+	# 120 s may have had it broken, and the lock is then someone else's.
+	if [ -n "$lock_held" ] && [ -f "$lock_dir/owner" ] && [ "$(head -n 1 "$lock_dir/owner")" = "$$" ]; then
+		rm -rf "$lock_dir"
+	fi
 }
 trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# ---- one run at a time ---------------------------------------------------------
+busy() {
+	echo "fetch-crl: another run holds the lock on $capath; nothing touched"
+	exit 0
+}
+
+# True when the directory lock's owner is gone, or it is older than 120 s, or it
+# says nothing sensible. A lock whose owner file is not there yet is given a
+# second: its owner writes it right after the mkdir.
+lock_is_stale() {
+	holder=
+	since=
+	for _ in 1 2; do
+		if [ -f "$lock_dir/owner" ]; then
+			{
+				IFS= read -r holder
+				IFS= read -r since
+			} <"$lock_dir/owner" || true
+		fi
+		[ -z "$holder" ] || break
+		sleep 1
+	done
+	case $holder in '' | *[!0-9]*) return 0 ;; esac
+	case $since in '' | *[!0-9]*) return 0 ;; esac
+	kill -0 "$holder" 2>/dev/null || return 0
+	[ $(($(date +%s) - since)) -gt 120 ]
+}
+
+if command -v flock >/dev/null 2>&1; then
+	{ : >>"$lock_file"; } 2>/dev/null || fail "refusing to run: cannot create the lock file $lock_file"
+	exec 9>"$lock_file"
+	flock -n 9 || busy
+else
+	tries=0
+	until mkdir "$lock_dir" 2>/dev/null; do
+		[ -d "$lock_dir" ] || fail "refusing to run: cannot create the lock directory $lock_dir"
+		lock_is_stale || busy
+		# Only one of several runs that find it stale can move it away.
+		if mv "$lock_dir" "$lock_dir.stale.$$" 2>/dev/null; then
+			rm -rf "$lock_dir.stale.$$"
+			echo "fetch-crl: broke a stale lock on $capath" >&2
+		fi
+		tries=$((tries + 1))
+		[ "$tries" -lt 5 ] || busy
+	done
+	lock_held=1
+	printf '%s\n%s\n' "$$" "$(date +%s)" >"$lock_dir/owner"
+fi
 
 # A CRL number as upper-case hex without leading zeros, for comparison; fails
 # when the list carries none.
@@ -143,8 +214,6 @@ request() {
 # The state: the ETag of the installed list, the file it was installed as and
 # the file's SHA-256. Anything missing, malformed or not matching the file on
 # disk means "no tag": the request is then unconditional.
-key=$(printf '%s' "$url" | openssl dgst -sha256 -r | cut -c1-16)
-state="$capath/.fetch-crl.$key"
 etag=
 installed=
 held_sha=

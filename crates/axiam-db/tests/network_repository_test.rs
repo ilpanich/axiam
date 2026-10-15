@@ -9,19 +9,20 @@
 //! conditional on the version read; another tenant's rows are invisible; and a
 //! profile's `Session-Timeout` is clamped to the tenant's *current* cap at read.
 
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::network::{
-    NetworkSegmentKind, NetworkSegmentUpdate, NewNetworkSegment, NewReplyProfile,
-    RESOURCE_TYPE_NETWORK_BRANCH, RESOURCE_TYPE_NETWORK_ROOT, RESOURCE_TYPE_NETWORK_SEGMENT,
-    RESOURCE_TYPE_NETWORK_SITE, ReplyProfileReplace, SetNetworkPolicy,
+    NetworkSegment, NetworkSegmentKind, NetworkSegmentUpdate, NetworkWriteClearance,
+    NetworkWriteTarget, NewNetworkSegment, NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH,
+    RESOURCE_TYPE_NETWORK_ROOT, RESOURCE_TYPE_NETWORK_SEGMENT, RESOURCE_TYPE_NETWORK_SITE,
+    ReplyProfile, ReplyProfileReplace, SetNetworkPolicy,
 };
 use axiam_core::models::radius_reply::{
     REPLY_DICTIONARY_V1, ReplyProfileInput, ServiceType, TerminationAction,
 };
 use axiam_core::models::resource::CreateResource;
 use axiam_core::repository::{
-    NetworkPolicyRepository, NetworkSegmentRepository, Pagination, ReplyProfileRepository,
-    ResourceRepository,
+    NetworkPolicyRepository, NetworkSegmentRepository, PaginatedResult, Pagination,
+    ReplyProfileRepository, ResourceRepository,
 };
 use axiam_db::repository::{
     SurrealNetworkPolicyRepository, SurrealNetworkSegmentRepository, SurrealReplyProfileRepository,
@@ -40,12 +41,121 @@ async fn setup() -> Surreal<Db> {
     db
 }
 
-fn segments(db: &Surreal<Db>) -> SurrealNetworkSegmentRepository<Db> {
-    SurrealNetworkSegmentRepository::new(db.clone())
+fn segments(db: &Surreal<Db>) -> Cleared<SurrealNetworkSegmentRepository<Db>> {
+    Cleared(SurrealNetworkSegmentRepository::new(db.clone()))
 }
 
-fn profiles(db: &Surreal<Db>) -> SurrealReplyProfileRepository<Db> {
-    SurrealReplyProfileRepository::new(db.clone())
+fn profiles(db: &Surreal<Db>) -> Cleared<SurrealReplyProfileRepository<Db>> {
+    Cleared(SurrealReplyProfileRepository::new(db.clone()))
+}
+
+/// The repositories as the authorization function's caller sees them.
+///
+/// Every write method takes the `NetworkWriteClearance` that
+/// `axiam_authz::network_gate` issues for exactly that write (W6.2). This file
+/// tests what the *data* decides, so it stands in for the function and mints
+/// the matching clearance itself; what the function decides is tested in
+/// `axiam-authz` and `axiam-api-rest`. `the_repository_refuses_a_clearance_for_another_write`
+/// below pins that a mismatched one writes nothing.
+struct Cleared<R>(R);
+
+fn cleared(tenant_id: Uuid, actor: Uuid, target: NetworkWriteTarget) -> NetworkWriteClearance {
+    NetworkWriteClearance::issued_by_the_network_gate(tenant_id, actor, target)
+}
+
+impl Cleared<SurrealNetworkSegmentRepository<Db>> {
+    async fn create(&self, input: NewNetworkSegment) -> AxiamResult<NetworkSegment> {
+        let c = cleared(
+            input.tenant_id,
+            input.actor,
+            NetworkWriteTarget::SegmentCreate {
+                path: input.path.clone(),
+            },
+        );
+        self.0.create(input, &c).await
+    }
+    async fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: NetworkSegmentUpdate,
+    ) -> AxiamResult<NetworkSegment> {
+        let c = cleared(
+            tenant_id,
+            update.actor,
+            NetworkWriteTarget::SegmentUpdate { segment_id: id },
+        );
+        self.0.update(tenant_id, id, update, &c).await
+    }
+    async fn delete(&self, tenant_id: Uuid, id: Uuid, expected_version: u64) -> AxiamResult<()> {
+        let c = cleared(
+            tenant_id,
+            Uuid::new_v4(),
+            NetworkWriteTarget::SegmentDelete { segment_id: id },
+        );
+        self.0.delete(tenant_id, id, expected_version, &c).await
+    }
+    async fn get(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<NetworkSegment> {
+        self.0.get(tenant_id, id).await
+    }
+    async fn get_by_path(&self, tenant_id: Uuid, path: &str) -> AxiamResult<NetworkSegment> {
+        self.0.get_by_path(tenant_id, path).await
+    }
+    async fn list_page(
+        &self,
+        tenant_id: Uuid,
+        site_key: Option<&str>,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<NetworkSegment>> {
+        self.0.list_page(tenant_id, site_key, pagination).await
+    }
+}
+
+impl Cleared<SurrealReplyProfileRepository<Db>> {
+    async fn create(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: NewReplyProfile,
+    ) -> AxiamResult<ReplyProfile> {
+        let c = cleared(
+            tenant_id,
+            input.actor,
+            NetworkWriteTarget::ProfileWrite { segment_id },
+        );
+        self.0.create(tenant_id, segment_id, input, &c).await
+    }
+    async fn replace(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: ReplyProfileReplace,
+    ) -> AxiamResult<ReplyProfile> {
+        let c = cleared(
+            tenant_id,
+            input.actor,
+            NetworkWriteTarget::ProfileWrite { segment_id },
+        );
+        self.0.replace(tenant_id, segment_id, input, &c).await
+    }
+    async fn delete(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        expected_version: u64,
+    ) -> AxiamResult<()> {
+        let c = cleared(
+            tenant_id,
+            Uuid::new_v4(),
+            NetworkWriteTarget::ProfileDelete { segment_id },
+        );
+        self.0
+            .delete(tenant_id, segment_id, expected_version, &c)
+            .await
+    }
+    async fn get_by_segment(&self, tenant_id: Uuid, segment_id: Uuid) -> AxiamResult<ReplyProfile> {
+        self.0.get_by_segment(tenant_id, segment_id).await
+    }
 }
 
 fn policies(db: &Surreal<Db>) -> SurrealNetworkPolicyRepository<Db> {
@@ -1081,4 +1191,71 @@ async fn a_profile_and_an_envelope_change_racing_never_leave_a_stranded_profile(
             "round {round}: at least one writer wins: {updated:?} / {created:?}"
         );
     }
+}
+
+/// The type-level half of the §5.1 enumeration (W6.2): a clearance the
+/// authorization function issued for one write does not carry another. Each
+/// mismatch is refused before the datastore is touched, and nothing is written.
+#[tokio::test]
+async fn the_repository_refuses_a_clearance_for_another_write() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let raw = SurrealNetworkSegmentRepository::new(db.clone());
+    let input = corp(tenant);
+
+    // Another path, another tenant, another actor, another kind of write.
+    for wrong in [
+        cleared(
+            tenant,
+            input.actor,
+            NetworkWriteTarget::SegmentCreate {
+                path: "/network/zones/hq/iot".into(),
+            },
+        ),
+        cleared(
+            Uuid::new_v4(),
+            input.actor,
+            NetworkWriteTarget::SegmentCreate {
+                path: input.path.clone(),
+            },
+        ),
+        cleared(
+            tenant,
+            Uuid::new_v4(),
+            NetworkWriteTarget::SegmentCreate {
+                path: input.path.clone(),
+            },
+        ),
+        cleared(
+            tenant,
+            input.actor,
+            NetworkWriteTarget::SegmentDelete {
+                segment_id: Uuid::new_v4(),
+            },
+        ),
+    ] {
+        let err = raw.create(input.clone(), &wrong).await.unwrap_err();
+        assert!(
+            matches!(err, AxiamError::AuthorizationDenied { .. }),
+            "{err:?}"
+        );
+    }
+    assert_eq!(resource_count(&db, tenant).await, 0, "nothing was written");
+
+    // The profile side: a clearance for the segment's delete does not write
+    // its profile.
+    let seg = segments(&db).create(corp(tenant)).await.unwrap();
+    let raw_profiles = SurrealReplyProfileRepository::new(db.clone());
+    let input = new_profile(seg.version, profile());
+    let wrong = cleared(
+        tenant,
+        input.actor,
+        NetworkWriteTarget::SegmentDelete { segment_id: seg.id },
+    );
+    let err = raw_profiles
+        .create(tenant, seg.id, input, &wrong)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AxiamError::AuthorizationDenied { .. }));
+    assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_err());
 }

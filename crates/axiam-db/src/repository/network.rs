@@ -49,9 +49,10 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::network::{
     NETWORK_ROOT_NAME, NetworkPolicy, NetworkSegment, NetworkSegmentKind, NetworkSegmentPath,
-    NetworkSegmentUpdate, NewNetworkSegment, NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH,
-    RESOURCE_TYPE_NETWORK_ROOT, RESOURCE_TYPE_NETWORK_SEGMENT, RESOURCE_TYPE_NETWORK_SITE,
-    ReplyProfile, ReplyProfileReplace, SetNetworkPolicy, validate_segment_fields,
+    NetworkSegmentUpdate, NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment,
+    NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH, RESOURCE_TYPE_NETWORK_ROOT,
+    RESOURCE_TYPE_NETWORK_SEGMENT, RESOURCE_TYPE_NETWORK_SITE, ReplyProfile, ReplyProfileReplace,
+    SetNetworkPolicy, reserved_node_id, validate_segment_fields,
 };
 use axiam_core::models::radius_reply::{
     DEFAULT_SESSION_TIMEOUT_MAX_SECS, ReplyProfileInput, SESSION_TIMEOUT_CAP_CEILING_SECS,
@@ -197,7 +198,9 @@ fn tx_outcome(errors: HashMap<usize, surrealdb::Error>, entity: &str) -> Result<
 /// The id of a reserved node: the same for the same tenant and path, so a race
 /// to make it is a race for one key.
 fn node_id(tenant_id: Uuid, path: &str) -> Uuid {
-    Uuid::new_v5(&tenant_id, path.as_bytes())
+    // One derivation, shared with the authorization function, which must name
+    // these nodes before they exist (`axiam_core::models::network`).
+    reserved_node_id(tenant_id, path)
 }
 
 fn to_u32(value: i64, what: &str) -> Result<u32, DbError> {
@@ -447,7 +450,20 @@ impl<C: Connection> SurrealNetworkSegmentRepository<C> {
 }
 
 impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository<C> {
-    async fn create(&self, input: NewNetworkSegment) -> AxiamResult<NetworkSegment> {
+    async fn create(
+        &self,
+        input: NewNetworkSegment,
+        clearance: &NetworkWriteClearance,
+    ) -> AxiamResult<NetworkSegment> {
+        // Cleared by the authorization function for exactly this write, or
+        // nothing happens (design note §5.1).
+        clearance.check(
+            input.tenant_id,
+            input.actor,
+            &NetworkWriteTarget::SegmentCreate {
+                path: input.path.clone(),
+            },
+        )?;
         // Everything the data decides, before the datastore is touched.
         let path = NetworkSegmentPath::parse(&input.path)?;
         if path.kind != input.kind {
@@ -551,7 +567,13 @@ impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository
         tenant_id: Uuid,
         id: Uuid,
         update: NetworkSegmentUpdate,
+        clearance: &NetworkWriteClearance,
     ) -> AxiamResult<NetworkSegment> {
+        clearance.check(
+            tenant_id,
+            update.actor,
+            &NetworkWriteTarget::SegmentUpdate { segment_id: id },
+        )?;
         // `NotFound` for a segment that is not this tenant's; the kind is the
         // stored one, because it does not change here.
         let stored = self.fetch(tenant_id, id).await?;
@@ -562,7 +584,19 @@ impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository
         self.fetch(tenant_id, id).await
     }
 
-    async fn delete(&self, tenant_id: Uuid, id: Uuid, expected_version: u64) -> AxiamResult<()> {
+    async fn delete(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        clearance: &NetworkWriteClearance,
+    ) -> AxiamResult<()> {
+        // A delete names no actor of its own: the clearance's is the writer.
+        clearance.check(
+            tenant_id,
+            clearance.actor(),
+            &NetworkWriteTarget::SegmentDelete { segment_id: id },
+        )?;
         self.fetch(tenant_id, id).await?;
         retry_on_write_conflict(|| self.delete_tx(tenant_id, id, expected_version))
             .await
@@ -900,7 +934,13 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
         tenant_id: Uuid,
         segment_id: Uuid,
         input: NewReplyProfile,
+        clearance: &NetworkWriteClearance,
     ) -> AxiamResult<ReplyProfile> {
+        clearance.check(
+            tenant_id,
+            input.actor,
+            &NetworkWriteTarget::ProfileWrite { segment_id },
+        )?;
         self.check_write(
             tenant_id,
             segment_id,
@@ -932,7 +972,13 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
         tenant_id: Uuid,
         segment_id: Uuid,
         input: ReplyProfileReplace,
+        clearance: &NetworkWriteClearance,
     ) -> AxiamResult<ReplyProfile> {
+        clearance.check(
+            tenant_id,
+            input.actor,
+            &NetworkWriteTarget::ProfileWrite { segment_id },
+        )?;
         // `NotFound` for a segment without a profile, before anything else.
         self.fetch_stored(tenant_id, segment_id).await?;
         self.check_write(
@@ -962,7 +1008,13 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
         tenant_id: Uuid,
         segment_id: Uuid,
         expected_version: u64,
+        clearance: &NetworkWriteClearance,
     ) -> AxiamResult<()> {
+        clearance.check(
+            tenant_id,
+            clearance.actor(),
+            &NetworkWriteTarget::ProfileDelete { segment_id },
+        )?;
         self.fetch_stored(tenant_id, segment_id).await?;
         retry_on_write_conflict(|| async {
             let mut result = self

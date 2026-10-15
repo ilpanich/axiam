@@ -12,7 +12,9 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedPrincipal;
+use crate::network_gate;
 use crate::state::AppState;
+use axiam_authz::network_gate::NetworkWrite;
 
 // -----------------------------------------------------------------------
 // Request types
@@ -83,6 +85,17 @@ pub async fn create<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    // §4.2: the `network:` namespace is reserved, so a tenant cannot mint a
+    // look-alike of the nine.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PermissionCreate {
+            action: &req.action,
+        },
+    )
+    .await?;
     let input = CreatePermission {
         tenant_id: principal.tenant_id,
         action: req.action,
@@ -171,13 +184,27 @@ pub async fn update<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    let permission_id = path.into_inner();
+    // No rename into or out of the reserved namespace, and no change to one of
+    // its permissions: renaming `network:join` would release every
+    // quarantine at once.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PermissionUpdate {
+            permission_id,
+            action: req.action.as_deref(),
+        },
+    )
+    .await?;
     let input = UpdatePermission {
         action: req.action,
         description: req.description,
     };
     let permission = state
         .permission_repo
-        .update(principal.tenant_id, path.into_inner(), input)
+        .update(principal.tenant_id, permission_id, input)
         .await?;
     // D7 (REVOCATION — security critical): changing a permission's `action`
     // narrows access (a subject allowed for the old action is now denied).
@@ -211,9 +238,19 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("permissions:delete", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
         .await?;
+    let permission_id = path.into_inner();
+    // The reserved catalogue is not deleted: dropping `network:join` would
+    // drop every quarantine deny with it.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PermissionDelete { permission_id },
+    )
+    .await?;
     state
         .permission_repo
-        .delete(principal.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, permission_id)
         .await?;
     // D7 (REVOCATION — security critical): deleting a permission removes it
     // from every role/subject that was granted it. Flush the tenant.
@@ -252,11 +289,27 @@ pub async fn grant_to_role<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    let role_id = path.into_inner();
+    // §5.3 / §4.2: a `network:` grant changes every assignment of the role at
+    // once, so it takes `network:grant` at /network (and every meta permission
+    // it confers), and never lands on a global or group-held role.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PermissionGrant {
+            role_id,
+            permission_id: req.permission_id,
+            effect: req.effect,
+            scope_ids: &req.scope_ids,
+        },
+    )
+    .await?;
     state
         .permission_repo
         .grant_to_role_with_effect(
             principal.tenant_id,
-            path.into_inner(),
+            role_id,
             req.permission_id,
             req.scope_ids,
             req.effect,
@@ -437,6 +490,18 @@ pub async fn revoke_from_role<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
+    // §5.3: revoking a `network:` grant of either effect (a deny's revoke
+    // releases a quarantine) takes `network:grant` at /network.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PermissionRevoke {
+            role_id: p.role_id,
+            permission_id: p.permission_id,
+        },
+    )
+    .await?;
     state
         .permission_repo
         .revoke_from_role(principal.tenant_id, p.role_id, p.permission_id)

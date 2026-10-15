@@ -4282,7 +4282,11 @@ pub trait ScimTargetStateRepository: Send + Sync {
 /// The repository decides only what the data decides: a path outside
 /// `/network`, a kind that disagrees with its branch, a VLAN or a name outside
 /// its bounds, a VLAN or rank already taken at the site. Who may write is the
-/// authorization function's (design note §5.2).
+/// authorization function's (design note §5.2), and every write method of this
+/// trait and of [`ReplyProfileRepository`] takes the
+/// [`crate::models::network::NetworkWriteClearance`] that function issues for
+/// exactly that write: one issued for another tenant, actor or target is
+/// `AuthorizationDenied` and nothing is written.
 pub trait NetworkSegmentRepository: Send + Sync {
     /// Create a segment at `input.path`, making the `/network`, branch and site
     /// nodes on first use, in one transaction.
@@ -4293,6 +4297,7 @@ pub trait NetworkSegmentRepository: Send + Sync {
     fn create(
         &self,
         input: crate::models::network::NewNetworkSegment,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
 
     /// One segment. `NotFound` when it does not exist in this tenant.
@@ -4331,6 +4336,7 @@ pub trait NetworkSegmentRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
         update: crate::models::network::NetworkSegmentUpdate,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
 
     /// Remove a segment **and its profile and its resource node**, in one
@@ -4341,6 +4347,7 @@ pub trait NetworkSegmentRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
         expected_version: u64,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
@@ -4364,6 +4371,7 @@ pub trait ReplyProfileRepository: Send + Sync {
         tenant_id: Uuid,
         segment_id: Uuid,
         input: crate::models::network::NewReplyProfile,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
 
     /// The segment's effective profile. `NotFound` when the segment has none
@@ -4382,6 +4390,7 @@ pub trait ReplyProfileRepository: Send + Sync {
         tenant_id: Uuid,
         segment_id: Uuid,
         input: crate::models::network::ReplyProfileReplace,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
 
     /// Delete the segment's profile (no profile means no candidate, which only
@@ -4391,6 +4400,7 @@ pub trait ReplyProfileRepository: Send + Sync {
         tenant_id: Uuid,
         segment_id: Uuid,
         expected_version: u64,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 

@@ -434,9 +434,351 @@ impl SetNetworkPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The reserved nodes' ids
+// ---------------------------------------------------------------------------
+
+/// The path of the reserved root.
+pub const NETWORK_ROOT_PATH: &str = "/network";
+
+/// The id of a reserved node of the `/network` subtree: a v5 UUID of the tenant
+/// and the node's path.
+///
+/// Deterministic so that two first writers race for one key (the repository's
+/// reason) and so that the authorization function can name `/network`, a
+/// branch or a site **before it exists**: a role assigned tenant-wide is a
+/// grant at `/network` (design note §5.3), and a segment's first writer must be
+/// checked at the site it is about to create.
+#[must_use]
+pub fn reserved_node_id(tenant_id: Uuid, path: &str) -> Uuid {
+    Uuid::new_v5(&tenant_id, path.as_bytes())
+}
+
+/// The id of the tenant's `/network` root.
+#[must_use]
+pub fn network_root_id(tenant_id: Uuid) -> Uuid {
+    reserved_node_id(tenant_id, NETWORK_ROOT_PATH)
+}
+
+/// The id of the branch that holds segments of `kind`.
+#[must_use]
+pub fn branch_node_id(tenant_id: Uuid, kind: NetworkSegmentKind) -> Uuid {
+    reserved_node_id(tenant_id, &format!("{NETWORK_ROOT_PATH}/{}", kind.branch()))
+}
+
+/// The id of the site `site_key` under the branch of `kind`.
+#[must_use]
+pub fn site_node_id(tenant_id: Uuid, kind: NetworkSegmentKind, site_key: &str) -> Uuid {
+    reserved_node_id(
+        tenant_id,
+        &format!("{NETWORK_ROOT_PATH}/{}/{site_key}", kind.branch()),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The reserved permission namespace (design note §4.2)
+// ---------------------------------------------------------------------------
+
+/// The reserved permission namespace. `permissions:create` and
+/// `permissions:update` refuse an action in it, so a tenant cannot mint a
+/// look-alike or rename one of the nine.
+pub const NETWORK_PERMISSION_PREFIX: &str = "network:";
+/// May be placed on a segment. Held by a device's service account.
+pub const NETWORK_JOIN: &str = "network:join";
+/// Administrative login to a segment's NAS devices. Defined, not grantable
+/// under option B.
+pub const NETWORK_ADMIN: &str = "network:admin";
+/// Read segments and profiles.
+pub const NETWORK_READ: &str = "network:read";
+/// Write the tree and each segment's envelope.
+pub const NETWORK_SEGMENTS_WRITE: &str = "network:segments_write";
+/// Write a segment's reply profile.
+pub const NETWORK_PROFILES_WRITE: &str = "network:profiles_write";
+/// Confer `network:join` at a node.
+pub const NETWORK_GRANT: &str = "network:grant";
+/// Confer the administrative class. Option A only.
+pub const NETWORK_GRANT_ADMIN: &str = "network:grant_admin";
+/// Ask for placement decisions for a site (D4's caller).
+pub const NETWORK_DECIDE: &str = "network:decide";
+/// Read the rendered export for a site.
+pub const NETWORK_EXPORT: &str = "network:export";
+
+/// The meta permissions of design note §5.3: assigning a role that carries one
+/// of these at a node needs the assigner to hold it there ("you delegate only
+/// what you hold").
+pub const NETWORK_META_ACTIONS: &[&str] = &[
+    NETWORK_GRANT,
+    NETWORK_PROFILES_WRITE,
+    NETWORK_SEGMENTS_WRITE,
+    NETWORK_DECIDE,
+    NETWORK_EXPORT,
+];
+
+/// The administrative class (§3.3, H4): defined so that option A inherits the
+/// rule, and not grantable as an allow under option B.
+pub const NETWORK_ADMIN_CLASS_ACTIONS: &[&str] = &[NETWORK_ADMIN, NETWORK_GRANT_ADMIN];
+
+/// The `network:*` actions the seeded **super-admin** role holds: the meta
+/// permissions and `network:read`, never `network:join` or the administrative
+/// class.
+///
+/// # Why the bootstrap role is exempt from §4.2 rule 1, and only this far
+///
+/// Rule 1 forbids a network-sensitive role to be global. The seeded
+/// super-admin is global, and it is the **one** role that must be: with the
+/// §5.3 bound in force a network administrator can only be made by someone who
+/// already holds `network:grant` (and every meta permission conferred) at the
+/// node, so a tenant whose bootstrap role held none of them could never
+/// administer its network at all. The exemption is narrow:
+///
+/// * it carries no `network:join`, so no device lands on every segment by
+///   holding the super-admin role, which is what rule 1's "global defeats
+///   segment scoping" is about;
+/// * it carries neither `network:admin` nor `network:grant_admin`, which are
+///   not grantable under option B;
+/// * it does **not** bypass §5.3: assigning the super-admin role is a
+///   tenant-wide assignment of a role carrying meta permissions, so the
+///   assigner must hold every one of them at `/network`;
+/// * it is made only by the seeder (`seed_default_roles`, and
+///   `reconcile_default_role_grants` on boot). The API refuses a `network:`
+///   grant to any global role, this one included.
+///
+/// The seeded `admin` and `viewer` roles hold no `network:` permission.
+pub const SEEDED_SUPER_ADMIN_NETWORK_ACTIONS: &[&str] = &[
+    NETWORK_READ,
+    NETWORK_SEGMENTS_WRITE,
+    NETWORK_PROFILES_WRITE,
+    NETWORK_GRANT,
+    NETWORK_DECIDE,
+    NETWORK_EXPORT,
+];
+
+/// Whether `action` is in the reserved `network:` namespace.
+///
+/// Case-insensitive and blind to surrounding whitespace, so that a look-alike
+/// (`Network:join`, ` network:grant`) counts as reserved: the engine matches
+/// actions exactly and such a permission would grant nothing, but it would
+/// read as one of the nine in every listing an administrator looks at.
+#[must_use]
+pub fn is_network_action(action: &str) -> bool {
+    action
+        .trim_start()
+        .get(..NETWORK_PERMISSION_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(NETWORK_PERMISSION_PREFIX))
+}
+
+// ---------------------------------------------------------------------------
+// The write clearance (design note §5.1)
+// ---------------------------------------------------------------------------
+
+/// Which segment or profile write a [`NetworkWriteClearance`] was issued for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkWriteTarget {
+    /// Create the segment at this path.
+    SegmentCreate {
+        /// The path of the segment to create.
+        path: String,
+    },
+    /// Rewrite this segment's envelope.
+    SegmentUpdate {
+        /// The segment.
+        segment_id: Uuid,
+    },
+    /// Delete this segment.
+    SegmentDelete {
+        /// The segment.
+        segment_id: Uuid,
+    },
+    /// Create or replace this segment's reply profile.
+    ProfileWrite {
+        /// The owning segment.
+        segment_id: Uuid,
+    },
+    /// Delete this segment's reply profile.
+    ProfileDelete {
+        /// The owning segment.
+        segment_id: Uuid,
+    },
+}
+
+/// Proof that the authorization function of design note §5.1 cleared one
+/// segment or profile write.
+///
+/// Every write method of [`crate::repository::NetworkSegmentRepository`] and
+/// [`crate::repository::ReplyProfileRepository`] takes one, and refuses a
+/// clearance issued for another tenant, another actor or another write. That
+/// makes "a write reaches the repository without the function" a **compile
+/// error** rather than a review finding (the T-429 lesson).
+///
+/// The constructor is public because the function lives in `axiam-authz`,
+/// which this crate cannot name; it is hidden from the documentation and its
+/// call sites are pinned by `network_gate_enumeration_test` in `axiam-api-rest`
+/// to the function's own module and to tests. The type is neither `Clone` nor
+/// `Default`, so a clearance cannot be copied into a second write.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NetworkWriteClearance {
+    tenant_id: Uuid,
+    actor: Uuid,
+    target: NetworkWriteTarget,
+}
+
+impl NetworkWriteClearance {
+    /// Mint a clearance. **Only** `axiam_authz::network_gate` calls this in
+    /// production code; anything else is caught by the enumeration test.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn issued_by_the_network_gate(
+        tenant_id: Uuid,
+        actor: Uuid,
+        target: NetworkWriteTarget,
+    ) -> Self {
+        Self {
+            tenant_id,
+            actor,
+            target,
+        }
+    }
+
+    /// The tenant the write was cleared in.
+    #[must_use]
+    pub fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+
+    /// The writer the write was cleared for.
+    #[must_use]
+    pub fn actor(&self) -> Uuid {
+        self.actor
+    }
+
+    /// The write that was cleared.
+    #[must_use]
+    pub fn target(&self) -> &NetworkWriteTarget {
+        &self.target
+    }
+
+    /// Refuse unless this clearance is for exactly this write, in this tenant,
+    /// by this actor. A mismatch is a programming error in the caller, so it is
+    /// reported as `AuthorizationDenied` and the write does not happen.
+    pub fn check(
+        &self,
+        tenant_id: Uuid,
+        actor: Uuid,
+        target: &NetworkWriteTarget,
+    ) -> AxiamResult<()> {
+        if self.tenant_id == tenant_id && self.actor == actor && &self.target == target {
+            Ok(())
+        } else {
+            Err(AxiamError::AuthorizationDenied {
+                reason: "the network write was not cleared by the authorization function \
+                         for this tenant, actor and target"
+                    .into(),
+                action: None,
+                resource_id: None,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_node_ids_are_per_tenant_and_per_path() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        assert_eq!(network_root_id(a), reserved_node_id(a, "/network"));
+        assert_ne!(network_root_id(a), network_root_id(b));
+        assert_eq!(
+            branch_node_id(a, NetworkSegmentKind::Quarantine),
+            reserved_node_id(a, "/network/quarantine")
+        );
+        assert_eq!(
+            site_node_id(a, NetworkSegmentKind::Access, "hq"),
+            reserved_node_id(a, "/network/zones/hq")
+        );
+        assert_ne!(
+            site_node_id(a, NetworkSegmentKind::Access, "hq"),
+            site_node_id(a, NetworkSegmentKind::Quarantine, "hq")
+        );
+    }
+
+    #[test]
+    fn the_reserved_namespace_catches_look_alikes() {
+        for reserved in [
+            "network:join",
+            "Network:join",
+            "NETWORK:grant",
+            "  network:anything",
+            "network:",
+        ] {
+            assert!(is_network_action(reserved), "{reserved}");
+        }
+        for free in ["networks:join", "net:join", "users:list", "", "network"] {
+            assert!(!is_network_action(free), "{free}");
+        }
+    }
+
+    #[test]
+    fn the_seeded_super_admin_holds_no_join_and_no_admin_class() {
+        assert!(!SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&NETWORK_JOIN));
+        for a in NETWORK_ADMIN_CLASS_ACTIONS {
+            assert!(!SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(a));
+        }
+        for meta in NETWORK_META_ACTIONS {
+            assert!(SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(meta), "{meta}");
+        }
+    }
+
+    #[test]
+    fn a_clearance_covers_one_write_only() {
+        let t = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let seg = Uuid::new_v4();
+        let c = NetworkWriteClearance::issued_by_the_network_gate(
+            t,
+            actor,
+            NetworkWriteTarget::ProfileWrite { segment_id: seg },
+        );
+        assert!(
+            c.check(
+                t,
+                actor,
+                &NetworkWriteTarget::ProfileWrite { segment_id: seg }
+            )
+            .is_ok()
+        );
+        for (tenant, who, target) in [
+            (
+                Uuid::new_v4(),
+                actor,
+                NetworkWriteTarget::ProfileWrite { segment_id: seg },
+            ),
+            (
+                t,
+                Uuid::new_v4(),
+                NetworkWriteTarget::ProfileWrite { segment_id: seg },
+            ),
+            (
+                t,
+                actor,
+                NetworkWriteTarget::ProfileDelete { segment_id: seg },
+            ),
+            (
+                t,
+                actor,
+                NetworkWriteTarget::ProfileWrite {
+                    segment_id: Uuid::new_v4(),
+                },
+            ),
+        ] {
+            assert!(matches!(
+                c.check(tenant, who, &target),
+                Err(AxiamError::AuthorizationDenied { .. })
+            ));
+        }
+    }
 
     #[test]
     fn a_segment_path_has_exactly_the_reserved_shape() {

@@ -596,6 +596,21 @@ pub async fn bind<C: Connection + Clone>(
         .get_by_id(principal.tenant_id, sa_id)
         .await?;
 
+    // §5.3 (correction R101W6-03) and H6: placement is the pair (the
+    // account's joins, the binding), so binding to an account that holds a
+    // `network:join` allow needs `network:grant` at every such node; and no
+    // service account binds a certificate to itself.
+    let _cleared = crate::network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        axiam_authz::network_gate::NetworkWrite::CertificateBind {
+            certificate_id: cert.id,
+            service_account_id: sa_id,
+        },
+    )
+    .await?;
+
     state
         .pki
         .cert_repo

@@ -543,6 +543,36 @@ re-vendor (W7), as expected.
 
 ### 13.2 W2
 
+**Head `3652db6d6`** on `claude/release-1.1.0-w2` (from `3d011573e`), 2026-10-15:
+four task commits, one fix of W2.1, the F4 review and one in-wave fix, all
+signed; the SAML-off `cargo check` before every commit. **Gap found and closed
+in this wave:** the executors' gate ran without CI's `RUSTFLAGS=-Dwarnings`
+(`ci.yml:14`), so W2.1 left an unused binding that only warns locally and
+fails CI's "Build (SAML off)" job; from W2.4 on every executor builds with
+`RUSTFLAGS=-Dwarnings`. W1 was gated without it; W8.1 runs with it (and the
+plan-branch merge checks it first).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W2.1 #654 | `cad058673` | Sonnet | `CryptoGate` (`axiam-federation/src/saml_gate.rs`) bounds every SAML acquire by `hash_acquire_timeout_secs`; `with_crypto_semaphore` replaced by `with_crypto_gate` so no composition can pass an unbounded semaphore. Busy ACS → the same `401` and body as a bad signature; metadata → its failure; IdP SSO/SLO receiver → `503` + `Retry-After: 5`, no state written. The IdP's own signing (authenticated) left unbounded. *Tree:* T-477, not named by the plan, was the entry stating the unbounded wait (amended with T-102, T-474). |
+| W2.2 #632 | `b1ddc8947` | Sonnet | `federation_link_oidc_callback`, `federation_link_saml_acs`; `rate_limit_bucket_names_test.rs` (source scan of `crates/*/src`, allow-list with exact counts). *Tree:* `login` is registered once (its second spelling is a doc example), so two intentional shared names (`directory_config` ×3, `uma_rreg` ×2), not the three the 1.0.1 combined review §6 names. |
+| W2.3 #633 | `ff8ca52a0` | Opus | **D-3: the principal `(tenant, sub)` alone** — `(address, sub)` leaves one token from many addresses unbounded. A `cnf` token is keyed `(address, tenant, sub)` (its proof is checked after the limiter). The key comes from the audit middleware's cached verified identity, so no extra verification; no identity → address. `RateLimitKeyMode::Principal` cannot be set from `AXIAM__RATE_LIMIT__KEY`. *Tree:* `authz.rs:215-245` checks only that a credential is present, so the limiter runs before verification and the reused verification is the audit middleware's (`axiam-audit/src/middleware.rs:612-664`, wired `boot.rs:3069`). |
+| fix | `fea3b64d6` | Sonnet | W2.1's `hash_acquire_timeout_secs` binding gated `#[cfg(feature = "saml")]`; SAML-off `check` and `--tests` exit 0 under `-Dwarnings`. |
+| W2.4 #634 | `c7ec9a1c2` | Sonnet | Both `saml_idp/sign.rs` self-checks parse with `receiver_parser_options()`; a source-scan test pins both calls (a refused self-check reads the same either way, so the call is what is pinned). |
+| W2.5 | `3d2489dc8` | Opus | `claude_dev/security-review-release-1.1.0-w2-2026-10-15.md`: nothing Medium or higher; R110W2-01, -02 Low; -03 … -06 Informational. |
+| fix | `3652db6d6` | Sonnet | **R110W2-01** (Low, fixed in-wave because the wave closes #633 on it): the five authenticated federation flow routes keep an outermost per-address backstop at `end_session_per_min × 10` (`FEDERATION_FLOW_BACKSTOP_FACTOR`, the CIBA list's pattern, in-process per replica); four tests, mutation-checked; T-474 and the two deployment rows. |
+
+Filed on the next patch milestone (`1.1.x`, named in each body):
+ilpanich/axiam#670 (R110W2-02, Low — `DPoP`-scheme requests not attributed by
+the audit middleware), #671 (R110W2-03 — ten authenticated waiters on the
+crypto semaphore still unbounded; the Redirect-binding query check stays
+ungated by decision), #672 (R110W2-04 — the bucket-name scan's blind spots),
+#673 (R110W2-05 — in-process governors never swept), #674 (R110W2-06 — text
+and the unpinned audit-before-limiter order; its (h), the website copy, is
+W8.3's). For **W8.4**: the CHANGELOG's #614 entry (`~301-302`) names the old
+buckets; for **W6**: its new `network_*` buckets must pass
+`rate_limit_bucket_names_test.rs` after the merge.
+
 ### 13.3 W3
 
 ### 13.4 W4

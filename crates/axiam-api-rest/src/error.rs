@@ -42,6 +42,22 @@ struct ErrorBody {
     resource_id: Option<String>,
 }
 
+/// A `422 Unprocessable Entity` in the crate's error shape (`{error, message}`).
+///
+/// [`AxiamError`] has no variant that maps to 422 for a well-formed request the
+/// server declines on a policy it can name (`Validation` is the `400` of a
+/// malformed one, and `PasswordPolicy` is specific to passwords), so a handler
+/// that needs the distinction builds the response here. `error` is the stable
+/// slug a client switches on; `message` is shown to the caller verbatim.
+pub fn unprocessable_entity(error: &str, message: String) -> HttpResponse {
+    HttpResponse::UnprocessableEntity().json(ErrorBody {
+        error: error.into(),
+        message,
+        action: None,
+        resource_id: None,
+    })
+}
+
 impl actix_web::ResponseError for AxiamApiError {
     fn status_code(&self) -> StatusCode {
         match &self.0 {

@@ -928,6 +928,64 @@ async fn a_tombstoned_tenants_device_client_is_refused_at_both_endpoints() {
     assert!(body.get("access_token").is_none(), "{body}");
 }
 
+/// #641 (W3.7, c): tombstoning a tenant deletes its `device_grant` rows in the
+/// deletion's own transaction, as it does its CIBA requests, rather than
+/// leaving them to the purge: an approved grant is a bearer for an access
+/// token, and a user code is the tenant's own. Another tenant's grant stays.
+#[actix_web::test]
+async fn tombstoning_a_tenant_deletes_its_device_grants_and_no_other_tenants() {
+    let f = setup().await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    seed_grant_with_interval(&f, DeviceGrantStatus::Pending, 600, 5).await;
+    let bystander = Uuid::new_v4();
+    SurrealDeviceGrantRepository::new(f.db.clone())
+        .create(CreateDeviceGrant {
+            tenant_id: bystander,
+            client_id: f.client_id.clone(),
+            device_code_hash: hash_device_code("a-bystanders-device-code"),
+            user_code: normalize_user_code(&generate_user_code()),
+            scopes: vec!["openid".into()],
+            expires_at: Utc::now() + Duration::seconds(600),
+            interval_secs: 5,
+            resource: None,
+        })
+        .await
+        .unwrap();
+    let rows = |tenant: Uuid| {
+        let db = f.db.clone();
+        async move {
+            let mut r = db
+                .query(
+                    "SELECT count() AS total FROM device_grant \
+                     WHERE tenant_id = $tenant GROUP ALL",
+                )
+                .bind(("tenant", tenant.to_string()))
+                .await
+                .unwrap();
+            let r: Vec<axiam_db::CountRow> = r.take(0).unwrap();
+            r.first().map_or(0, |r| r.total)
+        }
+    };
+    assert_eq!(rows(f.tenant_id).await, 2);
+
+    SurrealTenantRepository::new(f.db.clone())
+        .delete(f.tenant_id)
+        .await
+        .unwrap();
+
+    // Before any purge: the row is gone, so there is no grant left to redeem
+    // and no user code left to approve, whatever the tenant read does.
+    assert_eq!(rows(f.tenant_id).await, 0, "the tombstoned tenant's grants");
+    assert_eq!(rows(bystander).await, 1, "another tenant's grant");
+    let app = test_app!(f);
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+}
+
 /// A public client that presents a credential is refused, at the start and at
 /// the poll, as at every other endpoint (T21.2): its registration names none
 /// to check it against.

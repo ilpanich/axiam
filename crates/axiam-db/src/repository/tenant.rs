@@ -608,8 +608,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         //   and single-logout state (T23.2.1–T23.2.4: a sealed private key, the
         //   `NameID` each SP was given), its SSF streams, step-up records and
         //   buffered events (T23.5.2: a sealed receiver credential, subjects'
-        //   addresses), its CIBA requests, and its SCIM targets with their links
-        //   and delivery state.
+        //   addresses), its CIBA requests and device grants (#641: an approved
+        //   grant is a bearer for an access token, and a user code is the
+        //   tenant's own), and its SCIM targets with their links and delivery
+        //   state.
         //
         // * R1W1-01: its certificates and signing CAs are revoked. The handler
         //   revoked them once already, through the services that forward a
@@ -641,6 +643,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE ssf_event_buffer WHERE tenant_id = $id; \
                  DELETE ssf_step_up WHERE tenant_id = $id; \
                  DELETE ciba_request WHERE tenant_id = $id; \
+                 DELETE device_grant WHERE tenant_id = $id; \
                  DELETE ssf_stream WHERE tenant_id = $id; \
                  DELETE scim_target_link WHERE tenant_id = $id; \
                  DELETE scim_target_state WHERE tenant_id = $id; \

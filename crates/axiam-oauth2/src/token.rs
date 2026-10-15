@@ -1628,6 +1628,19 @@ where
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 
+        // #641 (W3.7, T-472): the account row survives a tenant tombstone until
+        // the purge, so a verified secret proves nothing about the tenant. It
+        // is read here — after the secret and the status, as the client path
+        // reads it after its credential (R1W1-03), so a tombstoned tenant costs
+        // exactly the one verify every other refusal costs and no answer or
+        // cost tells it from a wrong secret — and before the scope check, so
+        // that check is not an oracle for a tenant that is gone. `live_tenant`
+        // answers the same `invalid_client`; the earlier `invalid_request`
+        // ("unknown tenant") was distinguishable from every other refusal.
+        let t_tenant_lookup = std::time::Instant::now();
+        let tenant = self.live_tenant(tenant_id).await?;
+        let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
+
         if let Some(scope) = requested_scope.filter(|s| !s.trim().is_empty()) {
             return Err(OAuth2Error::InvalidScope(format!(
                 "unregistered scopes: {} — a service account registers no scopes; \
@@ -1635,17 +1648,6 @@ where
                 scope.split_whitespace().collect::<Vec<_>>().join(", ")
             )));
         }
-
-        let t_tenant_lookup = std::time::Instant::now();
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => OAuth2Error::InvalidRequest("unknown tenant".into()),
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-        let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
         let t_token_mint = std::time::Instant::now();
         // X1 — the fourth issuance path, hooked like the other three.

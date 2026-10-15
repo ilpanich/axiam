@@ -2139,58 +2139,9 @@ async fn token_inner<C: Connection + Clone>(
     let attempted_client_id = form.client_id.clone();
     let started = std::time::Instant::now();
 
-    // B2 / RFC 8628 §3.4: the device-code grant is served by its own service.
-    // Dispatching here, before `TokenService::exchange`, is the single `match`
-    // arm the device flow costs the rest of the codebase — `TokenService`
-    // never learns that this grant exists.
-    //
-    // Note what is deliberately NOT done: no client authentication. RFC 8628
-    // targets public clients (a television cannot keep a secret), so the
-    // device presents only its `device_code`, which is a 256-bit CSPRNG value
-    // stored as a hash. The device code IS the credential.
-    if grant_type == DEVICE_CODE_GRANT_TYPE {
-        let device_code = match form.device_code.as_deref() {
-            Some(code) if !code.is_empty() => code.to_owned(),
-            _ => {
-                return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
-                    "device_code is required for the device_code grant".into(),
-                ));
-            }
-        };
-        return match state
-            .oauth2
-            .device_authorization_service
-            .poll_at(
-                tenant_id,
-                &device_code,
-                form.resource.as_deref(),
-                // T21.6. The device-code grant runs above the point where a
-                // `TokenRequestContext` is built (RFC 8628 performs no client
-                // authentication), so the binding is read directly here.
-                crate::middleware::tenant_path::binding_of(&req)
-                    .map(|binding| binding.issuer().to_owned())
-                    .as_deref(),
-            )
-            .await
-        {
-            Ok(resp) => HttpResponse::Ok()
-                .append_header(("Cache-Control", "no-store"))
-                .append_header(("Pragma", "no-cache"))
-                .json(resp),
-            // `authorization_pending` and `slow_down` are the NORMAL answers
-            // here — a device polls for as long as the user takes to walk to
-            // another screen — so they are not logged as failures. Treating
-            // the expected path as an error condition would bury the real
-            // ones under it.
-            Err(e) => build_oauth2_error_response(&e),
-        };
-    }
-
     // T21.5 — before client authentication, for the reason the authorize
     // endpoint calls it before the client lookup: what follows must act on an
-    // ordinary row. Placed after the device-code branch because RFC 8628's
-    // grant authenticates no client at all and carries no `client_id` worth
-    // resolving.
+    // ordinary row. Every grant, the device-code grant included since #635.
     if let Some(client_id) = form.client_id.as_deref() {
         crate::cimd::materialise_if_cimd(&state, &req, tenant_id, client_id).await;
     }
@@ -2204,10 +2155,12 @@ async fn token_inner<C: Connection + Clone>(
     // one, and a `fapi2` client could obtain an unconstrained token from a
     // grant `fapi::enforce_token_request` never saw.
     //
-    // The device-code grant stays above this line deliberately: RFC 8628
-    // performs no client authentication at all, so there is no registration
-    // in hand for the profile gate to enforce and no party for a proof to
-    // bind to.
+    // #635 (R101W3-01): the device-code grant used to be dispatched above this
+    // line, on the reading that RFC 8628 authenticates no client. That holds
+    // for a public client only, and it left a confidential, sender-constrained
+    // or `fapi2` client's device grant redeemable by anyone holding the device
+    // code, as an unbound bearer token. It is now dispatched below, with the
+    // CIBA grant, and authenticates its client like every other grant.
     let ctx = match token_request_context(&req) {
         Ok(ctx) => ctx.with_assertion_from(&form),
         Err(response) => return *response,
@@ -2267,9 +2220,9 @@ async fn token_inner<C: Connection + Clone>(
     }
 
     // B3 / RFC 8693. Like the device grant, its own service behind one match
-    // arm. Unlike the device grant, the exchanging client DOES authenticate —
-    // it is a confidential service, not a television, and an exchange is
-    // precisely the operation that should be attributable.
+    // arm. The exchanging client must be confidential — it is a service, not
+    // a television, and an exchange is precisely the operation that should be
+    // attributable.
     if grant_type == TOKEN_EXCHANGE_GRANT_TYPE {
         // SEC-093: the transport context travels with the grant, so a client
         // registered for `tls_client_auth` / `private_key_jwt` is
@@ -2311,6 +2264,13 @@ async fn token_inner<C: Connection + Clone>(
             .token_service
             .exchange_ciba(tenant_id, form, &ctx, state.oauth2.ciba_service.requests())
             .await
+    } else if grant_type == DEVICE_CODE_GRANT_TYPE {
+        // B2 / RFC 8628 §3.4, behind the same limiters and the same
+        // client-authentication audit as the CIBA grant (#635). The normal
+        // answers of a device's poll — `authorization_pending`, `slow_down` —
+        // are errors on the wire and reach `build_oauth2_error_response`
+        // below without being logged or audited as failures.
+        poll_device_grant(&state, tenant_id, form, &ctx).await
     } else {
         state
             .oauth2
@@ -2391,6 +2351,48 @@ async fn token_inner<C: Connection + Clone>(
             build_oauth2_error_response(&e)
         }
     }
+}
+
+/// The device-code grant at the token endpoint (B2, RFC 8628 §3.4; #635).
+///
+/// Three steps, in an order that keeps the grant out of reach of anybody but
+/// its client: the `device_code` must be present (decidable from the request
+/// alone); the client authenticates — by its registered method, with the
+/// profile's request-time rules and the token binding decided
+/// (`TokenService::authenticate_device_poll`) — **before the grant is read**;
+/// and only then is the grant polled, which refuses one issued to another
+/// client as an unknown code. A caller holding only a leaked device code
+/// therefore neither spends it nor learns its state.
+async fn poll_device_grant<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    form: TokenRequest,
+    ctx: &TokenRequestContext,
+) -> Result<TokenResponse, OAuth2Error> {
+    let device_code = form
+        .device_code
+        .as_deref()
+        .filter(|code| !code.is_empty())
+        .ok_or_else(|| {
+            OAuth2Error::InvalidRequest("device_code is required for the device_code grant".into())
+        })?;
+    let client = state
+        .oauth2
+        .token_service
+        .authenticate_device_poll(tenant_id, &form, ctx)
+        .await?;
+    state
+        .oauth2
+        .device_authorization_service
+        .poll_at(
+            tenant_id,
+            &client,
+            device_code,
+            form.resource.as_deref(),
+            // T21.6 — the issuer the request arrived under, from the path.
+            ctx.issuer.as_deref(),
+        )
+        .await
 }
 
 /// Build the token endpoint's transport context from the connection (X5.1).
@@ -4280,18 +4282,23 @@ fn build_error_redirect(
 /// `user_code` (the string a human reads off a screen and types elsewhere),
 /// and the `verification_uri` to send them to.
 ///
-/// **Unauthenticated by design.** RFC 8628 exists for input-constrained public
-/// clients — a television, a CLI, an IoT sensor — none of which can keep a
-/// client secret, so there is no secret to present. What is still verified is
-/// that `client_id` names a real client in this tenant that is registered for
-/// this grant; without that check any string could mint pending grants and
-/// exhaust the user-code space, which is a denial of service against every
-/// legitimate device at once.
+/// **The client authenticates by its registered method (#635).** RFC 8628
+/// exists for input-constrained clients — a television, a CLI, an IoT sensor —
+/// which are usually public: a client registered with
+/// `token_endpoint_auth_method: none` presents nothing, as before, and is
+/// refused if it presents a credential. A confidential client presents its
+/// credential here as at the token endpoint (RFC 8628 §3.1 → RFC 6749
+/// §3.2.1): its secret, a client assertion, or its certificate. Either way
+/// `client_id` must name a client of a live tenant that holds this grant;
+/// without that any string could mint pending grants and exhaust the
+/// user-code space, which is a denial of service against every legitimate
+/// device at once. A failed client authentication is `401 invalid_client`
+/// with the RFC 6749 §5.2 challenge, and is audited as at the token endpoint.
 ///
 /// The endpoint carries its own rate-limit bucket (see `server.rs`) rather
-/// than sharing the generic token bucket: it is unauthenticated and it
-/// allocates state, which is a different abuse profile from the token
-/// endpoint's.
+/// than sharing the generic token bucket: it is reachable without a
+/// credential and it allocates state, which is a different abuse profile from
+/// the token endpoint's.
 #[utoipa::path(
     post,
     path = "/oauth2/device_authorization",
@@ -4305,18 +4312,97 @@ fn build_error_redirect(
         (status = 200, description = "Device and user codes",
          body = DeviceAuthorizationResponse),
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 401, description = "Client authentication failed",
+         body = OAuth2ErrorResponse),
     ),
 )]
 pub async fn device_authorization<C: Connection + Clone>(
+    http_req: HttpRequest,
+    tenant_query: web::Query<TenantQuery>,
+    form: web::Form<DeviceAuthorizationRequest>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    // W8 / RFC 6749 §5.2 — the challenge is decided from the request, before
+    // the handler runs, and applied to whatever 401 it produces.
+    let challenge = client_auth_challenge(&http_req);
+    with_client_auth_challenge(
+        device_authorization_inner(http_req, tenant_query, form, state).await,
+        challenge,
+    )
+}
+
+/// See [`token_inner`] for why this split exists.
+async fn device_authorization_inner<C: Connection + Clone>(
+    http_req: HttpRequest,
     tenant_query: web::Query<TenantQuery>,
     form: web::Form<DeviceAuthorizationRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
     let tenant_id = tenant_query.into_inner().tenant_id;
+    let req = form.into_inner();
+
+    // No CIMD materialisation here, unlike PAR and the token endpoint: a
+    // `managed_by: cimd` client can never hold this grant (`cimd.rs` admits
+    // the two code grants only), so a URL-shaped `client_id` would buy an
+    // outbound fetch for a refusal.
+    //
+    // #635 — the token endpoint's client-authentication path: the same
+    // request context (the Basic header, the verified client certificate, the
+    // assertion), the registration deciding the method.
+    let ctx = match token_request_context(&http_req) {
+        Ok(ctx) => ctx.with_assertion(
+            req.client_assertion.as_deref(),
+            req.client_assertion_type.as_deref(),
+        ),
+        Err(response) => return *response,
+    };
+    let client_id = match axiam_oauth2::token::resolve_client_id(Some(&req.client_id), &ctx) {
+        Ok(id) => id.to_owned(),
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+    let client = match state
+        .oauth2
+        .token_service
+        .authenticate_device_authorization(
+            tenant_id,
+            &client_id,
+            req.client_secret.as_deref(),
+            &ctx,
+        )
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            if matches!(e, OAuth2Error::InvalidClient(_)) {
+                // The token endpoint's detection, for the same event at a
+                // second endpoint: detached, so the response time says nothing
+                // about the tenant (§22.3 residual 1), and attributed by the
+                // same SEC-087 rules.
+                let tenant_repo = state.tenant_repo.clone();
+                let audit_repo = state.audit_repo.clone();
+                let peer = peer_ip(&http_req);
+                let forwarded = client_ip(&http_req);
+                actix_web::rt::spawn(async move {
+                    append_client_auth_failure_audit(
+                        &tenant_repo,
+                        &audit_repo,
+                        tenant_id,
+                        Some(client_id.as_str()),
+                        DEVICE_CODE_GRANT_TYPE,
+                        peer,
+                        forwarded,
+                    )
+                    .await;
+                });
+            }
+            return build_oauth2_error_response(&e);
+        }
+    };
+
     match state
         .oauth2
         .device_authorization_service
-        .authorize(tenant_id, form.into_inner())
+        .authorize(tenant_id, client, req)
         .await
     {
         Ok(resp) => HttpResponse::Ok()

@@ -1294,8 +1294,6 @@ where
     );
     let device_authorization_service = DeviceAuthorizationService::new(
         device_grant_repo.clone(),
-        oauth2_client_repo.clone(),
-        tenant_repo.clone(),
         SurrealRefreshTokenRepository::new(pool.handle_for_repo()),
         user_repo.clone(),
         config.auth.clone(),

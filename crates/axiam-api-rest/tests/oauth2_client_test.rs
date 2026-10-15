@@ -518,17 +518,18 @@ async fn approved_device_grant(
     device_code
 }
 
-/// Poll the token endpoint with a device code: `(status, body)`.
+/// Poll the token endpoint with a device code, as the public client
+/// `client_id` (RFC 8628 §3.4): `(status, body)`.
 macro_rules! poll_device {
-    ($app:expr, $tenant_id:expr, $device_code:expr) => {{
+    ($app:expr, $tenant_id:expr, $client_id:expr, $device_code:expr) => {{
         let req = test::TestRequest::post()
             .peer_addr("127.0.0.1:12345".parse().unwrap())
             .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
             .insert_header(("content-type", "application/x-www-form-urlencoded"))
             .set_payload(format!(
                 "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code\
-                 &device_code={}",
-                $device_code
+                 &device_code={}&client_id={}",
+                $device_code, $client_id
             ))
             .to_request();
         let resp = test::call_service(&$app, req).await;
@@ -540,10 +541,12 @@ macro_rules! poll_device {
 
 /// **#610 (d).** Deleting a client voids its device grants and CIBA requests.
 ///
-/// The device poll authenticates nothing but the device code, so an approved
-/// grant outlives its client — and, for a `managed_by: cimd` client whose
-/// `client_id` names its metadata document, redeems again once the next request
-/// re-materialises the row. The pending CIBA request would meanwhile stay
+/// Before #635 the device poll authenticated nothing but the device code, so
+/// an approved grant outlived its client — and, for a `managed_by: cimd`
+/// client whose `client_id` names its metadata document, redeemed again once
+/// the next request re-materialised the row. The poll now reads the client
+/// (gone: `invalid_client`), and the deletion still voids the grant, which is
+/// what refuses it once the `client_id` names a row again. The pending CIBA request would meanwhile stay
 /// listed for its user naming a client that is gone.
 ///
 /// A grant of another client in the same tenant is the control: it still
@@ -589,7 +592,10 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
                 "name": name,
                 "redirect_uris": [],
                 "grant_types": [DEVICE_GRANT],
-                "scopes": ["openid"]
+                "scopes": ["openid"],
+                // Public, as a television is: it polls with its `client_id`
+                // alone (#635).
+                "token_endpoint_auth_method": "none"
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -670,13 +676,13 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
         "a deleted client's device grant is deleted"
     );
 
-    // Even before anything is re-materialised the poll authenticates no client,
-    // so the grant is what refuses it.
+    // Before anything is re-materialised the client is gone, which the poll
+    // now reads (#635): `invalid_client`, nothing minted.
     let before_refresh = refresh_token_count(&db).await;
-    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    let (status, body) = poll_device!(app, tenant_id, doomed_client, doomed_code);
     assert_eq!(
         (status, body["error"].as_str()),
-        (400, Some("invalid_grant")),
+        (401, Some("invalid_client")),
         "{body}"
     );
 
@@ -715,7 +721,7 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
         .await
         .unwrap();
     assert_eq!(rematerialised.client_id, doomed_client);
-    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    let (status, body) = poll_device!(app, tenant_id, doomed_client, doomed_code);
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
@@ -729,7 +735,7 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
     );
 
     // The control: another client's approved grant is untouched.
-    let (status, body) = poll_device!(app, tenant_id, surviving_code);
+    let (status, body) = poll_device!(app, tenant_id, surviving_client, surviving_code);
     assert_eq!(status, 200, "{body}");
     assert!(body["access_token"].as_str().is_some_and(|t| !t.is_empty()));
 }

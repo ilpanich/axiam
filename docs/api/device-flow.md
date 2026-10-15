@@ -45,11 +45,19 @@ client_id=oa_...&scope=openid
 }
 ```
 
-**No client authentication.** RFC 8628 exists for public clients, and a
-television cannot keep a secret. `client_id` is still checked against the
-tenant's registered clients and its grant list — without that, any string
-could mint pending grants and exhaust the user-code space, which is a denial
-of service against every legitimate device at once.
+**The client authenticates by its registered method** (RFC 8628 §3.1, which
+applies RFC 6749 §3.2.1 here; #635). A device is usually a **public** client —
+a television cannot keep a secret — registered with
+`token_endpoint_auth_method: none`: it sends `client_id` and nothing else, and
+is refused if it sends a credential. A **confidential** client that holds the
+grant authenticates here exactly as at the token endpoint — `client_secret`
+for `client_secret_post`, the `Authorization: Basic` header for
+`client_secret_basic`, `client_assertion` for `private_key_jwt`, its
+certificate for the mTLS methods — and a failure is `401 invalid_client`.
+Either way `client_id` must name a client of a live tenant that holds the
+grant — without that, any string could mint pending grants and exhaust the
+user-code space, which is a denial of service against every legitimate device
+at once.
 
 `verification_uri_complete` is the pre-filled variant; render it as a QR code
 and the user scans instead of typing eight characters.
@@ -60,8 +68,24 @@ and the user scans instead of typing eight characters.
 POST /oauth2/token?tenant_id=<uuid>
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…
+grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…&client_id=oa_...
 ```
+
+**The poll names its client and authenticates it** (RFC 8628 §3.4; #635).
+`client_id` is required (from the body, or from the Basic header or client
+assertion of a client authenticating that way), and a confidential client adds
+its credential as for any other grant. The client is checked **before the
+device code is looked at**: an unknown client or a failed credential is
+`401 invalid_client`, as is a client that no longer holds the grant — so an
+approved grant is refused once the grant type is removed from its client — and
+a `client_id` that is not the grant's is answered `invalid_grant`, exactly as an
+unknown code. None of these spends the code or records a poll against it, so a
+leaked device code is worth nothing to anyone but its client. A client
+registered for sender-constrained tokens gets one here too: a DPoP proof binds
+the token (`cnf.jkt`, `token_type: DPoP`), a client certificate binds it
+(`cnf.x5t#S256`), and a poll without the proof or certificate the registration
+requires is refused rather than answered with a bearer token. A `fapi2` client
+meets its profile's token-request rules as at every other grant.
 
 **Most of these requests return an error, and that is normal.** RFC 8628 §3.5:
 
@@ -179,11 +203,15 @@ POST /api/v1/oauth2-clients
   "name": "living-room-tv",
   "redirect_uris": [],
   "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
-  "scopes": ["openid"]
+  "scopes": ["openid"],
+  "token_endpoint_auth_method": "none"
 }
 ```
 
-No redirect URI is needed — the device never handles one.
+No redirect URI is needed — the device never handles one. Omit
+`token_endpoint_auth_method` and the client is confidential
+(`client_secret_post`, the default): it must then send its `client_secret` at
+both endpoints.
 
 ## Not implemented
 

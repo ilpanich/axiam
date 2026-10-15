@@ -596,6 +596,10 @@ export const OAUTH2_PAGES: DocPage[] = [
         code: "POST /oauth2/device_authorization?tenant_id=<uuid>\nContent-Type: application/x-www-form-urlencoded\n\nclient_id=oa_...&scope=openid",
       },
       {
+        type: "p",
+        text: "A device is usually a **public** client (`token_endpoint_auth_method: none`) and sends its `client_id` alone. A **confidential** client that holds the grant authenticates at both device endpoints exactly as at the token endpoint, by the method it registered; a failure is `401 invalid_client`.",
+      },
+      {
         type: "code",
         caption: "response",
         code: "{\n  \"device_code\": \"...\",\n  \"user_code\": \"WXYZ-1234\",\n  \"verification_uri\": \"https://id.acme.dev/device\",\n  \"verification_uri_complete\": \"https://id.acme.dev/device?user_code=WXYZ-1234\",\n  \"expires_in\": 600,\n  \"interval\": 5\n}",
@@ -619,7 +623,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "poll", text: "3. The device polls" },
       {
         type: "p",
-        text: "The device posts the device grant to the token endpoint at `interval` seconds. Every non-success answer is one of four RFC 8628 errors, and each has exactly one correct reaction:",
+        text: "The device posts the device grant — its `device_code` and its `client_id`, plus its credential if it is confidential — to the token endpoint at `interval` seconds. Every non-success answer is one of four RFC 8628 errors, and each has exactly one correct reaction:",
       },
       {
         type: "table",
@@ -630,6 +634,10 @@ export const OAUTH2_PAGES: DocPage[] = [
           ["access_denied", "The user refused.", "Stop. Show that it was declined."],
           ["expired_token", "The device code expired.", "Stop, and start a new request with a fresh code."],
         ],
+      },
+      {
+        type: "note",
+        text: "The client is checked before the device code is looked at: a `client_id` that is not the grant's is answered like an unknown code, and nothing is spent, so a leaked device code is worth nothing to anyone but its client. A client registered for DPoP- or certificate-bound tokens gets a bound token from this grant too. See [`docs/api/device-flow.md`](https://github.com/ilpanich/axiam/blob/main/docs/api/device-flow.md).",
       },
       {
         type: "warn",

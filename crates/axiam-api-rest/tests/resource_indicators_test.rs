@@ -823,6 +823,9 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
             "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
             "scopes": ["openid"],
             "allowed_resources": [MCP, MCP_TWO],
+            // A television: public, so it polls with its `client_id` alone
+            // (RFC 8628 §3.4; #635).
+            "token_endpoint_auth_method": "none",
         })
     );
     let client_id = client["client_id"].as_str().unwrap();
@@ -885,7 +888,7 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         "/oauth2/token",
         format!(
             "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-             &device_code={device_code}&resource={MCP_TWO}"
+             &device_code={device_code}&client_id={client_id}&resource={MCP_TWO}"
         )
     );
     assert_eq!(status, 400, "{body}");
@@ -899,7 +902,8 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         f,
         "/oauth2/token",
         format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
         )
     );
     assert_eq!(status, 200, "{tokens}");
@@ -912,7 +916,8 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         f,
         "/oauth2/token",
         format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
         )
     );
     assert_eq!(status, 200, "{tokens}");
@@ -936,6 +941,7 @@ async fn the_device_authorization_endpoint_refuses_an_unregistered_resource() {
             "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
             "scopes": ["openid"],
             "allowed_resources": [MCP],
+            "token_endpoint_auth_method": "none",
         })
     );
     let client_id = client["client_id"].as_str().unwrap();

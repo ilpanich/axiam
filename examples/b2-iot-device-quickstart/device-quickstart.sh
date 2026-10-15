@@ -83,11 +83,14 @@ rm -f "${ADMIN_LOGIN_HEADERS}"
 # ---------------------------------------------------------------------------
 # 1. Register the device as an OAuth2 client. Real deployments do this once,
 #    ahead of time, from fleet-provisioning tooling — not per boot. No
-#    redirect_uris: a device never receives a browser redirect.
+#    redirect_uris: a device never receives a browser redirect. Public
+#    (`token_endpoint_auth_method: none`): a device keeps no secret, so it
+#    authenticates with its client_id alone; a confidential client would have
+#    to send its client_secret at both endpoints below.
 # ---------------------------------------------------------------------------
 log "registering device client '${CLIENT_NAME}'"
 CLIENT_JSON=$(api_expect POST "${ADMIN_JAR}" "${ADMIN_CSRF}" /api/v1/oauth2-clients \
-  "{\"name\":\"${CLIENT_NAME}\",\"redirect_uris\":[],\"grant_types\":[\"urn:ietf:params:oauth:grant-type:device_code\"],\"scopes\":[\"openid\"]}" \
+  "{\"name\":\"${CLIENT_NAME}\",\"redirect_uris\":[],\"grant_types\":[\"urn:ietf:params:oauth:grant-type:device_code\"],\"scopes\":[\"openid\"],\"token_endpoint_auth_method\":\"none\"}" \
   201)
 CLIENT_ID=$(printf '%s' "${CLIENT_JSON}" | jq -r '.client_id')
 if [ "${CLIENT_ID}" = "null" ] || [ -z "${CLIENT_ID}" ]; then
@@ -96,8 +99,9 @@ fi
 log "client_id=${CLIENT_ID}"
 
 # ---------------------------------------------------------------------------
-# 2. Device side: start the flow. Unauthenticated — the device holds no
-#    credential of its own yet, that's the whole point of RFC 8628.
+# 2. Device side: start the flow. The device presents only its (public)
+#    client_id — it holds no user credential, that's the whole point of
+#    RFC 8628.
 #
 #    `tenant_id` is a required QUERY parameter on both /oauth2/device_authorization
 #    and /oauth2/token (both take `web::Query<TenantQuery>`); omitting it gets

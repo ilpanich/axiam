@@ -36,6 +36,11 @@ use crate::pkce;
 #[path = "token_ciba.rs"]
 mod ciba_grant;
 
+/// #635 — the device grant's client authentication. A child module for the
+/// same reason as the CIBA grant's.
+#[path = "token_device.rs"]
+mod device_grant;
+
 /// The single `error_description` every token-endpoint client-authentication
 /// failure returns, whatever actually went wrong (SEC-086).
 ///

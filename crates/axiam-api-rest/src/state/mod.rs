@@ -202,8 +202,6 @@ pub type TokenServiceT<C> = TokenService<
 /// The REST layer keeps the seam at a single `match` arm on `grant_type`.
 pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
     SurrealDeviceGrantRepository<C>,
-    SurrealOAuth2ClientRepository<C>,
-    SurrealTenantRepository<C>,
     SurrealRefreshTokenRepository<C>,
     SurrealUserRepository<C>,
 >;
@@ -804,8 +802,6 @@ impl<C: Connection + Clone> AppState<C> {
         ));
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
-            oauth2_client_repo.clone(),
-            tenant_repo.clone(),
             refresh_token_repo.clone(),
             user_repo.clone(),
             auth_config.clone(),

@@ -575,6 +575,56 @@ buckets; for **W6**: its new `network_*` buckets must pass
 
 ### 13.3 W3
 
+**Head `b40b33a67`** on `claude/release-1.1.0-w3` (from `3d011573e`), 2026-10-15:
+eight task commits, the F4 review and one in-wave fix, all signed; every gate
+command exit 0 under `RUSTFLAGS=-Dwarnings`. `sdks/openapi.json` was held until
+W3.8 and regenerated once (the review's own rebuild is byte-identical).
+**Re-model:** W3.5 ran at Opus, not Sonnet (§1.1): "refused calls no longer
+counted" made the admission a check-then-increment under concurrency.
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W3.1 #635 | `3fcac1532` | Opus | `token_device.rs`: the device grant authenticates its client at both endpoints through the other grants' path (registered method, live tenant, FAPI `enforce_client_authentication` / `enforce_token_request`, grant check, `cnf` at the poll); an unknown client costs one HMAC verify against a fixed hash no secret produces; a foreign `client_id` is `invalid_grant` before `record_poll`; no refusal spends or reveals a grant; device tokens are bound (`cnf`, `token_type: DPoP`) for DPoP/mTLS clients. *Tree:* W3.7(a) folded in; W3.7(b) answers **`invalid_client`** (client authentication reads the tenant), not the plan's `invalid_grant`; `boot.rs` / `state/mod.rs` changed (service generics). |
+| W3.2 #636 | `1d9b8664b` | Sonnet | Admin `PUT` of a `dcr`/`cimd` row refuses (422 `scope_exceeds_ceiling`, naming the scopes) a scope outside the effective `dcr_allowed_scopes`; a row beyond a since-narrowed ceiling may keep what it holds but gain nothing. *Tree:* `AxiamError::Validation` is 400 and there is no `Unprocessable`, so a REST-crate `unprocessable_entity` helper; `POST` can only create `admin` rows and there is no `PATCH`, so only update refuses. |
+| W3.3 #637 | `fe6878687` | Opus | `RESERVED_ACTION_NAMESPACES` (`tenants.`, `gdpr.`, ASCII-case-insensitive) refused from AMQP (to the DLQ, after the signature checks, before the nonce); the purge bound is `min(exported_through, receipt timestamp)` of the receipt found in the deleted tenant's own log (none → keep the whole trail); deletion refuses (409) a receipt claiming rows after itself. *Tree:* the namespaces live in `axiam-core` (amqp may not depend on db). |
+| W3.4 #638 | `f07713169` | Sonnet | The hint cap reads the previous window with `peek_count` (was an upsert); new job `rate_limit_bucket` deletes rows older than 2 × the longest window in use (600 s, derived from the three writers) **+ 60 s clock margin**, bounded, two-replica safe. *Tree:* the margin is the executor's addition (lenient-only); no `updated_at` index (no migration owned). |
+| W3.5 #639 | `8492128e7` | **Opus** (re-modelled) | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (default 3, `≥ 1`, checked at boot because the CIBA service is built before `validate()`); refused calls are taken back by a conditional decrement; an "overtaken" rule closes a 1.0.1 late-call hole; the bound — at most the allowance in any two consecutive windows, across replicas — holds exactly, errors strict-side only. Conformance harness sets 1000. |
+| W3.6 #640 | `3ae58f5d4` | Sonnet | `AuditLogRepository::datastore_now()` (required, no `Utc::now()` default) bounds the export; the receipt is written after the last page. *Tree:* no server-time helper existed (eleven doubles in six crates gained it); `audit.rs:355` unchanged. |
+| W3.7 #641 | `afa4dce4f` | Sonnet | The tombstone transaction deletes `device_grant`; the `sa_` `client_credentials` path answers a tombstoned tenant `invalid_client` after its verify (it answered a distinguishable `invalid_request`). (a)/(b) were W3.1's. |
+| W3.8 #642 | `ee2a3bacc` | Sonnet | (a) R101W3-01 named as the reason (module doc, the `[1.0.1]` #610(d) entry corrected in place, T-289); (b) the client `DELETE` text; (c) CIBA mints no ID token without `openid`; (d) `boot.rs` re-indented; (f), (g) left, reasons in the commit; spec regenerated (W3.1's fields and 401, W3.2's 422, (b), #656's per-address backstop text, the tenant `DELETE`'s 409); registry digest-only (190 / 28). **(e) not obtained:** 1.0.1's W3.2 quick bench (`just bench-quick` Cell 1, `claude_dev/quick-bench-runbook-2026-08-16.md`) needs `just`, k6 (`dl.k6.io` denied by the proxy) and an AXIAM server image (`ghcr.io/ilpanich/axiam/server:1.0.1` not found; a local fat-LTO release build exceeds this machine's disk), and is a before/after pair (`7be5e8094~1` vs HEAD). Left for the maintainer's bench box. |
+| W3.9 | `f70976a26` | Opus | `claude_dev/security-review-release-1.1.0-w3-2026-10-15.md`: R110W3-01 **Medium**, -02 Low, -03 … -12 Informational. |
+| fix | `b40b33a67` | Opus | **R110W3-01** (Medium): the public-client token bucket keyed on the transport peer, so behind the proxy one address could hold every public client's device polls at `429 slow_down`; it now keys on the route limiter's client address (`select_rate_limit_ip`, one reader of `TRUSTED_HOPS`), audit rows keep the peer; also fixes public code and refresh requests (exposed since T21.2, which had no flood test — one added). |
+
+Filed on `1.1.x` (named in each body): ilpanich/axiam#675 (R110W3-02, Low —
+existing confidential device clients are refused after the upgrade), #676 …
+#684 (R110W3-03 … -10, -12), #685 (the public-client bucket now never refuses
+first), #686 (Low, pre-existing T-212: without a proxy the limiters key on a
+caller-written `X-Forwarded-For`). R110W3-11 (contract text the wave made
+stale) is W7.1's, below.
+
+**Contract question for the maintainer (§10: recorded, not answered; also for
+the conformance review's §5).** `sdks/CONTRACT.md` §14.1 (`:2859-2861`):
+"`device_authorize` is **unauthenticated** … SDKs MUST NOT send
+`client_secret` on it". Since W3.1 a confidential device client must
+authenticate at both device endpoints (public clients send nothing and are
+refused if they do), so an SDK following §14.1 cannot run the device grant for
+a confidential client. Options from the review: (a) §14.1 keeps
+"unauthenticated" for public clients and SDKs send a confidential client's
+credential at both endpoints; (b) the server returns to §14.1 at the start
+endpoint (reverses part of W3.1; not recommended); (c) device clients must be
+public at registration. **Asked of the maintainer on 2026-10-15; W7 does not
+start without the answer.**
+
+For **W7.1** (R110W3-11, stale contract text): §14 intro (`:2842-2846`, device
+tokens' `client_id` claim and `403`); §14.2 (the poll's `401 invalid_client`;
+DPoP proof per poll and `token_type: DPoP`); §27 rule 2 (`:9068`, a deleted
+client's poll is `invalid_client`); §33.3 rule 13 (the hint-cap setting,
+refused calls not counted, SDK suites raise it); §8/§8b (the reserved
+`tenants.` / `gdpr.` actions); the admin `PUT`'s 422 `scope_exceeds_ceiling`;
+`tenants.delete`'s second 409. For **W8.4**: upgrade notes for W3.1 (confidential
+device clients must send their credential at both endpoints, the poll requires
+`client_id`; review §2.2 text), W3.2's 422, W3.5's setting.
+
 ### 13.4 W4
 
 **W4.1 (#626, #629) — done 2026-10-14, no code.** Comments:

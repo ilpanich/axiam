@@ -19,7 +19,13 @@
 //!   counter with no governor;
 //! - the limiter verifies nothing itself: without the audit middleware's
 //!   verified identity a valid token is keyed on its address;
-//! - (SAML builds) all five routes are keyed this way.
+//! - (SAML builds) all five routes are keyed this way;
+//! - R110W2-01: keying on the principal does not remove the per-address bound.
+//!   Every route also carries an address-keyed backstop at ten times the
+//!   principal's allowance (`FEDERATION_FLOW_BACKSTOP_FACTOR`), so one address
+//!   holding many principals is refused at the backstop, with the shared
+//!   counter on or off, while fewer principals than that each keep their own
+//!   allowance.
 //!
 //! The requests are ones the handler refuses (`400` for an empty
 //! `redirect_uri`, `401` for a token that does not verify) without touching
@@ -242,6 +248,119 @@ where
         >,
 {
     test::call_service(app, req).await.status().as_u16()
+}
+
+/// A request to one of the authenticated federation flow routes, one the
+/// handler refuses without touching the network.
+fn flow_request(
+    route: &str,
+    token: &str,
+    config_id: &str,
+    from: SocketAddr,
+) -> actix_http::Request {
+    let base = |builder: test::TestRequest, uri: &str| {
+        builder
+            .uri(uri)
+            .peer_addr(from)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+    };
+    match route {
+        "saml/authn-request" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/saml/authn-request",
+        )
+        .set_json(serde_json::json!({ "config_id": config_id, "acs_url": "" })),
+        "saml/acs" => base(test::TestRequest::post(), "/api/v1/federation/saml/acs").set_json(
+            serde_json::json!({
+                "config_id": config_id,
+                "saml_response": "",
+                "acs_url": "https://sp.example.com/acs"
+            }),
+        ),
+        "saml/metadata" => base(
+            test::TestRequest::get(),
+            &format!("/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="),
+        ),
+        "oidc/authorize" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/oidc/authorize",
+        )
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "redirect_uri": "",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        })),
+        "oidc/callback" => base(
+            test::TestRequest::post(),
+            "/api/v1/federation/oidc/callback",
+        )
+        .set_json(serde_json::json!({
+            "config_id": config_id,
+            "code": "",
+            "redirect_uri": "https://example.com/cb",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        })),
+        other => panic!("not a federation flow route: {other}"),
+    }
+    .to_request()
+}
+
+/// The per-address backstop is this many times the principal's allowance
+/// (`FEDERATION_FLOW_BACKSTOP_FACTOR` in `server.rs`; R110W2-01).
+const BACKSTOP: u32 = PER_MIN * 10;
+
+/// R110W2-01: principals from one address, each well within their own
+/// allowance, are served until the address has spent `BACKSTOP` requests, and
+/// the next — from a principal who has spent nothing — is refused. The
+/// refusal is the address's: the same principal from another address is
+/// served, and so is the first principal to be refused, from there.
+async fn assert_backstop_bounds_one_address<S, B>(
+    app: &S,
+    auth: &AuthConfig,
+    route: &str,
+    from: SocketAddr,
+    elsewhere: SocketAddr,
+) where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+{
+    let config_id = Uuid::new_v4().to_string();
+    let (tenant, org) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut served = 0;
+    while served < BACKSTOP {
+        // `PER_MIN` requests per principal: never more than their allowance.
+        let token = Principal::new(tenant, org).token(auth);
+        for _ in 0..PER_MIN.min(BACKSTOP - served) {
+            let got = status(app, flow_request(route, &token, &config_id, from)).await;
+            assert_ne!(
+                got, 429,
+                "{route}: request {served} from one address is under the backstop and the \
+                 principal's own allowance"
+            );
+            served += 1;
+        }
+    }
+
+    let fresh = Principal::new(tenant, org).token(auth);
+    let got = status(app, flow_request(route, &fresh, &config_id, from)).await;
+    assert_eq!(
+        got, 429,
+        "{route}: a principal with an untouched allowance is refused once their address has \
+         spent {BACKSTOP} requests"
+    );
+
+    let got = status(app, flow_request(route, &fresh, &config_id, elsewhere)).await;
+    assert_ne!(
+        got, 429,
+        "{route}: the backstop is the address's: the same principal from another address is served"
+    );
 }
 
 /// The one-token-many-addresses and relay checks, against whatever layers
@@ -489,51 +608,7 @@ async fn every_authenticated_federation_flow_route_keys_on_the_principal() {
     let app = routes_app!(db, auth, enabled_counter(&db), audit: true);
     let token = Principal::new(Uuid::new_v4(), Uuid::new_v4()).token(&auth);
     let config_id = Uuid::new_v4().to_string();
-
-    let request = |route: &str, from: SocketAddr| {
-        let base = |builder: test::TestRequest, uri: &str| {
-            builder
-                .uri(uri)
-                .peer_addr(from)
-                .insert_header(("Authorization", format!("Bearer {token}")))
-                .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
-                .insert_header(("X-CSRF-Token", CSRF_TOKEN))
-        };
-        match route {
-            "saml/authn-request" => base(
-                test::TestRequest::post(),
-                "/api/v1/federation/saml/authn-request",
-            )
-            .set_json(serde_json::json!({ "config_id": config_id, "acs_url": "" })),
-            "saml/acs" => base(test::TestRequest::post(), "/api/v1/federation/saml/acs").set_json(
-                serde_json::json!({
-                    "config_id": config_id,
-                    "saml_response": "",
-                    "acs_url": "https://sp.example.com/acs"
-                }),
-            ),
-            "saml/metadata" => base(
-                test::TestRequest::get(),
-                &format!("/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="),
-            ),
-            "oidc/authorize" => {
-                return oidc_authorize(&token, from);
-            }
-            "oidc/callback" => base(
-                test::TestRequest::post(),
-                "/api/v1/federation/oidc/callback",
-            )
-            .set_json(serde_json::json!({
-                "config_id": config_id,
-                "code": "",
-                "redirect_uri": "https://example.com/cb",
-                "state": "some-state",
-                "nonce": "some-nonce"
-            })),
-            other => panic!("not a federation flow route: {other}"),
-        }
-        .to_request()
-    };
+    let request = |route: &str, from: SocketAddr| flow_request(route, &token, &config_id, from);
 
     for route in [
         "saml/authn-request",
@@ -554,5 +629,74 @@ async fn every_authenticated_federation_flow_route_keys_on_the_principal() {
             got, 429,
             "{route}: a fresh address is refused on the principal's count"
         );
+    }
+}
+
+/// R110W2-01: keying on the principal must not leave a caller with a valid
+/// token unbounded per address. One address holding many principals is refused
+/// at ten times the principal's allowance — both limiter layers on, and
+/// nothing about the principal layers changed (a relay below the backstop is
+/// `a_relay_with_many_users_gives_each_user_their_own_allowance`).
+#[actix_rt::test]
+async fn one_address_holding_many_principals_meets_the_backstop() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let app = routes_app!(db, auth, enabled_counter(&db), audit: true);
+    assert_backstop_bounds_one_address(&app, &auth, "oidc/authorize", peer(100), peer(101)).await;
+}
+
+/// R110W2-01: the backstop is an in-process governor, so it holds with the
+/// shared counter off (`AXIAM__RATE_LIMIT__SHARED=off`), where the principal
+/// layer is in-process too.
+#[actix_rt::test]
+async fn the_backstop_holds_with_the_shared_counter_off() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let app = routes_app!(db, auth, disabled_counter(), audit: true);
+    assert_backstop_bounds_one_address(&app, &auth, "oidc/authorize", peer(110), peer(111)).await;
+}
+
+/// R110W2-01: the backstop does not reach across addresses — one token from
+/// many addresses is still one bucket — and a refused address does not spend
+/// another's: the existing principal tests stay green with the backstop
+/// wrapped on, and this one pins the combination. Exhausting the backstop of
+/// one address leaves a token's own count untouched.
+#[actix_rt::test]
+async fn one_token_from_many_addresses_is_still_one_bucket_beside_the_backstop() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let app = routes_app!(db, auth, enabled_counter(&db), audit: true);
+    let (tenant, org) = (Uuid::new_v4(), Uuid::new_v4());
+
+    // Spend one address's backstop.
+    assert_backstop_bounds_one_address(&app, &auth, "oidc/authorize", peer(120), peer(121)).await;
+
+    // A token that was never seen: PER_MIN requests from as many addresses
+    // are served, and the next, from another address, meets the principal.
+    let alice = Principal::new(tenant, org).token(&auth);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&alice, peer(130 + i as u8))).await;
+        assert_eq!(got, 400, "alice's request {i} from its own address");
+    }
+    assert_eq!(status(&app, oidc_authorize(&alice, peer(139))).await, 429);
+}
+
+/// R110W2-01: every one of the five routes carries its own backstop, each
+/// with a counter of its own (the OIDC pair always, the SAML three when the
+/// feature is on).
+#[actix_rt::test]
+async fn every_authenticated_federation_flow_route_carries_the_backstop() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let app = routes_app!(db, auth, enabled_counter(&db), audit: true);
+    let mut routes = vec!["oidc/authorize", "oidc/callback"];
+    if cfg!(feature = "saml") {
+        routes.extend(["saml/authn-request", "saml/acs", "saml/metadata"]);
+    }
+    for (n, route) in routes.into_iter().enumerate() {
+        // One address for all the routes: each route's backstop is its own, so
+        // the address spent on one is whole on the next.
+        assert_backstop_bounds_one_address(&app, &auth, route, peer(150), peer(151 + n as u8))
+            .await;
     }
 }

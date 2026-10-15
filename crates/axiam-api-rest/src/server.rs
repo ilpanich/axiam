@@ -25,6 +25,21 @@ use crate::openapi::api_doc;
 /// one NAT.
 const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 
+/// R110W2-01: how many times the per-principal allowance of the five
+/// authenticated federation flow routes (`end_session_per_min`) their
+/// per-address backstop admits.
+///
+/// #633 keyed those routes on the verified principal, which dropped every
+/// per-address bound for a caller holding a valid token: one address holding
+/// *K* principals (self-registration, service accounts) would get *K* x the
+/// allowance. The backstop restores a bound on the address, sized like
+/// [`CIBA_LIST_BACKSTOP_FACTOR`] for the same reason: NAT-sized, so an
+/// application relaying ten users at full speed (and far more at human speed)
+/// never meets it, while a party holding hundreds of principals behind one
+/// address does. A separate constant, not a shared one, because each factor
+/// scales a different knob and the two are tuned apart.
+const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -113,6 +128,22 @@ fn build_principal_governor(
     requests_per_min: u32,
 ) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
     build_client_aware_governor(requests_per_min, RateLimitKeyMode::Principal)
+}
+
+/// R110W2-01: the outermost layer of each authenticated federation flow route,
+/// an **address**-keyed governor at [`FEDERATION_FLOW_BACKSTOP_FACTOR`] times
+/// the principal's allowance (`requests_per_min`).
+///
+/// It is an in-process governor and nothing else, exactly as the CIBA list's
+/// backstop is: it runs the same whether `AXIAM__RATE_LIMIT__SHARED` is on or
+/// off, carries no shared-counter bucket (so it takes no name for
+/// `rate_limit_bucket_names_test.rs` to check), and is per replica. The
+/// principal layers beneath it are the ones that go cross-replica; this one
+/// only has to bound how many principals one address can spend at once.
+fn build_federation_flow_backstop(
+    requests_per_min: u32,
+) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+    build_governor(requests_per_min.saturating_mul(FEDERATION_FLOW_BACKSTOP_FACTOR))
 }
 
 /// Register health and readiness routes.
@@ -1454,6 +1485,15 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // `build_principal_governor` and `keyed_on_principal`, through one
             // key function; neither verifies a signature (the audit middleware
             // already did, and they read its result).
+            //
+            // R110W2-01: that key dropped every per-address bound for a caller
+            // with a valid token (one address holding K principals got K x the
+            // allowance), so each of the five resources also carries, outermost,
+            // `build_federation_flow_backstop`: an address-keyed in-process
+            // governor at `FEDERATION_FLOW_BACKSTOP_FACTOR` (10) times the
+            // allowance, the CIBA list's precedent. It is a governor only, so it
+            // applies with `AXIAM__RATE_LIMIT__SHARED` on or off, takes no
+            // shared-counter bucket name, and is per replica.
             .service(
                 web::resource("/federation/oidc/authorize")
                     .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
@@ -1461,6 +1501,9 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         "federation_oidc_authorize",
                         rate_limit_cfg,
                     ).keyed_on_principal())
+                    .wrap(build_federation_flow_backstop(
+                        rate_limit_cfg.end_session_per_min,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_authorize::<C>),
                     ),
@@ -1472,6 +1515,9 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         "federation_link_oidc_callback",
                         rate_limit_cfg,
                     ).keyed_on_principal())
+                    .wrap(build_federation_flow_backstop(
+                        rate_limit_cfg.end_session_per_min,
+                    ))
                     .route(
                         web::post().to(handlers::federation::oidc_callback::<C>),
                     ),
@@ -1902,6 +1948,9 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     "federation_saml_authn_request",
                     rate_limit_cfg,
                 ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
+                ))
                 .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
         )
         .service(
@@ -1911,6 +1960,9 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     "federation_link_saml_acs",
                     rate_limit_cfg,
                 ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
+                ))
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),
         )
         .service(
@@ -1920,6 +1972,9 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     "federation_saml_metadata",
                     rate_limit_cfg,
                 ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
+                ))
                 .route(web::get().to(handlers::federation::saml_metadata::<C>)),
         );
     cfg.service(api_scope);

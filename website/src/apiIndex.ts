@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.1";
-export const API_OPERATION_COUNT = 278;
-export const API_PATH_COUNT = 191;
+export const API_OPERATION_COUNT = 288;
+export const API_PATH_COUNT = 195;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1516,6 +1516,63 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/ssf/v1/verify",
     "summary": ""
+   }
+  ]
+ },
+ {
+  "id": "api-network-access",
+  "label": "Network access",
+  "blurb": "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, and what a device placed on a segment is given. The decision route FreeRADIUS calls is not part of this index.",
+  "operations": [
+   {
+    "method": "GET",
+    "path": "/api/v1/network/profiles",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/network/profiles",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": "A **replacement** of the segment's profile, conditional on the profile's `version` and the segment's."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": "No profile means the segment is not a placement candidate, which only narrows; the write gate asks `network:profiles_write` alone (H1)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/segments",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/network/segments",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": "A **replacement** of the envelope, conditional on `version`."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": "The segment, **its reply profile** and its resource node, in one transaction."
    }
   ]
  },

@@ -156,6 +156,13 @@ impl Cleared<SurrealReplyProfileRepository<Db>> {
     async fn get_by_segment(&self, tenant_id: Uuid, segment_id: Uuid) -> AxiamResult<ReplyProfile> {
         self.0.get_by_segment(tenant_id, segment_id).await
     }
+    async fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<ReplyProfile>> {
+        self.0.list_page(tenant_id, pagination).await
+    }
 }
 
 fn policies(db: &Surreal<Db>) -> SurrealNetworkPolicyRepository<Db> {
@@ -1258,4 +1265,111 @@ async fn the_repository_refuses_a_clearance_for_another_write() {
         .unwrap_err();
     assert!(matches!(err, AxiamError::AuthorizationDenied { .. }));
     assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_err());
+}
+
+/// The profile list (W6.3): a tenant's own effective profiles, paged, searchable
+/// by `filter_id` and segment id, and clamped to the current cap like a single
+/// read.
+#[tokio::test]
+async fn profiles_list_is_the_tenants_own_paged_and_clamped() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    let mut made = Vec::new();
+    for (name, vlan, rank) in [("corp", 10u16, 10u32), ("iot", 20, 20), ("guest", 30, 30)] {
+        let mut input = corp(tenant);
+        input.path = format!("/network/zones/hq/{name}");
+        input.vlan_id = vlan;
+        input.rank = Some(rank);
+        let seg = segments(&db).create(input).await.unwrap();
+        // `guest` stays without a profile.
+        if name != "guest" {
+            let mut p = profile();
+            p.filter_id = Some(
+                if name == "corp" {
+                    "corp-acl"
+                } else {
+                    "guest-acl"
+                }
+                .into(),
+            );
+            profiles(&db)
+                .create(tenant, seg.id, new_profile(seg.version, p))
+                .await
+                .unwrap();
+        }
+        made.push(seg);
+    }
+    // Another tenant's profile is never listed.
+    let foreign = segments(&db).create(corp(other)).await.unwrap();
+    profiles(&db)
+        .create(other, foreign.id, new_profile(foreign.version, profile()))
+        .await
+        .unwrap();
+
+    let all = profiles(&db).list_page(tenant, page()).await.unwrap();
+    assert_eq!(all.total, 2, "a segment without a profile is not listed");
+    assert_eq!(all.items.len(), 2);
+    assert!(all.items.iter().all(|p| p.tenant_id == tenant));
+
+    let first = profiles(&db)
+        .list_page(
+            tenant,
+            Pagination {
+                offset: 0,
+                limit: 1,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((first.items.len(), first.total), (1, 2));
+    let second = profiles(&db)
+        .list_page(
+            tenant,
+            Pagination {
+                offset: 1,
+                limit: 1,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((second.items.len(), second.total), (1, 2));
+    assert_ne!(first.items[0].segment_id, second.items[0].segment_id);
+
+    let searched = profiles(&db)
+        .list_page(
+            tenant,
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: Some("corp-acl".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.items[0].filter_id.as_deref(), Some("corp-acl"));
+
+    // The list reads under the tenant's current cap, like a single read.
+    policies(&db)
+        .set(
+            tenant,
+            SetNetworkPolicy {
+                session_timeout_max_secs: 600,
+                expected_version: 0,
+                actor: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let clamped = profiles(&db).list_page(tenant, page()).await.unwrap();
+    assert!(
+        clamped
+            .items
+            .iter()
+            .all(|p| p.session_timeout_secs == 600 && p.session_timeout_clamped)
+    );
 }

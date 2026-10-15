@@ -4382,6 +4382,16 @@ pub trait ReplyProfileRepository: Send + Sync {
         segment_id: Uuid,
     ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
 
+    /// One page of the tenant's effective profiles, ordered by owning segment
+    /// id, optionally narrowed by [`Pagination::search`] (matched against the
+    /// profile's `filter_id` and its segment id). Each carries the tenant's
+    /// current cap as [`Self::get_by_segment`] does.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::ReplyProfile>>> + Send;
+
     /// Replace the segment's profile. Errors as for [`Self::create`], with
     /// `NotFound` for a segment without a profile and `Conflict` also for a
     /// stale profile version.

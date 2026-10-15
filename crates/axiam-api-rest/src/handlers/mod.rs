@@ -18,6 +18,7 @@ pub mod gdpr;
 pub mod groups;
 pub mod mds;
 pub mod mfa_methods;
+pub mod network;
 pub mod notification_rules;
 pub mod oauth2;
 pub mod oauth2_clients;

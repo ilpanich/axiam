@@ -81,7 +81,7 @@ pub fn is_reserved_resource_type(resource_type: &str) -> bool {
 }
 
 /// What a segment is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkSegmentKind {
     /// A segment a device may be placed on in normal operation. Lives under
@@ -310,7 +310,7 @@ pub fn validate_segment_fields(
 /// A segment's reply profile as read: **the effective one**, with the
 /// `Session-Timeout` already clamped to the tenant's current cap (design note
 /// §3.4) and `Idle-Timeout` kept within it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ReplyProfile {
     /// The owning segment, which is also this profile's id: one profile per
     /// segment, at most.

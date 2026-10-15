@@ -1731,6 +1731,90 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     ),
             )
+            // --- Network segments and RADIUS reply profiles (RADIUS D4, W6.3;
+            // `claude_dev/radius-reply-profile-design.md` §5.1). The tenant is
+            // the token's. Reads are unlimited; each of the six writes has a
+            // bucket of its own under `network_admin_per_min`, named
+            // `network_*`. `.to()` first, then `.wrap()`. Each write passes the
+            // write gate (`crate::network_gate`) before it reaches a repository.
+            .service(
+                web::resource("/network/segments")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::list_segments::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::network::create_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_create",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/segments/{id}")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::get_segment::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::network::delete_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_delete",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/profiles")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::list_profiles::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::network::create_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_create",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/profiles/{segment_id}")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::get_profile::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::network::delete_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_delete",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(

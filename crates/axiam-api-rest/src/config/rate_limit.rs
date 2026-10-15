@@ -221,6 +221,8 @@ pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS D4 / W6.3, never preset.
+pub const ENV_NETWORK_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
 pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CRL_PER_MIN` — #565 (T-102), never preset.
@@ -594,6 +596,16 @@ pub struct RateLimitConfig {
     /// administering targets produces. One bucket per route; per-IP; never
     /// preset.
     pub scim_target_admin_per_min: u32,
+    /// Max writes per minute per IP to each of the network-segment management
+    /// routes — create, replace and delete a segment, create, replace and
+    /// delete a segment's reply profile (default: 30 — RADIUS D4, W6.3,
+    /// `claude_dev/radius-reply-profile-design.md` §5.1). Reads are not in it.
+    /// A segment write decides which VLAN a device is placed on and a profile
+    /// write shapes what that placement gives, so each is a grant (§5.2); every
+    /// write also runs the write gate's reads and a reactor round trip. Thirty
+    /// a minute is far more than a person administering a network produces. One
+    /// bucket per route (six, named `network_*`); per-IP; never preset.
+    pub network_admin_per_min: u32,
     /// Max requests per minute per IP to each of the CIBA approval routes — the
     /// signed-in user's half of a backchannel authentication request:
     /// `GET /api/v1/ciba/requests` (the pending list, #566),
@@ -806,6 +818,9 @@ impl Default for RateLimitConfig {
             ssf_admin_per_min: 30,
             // G-6 / T23.6.4 — see the field docs.
             scim_target_admin_per_min: 30,
+            // RADIUS D4 / W6.3 — see the field docs. Administrator writes that
+            // each place devices on a VLAN or shape what the placement gives.
+            network_admin_per_min: 30,
             // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
             ciba_approval_per_min: 30,
             // #565 (T-102) — see the field docs. A relying party fetches once
@@ -1047,6 +1062,10 @@ impl RateLimitConfig {
             "scim_target_admin_per_min must be >= 1"
         );
         assert!(
+            self.network_admin_per_min >= 1,
+            "network_admin_per_min must be >= 1"
+        );
+        assert!(
             self.ciba_approval_per_min >= 1,
             "ciba_approval_per_min must be >= 1"
         );
@@ -1195,6 +1214,7 @@ mod tests {
             (ENV_SSF_PER_MIN, d.ssf_per_min),
             (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
             (ENV_SCIM_TARGET_ADMIN_PER_MIN, d.scim_target_admin_per_min),
+            (ENV_NETWORK_ADMIN_PER_MIN, d.network_admin_per_min),
             (ENV_CIBA_APPROVAL_PER_MIN, d.ciba_approval_per_min),
             (ENV_CRL_PER_MIN, d.crl_per_min),
             (ENV_EMAIL_TEST_PER_MIN, d.email_test_per_min),
@@ -1270,6 +1290,7 @@ mod tests {
                 cfg.scim_target_admin_per_min,
                 shipped.scim_target_admin_per_min
             );
+            assert_eq!(cfg.network_admin_per_min, shipped.network_admin_per_min);
             assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
             assert_eq!(cfg.crl_per_min, shipped.crl_per_min);
             assert_eq!(cfg.email_test_per_min, shipped.email_test_per_min);
@@ -1285,6 +1306,7 @@ mod tests {
                 ENV_SSF_PER_MIN,
                 ENV_SSF_ADMIN_PER_MIN,
                 ENV_SCIM_TARGET_ADMIN_PER_MIN,
+                ENV_NETWORK_ADMIN_PER_MIN,
                 ENV_CIBA_APPROVAL_PER_MIN,
                 ENV_CRL_PER_MIN,
                 ENV_EMAIL_TEST_PER_MIN,
@@ -1503,6 +1525,7 @@ mod tests {
         assert_eq!(d.ssf_per_min, 60);
         assert_eq!(d.ssf_admin_per_min, 30);
         assert_eq!(d.scim_target_admin_per_min, 30);
+        assert_eq!(d.network_admin_per_min, 30);
         assert_eq!(d.ciba_approval_per_min, 30);
         assert_eq!(d.crl_per_min, 60);
         assert_eq!(d.email_test_per_min, 10);

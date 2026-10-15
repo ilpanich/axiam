@@ -68,6 +68,16 @@ const GUARDED_WRITES: &[&str] = &[
     "resource_repo.create_uma_registered(",
     "resource_repo.update(",
     "resource_repo.delete(",
+    // Segment and reply-profile writes (the W6.3 routes). These also cannot
+    // compile without a `NetworkWriteClearance`; naming them here pins the
+    // other half, that the handler asked the gate *before* it reached the
+    // repository, and that a new caller of any of them is argued in review.
+    "segment_repo.create(",
+    "segment_repo.update(",
+    "segment_repo.delete(",
+    "profile_repo.create(",
+    "profile_repo.replace(",
+    "profile_repo.delete(",
     // The same edges written as SurrealQL, outside a repository.
     "->has_role->",
     "->grants->",
@@ -325,7 +335,8 @@ fn exemption(site: &Site) -> Option<&'static str> {
         .map(|(_, _, reason)| *reason)
 }
 
-/// The oracle of W6.2's enumeration: no write of the kinds the gate decides
+/// The oracle of W6.2's enumeration (extended by W6.3 to the segment and
+/// profile routes): no write of the kinds the gate decides
 /// reaches its repository from a function that has not asked the gate first.
 #[test]
 fn every_network_relevant_write_is_gated_or_exempt_with_a_reason() {
@@ -399,6 +410,13 @@ fn the_scan_finds_the_known_write_sites() {
         ("uma", "register_resource_set"),
         ("uma", "update_resource_set"),
         ("uma", "delete_resource_set"),
+        // W6.3: the ten-operation network surface's six writes.
+        ("network", "create_segment"),
+        ("network", "replace_segment"),
+        ("network", "delete_segment"),
+        ("network", "create_profile"),
+        ("network", "replace_profile"),
+        ("network", "delete_profile"),
     ] {
         assert!(
             gated.contains(&(file.to_owned(), function.to_owned())),

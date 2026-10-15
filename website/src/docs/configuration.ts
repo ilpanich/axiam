@@ -458,6 +458,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the network-segment management API: create, replace and delete a segment under /api/v1/network/segments and a segment's reply profile under /api/v1/network/profiles. A segment write decides which VLAN a device is placed on and a profile write shapes what the placement gives. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN",
             "Max requests per minute, per IP, to each CIBA approval route under /api/v1/ciba/requests: read a pending request, approve it, refuse it. One bucket per route, so reads cannot starve decisions. Human-driven, behind a session and a CSRF token; a request id that is not the caller's own answers 404. Never moved by a profile preset.",
             "30",

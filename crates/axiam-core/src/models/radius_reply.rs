@@ -169,7 +169,7 @@ pub fn dictionary(version: &str) -> Option<&'static [DictionaryEntry]> {
 }
 
 /// `Termination-Action` (RFC 2865 §5.29).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationAction {
     /// 0, `Default`: the NAS ends the session when `Session-Timeout` expires.
@@ -212,7 +212,7 @@ impl TerminationAction {
 }
 
 /// `Service-Type` (RFC 2865 §5.6), the values the dictionary admits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceType {
     /// 2, `Framed-User`: the only value option B accepts.
@@ -299,7 +299,7 @@ fn default_dictionary() -> String {
 
 /// What a writer supplies for a profile. Closed: an unknown key is a refusal
 /// naming it, never ignored (design note §3.4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyProfileInput {
     /// The dictionary version the profile is written against; defaults to

@@ -478,6 +478,28 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("reconcile", "POST", "/api/v1/scim-targets/{id}/reconcile"),
         ],
     },
+    "network": {
+        "doc": "A tenant's network segments and the RADIUS reply profile each owns "
+               "(RADIUS D4): a segment is a node of the reserved /network subtree "
+               "of the resource tree (kind, VLAN, Filter-Id envelope, placement "
+               "rank), and its profile is the typed `axiam-radius-reply/1` record a "
+               "decision renders. Every write is conditional on the `version` the "
+               "caller read and passes the server's write gate; the tenant's "
+               "Session-Timeout cap has no operation here. The decision route "
+               "FreeRADIUS calls is not in this registry.",
+        "operations": [
+            ("list_segments", "GET", "/api/v1/network/segments"),
+            ("create_segment", "POST", "/api/v1/network/segments"),
+            ("get_segment", "GET", "/api/v1/network/segments/{id}"),
+            ("replace_segment", "PUT", "/api/v1/network/segments/{id}"),
+            ("delete_segment", "DELETE", "/api/v1/network/segments/{id}"),
+            ("list_profiles", "GET", "/api/v1/network/profiles"),
+            ("create_profile", "POST", "/api/v1/network/profiles"),
+            ("get_profile", "GET", "/api/v1/network/profiles/{segment_id}"),
+            ("replace_profile", "PUT", "/api/v1/network/profiles/{segment_id}"),
+            ("delete_profile", "DELETE", "/api/v1/network/profiles/{segment_id}"),
+        ],
+    },
     "settings": {
         "doc": "Effective settings, and the organization/tenant layers they "
                "resolve from.",

@@ -967,6 +967,49 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
         self.effective(tenant_id, segment_id).await
     }
 
+    async fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<ReplyProfile>> {
+        let search = search_filter(&pagination, &["filter_id", "segment_id"]);
+        let search_term = search_bind(&pagination);
+        let mut count_result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT count() AS total FROM reply_profile \
+                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("search", search_term.clone()))
+            .await
+            .map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT * FROM reply_profile \
+                 WHERE tenant_id = $tenant_id{search} \
+                 ORDER BY segment_id ASC LIMIT $limit START $offset"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("search", search_term))
+            .bind(("limit", pagination.limit))
+            .bind(("offset", pagination.offset))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<ProfileRow> = result.take(0).map_err(DbError::from)?;
+        let cap = self.policy.get(tenant_id).await?.session_timeout_max_secs;
+        let items = rows
+            .into_iter()
+            .map(|row| row.into_effective(cap).map_err(AxiamError::from))
+            .collect::<AxiamResult<Vec<_>>>()?;
+        Ok(paginate(items, count_rows, &pagination))
+    }
+
     async fn replace(
         &self,
         tenant_id: Uuid,

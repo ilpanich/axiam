@@ -121,8 +121,9 @@ impl fmt::Display for ProfileRefusal {
                 f,
                 "{SWITCH} (the minimal profile has no reactor transport) but the datastore \
                  holds {count} enabled reactor registration(s). A fail_closed reactor with no \
-                 transport denies login.post_auth, user.pre_create, user.pre_update and \
-                 grant.pre_assign in every tenant that registered one. Disable or delete those \
+                 transport denies login.post_auth, user.pre_create, user.pre_update, \
+                 grant.pre_assign, network.pre_profile_write and network.pre_segment_write \
+                 in every tenant that registered one. Disable or delete those \
                  registrations (PUT /api/v1/reactors/{{id}} with enabled: false) and start \
                  again, or run the full profile (AXIAM__AMQP__ENABLED=true)."
             ),

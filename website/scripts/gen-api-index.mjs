@@ -98,6 +98,12 @@ const DOMAINS = [
     tags: ["ssf", "ssf-receiver"],
   },
   {
+    label: "Network access",
+    blurb:
+      "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, and what a device placed on a segment is given. The decision route FreeRADIUS calls is not part of this index.",
+    tags: ["network"],
+  },
+  {
     label: "Audit & operations",
     blurb: "The append-only trail, and the endpoints a monitor reads.",
     tags: ["audit", "health"],

@@ -236,9 +236,11 @@ ENDPOINTS = {
     #     handshake, which only the p3-mtls profile presents.
     #   ssf / ssf_admin — a receiver token and a stream, and the writes repoint
     #     where a tenant's security events are pushed.
-    #   saml_admin / directory_admin / scim_target_admin — administrators'
-    #     writes; each resolves or contacts a tenant-chosen host, or generates an
-    #     RSA-4096 key, so a closed-loop cell would measure that, not the limiter.
+    #   saml_admin / directory_admin / scim_target_admin / network_admin —
+    #     administrators' writes; each resolves or contacts a tenant-chosen host,
+    #     generates an RSA-4096 key, or (network_admin) runs the write gate's reads
+    #     and a reactor round trip, so a closed-loop cell would measure that, not
+    #     the limiter.
     "bc_authorize_per_min": (None, "POST /oauth2/bc-authorize (CIBA backchannel authentication)"),
     "ciba_approval_per_min": (
         None,
@@ -264,6 +266,10 @@ ENDPOINTS = {
     "scim_target_admin_per_min": (
         None,
         "POST, PUT, DELETE /api/v1/scim-targets[/{id}[/reconcile]] (outbound SCIM target registry writes)",
+    ),
+    "network_admin_per_min": (
+        None,
+        "POST, PUT, DELETE /api/v1/network/{segments,profiles}[/{id}] (network segment and reply profile writes; one bucket per route)",
     ),
     # #565 (T-102). The certificate revocation list route carries its limiter
     # from the commit that added it, so it has a row from that commit too.
@@ -335,6 +341,7 @@ def read_configured_defaults():
                   "bc_authorize_per_min", "ciba_approval_per_min", "device_login_per_min",
                   "ssf_per_min", "ssf_admin_per_min", "saml_admin_per_min",
                   "directory_admin_per_min", "scim_target_admin_per_min",
+                  "network_admin_per_min",
                   # #565: the certificate revocation list route.
                   "crl_per_min",
                   # #529: the email delivery self-test routes.

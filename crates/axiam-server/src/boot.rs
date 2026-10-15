@@ -789,12 +789,13 @@ where
         );
     } else {
         tracing::info!(
-            "X1 reactors: the dispatch gate is wired into all five interceptor \
+            "X1 reactors: the dispatch gate is wired into all seven interceptor \
          events over the lapin AMQP transport. A tenant with NO registered \
          reactor is unaffected and never touches the broker. While the broker \
          is unreachable a REGISTERED reactor's failure_policy applies to every \
          dispatch — a fail_closed registration (the default for login.post_auth, \
-         user.pre_create, user.pre_update and grant.pre_assign) will DENY those \
+         user.pre_create, user.pre_update, grant.pre_assign and the two network.pre_*_write \
+         events) will DENY those \
          operations, and every one of those denials is audited as \
          'reactor.dispatch_failed'."
         );

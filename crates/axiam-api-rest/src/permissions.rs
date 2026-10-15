@@ -1360,6 +1360,39 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/scim-targets/{id}/reconcile",
         "scim_targets:write",
     ),
+    // Network segments and RADIUS reply profiles (RADIUS D4, W6.3). The route
+    // permission is the one the write gate asks for first (design note §5.2,
+    // §4.2); a profile write also needs `network:grant` on the segment (H2).
+    ("GET", "/api/v1/network/segments", "network:read"),
+    ("POST", "/api/v1/network/segments", "network:segments_write"),
+    ("GET", "/api/v1/network/segments/{id}", "network:read"),
+    (
+        "PUT",
+        "/api/v1/network/segments/{id}",
+        "network:segments_write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/network/segments/{id}",
+        "network:segments_write",
+    ),
+    ("GET", "/api/v1/network/profiles", "network:read"),
+    ("POST", "/api/v1/network/profiles", "network:profiles_write"),
+    (
+        "GET",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:profiles_write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:profiles_write",
+    ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (
         "GET",

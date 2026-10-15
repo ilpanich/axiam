@@ -6,7 +6,8 @@
 //! `axiam_amqp::messages` — no live RabbitMQ broker.
 //!
 //! Covered branches: valid Ack (event persisted), malformed JSON,
-//! unsigned/invalid HMAC, key_version below minimum, stale `issued_at`, nonce
+//! unsigned/invalid HMAC, key_version below minimum, stale `issued_at`, an
+//! action reserved for the server's control records (R101W3-03), nonce
 //! replay, nonce-store error, unknown actor_type, unknown outcome, and a
 //! persistence failure.
 
@@ -449,4 +450,94 @@ async fn persistence_failure_is_nackdropped() {
     let outcome =
         process_audit_event(&raw, &FailingAuditRepo, MASTER, &nonce_repo, skew(), now).await;
     assert!(matches!(outcome, AuditIngestOutcome::NackDrop));
+}
+
+/// R101W3-03 (#637): an action in a namespace the server reserves for its
+/// control records — every `tenants.*` record the tenant deletion and purge
+/// read back (the export receipt, `tenants.deleted`, `tenants.purged`), the
+/// `gdpr.*` records, in any case — is refused even when the message is validly
+/// signed with the tenant's subkey, fresh and new, and nothing is persisted.
+/// The review's probe: a forged `tenants.audit_exported` receipt with
+/// `exported_through` 2100-01-01 was acknowledged and became the newest
+/// receipt the deletion accepted. An ordinary action from the same producer is
+/// still persisted.
+#[tokio::test]
+async fn a_reserved_control_action_is_refused_and_not_persisted() {
+    use axiam_db::repository::tenant_purge::TENANT_CONTROL_ACTIONS;
+
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    let mut reserved: Vec<&str> = TENANT_CONTROL_ACTIONS.to_vec();
+    reserved.extend([
+        "gdpr.user_pseudonymized",
+        "gdpr.erasure_requested",
+        "Tenants.Audit_Exported",
+    ]);
+    for action in reserved {
+        // As the probe sent it: the receipt's metadata, signed by the tenant.
+        let mut msg = AuditEventMessage {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: "User".into(),
+            action: action.into(),
+            resource_id: Some(tenant_id),
+            outcome: "Success".into(),
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "record_count": 0,
+                "exported_through": "2100-01-01T00:00:00Z",
+            })),
+            key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::new_v4(),
+            issued_at: now,
+            hmac_signature: None,
+        };
+        let canonical = serde_json::to_vec(&msg).unwrap();
+        let subkey = derive_tenant_key(MASTER, tenant_id, CURRENT_KEY_VERSION);
+        msg.hmac_signature = Some(sign_payload(&subkey, &canonical));
+        let raw = serde_json::to_vec(&msg).unwrap();
+
+        let outcome =
+            process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+        assert!(
+            matches!(outcome, AuditIngestOutcome::NackDrop),
+            "{action} must be refused"
+        );
+    }
+    let page = Pagination {
+        offset: 0,
+        limit: 100,
+        search: None,
+    };
+    let listed = audit_repo
+        .list(tenant_id, AuditLogFilter::default(), page.clone())
+        .await
+        .unwrap();
+    assert!(listed.items.is_empty(), "no reserved action was persisted");
+
+    let raw = signed_event(
+        tenant_id,
+        Uuid::new_v4(),
+        "User",
+        "Success",
+        "tenant.audit_exported_lookalike",
+        CURRENT_KEY_VERSION,
+        now,
+        Uuid::new_v4(),
+    );
+    let outcome = process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+    assert!(matches!(outcome, AuditIngestOutcome::Ack));
+    let listed = audit_repo
+        .list(tenant_id, AuditLogFilter::default(), page)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.items.len(),
+        1,
+        "an ordinary action is still persisted"
+    );
 }

@@ -24,6 +24,15 @@
 //! under the tenant id until the retention sweep (T-119) takes them (see
 //! `axiam_db::repository::tenant_purge`).
 //!
+//! The receipt is the server's alone (R101W3-03, #637). It is an ordinary
+//! audit row, and the AMQP audit ingestion appends rows a tenant's own
+//! producers sign, so that ingestion refuses every action in the `tenants.`
+//! and `gdpr.` namespaces ([`axiam_core::models::audit::RESERVED_ACTION_NAMESPACES`]).
+//! [`delete`] also refuses (`409`) a receipt whose `exported_through` is later
+//! than its own `timestamp` — an export starts before its receipt is written —
+//! and the purge clamps the bound to that timestamp, so a receipt can never
+//! make the purge delete a row written after it.
+//!
 //! ## What this does and does not prove
 //!
 //! It proves that a named principal asked this server for the whole trail, and
@@ -97,7 +106,7 @@ pub const TENANT_DELETED_ACTION: &str = axiam_db::repository::tenant_purge::TENA
 /// `audit_exported_through`, `audit_rows_deleted` and `audit_rows_kept` say
 /// which of the tenant's audit rows went and how many stay for the retention
 /// sweep (R1W1-04).
-pub const TENANT_PURGED_ACTION: &str = "tenants.purged";
+pub const TENANT_PURGED_ACTION: &str = axiam_db::repository::tenant_purge::TENANT_PURGED_ACTION;
 
 /// How recent the export receipt must be for [`delete`] to accept it.
 ///
@@ -138,7 +147,11 @@ enum ExportPhase {
 ///
 /// Reads the tenant's own audit log — the receipt is an ordinary append-only
 /// entry, so this needs no new table, no new retention rule and no second
-/// source of truth that could disagree with the trail it is about.
+/// source of truth that could disagree with the trail it is about. Only the
+/// server writes one: the AMQP audit ingestion, whose messages the tenant's own
+/// producers sign, refuses every `tenants.*` action (R101W3-03, #637), and
+/// [`delete`] refuses a receipt whose `exported_through` is later than its own
+/// `timestamp`.
 async fn recent_export_receipt<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
@@ -702,6 +715,24 @@ pub async fn delete<C: Connection + Clone>(
         }
         .into());
     };
+    // R101W3-03 (#637): an export starts before its receipt is written, so an
+    // honest receipt covers rows up to a time no later than its own datastore
+    // timestamp. One that claims to cover rows written after it was not written
+    // by the export, and its `exported_through` would set how much of the trail
+    // the purge deletes: refused, with the same `409` as no receipt, before
+    // anything changes. (The purge clamps to the receipt's timestamp too.)
+    if exported_through.is_some_and(|through| through > exported_at) {
+        return Err(AxiamError::Conflict {
+            reason: format!(
+                "the newest audit export receipt of this tenant claims to cover rows written \
+                 after it, which no export writes. Export again with \
+                 POST /api/v1/organizations/{}/tenants/{}/audit-export, then retry within \
+                 {AUDIT_EXPORT_MAX_AGE_HOURS} hours.",
+                path.org_id, path.tenant_id
+            ),
+        }
+        .into());
+    }
 
     // #523 (P23W2-04, D-4): revoke, tombstone — the erasure's order, its first
     // step in the request. The tenant's sessions go first, through the

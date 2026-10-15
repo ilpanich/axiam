@@ -63,10 +63,18 @@
 //! The export time is read from the newest `tenants.deleted` record naming the
 //! tenant (`resource_id`). A record written before this rule existed carries
 //! only the receipt id, and the time is then read from that receipt's own
-//! `exported_through`, which every receipt has carried; the receipt is a row
-//! after the export, so the purge never deletes it. When neither yields a time
-//! — no deletion record (its write was dead-lettered, or the purge ran before
-//! it landed), or a record without one — the purge deletes **no** audit row
+//! `exported_through`, which every receipt has carried. Either way it is
+//! **clamped to the receipt's own `timestamp`** (R101W3-03, #637): the receipt
+//! is written after the export drains, so an honest export time is earlier than
+//! the receipt, and the row's `timestamp` is the datastore's while
+//! `exported_through` is whatever its writer said. A receipt claiming to cover
+//! rows after itself bounds the purge at itself, never later (the deletion
+//! refuses such a receipt since #637, and no AMQP producer can write one —
+//! `tenants.*` is reserved, [`axiam_core::models::audit::RESERVED_ACTION_NAMESPACES`]).
+//! An honest receipt is after the bound, so the purge never deletes it. When no
+//! time can be read — no deletion record (its write was dead-lettered, or the
+//! purge ran before it landed), a record without one, or a record whose
+//! receipt is not in the tenant's log — the purge deletes **no** audit row
 //! and no signature of the tenant: it keeps everything, as for an orphan, and
 //! leaves it to the retention sweep. `tenants.purged` records the export time
 //! used (or `null`) and how many audit rows were deleted and kept
@@ -122,6 +130,22 @@ pub const TENANT_DELETED_ACTION: &str = "tenants.deleted";
 
 /// The action of the export receipt in the tenant's own audit log (T-118).
 pub const AUDIT_EXPORT_ACTION: &str = "tenants.audit_exported";
+
+/// The action of the **system**-log record the cleanup job writes once it has
+/// purged a deleted tenant (`resource_id` = the tenant).
+pub const TENANT_PURGED_ACTION: &str = "tenants.purged";
+
+/// Every control record the tenant deletion and purge write and read back.
+///
+/// Each falls in a namespace of
+/// [`axiam_core::models::audit::RESERVED_ACTION_NAMESPACES`], so no AMQP
+/// producer can write one (R101W3-03, #637); the purge's tests and the AMQP
+/// consumer's pin that.
+pub const TENANT_CONTROL_ACTIONS: &[&str] = &[
+    TENANT_DELETED_ACTION,
+    AUDIT_EXPORT_ACTION,
+    TENANT_PURGED_ACTION,
+];
 
 /// The key of [`TENANT_DELETED_ACTION`]'s metadata holding the time the
 /// accepted export covered up to (its receipt's [`RECEIPT_EXPORTED_THROUGH`]).
@@ -416,10 +440,11 @@ pub(crate) enum PurgeScope {
 /// job records in `tenants.purged` (R1W1-04).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TenantPurgeReport {
-    /// The time the export the deletion required covered up to; the purge
-    /// deleted the tenant's audit rows at or before it. `None` when no export
-    /// time could be read (an orphan, or a deletion record without one): no
-    /// audit row was deleted.
+    /// The time the export the deletion required covered up to, clamped to
+    /// its receipt's own `timestamp` (R101W3-03); the purge deleted the
+    /// tenant's audit rows at or before it. `None` when no export time could
+    /// be read (an orphan, a deletion record without one, or one whose receipt
+    /// is not in the tenant's log): no audit row was deleted.
     pub audit_exported_through: Option<DateTime<Utc>>,
     /// Audit rows of the tenant this purge deleted. A purge resumed after a
     /// failure counts only what the resuming pass deleted.
@@ -509,9 +534,20 @@ async fn count<C: Connection>(
 /// Read from the newest [`TENANT_DELETED_ACTION`] record in the system log
 /// naming the tenant: its [`DELETION_EXPORTED_THROUGH`], or, for a record
 /// written before that key existed, the [`RECEIPT_EXPORTED_THROUGH`] of the
-/// receipt it names ([`DELETION_RECEIPT_ID`]), which is in the tenant's own log
-/// and after the export, so still there. A value that is not an RFC 3339 time
-/// counts as absent: the purge then keeps the whole trail.
+/// receipt it names ([`DELETION_RECEIPT_ID`]).
+///
+/// **Clamped to the receipt's own `timestamp`** (R101W3-03, #637). The receipt
+/// is written after the export drains, so an honest `exported_through` is
+/// earlier than the row that carries it; the row's `timestamp` is assigned by
+/// the datastore, while `exported_through` is metadata whoever wrote the row
+/// chose. The bound is therefore `min(exported_through, receipt.timestamp)`:
+/// a receipt claiming to cover rows written after it bounds the purge at the
+/// receipt, never later. The receipt is looked up in **this tenant's** log, by
+/// id and action. A record that names no receipt, or one that is not there —
+/// a purge resumed after a clamped pass deleted it, or a record no deletion
+/// wrote — leaves nothing to clamp to, and counts as no time: the purge then
+/// keeps the whole trail. A value that is not an RFC 3339 time counts as
+/// absent too.
 async fn audit_export_cutoff<C: Connection>(
     db: &DbHandle<C>,
     tenant_id: Uuid,
@@ -520,6 +556,12 @@ async fn audit_export_cutoff<C: Connection>(
     struct MetadataRow {
         #[surreal(default)]
         metadata: Option<serde_json::Value>,
+    }
+    #[derive(Debug, SurrealValue)]
+    struct ReceiptRow {
+        #[surreal(default)]
+        metadata: Option<serde_json::Value>,
+        timestamp: DateTime<Utc>,
     }
     fn time_at(metadata: Option<&serde_json::Value>, key: &str) -> Option<DateTime<Utc>> {
         let raw = metadata?.get(key)?.as_str()?;
@@ -544,18 +586,15 @@ async fn audit_export_cutoff<C: Connection>(
     let Some(deletion) = rows.into_iter().next().and_then(|r| r.metadata) else {
         return Ok(None);
     };
-    if let Some(at) = time_at(Some(&deletion), DELETION_EXPORTED_THROUGH) {
-        return Ok(Some(at));
-    }
-    // A deletion recorded before `audit_exported_through` existed: ask the
-    // receipt it names, in the tenant's own log.
+    // The receipt the deletion accepted, in the tenant's own log: the clamp's
+    // source, and the export time of a record that does not carry one.
     let Some(receipt_id) = deletion.get(DELETION_RECEIPT_ID).and_then(|v| v.as_str()) else {
         return Ok(None);
     };
     let mut result = db
         .current()
         .query(
-            "SELECT metadata FROM type::record('audit_log', $receipt) \
+            "SELECT metadata, timestamp FROM type::record('audit_log', $receipt) \
              WHERE tenant_id = $id AND action = $action",
         )
         .bind(("receipt", receipt_id.to_owned()))
@@ -563,11 +602,13 @@ async fn audit_export_cutoff<C: Connection>(
         .bind(("action", AUDIT_EXPORT_ACTION.to_owned()))
         .await?
         .check()?;
-    let rows: Vec<MetadataRow> = result.take(0)?;
-    Ok(rows
-        .into_iter()
-        .next()
-        .and_then(|r| time_at(r.metadata.as_ref(), RECEIPT_EXPORTED_THROUGH)))
+    let rows: Vec<ReceiptRow> = result.take(0)?;
+    let Some(receipt) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let claimed = time_at(Some(&deletion), DELETION_EXPORTED_THROUGH)
+        .or_else(|| time_at(receipt.metadata.as_ref(), RECEIPT_EXPORTED_THROUGH));
+    Ok(claimed.map(|through| through.min(receipt.timestamp)))
 }
 
 /// Tenant ids that own rows in a tenant-scoped table (the audit trail aside,

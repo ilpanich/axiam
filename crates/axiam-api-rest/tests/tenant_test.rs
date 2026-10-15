@@ -538,6 +538,95 @@ async fn a_stale_export_receipt_does_not_unblock_delete() {
     );
 }
 
+/// R101W3-03 (#637): a receipt whose `exported_through` is later than its own
+/// `timestamp` — one no export writes, since an export starts before its
+/// receipt — does not unblock DELETE: the same `409` as no receipt, and the
+/// tenant is left exactly as it was. A fresh export, written by the server,
+/// then does.
+///
+/// Before the fix such a receipt (written through the AMQP audit ingestion,
+/// which a tenant's producers sign) was accepted, and its `exported_through`
+/// set how much of the trail the purge deleted.
+#[actix_rt::test]
+async fn a_receipt_claiming_rows_after_itself_does_not_unblock_delete() {
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
+
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let doomed = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Forged".into(),
+            slug: "forged-receipt".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id: doomed.id,
+            actor_id: user_id,
+            actor_type: ActorType::User,
+            action: axiam_api_rest::handlers::tenants::AUDIT_EXPORT_ACTION.to_string(),
+            resource_id: Some(doomed.id),
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "record_count": 0,
+                "exported_through": Utc::now() + Duration::days(1),
+            })),
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+    let delete = || {
+        test::TestRequest::delete()
+            .uri(&format!(
+                "/api/v1/organizations/{org_id}/tenants/{}",
+                doomed.id
+            ))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, delete()).await.status().as_u16(),
+        409,
+        "a receipt covering rows after itself must not authorise a deletion"
+    );
+    assert!(
+        tenant_repo.get_by_id(doomed.id).await.is_ok(),
+        "the refusal leaves the tenant live"
+    );
+    let deletions = SurrealAuditLogRepository::new(db.clone())
+        .list_system(
+            AuditLogFilter {
+                action: Some(axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.to_string()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(deletions.items.is_empty(), "no deletion is recorded");
+
+    // The server's own export is newer, honest, and unblocks it.
+    let _ = export_audit_body!(app, token, org_id, doomed.id);
+    assert_eq!(
+        test::call_service(&app, delete()).await.status().as_u16(),
+        204
+    );
+}
+
 /// An export of a DIFFERENT tenant must not unblock this one.
 #[actix_rt::test]
 async fn an_export_of_another_tenant_does_not_unblock_delete() {

@@ -270,9 +270,9 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// Remove every tenant-scoped row of a **tombstoned** tenant, then the
     /// tenant row. Of its audit trail, only the rows the export its deletion
     /// required holds go — those at or before the export time the
-    /// `tenants.deleted` record names (R1W1-04); the rest, or all of it when no
-    /// export time can be read, stays for the retention sweep. The report says
-    /// which.
+    /// `tenants.deleted` record names, never later than the receipt it names
+    /// (R1W1-04, R101W3-03); the rest, or all of it when no export time can be
+    /// read, stays for the retention sweep. The report says which.
     ///
     /// Each table is one idempotent `DELETE`; a failure stops the purge with
     /// the tenant still tombstoned, and calling this again resumes it. A live

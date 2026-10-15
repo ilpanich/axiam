@@ -2170,12 +2170,18 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
         }
     };
     // The tombstoned tenant's trail: one row the export holds, then the
-    // export, then one row it does not hold.
+    // export, then one row it does not hold — its receipt, which the deletion
+    // record names and whose timestamp caps the bound (R101W3-03, #637).
     entry(tombstoned, "users.updated", None).await;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let exported_through = Utc::now();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let late = entry(tombstoned, "users.created", None).await;
+    let late = entry(
+        tombstoned,
+        axiam_api_rest::handlers::tenants::AUDIT_EXPORT_ACTION,
+        Some(serde_json::json!({ "exported_through": exported_through })),
+    )
+    .await;
     tenants.delete(tombstoned).await.unwrap();
     audit
         .append(CreateAuditLogEntry {
@@ -2186,7 +2192,10 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
             resource_id: Some(tombstoned),
             outcome: AuditOutcome::Success,
             ip_address: None,
-            metadata: Some(serde_json::json!({ "audit_exported_through": exported_through })),
+            metadata: Some(serde_json::json!({
+                "audit_export_receipt_id": late.id,
+                "audit_exported_through": exported_through,
+            })),
         })
         .await
         .unwrap();

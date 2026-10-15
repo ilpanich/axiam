@@ -171,6 +171,13 @@ jobs:
       - name: Conformance gate rules (fixtures)
         run: python3 -m unittest discover -s conformance/scripts -p 'test_*.py' --verbose
 
+      # The conformance scripts take `module_timeout` (a workflow dispatch input)
+      # into bash arithmetic, where `a[$(cmd)]` is command execution (R101W4-02).
+      # They must refuse anything but digits BEFORE the arithmetic; the test feeds
+      # them the payload and checks that it neither runs nor passes.
+      - name: Conformance scripts refuse non-numeric knobs
+        run: bash conformance/scripts/tests/validate_inputs_test.sh
+
   build:
     name: Build
     runs-on: ubuntu-latest

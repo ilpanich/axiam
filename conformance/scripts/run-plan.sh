@@ -24,6 +24,14 @@ SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPTS_DIR/lib-env.sh"
 conf_load
 
+# Numeric knobs are checked BEFORE anything else happens, and before they reach
+# `$(( ... ))`, where a non-numeric value is code (R101W4-02; conf_require_uint
+# says how). `10#` pins base 10 so a leading zero is not read as octal.
+conf_require_uint CONFORMANCE_SUITE_WAIT "${CONFORMANCE_SUITE_WAIT:-180}" || exit 2
+conf_require_uint CONFORMANCE_MODULE_TIMEOUT "${CONFORMANCE_MODULE_TIMEOUT:-300}" || exit 2
+suite_wait=$((10#${CONFORMANCE_SUITE_WAIT:-180}))
+module_timeout=$((10#${CONFORMANCE_MODULE_TIMEOUT:-300}))
+
 BASE="${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}"
 mkdir -p "$OUT_DIR"
 
@@ -43,7 +51,6 @@ echo "[run-plan] config: $PLAN_CONFIG"
 # restart `conformance-up` performs), and curl without `-f` exits 0 on that, so
 # a plan POST made in that window got an HTML error page back and created
 # nothing — run 37276852665, all three variants, after a probe that "passed".
-suite_wait="${CONFORMANCE_SUITE_WAIT:-180}"
 suite_deadline=$(( $(date +%s) + suite_wait ))
 until "${CURL[@]}" -f --max-time 10 "$BASE/api/runner/available" >/dev/null 2>&1; do
   if [ "$(date +%s)" -ge "$suite_deadline" ]; then
@@ -117,7 +124,7 @@ while IFS= read -r module; do
   # the 60-second PAR window. 180 seconds was tight enough that a module doing
   # one of those plus a sign-in hop could reach the deadline while still
   # perfectly healthy.
-  deadline=$(( $(date +%s) + ${CONFORMANCE_MODULE_TIMEOUT:-300} ))
+  deadline=$(( $(date +%s) + module_timeout ))
   status=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
     INFO=$("${CURL[@]}" "$BASE/api/info/$TEST_ID" 2>/dev/null || echo '{}')

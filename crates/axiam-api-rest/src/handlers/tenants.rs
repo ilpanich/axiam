@@ -31,7 +31,11 @@
 //! [`delete`] also refuses (`409`) a receipt whose `exported_through` is later
 //! than its own `timestamp` — an export starts before its receipt is written —
 //! and the purge clamps the bound to that timestamp, so a receipt can never
-//! make the purge delete a row written after it.
+//! make the purge delete a row written after it. The bound is read from the
+//! audit datastore's clock, the one that stamps the rows
+//! ([`axiam_core::repository::AuditLogRepository::datastore_now`], R101W3-07,
+//! #640), so an application host whose clock leads the datastore's neither
+//! claims rows it did not page nor writes a receipt `delete` refuses.
 //!
 //! ## What this does and does not prove
 //!
@@ -871,13 +875,35 @@ pub async fn export_audit<C: Connection + Clone>(
         .into());
     }
 
-    let tenant_id = path.tenant_id;
-    let actor_id = user.user_id;
-    let audit_repo = state.audit_repo.clone();
+    audit_export_response(state.audit_repo.clone(), path.tenant_id, user.user_id).await
+}
+
+/// The export itself, over any audit repository: the bound is read from the
+/// repository's datastore, the rows are paged up to it, and the receipt is
+/// appended last. Split from [`export_audit`] so that a test can put a
+/// repository behind it whose clock differs from the application host's.
+pub(crate) async fn audit_export_response<R>(
+    audit_repo: R,
+    tenant_id: Uuid,
+    actor_id: Uuid,
+) -> Result<HttpResponse, AxiamApiError>
+where
+    R: AuditLogRepository + Clone + Send + Sync + 'static,
+{
     // Fix the upper bound of the export at the moment it starts. Without it,
     // rows appended while the stream is draining would shift the offsets of
     // every page after them and the export would skip entries.
-    let started_at = Utc::now();
+    //
+    // The bound is the DATASTORE's clock, not this host's (R101W3-07, #640):
+    // `audit_log.timestamp` is stamped by the datastore, so a bound read from
+    // an application host whose clock leads it by δ would reach δ past the
+    // datastore's present, claim rows stamped in (t0 - δ, bound] that were
+    // appended during the stream and never paged, and — the purge deleting up
+    // to `exported_through` — delete them unexported. Taken here, before the
+    // first page is read, and the receipt below appended after the last, the
+    // receipt's own stamp is never earlier than the bound it records, which is
+    // what `delete` requires of it.
+    let started_at = audit_repo.datastore_now().await?;
 
     let stream = futures::stream::unfold(
         ExportPhase::Rows {

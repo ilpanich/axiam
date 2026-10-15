@@ -98,6 +98,9 @@ impl AmqpNonceRepository for FailingNonceRepo {
 // failure → NackDrop branch.
 struct FailingAuditRepo;
 impl AuditLogRepository for FailingAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         Err(AxiamError::Database("audit store unavailable".into()))
     }
@@ -132,6 +135,9 @@ struct CountingAuditRepo {
     count: Mutex<u32>,
 }
 impl AuditLogRepository for CountingAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         *self.count.lock().unwrap() += 1;
         Ok(AuditLogEntry {

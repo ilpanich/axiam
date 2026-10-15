@@ -1411,6 +1411,19 @@ pub struct AuditLogFilter {
 }
 
 pub trait AuditLogRepository: Send + Sync {
+    /// The datastore's own clock, read now.
+    ///
+    /// `audit_log.timestamp` is stamped by the datastore (`DEFAULT time::now()`),
+    /// never by the application. Anything that compares a bound with those
+    /// stamps — the tenant audit export's `exported_through`, which the purge
+    /// later deletes up to (T-118) — must therefore take the bound from the
+    /// same clock: an application host whose clock leads the datastore's by
+    /// δ would otherwise claim rows that were never paged, and a receipt
+    /// whose bound is later than its own stamp is refused by the deletion.
+    ///
+    /// An implementation that is not backed by a datastore returns its own
+    /// process clock; a wrapper must forward to the repository it wraps.
+    fn datastore_now(&self) -> impl Future<Output = AxiamResult<DateTime<Utc>>> + Send;
     /// Append a new audit log entry. No update or delete operations exist.
     fn append(
         &self,

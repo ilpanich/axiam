@@ -602,6 +602,12 @@ where
     A: axiam_core::repository::AuditLogRepository,
     T: axiam_core::repository::TenantRepository,
 {
+    fn datastore_now(
+        &self,
+    ) -> impl std::future::Future<Output = AxiamResult<chrono::DateTime<chrono::Utc>>> + Send {
+        self.inner.datastore_now()
+    }
+
     async fn append(
         &self,
         input: axiam_core::models::audit::CreateAuditLogEntry,

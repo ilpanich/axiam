@@ -961,6 +961,9 @@ type AuditLog = Arc<Mutex<Vec<axiam_core::models::audit::CreateAuditLogEntry>>>;
 struct MockAuditRepo(AuditLog);
 
 impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(
         &self,
         input: axiam_core::models::audit::CreateAuditLogEntry,

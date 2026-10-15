@@ -194,6 +194,9 @@ async fn cleanup_does_not_propagate_db_errors_as_panics() {
 struct FailingAuditRepo;
 
 impl AuditLogRepository for FailingAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
     }

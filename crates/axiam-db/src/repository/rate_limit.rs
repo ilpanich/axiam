@@ -26,7 +26,7 @@ struct RateLimitBucketRow {
     count: u64,
 }
 
-/// Row shape of [`SurrealRateLimitBucketRepository::peek_count`].
+/// Row shape of [`SurrealRateLimitBucketRepository::peek_bucket`].
 #[derive(Debug, SurrealValue)]
 struct RateLimitBucketPeek {
     count: u64,
@@ -148,6 +148,22 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
     /// the stored `count` otherwise. A plain `SELECT`: it creates no row, so
     /// asking after a key nobody has written leaves the table as it was.
     pub async fn peek_count(&self, key: &str, window_start: DateTime<Utc>) -> Result<u64, DbError> {
+        Ok(self
+            .peek_bucket(key)
+            .await?
+            .filter(|(stored, _)| *stored >= window_start)
+            .map_or(0, |(_, count)| count))
+    }
+
+    /// Reads the bucket `key` as it is stored, writing nothing: the start of
+    /// the window its count belongs to and the count, or `None` when no
+    /// bucket exists for `key`.
+    ///
+    /// Unlike [`Self::peek_count`] this tells a bucket that has moved on to a
+    /// newer window from one still holding the window asked about, which is
+    /// what the CIBA hint cap needs to notice a call that has been overtaken
+    /// by the next window (`axiam_oauth2::ciba::CibaHintCap`).
+    pub async fn peek_bucket(&self, key: &str) -> Result<Option<(DateTime<Utc>, u64)>, DbError> {
         let mut result = self
             .db
             .current()
@@ -161,8 +177,38 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
         Ok(rows
             .into_iter()
             .next()
-            .filter(|row| row.window_start >= window_start)
-            .map_or(0, |row| row.count))
+            .map(|row| (row.window_start, row.count)))
+    }
+
+    /// Takes one back from the bucket `key`, in one conditional statement: the
+    /// count drops by one only while the bucket still holds the window
+    /// starting at `window_start` and the count is above zero. Otherwise —
+    /// no bucket, a bucket that has moved on to another window, a count of
+    /// zero — nothing is written (in particular, no row is created). Returns
+    /// whether one was taken back.
+    ///
+    /// The undo of one [`Self::increment_by`] of `1` for the same window, for
+    /// a caller that counts first and decides afterwards (the CIBA hint cap
+    /// takes back the count of a call it refused). The read of `count` and the
+    /// write are one statement on one record, so it cannot lose an increment
+    /// made concurrently.
+    pub async fn decrement(&self, key: &str, window_start: DateTime<Utc>) -> Result<bool, DbError> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('rate_limit_bucket', $key) SET count = count - 1 \
+                 WHERE window_start = $window_start AND count > 0 \
+                 RETURN AFTER",
+            )
+            .bind(("key", key.to_string()))
+            .bind(("window_start", window_start))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RateLimitBucketRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
     }
 
     /// Deletes, at most `limit` at a time, the buckets whose `updated_at` is
@@ -325,6 +371,52 @@ mod tests {
             2,
             "the row was rewritten"
         );
+        assert_eq!(rows(&db).await, 1);
+    }
+
+    /// `peek_bucket` reports the stored window and count as they are, a newer
+    /// window included, and writes nothing (#639).
+    #[tokio::test]
+    async fn peek_bucket_reports_the_stored_window() {
+        let (repo, db) = repo().await;
+        let w1 = Utc::now();
+        let w2 = w1 + Duration::minutes(10);
+        assert_eq!(repo.peek_bucket("k").await.unwrap(), None);
+        assert_eq!(rows(&db).await, 0, "a read created a row");
+        repo.increment_by("k", w1, 2).await.unwrap();
+        let (stored, count) = repo.peek_bucket("k").await.unwrap().unwrap();
+        assert_eq!((stored.timestamp(), count), (w1.timestamp(), 2));
+        repo.increment_by("k", w2, 1).await.unwrap();
+        let (stored, count) = repo.peek_bucket("k").await.unwrap().unwrap();
+        assert_eq!((stored.timestamp(), count), (w2.timestamp(), 1));
+        assert_eq!(rows(&db).await, 1);
+    }
+
+    /// `decrement` takes one back only from the window it names and never
+    /// below zero, and creates no row (#639).
+    #[tokio::test]
+    async fn decrement_takes_one_back_from_its_own_window_only() {
+        let (repo, db) = repo().await;
+        let w1 = Utc::now();
+        let w2 = w1 + Duration::minutes(10);
+        assert!(!repo.decrement("k", w1).await.unwrap(), "no row");
+        assert_eq!(rows(&db).await, 0, "a decrement created a row");
+
+        repo.increment_by("k", w1, 2).await.unwrap();
+        assert!(repo.decrement("k", w1).await.unwrap());
+        assert_eq!(repo.peek_count("k", w1).await.unwrap(), 1);
+        // Another window's: the bucket holds w1, so nothing is taken.
+        assert!(!repo.decrement("k", w2).await.unwrap());
+        assert_eq!(repo.peek_count("k", w1).await.unwrap(), 1);
+        assert!(repo.decrement("k", w1).await.unwrap());
+        assert!(!repo.decrement("k", w1).await.unwrap(), "never below zero");
+        assert_eq!(repo.peek_count("k", w1).await.unwrap(), 0);
+
+        // A bucket that has moved on to a newer window is not touched by
+        // the older window's undo.
+        repo.increment_by("k", w2, 1).await.unwrap();
+        assert!(!repo.decrement("k", w1).await.unwrap());
+        assert_eq!(repo.peek_count("k", w2).await.unwrap(), 1);
         assert_eq!(rows(&db).await, 1);
     }
 

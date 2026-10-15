@@ -1321,13 +1321,17 @@ where
         // #599 (T-424) — the per-(client, hint) cap on `bc-authorize` counts in
         // the shared rate-limit table every replica writes, so it holds across
         // replicas; its bucket keys are an HMAC under a key derived from the
-        // signing key every replica already shares.
+        // signing key every replica already shares. Its allowance is
+        // `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (#639; never preset, so
+        // the value read here is final; `0` stops the start-up here with
+        // `validate`'s message).
         axiam_oauth2::ciba::CibaHintCap::derived_from(
             Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
                 pool.handle_for_repo(),
             )),
             config.auth.jwt_private_key_pem.as_bytes(),
-        ),
+        )
+        .with_per_hint(config.rate_limit.bc_authorize_per_hint_checked()),
     )
     // D-61 — signed authentication requests (CIBA Core §7.1.1, FAPI-CIBA).
     // The keys come through the same federation JWKS cache the
@@ -1529,6 +1533,7 @@ where
         introspect_per_min = config.rate_limit.introspect_per_min,
         revoke_per_min = config.rate_limit.revoke_per_min,
         authz_check_per_min = config.rate_limit.authz_check_per_min,
+        bc_authorize_per_hint = config.rate_limit.bc_authorize_per_hint,
         grpc_authz_per_sec = config.grpc.grpc_authz_per_sec,
         operator_overrides = %rate_limit_posture.overrides_display(),
         "Rate-limit posture active"
@@ -3485,3 +3490,61 @@ const _: () =
     assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < ORDERLY_STOP.outbound.as_millis());
 const _: () =
     assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < LEASE_LOSS_STOP.outbound.as_millis());
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    /// Builds the configuration the way `load_config` does, from an injected
+    /// environment instead of the process's.
+    fn config_from(env: &[(&str, &str)]) -> super::AppConfig {
+        let source: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("AXIAM")
+                    .separator("__")
+                    .source(Some(source)),
+            )
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize")
+    }
+
+    /// #639: `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` is read into the hint
+    /// cap's allowance; unset, it is the shipped three; `0` is refused at
+    /// startup, by `validate` and by the accessor the composition root hands
+    /// the CIBA service.
+    #[test]
+    fn the_hint_cap_allowance_is_read_from_the_environment() {
+        let cfg = config_from(&[("AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT", "25")]);
+        assert_eq!(cfg.rate_limit.bc_authorize_per_hint, 25);
+        assert_eq!(cfg.rate_limit.bc_authorize_per_hint_checked().get(), 25);
+        cfg.rate_limit.validate();
+
+        let shipped = config_from(&[]);
+        assert_eq!(shipped.rate_limit.bc_authorize_per_hint, 3);
+
+        let zero = config_from(&[("AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT", "0")]);
+        for refused in [
+            std::panic::catch_unwind(|| zero.rate_limit.validate()),
+            std::panic::catch_unwind(|| {
+                zero.rate_limit.bc_authorize_per_hint_checked();
+            }),
+        ] {
+            let message = refused.expect_err("0 is refused");
+            let message = message
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| message.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_default();
+            assert!(
+                message.contains("bc_authorize_per_hint must be >= 1"),
+                "{message}"
+            );
+        }
+    }
+}

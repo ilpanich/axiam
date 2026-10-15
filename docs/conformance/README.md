@@ -285,6 +285,26 @@ CONFORMANCE_DATE=$(date +%F) just conformance-report
 CONFORMANCE_DATE=$(date +%F) just conformance-evidence   # the REVIEW modules' screenshots
 ```
 
+### The CIBA hint cap, and a CIBA run
+
+A run that drives CIBA — a FAPI-CIBA plan (none is in `conformance/plans/` yet;
+[`../compliance/oidc-conformance.md`](../compliance/oidc-conformance.md#openid-connect-ciba-core-10-phase-23-g-7)),
+or an SDK's CIBA integration suite against a live server — makes many
+`bc-authorize` calls for **one test user from one client** within minutes. In
+production a client may have only **three** such calls admitted per hint in any
+ten minutes (#599, T-424), and the fourth is answered `429 slow_down`, which a
+module or a test reads as a protocol failure. The allowance is
+`AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (#639): `serve-axiam.sh` raises it to
+`1000` for the harness, overridable like its other limits, and an SDK suite's
+server sets it the same way. Refused calls are not counted, so a suite that did
+meet the cap is admitted again once the window after the one in which it used
+the allowance has passed (ten to twenty minutes). This is not a relaxation of
+anything a suite measures — no OIDF module is about the per-hint allowance, and
+an SDK suite tests the client, not the server's cap — and it is a test
+deployment's setting only:
+[`../deployment/rate-limit-sizing.md`](../deployment/rate-limit-sizing.md) says
+why production keeps three.
+
 ### The FAPI clients must carry `profile: "fapi2"` — and they do
 
 `fapi2-security-profile-final-refresh-token` sleeps thirty seconds, replays the

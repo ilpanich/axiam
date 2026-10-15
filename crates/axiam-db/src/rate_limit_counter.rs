@@ -317,6 +317,17 @@ impl MachineTrafficAdvisory {
 /// Boxed future returned by [`SharedRateLimitStore::increment_by`].
 pub type StoreIncrementFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, DbError>> + Send + 'a>>;
 
+/// Boxed future returned by [`SharedRateLimitStore::peek_bucket`]: the start
+/// of the window the stored count belongs to and the count, or `None` when no
+/// bucket exists.
+pub type StorePeekFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<(DateTime<Utc>, u64)>, DbError>> + Send + 'a>>;
+
+/// Boxed future returned by [`SharedRateLimitStore::decrement`]: whether one
+/// was taken back.
+pub type StoreDecrementFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, DbError>> + Send + 'a>>;
+
 /// The single write primitive the write-behind flusher needs.
 ///
 /// Object-safe on purpose (hence the boxed future rather than an
@@ -337,21 +348,33 @@ pub trait SharedRateLimitStore: Send + Sync + 'static {
         delta: u64,
     ) -> StoreIncrementFuture<'a>;
 
-    /// Reads the count of the bucket `key` for the fixed window starting at
-    /// `window_start`, **without writing**: `0` when the bucket does not
-    /// exist or was last written for an older window (a write for
-    /// `window_start` would have reset it), the stored count otherwise.
+    /// Reads the bucket `key` as stored, **without writing**: the start of the
+    /// window its count belongs to and the count, or `None` when no bucket
+    /// exists.
     ///
-    /// This is what [`Self::increment_by`] with a `delta` of `0` returns, minus
-    /// the side effect: that call upserts, so reading a bucket nobody had
-    /// written creates a row, and reading one left from an older window
-    /// rewrites it. A caller that only wants to know what an earlier window
-    /// came to (the hint cap's previous window) must use this.
-    fn peek_count<'a>(
+    /// [`Self::increment_by`] with a `delta` of `0` is no substitute: that call
+    /// upserts, so reading a bucket nobody had written creates a row, and
+    /// reading one left from an older window rewrites it (#638). The stored
+    /// window is returned as it is, so a caller can tell a bucket still
+    /// holding the window it asks about from one an older window left and from
+    /// one a newer window has already taken over (the CIBA hint cap refuses a
+    /// call the next window has overtaken, #639).
+    fn peek_bucket<'a>(&'a self, key: &'a str) -> StorePeekFuture<'a>;
+
+    /// Takes one back from the bucket `key`, atomically, when it still holds
+    /// the window starting at `window_start` and its count is above zero;
+    /// writes nothing (and creates no bucket) otherwise. Resolves to whether
+    /// one was taken back.
+    ///
+    /// The undo of an [`Self::increment_by`] of `1` for the same window, for a
+    /// caller that counts first and decides afterwards: the CIBA hint cap
+    /// counts every call and takes back the count of a call it refused, so a
+    /// refused call does not consume the allowance (#639).
+    fn decrement<'a>(
         &'a self,
         key: &'a str,
         window_start: DateTime<Utc>,
-    ) -> StoreIncrementFuture<'a>;
+    ) -> StoreDecrementFuture<'a>;
 }
 
 impl<C: Connection> SharedRateLimitStore for SurrealRateLimitBucketRepository<C> {
@@ -369,12 +392,16 @@ impl<C: Connection> SharedRateLimitStore for SurrealRateLimitBucketRepository<C>
         ))
     }
 
-    fn peek_count<'a>(
+    fn peek_bucket<'a>(&'a self, key: &'a str) -> StorePeekFuture<'a> {
+        Box::pin(SurrealRateLimitBucketRepository::peek_bucket(self, key))
+    }
+
+    fn decrement<'a>(
         &'a self,
         key: &'a str,
         window_start: DateTime<Utc>,
-    ) -> StoreIncrementFuture<'a> {
-        Box::pin(SurrealRateLimitBucketRepository::peek_count(
+    ) -> StoreDecrementFuture<'a> {
+        Box::pin(SurrealRateLimitBucketRepository::decrement(
             self,
             key,
             window_start,
@@ -1365,17 +1392,31 @@ mod tests {
             })
         }
 
-        fn peek_count<'a>(
-            &'a self,
-            key: &'a str,
-            window_start: DateTime<Utc>,
-        ) -> StoreIncrementFuture<'a> {
+        fn peek_bucket<'a>(&'a self, key: &'a str) -> StorePeekFuture<'a> {
             Box::pin(async move {
                 let counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
                 Ok(counts
-                    .get(&(key.to_string(), window_start))
-                    .copied()
-                    .unwrap_or(0))
+                    .iter()
+                    .filter(|((k, _), _)| k == key)
+                    .map(|((_, window), count)| (*window, *count))
+                    .max_by_key(|(window, _)| *window))
+            })
+        }
+
+        fn decrement<'a>(
+            &'a self,
+            key: &'a str,
+            window_start: DateTime<Utc>,
+        ) -> StoreDecrementFuture<'a> {
+            Box::pin(async move {
+                let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+                match counts.get_mut(&(key.to_string(), window_start)) {
+                    Some(count) if *count > 0 => {
+                        *count -= 1;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
             })
         }
     }
@@ -2099,12 +2140,16 @@ mod window_mode_tests {
             Box::pin(async move { Ok(0) })
         }
 
-        fn peek_count<'a>(
+        fn peek_bucket<'a>(&'a self, _key: &'a str) -> StorePeekFuture<'a> {
+            Box::pin(async move { Ok(None) })
+        }
+
+        fn decrement<'a>(
             &'a self,
             _key: &'a str,
             _window_start: DateTime<Utc>,
-        ) -> StoreIncrementFuture<'a> {
-            Box::pin(async move { Ok(0) })
+        ) -> StoreDecrementFuture<'a> {
+            Box::pin(async move { Ok(false) })
         }
     }
 
@@ -2382,12 +2427,16 @@ mod window_mode_tests {
             Box::pin(async move { Ok(self.total.fetch_add(delta, Ordering::SeqCst) + delta) })
         }
 
-        fn peek_count<'a>(
+        fn peek_bucket<'a>(&'a self, _key: &'a str) -> StorePeekFuture<'a> {
+            Box::pin(async move { Ok(None) })
+        }
+
+        fn decrement<'a>(
             &'a self,
             _key: &'a str,
             _window_start: DateTime<Utc>,
-        ) -> StoreIncrementFuture<'a> {
-            Box::pin(async move { Ok(0) })
+        ) -> StoreDecrementFuture<'a> {
+            Box::pin(async move { Ok(false) })
         }
     }
 

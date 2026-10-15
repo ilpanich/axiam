@@ -207,6 +207,9 @@ pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` — G-7 (CIBA), preset.
 pub const ENV_BC_AUTHORIZE_PER_MIN: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` — #639 (CIBA hint cap), never
+/// preset.
+pub const ENV_BC_AUTHORIZE_PER_HINT: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
@@ -484,6 +487,27 @@ pub struct RateLimitConfig {
     /// notification a request sends a user is throttled per user by a fixed
     /// bucket no preset moves (`axiam_oauth2::ciba`'s notification limit).
     pub bc_authorize_per_min: u32,
+    /// Max `POST /oauth2/bc-authorize` calls **admitted per client per hint**
+    /// in any ten-minute stretch (default: 3 — #599, T-424; configurable since
+    /// #639). Not a per-minute rate and not a bucket of the route's limiters:
+    /// the CIBA hint cap (`axiam_oauth2::ciba::CibaHintCap`), counted in the
+    /// shared rate-limit table so it holds across replicas.
+    ///
+    /// It bounds how many open requests one client can hold for one person:
+    /// `requested_expiry` is the client's to choose, so without it a client
+    /// that may address a user could keep the user's pending list full of
+    /// short-lived requests of its own. Three is room for a retry or two while
+    /// the first is still on the user's phone. A call past it is refused
+    /// `429 slow_down`, before the hint is looked up, whoever the hint names
+    /// (D-63); a refused call is not counted, so a client that waits for the
+    /// window to pass is admitted again.
+    ///
+    /// **Raise it for a conformance or SDK integration run** — the OpenID
+    /// FAPI-CIBA test plan and the SDKs' CIBA suites drive many flows for one
+    /// test user from one client within minutes (`docs/conformance/README.md`).
+    /// Set every replica alike. Must be `>= 1` (checked at startup); never
+    /// preset — it bounds one user's attention, not the server's capacity.
+    pub bc_authorize_per_hint: u32,
     /// Max `/oauth2/end_session` requests per minute per IP (default: 30 —
     /// B5). Deliberately NOT part of [`MachineLimitPreset`]: like the other
     /// human-driven endpoints this is not sized from capacity.
@@ -791,6 +815,9 @@ impl Default for RateLimitConfig {
             // G-7 — half the token endpoint's: an initiation is rarer than
             // the token requests that follow it.
             bc_authorize_per_min: 60,
+            // #599 / #639 — see the field docs. Calls per client per hint per
+            // ten minutes, not per minute.
+            bc_authorize_per_hint: axiam_oauth2::ciba::DEFAULT_REQUESTS_PER_CLIENT_HINT,
             end_session_per_min: 30,
             // T21.4 — see the field docs. The smallest limit here, because
             // this is the only unauthenticated *write* endpoint.
@@ -830,7 +857,25 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// What [`RateLimitConfig::validate`] (and
+/// [`RateLimitConfig::bc_authorize_per_hint_checked`]) says about a `0`.
+const BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE: &str =
+    "bc_authorize_per_hint must be >= 1 (AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT)";
+
 impl RateLimitConfig {
+    /// [`RateLimitConfig::bc_authorize_per_hint`], as the hint cap takes it.
+    ///
+    /// # Panics
+    ///
+    /// On `0`, with [`RateLimitConfig::validate`]'s message: the composition
+    /// root builds the CIBA service before it validates the rest of the
+    /// configuration, and a cap that refused every call is a misconfiguration
+    /// to stop at startup, not a deployment without CIBA.
+    pub fn bc_authorize_per_hint_checked(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(self.bc_authorize_per_hint)
+            .unwrap_or_else(|| panic!("{BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE}"))
+    }
+
     /// Applies [`RateLimitConfig::profile`]'s preset to every machine-traffic
     /// limit the operator did **not** pin with an explicit
     /// `AXIAM__RATE_LIMIT__*` env var, reading the process environment.
@@ -1024,6 +1069,11 @@ impl RateLimitConfig {
             "bc_authorize_per_min must be >= 1"
         );
         assert!(
+            self.bc_authorize_per_hint >= 1,
+            "{}",
+            BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE
+        );
+        assert!(
             self.end_session_per_min >= 1,
             "end_session_per_min must be >= 1"
         );
@@ -1183,6 +1233,7 @@ mod tests {
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
             (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
             (ENV_BC_AUTHORIZE_PER_MIN, d.bc_authorize_per_min),
+            (ENV_BC_AUTHORIZE_PER_HINT, d.bc_authorize_per_hint),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -1273,6 +1324,7 @@ mod tests {
             assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
             assert_eq!(cfg.crl_per_min, shipped.crl_per_min);
             assert_eq!(cfg.email_test_per_min, shipped.email_test_per_min);
+            assert_eq!(cfg.bc_authorize_per_hint, shipped.bc_authorize_per_hint);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1288,6 +1340,7 @@ mod tests {
                 ENV_CIBA_APPROVAL_PER_MIN,
                 ENV_CRL_PER_MIN,
                 ENV_EMAIL_TEST_PER_MIN,
+                ENV_BC_AUTHORIZE_PER_HINT,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1506,6 +1559,7 @@ mod tests {
         assert_eq!(d.ciba_approval_per_min, 30);
         assert_eq!(d.crl_per_min, 60);
         assert_eq!(d.email_test_per_min, 10);
+        assert_eq!(d.bc_authorize_per_hint, 3);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from
@@ -1639,6 +1693,61 @@ mod tests {
             posture.overrides_display(),
             format!("{ENV_KEY},{ENV_TOKEN_PER_MIN}")
         );
+    }
+
+    /// #639: the CIBA hint cap's allowance ships at the cap's own default
+    /// (three), no profile moves it, and `0` — a cap that refused every
+    /// `bc-authorize` — is refused at startup.
+    #[test]
+    fn bc_authorize_per_hint_defaults_to_three_and_is_never_preset() {
+        let shipped = RateLimitConfig::default();
+        assert_eq!(shipped.bc_authorize_per_hint, 3);
+        assert_eq!(
+            shipped.bc_authorize_per_hint,
+            axiam_oauth2::ciba::DEFAULT_REQUESTS_PER_CLIENT_HINT
+        );
+        assert_eq!(shipped.bc_authorize_per_hint_checked().get(), 3);
+        for profile in [RateLimitProfile::Gateway, RateLimitProfile::Mesh] {
+            let mut cfg = RateLimitConfig {
+                profile,
+                bc_authorize_per_hint: 40,
+                ..RateLimitConfig::default()
+            };
+            let posture = cfg.apply_profile(|_| false);
+            assert_eq!(cfg.bc_authorize_per_hint, 40, "{profile:?}");
+            assert!(
+                !posture
+                    .operator_overrides
+                    .contains(&ENV_BC_AUTHORIZE_PER_HINT)
+            );
+        }
+        // Deserialized under the name the environment variable maps to.
+        let cfg: RateLimitConfig = serde_json::from_str(r#"{"bc_authorize_per_hint": 4}"#).unwrap();
+        assert_eq!(cfg.bc_authorize_per_hint, 4);
+        assert_eq!(
+            ENV_BC_AUTHORIZE_PER_HINT,
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bc_authorize_per_hint must be >= 1")]
+    fn a_zero_bc_authorize_per_hint_is_refused_at_validation() {
+        RateLimitConfig {
+            bc_authorize_per_hint: 0,
+            ..RateLimitConfig::default()
+        }
+        .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "bc_authorize_per_hint must be >= 1")]
+    fn a_zero_bc_authorize_per_hint_is_refused_by_the_accessor() {
+        RateLimitConfig {
+            bc_authorize_per_hint: 0,
+            ..RateLimitConfig::default()
+        }
+        .bc_authorize_per_hint_checked();
     }
 
     /// Non-negotiable invariant: **no profile may raise a human endpoint.**

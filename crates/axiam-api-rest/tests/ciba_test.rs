@@ -1200,6 +1200,54 @@ async fn the_cap_is_shared_by_replicas_over_one_store() {
     assert_eq!(statuses, [200, 200, 200, 429, 429]);
 }
 
+/// #639: the allowance is the deployment's (`RateLimitConfig::
+/// bc_authorize_per_hint`, which the composition root hands the cap). With it
+/// at four, a fourth request for one hint is admitted and a fifth refused, and
+/// the refused fifth adds nothing to the count: the stored count is the four
+/// admitted ones.
+#[actix_web::test]
+async fn the_per_hint_allowance_is_the_deployments() {
+    let mut f = setup().await;
+    let allowance = RateLimitConfig {
+        bc_authorize_per_hint: 4,
+        ..permissive()
+    };
+    f.state.oauth2.ciba_service = axiam_oauth2::ciba::CibaService::new(
+        axiam_db::SurrealCibaRequestRepository::new(f.db.clone(), None),
+        SurrealUserRepository::new(f.db.clone()),
+        f.auth.jwt_public_key_pem.clone(),
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+                f.db.clone(),
+            )),
+            f.auth.jwt_private_key_pem.as_bytes(),
+        )
+        .with_per_hint(allowance.bc_authorize_per_hint_checked()),
+    );
+    let app = app!(f, allowance);
+    for _ in 0..4 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    for _ in 0..3 {
+        let (status, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+        assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
+    }
+    assert_eq!(stored_requests(&f).await, 4);
+    let mut counted =
+        f.db.query(
+            "SELECT VALUE count FROM rate_limit_bucket \
+             WHERE string::starts_with(meta::id(id), 'ciba_hint_cap:')",
+        )
+        .await
+        .unwrap();
+    let counted: Vec<i64> = counted.take(0).unwrap();
+    assert_eq!(
+        counted.iter().sum::<i64>(),
+        4,
+        "the refused calls took their count back: {counted:?}"
+    );
+}
+
 /// The CIBA grant at the token endpoint is counted by the token endpoint's
 /// limiter like every other grant.
 #[actix_web::test]

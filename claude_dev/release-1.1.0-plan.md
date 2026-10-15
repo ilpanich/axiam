@@ -615,6 +615,17 @@ endpoint (reverses part of W3.1; not recommended); (c) device clients must be
 public at registration. **Asked of the maintainer on 2026-10-15; W7 does not
 start without the answer.**
 
+**Answered by the maintainer, 2026-10-15: option (a).** §14.1 keeps
+"unauthenticated" for a public client; an SDK client configured with a
+credential (client secret — post or Basic —, `private_key_jwt`, or an mTLS
+certificate) sends it at **both** `device_authorize` and the poll, by the same
+rules as its other token requests. W7.1 rewrites §14.1/§14.2 (with the stale
+§14 text listed below) and every SDK port implements it. The server is
+unchanged. **R110W3-02 (#675), also answered:** beyond W8.4's upgrade note,
+1.1.0 adds a **boot-time warning** counting the confidential clients that hold
+the device grant (a small server change on the W3 branch, after W6.3; reviewed
+by W8.2); "an admin `PUT` may turn a device-only client public" stays on #675.
+
 For **W7.1** (R110W3-11, stale contract text): §14 intro (`:2842-2846`, device
 tokens' `client_id` claim and `403`); §14.2 (the poll's `401 invalid_client`;
 DPoP proof per poll and `token_type: DPoP`); §27 rule 2 (`:9068`, a deleted

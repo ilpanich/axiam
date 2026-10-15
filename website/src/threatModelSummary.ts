@@ -63,10 +63,10 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.41.0",
  "diagramCount": 10,
- "total": 477,
- "open": 19,
- "mitigated": 443,
- "notApplicable": 15,
+ "total": 487,
+ "open": 24,
+ "mitigated": 453,
+ "notApplicable": 10,
  "areas": [
   {
    "id": 0,
@@ -133,10 +133,10 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "id": 9,
-   "title": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1)",
-   "total": 21,
-   "open": 2,
-   "notApplicable": 15
+   "title": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "total": 31,
+   "open": 7,
+   "notApplicable": 10
   }
  ],
  "categories": [
@@ -144,37 +144,37 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "name": "Spoofing",
    "total": 105,
    "open": 4,
-   "notApplicable": 3
+   "notApplicable": 2
   },
   {
    "name": "Tampering",
-   "total": 93,
+   "total": 96,
    "open": 1,
    "notApplicable": 2
   },
   {
    "name": "Repudiation",
-   "total": 16,
-   "open": 1,
-   "notApplicable": 1
+   "total": 17,
+   "open": 2,
+   "notApplicable": 0
   },
   {
    "name": "Information disclosure",
    "total": 113,
    "open": 7,
-   "notApplicable": 3
+   "notApplicable": 1
   },
   {
    "name": "Denial of service",
-   "total": 60,
-   "open": 3,
+   "total": 61,
+   "open": 4,
    "notApplicable": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 90,
-   "open": 3,
-   "notApplicable": 2
+   "total": 95,
+   "open": 6,
+   "notApplicable": 1
   }
  ],
  "severities": [
@@ -186,20 +186,20 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 198,
+   "total": 201,
    "open": 9,
-   "notApplicable": 7
+   "notApplicable": 6
   },
   {
    "name": "Medium",
-   "total": 200,
-   "open": 7,
-   "notApplicable": 7
+   "total": 204,
+   "open": 9,
+   "notApplicable": 3
   },
   {
    "name": "Low",
-   "total": 36,
-   "open": 1,
+   "total": 39,
+   "open": 4,
    "notApplicable": 1
   }
  ],
@@ -310,7 +310,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "category": "Information disclosure",
    "severity": "High",
    "diagramId": 9,
-   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1)",
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
    "element": "Access-Request / Accept / Reject / Challenge",
    "residualRisk": "**Corrected 2026-10-14 (R101W6-09, the W6 F4 review; model 2.41.0): Open for the operator-run recipe.** The entry was recorded Not applicable from model 2.36.0, and W6.2 (2026-10-13) kept it there while stating, below, that the recipe carries this residual. Not applicable is this model's status for “nothing is exposed”, which the recipe contradicts, so the status now follows the residual. The responsibility lands on whoever runs the recipe (`docs/pki/freeradius.md`, 1.0.1, #563). FreeRADIUS terminates RADIUS and EAP-TLS there, and on plain UDP — the only transport its end-to-end exercises, since `eapol_test` speaks UDP only — the EAP-TLS keys (`MS-MPPE-Send-Key` and `MS-MPPE-Recv-Key`, from which the access point derives the Wi-Fi session key) travel under the MD5 obfuscation this entry describes, keyed with the per-client shared secret; anyone who captures the traffic and learns or guesses the secret recovers them. FreeRADIUS enforces no minimum secret length, the recipe generates no secret and no test asserts a floor; the guide states one. The control is a choice the operator makes, not one AXIAM enforces: RadSec (RFC 6614) where the NAS supports it, where the obfuscation is keyed with a fixed public string and TLS carries the confidentiality. The guide documents the block and says to use it; the end-to-end does not exercise it. The weakness is inherent in the legacy transport and is accepted only by the operator who stays on it. The entry's own text for a native build already said it would stay Open for every legacy NAS. No test is claimed, and no status here rests on one. **Native front end (option A), unchanged and not built:** Not built (G-11 declined 2026-10-06; spike record §4.2, §4.3, §6.3, R3). The W5 F4 review's constraint (§15): **MD5-only attributes treated as the weakness they are**. Required of any build: PAP and `MS-MPPE-*` carried only over RadSec or, preferably, RADIUS/1.1 over TLS 1.3, where the obfuscation is removed and TLS carries the confidentiality; on plain UDP only for a NAS registered `legacy_udp`, with a generated secret of at least 128 bits, flagged in the API, the console and each decision's audit row — never PAP over UDP without that flag; CHAP, MS-CHAP, MS-CHAPv2 and EAP-MD5 not implemented (an Argon2id store cannot verify them, and should not be able to); RADIUS accounting not implemented. If built as specified this entry stays **Open** for every `legacy_udp` NAS: the weakness is inherent in the legacy profile and is accepted only per NAS, by an explicit flag. **1.0.1 (W6.2, #563; 2026-10-13): stayed Not applicable, superseded above.** On plain UDP the recipe carries the EAP-TLS keys under the MD5 obfuscation this entry describes; the guide says to use RadSec where the NAS allows, and the RadSec block is documented but not exercised (`eapol_test` speaks UDP only). The entry's residual is unchanged."
   },
@@ -380,9 +380,29 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "category": "Elevation of privilege",
    "severity": "Medium",
    "diagramId": 9,
-   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1)",
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
    "element": "RADIUS decision (tenant, authN, reply attributes)",
-   "residualRisk": "**Corrected 2026-10-14 (R101W6-09, the W6 F4 review; model 2.41.0): Open for the operator-run recipe.** The entry was recorded Not applicable from model 2.36.0, and W6.2 (2026-10-13) kept it there while stating, below, the revocation lag the recipe carries. Not applicable is this model's status for “nothing is exposed”, which the recipe contradicts, so the status now follows the residual. The responsibility lands on whoever runs the recipe (`docs/pki/freeradius.md`, 1.0.1, #563), and its bound is stated: a revoked certificate stops being admitted at the first new EAP conversation after FreeRADIUS has read the new list, not at once, and a session the NAS has already admitted outlives it. AXIAM publishes a revocation at once (the CRL route's next response names the serial); the operator's fetch job brings it to the `ca_path` directory at most one fetch interval later; FreeRADIUS re-reads the lists only at the first new EAP conversation after `ca_path_reload_interval`, whose smallest accepted value is 300 s; and a device that is already connected keeps its port until `Session-Timeout`. The bound is the fetch interval plus 300 seconds plus the `Session-Timeout` — with the guide's figures roughly an hour and ten minutes in the worst case, a few minutes for a device that is not connected. Measured: `crates/axiam-server/tests/radius_e2e.rs::eap_tls_with_an_axiam_issued_device_certificate` revokes a device, sees AXIAM serve the new list, sees FreeRADIUS still admit the device because it holds the old one, and then sees it refused as revoked once the list is in `ca_path` (284 s after the revocation in the W6.2 run). Not covered by it: the session step — it connects no session and revokes it under it. No control ends a session already admitted: dynamic authorization (RFC 5176) is in neither AXIAM nor the recipe, and the recipe does not call AXIAM when a device authenticates (the real-time check, deferred item D4, is not built), so a disabled service account is seen only when its certificate is revoked. The operator's levers are the three numbers (a shorter fetch interval and `Session-Timeout`) and a shorter `validity_days` on devices; a fetch that stops is the other way this goes wrong, since a list past its `nextUpdate` refuses every device of the tenant (fail-closed, and an outage). The entry's own text for a native build already said it would stay Open until dynamic authorization ships. No test is claimed for the bound as a mitigation, and no status here rests on one. **Native front end (option A), unchanged and not built:** Not built (G-11 declined 2026-10-06; spike record R21). Required of any build: `Session-Timeout` capped per tenant and the bound stated in the product. Dynamic authorization is a separate, later item and inherits T-467's binding rule: AXIAM's own messages, carrying session and user identifiers, go to the registered NAS address only. If built as specified this entry stays **Open** — a residual bounded by the session timeout until dynamic authorization ships. **1.0.1 (W6.2, #563; 2026-10-13): stayed Not applicable, superseded above.** The recipe bounds this with the CRL fetch interval, FreeRADIUS's `ca_path_reload_interval` (300 s at the smallest) and `Session-Timeout`; the guide states the bound and the end-to-end shows a revoked device still admitted until the list is re-read. No control ends a session already admitted, so the residual stands until dynamic authorization exists."
+   "residualRisk": "**Amended 2026-10-15 (W6.6, RADIUS D4, #563; 1.1.0): the D4 column — still Open.** With the decision route (`POST /api/v1/network/decide`, T-468; `docs/pki/freeradius.md` section 5) a revoked certificate and a disabled service account are refused at the device's **next authentication**: the decision reads the certificate's row and runs `authenticate_der` on every request, uncached, and requires the account to be `Active`, so the CRL lag described below does not apply to it (FreeRADIUS's `check_crl` stays on, a second check with its own lag). Tests: `crates/axiam-api-rest/tests/network_decide_test.rs::revocation_and_a_disabled_account_refuse_at_the_next_request`; `crates/axiam-server/tests/radius_e2e.rs::a_decision_per_authentication_places_revokes_and_quarantines` (a device revoked in AXIAM is refused at once while FreeRADIUS still holds the old list). A quarantine (a deny of `network:join`) and any change to an assignment, a segment or a profile take effect at the next authentication too — after `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (5 s by default) on another replica when the optional decision cache is on without its broadcast. What remains is this entry's residual: a device that is **already connected** keeps its port until `Session-Timeout`, which its profile sets between 300 seconds and the tenant's cap (`network.session_timeout_max_secs`, 300 to 86 400, default 3 600; T-485), and then re-authenticates under `Termination-Action = RADIUS-Request` and meets the decision. No control ends a session already admitted: dynamic authorization (RFC 5176 CoA and Disconnect) is in neither AXIAM nor the recipe. The status stays Open (plan §12 Q9); the text below is the D3 profile's, unchanged for a deployment that does not run D4. **Corrected 2026-10-14 (R101W6-09, the W6 F4 review; model 2.41.0): Open for the operator-run recipe.** The entry was recorded Not applicable from model 2.36.0, and W6.2 (2026-10-13) kept it there while stating, below, the revocation lag the recipe carries. Not applicable is this model's status for “nothing is exposed”, which the recipe contradicts, so the status now follows the residual. The responsibility lands on whoever runs the recipe (`docs/pki/freeradius.md`, 1.0.1, #563), and its bound is stated: a revoked certificate stops being admitted at the first new EAP conversation after FreeRADIUS has read the new list, not at once, and a session the NAS has already admitted outlives it. AXIAM publishes a revocation at once (the CRL route's next response names the serial); the operator's fetch job brings it to the `ca_path` directory at most one fetch interval later; FreeRADIUS re-reads the lists only at the first new EAP conversation after `ca_path_reload_interval`, whose smallest accepted value is 300 s; and a device that is already connected keeps its port until `Session-Timeout`. The bound is the fetch interval plus 300 seconds plus the `Session-Timeout` — with the guide's figures roughly an hour and ten minutes in the worst case, a few minutes for a device that is not connected. Measured: `crates/axiam-server/tests/radius_e2e.rs::eap_tls_with_an_axiam_issued_device_certificate` revokes a device, sees AXIAM serve the new list, sees FreeRADIUS still admit the device because it holds the old one, and then sees it refused as revoked once the list is in `ca_path` (284 s after the revocation in the W6.2 run). Not covered by it: the session step — it connects no session and revokes it under it. No control ends a session already admitted: dynamic authorization (RFC 5176) is in neither AXIAM nor the recipe, and the recipe does not call AXIAM when a device authenticates (the real-time check, deferred item D4, is not built), so a disabled service account is seen only when its certificate is revoked. The operator's levers are the three numbers (a shorter fetch interval and `Session-Timeout`) and a shorter `validity_days` on devices; a fetch that stops is the other way this goes wrong, since a list past its `nextUpdate` refuses every device of the tenant (fail-closed, and an outage). The entry's own text for a native build already said it would stay Open until dynamic authorization ships. No test is claimed for the bound as a mitigation, and no status here rests on one. **Native front end (option A), unchanged and not built:** Not built (G-11 declined 2026-10-06; spike record R21). Required of any build: `Session-Timeout` capped per tenant and the bound stated in the product. Dynamic authorization is a separate, later item and inherits T-467's binding rule: AXIAM's own messages, carrying session and user identifiers, go to the registered NAS address only. If built as specified this entry stays **Open** — a residual bounded by the session timeout until dynamic authorization ships. **1.0.1 (W6.2, #563; 2026-10-13): stayed Not applicable, superseded above.** The recipe bounds this with the CRL fetch interval, FreeRADIUS's `ca_path_reload_interval` (300 s at the smallest) and `Session-Timeout`; the guide states the bound and the end-to-end shows a revoked device still admitted until the list is re-read. No control ends a session already admitted, so the residual stands until dynamic authorization exists."
+  },
+  {
+   "number": 482,
+   "title": "A service account that holds `network:grant` assigns itself `network:join`, a device placing itself",
+   "category": "Elevation of privilege",
+   "severity": "Medium",
+   "diagramId": 9,
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "element": "Network management API and write gate",
+   "residualRisk": "**Open (entered 2026-10-15 by W6.6; W6.2's residual 4, for W6.7 to decide).** The gate applies H6 to profile and segment writes and to binding (`crates/axiam-api-rest/tests/network_gate_test.rs::a_service_account_cannot_bind_a_certificate_to_itself`; the gate's `h6_a_service_account_cannot_bind_a_certificate_to_itself`), not to an assignment whose subject is the writer. What bounds it today: the account must already hold `network:grant` at the node, which only a holder of `network:grant` there could delegate to it (§5.3, T-479), so the account was already trusted to confer that join on any other account; and the assignment is recorded by the route's request row (T-484). What would close it: H6 applied to assignment — refuse an assignment of a network-sensitive role whose subject is the writer, or the account the writer's certificate is bound to. No test is claimed."
+  },
+  {
+   "number": 486,
+   "title": "AXIAM unavailable, or reached through a proxy that ends TLS, refuses every device's authentication",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 9,
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "element": "authorize (rlm_rest)",
+   "residualRisk": "**Open: the accepted price of D4, and the operator's to carry (entered 2026-10-15 by W6.6; `docs/pki/freeradius.md`, section 5).** Failing closed is the design — no fallback placement, no cached decision — because an outage that admitted devices would admit revoked and quarantined ones. What AXIAM provides: an allowance per caller sized for a site's power-restore storm (`network_decide_per_min`, 6 000 a minute), one `check_access_batch` per decision through the decision cache, and a recipe whose connection pool starts empty so that FreeRADIUS starts without AXIAM. What the operator carries, as the guide says: AXIAM run as a service the network depends on; mutual TLS that ends at AXIAM (a layer-4 pass-through is fine); one service account per FreeRADIUS server, so one site's storm stays out of another's bucket; FreeRADIUS's own certificate renewed before it ends; the list fetched while `check_crl` is on. `crates/axiam-server/tests/radius_e2e.rs::a_decision_per_authentication_places_revokes_and_quarantines` shows the failure is closed (AXIAM unreachable is a refusal); that is not a mitigation of the outage, and no status rests on it."
   },
   {
    "number": 161,
@@ -393,6 +413,36 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "Attribute mapping & JIT provisioning",
    "residualRisk": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit."
+  },
+  {
+   "number": 481,
+   "title": "The network gate clears a write on a state that changes before the write lands",
+   "category": "Elevation of privilege",
+   "severity": "Low",
+   "diagramId": 9,
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "element": "Network management API and write gate",
+   "residualRisk": "**Open (entered 2026-10-15 by W6.6; W6.2's residual 1, for the W6 F4 review, W6.7, to decide).** Nothing re-checks the gate's reads inside the write's transaction. The window is the time between the gate's read and the write. Bounding it: every check is uncached, so the window is one request's, not a cache TTL's; a binding that races an assignment or a release ends in a state the note's §5.3 also admits in the other order (bind first, then the assignment, which needs `network:grant` at the node), so it confers nothing a sequential pair could not — what the race changes is who was asked; and every write, and every refusal, is audited. Segment, profile and cap writes are the exception: each is conditional on the versions the caller read, inside the write's transaction (T-478). What would close the rest: re-reading the writer's grant and the account's joins inside the write's transaction, or a version on the account that both edges' writes claim (the two-writer rule). No test is claimed."
+  },
+  {
+   "number": 483,
+   "title": "An organization-level administrator carries the network meta permissions into every tenant of its organization",
+   "category": "Elevation of privilege",
+   "severity": "Low",
+   "diagramId": 9,
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "element": "Network management API and write gate",
+   "residualRisk": "**Open (entered 2026-10-15 by W6.6; W6.2's residual 3, for W6.7 to decide).** Accepted for now, and bounded: organization-level principals are trusted across their organization's tenants and only there (§8, assumption 7); the seeded role carries no `network:join` and neither administrative-class permission; the gate checks every writer with its own subject scope (the gate's `the_writer_is_checked_with_its_own_subject_scope`), so such a writer holds only what the global role grants; and `network:decide` is of no use to it, since the decision route takes a certificate-bound service account only (T-468). It departs from the note's §7 sentence that an organization-level subject cannot carry a network grant across tenants. What would close it: withhold the network set from the organization scope tenant's super-admin, or confine the exemption to the tenant's own role. No test is claimed."
+  },
+  {
+   "number": 484,
+   "title": "A cleared network-sensitive assignment, grant or binding leaves no row of its own, only the route's",
+   "category": "Repudiation",
+   "severity": "Low",
+   "diagramId": 9,
+   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
+   "element": "Network management API and write gate",
+   "residualRisk": "**Open (entered 2026-10-15 by W6.6; W6.2's residual 5, for W6.7 to decide).** The segment, profile and cap writes do write their own rows, with the values before and after (T-478, T-485); this entry is the §5.3 writes only. What exists: the request row per write (the actor, the path with the role and subject ids, the outcome), the refusal rows (`network_role.assign_refused`, `network_role.unassign_refused`, `network_role.grant_refused`, `certificate_binding.refused`, …) and the assignment edge itself, which carries its node. What would close it: a success row from the gate's caller whenever the clearance is network-sensitive (`GateClearance::is_network_sensitive` already says which). No test is claimed."
   }
  ]
 };

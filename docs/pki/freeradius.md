@@ -494,12 +494,28 @@ changes, up to half its lifetime, with a file fresh enough to silence the
 age alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
 looks it up.
 
-Use HTTPS. The signature check stops a list the CA did not sign, and the number
-check a replay of an older one; neither stops whoever answers the fetch from
-serving the genuine current list again after a newer one exists, which only
-lengthens [the lag](#the-revocation-lag). The alert on a list that is older than
-half its lifetime ([below](#the-revocation-lag)) is what catches a fetch that no
-longer moves.
+Use HTTPS, and the script holds you to it: the URL must start with `https://`,
+and an `http://` URL is refused unless `FETCH_CRL_ALLOW_HTTP=1` is set in the
+script's environment. The list is signed, so plain HTTP costs no integrity, which
+is why there is a switch at all (a lab, or a loopback stand-in, as the
+end-to-end test uses); but the signature check stops a list the CA did not sign,
+and the number check a replay of an older one, and neither stops whoever answers
+the fetch from serving the genuine current list again after a newer one exists,
+which only lengthens [the lag](#the-revocation-lag). Over HTTP anyone on the path
+can do that; over HTTPS only the server and anything that terminates TLS for it
+can. Any other scheme (`file:`, `ftp:`, ...) is refused, and so is a URL that
+starts with `-`.
+
+The script's `curl` runs as `curl -q … --url <url>`: `-q` so that it does not read
+the `~/.curlrc` of the user whose cron job this is (a `location` or `insecure`
+line there would turn a refused redirect into a followed one, or TLS verification
+off), `--proto` pinned to the URL's scheme, and no redirect followed (a `3xx` is
+reported as the status it is and the installed list stays). Before curl 8.4,
+`--max-filesize` does not stop a chunked body without a declared size; only
+`--max-time` (20 seconds) does (R110W5-03).
+
+The alert on a list that is older than half its lifetime
+([below](#the-revocation-lag)) is what catches a fetch that no longer moves.
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request

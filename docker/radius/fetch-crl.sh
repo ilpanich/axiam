@@ -47,6 +47,20 @@
 # same job, and two that overlapped could install the older of two lists and pair
 # it with the newer one's ETag (R110W5-02). The lock file stays in `capath`.
 #
+# curl is called as `curl -q ... --url <url>` (R110W5-03). `-q`, which must be
+# its first argument, stops it reading the `~/.curlrc` of whoever runs this (a
+# `location` or `insecure` line there would undo what follows). The URL is given
+# as the value of `--url`, so it can never be read as an option, and it must start
+# with `https://`. A URL starting `http://` is refused unless FETCH_CRL_ALLOW_HTTP=1
+# is set in the environment: the list is signed, so plain HTTP costs no integrity,
+# but it lets whoever answers the fetch withhold a newer list, and the guide says
+# to use HTTPS; the end-to-end test's stand-in for the route is plain HTTP on a
+# loopback port and sets it. Any other scheme (`file:`, `ftp:`, ...) is refused.
+# `--proto` pins curl to the scheme given, no `-L` and `--max-redirs 0` mean a
+# redirect is never followed (it is reported as the HTTP status it is), and
+# `--globoff` turns URL globbing off. `--max-filesize` stops an unsized (chunked)
+# body only from curl 8.4; before that `--max-time` alone bounds it.
+#
 # Exit 0: installed, unchanged, or another run holds the lock. Exit 1: the list
 # was refused or could not be fetched; the installed list is untouched and the
 # reason is on stderr. Alert on a non-zero exit, and on a list in `capath` older
@@ -72,6 +86,17 @@ fail() {
 url=$1
 ca_file=$2
 capath=$3
+# https:// always; http:// only when the operator said so. Checked here, before
+# anything else, so that a URL that looks like an option never reaches curl.
+case $url in
+https://*) proto='=https' ;;
+http://*)
+	[ "${FETCH_CRL_ALLOW_HTTP:-}" = 1 ] ||
+		fail "refusing to run: $url is plain HTTP; use https://, or set FETCH_CRL_ALLOW_HTTP=1 to accept it (the list is signed, but whoever answers can withhold a newer one)"
+	proto='=http'
+	;;
+*) fail "refusing to run: the URL must start with https:// (or http:// with FETCH_CRL_ALLOW_HTTP=1)" ;;
+esac
 [ -r "$ca_file" ] || fail "refusing to run: cannot read the CA certificate $ca_file"
 [ -d "$capath" ] && [ -w "$capath" ] || fail "refusing to run: $capath is not a writable directory"
 
@@ -201,12 +226,12 @@ response_etag() {
 request() {
 	rm -f "$work/crl.der" "$work/headers"
 	tag=$1
-	set -- -sS --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
+	set -- -sS --proto "$proto" --max-redirs 0 --globoff --connect-timeout 10 --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
 	if [ -n "$tag" ]; then
 		set -- "$@" -H "If-None-Match: $tag"
 	fi
 	rc=0
-	code=$(curl "$@" "$url") || rc=$?
+	code=$(curl -q "$@" --url "$url") || rc=$?
 	[ "$rc" -eq 0 ] || fail "the fetch of $url failed (curl exit $rc)"
 }
 

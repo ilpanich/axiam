@@ -1089,21 +1089,33 @@ impl Fetch {
 }
 
 /// Run the fetch script the guide ships, as an operator's cron job would:
-/// `fetch-crl.sh <url> <ca.pem> <capath>`, under the host's `sh`.
-fn fetch_crl(mirror: &Mirror, ca_file: &Path, capath: &Path) -> Fetch {
+/// `fetch-crl.sh <url> <ca.pem> <capath>`, under the host's `sh`. The stand-in
+/// for the route is plain HTTP on a loopback port, which the script refuses
+/// unless `FETCH_CRL_ALLOW_HTTP=1` is in its environment (R110W5-03): `allow_http`
+/// says whether this run sets it.
+fn fetch_crl_with(mirror: &Mirror, ca_file: &Path, capath: &Path, allow_http: bool) -> Fetch {
     let script = repo_root().join("docker/radius/fetch-crl.sh");
-    let out = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg(&script)
         .arg(mirror.url())
         .arg(ca_file)
         .arg(capath)
-        .output()
-        .expect("`sh` can run the fetch script");
+        .env_remove("FETCH_CRL_ALLOW_HTTP");
+    if allow_http {
+        command.env("FETCH_CRL_ALLOW_HTTP", "1");
+    }
+    let out = command.output().expect("`sh` can run the fetch script");
     Fetch {
         ok: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
+}
+
+/// [`fetch_crl_with`] as the end-to-end runs it: the plain-HTTP stand-in allowed.
+fn fetch_crl(mirror: &Mirror, ca_file: &Path, capath: &Path) -> Fetch {
+    fetch_crl_with(mirror, ca_file, capath, true)
 }
 
 /// One field of a DER list, as `openssl crl -noout <flag>` prints it.
@@ -1356,6 +1368,21 @@ async fn fetch_script_cases(
     );
     unchanged("304");
     say("fetch script", "304: unchanged, the installed list stays");
+
+    // ---- plain HTTP is refused unless the operator allows it -------------
+    // The script's default is HTTPS only (R110W5-03): the stand-in's `http://`
+    // URL is refused before curl runs, and nothing is touched.
+    let run = fetch_crl_with(mirror, ca_file, capath, false);
+    assert!(
+        !run.ok && run.stderr.contains("plain HTTP"),
+        "an http:// URL without FETCH_CRL_ALLOW_HTTP=1 is refused:\n{}",
+        run.report()
+    );
+    unchanged("plain HTTP without the opt-in");
+    say(
+        "fetch script",
+        "http:// without FETCH_CRL_ALLOW_HTTP=1 is refused; the installed list stays",
+    );
 
     // ---- a list another key signed, under the CA's name -----------------
     let forged = forged_list(work, &ca.pem, crl_number(&current.der));

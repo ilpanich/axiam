@@ -6,7 +6,9 @@
 # CRL route (crl-stub.py) and a throwaway CA, and checks what the script's header
 # promises: the ETag handling (R110W5-01), the lock (R110W5-02), curl's options
 # (R110W5-03). No FreeRADIUS, no docker, no AXIAM: needs sh, bash, curl, openssl,
-# python3 (and flock for the flock half of the lock cases).
+# python3 (and flock for the flock half of the lock cases). The stand-in is plain
+# HTTP on a loopback port, so the runs set FETCH_CRL_ALLOW_HTTP=1 except where a
+# case is about that.
 # Exit status: the number of failed checks.
 SH=${1:-sh}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -43,11 +45,11 @@ newcap() { CAPATH=$T/cap.$((++capn)); mkdir -p "$CAPATH"; }
 capn=0
 run() { # run [VAR=val ...]  (extra env for the script)
   : >"$T/req.log"
-  env HOME="$T/home" "$@" "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+  env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$@" "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
 }
 runu() { # run with a given URL
   u=$1; shift; : >"$T/req.log"
-  env HOME="$T/home" "$@" "$SH" "$SCRIPT" "$u" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+  env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$@" "$SH" "$SCRIPT" "$u" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
 }
 reqs() { wc -l <"$T/req.log" | tr -d ' '; }
 lastinm() { tail -n 1 "$T/req.log" | cut -f2; }
@@ -230,5 +232,36 @@ wait $fl
 env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
 t "02/flock: after the holder exits the run proceeds" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ]'
 
+echo "-- R110W5-03"
+newcap; serve 1 '"t1"' redirect "http://127.0.0.1:$PORT/other"
+printf 'location\n' >"$T/home/.curlrc"
+run
+t "03: ~/.curlrc 'location' does not make the script follow a redirect (exit 1, HTTP 302)" '[ $rc -eq 1 ] && msg | grep -q "HTTP 302" && [ ! -e "$(installed)" ] && [ "$(reqs)" = 1 ]'
+printf 'output = "%s/pwned"\n' "$T" >"$T/home/.curlrc"; serve 1 '"t1"'; newcap; run
+t "03: ~/.curlrc 'output' is not read" '[ $rc -eq 0 ] && [ ! -e "$T/pwned" ]'
+rm -f "$T/home/.curlrc"
+serve 1 '"t1"'
+newcap; runu "-o$T/pwn2"
+t "03: a URL that is an option (-o...) is refused, nothing written" '[ $rc -ne 0 ] && [ ! -e "$T/pwn2" ] && [ "$(reqs)" = 0 ]'
+newcap; runu "--output=$T/pwn3"
+t "03: a URL --output=... is refused" '[ $rc -ne 0 ] && [ ! -e "$T/pwn3" ]'
+printf 'url = "%s"\n' "$URL" >"$T/cfg"
+newcap; runu "-K$T/cfg"
+t "03: a URL -K<config file> is refused, and curl is never run (no request reaches the stand-in)" '[ $rc -ne 0 ] && [ "$(reqs)" = 0 ] && [ ! -e "$(installed)" ]'
+newcap; runu "file:///etc/passwd"
+t "03: file:// refused" '[ $rc -ne 0 ] && [ ! -e "$(installed)" ] && msg | grep -qi "refus"'
+for u in "ftp://127.0.0.1/crl" "gopher://127.0.0.1/x" "HTTP://127.0.0.1:$PORT/crl" " http://127.0.0.1:$PORT/crl" "https:/x" ""; do
+  newcap; runu "$u"; t "03: URL [$u] refused" '[ $rc -ne 0 ] && [ ! -e "$(installed)" ]'
+done
+newcap; serve 1 '"t1"'; run FETCH_CRL_ALLOW_HTTP=
+t "03: http:// without the opt-in is refused" '[ $rc -ne 0 ] && [ ! -e "$(installed)" ] && [ "$(reqs)" = 0 ]'
+newcap; env HOME="$T/home" FETCH_CRL_ALLOW_HTTP=yes "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+t "03: FETCH_CRL_ALLOW_HTTP=yes (not 1) does not open it" '[ $rc -ne 0 ]'
+newcap; run FETCH_CRL_ALLOW_HTTP=1
+t "03: http:// with FETCH_CRL_ALLOW_HTTP=1 works" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ]'
+newcap; ctl file "$T/lists/L1.der" etag '"t1"' redirect "https://127.0.0.1:1/"; run FETCH_CRL_ALLOW_HTTP=1
+t "03: a redirect is not followed even with the opt-in" '[ $rc -eq 1 ] && msg | grep -q "HTTP 302" && [ "$(reqs)" = 1 ]'
+newcap; serve 1 '"t1"'; runu "https://127.0.0.1:$PORT/crl"
+t "03: https:// is attempted (a TLS failure against the plain server, not a scheme refusal)" '[ $rc -eq 1 ] && msg | grep -q "curl exit" && [ ! -e "$(installed)" ]'
 echo "== $passes passed, $fails failed"
 exit $fails

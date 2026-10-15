@@ -56,8 +56,8 @@ which FreeRADIUS does at `ca_path_reload_interval`, 300 seconds at the smallest
 | `docker/radius/raddb/default` | the one virtual server: EAP, and nothing else |
 | `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified, keyed on the certificate serial |
 | `docker/radius/raddb/axiam_placement` | the `files` module that reads the placement table |
-| `docker/radius/fetch-crl.sh` | the revocation-list fetch job the guide's section 4 describes; the test runs it on the host, against a local stand-in for the CRL route (needs `curl` and `openssl`) |
-| `docker/radius/tests/` | `fetch-crl-test.sh <shell>`: the fetch script's own cases (tags, lock) against a stand-in for the route and a throwaway CA, no docker and no AXIAM; `radius-e2e.yml` runs it under `dash` and `bash` |
+| `docker/radius/fetch-crl.sh` | the revocation-list fetch job the guide's section 4 describes; the test runs it on the host, against a local stand-in for the CRL route (needs `curl` and `openssl`; it sets `FETCH_CRL_ALLOW_HTTP=1`, because the stand-in is plain HTTP and the script refuses that otherwise) |
+| `docker/radius/tests/` | `fetch-crl-test.sh <shell>`: the fetch script's own cases (tags, lock, curl options) against a stand-in for the route and a throwaway CA, no docker and no AXIAM; `radius-e2e.yml` runs it under `dash` and `bash` |
 | `docker/.secrets/radius/` | per run: `env`, `server-ca.pem`, the supplicants' files, and `trust/` (`server.pem`, `server.key`, `ca.pem`, `capath/<hash>.r0`, `placement`), mounted at `/etc/freeradius/axiam` |
 | `.github/workflows/radius-e2e.yml` | the same, in CI |
 

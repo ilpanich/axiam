@@ -1569,6 +1569,25 @@ pub trait OAuth2ClientRepository: Send + Sync {
         managed_by: ManagedBy,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// How many **confidential** clients hold any of `grant_types`, across
+    /// every **live** tenant, and in how many tenants (R110W3-02).
+    ///
+    /// Confidential means `token_endpoint_auth_method` is anything but `none`,
+    /// an absent value (a row older than the column) included: that is the
+    /// client the device grant has authenticated since 1.1.0 (#635). A client
+    /// of a tombstoned tenant is not counted, and neither is an orphaned row
+    /// whose tenant no longer exists: the purge is about to remove both.
+    ///
+    /// `grant_types` lists the spellings of one grant, so a caller that
+    /// accepts a URN and a bare name asks once. Deployment-wide and
+    /// tenant-free for the same reason as [`Self::list_all_by_managed_by`],
+    /// and answered by the datastore as two numbers: the caller never pages
+    /// a table, and no row of any client leaves the database.
+    fn count_confidential_with_grant(
+        &self,
+        grant_types: &[&str],
+    ) -> impl Future<Output = AxiamResult<crate::models::oauth2_client::ConfidentialGrantCount>> + Send;
+
     /// Every client with the given provenance, across **all** tenants
     /// (T21.4's sweeper).
     ///

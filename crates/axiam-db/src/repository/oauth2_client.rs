@@ -5,8 +5,8 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::ciba::{CibaClientMetadata, CibaDeliveryMode, CibaRequestSigningAlg};
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client,
-    DcrRegistrationReplacement, ManagedBy, OAuth2Client, UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, ConfidentialGrantCount,
+    CreateOAuth2Client, DcrRegistrationReplacement, ManagedBy, OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -1132,6 +1132,50 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         // No rows at all is `GROUP ALL` over an empty set, which is zero
         // clients rather than a missing answer.
         Ok(rows.first().map_or(0, |r| r.total))
+    }
+
+    /// R110W3-02 — confidential clients holding a grant, in live tenants, as
+    /// two aggregates in one round trip. See the trait for the contract.
+    ///
+    /// Absent `token_endpoint_auth_method` is confidential (it decodes to the
+    /// default, `client_secret_post`), so the filter says `NONE OR != 'none'`
+    /// rather than leaning on how the datastore orders `NONE` against a string.
+    /// The live-tenant subquery reads the `tenant` table once, not once per
+    /// client row.
+    async fn count_confidential_with_grant(
+        &self,
+        grant_types: &[&str],
+    ) -> AxiamResult<ConfidentialGrantCount> {
+        const WHERE: &str = "grant_types CONTAINSANY $grants \
+             AND (token_endpoint_auth_method = NONE OR token_endpoint_auth_method != 'none') \
+             AND tenant_id IN (SELECT VALUE meta::id(id) FROM tenant WHERE deleted_at = NONE)";
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT count() AS total FROM oauth2_client WHERE {WHERE} GROUP ALL; \
+                 SELECT count() AS total FROM \
+                   (SELECT tenant_id FROM oauth2_client WHERE {WHERE} GROUP BY tenant_id) \
+                 GROUP ALL;"
+            ))
+            .bind((
+                "grants",
+                grant_types
+                    .iter()
+                    .map(|g| (*g).to_owned())
+                    .collect::<Vec<String>>(),
+            ))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let clients: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        let tenants: Vec<CountRow> = result.take(1).map_err(DbError::from)?;
+        // `GROUP ALL` over an empty set returns no row: zero, not a missing answer.
+        Ok(ConfidentialGrantCount {
+            clients: clients.first().map_or(0, |r| r.total),
+            tenants: tenants.first().map_or(0, |r| r.total),
+        })
     }
 
     /// T21.4 — every row with this provenance, deployment-wide, for the

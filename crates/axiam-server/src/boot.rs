@@ -1184,6 +1184,8 @@ where
         .build()
         .expect("failed to build reqwest client");
     let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+    // R110W3-02 (#675): once per process, beside boot, counts only — see the module.
+    let _ = crate::device_grant_scan::spawn_boot_scan(oauth2_client_repo.clone());
     // T21.4 — RFC 7591 initial access tokens. Read by the unauthenticated
     // registration endpoint and swept by the cleanup task.
     let oauth2_registration_token_repo =

@@ -109,6 +109,19 @@ impl AuthnRequestParamsMode {
     }
 }
 
+/// How many confidential clients hold a given grant, and in how many live
+/// tenants (the boot-time device-grant warning, R110W3-02).
+///
+/// Counts only. It names no client and no tenant: it feeds a log line, and a
+/// client id or a tenant name has no business in one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConfidentialGrantCount {
+    /// Confidential clients that hold the grant, across every live tenant.
+    pub clients: u64,
+    /// Live tenants that hold at least one such client.
+    pub tenants: u64,
+}
+
 /// Who created a client registration (D5, T21.4).
 ///
 /// The discriminator that separates a registration an administrator made from

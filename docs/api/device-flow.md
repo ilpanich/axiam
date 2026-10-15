@@ -213,6 +213,14 @@ No redirect URI is needed — the device never handles one. Omit
 (`client_secret_post`, the default): it must then send its `client_secret` at
 both endpoints.
 
+When the server starts and finds confidential clients that hold the device
+grant, it logs one `WARN` with their number and the number of tenants they
+belong to (`N confidential OAuth2 client(s) in M tenant(s) hold the device-code
+grant …`; counts only, no client id or name). Each of them answers
+`401 invalid_client` at `/oauth2/device_authorization` and at the poll unless
+its device sends the credential. A client cannot be changed between public and
+confidential, so a device that holds no secret needs a new public client.
+
 ## Not implemented
 
 Interactive claims-gathering and the `verification_uri` *page itself* (the

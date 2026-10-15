@@ -63,12 +63,16 @@ use crate::token::TokenResponse;
 /// The grant type this service handles.
 pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
+/// Both spellings of the device grant the admin API accepts in a client's
+/// `grant_types`: the URN, and the bare `device_code`.
+pub const DEVICE_CODE_GRANT_SPELLINGS: [&str; 2] = [DEVICE_CODE_GRANT_TYPE, "device_code"];
+
 /// Whether a client's `grant_types` hold the device grant, in either spelling
 /// the admin API accepts (the URN, or the bare `device_code`).
 pub fn holds_device_grant(grant_types: &[String]) -> bool {
     grant_types
         .iter()
-        .any(|g| g == DEVICE_CODE_GRANT_TYPE || g == "device_code")
+        .any(|g| DEVICE_CODE_GRANT_SPELLINGS.contains(&g.as_str()))
 }
 
 /// A client [`crate::token::TokenService`] authenticated for the device grant

@@ -336,6 +336,22 @@ pub trait SharedRateLimitStore: Send + Sync + 'static {
         window_start: DateTime<Utc>,
         delta: u64,
     ) -> StoreIncrementFuture<'a>;
+
+    /// Reads the count of the bucket `key` for the fixed window starting at
+    /// `window_start`, **without writing**: `0` when the bucket does not
+    /// exist or was last written for an older window (a write for
+    /// `window_start` would have reset it), the stored count otherwise.
+    ///
+    /// This is what [`Self::increment_by`] with a `delta` of `0` returns, minus
+    /// the side effect: that call upserts, so reading a bucket nobody had
+    /// written creates a row, and reading one left from an older window
+    /// rewrites it. A caller that only wants to know what an earlier window
+    /// came to (the hint cap's previous window) must use this.
+    fn peek_count<'a>(
+        &'a self,
+        key: &'a str,
+        window_start: DateTime<Utc>,
+    ) -> StoreIncrementFuture<'a>;
 }
 
 impl<C: Connection> SharedRateLimitStore for SurrealRateLimitBucketRepository<C> {
@@ -350,6 +366,18 @@ impl<C: Connection> SharedRateLimitStore for SurrealRateLimitBucketRepository<C>
             key,
             window_start,
             delta,
+        ))
+    }
+
+    fn peek_count<'a>(
+        &'a self,
+        key: &'a str,
+        window_start: DateTime<Utc>,
+    ) -> StoreIncrementFuture<'a> {
+        Box::pin(SurrealRateLimitBucketRepository::peek_count(
+            self,
+            key,
+            window_start,
         ))
     }
 }
@@ -1336,6 +1364,20 @@ mod tests {
                 Ok(*entry)
             })
         }
+
+        fn peek_count<'a>(
+            &'a self,
+            key: &'a str,
+            window_start: DateTime<Utc>,
+        ) -> StoreIncrementFuture<'a> {
+            Box::pin(async move {
+                let counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+                Ok(counts
+                    .get(&(key.to_string(), window_start))
+                    .copied()
+                    .unwrap_or(0))
+            })
+        }
     }
 
     fn counter_with(store: Arc<RecordingStore>) -> SharedRateLimitCounter {
@@ -2056,6 +2098,14 @@ mod window_mode_tests {
         ) -> StoreIncrementFuture<'a> {
             Box::pin(async move { Ok(0) })
         }
+
+        fn peek_count<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+        ) -> StoreIncrementFuture<'a> {
+            Box::pin(async move { Ok(0) })
+        }
     }
 
     /// A window boundary lands 30 s into the measurement — the alignment
@@ -2330,6 +2380,14 @@ mod window_mode_tests {
             delta: u64,
         ) -> StoreIncrementFuture<'a> {
             Box::pin(async move { Ok(self.total.fetch_add(delta, Ordering::SeqCst) + delta) })
+        }
+
+        fn peek_count<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+        ) -> StoreIncrementFuture<'a> {
+            Box::pin(async move { Ok(0) })
         }
     }
 

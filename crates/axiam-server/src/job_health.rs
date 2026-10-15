@@ -51,6 +51,9 @@ pub const SWEEP_JOBS: &[&str] = &[
     "ssf_step_up",
     // G-7 (T23.7.1): the CIBA pending-request store's expiry.
     "ciba_request",
+    // #638: the shared rate-limit table's stale buckets (the hint cap's, the
+    // limiters' counters).
+    "rate_limit_bucket",
     "amqp_nonce_replay",
     "gdpr_purge",
     "gdpr_export",
@@ -250,6 +253,8 @@ mod tests {
             "ssf_step_up",
             "scim_reconcile",
             "ciba_request",
+            // #638: the shared rate-limit table's sweep.
+            "rate_limit_bucket",
             // #523 (D-4): the deleted tenants' purge.
             "tenant_purge",
             // T-470: revocations forwarded to Vault, and (#603) the ones it

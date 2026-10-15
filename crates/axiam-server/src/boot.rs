@@ -2809,6 +2809,10 @@ where
     )
     // G-7 (T23.7.1): the CIBA pending-request expiry.
     .with_ciba(Arc::new(ciba_request_repo.clone()))
+    // #638: the shared rate-limit table's stale buckets.
+    .with_rate_limit_buckets(Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+        db_handle.clone(),
+    )))
     // T-470: `vault_pki` revocations a revoke request could not forward.
     .with_vault_revocations(Arc::new(cert_service.clone()))
     .with_step_for_tests(opts.cleanup_step_for_tests.take());

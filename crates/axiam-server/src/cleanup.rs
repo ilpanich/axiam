@@ -176,6 +176,9 @@ pub struct CleanupTask<C: Connection> {
     /// the `ciba_request` sweep marks `expired` and, after a retention, deletes.
     /// `None` runs no sweep.
     ciba_request_repo: Option<Arc<axiam_db::SurrealCibaRequestRepository<C>>>,
+    /// #638: the shared rate-limit table, whose stale buckets the
+    /// `rate_limit_bucket` sweep removes. `None` runs no sweep.
+    rate_limit_bucket_repo: Option<Arc<axiam_db::SurrealRateLimitBucketRepository<C>>>,
     /// T-470: forwards to Vault the revocations of `vault_pki` leaves it does
     /// not have yet, as the `vault_revocation` job. `None` runs no sweep.
     vault_revocations: Option<Arc<VaultRevocationForwarder<C>>>,
@@ -225,6 +228,114 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// hour. A purge that fails releases its claim, so a failure is retried at the
 /// next tick as before.
 pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
+
+// ---------------------------------------------------------------------------
+// Shared rate-limit table (#638, R101W3-05)
+// ---------------------------------------------------------------------------
+
+const fn longest(a: u64, b: u64) -> u64 {
+    if a > b { a } else { b }
+}
+
+/// The longest fixed window any writer of `rate_limit_bucket` counts in, in
+/// seconds. Derived from the writers, not chosen:
+///
+/// - the REST and gRPC shared counters, whose window is
+///   [`axiam_db::rate_limit_counter::DEFAULT_WINDOW_SECS`] (the REST layer's
+///   private `WINDOW_SECS` and the gRPC layer's are each asserted equal to it
+///   by their own tests; the gRPC one is read here as well);
+/// - the CIBA hint cap, [`axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS`].
+///
+/// `rg -n "increment_by" crates/` finds no other writer; a new one with a
+/// longer window must be added to this expression, or the sweep deletes its
+/// rows early (see [`RATE_LIMIT_BUCKET_RETENTION`] for what that costs).
+pub const RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS: u64 = longest(
+    axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS,
+    longest(
+        axiam_db::rate_limit_counter::DEFAULT_WINDOW_SECS,
+        axiam_api_grpc::middleware::rate_limit::WINDOW_SECS as u64,
+    ),
+);
+
+/// Slack on top of two windows, covering the clock offset between a writer, a
+/// reader and the datastore: one minute, far beyond what NTP leaves.
+pub const RATE_LIMIT_BUCKET_CLOCK_MARGIN: Duration = Duration::from_secs(60);
+
+/// How long after its last write a `rate_limit_bucket` row is kept: twice
+/// [`RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS`], plus
+/// [`RATE_LIMIT_BUCKET_CLOCK_MARGIN`].
+///
+/// # Why no live limiter reads a row this old
+///
+/// A bucket row holds the count of one fixed window `[s, s + W)`, `W` its
+/// writer's window. A write lands at some `u >= s`: it is made while the
+/// window is open, and a write-behind flush of the window comes later still.
+/// A limiter reads a stored count in two places only:
+///
+/// 1. the window it belongs to, at a time `t < s + W` (the shared counters'
+///    flush returns it, and the hint cap adds to it);
+/// 2. the hint cap's *previous* window, at `t < s + 2W` (the one later window
+///    that adds it to its own count).
+///
+/// From `t >= s + 2W` on, nothing reads the stored count as a count: an
+/// upsert for any later window finds `window_start` older than its own and
+/// starts from its delta, and a peek finds the same and answers `0` — both
+/// exactly what an absent row gives. So a row is dead once `s + 2W` has
+/// passed, and `s <= u`.
+///
+/// The sweep deletes a row only when `updated_at` (the datastore's clock at
+/// the last write, `u`) is more than `2L + margin` in the past, `L >= W`
+/// being the longest window in use. A reader at `t` (its own clock) after the
+/// sweep has `t >= u + 2L + margin - offset >= s + 2W` as long as the offset
+/// between the clocks is under the margin. No row a limiter still reads is
+/// ever deleted.
+///
+/// If a clock were off by more than the margin, the cost is a count read as
+/// `0` for the rest of one window — the same thing a window boundary does —
+/// never a refusal that should not happen.
+///
+/// The table is bounded by what was written in the last `RETENTION`; the
+/// sweep makes the growth of a table that gained a row per hint, per client
+/// IP and per endpoint, forever, a steady state.
+pub const RATE_LIMIT_BUCKET_RETENTION: Duration = Duration::from_secs(
+    2 * RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS + RATE_LIMIT_BUCKET_CLOCK_MARGIN.as_secs(),
+);
+
+/// Rows one `rate_limit_bucket` delete removes at most.
+pub const RATE_LIMIT_BUCKET_SWEEP_BATCH: u32 = 500;
+
+/// Deletes in one tick: with [`RATE_LIMIT_BUCKET_SWEEP_BATCH`], 50 000 rows,
+/// after which the next tick continues. A tick is never held open by a table
+/// that grew for months before this sweep existed.
+pub const RATE_LIMIT_BUCKET_SWEEP_MAX_BATCHES: u32 = 100;
+
+/// One pass of the `rate_limit_bucket` job (#638): delete the buckets whose
+/// last write is older than [`RATE_LIMIT_BUCKET_RETENTION`] at `now`, in
+/// batches; returns how many were removed.
+///
+/// Safe for any number of replicas sweeping at once: each delete re-checks
+/// `updated_at` on the row it removes, so a row is removed once, and a row a
+/// limiter has just written is kept. A public free function, for the reason
+/// [`run_erasure_pipeline`] is.
+pub async fn sweep_rate_limit_buckets<C: Connection + Send + Sync + 'static>(
+    repo: &axiam_db::SurrealRateLimitBucketRepository<C>,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, AxiamError> {
+    let retention = chrono::Duration::from_std(RATE_LIMIT_BUCKET_RETENTION)
+        .map_err(|e| AxiamError::Internal(e.to_string()))?;
+    let cutoff = now - retention;
+    let mut removed = 0u64;
+    for _ in 0..RATE_LIMIT_BUCKET_SWEEP_MAX_BATCHES {
+        let n = repo
+            .delete_stale(cutoff, RATE_LIMIT_BUCKET_SWEEP_BATCH)
+            .await?;
+        removed += n;
+        if n < u64::from(RATE_LIMIT_BUCKET_SWEEP_BATCH) {
+            break;
+        }
+    }
+    Ok(removed)
+}
 
 /// One pass of the `tenant_purge` job: purge every tombstoned tenant and, when
 /// `scan_orphans`, every orphaned tenant id.
@@ -1179,6 +1290,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_sink: None,
             scim_reconciliation: None,
             ciba_request_repo: None,
+            rate_limit_bucket_repo: None,
             vault_revocations: None,
             last_orphan_scan: None,
             step_for_tests: None,
@@ -1193,6 +1305,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     #[must_use]
     pub fn with_ciba(mut self, repo: Arc<axiam_db::SurrealCibaRequestRepository<C>>) -> Self {
         self.ciba_request_repo = Some(repo);
+        self
+    }
+
+    /// Sweep the shared rate-limit table (#638), as the `rate_limit_bucket`
+    /// job: see [`sweep_rate_limit_buckets`].
+    ///
+    /// A builder step for the reason [`Self::with_ssf`] is one.
+    #[must_use]
+    pub fn with_rate_limit_buckets(
+        mut self,
+        repo: Arc<axiam_db::SurrealRateLimitBucketRepository<C>>,
+    ) -> Self {
+        self.rate_limit_bucket_repo = Some(repo);
         self
     }
 
@@ -1477,6 +1602,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         if self.stop_requested() {
             return;
         }
+        // #638: rate-limit buckets no limiter can still read. DEBUG: a
+        // stale bucket is one whose window has long passed.
+        Self::record(
+            &self.job_health,
+            "rate_limit_bucket",
+            self.sweep_rate_limit_buckets().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
         // T-470: a `vault_pki` leaf revoked in AXIAM whose
         // revocation Vault does not have yet — a revoke request
         // could not reach it, or the revocation came from a bulk
@@ -1744,6 +1881,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             chrono::Duration::seconds(axiam_oauth2::ciba::EXPIRED_RETENTION_SECS),
         )
         .await
+    }
+
+    /// Remove the shared rate-limit table's stale buckets (#638), as the
+    /// `rate_limit_bucket` job. A size bound, not a correctness one: see
+    /// [`sweep_rate_limit_buckets`]. `Ok(0)` without the repository.
+    async fn sweep_rate_limit_buckets(&self) -> Result<u64, AxiamError> {
+        let Some(repo) = &self.rate_limit_bucket_repo else {
+            return Ok(0);
+        };
+        sweep_rate_limit_buckets(repo, Utc::now()).await
     }
 
     // -----------------------------------------------------------------------

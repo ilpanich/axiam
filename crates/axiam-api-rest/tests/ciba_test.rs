@@ -1112,6 +1112,44 @@ async fn the_cap_is_per_client_and_per_hint() {
     );
 }
 
+/// The hint cap's rows in the shared rate-limit table.
+async fn hint_cap_rows(f: &Fixture) -> i64 {
+    let mut count =
+        f.db.query(
+            "SELECT count() AS n FROM rate_limit_bucket \
+             WHERE string::starts_with(meta::id(id), 'ciba_hint_cap:') GROUP ALL",
+        )
+        .await
+        .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    n.unwrap_or(0)
+}
+
+/// #638: a hint's first call creates exactly one row, the current window's;
+/// the previous window's count is read, not written (it used to be an upsert
+/// of zero, which created a second row for a window nobody had counted in).
+/// Further calls in the window add no row, a second hint adds one, and the
+/// refused fourth call adds none.
+#[actix_web::test]
+async fn a_new_hint_creates_one_rate_limit_row() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    assert_eq!(hint_cap_rows(&f).await, 0);
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    assert_eq!(hint_cap_rows(&f).await, 1, "one row for a new hint");
+    for _ in 0..2 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 429);
+    assert_eq!(
+        hint_cap_rows(&f).await,
+        1,
+        "the window's one row, refused call too"
+    );
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=bob").0, 200);
+    assert_eq!(hint_cap_rows(&f).await, 2, "one row per hint");
+}
+
 /// A replica's state: its own `AppState` (and so its own CIBA service and
 /// counter store) over the fixture's datastore, or the fixture's own. Built
 /// here, outside the test's future, which an `AppState` would overflow.

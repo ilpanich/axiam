@@ -848,6 +848,13 @@ enum HintName {
 /// under a key only the deployment holds, of the client and the hint: the
 /// table is not a dictionary of hashes of the usernames and addresses clients
 /// have tried.
+///
+/// A call writes one row, the current window's; the previous window's count is
+/// only read. A row is read until the end of the window after the one it was
+/// written in, so the server's `rate_limit_bucket` sweep deletes a row once it
+/// is more than twice [`HINT_CAP_WINDOW_SECS`] old (with a margin), which
+/// bounds the table by the hints named in that stretch instead of every hint
+/// ever named.
 #[derive(Clone)]
 pub struct CibaHintCap {
     store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
@@ -905,9 +912,10 @@ impl CibaHintCap {
 
     /// Count this call and say whether it is admitted.
     ///
-    /// Increments this window's bucket and reads the previous window's (an
-    /// upsert of zero, which also resets a bucket left from an older window
-    /// of the same parity), then admits when the two come to at most
+    /// Increments this window's bucket and reads the previous window's with a
+    /// `SELECT` (it writes nothing: a hint's first call creates its one row,
+    /// this window's; the table's sweep, `rate_limit_bucket`, removes it once
+    /// no later call can read it), then admits when the two come to at most
     /// [`MAX_REQUESTS_PER_CLIENT_HINT`]. A refused call is counted too.
     async fn admit(
         &self,
@@ -929,7 +937,7 @@ impl CibaHintCap {
             .map_err(failed)?;
         let previous = self
             .store
-            .increment_by(&slot(index - 1), start(index - 1), 0)
+            .peek_count(&slot(index - 1), start(index - 1))
             .await
             .map_err(failed)?;
         Ok(current.saturating_add(previous) <= MAX_REQUESTS_PER_CLIENT_HINT)
@@ -2047,6 +2055,18 @@ mod tests {
             let count = entry.1;
             Box::pin(async move { Ok(count) })
         }
+
+        fn peek_count<'a>(
+            &'a self,
+            key: &'a str,
+            window_start: DateTime<Utc>,
+        ) -> axiam_db::StoreIncrementFuture<'a> {
+            let count = match self.0.lock().unwrap().get(key) {
+                Some((stored, count)) if *stored >= window_start => *count,
+                _ => 0,
+            };
+            Box::pin(async move { Ok(count) })
+        }
     }
 
     fn cap() -> (CibaHintCap, std::sync::Arc<MemStore>) {
@@ -2143,5 +2163,21 @@ mod tests {
         }
         let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
         assert_eq!(keys.len(), 2, "{keys:?}");
+    }
+
+    /// #638: the first call for a hint writes one bucket, the current
+    /// window's; reading the previous window's creates none. The second
+    /// bucket exists only once a later window has counted a call.
+    #[tokio::test]
+    async fn a_new_hint_writes_one_bucket() {
+        let (cap, store) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("carol".into());
+        assert!(cap.admit(tenant, "oa_a", &hint, at(40, 3)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 1);
+        assert!(cap.admit(tenant, "oa_a", &hint, at(40, 4)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 1, "same window, same row");
+        assert!(cap.admit(tenant, "oa_a", &hint, at(41, 0)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 2, "the next window's own");
     }
 }

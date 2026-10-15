@@ -17,12 +17,27 @@ use surrealdb_types::SurrealValue;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::{classify_write_error, retry_on_write_conflict};
 
 /// Row shape returned by the windowed-CAS `UPSERT ... RETURN AFTER` query —
 /// only `count` is needed by the caller.
 #[derive(Debug, SurrealValue)]
 struct RateLimitBucketRow {
     count: u64,
+}
+
+/// Row shape of [`SurrealRateLimitBucketRepository::peek_count`].
+#[derive(Debug, SurrealValue)]
+struct RateLimitBucketPeek {
+    count: u64,
+    window_start: DateTime<Utc>,
+}
+
+/// One row [`SurrealRateLimitBucketRepository::delete_stale`] removed.
+#[derive(Debug, SurrealValue)]
+struct RemovedBucket {
+    #[allow(dead_code)] // counted, never read
+    record_id: String,
 }
 
 /// SurrealDB-backed shared rate-limit bucket counter.
@@ -123,6 +138,75 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
 
         Ok(row.count)
     }
+
+    /// Reads the count of the bucket `key` for the fixed window starting at
+    /// `window_start`, writing nothing.
+    ///
+    /// Answers what [`Self::increment_by`] would return for a `delta` of `0`:
+    /// `0` when no row exists or its stored `window_start` is older than
+    /// `window_start` (an upsert would have started the new window at `0`),
+    /// the stored `count` otherwise. A plain `SELECT`: it creates no row, so
+    /// asking after a key nobody has written leaves the table as it was.
+    pub async fn peek_count(&self, key: &str, window_start: DateTime<Utc>) -> Result<u64, DbError> {
+        let mut result = self
+            .db
+            .current()
+            .query("SELECT count, window_start FROM type::record('rate_limit_bucket', $key)")
+            .bind(("key", key.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RateLimitBucketPeek> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .filter(|row| row.window_start >= window_start)
+            .map_or(0, |row| row.count))
+    }
+
+    /// Deletes, at most `limit` at a time, the buckets whose `updated_at` is
+    /// before `cutoff`; returns how many were removed.
+    ///
+    /// The `WHERE` is evaluated again by the `DELETE` itself, per record, so a
+    /// bucket a limiter wrote between the selection and the deletion is kept,
+    /// and two replicas sweeping at once cannot remove a row twice or remove
+    /// a row the other has just refreshed: each row goes once, or stays. The
+    /// count is of rows this call removed (`RETURN BEFORE`), not of rows it
+    /// selected. When two sweepers contend for the same rows the datastore
+    /// aborts the loser's transaction: that is retried, and if it keeps
+    /// losing it reports `0` (the winner removed the rows). Which `cutoff` is safe to pass is the caller's to establish;
+    /// the server's sweep derives it from the windows in use.
+    pub async fn delete_stale(&self, cutoff: DateTime<Utc>, limit: u32) -> Result<u64, DbError> {
+        match retry_on_write_conflict(|| self.delete_stale_once(cutoff, limit)).await {
+            // Two sweepers selected the same rows and this one lost the
+            // commit: the winner removed them, which is what was wanted. Not
+            // an error; whatever is left is the next pass's.
+            Err(DbError::Conflict(_)) => Ok(0),
+            outcome => outcome,
+        }
+    }
+
+    async fn delete_stale_once(&self, cutoff: DateTime<Utc>, limit: u32) -> Result<u64, DbError> {
+        let entity = "rate_limit_bucket";
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "LET $ids = (SELECT VALUE id FROM rate_limit_bucket \
+                     WHERE updated_at < $cutoff LIMIT $limit); \
+                 LET $removed = (DELETE $ids WHERE updated_at < $cutoff RETURN BEFORE); \
+                 SELECT meta::id(id) AS record_id FROM $removed",
+            )
+            .bind(("cutoff", cutoff))
+            .bind(("limit", i64::from(limit)))
+            .await
+            .map_err(|e| classify_write_error(e, entity))?
+            .check()
+            .map_err(|e| classify_write_error(e, entity))?;
+        let removed: Vec<RemovedBucket> = result.take(2).map_err(DbError::from)?;
+        Ok(removed.len() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +282,73 @@ mod tests {
         let other = "login:203.0.113.7";
         assert_eq!(repo.increment_by(other, window2, 2).await.unwrap(), 2);
         assert_eq!(repo.increment_by(key, window2, 1).await.unwrap(), 5);
+    }
+    async fn repo() -> (
+        SurrealRateLimitBucketRepository<surrealdb::engine::local::Db>,
+        Surreal<surrealdb::engine::local::Db>,
+    ) {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        (SurrealRateLimitBucketRepository::new(db.clone()), db)
+    }
+
+    async fn rows(db: &Surreal<surrealdb::engine::local::Db>) -> usize {
+        let mut r = db
+            .query("SELECT count() AS total FROM rate_limit_bucket GROUP ALL")
+            .await
+            .unwrap();
+        let n: Vec<crate::helpers::CountRow> = r.take(0).unwrap();
+        n.first().map_or(0, |c| c.total as usize)
+    }
+
+    /// `peek_count` answers what a zero-delta `increment_by` would, and
+    /// writes nothing (#638): no row for a key nobody wrote, none changed
+    /// for one left from an older window.
+    #[tokio::test]
+    async fn peek_count_reads_without_writing() {
+        let (repo, db) = repo().await;
+        let w1 = Utc::now();
+        let w2 = w1 + Duration::minutes(10);
+
+        // Unknown key: zero, and still no row.
+        assert_eq!(repo.peek_count("k", w1).await.unwrap(), 0);
+        assert_eq!(rows(&db).await, 0, "a read created a row");
+
+        repo.increment_by("k", w1, 2).await.unwrap();
+        assert_eq!(repo.peek_count("k", w1).await.unwrap(), 2);
+        // Asked about a newer window than the stored one: the upsert would
+        // have reset it to zero; the read says zero and leaves the row alone.
+        assert_eq!(repo.peek_count("k", w2).await.unwrap(), 0);
+        assert_eq!(
+            repo.peek_count("k", w1).await.unwrap(),
+            2,
+            "the row was rewritten"
+        );
+        assert_eq!(rows(&db).await, 1);
+    }
+
+    /// `delete_stale` removes rows whose `updated_at` is before the cutoff,
+    /// keeps the others, and honours its batch size.
+    #[tokio::test]
+    async fn delete_stale_removes_old_rows_in_batches_and_keeps_current_ones() {
+        let (repo, db) = repo().await;
+        let w = Utc::now();
+        for k in ["old1", "old2", "old3", "fresh"] {
+            repo.increment_by(k, w, 1).await.unwrap();
+        }
+        db.query("UPDATE rate_limit_bucket SET updated_at = d'2000-01-01T00:00:00Z' WHERE meta::id(id) IN ['old1','old2','old3']")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let cutoff = w - Duration::hours(1);
+
+        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 2, "one batch");
+        assert_eq!(rows(&db).await, 2);
+        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 1);
+        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 0);
+        assert_eq!(rows(&db).await, 1);
+        assert_eq!(repo.peek_count("fresh", w).await.unwrap(), 1);
     }
 }

@@ -16,7 +16,7 @@ and every device key are minted by the test, per run, into
 ## Run it locally
 
 Prerequisites beyond the Rust toolchain: Docker with the compose plugin,
-`openssl`, and `eapol_test`, which is `wpa_supplicant`'s test tool
+`openssl`, `curl` (the fetch script), and `eapol_test`, which is `wpa_supplicant`'s test tool
 (`sudo apt-get install -y eapoltest` on Ubuntu 24.04; elsewhere build it from
 `wpa_supplicant`'s sources with `CONFIG_EAPOL_TEST=y`).
 
@@ -56,6 +56,7 @@ which FreeRADIUS does at `ca_path_reload_interval`, 300 seconds at the smallest
 | `docker/radius/raddb/default` | the one virtual server: EAP, and nothing else |
 | `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified, keyed on the certificate serial |
 | `docker/radius/raddb/axiam_placement` | the `files` module that reads the placement table |
+| `docker/radius/fetch-crl.sh` | the revocation-list fetch job the guide's section 4 describes; the test runs it on the host, against a local stand-in for the CRL route (needs `curl` and `openssl`) |
 | `docker/.secrets/radius/` | per run: `env`, `server-ca.pem`, the supplicants' files, and `trust/` (`server.pem`, `server.key`, `ca.pem`, `capath/<hash>.r0`, `placement`), mounted at `/etc/freeradius/axiam` |
 | `.github/workflows/radius-e2e.yml` | the same, in CI |
 

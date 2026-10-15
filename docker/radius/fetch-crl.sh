@@ -1,0 +1,173 @@
+#!/bin/sh
+# fetch-crl.sh: keep FreeRADIUS's copy of AXIAM's revocation list fresh.
+#
+#   fetch-crl.sh <crl-url> <ca.pem> <capath>
+#
+#   <crl-url>  AXIAM's list for the tenant signing CA:
+#              https://axiam.example.com/pki/v1/<org>/ca/<ca>/crl
+#   <ca.pem>   the tenant signing CA's certificate: FreeRADIUS's `ca_file`
+#   <capath>   FreeRADIUS's `ca_path`; the list lands there as `<hash>.r0`,
+#              the name OpenSSL looks an issuer's list up by
+#
+# Run it from cron or a systemd timer, every five minutes. The guide is
+# docs/pki/freeradius.md, section 4; the end-to-end test
+# crates/axiam-server/tests/radius_e2e.rs runs THIS file, so a claim below is a
+# case of that test.
+#
+# It installs a list only when
+#   1. the server answered 200 and the body is a CRL (a 304 means "unchanged",
+#      and nothing is touched);
+#   2. `ca.pem` signed it. `openssl crl -verify` exits 0 on "verify failure"
+#      when the list names the CA but another key signed it (probed on OpenSSL
+#      3.0.13), so the exit status is not the check: the text "verify OK" is;
+#   3. its CRL number is not lower than the one already installed, so a
+#      replayed, older, validly signed list cannot undo a revocation (equal is
+#      accepted: the same list again is not a replay);
+# and it installs it atomically: written beside its destination, then `mv`.
+#
+# It remembers the ETag of the list it installed (in `<capath>/.fetch-crl.*`,
+# a name OpenSSL never looks up) and sends it as `If-None-Match`. The tag is
+# stored only after the list it belongs to is in place, so a run cut short at
+# worst fetches the list once more. Exit 0: installed or unchanged. Exit 1: the
+# list was refused or could not be fetched; the installed list is untouched and
+# the reason is on stderr. Alert on a non-zero exit, and on a list in `capath`
+# older than half its lifetime (the guide says why).
+#
+# Needs: sh, curl, openssl, sed, sort, tr, cut, head, mktemp.
+
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 022
+
+fail() {
+	echo "fetch-crl: $*" >&2
+	exit 1
+}
+
+[ "$#" -eq 3 ] || {
+	echo "usage: fetch-crl.sh <crl-url> <ca.pem> <capath>" >&2
+	exit 2
+}
+url=$1
+ca_file=$2
+capath=$3
+[ -r "$ca_file" ] || fail "refusing to run: cannot read the CA certificate $ca_file"
+[ -d "$capath" ] && [ -w "$capath" ] || fail "refusing to run: $capath is not a writable directory"
+
+work=$(mktemp -d)
+stage=
+cleanup() {
+	rm -rf "$work"
+	[ -z "$stage" ] || rm -f "$stage"
+}
+trap cleanup EXIT
+
+# A CRL number as upper-case hex without leading zeros, for comparison; fails
+# when the list carries none.
+crl_number() {
+	raw=$(openssl crl -in "$1" -noout -crlnumber 2>/dev/null) || return 1
+	case $raw in crlNumber=*) ;; *) return 1 ;; esac
+	n=$(printf '%s\n' "$raw" | sed 's/^crlNumber=\(0[xX]\)\{0,1\}//' | tr 'a-f' 'A-F' | sed 's/^0*//')
+	case $n in *[!0-9A-F]*) return 1 ;; esac
+	printf '%s' "${n:-0}"
+}
+
+# True when the hex number $1 is lower than $2 (both normalised: no leading
+# zeros, so the longer one is the larger, and equal lengths sort as numbers).
+number_lower() {
+	[ "${#1}" -eq "${#2}" ] || {
+		[ "${#1}" -lt "${#2}" ]
+		return
+	}
+	[ "$1" != "$2" ] || return 1
+	[ "$(printf '%s\n%s\n' "$1" "$2" | sort | head -n 1)" = "$1" ]
+}
+
+# ---- the request ------------------------------------------------------------
+# The state: the ETag of the installed list and the file it was installed as.
+key=$(printf '%s' "$url" | openssl dgst -sha256 -r | cut -c1-16)
+state="$capath/.fetch-crl.$key"
+etag=
+installed=
+if [ -f "$state" ]; then
+	{
+		IFS= read -r etag
+		IFS= read -r installed
+	} <"$state" || true
+fi
+case $etag in *[![:graph:]]*) etag= ;; esac
+case $installed in
+'' | *[!0-9a-f.r]*) etag= ;;
+*) [ -f "$capath/$installed" ] || etag= ;; # no list on disk: nothing to revalidate
+esac
+
+set -- -sS --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
+if [ -n "$etag" ]; then
+	set -- "$@" -H "If-None-Match: $etag"
+fi
+rc=0
+code=$(curl "$@" "$url") || rc=$?
+[ "$rc" -eq 0 ] || fail "the fetch of $url failed (curl exit $rc)"
+
+case $code in
+200) ;;
+304)
+	[ -n "$etag" ] || fail "refusing a 304 to a request that held no ETag"
+	echo "fetch-crl: unchanged (304); $capath/$installed stays"
+	exit 0
+	;;
+*) fail "$url answered HTTP $code; the installed list stays" ;;
+esac
+
+# ---- the list -----------------------------------------------------------------
+openssl crl -inform DER -in "$work/crl.der" -outform PEM -out "$work/crl.pem" 2>/dev/null ||
+	fail "refusing the list: the body is not a DER certificate revocation list"
+
+# Never install a list the trusted CA did not sign.
+rc=0
+out=$(openssl crl -in "$work/crl.pem" -CAfile "$ca_file" -noout -verify 2>&1) || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$out" = "verify OK" ]; } ||
+	fail "refusing the list: it was not signed by $ca_file (openssl: ${out:-exit $rc})"
+
+hash=$(openssl crl -in "$work/crl.pem" -noout -hash)
+case $hash in
+*[!0-9a-f]* | '') fail "refusing the list: no issuer name hash" ;;
+esac
+target="$capath/$hash.r0"
+
+# Never install an older list than the one in place (a replay).
+new=$(crl_number "$work/crl.pem") || fail "refusing the list: it carries no CRL number"
+if [ -f "$target" ]; then
+	if old=$(crl_number "$target"); then
+		if number_lower "$new" "$old"; then
+			fail "refusing the list: its CRL number 0x$new is lower than the installed list's 0x$old"
+		fi
+	else
+		echo "fetch-crl: $target has no readable CRL number; replacing it" >&2
+	fi
+fi
+
+# ---- install: beside the destination, then rename -----------------------------
+stage=$(mktemp "$capath/.incoming.XXXXXX")
+cat "$work/crl.pem" >"$stage"
+chmod 0644 "$stage"
+mv -f "$stage" "$target"
+stage=
+
+# Remember the ETag only now that the list it names is in place.
+new_etag=$(sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p' "$work/headers" | tr -d '\r' |
+	sed 's/[[:space:]]*$//' | tail -n 1)
+case $new_etag in
+*[![:graph:]]*) new_etag= ;;
+esac
+if [ -n "$new_etag" ]; then
+	stage=$(mktemp "$capath/.incoming.XXXXXX")
+	printf '%s\n%s\n' "$new_etag" "$hash.r0" >"$stage"
+	chmod 0644 "$stage"
+	mv -f "$stage" "$state"
+	stage=
+else
+	rm -f "$state"
+fi
+echo "fetch-crl: installed $target (CRL number 0x$new)"

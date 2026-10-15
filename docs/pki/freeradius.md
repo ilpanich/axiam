@@ -386,35 +386,54 @@ AXIAM publishes each issuing CA's list at
 certificate AXIAM signs, as its CRL distribution point. Details:
 [Certificate revocation lists](README.md#certificate-revocation-lists).
 
-FreeRADIUS reads lists from files. Fetch the tenant signing CA's list on a
-schedule, convert it, check that the CA you trust signed it, and move it into
-`ca_path` under the name OpenSSL looks it up by (`<issuer-name-hash>.r0`):
+FreeRADIUS reads lists from files. [`docker/radius/fetch-crl.sh`](../../docker/radius/fetch-crl.sh)
+fetches the tenant signing CA's list, checks it, and moves it into `ca_path` under
+the name OpenSSL looks it up by (`<issuer-name-hash>.r0`). The file is the recipe:
+this page does not copy it, so that what you read cannot drift from what the
+end-to-end test runs. Run it from cron or a systemd timer, every five minutes:
 
 ```sh
-#!/bin/sh
-# Run from cron or a systemd timer every 5 minutes.
-set -eu
-URL="https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl"
-DIR=/etc/freeradius/axiam/capath
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-
-curl -fsS --max-time 20 -o "$tmp/crl.der" "$URL"
-openssl crl -inform DER -in "$tmp/crl.der" -outform PEM -out "$tmp/crl.pem"
-# Never install a list the trusted CA did not sign.
-openssl crl -in "$tmp/crl.pem" -CAfile /etc/freeradius/axiam/ca.pem -noout -verify
-hash=$(openssl crl -in "$tmp/crl.pem" -noout -hash)
-install -m 0644 "$tmp/crl.pem" "$DIR/.incoming"
-mv "$DIR/.incoming" "$DIR/$hash.r0"          # atomic: never a half-written list
+fetch-crl.sh "https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl" \
+    /etc/freeradius/axiam/ca.pem /etc/freeradius/axiam/capath
 ```
 
-Use HTTPS. The signature check stops a list the CA did not sign; it does not
-stop a replay of an older, validly signed one, so a script that holds the CRL number
-should also refuse a list whose number is lower than the one on disk.
+It installs a list only if all of these hold, and otherwise exits 1, says why on
+stderr and leaves the installed list alone:
+
+- **The CA you trust signed it.** The check is the *text* `openssl crl -verify`
+  prints, which must be exactly `verify OK`, not its exit status: OpenSSL 3.0
+  prints `verify failure` and exits **0** when a list names the CA but another key
+  signed it, so a script that trusts the exit status installs a list forged under
+  the CA's name (R101W6-04, [#643](https://github.com/ilpanich/axiam/issues/643))
+  — and FreeRADIUS then refuses the whole tenant, with the genuine list gone from
+  disk.
+  ```sh
+  out=$(openssl crl -in "$work/crl.pem" -CAfile "$ca_file" -noout -verify 2>&1) || rc=$?
+  { [ "$rc" -eq 0 ] && [ "$out" = "verify OK" ]; } || fail "…not signed by $ca_file"
+  ```
+- **Its CRL number is not lower than the installed list's.** A validly signed
+  but older list is a replay that would undo a revocation. A number is compared
+  as the hex integer it is (`openssl crl -noout -crlnumber`); an equal number is
+  accepted, since the same list again is not a replay.
+- **The server said `200`.** The script sends the `ETag` of the list it
+  installed as `If-None-Match`; a `304` means "unchanged", and nothing is touched.
+  The tag is stored (in `ca_path`, as `.fetch-crl.*`, a name OpenSSL never looks
+  up) only after its list is in place.
+
+and it installs atomically: written beside its destination, then renamed, so
+FreeRADIUS never reads a half-written list.
+
+Use HTTPS. The signature check stops a list the CA did not sign, and the number
+check a replay of an older one; neither stops whoever answers the fetch from
+serving the genuine current list again after a newer one exists, which only
+lengthens [the lag](#the-revocation-lag). The alert on a list that is older than
+half its lifetime ([below](#the-revocation-lag)) is what catches a fetch that no
+longer moves.
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request
-with `304` (send `If-None-Match`), and the route's limiter is 60 requests a minute
-per address.
+with `304` (the script sends `If-None-Match`), and the route's limiter is 60
+requests a minute per address.
 
 ### The revocation lag
 
@@ -518,6 +537,7 @@ they produce into the shipped FreeRADIUS configuration, and authenticates with
 | **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept |
 | **wrong CA** | a device of another tenant of the same organization — whose signing CA is under the same organization CA as the trusted one — is refused presenting its leaf, its leaf and signing CA (`unable to get local issuer certificate`) and its whole chain up to the shared root (`self-signed certificate in certificate chain`); a device of another organization is refused; the tenant's own device presenting its whole chain is admitted |
 | **revoked after the CRL refresh** | a revoked device is still admitted while FreeRADIUS holds the old list; once AXIAM's list is in `ca_path` and FreeRADIUS has read it, the device is refused with `certificate revoked` and another device is not |
+| **the fetch script** | the revocation list reaches `ca_path` through [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) itself, run on the host against a local stand-in for the CRL route. A list another key signed under the CA's name (with a higher number, so only its signature can stop it) is refused, although `openssl crl -verify` exits 0 on it; a list the CA signed with a lower CRL number is refused; a `304` to the stored `ETag` leaves the list alone; each refusal leaves the installed list byte for byte as it was |
 | unplaced | a valid, unrevoked, unbound device is refused, although the table also holds a bound certificate whose subject is `DEFAULT` (which is admitted, as itself) |
 | TLS 1.2 | a supplicant offering only TLS 1.2 is refused |
 | EAP-MD5 | a supplicant that asks for EAP-MD5 gets an EAP-Failure |

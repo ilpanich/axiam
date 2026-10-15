@@ -629,9 +629,11 @@ pub type UnitStepForTests = Arc<
 /// stays due), and it never crosses it once the stop is requested. So the only
 /// unit a stop can find past its point of no return crossed it before the stop
 /// was requested, and it has the whole of the teardown's window for its last
-/// statements — from the stop signal through the outbound and audit drains to
-/// the end of the cleanup bound: 5 to 12 s for `SIGTERM`, 2 to 6 s after a lost
-/// lease. One that outlasts even that is cut, and its record is lost (T-444).
+/// statements — from the stop signal through the gRPC stop, the lease release
+/// and the outbound and audit drains to the end of the cleanup bound: 5 to 18 s
+/// for `SIGTERM`, 2 to 13 s after a lost lease, whose stop signal comes at the
+/// loss (#628). One that outlasts even that is cut, and its record is lost
+/// (T-444).
 #[derive(Clone)]
 pub struct AuditedWork {
     stop: watch::Receiver<bool>,

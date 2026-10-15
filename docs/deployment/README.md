@@ -1837,21 +1837,33 @@ In audit terms, a restart loses the following, and nothing else:
 
 An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
 finishes the requests in flight, tells the cleanup task to stop (it starts no
-further sweep, GDPR erasure or export) and then **writes the audit rows the
-audit middleware still holds**, before the process exits. Before that drain, in
-the minimal profile, each in-process outbound queue is closed and one
-`<kind>.delivery_abandoned` row is written for every delivery still queued or
-waiting for a retry. A `SIGKILL` or an out-of-memory kill does none of that and
-loses what is queued.
+further sweep, GDPR erasure, export or tenant purge), stops gRPC, gives the
+minimal profile's singleton lease up so that a successor need not wait out its
+TTL, and then **writes the audit rows the audit middleware still holds**, before
+the process exits. Before that drain, in the minimal profile, each in-process
+outbound queue is closed and one `<kind>.delivery_abandoned` row is written for
+every delivery still queued or waiting for a retry. A `SIGKILL` or an
+out-of-memory kill does none of that and loses what is queued.
+
+The cleanup task is told to stop **before** the lease is given up: once it is,
+a successor may start, and this instance must not start work beside it. After a
+lost lease it is told at the loss itself, not once the requests in flight have
+been drained or cut. (Corrected 2026-10-15, #628: before 1.1.0 the cleanup task
+was told only after the lease release — and after a lost lease, after the REST
+cut and the gRPC stop, up to 7 s in, so the old instance could still start an
+erasure or a tenant purge beside its successor — and the release itself was an
+unbounded datastore call outside the stop's budget.)
 
 **Give the container a termination grace period of at least 40 s.** A
-`SIGTERM` stop has five bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
+`SIGTERM` stop has six bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
 arithmetic is checked when the server is built). The REST listener waits up to
 **20 s** for requests in flight (`shutdown_timeout`, set explicitly; actix's own
 default is 30 s). The gRPC server then gets up to **5 s** to finish its calls,
-the in-process outbound queues up to **2 s** to account for what they hold, the
-audit queue up to **5 s** to be written, and the cleanup task up to **5 s** to
-finish the sweep it was in. That is 37 s, and 40 s leaves a 3 s margin. A
+the lease release up to **1 s** (minimal profile; past it the release is
+abandoned and a successor waits out the lease's TTL instead), the in-process
+outbound queues up to **2 s** to account for what they hold, the audit queue up
+to **5 s** to be written, and the cleanup task up to **5 s** to finish the sweep
+it was in. That is 38 s, and 40 s leaves a 2 s margin. A
 shorter grace period lets the orchestrator kill the process during the drain,
 which loses exactly the audit rows the orderly stop exists to keep. Compose's
 default is 10 s and Kubernetes' is 30 s, so both are set:
@@ -1882,7 +1894,7 @@ finished rather than wait for it:
     audit entries it deleted and kept) for a tenant purge. The erasure and its
     proof, or the purge, stand; the row is never written. It takes a datastore
     that did not answer the handful of statements left in the whole window after
-    the stop began (5 to 12 s for `SIGTERM`, 2 to 6 s after a lost lease). The log
+    the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
     not reach its audit row in time`;
   - a data export cut after it was marked ready and before its mail was queued:
@@ -1903,7 +1915,8 @@ finished rather than wait for it:
   lease must not run beside its successor for longer than **15 s**
   (`LeaseTiming::lost_stop_deadline`), so its stop has a budget of its own
   (`LEASE_LOSS_STOP`): requests in flight **5 s**, gRPC 2 s, outbound queues
-  1 s, audit drain 3 s, cleanup 2 s — 13 s. actix's drain is fixed at 20 s when
+  1 s, audit drain 3 s, cleanup 2 s — 13 s; there is no lease release, as the
+  lease is no longer this instance's. actix's drain is fixed at 20 s when
   the listener is bound and cannot be shortened for one stop, so a request still
   running 5 s after the loss is **cut** (the connection is closed without a
   response) and the teardown runs on; the log says `requests still in flight
@@ -1913,7 +1926,7 @@ finished rather than wait for it:
 
 An instance that loses its lease, or whose consumer or gRPC server dies, exits
 non-zero after the stop. A backstop ends the process regardless if the stop
-overruns: 15 s after it began for a lost lease, 38 s — the whole `SIGTERM`
+overruns: 15 s after it began for a lost lease, 39 s — the whole `SIGTERM`
 budget and 1 s, inside the grace period — for a dead consumer or gRPC server.
 A lease lost while a `SIGTERM` stop is already past its REST drain keeps the
 `SIGTERM` bounds for the steps left, so its 15 s backstop can end that stop up

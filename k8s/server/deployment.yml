@@ -18,11 +18,12 @@ spec:
         app: axiam
         component: server
     spec:
-      # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC, 2 s
-      # for the in-process outbound queues, 5 s for the audit queue and 5 s for
-      # the cleanup task: 37 s (`ORDERLY_STOP`, `boot.rs`; #569, #598). The
-      # default of 30 s is shorter than that, and a pod killed during the audit
-      # drain loses the rows it still holds; 40 s leaves a 3 s margin. What a
+      # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC, 1 s
+      # for the minimal profile's lease release, 2 s for the in-process outbound
+      # queues, 5 s for the audit queue and 5 s for the cleanup task: 38 s
+      # (`ORDERLY_STOP`, `boot.rs`; #569, #598, #628). The default of 30 s is
+      # shorter than that, and a pod killed during the audit drain loses the
+      # rows it still holds; 40 s leaves a 2 s margin. What a
       # stop can cut is in docs/deployment/README.md, "Stopping, and the grace
       # period".
       terminationGracePeriodSeconds: 40

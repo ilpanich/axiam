@@ -610,13 +610,14 @@ pub struct RateLimitConfig {
     pub scim_target_admin_per_min: u32,
     /// Max writes per minute per IP to each of the network-segment management
     /// routes — create, replace and delete a segment, create, replace and
-    /// delete a segment's reply profile (default: 30 — RADIUS D4, W6.3,
+    /// delete a segment's reply profile, and replace the tenant's `Session-Timeout`
+    /// cap (default: 30 — RADIUS D4, W6.3,
     /// `claude_dev/radius-reply-profile-design.md` §5.1). Reads are not in it.
     /// A segment write decides which VLAN a device is placed on and a profile
     /// write shapes what that placement gives, so each is a grant (§5.2); every
     /// write also runs the write gate's reads and a reactor round trip. Thirty
     /// a minute is far more than a person administering a network produces. One
-    /// bucket per route (six, named `network_*`); per-IP; never preset.
+    /// bucket per route (seven, named `network_*`); per-IP; never preset.
     pub network_admin_per_min: u32,
     /// Max `POST /api/v1/network/decide` requests per minute **per
     /// authenticated caller** (default: 6 000 — RADIUS D4, W6.4; maintainer

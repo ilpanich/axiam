@@ -459,7 +459,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN",
-            "Max writes per minute, per IP, to the network-segment management API: create, replace and delete a segment under /api/v1/network/segments and a segment's reply profile under /api/v1/network/profiles. A segment write decides which VLAN a device is placed on and a profile write shapes what the placement gives. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "Max writes per minute, per IP, to the network-segment management API: create, replace and delete a segment under /api/v1/network/segments, a segment's reply profile under /api/v1/network/profiles, and PUT /api/v1/network/policy, the tenant's Session-Timeout cap. A segment write decides which VLAN a device is placed on and a profile write shapes what the placement gives. One bucket per route; reads are not limited. Never moved by a profile preset.",
             "30",
           ],
           [

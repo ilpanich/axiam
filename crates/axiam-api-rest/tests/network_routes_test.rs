@@ -1,4 +1,5 @@
-//! The ten network management routes against the real authorization engine and
+//! The twelve network management routes (the ten of W6.3 and the two of the
+//! tenant's `Session-Timeout` cap, W6.3b) against the real authorization engine and
 //! the real write gate (RADIUS D4, W6.3;
 //! `claude_dev/radius-reply-profile-design.md` §4.2, §5.1, §5.2, §5.4).
 //!
@@ -26,7 +27,8 @@ use axiam_auth::token::{issue_access_token, issue_service_account_token};
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::audit::{AuditLogEntry, AuditOutcome};
 use axiam_core::models::network::{
-    NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ, NETWORK_SEGMENTS_WRITE,
+    NETWORK_ADMIN, NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ,
+    NETWORK_SEGMENTS_WRITE,
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::PermissionEffect;
@@ -59,6 +61,7 @@ const PEER: &str = "198.51.100.7:40000";
 
 const SEGMENTS: &str = "/api/v1/network/segments";
 const PROFILES: &str = "/api/v1/network/profiles";
+const POLICY: &str = "/api/v1/network/policy";
 
 fn test_auth_config() -> AuthConfig {
     let kp =
@@ -757,10 +760,19 @@ async fn a_service_account_token_is_401() {
     let w = World::new().await;
     let app = app!(w);
     let token = w.sa_token().await;
-    for (method, uri) in [("GET", SEGMENTS), ("GET", PROFILES)] {
+    for (method, uri) in [("GET", SEGMENTS), ("GET", PROFILES), ("GET", POLICY)] {
         let (status, _) = call(&app, &token, method, uri, None).await;
         assert_eq!(status, 401, "{method} {uri}");
     }
+    let (status, _) = call(
+        &app,
+        &token,
+        "PUT",
+        POLICY,
+        Some(json!({"session_timeout_max_secs": 1800, "version": 0})),
+    )
+    .await;
+    assert_eq!(status, 401, "the cap is human-only too");
     let (status, _) = call(
         &app,
         &token,
@@ -1410,10 +1422,456 @@ async fn another_tenants_segments_and_profiles_are_invisible() {
 }
 
 // ---------------------------------------------------------------------------
+// The tenant's Session-Timeout cap (plan 13.6, W6.3b)
+// ---------------------------------------------------------------------------
+
+impl World {
+    /// The token of a user of the default tenant who may read the network and
+    /// write the cap: `network:read` and `network:admin`, tenant-wide. Granted
+    /// directly: `network:admin` is not grantable through the API (the grant
+    /// gate refuses it, `4.2:not-grantable`), which `the_cap_cannot_be_written_by_the_roles_the_api_can_make`
+    /// pins.
+    async fn cap_writer(&self) -> String {
+        self.user_with(&[NETWORK_READ, NETWORK_ADMIN]).await
+    }
+}
+
+fn policy_body(cap: u64, version: u64) -> Value {
+    json!({"session_timeout_max_secs": cap, "version": version})
+}
+
+/// Before any write the cap is the default 3600 at version 0, and reading it
+/// needs `network:read` at `/network`.
+#[actix_rt::test]
+async fn the_cap_reads_3600_before_any_write() {
+    let w = World::new().await;
+    let app = app!(w);
+    let reader = w.user_with(&[NETWORK_READ]).await;
+    let (status, policy) = call(&app, &reader, "GET", POLICY, None).await;
+    assert_eq!(status, 200, "{policy}");
+    assert_eq!(policy["session_timeout_max_secs"], 3600);
+    assert_eq!(policy["version"], 0);
+    assert_eq!(policy["tenant_id"], w.tenant.to_string());
+    assert_eq!(policy["updated_by"], Value::Null);
+    assert_eq!(policy["updated_at"], Value::Null);
+
+    let nobody = w.user_with(&[]).await;
+    let (status, err) = call(&app, &nobody, "GET", POLICY, None).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_READ);
+    // Writing the cap does not come with reading it, nor the other way round.
+    let (status, _) = call(&app, &reader, "PUT", POLICY, Some(policy_body(1800, 0))).await;
+    assert_eq!(status, 403);
+}
+
+/// Lowering: the first write (version 0) stores the cap and moves the version;
+/// a read sees it; the audit row says `lowered` with the cap before and after.
+#[actix_rt::test]
+async fn lowering_the_cap_then_reading_it() {
+    let w = World::new().await;
+    let app = app!(w);
+    let writer = w.cap_writer().await;
+
+    let (status, put) = call(&app, &writer, "PUT", POLICY, Some(policy_body(1800, 0))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["session_timeout_max_secs"], 1800);
+    assert_eq!(put["version"], 1);
+    assert!(put["updated_by"].is_string() && put["updated_at"].is_string());
+
+    let (status, got) = call(&app, &writer, "GET", POLICY, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(got, put);
+
+    // And again, the second write is conditional on version 1.
+    let (status, put) = call(&app, &writer, "PUT", POLICY, Some(policy_body(300, 1))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(
+        (
+            put["session_timeout_max_secs"].clone(),
+            put["version"].clone()
+        ),
+        (json!(300), json!(2))
+    );
+
+    let rows = w.audit("network_policy.lowered").await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let first = rows
+        .iter()
+        .find(|r| r.metadata["after"]["session_timeout_max_secs"] == 1800)
+        .unwrap();
+    assert_eq!(first.outcome, AuditOutcome::Success);
+    assert_eq!(first.metadata["direction"], "lowered");
+    assert_eq!(first.metadata["before"]["session_timeout_max_secs"], 3600);
+    assert_eq!(first.metadata["before"]["version"], 0);
+    assert_eq!(first.metadata["after"]["version"], 1);
+    assert_eq!(first.resource_id, Some(w.tenant));
+    assert!(w.audit("network_policy.raised").await.is_empty());
+    assert!(w.audit("network_policy.write_refused").await.is_empty());
+}
+
+/// Raising is allowed with nothing beyond `network:admin`, and is audited as a
+/// raise: from the default as well as from a value the tenant wrote. The holder
+/// here has `network:read` and `network:admin` only: not `profiles_write`, not
+/// `grant`, not `segments_write` (the gate's decision, recorded in
+/// `NetworkWrite::PolicyWrite`).
+#[actix_rt::test]
+async fn raising_the_cap_is_allowed_and_audited_as_raised() {
+    let w = World::new().await;
+    let app = app!(w);
+    let writer = w.cap_writer().await;
+
+    // From the default: 3600 to 7200 at version 0.
+    let (status, put) = call(&app, &writer, "PUT", POLICY, Some(policy_body(7200, 0))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["session_timeout_max_secs"], 7200);
+    // Down, then up again, to the ceiling.
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(900, 1))).await;
+    assert_eq!(status, 200);
+    let (status, put) = call(&app, &writer, "PUT", POLICY, Some(policy_body(86_400, 2))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["session_timeout_max_secs"], 86_400);
+
+    let raised = w.audit("network_policy.raised").await;
+    assert_eq!(raised.len(), 2, "{raised:?}");
+    for row in &raised {
+        assert_eq!(row.outcome, AuditOutcome::Success);
+        assert_eq!(row.metadata["direction"], "raised");
+    }
+    let to_ceiling = raised
+        .iter()
+        .find(|r| r.metadata["after"]["session_timeout_max_secs"] == 86_400)
+        .unwrap();
+    assert_eq!(
+        to_ceiling.metadata["before"]["session_timeout_max_secs"],
+        900
+    );
+    assert_eq!(to_ceiling.metadata["before"]["version"], 2);
+    assert_eq!(to_ceiling.metadata["after"]["version"], 3);
+    let from_default = raised
+        .iter()
+        .find(|r| r.metadata["after"]["session_timeout_max_secs"] == 7200)
+        .unwrap();
+    assert_eq!(
+        from_default.metadata["before"]["session_timeout_max_secs"],
+        3600
+    );
+    assert_eq!(w.audit("network_policy.lowered").await.len(), 1);
+
+    // Writing what is already there moves the version and is audited as such.
+    let (status, put) = call(&app, &writer, "PUT", POLICY, Some(policy_body(86_400, 3))).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(put["version"], 4);
+    assert_eq!(w.audit("network_policy.unchanged").await.len(), 1);
+}
+
+/// A cap outside 300 to 86 400, an unknown key and a value that is not a
+/// number are `400`; nothing is written. The out-of-range ones are audited
+/// (after the gate, so only a caller who may write the cap makes one).
+#[actix_rt::test]
+async fn a_cap_outside_the_range_is_400_and_changes_nothing() {
+    let w = World::new().await;
+    // Many refused writes in a row: raise the allowance, the limiter has its own test.
+    let limits = RateLimitConfig {
+        network_admin_per_min: 1000,
+        ..RateLimitConfig::default()
+    };
+    let app = app!(w, limits);
+    let writer = w.cap_writer().await;
+
+    for cap in [0u64, 299, 86_401, 4_000_000] {
+        let (status, err) = call(&app, &writer, "PUT", POLICY, Some(policy_body(cap, 0))).await;
+        assert_eq!(status, 400, "{cap}: {err}");
+    }
+    // Not even a u32, a string, and a key the record does not have.
+    for body in [
+        policy_body(5_000_000_000, 0),
+        json!({"session_timeout_max_secs": -1, "version": 0}),
+        json!({"session_timeout_max_secs": "1800", "version": 0}),
+        json!({"session_timeout_max_secs": 1800}),
+        json!({"session_timeout_max_secs": 1800, "version": 0, "enabled": true}),
+    ] {
+        let (status, _) = call(&app, &writer, "PUT", POLICY, Some(body.clone())).await;
+        assert_eq!(status, 400, "{body}");
+    }
+    let (_, err) = call(
+        &app,
+        &writer,
+        "PUT",
+        POLICY,
+        Some(json!({"session_timeout_max_secs": 1800, "version": 0, "enabled": true})),
+    )
+    .await;
+    assert!(err.to_string().contains("enabled"), "names the key: {err}");
+
+    let rows = w.audit("network_policy.write_refused").await;
+    assert_eq!(rows.len(), 4, "the four out-of-range values: {rows:?}");
+    for row in &rows {
+        assert_eq!(row.outcome, AuditOutcome::Denied);
+        assert_eq!(row.metadata["rule"], "validation");
+        assert_eq!(row.metadata["status"], 400);
+        assert_eq!(row.metadata["write"], "policy_replace");
+        assert_eq!(row.metadata["before"]["session_timeout_max_secs"], 3600);
+    }
+    let (_, got) = call(&app, &writer, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            got["session_timeout_max_secs"].clone(),
+            got["version"].clone()
+        ),
+        (json!(3600), json!(0))
+    );
+
+    // The bounds themselves are settable.
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(300, 0))).await;
+    assert_eq!(status, 200);
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(86_400, 1))).await;
+    assert_eq!(status, 200);
+}
+
+/// A write is conditional on the version read: a stale one (a version already
+/// written over, a first write when one exists, or one from the future) is
+/// `409`, audited as `version:stale`, and changes nothing.
+#[actix_rt::test]
+async fn a_stale_version_is_409_and_changes_nothing() {
+    let w = World::new().await;
+    let app = app!(w);
+    let writer = w.cap_writer().await;
+
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(1800, 0))).await;
+    assert_eq!(status, 200);
+    for stale in [0u64, 5] {
+        let (status, err) =
+            call(&app, &writer, "PUT", POLICY, Some(policy_body(7200, stale))).await;
+        assert_eq!(status, 409, "version {stale}: {err}");
+    }
+    let (_, got) = call(&app, &writer, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            got["session_timeout_max_secs"].clone(),
+            got["version"].clone()
+        ),
+        (json!(1800), json!(1))
+    );
+
+    let rows = w.audit("network_policy.write_refused").await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.metadata["rule"], "version:stale");
+        assert_eq!(row.metadata["status"], 409);
+        assert_eq!(row.metadata["before"]["session_timeout_max_secs"], 1800);
+        assert_eq!(row.metadata["after"]["session_timeout_max_secs"], 7200);
+    }
+    assert!(w.audit("network_policy.raised").await.is_empty());
+}
+
+/// Without `network:admin` at `/network` the write is `403` naming it, changes
+/// nothing and leaves a refusal row carrying the rule, the permission, the
+/// node and the cap before and after, whatever else the caller holds.
+#[actix_rt::test]
+async fn writing_the_cap_without_network_admin_is_403_with_a_refusal_row() {
+    let w = World::new().await;
+    let app = app!(w);
+    // Everything a network administrator can be made with through the API.
+    let netadmin = w.netadmin(w.tenant).await;
+    let (status, err) = call(&app, &netadmin, "PUT", POLICY, Some(policy_body(7200, 0))).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_ADMIN);
+
+    let reader = w.user_with(&[NETWORK_READ]).await;
+    let (status, _) = call(&app, &reader, "PUT", POLICY, Some(policy_body(300, 0))).await;
+    assert_eq!(status, 403);
+
+    let rows = w.audit("network_policy.write_refused").await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let raise = rows
+        .iter()
+        .find(|r| r.metadata["after"]["session_timeout_max_secs"] == "7200")
+        .expect("the refused raise");
+    assert_eq!(raise.outcome, AuditOutcome::Denied);
+    assert_eq!(raise.metadata["rule"], "4.2:policy_write");
+    assert_eq!(raise.metadata["write"], "policy_write");
+    assert_eq!(raise.metadata["status"], 403);
+    assert_eq!(raise.metadata["missing_permission"], NETWORK_ADMIN);
+    assert_eq!(
+        raise.metadata["node"],
+        axiam_core::models::network::network_root_id(w.tenant).to_string()
+    );
+    assert_eq!(raise.metadata["before"]["session_timeout_max_secs"], "3600");
+    assert_eq!(raise.metadata["after"]["direction"], "raised");
+    let lower = rows
+        .iter()
+        .find(|r| r.metadata["after"]["session_timeout_max_secs"] == "300")
+        .expect("the refused lowering");
+    assert_eq!(lower.metadata["after"]["direction"], "lowered");
+
+    let (_, got) = call(&app, &netadmin, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            got["session_timeout_max_secs"].clone(),
+            got["version"].clone()
+        ),
+        (json!(3600), json!(0))
+    );
+    assert!(w.audit("network_policy.raised").await.is_empty());
+    assert!(w.audit("network_policy.lowered").await.is_empty());
+}
+
+/// What is true of the shipped permission model today, pinned so that a change
+/// is a decision: `network:admin` is not grantable (the grant gate refuses an
+/// allow of it) and the seeded super-admin does not hold it, so no role the API
+/// can make writes the cap. The route's permission is the maintainer's choice of
+/// 2026-10-15; this test is the evidence for the contract question the commit
+/// records.
+#[actix_rt::test]
+async fn the_cap_cannot_be_written_by_the_roles_the_api_can_make() {
+    let w = World::new().await;
+    let app = app!(w);
+    let seeded = SurrealRoleRepository::new(w.db.clone())
+        .list(w.tenant, page())
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|r| r.name == "super-admin")
+        .expect("the seeded super-admin");
+    let user = w.user(w.tenant, &[(seeded.id, None)]).await;
+    let super_admin = w.token(w.tenant, user);
+    // It holds the meta permissions: it can read the cap...
+    let (status, _) = call(&app, &super_admin, "GET", POLICY, None).await;
+    assert_eq!(status, 200);
+    // ...and cannot write it.
+    let (status, err) = call(
+        &app,
+        &super_admin,
+        "PUT",
+        POLICY,
+        Some(policy_body(1800, 0)),
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_ADMIN);
+
+    // And the API refuses to make a role that could: an allow of network:admin
+    // is not grantable (4.2:not-grantable). (The grant route itself is covered
+    // by the gate's tests; here the permission registry shows the shape.)
+    assert!(
+        axiam_core::models::network::NETWORK_ADMIN_CLASS_ACTIONS.contains(&NETWORK_ADMIN),
+        "network:admin is in the administrative class"
+    );
+}
+
+/// Lowering the cap below an existing profile's `session_timeout_secs` is
+/// fine: the stored value is untouched, the profile reads clamped
+/// (`session_timeout_clamped`), `Idle-Timeout` stays within it, a new profile
+/// above the lowered cap is refused (H3), and raising the cap again restores
+/// the stored value.
+#[actix_rt::test]
+async fn a_profile_above_a_lowered_cap_reads_clamped() {
+    let w = World::new().await;
+    let app = app!(w);
+    let netadmin = w.netadmin(w.tenant).await;
+    let writer = w.cap_writer().await;
+    let segment = make_segment(&app, &netadmin, "corp", 10, &["corp-acl"]).await;
+    let id = segment["id"].as_str().unwrap().to_owned();
+    let (status, created) = call(
+        &app,
+        &netadmin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&segment, 1800, Some("corp-acl"))),
+    )
+    .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["session_timeout_clamped"], false);
+    assert_eq!(created["idle_timeout_secs"], 600);
+
+    // 1800 under a cap of 900.
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(900, 0))).await;
+    assert_eq!(status, 200);
+    let (status, got) = call(&app, &netadmin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got["session_timeout_secs"], 900);
+    assert_eq!(got["session_timeout_clamped"], true);
+    assert_eq!(got["idle_timeout_secs"], 600, "within the clamped timeout");
+    let (_, list) = call(&app, &netadmin, "GET", PROFILES, None).await;
+    assert_eq!(list["items"][0]["session_timeout_clamped"], true);
+
+    // A cap of 300 pulls Idle-Timeout down with it.
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(300, 1))).await;
+    assert_eq!(status, 200);
+    let (_, got) = call(&app, &netadmin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(got["session_timeout_secs"], 300);
+    assert_eq!(got["idle_timeout_secs"], 300);
+
+    // A new write above the lowered cap is refused by the gate (H3).
+    let (status, err) = call(
+        &app,
+        &netadmin,
+        "PUT",
+        &format!("{PROFILES}/{id}"),
+        Some(json!({
+            "version": 1, "segment_version": segment["version"],
+            "profile": {"session_timeout_secs": 1800, "filter_id": "corp-acl"},
+        })),
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    let rows = w.audit("reply_profile.write_refused").await;
+    assert_eq!(
+        the_row(&rows).metadata["rule"],
+        "H3:envelope:session_timeout"
+    );
+
+    // Raised again, the stored 1800 is what is rendered.
+    let (status, _) = call(&app, &writer, "PUT", POLICY, Some(policy_body(3600, 2))).await;
+    assert_eq!(status, 200);
+    let (_, got) = call(&app, &netadmin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(got["session_timeout_secs"], 1800);
+    assert_eq!(got["session_timeout_clamped"], false);
+    assert_eq!(got["idle_timeout_secs"], 600);
+    assert_eq!(got["version"], 1, "the profile row was never touched");
+}
+
+/// The cap is the tenant's own: another tenant's write moves neither the value
+/// nor the version of this one, and its audit rows are its own.
+#[actix_rt::test]
+async fn the_cap_is_per_tenant() {
+    let w = World::new().await;
+    let app = app!(w);
+    let writer = w.cap_writer().await;
+    let other_role = w
+        .role(w.other_tenant, "cap", &[NETWORK_READ, NETWORK_ADMIN])
+        .await;
+    let other_user = w.user(w.other_tenant, &[(other_role, None)]).await;
+    let other = w.token(w.other_tenant, other_user);
+
+    let (status, _) = call(&app, &other, "PUT", POLICY, Some(policy_body(86_400, 0))).await;
+    assert_eq!(status, 200);
+    let (_, mine) = call(&app, &writer, "GET", POLICY, None).await;
+    assert_eq!(
+        (
+            mine["session_timeout_max_secs"].clone(),
+            mine["version"].clone()
+        ),
+        (json!(3600), json!(0))
+    );
+    let (_, theirs) = call(&app, &other, "GET", POLICY, None).await;
+    assert_eq!(theirs["session_timeout_max_secs"], 86_400);
+    assert_eq!(theirs["tenant_id"], w.other_tenant.to_string());
+    assert!(w.audit("network_policy.raised").await.is_empty());
+    assert_eq!(
+        w.audit_in(w.other_tenant, "network_policy.raised")
+            .await
+            .len(),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rate-limit buckets (plan §7 rule 6), pinned
 // ---------------------------------------------------------------------------
 
-/// Each of the six write routes has a bucket of its own under
+/// Each of the seven write routes has a bucket of its own under
 /// `network_admin_per_min`: past the allowance a route answers `429`, and a
 /// sibling's bucket is untouched. Reads are not limited.
 #[actix_rt::test]
@@ -1457,6 +1915,11 @@ async fn every_write_route_has_its_own_bucket_and_reads_are_not_limited() {
             ),
         ),
         ("DELETE", format!("{PROFILES}/{id}?version=1"), None),
+        (
+            "PUT",
+            POLICY.to_owned(),
+            Some(json!({"session_timeout_max_secs": 1800, "version": 0})),
+        ),
     ];
     for (method, uri, body) in &routes {
         let (first, _) = call(&app, &admin, method, uri, body.clone()).await;
@@ -1469,7 +1932,7 @@ async fn every_write_route_has_its_own_bucket_and_reads_are_not_limited() {
     }
     // Reads are not limited.
     for _ in 0..4 {
-        for uri in [SEGMENTS.to_owned(), PROFILES.to_owned()] {
+        for uri in [SEGMENTS.to_owned(), PROFILES.to_owned(), POLICY.to_owned()] {
             let (status, _) = call(&app, &admin, "GET", &uri, None).await;
             assert_eq!(status, 200, "{uri}");
         }
@@ -1494,6 +1957,7 @@ async fn the_buckets_are_named_network_and_are_distinct() {
     assert_eq!(
         names,
         [
+            "network_policy_replace",
             "network_profile_create",
             "network_profile_delete",
             "network_profile_replace",

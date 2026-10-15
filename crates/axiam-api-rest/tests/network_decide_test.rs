@@ -44,8 +44,8 @@ use axiam_core::models::certificate::{
 };
 use axiam_core::models::network::{
     NETWORK_DECIDE, NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ,
-    NETWORK_SEGMENTS_WRITE, NetworkSegmentKind, SetNetworkPolicy, branch_node_id, network_root_id,
-    site_node_id,
+    NETWORK_SEGMENTS_WRITE, NetworkSegmentKind, NetworkWriteClearance, NetworkWriteTarget,
+    SetNetworkPolicy, branch_node_id, network_root_id, site_node_id,
 };
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::PermissionEffect;
@@ -691,14 +691,21 @@ async fn a_device_is_placed_with_its_segments_attributes() {
     .await;
     // Lowered below the stored 1800 after the profile was written (allowed:
     // reads clamp, which only narrows).
+    let actor = Uuid::new_v4();
     SurrealNetworkPolicyRepository::new(w.db.clone())
         .set(
             w.tenant,
             SetNetworkPolicy {
                 session_timeout_max_secs: 900,
                 expected_version: 0,
-                actor: Uuid::new_v4(),
+                actor,
             },
+            // Test setup stands in for the gate, as for the segments above.
+            &NetworkWriteClearance::issued_by_the_network_gate(
+                w.tenant,
+                actor,
+                NetworkWriteTarget::PolicyWrite,
+            ),
         )
         .await
         .unwrap();

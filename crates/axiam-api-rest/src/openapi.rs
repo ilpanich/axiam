@@ -346,6 +346,8 @@ use crate::handlers;
         handlers::network::get_profile,
         handlers::network::replace_profile,
         handlers::network::delete_profile,
+        handlers::network::get_policy,
+        handlers::network::replace_policy,
         handlers::network_decide::decide,
         // SSF 1.0 transmitter metadata and stream management API — the
         // receiver's protocol surface (G-5, T23.5.2, CONTRACT §32.6).
@@ -723,6 +725,8 @@ use crate::handlers;
         handlers::network::ReplaceNetworkSegmentRequest,
         handlers::network::CreateReplyProfileRequest,
         handlers::network::ReplaceReplyProfileRequest,
+        handlers::network::NetworkPolicyResponse,
+        handlers::network::ReplaceNetworkPolicyRequest,
         axiam_core::models::network::NetworkSegmentKind,
         axiam_core::models::network::ReplyProfile,
         handlers::network_decide::NetworkDecisionRequest,

@@ -745,7 +745,15 @@ impl<C: Connection> NetworkPolicyRepository for SurrealNetworkPolicyRepository<C
         }
     }
 
-    async fn set(&self, tenant_id: Uuid, input: SetNetworkPolicy) -> AxiamResult<NetworkPolicy> {
+    async fn set(
+        &self,
+        tenant_id: Uuid,
+        input: SetNetworkPolicy,
+        clearance: &NetworkWriteClearance,
+    ) -> AxiamResult<NetworkPolicy> {
+        // Cleared by the authorization function for exactly this write, or
+        // nothing happens (design note §5.1).
+        clearance.check(tenant_id, input.actor, &NetworkWriteTarget::PolicyWrite)?;
         input.validate()?;
         retry_on_write_conflict(|| self.write_tx(tenant_id, &input))
             .await

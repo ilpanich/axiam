@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:8bbbf8e1c7f1dfade4655e98ba5dc50ec7b0c8fc9b11110818ba5ea5b064f8a8"
+    "x-axiam-spec-digest": "sha256:9228c706b28f1285245ccfb07e0a3e3762266718a901c2431d9b64336b52468a"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4387,6 +4387,89 @@
         "security": [
           {
             "service_account": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/policy": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/policy`",
+        "description": "The tenant's `Session-Timeout` cap. A tenant that never wrote one reads the\ndefault (3600 seconds, `version` 0).",
+        "operationId": "get_policy",
+        "responses": {
+          "200": {
+            "description": "The tenant's network policy: the cap on a reply profile's `Session-Timeout` (3600 and `version` 0 until the tenant first writes one)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkPolicyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token (the network routes are human-only)"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on `/network`"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`PUT /api/v1/network/policy`",
+        "description": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on\n`version`.",
+        "operationId": "replace_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceNetworkPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new policy. Lowering the cap is always allowed, even below an existing profile's `session_timeout_secs`: the stored value is untouched and every read clamps it to the cap (`session_timeout_clamped`), so raising the cap again restores it. Raising the cap is allowed and audited as `network_policy.raised`; lowering as `network_policy.lowered`, each with the cap before and after",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkPolicyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`session_timeout_max_secs` outside 300 to 86 400, or an unknown field"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:admin` on `/network` (the response names the permission and the node)"
+          },
+          "409": {
+            "description": "The policy changed since `version` was read"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
           }
         ]
       }
@@ -21167,6 +21250,50 @@
           }
         }
       },
+      "NetworkPolicyResponse": {
+        "type": "object",
+        "description": "The tenant's network policy, as the management API returns it.",
+        "required": [
+          "tenant_id",
+          "session_timeout_max_secs",
+          "version"
+        ],
+        "properties": {
+          "session_timeout_max_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`network.session_timeout_max_secs`: the most a reply profile's\n`Session-Timeout` may be, in seconds (300 to 86 400; 3600 until the\ntenant writes one). A stored profile above it is clamped at read.",
+            "minimum": 0
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last write time; absent while it is the default."
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The administrator who last wrote it; absent while it is the default."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the next `PUT` must name; `0` until the tenant first writes.",
+            "minimum": 0
+          }
+        }
+      },
       "NetworkSegmentKind": {
         "type": "string",
         "description": "What a segment is for.",
@@ -23862,6 +23989,29 @@
             "description": "The dictionary version the attributes belong to."
           }
         }
+      },
+      "ReplaceNetworkPolicyRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/network/policy`: a **replacement** of the policy.",
+        "required": [
+          "session_timeout_max_secs",
+          "version"
+        ],
+        "properties": {
+          "session_timeout_max_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The new cap on a reply profile's `Session-Timeout`, in seconds: 300 to\n86 400. Lowering it below an existing profile's value is fine (reads\nclamp); raising it is allowed and audited as a raise.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The policy's `version` as the caller read it (`0` for a tenant that has\nnever written one). A stale one is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "ReplaceNetworkSegmentRequest": {
         "type": "object",

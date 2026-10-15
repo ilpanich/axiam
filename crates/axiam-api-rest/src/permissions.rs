@@ -1414,6 +1414,11 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/network/profiles/{segment_id}",
         "network:profiles_write",
     ),
+    // The tenant's `Session-Timeout` cap (plan 13.6, W6.3b): read at the
+    // `/network` root; written with `network:admin` there, which the write gate
+    // asks for itself (`NetworkWrite::PolicyWrite`).
+    ("GET", "/api/v1/network/policy", "network:read"),
+    ("PUT", "/api/v1/network/policy", "network:admin"),
     // The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
     // node the decision reads, inside the handler. Its caller is a machine, by
     // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.

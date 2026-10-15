@@ -404,6 +404,45 @@ impl NetworkPolicy {
     }
 }
 
+/// Which way a write moves the `Session-Timeout` cap.
+///
+/// Lowering only narrows (reads clamp), so it is always allowed. Raising widens
+/// what a profile writer may set from then on, and is allowed and audited as
+/// such (plan section 13.6): the audit action says which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapChange {
+    /// The new cap is above the current one.
+    Raised,
+    /// The new cap is below the current one.
+    Lowered,
+    /// The new cap equals the current one (a write that only bumps the version).
+    Unchanged,
+}
+
+impl CapChange {
+    /// The direction from `before` to `after`.
+    #[must_use]
+    pub const fn between(before: u32, after: u32) -> Self {
+        if after > before {
+            Self::Raised
+        } else if after < before {
+            Self::Lowered
+        } else {
+            Self::Unchanged
+        }
+    }
+
+    /// `raised`, `lowered` or `unchanged`: the word the audit row carries.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raised => "raised",
+            Self::Lowered => "lowered",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
 /// What writing the tenant's network policy takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetNetworkPolicy {
@@ -692,6 +731,17 @@ pub const NETWORK_DECIDE: &str = "network:decide";
 /// Read the rendered export for a site.
 pub const NETWORK_EXPORT: &str = "network:export";
 
+/// The permission that writes the tenant's network policy (the
+/// `Session-Timeout` cap), checked by the write gate at the `/network` root.
+///
+/// The maintainer's decision of 2026-10-15 (plan section 13.6): `network:admin`.
+/// Note that `network:admin` is **defined and not grantable** under option B
+/// (it is in [`NETWORK_ADMIN_CLASS_ACTIONS`]; the grant gate refuses an allow of
+/// it, `4.2:not-grantable`, and the seeded super-admin does not hold it), so on
+/// a deployment that runs the gate as shipped nobody holds it. Changing the
+/// permission that guards the cap is this one constant.
+pub const NETWORK_POLICY_WRITE: &str = NETWORK_ADMIN;
+
 /// The meta permissions of design note §5.3: assigning a role that carries one
 /// of these at a node needs the assigner to hold it there ("you delegate only
 /// what you hold").
@@ -760,7 +810,7 @@ pub fn is_network_action(action: &str) -> bool {
 // The write clearance (design note §5.1)
 // ---------------------------------------------------------------------------
 
-/// Which segment or profile write a [`NetworkWriteClearance`] was issued for.
+/// Which segment, profile or policy write a [`NetworkWriteClearance`] was issued for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkWriteTarget {
     /// Create the segment at this path.
@@ -788,6 +838,8 @@ pub enum NetworkWriteTarget {
         /// The owning segment.
         segment_id: Uuid,
     },
+    /// Write the tenant's network policy (the `Session-Timeout` cap).
+    PolicyWrite,
 }
 
 /// Proof that the authorization function of design note §5.1 cleared one
@@ -872,6 +924,16 @@ impl NetworkWriteClearance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cap_change_says_which_way_it_moved() {
+        assert_eq!(CapChange::between(3600, 7200), CapChange::Raised);
+        assert_eq!(CapChange::between(3600, 300), CapChange::Lowered);
+        assert_eq!(CapChange::between(3600, 3600), CapChange::Unchanged);
+        assert_eq!(CapChange::Raised.as_str(), "raised");
+        assert_eq!(CapChange::Lowered.as_str(), "lowered");
+        assert_eq!(CapChange::Unchanged.as_str(), "unchanged");
+    }
 
     fn segment(
         kind: NetworkSegmentKind,

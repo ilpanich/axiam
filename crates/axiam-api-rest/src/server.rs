@@ -1821,6 +1821,23 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     )
             )
+            // The tenant's `Session-Timeout` cap: a read, and one write in a
+            // bucket of its own, `network_policy_replace`, under the same
+            // `network_admin_per_min` (plan §13.6).
+            .service(
+                web::resource("/network/policy")
+                    .app_data(handlers::network::json_config())
+                    .route(web::get().to(handlers::network::get_policy::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_policy::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_policy_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    ),
+            )
             // --- The RADIUS placement decision (RADIUS D4, W6.4; design note
             // §6.3, T-468). The caller is FreeRADIUS's service account with a
             // certificate-bound token, so its bucket is the caller's `sub`

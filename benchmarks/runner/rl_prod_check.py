@@ -269,7 +269,7 @@ ENDPOINTS = {
     ),
     "network_admin_per_min": (
         None,
-        "POST, PUT, DELETE /api/v1/network/{segments,profiles}[/{id}] (network segment and reply profile writes; one bucket per route)",
+        "POST, PUT, DELETE /api/v1/network/{segments,profiles}[/{id}] and PUT /api/v1/network/policy (network segment, reply profile and Session-Timeout cap writes; one bucket per route)",
     ),
     # RADIUS D4 / W6.4 (D-6). Unmeasured: the caller is a FreeRADIUS service
     # account whose token is bound to its own certificate, so a cell needs the

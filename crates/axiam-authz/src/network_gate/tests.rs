@@ -1343,3 +1343,113 @@ async fn an_unknown_role_or_permission_is_left_to_the_repository() {
     .unwrap_err();
     assert!(matches!(err, AxiamError::NotFound { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// The tenant's Session-Timeout cap (plan 13.6)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_policy_write_needs_network_admin_at_the_root_and_carries_a_matching_token() {
+    let w = World::new();
+    let oracle = Oracle::default().allow(w.writer, NETWORK_ADMIN, w.root());
+    let c = cleared(
+        w.decide(
+            &oracle,
+            NetworkWrite::PolicyWrite {
+                session_timeout_max_secs: 1800,
+            },
+        )
+        .await,
+    );
+    assert!(c.is_network_sensitive());
+    c.into_write_clearance()
+        .expect("a policy write carries a token")
+        .check(w.tenant, w.writer, &NetworkWriteTarget::PolicyWrite)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_policy_write_without_network_admin_is_403_naming_it_with_the_values() {
+    let w = World::new();
+    // Everything a profile writer holds, and every meta permission: none of
+    // it writes the cap.
+    let oracle = Oracle::default()
+        .allow(w.writer, NETWORK_PROFILES_WRITE, w.root())
+        .allow(w.writer, NETWORK_GRANT, w.root())
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, w.root());
+    let r = refused(
+        w.decide(
+            &oracle,
+            NetworkWrite::PolicyWrite {
+                session_timeout_max_secs: 7200,
+            },
+        )
+        .await,
+        "4.2:policy_write",
+    );
+    assert_eq!(r.status, RefusalStatus::Forbidden);
+    assert_eq!(r.audit_action, AUDIT_POLICY_WRITE_REFUSED);
+    let missing = r.missing.expect("a 403 names the permission");
+    assert_eq!(
+        (missing.action.as_str(), missing.node),
+        (NETWORK_ADMIN, w.root())
+    );
+    // The audit row can show the cap and which way the write meant to move it.
+    assert!(
+        r.before
+            .contains(&("session_timeout_max_secs", "3600".to_owned()))
+    );
+    assert!(
+        r.after
+            .contains(&("session_timeout_max_secs", "7200".to_owned()))
+    );
+    assert!(r.after.contains(&("direction", "raised".to_owned())));
+}
+
+/// The decision the commit records: a raise asks no more than a lowering. The
+/// cap changes no stored profile (a read renders `min(stored, cap)`), and the
+/// split between whoever writes profiles and whoever writes the envelope is
+/// the note's own (§5.2 H3), so a raise does not also ask for
+/// `network:profiles_write` or `network:grant`.
+#[tokio::test]
+async fn a_raise_asks_no_more_than_a_lowering() {
+    let w = World::new();
+    let oracle = Oracle::default().allow(w.writer, NETWORK_ADMIN, w.root());
+    for cap in [300, 3600, 86_400] {
+        passes(
+            w.decide(
+                &oracle,
+                NetworkWrite::PolicyWrite {
+                    session_timeout_max_secs: cap,
+                },
+            )
+            .await,
+        );
+    }
+    // And the only thing asked, at any of them, is network:admin at /network.
+    let asked = oracle.asked.lock().unwrap();
+    assert!(
+        asked
+            .iter()
+            .all(|(_, action, node)| action == NETWORK_ADMIN && *node == w.root()),
+        "{asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deny_of_network_admin_at_the_root_refuses_the_policy_write() {
+    // The oracle answers deny for anything not listed, which is what
+    // deny-override gives a writer with an explicit deny: "does not hold".
+    let w = World::new();
+    let r = refused(
+        w.decide(
+            &Oracle::default(),
+            NetworkWrite::PolicyWrite {
+                session_timeout_max_secs: 600,
+            },
+        )
+        .await,
+        "4.2:policy_write",
+    );
+    assert!(r.after.contains(&("direction", "lowered".to_owned())));
+}

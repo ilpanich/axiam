@@ -114,7 +114,7 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "per EAP-TLS authentication through rlm_rest, not administration. Its caller "
         "is that server's service account with a token bound to its own certificate, "
         "over mTLS; an SDK client is neither, and a generated method could only ever "
-        "be refused. The ten network management operations beside it ARE the "
+        "be refused. The twelve network management operations beside it ARE the "
         "`network` namespace"
     ),
     ("POST", "/api/v1/users/me/resend-verification"): (
@@ -492,9 +492,11 @@ NAMESPACES: dict[str, dict[str, Any]] = {
                "of the resource tree (kind, VLAN, Filter-Id envelope, placement "
                "rank), and its profile is the typed `axiam-radius-reply/1` record a "
                "decision renders. Every write is conditional on the `version` the "
-               "caller read and passes the server's write gate; the tenant's "
-               "Session-Timeout cap has no operation here. The decision route "
-               "FreeRADIUS calls is not in this registry.",
+               "caller read and passes the server's write gate. The tenant's "
+               "Session-Timeout cap is one more row of it (get_policy, "
+               "replace_policy): lowering it is always allowed, raising it is "
+               "allowed and audited. The decision route FreeRADIUS calls is not "
+               "in this registry.",
         "operations": [
             ("list_segments", "GET", "/api/v1/network/segments"),
             ("create_segment", "POST", "/api/v1/network/segments"),
@@ -506,6 +508,8 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("get_profile", "GET", "/api/v1/network/profiles/{segment_id}"),
             ("replace_profile", "PUT", "/api/v1/network/profiles/{segment_id}"),
             ("delete_profile", "DELETE", "/api/v1/network/profiles/{segment_id}"),
+            ("get_policy", "GET", "/api/v1/network/policy"),
+            ("replace_policy", "PUT", "/api/v1/network/policy"),
         ],
     },
     "settings": {

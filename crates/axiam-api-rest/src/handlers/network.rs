@@ -60,29 +60,50 @@
 //! per route (`network_segment_create` … `network_profile_delete`); reads are not
 //! separately limited.
 //!
-//! # What is not here
+//! # The tenant's `Session-Timeout` cap
 //!
-//! The tenant's `Session-Timeout` cap (`network.session_timeout_max_secs`) is not
-//! exposed: no permission of the note's §4.2 governs writing it, and raising it
-//! widens every profile's `Session-Timeout`. It is stored (W6.1) and read by the
-//! gate and the repositories, and has no route until the maintainer decides who
-//! may set it.
+//! Two more operations, beside the ten, on the one row of tenant policy the
+//! network surface has (`network.session_timeout_max_secs`, 300 to 86 400,
+//! default 3600; design note §3.4):
+//!
+//! | | |
+//! |---|---|
+//! | read | `GET /network/policy` — `network:read` at the `/network` root |
+//! | write | `PUT /network/policy` — [`NETWORK_POLICY_WRITE`](axiam_core::models::network::NETWORK_POLICY_WRITE) (`network:admin`) at the `/network` root, through the write gate |
+//!
+//! The maintainer's decision of 2026-10-15 (plan §13.6). The write is a
+//! replacement conditional on the row's `version` (`0` = never written, the
+//! first write; a stale one is `409`), in a bucket of its own
+//! (`network_policy_replace`). **Lowering is always allowed; raising is allowed
+//! and audited** (`network_policy.lowered` / `network_policy.raised`, each with
+//! the cap before and after and the versions). The gate asks no more of a raise
+//! than of a lowering — see
+//! [`NetworkWrite::PolicyWrite`](axiam_authz::network_gate::NetworkWrite::PolicyWrite)
+//! for why. No reactor hook: the design note names `network.pre_profile_write`
+//! and `network.pre_segment_write` and no third.
+//!
+//! Lowering the cap below an existing profile's `session_timeout_secs` is fine:
+//! the stored value is untouched, every read that produces a reply clamps it to
+//! the cap, and the profile says so (`session_timeout_clamped`). Raising the cap
+//! again restores the stored value.
 
 use actix_web::error::{JsonPayloadError, QueryPayloadError};
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_authz::network_gate::{
-    AUDIT_PROFILE_WRITE_REFUSED, AUDIT_SEGMENT_WRITE_REFUSED, NetworkWrite,
+    AUDIT_POLICY_WRITE_REFUSED, AUDIT_PROFILE_WRITE_REFUSED, AUDIT_SEGMENT_WRITE_REFUSED,
+    NetworkWrite,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::network::{
-    NETWORK_READ, NetworkSegment, NetworkSegmentKind, NetworkSegmentUpdate, NewNetworkSegment,
-    NewReplyProfile, ReplyProfile, ReplyProfileReplace, network_root_id, render_path,
+    CapChange, NETWORK_READ, NetworkPolicy, NetworkSegment, NetworkSegmentKind,
+    NetworkSegmentUpdate, NewNetworkSegment, NewReplyProfile, ReplyProfile, ReplyProfileReplace,
+    SetNetworkPolicy, network_root_id, render_path,
 };
 use axiam_core::models::radius_reply::ReplyProfileInput;
 use axiam_core::repository::{
-    AuditLogRepository, NetworkSegmentRepository, PaginatedResult, Pagination,
-    ReplyProfileRepository,
+    AuditLogRepository, NetworkPolicyRepository, NetworkSegmentRepository, PaginatedResult,
+    Pagination, ReplyProfileRepository,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -98,7 +119,9 @@ use crate::extractors::client_info::client_ip;
 use crate::network_gate;
 use crate::reactor_hooks;
 use crate::state::AppState;
-use axiam_db::repository::{SurrealNetworkSegmentRepository, SurrealReplyProfileRepository};
+use axiam_db::repository::{
+    SurrealNetworkPolicyRepository, SurrealNetworkSegmentRepository, SurrealReplyProfileRepository,
+};
 
 /// Audit action: a segment was created.
 pub const AUDIT_SEGMENT_CREATED: &str = "network_segment.created";
@@ -112,6 +135,14 @@ pub const AUDIT_PROFILE_CREATED: &str = "reply_profile.created";
 pub const AUDIT_PROFILE_REPLACED: &str = "reply_profile.replaced";
 /// Audit action: a segment's reply profile was deleted.
 pub const AUDIT_PROFILE_DELETED: &str = "reply_profile.deleted";
+
+/// Audit action: the tenant's `Session-Timeout` cap was raised.
+pub const AUDIT_POLICY_RAISED: &str = "network_policy.raised";
+/// Audit action: the tenant's `Session-Timeout` cap was lowered.
+pub const AUDIT_POLICY_LOWERED: &str = "network_policy.lowered";
+/// Audit action: the tenant's `Session-Timeout` cap was written to the value it
+/// already had (the version moves, the cap does not).
+pub const AUDIT_POLICY_UNCHANGED: &str = "network_policy.unchanged";
 
 const BODY_LIMIT: usize = 16_384;
 
@@ -272,6 +303,48 @@ pub struct SiteQuery {
     pub site: Option<String>,
 }
 
+/// The tenant's network policy, as the management API returns it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NetworkPolicyResponse {
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// `network.session_timeout_max_secs`: the most a reply profile's
+    /// `Session-Timeout` may be, in seconds (300 to 86 400; 3600 until the
+    /// tenant writes one). A stored profile above it is clamped at read.
+    pub session_timeout_max_secs: u32,
+    /// The version the next `PUT` must name; `0` until the tenant first writes.
+    pub version: u64,
+    /// The administrator who last wrote it; absent while it is the default.
+    pub updated_by: Option<Uuid>,
+    /// Last write time; absent while it is the default.
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl From<NetworkPolicy> for NetworkPolicyResponse {
+    fn from(p: NetworkPolicy) -> Self {
+        Self {
+            tenant_id: p.tenant_id,
+            session_timeout_max_secs: p.session_timeout_max_secs,
+            version: p.version,
+            updated_by: p.updated_by,
+            updated_at: p.updated_at,
+        }
+    }
+}
+
+/// The body of `PUT /api/v1/network/policy`: a **replacement** of the policy.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceNetworkPolicyRequest {
+    /// The new cap on a reply profile's `Session-Timeout`, in seconds: 300 to
+    /// 86 400. Lowering it below an existing profile's value is fine (reads
+    /// clamp); raising it is allowed and audited as a raise.
+    pub session_timeout_max_secs: u32,
+    /// The policy's `version` as the caller read it (`0` for a tenant that has
+    /// never written one). A stale one is `409`.
+    pub version: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Extractor configuration
 // ---------------------------------------------------------------------------
@@ -376,6 +449,13 @@ fn input_values(segment_id: Uuid, p: &ReplyProfileInput) -> Value {
         "idle_timeout_secs": p.idle_timeout_secs,
         "filter_id": p.filter_id,
         "service_type": p.service_type.map(|s| s.as_str()),
+    })
+}
+
+fn policy_values(p: &NetworkPolicy) -> Value {
+    json!({
+        "session_timeout_max_secs": p.session_timeout_max_secs,
+        "version": p.version,
     })
 }
 
@@ -549,6 +629,10 @@ fn segments<C: Connection + Clone>(state: &AppState<C>) -> SurrealNetworkSegment
 
 fn profiles<C: Connection + Clone>(state: &AppState<C>) -> SurrealReplyProfileRepository<C> {
     SurrealReplyProfileRepository::new(state.db.clone())
+}
+
+fn policies<C: Connection + Clone>(state: &AppState<C>) -> SurrealNetworkPolicyRepository<C> {
+    SurrealNetworkPolicyRepository::new(state.db.clone())
 }
 
 fn hook_payload(
@@ -1412,4 +1496,155 @@ pub async fn delete_profile<C: Connection + Clone>(
     )
     .await;
     Ok(HttpResponse::NoContent().finish())
+}
+
+// ---------------------------------------------------------------------------
+// The tenant's Session-Timeout cap
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/network/policy`
+///
+/// The tenant's `Session-Timeout` cap. A tenant that never wrote one reads the
+/// default (3600 seconds, `version` 0).
+#[utoipa::path(
+    get,
+    path = "/api/v1/network/policy",
+    tag = "network",
+    responses(
+        (status = 200, description = "The tenant's network policy: the cap on a reply \
+                                      profile's `Session-Timeout` (3600 and `version` 0 until \
+                                      the tenant first writes one)",
+         body = NetworkPolicyResponse),
+        (status = 401, description = "Not authenticated, or a service-account token (the \
+                                      network routes are human-only)"),
+        (status = 403, description = "The caller lacks `network:read` on `/network`"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_policy<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new(NETWORK_READ, network_root_id(user.tenant_id))
+        .check(&user, authz.get_ref().as_ref())
+        .await?;
+    let policy = policies(&state).get(user.tenant_id).await?;
+    Ok(HttpResponse::Ok().json(NetworkPolicyResponse::from(policy)))
+}
+
+/// `PUT /api/v1/network/policy`
+///
+/// A **replacement** of the tenant's `Session-Timeout` cap, conditional on
+/// `version`.
+#[utoipa::path(
+    put,
+    path = "/api/v1/network/policy",
+    tag = "network",
+    request_body = ReplaceNetworkPolicyRequest,
+    responses(
+        (status = 200, description = "The new policy. Lowering the cap is always allowed, \
+                                      even below an existing profile's `session_timeout_secs`: \
+                                      the stored value is untouched and every read clamps it \
+                                      to the cap (`session_timeout_clamped`), so raising the \
+                                      cap again restores it. Raising the cap is allowed and \
+                                      audited as `network_policy.raised`; lowering as \
+                                      `network_policy.lowered`, each with the cap before and \
+                                      after",
+         body = NetworkPolicyResponse),
+        (status = 400, description = "`session_timeout_max_secs` outside 300 to 86 400, or an \
+                                      unknown field"),
+        (status = 401, description = "Not authenticated, or a service-account token"),
+        (status = 403, description = "The caller lacks `network:admin` on `/network` (the \
+                                      response names the permission and the node)"),
+        (status = 409, description = "The policy changed since `version` was read"),
+        (status = 429, description = "Rate limit"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn replace_policy<C: Connection + Clone>(
+    user: AuthenticatedUser,
+    authz: AuthzData,
+    state: web::Data<AppState<C>>,
+    http_req: HttpRequest,
+    body: web::Json<ReplaceNetworkPolicyRequest>,
+) -> Result<HttpResponse, AxiamApiError> {
+    let principal = AuthenticatedPrincipal::from(user);
+    let req = body.into_inner();
+    let tenant_id = principal.tenant_id;
+    let input = SetNetworkPolicy {
+        session_timeout_max_secs: req.session_timeout_max_secs,
+        expected_version: req.version,
+        actor: principal.subject_id,
+    };
+    let requested = json!({
+        "session_timeout_max_secs": input.session_timeout_max_secs,
+        "expected_version": input.expected_version,
+    });
+    let refusal = |before: Value| Refusal {
+        action: AUDIT_POLICY_WRITE_REFUSED,
+        write: "policy_replace",
+        resource_id: Some(tenant_id),
+        before,
+        after: requested.clone(),
+    };
+
+    let cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::PolicyWrite {
+            session_timeout_max_secs: input.session_timeout_max_secs,
+        },
+    )
+    .await?;
+    let clearance = write_clearance(cleared)?;
+
+    let network_policy_repo = policies(&state);
+    let stored = network_policy_repo.get(tenant_id).await?;
+    let before = policy_values(&stored);
+    // The write is conditional on the version the caller read; if that is the
+    // version read just now, the cap compared here is the one the write
+    // replaces, and if it is not the write is a `409` and the direction moot.
+    let change = CapChange::between(
+        stored.session_timeout_max_secs,
+        input.session_timeout_max_secs,
+    );
+
+    if let Err(error) = input.validate() {
+        return Err(refused(&state, &http_req, &principal, refusal(before), error.into()).await);
+    }
+
+    let written = or_refuse!(
+        network_policy_repo.set(tenant_id, input, &clearance).await,
+        &state,
+        &http_req,
+        &principal,
+        refusal(before.clone())
+    );
+    let after = policy_values(&written);
+    append(
+        &state,
+        CreateAuditLogEntry {
+            tenant_id,
+            actor_id: principal.subject_id,
+            actor_type: principal.actor_type(),
+            action: match change {
+                CapChange::Raised => AUDIT_POLICY_RAISED,
+                CapChange::Lowered => AUDIT_POLICY_LOWERED,
+                CapChange::Unchanged => AUDIT_POLICY_UNCHANGED,
+            }
+            .to_owned(),
+            resource_id: Some(tenant_id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(&http_req),
+            metadata: Some(json!({
+                "direction": change.as_str(),
+                "before": before,
+                "after": after,
+            })),
+        },
+    )
+    .await;
+    Ok(HttpResponse::Ok().json(NetworkPolicyResponse::from(written)))
 }

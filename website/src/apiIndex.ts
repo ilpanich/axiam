@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.1";
-export const API_OPERATION_COUNT = 289;
-export const API_PATH_COUNT = 196;
+export const API_OPERATION_COUNT = 291;
+export const API_PATH_COUNT = 197;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1522,12 +1522,22 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-network-access",
   "label": "Network access",
-  "blurb": "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, and what a device placed on a segment is given. `POST /api/v1/network/decide` is the placement decision FreeRADIUS asks for, over mTLS with a token bound to its own certificate; it is not SDK surface.",
+  "blurb": "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, what a device placed on a segment is given, and the tenant's cap on its Session-Timeout. `POST /api/v1/network/decide` is the placement decision FreeRADIUS asks for, over mTLS with a token bound to its own certificate; it is not SDK surface.",
   "operations": [
    {
     "method": "POST",
     "path": "/api/v1/network/decide",
     "summary": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS authentication (RADIUS D4)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/policy",
+    "summary": "The tenant's `Session-Timeout` cap."
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/policy",
+    "summary": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on `version`."
    },
    {
     "method": "GET",

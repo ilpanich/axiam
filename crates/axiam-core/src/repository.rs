@@ -4448,11 +4448,14 @@ pub trait NetworkPolicyRepository: Send + Sync {
 
     /// Write the tenant's policy, conditional on the version read (0 for a
     /// tenant still on the default). `Validation` for a cap outside the
-    /// settable range, `Conflict` for a stale version.
+    /// settable range, `Conflict` for a stale version, `AuthorizationDenied`
+    /// for a `clearance` the write gate did not issue for this tenant, this
+    /// actor and a [`crate::models::network::NetworkWriteTarget::PolicyWrite`].
     fn set(
         &self,
         tenant_id: Uuid,
         input: crate::models::network::SetNetworkPolicy,
+        clearance: &crate::models::network::NetworkWriteClearance,
     ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkPolicy>> + Send;
 }
 

@@ -11,7 +11,7 @@
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::network::{
-    NetworkSegment, NetworkSegmentKind, NetworkSegmentUpdate, NetworkWriteClearance,
+    NetworkPolicy, NetworkSegment, NetworkSegmentKind, NetworkSegmentUpdate, NetworkWriteClearance,
     NetworkWriteTarget, NewNetworkSegment, NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH,
     RESOURCE_TYPE_NETWORK_ROOT, RESOURCE_TYPE_NETWORK_SEGMENT, RESOURCE_TYPE_NETWORK_SITE,
     ReplyProfile, ReplyProfileReplace, SetNetworkPolicy,
@@ -165,8 +165,18 @@ impl Cleared<SurrealReplyProfileRepository<Db>> {
     }
 }
 
-fn policies(db: &Surreal<Db>) -> SurrealNetworkPolicyRepository<Db> {
-    SurrealNetworkPolicyRepository::new(db.clone())
+fn policies(db: &Surreal<Db>) -> Cleared<SurrealNetworkPolicyRepository<Db>> {
+    Cleared(SurrealNetworkPolicyRepository::new(db.clone()))
+}
+
+impl Cleared<SurrealNetworkPolicyRepository<Db>> {
+    async fn get(&self, tenant_id: Uuid) -> AxiamResult<NetworkPolicy> {
+        self.0.get(tenant_id).await
+    }
+    async fn set(&self, tenant_id: Uuid, input: SetNetworkPolicy) -> AxiamResult<NetworkPolicy> {
+        let c = cleared(tenant_id, input.actor, NetworkWriteTarget::PolicyWrite);
+        self.0.set(tenant_id, input, &c).await
+    }
 }
 
 fn resources(db: &Surreal<Db>) -> SurrealResourceRepository<Db> {
@@ -1265,6 +1275,53 @@ async fn the_repository_refuses_a_clearance_for_another_write() {
         .unwrap_err();
     assert!(matches!(err, AxiamError::AuthorizationDenied { .. }));
     assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_err());
+}
+
+/// The tenant's cap is written like a segment: only with the clearance the
+/// gate issues for this tenant, this actor and a policy write (plan 13.6).
+#[tokio::test]
+async fn the_policy_refuses_a_clearance_for_another_write() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let actor = Uuid::new_v4();
+    let raw = SurrealNetworkPolicyRepository::new(db.clone());
+    let input = || SetNetworkPolicy {
+        session_timeout_max_secs: 600,
+        expected_version: 0,
+        actor,
+    };
+    for wrong in [
+        cleared(Uuid::new_v4(), actor, NetworkWriteTarget::PolicyWrite),
+        cleared(tenant, Uuid::new_v4(), NetworkWriteTarget::PolicyWrite),
+        cleared(
+            tenant,
+            actor,
+            NetworkWriteTarget::SegmentDelete {
+                segment_id: Uuid::new_v4(),
+            },
+        ),
+    ] {
+        let err = raw.set(tenant, input(), &wrong).await.unwrap_err();
+        assert!(
+            matches!(err, AxiamError::AuthorizationDenied { .. }),
+            "{err:?}"
+        );
+    }
+    let stored = policies(&db).get(tenant).await.unwrap();
+    assert_eq!(
+        (stored.session_timeout_max_secs, stored.version),
+        (3600, 0),
+        "nothing was written"
+    );
+    // The matching one writes.
+    let ok = cleared(tenant, actor, NetworkWriteTarget::PolicyWrite);
+    assert_eq!(
+        raw.set(tenant, input(), &ok)
+            .await
+            .unwrap()
+            .session_timeout_max_secs,
+        600
+    );
 }
 
 /// The profile list (W6.3): a tenant's own effective profiles, paged, searchable

@@ -125,6 +125,7 @@ fn write_kind(write: &NetworkWrite<'_>) -> &'static str {
         NetworkWrite::PermissionCreate { .. } => "permission_create",
         NetworkWrite::PermissionUpdate { .. } => "permission_update",
         NetworkWrite::PermissionDelete { .. } => "permission_delete",
+        NetworkWrite::PolicyWrite { .. } => "policy_write",
         NetworkWrite::CertificateBind { .. } => "certificate_bind",
         NetworkWrite::ResourceCreate { .. } => "resource_create",
         NetworkWrite::ResourceUpdate { .. } => "resource_update",

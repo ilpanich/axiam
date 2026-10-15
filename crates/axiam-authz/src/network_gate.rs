@@ -14,6 +14,9 @@
 //!   table and the three write-time rules of §4.2;
 //! * a certificate **bind** to a service account, against §5.3's binding rows
 //!   and H6 (correction R101W6-03 of the note);
+//! * a write of the tenant's network policy, the `Session-Timeout` cap that H3
+//!   reads as the envelope (`network:admin` at `/network`; see
+//!   [`NetworkWrite::PolicyWrite`] for why a raise asks no more than a lowering);
 //! * a write of the generic surfaces that could reach into the reserved
 //!   namespace: a permission whose action is in `network:` (create, rename,
 //!   delete), and a resource of a reserved `network_*` type, or under one, or
@@ -58,11 +61,12 @@ use std::future::Future;
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::network::{
-    NETWORK_ADMIN, NETWORK_ADMIN_CLASS_ACTIONS, NETWORK_GRANT, NETWORK_GRANT_ADMIN, NETWORK_JOIN,
-    NETWORK_META_ACTIONS, NETWORK_PROFILES_WRITE, NETWORK_SEGMENTS_WRITE, NetworkSegment,
-    NetworkSegmentKind, NetworkSegmentPath, NetworkSegmentUpdate, NetworkWriteClearance,
-    NetworkWriteTarget, NewNetworkSegment, ReplyProfile, branch_node_id, is_network_action,
-    is_reserved_resource_type, network_root_id, site_node_id,
+    CapChange, NETWORK_ADMIN, NETWORK_ADMIN_CLASS_ACTIONS, NETWORK_GRANT, NETWORK_GRANT_ADMIN,
+    NETWORK_JOIN, NETWORK_META_ACTIONS, NETWORK_POLICY_WRITE, NETWORK_PROFILES_WRITE,
+    NETWORK_SEGMENTS_WRITE, NetworkSegment, NetworkSegmentKind, NetworkSegmentPath,
+    NetworkSegmentUpdate, NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment,
+    ReplyProfile, branch_node_id, is_network_action, is_reserved_resource_type, network_root_id,
+    site_node_id,
 };
 use axiam_core::models::permission::{Permission, PermissionEffect, PermissionGrant};
 use axiam_core::models::radius_reply::ReplyProfileInput;
@@ -100,6 +104,8 @@ pub const AUDIT_PERMISSION_WRITE_REFUSED: &str = "network_permission.write_refus
 pub const AUDIT_RESOURCE_WRITE_REFUSED: &str = "network_resource.write_refused";
 /// A certificate bind refused (§5.3's binding rows, H6).
 pub const AUDIT_BINDING_REFUSED: &str = "certificate_binding.refused";
+/// A write of the tenant's network policy (the `Session-Timeout` cap) refused.
+pub const AUDIT_POLICY_WRITE_REFUSED: &str = "network_policy.write_refused";
 
 // ---------------------------------------------------------------------------
 // What the function reads
@@ -467,6 +473,39 @@ pub enum NetworkWrite<'a> {
         /// The permission.
         permission_id: Uuid,
     },
+    /// Write the tenant's network policy: the `Session-Timeout` cap
+    /// (`network.session_timeout_max_secs`, §3.4).
+    ///
+    /// Needs [`NETWORK_POLICY_WRITE`] (`network:admin`) at the `/network` root,
+    /// the writer's own, uncached, deny-override in force. **A raise asks
+    /// nothing more than a lowering does**, and the reasoning is the point of
+    /// this variant:
+    ///
+    /// * H3 reads the cap as a profile writer's envelope, so a raise widens
+    ///   what a writer holding `network:profiles_write` and `network:grant` may
+    ///   *later* set. It changes no stored profile and no reply already
+    ///   rendered: a stored `session_timeout_secs` was within the cap in force
+    ///   when it was written, and a read renders `min(stored, cap)`, so a raise
+    ///   to any value cannot render more than some writer once chose. (A raise
+    ///   after a lowering restores such a value; it was a writer's, within the
+    ///   cap then.)
+    /// * The cap is the tenant-wide axis of the envelope, beside the
+    ///   per-segment one (`network:segments_write`). The note splits those
+    ///   duties from profile writing on purpose (§5.2 H3: "a tenant can split
+    ///   the two duties between two people"), so asking the raiser to hold
+    ///   `network:profiles_write` or `network:grant` as well would undo the
+    ///   split. `network:admin` is the one permission above all of them.
+    /// * H6's reading (a subject placeable on a segment may not shape what
+    ///   joining gives) has no subject to bite on today: the route is
+    ///   human-only and a user is not a device until D6 binds certificates to
+    ///   users, which reopens §5.3 with §4.2 rule 2.
+    ///
+    /// The raise is therefore distinguished only in the audit row
+    /// (`network_policy.raised`), not by an extra check.
+    PolicyWrite {
+        /// The cap the write would store.
+        session_timeout_max_secs: u32,
+    },
     /// Bind a certificate to a service account (§5.3 binding rows, H6).
     CertificateBind {
         /// The certificate.
@@ -669,6 +708,9 @@ where
         NetworkWrite::PermissionDelete { permission_id } => {
             gate.permission_delete(permission_id).await
         }
+        NetworkWrite::PolicyWrite {
+            session_timeout_max_secs,
+        } => gate.policy_write(session_timeout_max_secs).await,
         NetworkWrite::CertificateBind {
             certificate_id,
             service_account_id,
@@ -1196,6 +1238,32 @@ where
         Ok(Ok(self.clearance(NetworkWriteTarget::SegmentDelete {
             segment_id,
         })))
+    }
+
+    // -- the tenant's policy (§3.4) ------------------------------------------
+
+    async fn policy_write(&self, new_cap: u32) -> AxiamResult<GateVerdict> {
+        if let Some(mut r) = self
+            .require_all(
+                &[NETWORK_POLICY_WRITE],
+                self.root(),
+                "4.2:policy_write",
+                AUDIT_POLICY_WRITE_REFUSED,
+            )
+            .await?
+        {
+            let current = self.store.session_timeout_cap(self.tenant()).await?;
+            r.before = vec![("session_timeout_max_secs", current.to_string())];
+            r.after = vec![
+                ("session_timeout_max_secs", new_cap.to_string()),
+                (
+                    "direction",
+                    CapChange::between(current, new_cap).as_str().to_owned(),
+                ),
+            ];
+            return Ok(Err(r));
+        }
+        Ok(Ok(self.clearance(NetworkWriteTarget::PolicyWrite)))
     }
 
     // -- role assignment (§5.3, §4.2) --------------------------------------

@@ -78,6 +78,8 @@ const GUARDED_WRITES: &[&str] = &[
     "profile_repo.create(",
     "profile_repo.replace(",
     "profile_repo.delete(",
+    // The tenant's Session-Timeout cap (plan 13.6): H3 reads it as the envelope.
+    "network_policy_repo.set(",
     // The same edges written as SurrealQL, outside a repository.
     "->has_role->",
     "->grants->",
@@ -417,6 +419,8 @@ fn the_scan_finds_the_known_write_sites() {
         ("network", "create_profile"),
         ("network", "replace_profile"),
         ("network", "delete_profile"),
+        // W6.3b: the tenant's Session-Timeout cap.
+        ("network", "replace_policy"),
     ] {
         assert!(
             gated.contains(&(file.to_owned(), function.to_owned())),

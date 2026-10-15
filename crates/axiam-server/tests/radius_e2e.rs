@@ -956,8 +956,8 @@ async fn placement_from_axiam(
             // The comment names the certificate by AXIAM's id, never by its
             // subject: a subject may hold a newline, which would end the comment.
             table.push_str(&format!(
-                "# certificate {id}\n{serial}\n\tTunnel-Type = VLAN,\n\
-                 \tTunnel-Medium-Type = IEEE-802,\n\tTunnel-Private-Group-Id = \"{VLAN}\",\n\
+                "# certificate {id}\n{serial}\n\tTunnel-Type:0 = VLAN,\n\
+                 \tTunnel-Medium-Type:0 = IEEE-802,\n\tTunnel-Private-Group-Id:0 = \"{VLAN}\",\n\
                  \tSession-Timeout = 3600,\n\tTermination-Action = RADIUS-Request\n\n"
             ));
             placed.push(item["subject"].as_str().expect("a subject").to_string());
@@ -1276,6 +1276,17 @@ fn set_readable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
         .expect("permissions can be set");
+}
+
+/// The octets of one RADIUS attribute as `eapol_test` dumps an Access-Accept
+/// (`Attribute 81 (Tunnel-Private-Group-Id) length=4` and, below it,
+/// `Value: 3230`), as lowercase hex. `None` when the attribute is not there.
+fn attribute_octets(output: &str, number: u8, name: &str) -> Option<String> {
+    let header = format!("Attribute {number} ({name})");
+    let mut lines = output.lines();
+    lines.find(|l| l.trim_start().starts_with(&header))?;
+    let value = lines.next()?.trim().strip_prefix("Value:")?;
+    Some(value.trim().to_ascii_lowercase())
 }
 
 fn certificate_serial(pem: &str) -> String {
@@ -1722,6 +1733,40 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
                 .output
                 .contains(&format!("Attribute {number} ({name})")),
             "accept: the Access-Accept carries {name} (RFC 3580): {}",
+            accept.output
+        );
+    }
+    // The wire encoding, read from the attribute's own octets: RFC 2868 puts a
+    // tag octet before a tagged integer's value, and FreeRADIUS 3.2.8 writes the
+    // placement's `:0` as 0x00 there; a tagged string with tag 0 carries no tag
+    // octet at all (its first octet, a digit, is above 0x1F, which RFC 2868 §3.6
+    // reads as the start of the string). A tag other than 0 would show as one
+    // more octet in front of the VLAN, and a NAS would read it as another tunnel.
+    let vlan_hex: String = VLAN.bytes().map(|b| format!("{b:02x}")).collect();
+    for (number, name, expected, what) in [
+        (
+            64,
+            "Tunnel-Type",
+            "0000000d".to_string(),
+            "tag 0x00, VLAN (13)",
+        ),
+        (
+            65,
+            "Tunnel-Medium-Type",
+            "00000006".to_string(),
+            "tag 0x00, IEEE-802 (6)",
+        ),
+        (
+            81,
+            "Tunnel-Private-Group-Id",
+            vlan_hex,
+            "the VLAN string and no tag octet",
+        ),
+    ] {
+        assert_eq!(
+            attribute_octets(&accept.output, number, name).as_deref(),
+            Some(expected.as_str()),
+            "accept: {name} is encoded as {what}: {}",
             accept.output
         );
     }

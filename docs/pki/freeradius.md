@@ -309,9 +309,9 @@ certificate, named by the certificate's serial as FreeRADIUS spells
 ```
 # certificate 6f1c2a90-3d4e-4b7a-9c1d-2e5f8a7b6c01
 1b5e0c9a47d2f3086e4a1c7b9d0e2f5a6c8b3d41
-	Tunnel-Type = VLAN,
-	Tunnel-Medium-Type = IEEE-802,
-	Tunnel-Private-Group-Id = "20",
+	Tunnel-Type:0 = VLAN,
+	Tunnel-Medium-Type:0 = IEEE-802,
+	Tunnel-Private-Group-Id:0 = "20",
 	Session-Timeout = 3600,
 	Termination-Action = RADIUS-Request
 ```
@@ -328,7 +328,15 @@ certificate, named by the certificate's serial as FreeRADIUS spells
   `HUP`; the EAP module's lists need the interval in section 4.)
 - **The VLAN is the three attributes RFC 3580 §3.31 prescribes**: `Tunnel-Type =
   VLAN`, `Tunnel-Medium-Type = IEEE-802`, `Tunnel-Private-Group-Id` a decimal
-  string between `1` and `4094` with tag `0`. Use these and no other attributes
+  string between `1` and `4094`. Each is written with the tag `:0`, FreeRADIUS 3's
+  spelling of a tagged attribute (RFC 2868 §3.1). On the wire that is a `0x00` tag
+  octet in front of the two integers' values; the string carries **no** tag
+  octet, because FreeRADIUS 3.2.8 encodes tag `0` on a string exactly as it
+  encodes no tag, and RFC 2868 §3.6 reads a first octet above `0x1F` (every digit
+  is) as the start of the string. The test reads the octets from the Accept
+  (`00 00 00 0d`, `00 00 00 06`, `32 30`). A tag other than `0` puts another octet
+  in front of the VLAN, which a NAS reads as one tunnel of several; do not write
+  one. Use these and no other attributes
   in a placement: the reply-profile design note
   ([`radius-reply-profile-design.md`](../../claude_dev/radius-reply-profile-design.md))
   keeps the set closed so that a hand-written table here is already an instance
@@ -404,8 +412,8 @@ while read -r id; do
   # A serial is lowercase hex and nothing else; anything else stops the run.
   case "$serial" in *[!0-9a-f]*|'') echo "certificate $id: bad serial" >&2; exit 1 ;; esac
   printf '# certificate %s\n%s\n' "$id" "$serial"
-  printf '\tTunnel-Type = VLAN,\n\tTunnel-Medium-Type = IEEE-802,\n'
-  printf '\tTunnel-Private-Group-Id = "20",\n\tSession-Timeout = 3600,\n'
+  printf '\tTunnel-Type:0 = VLAN,\n\tTunnel-Medium-Type:0 = IEEE-802,\n'
+  printf '\tTunnel-Private-Group-Id:0 = "20",\n\tSession-Timeout = 3600,\n'
   printf '\tTermination-Action = RADIUS-Request\n\n'
 done < "$tmp/ids" > "$tmp/placement"
 
@@ -589,7 +597,7 @@ they produce into the shipped FreeRADIUS configuration, and authenticates with
 |---|---|
 | **issue** | an organization CA, two tenants' signing CAs beneath it and a `Device` certificate are issued; the leaf carries `clientAuth` and its issuer's CRL distribution point; the CA is exported |
 | **bind** | the certificate is bound to a service account and listed as bound; the placement table generated from that list is keyed on the bound certificates' serials, and no entry on anything else |
-| **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept |
+| **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept; the octets of the three VLAN attributes are read from it: tag `0x00` before each integer, none before the VLAN string |
 | **wrong CA** | a device of another tenant of the same organization — whose signing CA is under the same organization CA as the trusted one — is refused presenting its leaf, its leaf and signing CA (`unable to get local issuer certificate`) and its whole chain up to the shared root (`self-signed certificate in certificate chain`); a device of another organization is refused; the tenant's own device presenting its whole chain is admitted |
 | **revoked after the CRL refresh** | a revoked device is still admitted while FreeRADIUS holds the old list; once AXIAM's list is in `ca_path` and FreeRADIUS has read it, the device is refused with `certificate revoked` and another device is not |
 | **the fetch script** | the revocation list reaches `ca_path` through [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) itself, run on the host against a local stand-in for the CRL route. A list another key signed under the CA's name (with a higher number, so only its signature can stop it) is refused, although `openssl crl -verify` exits 0 on it; a list the CA signed with a lower CRL number is refused; a `304` to the stored `ETag` leaves the list alone; each refusal leaves the installed list byte for byte as it was |

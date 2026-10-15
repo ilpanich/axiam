@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:0c7f4fdc861a49967dc00254be0c54ffab1bad03d6d76841736fed345ed4f8fe"
+    "x-axiam-spec-digest": "sha256:8bbbf8e1c7f1dfade4655e98ba5dc50ec7b0c8fc9b11110818ba5ea5b064f8a8"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4338,6 +4338,55 @@
         "security": [
           {
             "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/decide": {
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`POST /api/v1/network/decide`",
+        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
+        "operationId": "network_decide",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetworkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The decision. `{\"allow\": false}` carries no reason, whatever it was; `{\"allow\": true, \"reply\": …}` carries the placed segment's tunnel attributes and its reply profile's, `Session-Timeout` clamped to the tenant's cap. `Tunnel-Type` and `Tunnel-Medium-Type` carry tag 0 on the wire; `Tunnel-Private-Group-Id` carries no tag octet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkDecisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body: an unknown key (named), a site key outside the pattern, not exactly one of `certificate` and `fingerprint`, or one that does not decode"
+          },
+          "401": {
+            "description": "Not a service account, or its token is not bound (`cnf.x5t#S256`) to the certificate this mTLS connection presented, or that certificate is no longer the caller's own and valid, or the account is not active"
+          },
+          "403": {
+            "description": "The caller lacks `network:decide` on the site"
+          },
+          "429": {
+            "description": "The caller's `network_decide_per_min` allowance is spent"
+          }
+        },
+        "security": [
+          {
+            "service_account": []
           }
         ]
       }
@@ -21066,6 +21115,58 @@
           "email_address"
         ]
       },
+      "NetworkDecisionRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/network/decide`. Closed: an unknown key — a MAC\naddress, a user name — is a `400` naming it, so nothing the design note's\n§8 keeps out of the audit trail can be posted into it.",
+        "required": [
+          "site"
+        ],
+        "properties": {
+          "certificate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The certificate the device presented in EAP-TLS, DER, standard base64.\nExactly one of `certificate` and `fingerprint`."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of that certificate's DER, 64 hexadecimal digits. Exactly\none of `certificate` and `fingerprint`."
+          },
+          "site": {
+            "type": "string",
+            "description": "The site key, from FreeRADIUS's own client configuration\n(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`). Never taken from the packet."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NetworkDecisionResponse": {
+        "type": "object",
+        "description": "The decision: `{ \"allow\": false }` with **no reason**, or\n`{ \"allow\": true, \"reply\": … }`.",
+        "required": [
+          "allow"
+        ],
+        "properties": {
+          "allow": {
+            "type": "boolean",
+            "description": "Whether the device is placed. `false` carries nothing else, whatever\nthe reason (T-457, T-468)."
+          },
+          "reply": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RenderedReply",
+                "description": "The Access-Accept attributes of the segment the device is placed on:\nits tunnel triple (RFC 3580 §3.31) and its reply profile's fields, with\n`Session-Timeout` clamped to the tenant's cap. Only on an allow."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "NetworkSegmentKind": {
         "type": "string",
         "description": "What a segment is for.",
@@ -23741,6 +23842,27 @@
           }
         }
       },
+      "RenderedReply": {
+        "type": "object",
+        "description": "A rendered reply: the closed set of attributes of one dictionary version,\nproduced from typed fields only (design note §3.4: never rendered as text by\nconcatenation).",
+        "required": [
+          "dictionary",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyAttribute"
+            },
+            "description": "The attributes, in dictionary order: the segment's tunnel triple, then\nthe profile's fields that are set."
+          },
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the attributes belong to."
+          }
+        }
+      },
       "ReplaceNetworkSegmentRequest": {
         "type": "object",
         "description": "The body of `PUT /api/v1/network/segments/{id}`: a **replacement** of the\nenvelope. The kind and the place in the tree do not change.",
@@ -23813,6 +23935,40 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReplyAttribute": {
+        "type": "object",
+        "description": "One attribute of a rendered Access-Accept.",
+        "required": [
+          "name",
+          "number",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …)."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The attribute number (RFC 2865 / RFC 2868).",
+            "minimum": 0
+          },
+          "tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The RFC 2868 tag octet that goes **on the wire**, when one does.\n\n`0` on `Tunnel-Type` and `Tunnel-Medium-Type`: an integer tunnel\nattribute always carries its tag octet (`0x00`), which FreeRADIUS emits\nfor these with or without `:0`. **Absent** on `Tunnel-Private-Group-Id`:\nthe VLAN string goes on the wire with no tag octet in front of it (RFC\n2868 §3.6 allows that, since the string's first octet is above `0x1F`),\nwhich is exactly what FreeRADIUS 3.2.8 emits for the attribute written\nuntagged or tagged `:0` (verified on the wire, W5.4). Absent, too, on\nevery untagged attribute.",
+            "minimum": 0
+          },
+          "value": {
+            "$ref": "#/components/schemas/ReplyValue",
+            "description": "The value, typed as the dictionary types it."
+          }
+        }
       },
       "ReplyProfile": {
         "type": "object",
@@ -23964,6 +24120,21 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReplyValue": {
+        "oneOf": [
+          {
+            "type": "integer",
+            "format": "int32",
+            "description": "An `integer` attribute's value.",
+            "minimum": 0
+          },
+          {
+            "type": "string",
+            "description": "A `string` attribute's value."
+          }
+        ],
+        "description": "The value of one rendered attribute: an integer, or the one string kind the\ndictionary admits (a decimal VLAN or a `Filter-Id` identifier)."
       },
       "RequestAuditHealth": {
         "type": "object",

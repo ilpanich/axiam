@@ -4324,6 +4324,17 @@ pub trait NetworkSegmentRepository: Send + Sync {
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::NetworkSegment>>> + Send;
 
+    /// Every segment of one site, in both branches (`access` and
+    /// `quarantine`), ordered by kind, then rank, then name: the decision
+    /// path's read (design note §4.3). Tenant-scoped like every read here. A
+    /// row that does not read back is left out (logged), which makes it no
+    /// candidate: fail closed.
+    fn list_site(
+        &self,
+        tenant_id: Uuid,
+        site_key: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::network::NetworkSegment>>> + Send;
+
     /// Rewrite a segment's envelope.
     ///
     /// * `NotFound` when it does not exist in this tenant.
@@ -4391,6 +4402,16 @@ pub trait ReplyProfileRepository: Send + Sync {
         tenant_id: Uuid,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::ReplyProfile>>> + Send;
+
+    /// The stored profiles of `segment_ids` in this tenant, **as stored**, for
+    /// the decision path to re-validate (design note §3.4). A segment without a
+    /// profile is absent from the result; so is a row that does not read back
+    /// at all (logged). One query whatever the number of ids.
+    fn list_stored(
+        &self,
+        tenant_id: Uuid,
+        segment_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::network::StoredReplyProfile>>> + Send;
 
     /// Replace the segment's profile. Errors as for [`Self::create`], with
     /// `NotFound` for a segment without a profile and `Conflict` also for a

@@ -80,7 +80,8 @@ and the `crates.io` API answered `403`. Three hosts answered:
 | 11 | TACACS+ is the alternative network-administration protocol operators choose | **Not verifiable from this session** | RFC 8907 was unreachable. Corroboration only: FreeRADIUS `master` implements TACACS+ (`src/protocols/tacacs/tacacs.h`, citing "3.4. The TACACS+ Packet Header"). Which protocol operators choose is a market claim no source settles. |
 
 **What the re-read changes.** For this note: §3's dictionary uses the RFC
-3580 encoding as read (decimal string, tag 0, VLAN 1–4094) and its Session-Timeout
+3580 encoding as read (decimal string, tag 0, VLAN 1–4094; tag 0 on the string means
+no tag octet on the wire — corrected 2026-10-15, see §3.2) and its Session-Timeout
 floor follows from the §3.17 zero case. For the record and the model: the duplicate
 cache key (1j) and the `Proxy-State` rule (5b) are corrected, and §10 hands both to
 the review. Everything that stays unverifiable (1k, 3, 8, 9, 10, 11) concerns
@@ -175,7 +176,7 @@ dictionary change is a code change with review. No API adds an entry.
 |---|---|---|---|---|---|
 | `Tunnel-Type` | 64 | `ATTRIBUTE Tunnel-Type 64 integer has_tag` | 2868 §3.1; 3580 §3.31 | derived from the segment | exactly `VLAN` (13), tag `0x00` |
 | `Tunnel-Medium-Type` | 65 | `ATTRIBUTE Tunnel-Medium-Type 65 integer has_tag` | 2868 §3.2; 3580 §3.31 | derived | exactly `802` (6), tag `0x00` |
-| `Tunnel-Private-Group-Id` | 81 | `ATTRIBUTE Tunnel-Private-Group-Id 81 string has_tag` | 2868 §3.6; 3580 §3.31 | derived from `segment.vlan_id` | decimal `1`–`4094`, no sign, no leading zero, tag `0x00` |
+| `Tunnel-Private-Group-Id` | 81 | `ATTRIBUTE Tunnel-Private-Group-Id 81 string has_tag` | 2868 §3.6; 3580 §3.31 | derived from `segment.vlan_id` | decimal `1`–`4094`, no sign, no leading zero, tag 0: **no tag octet** on the wire (corrected 2026-10-15, below) |
 | `Session-Timeout` | 27 | `ATTRIBUTE Session-Timeout 27 integer` | 2865 §5.27; 3580 §3.17 | profile field `session_timeout_secs` | `300` ≤ v ≤ the tenant cap (§3.4); never `0` |
 | `Termination-Action` | 29 | `ATTRIBUTE Termination-Action 29 integer` | 2865 §5.29; 3580 §3.17 | profile field `termination_action` | `RADIUS-Request` (1, the default) or `Default` (0) |
 | `Idle-Timeout` | 28 | `ATTRIBUTE Idle-Timeout 28 integer` | 2865 §5.28 | profile field `idle_timeout_secs` | `60` ≤ v ≤ `session_timeout_secs` |
@@ -186,6 +187,25 @@ Every attribute in this table is allowed in an Access-Accept by RFC 2865's §5.4
 table (Service-Type `0-1`, Filter-Id `0+`, Session-Timeout / Idle-Timeout /
 Termination-Action `0-1`) or RFC 2868's (Tunnel-Private-Group-ID `0+`), read in
 the copies of §1.
+
+**Correction of 2026-10-15 (W6.4; the finding is W5.4's, commit `63fc3d7`, measured
+on the wire with FreeRADIUS 3.2.8).** The table said "tag `0x00`" for
+`Tunnel-Private-Group-Id`, reading RFC 3580 §3.31's "the tag field SHOULD be set to
+zero (0x00) in all tunnel attributes" as "a `0x00` octet precedes the VLAN string".
+That is not what FreeRADIUS emits, and not what RFC 2868 requires. For the two
+**integer** tunnel attributes the tag is a fixed octet of the attribute's value, so
+`Tunnel-Type` and `Tunnel-Medium-Type` always carry `0x00` (with or without `:0`
+written in FreeRADIUS's syntax). For the **string** `Tunnel-Private-Group-Id`,
+RFC 2868 §3.6 makes the tag octet optional — a first octet above `0x1F` is the start
+of the string — and FreeRADIUS 3.2.8 encodes the attribute written `:0` exactly as
+the untagged one: `20` goes on the wire as `32 30` (length 4), with no `0x00` in
+front; only a non-zero tag adds an octet (`:1` gives `01 32 30`). A decimal VLAN
+starts with `0x31`…`0x39`, so the untagged form is unambiguous. The decision route
+renders accordingly: `"tag": 0` on the two integers and **no** `tag` on the VLAN
+string (`ReplyAttribute::tag`, `crates/axiam-core/src/models/radius_reply.rs`), and
+the dictionary row's `tagged` flag now says only that FreeRADIUS's dictionary marks
+the attribute `has_tag`. The `rlm_rest` mapping that turns the reply into FreeRADIUS
+attributes is W6.5's.
 
 ### 3.3 What the dictionary excludes, and why
 
@@ -705,7 +725,8 @@ Under option B there is no NAS registry in AXIAM. The "authenticated NAS" is the
   A's FreeRADIUS is rejected" falls out of the wrong-CA case if the recipe issues
   under two tenants.
 - Any VLAN example uses only §3.2's attributes, encoded per RFC 3580 §3.31 (decimal
-  string, tag 0), with `Termination-Action = RADIUS-Request` and a bounded
+  string, tag 0 — no tag octet on the string, corrected 2026-10-15 in §3.2), with
+  `Termination-Action = RADIUS-Request` and a bounded
   `Session-Timeout`. The guide states the revocation and quarantine latency of
   §6.3's first column.
 - An unplaced device is rejected, not dropped onto the NAS's default VLAN.

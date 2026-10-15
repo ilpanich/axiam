@@ -109,6 +109,14 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "be one no SDK client can reach, handing out that map if it ever "
         "were. Operators scrape it from inside the network"
     ),
+    ("POST", "/api/v1/network/decide"): (
+        "RADIUS D4 (W6.4) -- the placement decision a FreeRADIUS server asks for once "
+        "per EAP-TLS authentication through rlm_rest, not administration. Its caller "
+        "is that server's service account with a token bound to its own certificate, "
+        "over mTLS; an SDK client is neither, and a generated method could only ever "
+        "be refused. The ten network management operations beside it ARE the "
+        "`network` namespace"
+    ),
     ("POST", "/api/v1/users/me/resend-verification"): (
         "§25 account lifecycle, not §27 management -- this is self-service on "
         "the caller's OWN record, the authenticated sibling of the excluded "

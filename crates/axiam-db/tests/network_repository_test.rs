@@ -1373,3 +1373,105 @@ async fn profiles_list_is_the_tenants_own_paged_and_clamped() {
             .all(|p| p.session_timeout_secs == 600 && p.session_timeout_clamped)
     );
 }
+
+/// The decision path's read of a site (W6.4): every segment of the site, both
+/// branches, ordered by kind then rank; and the stored profiles of those
+/// segments **as stored** — a row edited behind the API (an administrative
+/// `Service-Type`, which the write path refuses) comes back as it is, for the
+/// decision to re-validate, rather than failing the read or reading as
+/// something it was never validated as. Another tenant's rows and another
+/// site's are never in either.
+#[tokio::test]
+async fn the_decision_reads_a_site_and_its_profiles_as_stored() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    let mut made = Vec::new();
+    for (path, kind, vlan, rank) in [
+        (
+            "/network/zones/hq/iot",
+            NetworkSegmentKind::Access,
+            20u16,
+            Some(20u32),
+        ),
+        (
+            "/network/quarantine/hq/q",
+            NetworkSegmentKind::Quarantine,
+            999,
+            None,
+        ),
+        (
+            "/network/zones/hq/corp",
+            NetworkSegmentKind::Access,
+            10,
+            Some(10),
+        ),
+        (
+            "/network/zones/branch/corp",
+            NetworkSegmentKind::Access,
+            10,
+            Some(10),
+        ),
+    ] {
+        let mut input = corp(tenant);
+        input.path = path.into();
+        input.kind = kind;
+        input.vlan_id = vlan;
+        input.rank = rank;
+        made.push(segments(&db).create(input).await.unwrap());
+    }
+    segments(&db).create(corp(other)).await.unwrap();
+
+    let site = segments(&db).0.list_site(tenant, "hq").await.unwrap();
+    let names: Vec<_> = site.iter().map(|s| (s.kind, s.name.as_str())).collect();
+    assert_eq!(
+        names,
+        [
+            (NetworkSegmentKind::Access, "corp"),
+            (NetworkSegmentKind::Access, "iot"),
+            (NetworkSegmentKind::Quarantine, "q"),
+        ]
+    );
+    assert!(
+        segments(&db)
+            .0
+            .list_site(tenant, "nowhere")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Profiles on `corp` (hq) and `q`; `iot` has none.
+    let hq_corp = &made[2];
+    let q = &made[1];
+    for seg in [hq_corp, q] {
+        profiles(&db)
+            .create(tenant, seg.id, new_profile(seg.version, profile()))
+            .await
+            .unwrap();
+    }
+    db.query("UPDATE type::record('reply_profile', $id) SET service_type = 'administrative_user'")
+        .bind(("id", q.id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let ids: Vec<Uuid> = site.iter().map(|s| s.id).collect();
+    let stored = profiles(&db).0.list_stored(tenant, &ids).await.unwrap();
+    assert_eq!(stored.len(), 2, "a segment without a profile is absent");
+    let edited = stored.iter().find(|p| p.segment_id == q.id).unwrap();
+    assert_eq!(edited.service_type.as_deref(), Some("administrative_user"));
+    assert_eq!(edited.session_timeout_secs, 900);
+    assert_eq!(edited.version, 1);
+    // Another tenant asking for the same ids gets nothing.
+    assert!(
+        profiles(&db)
+            .0
+            .list_stored(other, &ids)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

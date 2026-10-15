@@ -84,7 +84,16 @@ pub struct DictionaryEntry {
     pub number: u8,
     /// `integer` or `string`, as FreeRADIUS's dictionary spells it.
     pub data_type: &'static str,
-    /// Whether the attribute carries an RFC 2868 tag octet (always `0x00` here).
+    /// Whether FreeRADIUS's dictionary marks the attribute `has_tag` (RFC 2868).
+    ///
+    /// **Not** the same as "a tag octet goes on the wire" (correction of
+    /// 2026-10-15, W5.4's finding on FreeRADIUS 3.2.8): the two *integer* tunnel
+    /// attributes always carry the tag octet, `0x00` here; the *string*
+    /// `Tunnel-Private-Group-Id` tagged `0` is encoded with **no** tag octet
+    /// (RFC 2868 §3.6 allows it: a first octet above `0x1F` starts the string,
+    /// and a decimal VLAN's first octet is `0x31`…`0x39`). Only a non-zero tag
+    /// would add an octet, and AXIAM never renders one. [`ReplyAttribute::tag`]
+    /// is what a rendered reply says goes on the wire.
     pub tagged: bool,
     /// The RFC sections that define it.
     pub rfc: &'static str,
@@ -381,6 +390,165 @@ fn invalid(message: impl Into<String>) -> AxiamError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The rendered reply: the decision's encoder (design note §3.4, §6.3)
+// ---------------------------------------------------------------------------
+
+/// `Tunnel-Type = VLAN` (RFC 2868 §3.1; RFC 3580 §3.31).
+pub const TUNNEL_TYPE_VLAN: u32 = 13;
+
+/// `Tunnel-Medium-Type = 802` (RFC 2868 §3.2; RFC 3580 §3.31).
+pub const TUNNEL_MEDIUM_TYPE_802: u32 = 6;
+
+/// The value of one rendered attribute: an integer, or the one string kind the
+/// dictionary admits (a decimal VLAN or a `Filter-Id` identifier).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum ReplyValue {
+    /// An `integer` attribute's value.
+    Integer(u32),
+    /// A `string` attribute's value.
+    Text(String),
+}
+
+/// One attribute of a rendered Access-Accept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ReplyAttribute {
+    /// The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …).
+    pub name: String,
+    /// The attribute number (RFC 2865 / RFC 2868).
+    pub number: u8,
+    /// The value, typed as the dictionary types it.
+    pub value: ReplyValue,
+    /// The RFC 2868 tag octet that goes **on the wire**, when one does.
+    ///
+    /// `0` on `Tunnel-Type` and `Tunnel-Medium-Type`: an integer tunnel
+    /// attribute always carries its tag octet (`0x00`), which FreeRADIUS emits
+    /// for these with or without `:0`. **Absent** on `Tunnel-Private-Group-Id`:
+    /// the VLAN string goes on the wire with no tag octet in front of it (RFC
+    /// 2868 §3.6 allows that, since the string's first octet is above `0x1F`),
+    /// which is exactly what FreeRADIUS 3.2.8 emits for the attribute written
+    /// untagged or tagged `:0` (verified on the wire, W5.4). Absent, too, on
+    /// every untagged attribute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u8>,
+}
+
+/// A rendered reply: the closed set of attributes of one dictionary version,
+/// produced from typed fields only (design note §3.4: never rendered as text by
+/// concatenation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct RenderedReply {
+    /// The dictionary version the attributes belong to.
+    pub dictionary: String,
+    /// The attributes, in dictionary order: the segment's tunnel triple, then
+    /// the profile's fields that are set.
+    pub attributes: Vec<ReplyAttribute>,
+}
+
+/// The values a reply is rendered from: a stored profile after the decision
+/// path re-validated it and clamped it to the tenant's current cap (design note
+/// §3.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveReplyProfile {
+    /// The dictionary version the profile was validated against.
+    pub dictionary: String,
+    /// `Session-Timeout`, already clamped to the tenant cap.
+    pub session_timeout_secs: u32,
+    /// Whether the stored value was above the cap and has been lowered.
+    pub session_timeout_clamped: bool,
+    /// `Termination-Action`.
+    pub termination_action: TerminationAction,
+    /// `Idle-Timeout`, never above the effective `Session-Timeout`.
+    pub idle_timeout_secs: Option<u32>,
+    /// `Filter-Id`.
+    pub filter_id: Option<String>,
+    /// `Service-Type`.
+    pub service_type: Option<ServiceType>,
+}
+
+/// Render the Access-Accept attributes for a device placed on a segment of
+/// VLAN `vlan_id` whose profile is `profile`.
+///
+/// The encoder accepts only dictionary values and checks them again here, the
+/// last step before the wire, whatever its caller checked: a VLAN outside 1 to
+/// 4094, a `Session-Timeout` below the floor or above the ceiling, an
+/// `Idle-Timeout` outside its bounds, a `Filter-Id` that is not an identifier,
+/// an administrative `Service-Type` or an unknown dictionary version is a
+/// `Validation` error and nothing is rendered.
+pub fn render_reply(vlan_id: u16, profile: &EffectiveReplyProfile) -> AxiamResult<RenderedReply> {
+    let Some(table) = dictionary(&profile.dictionary) else {
+        return Err(invalid("unknown reply dictionary version"));
+    };
+    if !is_valid_vlan(vlan_id) {
+        return Err(invalid("the segment's VLAN is outside 1 to 4094"));
+    }
+    if !(SESSION_TIMEOUT_FLOOR_SECS..=SESSION_TIMEOUT_CAP_CEILING_SECS)
+        .contains(&profile.session_timeout_secs)
+    {
+        return Err(invalid("Session-Timeout is outside its bounds"));
+    }
+    if let Some(idle) = profile.idle_timeout_secs
+        && !(IDLE_TIMEOUT_FLOOR_SECS..=profile.session_timeout_secs).contains(&idle)
+    {
+        return Err(invalid("Idle-Timeout is outside its bounds"));
+    }
+    if let Some(filter) = &profile.filter_id
+        && !is_valid_identifier(filter)
+    {
+        return Err(invalid("Filter-Id is not a valid identifier"));
+    }
+    if profile
+        .service_type
+        .is_some_and(ServiceType::is_admin_class)
+    {
+        return Err(invalid(
+            "the administrative Service-Type values are disabled",
+        ));
+    }
+
+    let mut attributes = Vec::with_capacity(table.len());
+    for entry in table {
+        let (value, tag) = match entry.name {
+            "Tunnel-Type" => (ReplyValue::Integer(TUNNEL_TYPE_VLAN), Some(0)),
+            "Tunnel-Medium-Type" => (ReplyValue::Integer(TUNNEL_MEDIUM_TYPE_802), Some(0)),
+            // Decimal, no sign, no leading zero (RFC 3580 §3.31), and no tag
+            // octet on the wire: see `ReplyAttribute::tag`.
+            "Tunnel-Private-Group-Id" => (ReplyValue::Text(vlan_id.to_string()), None),
+            "Session-Timeout" => (ReplyValue::Integer(profile.session_timeout_secs), None),
+            "Termination-Action" => (
+                ReplyValue::Integer(profile.termination_action.value()),
+                None,
+            ),
+            "Idle-Timeout" => match profile.idle_timeout_secs {
+                Some(idle) => (ReplyValue::Integer(idle), None),
+                None => continue,
+            },
+            "Filter-Id" => match &profile.filter_id {
+                Some(filter) => (ReplyValue::Text(filter.clone()), None),
+                None => continue,
+            },
+            "Service-Type" => match profile.service_type {
+                Some(service) => (ReplyValue::Integer(service.value()), None),
+                None => continue,
+            },
+            // A dictionary row this encoder does not know how to fill is a
+            // code defect; refusing is the fail-closed answer.
+            _ => return Err(invalid("a dictionary attribute has no encoder")),
+        };
+        attributes.push(ReplyAttribute {
+            name: entry.name.to_owned(),
+            number: entry.number,
+            value,
+            tag,
+        });
+    }
+    Ok(RenderedReply {
+        dictionary: profile.dictionary.clone(),
+        attributes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +566,92 @@ mod tests {
 
     fn filters() -> Vec<String> {
         vec!["corp-acl".into(), "other".into()]
+    }
+
+    fn effective() -> EffectiveReplyProfile {
+        EffectiveReplyProfile {
+            dictionary: REPLY_DICTIONARY_V1.into(),
+            session_timeout_secs: 900,
+            session_timeout_clamped: false,
+            termination_action: TerminationAction::RadiusRequest,
+            idle_timeout_secs: Some(120),
+            filter_id: Some("corp-acl".into()),
+            service_type: Some(ServiceType::FramedUser),
+        }
+    }
+
+    /// The tunnel triple of RFC 3580 §3.31 and the profile's fields, in
+    /// dictionary order; the integers carry tag 0 on the wire, the VLAN string
+    /// carries none (W5.4: FreeRADIUS 3.2.8 emits no tag octet for a string
+    /// tagged 0).
+    #[test]
+    fn the_reply_is_the_tunnel_triple_and_the_profile() {
+        let reply = render_reply(20, &effective()).unwrap();
+        let json = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "dictionary": "axiam-radius-reply/1",
+                "attributes": [
+                    {"name": "Tunnel-Type", "number": 64, "value": 13, "tag": 0},
+                    {"name": "Tunnel-Medium-Type", "number": 65, "value": 6, "tag": 0},
+                    {"name": "Tunnel-Private-Group-Id", "number": 81, "value": "20"},
+                    {"name": "Session-Timeout", "number": 27, "value": 900},
+                    {"name": "Termination-Action", "number": 29, "value": 1},
+                    {"name": "Idle-Timeout", "number": 28, "value": 120},
+                    {"name": "Filter-Id", "number": 11, "value": "corp-acl"},
+                    {"name": "Service-Type", "number": 6, "value": 2},
+                ]
+            })
+        );
+        // The VLAN string's first octet is above 0x1F, which is what lets it
+        // go on the wire untagged (RFC 2868 §3.6).
+        assert!(reply.attributes[2].tag.is_none());
+        assert!(b"20"[0] > 0x1F);
+    }
+
+    #[test]
+    fn unset_fields_are_absent_not_empty() {
+        let mut p = effective();
+        p.idle_timeout_secs = None;
+        p.filter_id = None;
+        p.service_type = None;
+        let names: Vec<_> = render_reply(4094, &p)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Tunnel-Type",
+                "Tunnel-Medium-Type",
+                "Tunnel-Private-Group-Id",
+                "Session-Timeout",
+                "Termination-Action"
+            ]
+        );
+    }
+
+    /// The encoder checks every value again, whatever its caller checked.
+    #[test]
+    fn the_encoder_refuses_what_the_dictionary_refuses() {
+        assert!(render_reply(0, &effective()).is_err());
+        assert!(render_reply(4095, &effective()).is_err());
+        let cases: [fn(&mut EffectiveReplyProfile); 6] = [
+            |p| p.session_timeout_secs = 0,
+            |p| p.session_timeout_secs = 86_401,
+            |p| p.idle_timeout_secs = Some(901),
+            |p| p.filter_id = Some("a b".into()),
+            |p| p.service_type = Some(ServiceType::AdministrativeUser),
+            |p| p.dictionary = "axiam-radius-reply/2".into(),
+        ];
+        for break_it in cases {
+            let mut p = effective();
+            break_it(&mut p);
+            assert!(render_reply(20, &p).is_err(), "{p:?}");
+        }
     }
 
     #[test]

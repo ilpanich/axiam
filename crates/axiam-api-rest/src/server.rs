@@ -25,6 +25,12 @@ use crate::openapi::api_doc;
 /// one NAT.
 const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 
+/// RADIUS D4 (W6.4): how many times the per-caller allowance of the decision
+/// route (`network_decide_per_min`) its per-address backstop admits. Sized so
+/// that several FreeRADIUS servers behind one address never meet it, while a
+/// burst of calls with a token that does not authenticate does.
+pub const NETWORK_DECIDE_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -1814,6 +1820,28 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                                 rate_limit_cfg.network_admin_per_min,
                             )),
                     )
+            )
+            // --- The RADIUS placement decision (RADIUS D4, W6.4; design note
+            // §6.3, T-468). The caller is FreeRADIUS's service account with a
+            // certificate-bound token, so its bucket is the caller's `sub`
+            // (`network_decide_per_min`, D-6), spent by the handler once the
+            // token has authenticated: the key does not exist before that, as
+            // for the CIBA pending list. The route's limiter from its first
+            // commit is therefore a per-address backstop ten times the per-caller
+            // allowance, for a token that does not authenticate; two callers
+            // behind one address keep a bucket each.
+            .service(
+                web::resource("/network/decide")
+                    .app_data(handlers::network_decide::json_config())
+                    .route(
+                        web::post()
+                            .to(handlers::network_decide::decide::<C>)
+                            .wrap(build_governor(
+                                rate_limit_cfg
+                                    .network_decide_per_min
+                                    .saturating_mul(NETWORK_DECIDE_BACKSTOP_FACTOR),
+                            )),
+                    ),
             )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---

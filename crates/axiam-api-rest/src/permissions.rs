@@ -448,10 +448,31 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "scim_tokens",
     // RADIUS D4 (W6.1): a segment's profile decides what VLAN and ACL a device
     // gets, and writing one is a grant (design note §5.2). A network
-    // administrator is a human's role; the one machine caller, FreeRADIUS's
-    // `network:decide` on the decision route, is W6.4's to place.
+    // administrator is a human's role. The one machine caller, FreeRADIUS's
+    // `network:decide` on the decision route, is placed by W6.4 as a named
+    // exception (`CERTIFICATE_BOUND_MACHINE_ROUTES`), not by admitting the
+    // family: a service account still cannot reach a management route.
     "network",
 ];
+
+/// Routes of a **human-only** family whose one caller is a machine, admitted by
+/// name, each with the condition it adds — an exception to
+/// [`HUMAN_ONLY_FAMILIES`], never a widening of a family.
+///
+/// Today one: `POST /api/v1/network/decide` (RADIUS D4, W6.4; design note §6.3,
+/// T-468). Its caller is a FreeRADIUS server's service account, so a person's
+/// token is refused (`401`); and because it is an authenticated oracle on
+/// "is this certificate good here", a service account is admitted only with a
+/// token **bound to its own certificate** (`cnf.x5t#S256`), presented over mTLS
+/// with that certificate, which still resolves to the same account: a plain
+/// bearer token of the same account is `401`. Admitting the whole `network`
+/// family instead would hand every service account the management routes'
+/// audience, which is the decision D-5 keeps human.
+///
+/// Each entry is `(method, path, permission)`; the route is in
+/// [`ROUTE_PERMISSION_MAP`] too, and `m2m_management_test` holds the two in step.
+pub const CERTIFICATE_BOUND_MACHINE_ROUTES: &[(&str, &str, &str)] =
+    &[("POST", "/api/v1/network/decide", "network:decide")];
 
 // ---------------------------------------------------------------------------
 // Public-path allowlist (D-04)
@@ -1393,6 +1414,10 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/network/profiles/{segment_id}",
         "network:profiles_write",
     ),
+    // The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
+    // node the decision reads, inside the handler. Its caller is a machine, by
+    // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.
+    ("POST", "/api/v1/network/decide", "network:decide"),
     // WebAuthn Attestation Policy (X3 wave 3)
     (
         "GET",

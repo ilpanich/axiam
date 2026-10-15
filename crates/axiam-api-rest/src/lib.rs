@@ -12,6 +12,7 @@ pub mod extractors;
 pub mod handlers;
 pub mod health;
 pub mod middleware;
+pub mod network_decide_guard;
 pub mod network_gate;
 pub mod openapi;
 pub mod permissions;

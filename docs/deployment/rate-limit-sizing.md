@@ -147,6 +147,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | 60 | 300 | 3000 |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | 60 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` | 6000 | 6000 | 6000 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | 5 | 5 |
@@ -182,6 +183,19 @@ stored and answered, so the response reveals nothing about the user), and each
 `auth_req_id` carries its own polling interval at the token endpoint, raised by
 `slow_down`. The CIBA grant's token requests are counted by `TOKEN_PER_MIN`
 like every other grant.
+
+`NETWORK_DECIDE_PER_MIN` (RADIUS D4, maintainer decision D-6) is the bucket of
+`POST /api/v1/network/decide`, the placement decision a FreeRADIUS server asks
+for once per EAP-TLS authentication. It is a machine-preset key, but it is
+**keyed on the authenticated caller** — the token's `sub`, the FreeRADIUS
+server's service account, whose token must be bound to its own certificate —
+not on the address and not on `AXIAM__RATE_LIMIT__KEY`: two FreeRADIUS servers
+behind one NAT have a bucket each, and a stolen caller credential is bounded by
+its own. Six thousand a minute is a hundred decisions a second, a power-restore
+storm at one site; that storm is the same under every network posture, so the
+presets leave it at 6 000. The caller key exists only once the handler has
+authenticated the token, so the bucket is spent there; the route also carries a
+per-address backstop ten times as large, for tokens that do not authenticate.
 
 The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
 bucket per gRPC **method family** (see §3.1). Leave `GRPC_IDENTITY_PER_SEC`

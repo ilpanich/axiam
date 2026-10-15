@@ -271,6 +271,14 @@ ENDPOINTS = {
         None,
         "POST, PUT, DELETE /api/v1/network/{segments,profiles}[/{id}] (network segment and reply profile writes; one bucket per route)",
     ),
+    # RADIUS D4 / W6.4 (D-6). Unmeasured: the caller is a FreeRADIUS service
+    # account whose token is bound to its own certificate, so a cell needs the
+    # p3-mtls handshake and a device certificate per decision; and the bucket is
+    # keyed on that caller's `sub`, not on the address a k6 cell varies.
+    "network_decide_per_min": (
+        None,
+        "POST /api/v1/network/decide (RADIUS placement decision; per authenticated caller)",
+    ),
     # #565 (T-102). The certificate revocation list route carries its limiter
     # from the commit that added it, so it has a row from that commit too.
     # Unmeasured because nothing in the bench drives it: a relying party
@@ -341,7 +349,7 @@ def read_configured_defaults():
                   "bc_authorize_per_min", "ciba_approval_per_min", "device_login_per_min",
                   "ssf_per_min", "ssf_admin_per_min", "saml_admin_per_min",
                   "directory_admin_per_min", "scim_target_admin_per_min",
-                  "network_admin_per_min",
+                  "network_admin_per_min", "network_decide_per_min",
                   # #565: the certificate revocation list route.
                   "crl_per_min",
                   # #529: the email delivery self-test routes.

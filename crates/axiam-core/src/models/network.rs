@@ -48,9 +48,10 @@ use uuid::Uuid;
 
 use crate::error::{AxiamError, AxiamResult};
 use crate::models::radius_reply::{
-    DEFAULT_SESSION_TIMEOUT_MAX_SECS, MAX_FILTER_IDS, ReplyProfileInput,
-    SESSION_TIMEOUT_CAP_CEILING_SECS, SESSION_TIMEOUT_FLOOR_SECS, ServiceType, TerminationAction,
-    is_valid_identifier, is_valid_vlan,
+    DEFAULT_SESSION_TIMEOUT_MAX_SECS, EffectiveReplyProfile, MAX_FILTER_IDS, RenderedReply,
+    ReplyProfileInput, SESSION_TIMEOUT_CAP_CEILING_SECS, SESSION_TIMEOUT_FLOOR_SECS, ServiceType,
+    TerminationAction, clamp_session_timeout, dictionary, is_valid_identifier, is_valid_vlan,
+    render_reply,
 };
 
 /// The name of the reserved root: `/network`.
@@ -435,6 +436,194 @@ impl SetNetworkPolicy {
 }
 
 // ---------------------------------------------------------------------------
+// The decision's read of a site (design note §3.4, §4.3)
+// ---------------------------------------------------------------------------
+
+/// A reply profile **as stored**, before the decision path re-validates it.
+///
+/// The management read ([`ReplyProfile`]) is typed, so a row edited in the
+/// datastore behind the API either fails to read or reads as something it was
+/// never validated as. The decision path must instead see the row as it is and
+/// decide, fail-closed, whether it may still be rendered (design note §3.4:
+/// "re-validated on every read that produces a reply"). Every value-bearing
+/// column is therefore kept in its stored form here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReplyProfile {
+    /// The owning segment, which is also the profile's id.
+    pub segment_id: Uuid,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// The dictionary version the row names.
+    pub dictionary: String,
+    /// `Session-Timeout` as stored.
+    pub session_timeout_secs: i64,
+    /// `Termination-Action` as stored (`default` / `radius_request`).
+    pub termination_action: String,
+    /// `Idle-Timeout` as stored.
+    pub idle_timeout_secs: Option<i64>,
+    /// `Filter-Id` as stored.
+    pub filter_id: Option<String>,
+    /// `Service-Type` as stored.
+    pub service_type: Option<String>,
+    /// The row's version.
+    pub version: u64,
+}
+
+/// Why a stored profile may no longer be rendered: the internal rule, for the
+/// `reply_profile.invalid` audit row (design note §5.4). Never on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDefect {
+    /// The rule the row fails: `3.4:segment` (the owning segment's own row is
+    /// outside its bounds), `3.4:dictionary` (an unknown dictionary version),
+    /// `3.3:admin-class` (an administrative `Service-Type`), `5.2:H3-envelope`
+    /// (a `Filter-Id` the segment no longer declares) or `3.4:value` (any other
+    /// value outside the dictionary's bounds).
+    pub rule: &'static str,
+    /// What was wrong, in words.
+    pub reason: String,
+}
+
+impl ProfileDefect {
+    fn new(rule: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            rule,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl StoredReplyProfile {
+    /// Re-validate the row against its dictionary, the owning `segment`'s
+    /// envelope and the tenant's current `cap`, and render the reply it would
+    /// produce (design note §3.4).
+    ///
+    /// A value above the cap is clamped down, which only narrows; every other
+    /// failure is a [`ProfileDefect`] and the segment is **not a candidate**.
+    /// The cap is applied by clamping, not by refusing, because lowering it is
+    /// allowed below stored profiles (§5.2); the absolute ceiling
+    /// ([`SESSION_TIMEOUT_CAP_CEILING_SECS`]) is a refusal.
+    pub fn revalidate(
+        &self,
+        segment: &NetworkSegment,
+        cap: u32,
+    ) -> Result<(EffectiveReplyProfile, RenderedReply), ProfileDefect> {
+        if segment.id != self.segment_id || segment.tenant_id != self.tenant_id {
+            return Err(ProfileDefect::new(
+                "3.4:segment",
+                "the profile is not the segment's",
+            ));
+        }
+        validate_segment_fields(
+            segment.kind,
+            segment.vlan_id,
+            &segment.filter_ids,
+            segment.rank,
+        )
+        .map_err(|e| ProfileDefect::new("3.4:segment", e.to_string()))?;
+        if dictionary(&self.dictionary).is_none() {
+            return Err(ProfileDefect::new(
+                "3.4:dictionary",
+                "unknown reply dictionary version",
+            ));
+        }
+        let value = |reason: &str| ProfileDefect::new("3.4:value", reason);
+        let session_timeout_secs = u32::try_from(self.session_timeout_secs)
+            .map_err(|_| value("session_timeout_secs is out of range"))?;
+        let termination_action = TerminationAction::parse(&self.termination_action)
+            .ok_or_else(|| value("unknown termination_action"))?;
+        let idle_timeout_secs = self
+            .idle_timeout_secs
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| value("idle_timeout_secs is out of range"))?;
+        let service_type = self
+            .service_type
+            .as_deref()
+            .map(|s| ServiceType::parse(s).ok_or_else(|| value("unknown service_type")))
+            .transpose()?;
+        if service_type.is_some_and(ServiceType::is_admin_class) {
+            return Err(ProfileDefect::new(
+                "3.3:admin-class",
+                "an administrative Service-Type is disabled",
+            ));
+        }
+        if let Some(filter) = &self.filter_id
+            && !segment.filter_ids.iter().any(|f| f == filter)
+        {
+            return Err(ProfileDefect::new(
+                "5.2:H3-envelope",
+                "filter_id is outside the segment's declared filter_ids",
+            ));
+        }
+        let input = ReplyProfileInput {
+            dictionary: self.dictionary.clone(),
+            session_timeout_secs,
+            termination_action,
+            idle_timeout_secs,
+            filter_id: self.filter_id.clone(),
+            service_type,
+        };
+        input
+            .validate(&segment.filter_ids, SESSION_TIMEOUT_CAP_CEILING_SECS)
+            .map_err(|e| ProfileDefect::new("3.4:value", e.to_string()))?;
+
+        let effective_timeout = clamp_session_timeout(session_timeout_secs, cap);
+        let effective = EffectiveReplyProfile {
+            dictionary: input.dictionary,
+            session_timeout_secs: effective_timeout,
+            session_timeout_clamped: effective_timeout != session_timeout_secs,
+            termination_action,
+            idle_timeout_secs: idle_timeout_secs.map(|i| i.min(effective_timeout)),
+            filter_id: input.filter_id,
+            service_type,
+        };
+        let reply = render_reply(segment.vlan_id, &effective)
+            .map_err(|e| ProfileDefect::new("3.4:value", e.to_string()))?;
+        Ok((effective, reply))
+    }
+}
+
+/// Choose the segment a device is placed on (design note §4.3 steps 2 to 5).
+///
+/// `segments[i]` is a candidate when it is enabled, `joinable[i]` (the
+/// subject's `check_access(network:join, segment)` answered **Allow**, with
+/// deny-override in force) and `usable[i]` (its profile passed re-validation).
+/// Among `access` candidates the lowest `rank` wins (unique per site, so the
+/// choice is decided at write time, not by query order); a `quarantine`
+/// candidate is used only when no `access` candidate remains — which is what
+/// deny-override makes the case for a quarantined device (§4.4), so quarantine
+/// needs no precedence rule of its own. Two quarantine candidates at one site
+/// are ordered by name. `None` is "no candidate": an Access-Reject, with no
+/// fallback segment.
+///
+/// The three slices are read in step; a length mismatch is no candidate.
+#[must_use]
+pub fn select_placement(
+    segments: &[NetworkSegment],
+    joinable: &[bool],
+    usable: &[bool],
+) -> Option<usize> {
+    if segments.len() != joinable.len() || segments.len() != usable.len() {
+        return None;
+    }
+    let candidates = || {
+        segments
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| s.enabled && joinable[*i] && usable[*i])
+    };
+    candidates()
+        .filter(|(_, s)| s.kind == NetworkSegmentKind::Access)
+        .min_by_key(|(_, s)| (s.rank.unwrap_or(u32::MAX), s.name.clone()))
+        .or_else(|| {
+            candidates()
+                .filter(|(_, s)| s.kind == NetworkSegmentKind::Quarantine)
+                .min_by_key(|(_, s)| s.name.clone())
+        })
+        .map(|(i, _)| i)
+}
+
+// ---------------------------------------------------------------------------
 // The reserved nodes' ids
 // ---------------------------------------------------------------------------
 
@@ -683,6 +872,131 @@ impl NetworkWriteClearance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn segment(
+        kind: NetworkSegmentKind,
+        name: &str,
+        vlan: u16,
+        rank: Option<u32>,
+    ) -> NetworkSegment {
+        let now = Utc::now();
+        NetworkSegment {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::nil(),
+            name: name.into(),
+            site_key: "hq".into(),
+            kind,
+            vlan_id: vlan,
+            filter_ids: vec!["corp-acl".into()],
+            rank,
+            enabled: true,
+            version: 1,
+            created_by: Uuid::nil(),
+            updated_by: Uuid::nil(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn stored(segment: &NetworkSegment) -> StoredReplyProfile {
+        StoredReplyProfile {
+            segment_id: segment.id,
+            tenant_id: segment.tenant_id,
+            dictionary: crate::models::radius_reply::REPLY_DICTIONARY_V1.into(),
+            session_timeout_secs: 1800,
+            termination_action: "radius_request".into(),
+            idle_timeout_secs: Some(1200),
+            filter_id: Some("corp-acl".into()),
+            service_type: Some("framed_user".into()),
+            version: 3,
+        }
+    }
+
+    #[test]
+    fn a_stored_profile_is_clamped_to_the_current_cap_at_read() {
+        let s = segment(NetworkSegmentKind::Access, "corp", 10, Some(10));
+        let (effective, reply) = stored(&s).revalidate(&s, 900).unwrap();
+        assert_eq!(effective.session_timeout_secs, 900);
+        assert!(effective.session_timeout_clamped);
+        assert_eq!(effective.idle_timeout_secs, Some(900));
+        assert_eq!(reply.attributes[2].name, "Tunnel-Private-Group-Id");
+        let (effective, _) = stored(&s).revalidate(&s, 3600).unwrap();
+        assert_eq!(effective.session_timeout_secs, 1800);
+        assert!(!effective.session_timeout_clamped);
+    }
+
+    /// A row edited behind the API is not rendered, and says which rule it
+    /// fails (design note §3.4, fail closed).
+    #[test]
+    fn a_stored_profile_that_no_longer_validates_is_a_defect() {
+        let s = segment(NetworkSegmentKind::Access, "corp", 10, Some(10));
+        type Break = fn(&mut StoredReplyProfile);
+        let cases: [(Break, &str); 7] = [
+            (
+                |p| p.dictionary = "axiam-radius-reply/9".into(),
+                "3.4:dictionary",
+            ),
+            (
+                |p| p.service_type = Some("administrative_user".into()),
+                "3.3:admin-class",
+            ),
+            (
+                |p| p.filter_id = Some("admin-acl".into()),
+                "5.2:H3-envelope",
+            ),
+            (|p| p.session_timeout_secs = 0, "3.4:value"),
+            (|p| p.session_timeout_secs = 86_401, "3.4:value"),
+            (|p| p.termination_action = "never".into(), "3.4:value"),
+            (|p| p.idle_timeout_secs = Some(5), "3.4:value"),
+        ];
+        for (break_it, rule) in cases {
+            let mut p = stored(&s);
+            break_it(&mut p);
+            assert_eq!(p.revalidate(&s, 3600).unwrap_err().rule, rule, "{p:?}");
+        }
+        // Another segment's profile is not this segment's.
+        let other = segment(NetworkSegmentKind::Access, "iot", 20, Some(20));
+        assert_eq!(
+            stored(&other).revalidate(&s, 3600).unwrap_err().rule,
+            "3.4:segment"
+        );
+    }
+
+    /// §4.3: lowest rank among access candidates; quarantine only when no
+    /// access candidate remains; disabled, unjoinable and unusable segments are
+    /// never candidates.
+    #[test]
+    fn placement_is_the_lowest_ranked_access_candidate_then_quarantine() {
+        let segs = vec![
+            segment(NetworkSegmentKind::Access, "iot", 20, Some(20)),
+            segment(NetworkSegmentKind::Access, "corp", 10, Some(10)),
+            segment(NetworkSegmentKind::Quarantine, "q", 999, None),
+        ];
+        assert_eq!(select_placement(&segs, &[true; 3], &[true; 3]), Some(1));
+        assert_eq!(
+            select_placement(&segs, &[true, false, true], &[true; 3]),
+            Some(0)
+        );
+        assert_eq!(
+            select_placement(&segs, &[true, true, true], &[false, false, true]),
+            Some(2)
+        );
+        assert_eq!(
+            select_placement(&segs, &[false, false, true], &[true; 3]),
+            Some(2)
+        );
+        assert_eq!(
+            select_placement(&segs, &[false, false, false], &[true; 3]),
+            None
+        );
+        let mut disabled = segs.clone();
+        disabled[2].enabled = false;
+        assert_eq!(
+            select_placement(&disabled, &[false, false, true], &[true; 3]),
+            None
+        );
+        assert_eq!(select_placement(&segs, &[true], &[true; 3]), None);
+    }
 
     #[test]
     fn reserved_node_ids_are_per_tenant_and_per_path() {

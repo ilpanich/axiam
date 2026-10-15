@@ -182,6 +182,9 @@ pub struct MachineLimitPreset {
     pub device_login_per_min: u32,
     /// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
     pub bc_authorize_per_min: u32,
+    /// `POST /api/v1/network/decide` per minute per authenticated caller
+    /// (RADIUS D4, W6.4; maintainer decision D-6).
+    pub network_decide_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
     /// root (`axiam-server::main`). Kept here so the whole family has one
@@ -221,6 +224,8 @@ pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS D4 / W6.4, preset (D-6).
+pub const ENV_NETWORK_DECIDE_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS D4 / W6.3, never preset.
 pub const ENV_NETWORK_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
@@ -296,6 +301,12 @@ impl RateLimitProfile {
                 // of sign-in requests is the per-user notification bucket,
                 // which no preset moves.
                 bc_authorize_per_min: 600,
+                // RADIUS D4 (D-6): the shipped 6 000 in every profile. The
+                // bucket is the authenticated caller's (one FreeRADIUS service
+                // account), so a NAT'd fleet is not what moves it; a site's
+                // power-restore storm is, and that is the same storm whatever
+                // the deployment's network posture.
+                network_decide_per_min: 6_000,
                 grpc_authz_per_sec: 1_000,
             }),
             // Private-network sizing: 6 000/min token = 100/s per client
@@ -311,6 +322,7 @@ impl RateLimitProfile {
                 authz_check_per_min: 60_000,
                 device_login_per_min: 3_000,
                 bc_authorize_per_min: 6_000,
+                network_decide_per_min: 6_000,
                 grpc_authz_per_sec: 5_000,
             }),
         }
@@ -606,6 +618,30 @@ pub struct RateLimitConfig {
     /// a minute is far more than a person administering a network produces. One
     /// bucket per route (six, named `network_*`); per-IP; never preset.
     pub network_admin_per_min: u32,
+    /// Max `POST /api/v1/network/decide` requests per minute **per
+    /// authenticated caller** (default: 6 000 — RADIUS D4, W6.4; maintainer
+    /// decision D-6; `claude_dev/radius-reply-profile-design.md` §6.3).
+    ///
+    /// The decision route's caller is a FreeRADIUS server's service account,
+    /// asking once per EAP-TLS authentication. Six thousand a minute is a
+    /// hundred a second: a power-restore storm at one site, where every access
+    /// point and device re-authenticates within a minute (spike §6.1).
+    ///
+    /// **Keyed on the token's `sub`, not on the address** (D-6, T-468): the
+    /// one thing that distinguishes two FreeRADIUS servers behind one NAT is
+    /// the credential each presents, and a stolen credential is bounded by its
+    /// own bucket whatever address it is used from. The key exists only once
+    /// the handler has authenticated the certificate-bound token, so the
+    /// bucket is spent there (`network_decide:{tenant}:{sub}`); the route also
+    /// carries a per-address backstop ten times this size, for a token that
+    /// does not authenticate.
+    ///
+    /// **In the machine presets** ([`MachineLimitPreset::network_decide_per_min`]),
+    /// at the same 6 000 in `gateway` and `mesh`: what sizes it is a site's
+    /// storm, which no network posture changes. An operator who pins
+    /// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` keeps their value under any
+    /// profile, as for every preset key.
+    pub network_decide_per_min: u32,
     /// Max requests per minute per IP to each of the CIBA approval routes — the
     /// signed-in user's half of a backchannel authentication request:
     /// `GET /api/v1/ciba/requests` (the pending list, #566),
@@ -821,6 +857,8 @@ impl Default for RateLimitConfig {
             // RADIUS D4 / W6.3 — see the field docs. Administrator writes that
             // each place devices on a VLAN or shape what the placement gives.
             network_admin_per_min: 30,
+            // RADIUS D4 / W6.4 (D-6) — see the field docs. Per caller.
+            network_decide_per_min: 6_000,
             // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
             ciba_approval_per_min: 30,
             // #565 (T-102) — see the field docs. A relying party fetches once
@@ -919,6 +957,11 @@ impl RateLimitConfig {
                 ENV_BC_AUTHORIZE_PER_MIN,
                 &mut self.bc_authorize_per_min,
                 preset.bc_authorize_per_min,
+            ),
+            (
+                ENV_NETWORK_DECIDE_PER_MIN,
+                &mut self.network_decide_per_min,
+                preset.network_decide_per_min,
             ),
         ] {
             if is_set(env) {
@@ -1066,6 +1109,10 @@ impl RateLimitConfig {
             "network_admin_per_min must be >= 1"
         );
         assert!(
+            self.network_decide_per_min >= 1,
+            "network_decide_per_min must be >= 1"
+        );
+        assert!(
             self.ciba_approval_per_min >= 1,
             "ciba_approval_per_min must be >= 1"
         );
@@ -1202,6 +1249,7 @@ mod tests {
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
             (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
             (ENV_BC_AUTHORIZE_PER_MIN, d.bc_authorize_per_min),
+            (ENV_NETWORK_DECIDE_PER_MIN, d.network_decide_per_min),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -1257,6 +1305,7 @@ mod tests {
                 (ENV_AUTHZ_CHECK_PER_MIN, cfg.authz_check_per_min),
                 (ENV_DEVICE_LOGIN_PER_MIN, cfg.device_login_per_min),
                 (ENV_BC_AUTHORIZE_PER_MIN, cfg.bc_authorize_per_min),
+                (ENV_NETWORK_DECIDE_PER_MIN, cfg.network_decide_per_min),
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1526,6 +1575,7 @@ mod tests {
         assert_eq!(d.ssf_admin_per_min, 30);
         assert_eq!(d.scim_target_admin_per_min, 30);
         assert_eq!(d.network_admin_per_min, 30);
+        assert_eq!(d.network_decide_per_min, 6_000);
         assert_eq!(d.ciba_approval_per_min, 30);
         assert_eq!(d.crl_per_min, 60);
         assert_eq!(d.email_test_per_min, 10);

@@ -52,7 +52,7 @@ use axiam_core::models::network::{
     NetworkSegmentUpdate, NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment,
     NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH, RESOURCE_TYPE_NETWORK_ROOT,
     RESOURCE_TYPE_NETWORK_SEGMENT, RESOURCE_TYPE_NETWORK_SITE, ReplyProfile, ReplyProfileReplace,
-    SetNetworkPolicy, reserved_node_id, validate_segment_fields,
+    SetNetworkPolicy, StoredReplyProfile, reserved_node_id, validate_segment_fields,
 };
 use axiam_core::models::radius_reply::{
     DEFAULT_SESSION_TIMEOUT_MAX_SECS, ReplyProfileInput, SESSION_TIMEOUT_CAP_CEILING_SECS,
@@ -562,6 +562,39 @@ impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository
         Ok(paginate(items, count_rows, &pagination))
     }
 
+    async fn list_site(&self, tenant_id: Uuid, site_key: &str) -> AxiamResult<Vec<NetworkSegment>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT * FROM network_segment \
+                 WHERE tenant_id = $tenant_id AND site_key = $site_key \
+                 ORDER BY kind ASC, rank ASC, name ASC",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("site_key", site_key.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<SegmentRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row.into_domain() {
+                Ok(segment) => Some(segment),
+                Err(error) => {
+                    // Fail closed: a segment that does not read is no
+                    // placement candidate, and the decision goes on without it.
+                    tracing::warn!(
+                        target: "axiam::network_decide",
+                        %tenant_id,
+                        %error,
+                        "a network segment row does not read back and is not a candidate"
+                    );
+                    None
+                }
+            })
+            .collect())
+    }
+
     async fn update(
         &self,
         tenant_id: Uuid,
@@ -746,6 +779,21 @@ struct ProfileRow {
 }
 
 impl ProfileRow {
+    /// The row as stored, for the decision path to re-validate.
+    fn into_stored(self) -> Result<StoredReplyProfile, DbError> {
+        Ok(StoredReplyProfile {
+            segment_id: parse_uuid(&self.segment_id, SEGMENT_ENTITY)?,
+            tenant_id: parse_uuid(&self.tenant_id, "tenant")?,
+            dictionary: self.dictionary,
+            session_timeout_secs: self.session_timeout_secs,
+            termination_action: self.termination_action,
+            idle_timeout_secs: self.idle_timeout_secs,
+            filter_id: self.filter_id,
+            service_type: self.service_type,
+            version: to_u64(self.version, "version")?,
+        })
+    }
+
     /// The effective profile under `cap`: `Session-Timeout` lowered to it, and
     /// `Idle-Timeout` kept within the result.
     fn into_effective(self, cap: u32) -> Result<ReplyProfile, DbError> {
@@ -965,6 +1013,41 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
 
     async fn get_by_segment(&self, tenant_id: Uuid, segment_id: Uuid) -> AxiamResult<ReplyProfile> {
         self.effective(tenant_id, segment_id).await
+    }
+
+    async fn list_stored(
+        &self,
+        tenant_id: Uuid,
+        segment_ids: &[Uuid],
+    ) -> AxiamResult<Vec<StoredReplyProfile>> {
+        let ids: Vec<String> = segment_ids.iter().map(Uuid::to_string).collect();
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT * FROM reply_profile \
+                 WHERE tenant_id = $tenant_id AND segment_id IN $ids",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("ids", ids))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<ProfileRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row.into_stored() {
+                Ok(profile) => Some(profile),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "axiam::network_decide",
+                        %tenant_id,
+                        %error,
+                        "a reply profile row does not read back and is not rendered"
+                    );
+                    None
+                }
+            })
+            .collect())
     }
 
     async fn list_page(

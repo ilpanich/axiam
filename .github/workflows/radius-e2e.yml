@@ -9,6 +9,11 @@ name: RADIUS E2E
 # `eapol_test` authenticates (accept), is refused by a wrong CA, and is refused
 # once a revoked certificate's list has reached FreeRADIUS (revoked-after-refresh).
 #
+# The same file also runs the D4 profile (W6.5): a second test in which FreeRADIUS
+# asks AXIAM, over mutual TLS that ends at AXIAM, where each device goes
+# (docs/pki/freeradius.md, section 5). It adds no container: AXIAM runs in the
+# test process and FreeRADIUS is the same pinned image.
+#
 # What it runs: `crates/axiam-server/tests/radius_e2e.rs`, gated by
 # AXIAM_E2E_RADIUS=1 (without it the test prints SKIPPED, which is why the CI
 # `test` job needs no containers). With the variable set a missing docker,
@@ -39,8 +44,15 @@ on:
       - "crates/axiam-api-rest/src/handlers/crl.rs"
       - "crates/axiam-api-rest/src/handlers/certificates.rs"
       - "crates/axiam-api-rest/src/handlers/ca_certificates.rs"
+      # D4 (the decision per authentication): the route, the gate it reads, the
+      # models it renders, and the override that turns it on.
+      - "crates/axiam-api-rest/src/handlers/network_decide.rs"
+      - "crates/axiam-authz/src/network_gate*"
+      - "crates/axiam-core/src/models/network.rs"
+      - "crates/axiam-core/src/models/radius_reply.rs"
       - "docker/radius/**"
       - "docker/docker-compose.radius.yml"
+      - "docker/docker-compose.radius-d4.yml"
       - "docs/pki/freeradius.md"
       - ".github/workflows/radius-e2e.yml"
   workflow_dispatch:

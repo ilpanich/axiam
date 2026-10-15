@@ -1,0 +1,118 @@
+# The modules of the D4 profile (docker/docker-compose.radius-d4.yml mounts this
+# file where the D3 profile's placement-table module is, so under D4 there is no
+# table). docs/pki/freeradius.md, "The decision per authentication".
+#
+# FreeRADIUS calls AXIAM twice per authentication at most:
+#
+#   axiam_token   POST /api/v1/auth/device   this server's token (cached)
+#   axiam_decide  POST /api/v1/network/decide
+#
+# BOTH over mutual TLS, with the same certificate: the token AXIAM issues for the
+# first is bound to that certificate (RFC 8705, cnf x5t#S256) and the second
+# refuses it on any connection that does not present it. That is only possible
+# if the TLS handshake ends AT AXIAM. A proxy or load balancer in between that
+# terminates TLS makes every decision a 401.
+#
+# The certificate is a `Service` certificate the tenant's signing CA issued and
+# AXIAM bound to the service account that holds `network:decide` on the site:
+# rest-chain.pem is that certificate followed by the signing CA, and rest.key its
+# key (re-encoded to PKCS#8 version 1, as for a supplicant: the guide's "Issue
+# and bind"). axiam-ca.pem is the CA that signed AXIAM's own server certificate.
+
+rest axiam_token {
+	connect_uri = "$ENV{AXIAM_D4_URL}"
+	connect_timeout = 3.0
+	http_negotiation = 1.1
+
+	tls {
+		ca_info_file = /etc/freeradius/axiam/axiam-ca.pem
+		certificate_file = /etc/freeradius/axiam/rest-chain.pem
+		private_key_file = /etc/freeradius/axiam/rest.key
+		check_cert = yes
+		check_cert_cn = yes
+	}
+
+	post-auth {
+		uri = "${..connect_uri}/api/v1/auth/device"
+		method = 'post'
+		body = 'none'
+		# The body is kept whole, in reply:REST-HTTP-Body, and read by
+		# check-eap-tls with a regular expression of its own: FreeRADIUS does
+		# not decode it into attributes.
+		force_to = 'plain'
+		timeout = 4.0
+		tls = ${..tls}
+	}
+
+	# start = 0: FreeRADIUS starts, and rejects every device, while AXIAM is
+	# away, instead of refusing to start.
+	pool {
+		start = 0
+		min = 0
+		max = 8
+		spare = 2
+		uses = 0
+		retry_delay = 5
+		lifetime = 0
+		idle_timeout = 60
+	}
+}
+
+rest axiam_decide {
+	connect_uri = "$ENV{AXIAM_D4_URL}"
+	connect_timeout = 3.0
+	http_negotiation = 1.1
+
+	tls {
+		ca_info_file = /etc/freeradius/axiam/axiam-ca.pem
+		certificate_file = /etc/freeradius/axiam/rest-chain.pem
+		private_key_file = /etc/freeradius/axiam/rest.key
+		check_cert = yes
+		check_cert_cn = yes
+	}
+
+	post-auth {
+		uri = "${..connect_uri}/api/v1/network/decide"
+		method = 'post'
+		body = 'json'
+		# The whole body is two values: the site key (clients.conf, never the
+		# packet) and the SHA-256 of the certificate EAP-TLS verified. No
+		# Calling-Station-Id and no User-Name: the route refuses both (a 400), and
+		# they stay in FreeRADIUS's own logs.
+		data = '{"site":"%{control:Tmp-String-1}","fingerprint":"%{control:Tmp-String-0}"}'
+		force_to = 'plain'
+		timeout = 4.0
+		tls = ${..tls}
+	}
+
+	pool {
+		start = 0
+		min = 0
+		max = 8
+		spare = 2
+		uses = 0
+		retry_delay = 5
+		lifetime = 0
+		idle_timeout = 60
+	}
+}
+
+# The token, for half of its life (check-eap-tls sets the TTL from expires_in).
+# An entry in memory: a restart or a HUP starts from an empty cache.
+cache axiam_token_cache {
+	driver = "rlm_cache_rbtree"
+	key = "axiam-decide-caller"
+	ttl = 600
+	update {
+		&control:Tmp-String-2 := &control:Tmp-String-2
+	}
+}
+
+# `%{axiam_take:...}`: the exec xlat needs a module with `wait = yes`; the default
+# `exec` module has `wait = no`. It runs one script with a serial as its argument
+# (hex, as FreeRADIUS spells TLS-Client-Cert-Serial) and nothing else.
+exec axiam_take {
+	wait = yes
+	shell_escape = yes
+	timeout = 5
+}

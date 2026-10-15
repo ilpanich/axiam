@@ -16,7 +16,7 @@
 #
 # It installs a list only when
 #   1. the server answered 200 and the body is a CRL (a 304 means "unchanged",
-#      and nothing is touched);
+#      and nothing is touched, but only when its ETag is the one this run sent);
 #   2. `ca.pem` signed it. `openssl crl -verify` exits 0 on "verify failure"
 #      when the list names the CA but another key signed it (probed on OpenSSL
 #      3.0.13), so the exit status is not the check: the text "verify OK" is;
@@ -25,15 +25,26 @@
 #      accepted: the same list again is not a replay);
 # and it installs it atomically: written beside its destination, then `mv`.
 #
-# It remembers the ETag of the list it installed (in `<capath>/.fetch-crl.*`,
-# a name OpenSSL never looks up) and sends it as `If-None-Match`. The tag is
-# stored only after the list it belongs to is in place, so a run cut short at
-# worst fetches the list once more. Exit 0: installed or unchanged. Exit 1: the
-# list was refused or could not be fetched; the installed list is untouched and
-# the reason is on stderr. Alert on a non-zero exit, and on a list in `capath`
-# older than half its lifetime (the guide says why).
+# It remembers the ETag of the list it installed, with the file's name and its
+# SHA-256 (in `<capath>/.fetch-crl.<key>`, a name OpenSSL never looks up), and
+# sends the tag as `If-None-Match`. The tag is stored only after the list it
+# belongs to is in place, so a run cut short at worst fetches the list once more.
+# A tag is stored only when it is ONE entity-tag, `"..."` or `W/"..."` with no
+# inner quote: never `*` and never a list, which AXIAM's route (RFC 9110) would
+# match against every list, so that a stored `*` would make every later run read
+# "304 unchanged" for ever (R110W5-01). The whole list is fetched, with no
+# `If-None-Match`, when
+#   - no valid tag is stored, or the installed file's SHA-256 is no longer the
+#     one stored beside the tag (the file was replaced, or the tag was paired
+#     with a list it does not name); or
+#   - the server answers 304 with an ETag other than the one sent, or none.
 #
-# Needs: sh, curl, openssl, sed, sort, tr, cut, head, mktemp.
+# Exit 0: installed or unchanged. Exit 1: the list was refused or could not be
+# fetched; the installed list is untouched and the reason is on stderr. Alert on
+# a non-zero exit, and on a list in `capath` older than half its lifetime (the
+# guide says why).
+#
+# Needs: sh, curl, openssl, sed, sort, tr, cut, head, tail, mktemp.
 
 set -eu
 LC_ALL=C
@@ -84,31 +95,90 @@ number_lower() {
 	[ "$(printf '%s\n%s\n' "$1" "$2" | sort | head -n 1)" = "$1" ]
 }
 
+# The SHA-256 of a file, as 64 lower-case hex digits.
+file_sha() {
+	openssl dgst -sha256 -r <"$1" | cut -d' ' -f1
+}
+
+# True when $1 is ONE entity-tag (RFC 9110 8.8.3): `"` etagc* `"`, optionally
+# after `W/`, etagc being printable ASCII but the double quote and the space.
+# So not `*`, not a comma list, and nothing with a control character.
+valid_etag() {
+	t=$1
+	case $t in W/*) t=${t#W/} ;; esac
+	case $t in
+	\"*\") ;;
+	*) return 1 ;;
+	esac
+	t=${t#\"}
+	t=${t%\"}
+	case $t in
+	*\"* | *[![:graph:]]*) return 1 ;;
+	esac
+	return 0
+}
+
+# The ETag of the response in $work/headers (the last one, without CR), or none.
+response_etag() {
+	sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p' "$work/headers" | tr -d '\r' |
+		sed 's/[[:space:]]*$//' | tail -n 1
+}
+
+# One request for the list; $1 is the ETag to revalidate, or empty for an
+# unconditional one. Sets `code` to the HTTP status. The body lands in
+# $work/crl.der and the headers in $work/headers.
+request() {
+	rm -f "$work/crl.der" "$work/headers"
+	tag=$1
+	set -- -sS --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
+	if [ -n "$tag" ]; then
+		set -- "$@" -H "If-None-Match: $tag"
+	fi
+	rc=0
+	code=$(curl "$@" "$url") || rc=$?
+	[ "$rc" -eq 0 ] || fail "the fetch of $url failed (curl exit $rc)"
+}
+
 # ---- the request ------------------------------------------------------------
-# The state: the ETag of the installed list and the file it was installed as.
+# The state: the ETag of the installed list, the file it was installed as and
+# the file's SHA-256. Anything missing, malformed or not matching the file on
+# disk means "no tag": the request is then unconditional.
 key=$(printf '%s' "$url" | openssl dgst -sha256 -r | cut -c1-16)
 state="$capath/.fetch-crl.$key"
 etag=
 installed=
+held_sha=
 if [ -f "$state" ]; then
 	{
 		IFS= read -r etag
 		IFS= read -r installed
+		IFS= read -r held_sha
 	} <"$state" || true
 fi
-case $etag in *[![:graph:]]*) etag= ;; esac
+valid_etag "$etag" || etag=
 case $installed in
 '' | *[!0-9a-f.r]*) etag= ;;
-*) [ -f "$capath/$installed" ] || etag= ;; # no list on disk: nothing to revalidate
+*)
+	if [ -f "$capath/$installed" ]; then
+		# The file in place must be the one the tag was stored for.
+		case $held_sha in
+		*[!0-9a-f]* | '') etag= ;;
+		*)
+			{ [ "${#held_sha}" -eq 64 ] && [ "$(file_sha "$capath/$installed")" = "$held_sha" ]; } || etag=
+			;;
+		esac
+	else
+		etag= # no list on disk: nothing to revalidate
+	fi
+	;;
 esac
 
-set -- -sS --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
-if [ -n "$etag" ]; then
-	set -- "$@" -H "If-None-Match: $etag"
+request "$etag"
+if [ "$code" = 304 ] && [ -n "$etag" ] && [ "$(response_etag)" != "$etag" ]; then
+	echo "fetch-crl: the 304 carries an ETag other than the one sent; fetching the list unconditionally" >&2
+	etag=
+	request ""
 fi
-rc=0
-code=$(curl "$@" "$url") || rc=$?
-[ "$rc" -eq 0 ] || fail "the fetch of $url failed (curl exit $rc)"
 
 case $code in
 200) ;;
@@ -155,19 +225,17 @@ chmod 0644 "$stage"
 mv -f "$stage" "$target"
 stage=
 
-# Remember the ETag only now that the list it names is in place.
-new_etag=$(sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p' "$work/headers" | tr -d '\r' |
-	sed 's/[[:space:]]*$//' | tail -n 1)
-case $new_etag in
-*[![:graph:]]*) new_etag= ;;
-esac
-if [ -n "$new_etag" ]; then
+# Remember the ETag only now that the list it names is in place, and only when
+# it is one entity-tag; the file's SHA-256 goes with it.
+new_etag=$(response_etag)
+if [ -n "$new_etag" ] && valid_etag "$new_etag"; then
 	stage=$(mktemp "$capath/.incoming.XXXXXX")
-	printf '%s\n%s\n' "$new_etag" "$hash.r0" >"$stage"
+	printf '%s\n%s\n%s\n' "$new_etag" "$hash.r0" "$(file_sha "$target")" >"$stage"
 	chmod 0644 "$stage"
 	mv -f "$stage" "$state"
 	stage=
 else
+	[ -z "$new_etag" ] || echo "fetch-crl: the ETag is not a single entity-tag; not stored" >&2
 	rm -f "$state"
 fi
 echo "fetch-crl: installed $target (CRL number 0x$new)"

@@ -79,6 +79,15 @@ jobs:
       - name: eapol_test is installed
         run: command -v eapol_test
 
+      # The fetch script's own cases (R110W5-01 ...): a stand-in for the CRL route
+      # and a throwaway CA, no docker and no AXIAM. Under both shells an operator's
+      # cron might run it with (`sh` is dash on Debian and Ubuntu).
+      - name: fetch-crl.sh cases
+        run: |
+          for shell in dash bash; do
+            docker/radius/tests/fetch-crl-test.sh "$shell"
+          done
+
       # The image is named once, in the compose file, by digest; pull exactly that,
       # with a retry, since Docker Hub rate-limits anonymous pulls.
       - name: Pull the pinned FreeRADIUS image

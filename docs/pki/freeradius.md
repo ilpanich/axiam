@@ -466,9 +466,17 @@ stderr and leaves the installed list alone:
   as the hex integer it is (`openssl crl -noout -crlnumber`); an equal number is
   accepted, since the same list again is not a replay.
 - **The server said `200`.** The script sends the `ETag` of the list it
-  installed as `If-None-Match`; a `304` means "unchanged", and nothing is touched.
-  The tag is stored (in `ca_path`, as `.fetch-crl.*`, a name OpenSSL never looks
-  up) only after its list is in place.
+  installed as `If-None-Match`; a `304` whose own `ETag` is the tag it sent means
+  "unchanged", and nothing is touched. The tag is stored (in `ca_path`, as
+  `.fetch-crl.*`, a name OpenSSL never looks up) only after its list is in place,
+  only if it is one entity-tag (`"…"` or `W/"…"`: never `*`, which AXIAM's route
+  matches against every list, and never a list of tags), and beside the SHA-256 of
+  the file it was installed as. The script fetches the whole list, with no
+  `If-None-Match`, when the file in `ca_path` is no longer that one (replaced,
+  deleted, corrupted) and when a `304` carries another tag or none; a `304` to
+  that request is refused. A tag stored as `*` would otherwise make every later
+  run read "unchanged" for as long as the list lasts, after whoever answered one
+  fetch was gone (R110W5-01).
 
 and it installs atomically: written beside its destination, then renamed, so
 FreeRADIUS never reads a half-written list.

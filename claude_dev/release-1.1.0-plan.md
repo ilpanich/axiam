@@ -731,6 +731,18 @@ so the route as built was writable by nobody. The cap write is guarded by
 `Session-Timeout` envelope every profile is clamped to, and envelopes are
 `segments_write`'s (H3 keeps envelope writers apart from profile writers).
 
+**Maintainer decision, 2026-10-15: the admin console is in 1.1.0.** The plan had
+no console work for D4 (nor did the design note), and `frontend/src` has no
+network page. A new item **W6.8** (Sonnet, M–L) lands on this branch after
+W6.6 and before the F4 review (W6.7), so the review reads it: a "Network
+access" section — the segment tree (`/network/{zones|quarantine}/<site>/<segment>`),
+the reply-profile editor (the typed dictionary; `Session-Timeout` shown
+clamped), the tenant cap (`GET`/`PUT /network/policy`), gate refusals (403 with
+the rule) and 409s surfaced — plus two console touches for W3's API changes:
+the OAuth2 client form shows the 422 `scope_exceeds_ceiling` message, and a
+confidential client holding the device grant is told it must authenticate at
+both device endpoints. Gate: vitest with the coverage threshold, `tsc`, lint.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
 ### 13.8 W8 — release readiness

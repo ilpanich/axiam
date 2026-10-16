@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:b6af2365d8693dd0ddc75c690c78ccf2f350e3da5a2f09d075ba31903e28ecd5"
+    "x-axiam-spec-digest": "sha256:47ff33434bf70f39511141689b8e0f9e558b9333d5ee2bcfff4d3d900b88dd7c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4461,7 +4461,14 @@
             "description": "The caller lacks `network:segments_write` on `/network` (the response names the permission and the node)"
           },
           "409": {
-            "description": "The policy changed since `version` was read"
+            "description": "`reason_code` `stale_version`: the policy changed since `version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -4706,7 +4713,14 @@
             "description": "No such segment in this tenant"
           },
           "409": {
-            "description": "The segment already has a profile, or the segment changed since `segment_version` was read"
+            "description": "`reason_code` `profile_exists` (`already_exists`): the segment already has a profile; or `stale_version`: the segment changed since `segment_version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -4818,7 +4832,14 @@
             "description": "No such segment in this tenant, or it has no profile"
           },
           "409": {
-            "description": "The profile changed since `version` was read, or the segment since `segment_version`"
+            "description": "`reason_code` `stale_version`: the profile changed since `version` was read, or the segment since `segment_version`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -4877,7 +4898,14 @@
             "description": "No such segment in this tenant, or it has no profile"
           },
           "409": {
-            "description": "The profile changed since `version` was read"
+            "description": "`reason_code` `stale_version`: the profile changed since `version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -5131,7 +5159,14 @@
             "description": "The caller lacks `network:segments_write` at the parent node (the response names the permission and the node), or a reactor vetoed the write"
           },
           "409": {
-            "description": "The site already has a segment with this name, VLAN or rank"
+            "description": "`already_exists` with `reason_code` `duplicate_name`, `duplicate_vlan` or `duplicate_rank`: the site already has a segment with this name, VLAN or rank; or `conflict` with `site_gone`: the site node was removed while the segment was being created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -5243,7 +5278,14 @@
             "description": "No such segment in this tenant"
           },
           "409": {
-            "description": "The segment changed since `version` was read, the new `filter_ids` would leave its reply profile outside the envelope (the message names the profile), or the site already has a segment with this VLAN or rank"
+            "description": "`reason_code` says which: `stale_version` — the segment changed since `version` was read, or a reply profile was written on it since; `strands_profile` — the new `filter_ids` would leave its reply profile outside the envelope (the message names the profile); `duplicate_vlan` / `duplicate_rank` (`already_exists`) — the site already has a segment with this VLAN or rank",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -5302,7 +5344,14 @@
             "description": "No such segment in this tenant"
           },
           "409": {
-            "description": "The segment changed since `version` was read, or it has child resources"
+            "description": "`reason_code` `stale_version`: the segment changed since `version` was read; or `has_children`: it has child resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           },
           "429": {
             "description": "Rate limit"
@@ -21197,6 +21246,44 @@
           "persistent",
           "email_address"
         ]
+      },
+      "NetworkConflictReason": {
+        "type": "string",
+        "description": "Why a network route answered `409`: the `reason_code` member of the body,\nbeside `error` (`sdks/CONTRACT.md` §36.3 rule 2, §36.4).\n\nThe vocabulary a client branches on, so that it never has to parse\n`message` (which stays for a human); open for decoding (§27.13), so a\nclient surfaces a value it does not know. The `error` slug is unchanged:\n`conflict` for a state conflict, `already_exists` for a uniqueness clash.",
+        "enum": [
+          "stale_version",
+          "strands_profile",
+          "has_children",
+          "duplicate_name",
+          "duplicate_vlan",
+          "duplicate_rank",
+          "profile_exists",
+          "site_gone",
+          "other"
+        ]
+      },
+      "NetworkConflictResponse": {
+        "type": "object",
+        "description": "The body of a network route's `409`, as the OpenAPI document shows it.",
+        "required": [
+          "error",
+          "message",
+          "reason_code"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "`conflict` for a state conflict, `already_exists` for a uniqueness\nclash — the crate's slugs, unchanged."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for a human. Never parsed: `reason_code` is what to branch on."
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/NetworkConflictReason",
+            "description": "Why the write conflicts."
+          }
+        }
       },
       "NetworkDecisionRequest": {
         "type": "object",

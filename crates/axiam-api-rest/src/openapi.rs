@@ -727,6 +727,8 @@ use crate::handlers;
         handlers::network::ReplaceReplyProfileRequest,
         handlers::network::NetworkPolicyResponse,
         handlers::network::ReplaceNetworkPolicyRequest,
+        handlers::network::NetworkConflictResponse,
+        handlers::network::NetworkConflictReason,
         axiam_core::models::network::NetworkSegmentKind,
         axiam_core::models::network::ReplyProfile,
         handlers::network_decide::NetworkDecisionRequest,

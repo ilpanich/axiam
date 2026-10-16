@@ -227,7 +227,8 @@ export function NetworkAccessPage() {
     networkErrorMessage(err, { fallback, nodeName });
 
   const refresh = () => invalidateEntity(queryClient, "network-segments");
-  // A 409 means another administrator wrote first: read the list again.
+  // A 409 is a write that no longer fits what the page shows (§36.4): read the
+  // list again, whatever its reason_code.
   const reloadOnConflict = (err: unknown) => {
     if (getApiErrorStatus(err) === 409) refresh();
   };

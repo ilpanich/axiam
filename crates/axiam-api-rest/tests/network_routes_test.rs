@@ -33,13 +33,14 @@ use axiam_core::models::network::{
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::PermissionEffect;
 use axiam_core::models::reactor::{DynReactorGate, ReactorOutcome};
+use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::{AssignmentScope, CreateRole};
 use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, PermissionRepository,
-    RoleRepository, ServiceAccountRepository, TenantRepository, UserRepository,
+    ResourceRepository, RoleRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
@@ -1112,6 +1113,207 @@ async fn a_stale_version_is_409_on_every_write_and_changes_nothing() {
     let rows = w.audit("reply_profile.write_refused").await;
     assert_eq!(rows.len(), 4, "{rows:?}");
     assert!(rows.iter().all(|r| r.metadata["status"] == 409));
+}
+
+/// Every `409` a network route raises carries `reason_code` beside `error`
+/// (§36.3 rule 2, §36.4): `stale_version` on each conditional write,
+/// `strands_profile`, `has_children`, `profile_exists` and the three
+/// uniqueness clashes, each with the crate's slug unchanged (`conflict`, or
+/// `already_exists` for a uniqueness clash) and the message still there for a
+/// human. No other status carries the member.
+#[actix_rt::test]
+async fn every_network_409_carries_its_reason_code() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let corp = make_segment(&app, &admin, "corp", 10, &["a", "b"]).await;
+    let iot = make_segment(&app, &admin, "iot", 20, &["a"]).await;
+    let (cid, iid) = (
+        corp["id"].as_str().unwrap().to_owned(),
+        iot["id"].as_str().unwrap().to_owned(),
+    );
+    let (status, _) = call(
+        &app,
+        &admin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&corp, 1800, Some("a"))),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    #[track_caller]
+    fn conflict(answer: (u16, Value), slug: &str, code: &str) {
+        let (status, body) = answer;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"], slug, "{body}");
+        assert_eq!(body["reason_code"], code, "{body}");
+        assert!(
+            body["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{body}"
+        );
+    }
+    let replace = |version: u64, vlan: u16, rank: u32, filters: Value| {
+        json!({"version": version, "vlan_id": vlan, "filter_ids": filters, "rank": rank,
+               "enabled": true})
+    };
+
+    // Segment create: the three uniqueness clashes.
+    for (body, code) in [
+        (segment_body("corp", 30, 30, &[]), "duplicate_name"),
+        (segment_body("lab", 10, 30, &[]), "duplicate_vlan"),
+        (segment_body("lab", 30, 10, &[]), "duplicate_rank"),
+    ] {
+        conflict(
+            call(&app, &admin, "POST", SEGMENTS, Some(body)).await,
+            "already_exists",
+            code,
+        );
+    }
+
+    // Segment replace: stale, stranding, VLAN and rank clashes.
+    let corp_uri = format!("{SEGMENTS}/{cid}");
+    for (body, slug, code) in [
+        (
+            replace(7, 10, 10, json!(["a", "b"])),
+            "conflict",
+            "stale_version",
+        ),
+        (
+            replace(1, 10, 10, json!(["b"])),
+            "conflict",
+            "strands_profile",
+        ),
+        (
+            replace(1, 20, 10, json!(["a", "b"])),
+            "already_exists",
+            "duplicate_vlan",
+        ),
+        (
+            replace(1, 10, 20, json!(["a", "b"])),
+            "already_exists",
+            "duplicate_rank",
+        ),
+    ] {
+        conflict(
+            call(&app, &admin, "PUT", &corp_uri, Some(body)).await,
+            slug,
+            code,
+        );
+    }
+
+    // Segment delete: stale, then a child resource.
+    conflict(
+        call(
+            &app,
+            &admin,
+            "DELETE",
+            &format!("{SEGMENTS}/{iid}?version=7"),
+            None,
+        )
+        .await,
+        "conflict",
+        "stale_version",
+    );
+    SurrealResourceRepository::new(w.db.clone())
+        .create(CreateResource {
+            tenant_id: w.tenant,
+            name: "child".into(),
+            resource_type: "project".into(),
+            parent_id: Some(iid.parse().unwrap()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    conflict(
+        call(
+            &app,
+            &admin,
+            "DELETE",
+            &format!("{SEGMENTS}/{iid}?version=1"),
+            None,
+        )
+        .await,
+        "conflict",
+        "has_children",
+    );
+
+    // Profiles: one already there, a stale segment version, a stale profile
+    // version on replace and on delete.
+    conflict(
+        call(
+            &app,
+            &admin,
+            "POST",
+            PROFILES,
+            Some(profile_body(&corp, 600, Some("a"))),
+        )
+        .await,
+        "already_exists",
+        "profile_exists",
+    );
+    let mut stale_create = profile_body(&iot, 600, Some("a"));
+    stale_create["segment_version"] = json!(5);
+    conflict(
+        call(&app, &admin, "POST", PROFILES, Some(stale_create)).await,
+        "conflict",
+        "stale_version",
+    );
+    conflict(
+        call(
+            &app,
+            &admin,
+            "PUT",
+            &format!("{PROFILES}/{cid}"),
+            Some(json!({"version": 9, "segment_version": 1,
+                        "profile": {"session_timeout_secs": 600, "filter_id": "a"}})),
+        )
+        .await,
+        "conflict",
+        "stale_version",
+    );
+    conflict(
+        call(
+            &app,
+            &admin,
+            "DELETE",
+            &format!("{PROFILES}/{cid}?version=9"),
+            None,
+        )
+        .await,
+        "conflict",
+        "stale_version",
+    );
+
+    // The policy.
+    conflict(
+        call(&app, &admin, "PUT", POLICY, Some(policy_body(1800, 4))).await,
+        "conflict",
+        "stale_version",
+    );
+
+    // Not a 409: no member.
+    let reader = w.user_with(&[NETWORK_READ]).await;
+    let (status, body) = call(
+        &app,
+        &reader,
+        "PUT",
+        &corp_uri,
+        Some(replace(1, 99, 10, json!([]))),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert!(body.get("reason_code").is_none(), "{body}");
+    let (status, body) = call(
+        &app,
+        &admin,
+        "GET",
+        &format!("{SEGMENTS}/{}", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(body.get("reason_code").is_none(), "{body}");
 }
 
 /// An envelope write that would strand the segment's profile is `409`, naming

@@ -398,7 +398,7 @@ describe("NetworkAccessPage — edit segment", () => {
   it("says another administrator wrote first on a stale version, and reloads the list", async () => {
     const dialog = await openEdit();
     apiMock.put.mockImplementation(() =>
-      rejection(409, { error: "conflict", message: "version mismatch" }),
+      rejection(409, { error: "conflict", reason_code: "stale_version", message: "version mismatch" }),
     );
     const readsBefore = apiMock.get.mock.calls.filter((c) => c[0] === SEGMENTS).length;
     await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
@@ -417,6 +417,7 @@ describe("NetworkAccessPage — edit segment", () => {
     apiMock.put.mockImplementation(() =>
       rejection(409, {
         error: "conflict",
+        reason_code: "strands_profile",
         message:
           "the segment's reply profile seg-corp uses filter_id 'corp-in', which the new filter_ids remove; change or delete the profile first",
       }),
@@ -427,7 +428,8 @@ describe("NetworkAccessPage — edit segment", () => {
     const alert = await within(dialog).findByRole("alert");
     expect(alert).toHaveTextContent("reply profile seg-corp");
     expect(alert).toHaveTextContent("filter_id 'corp-in'");
-    expect(alert).toHaveTextContent("Changed by someone else — reload and try again.");
+    // Not someone else's write: the server's sentence alone (§36.4).
+    expect(alert).not.toHaveTextContent("Changed by someone else");
   });
 
   it("resolves the node a 403 names to the segment's path", async () => {
@@ -473,7 +475,11 @@ describe("NetworkAccessPage — delete segment", () => {
   it("keeps the dialog open with the server's refusal on a 409", async () => {
     const dialog = await openDelete();
     apiMock.delete.mockImplementation(() =>
-      rejection(409, { error: "conflict", message: "the segment still has child resources" }),
+      rejection(409, {
+        error: "conflict",
+        reason_code: "has_children",
+        message: "the segment still has child resources",
+      }),
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     const alert = await within(dialog).findByRole("alert");
@@ -659,7 +665,7 @@ describe("NetworkAccessPage — reply profile", () => {
     const dialog = await openProfile("corp", { profiles: { "seg-corp": profile() } });
     await within(dialog).findByTestId("profile-effective-timeout");
     apiMock.put.mockImplementation(() =>
-      rejection(409, { error: "conflict", message: "the segment changed" }),
+      rejection(409, { error: "conflict", reason_code: "stale_version", message: "the segment changed" }),
     );
     await userEvent.click(within(dialog).getByRole("button", { name: "Save profile" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
@@ -847,7 +853,7 @@ describe("NetworkAccessPage — Session-Timeout cap", () => {
   it("says someone else wrote first on a 409, without the server's wording", async () => {
     mockGets();
     apiMock.put.mockImplementation(() =>
-      rejection(409, { error: "conflict", message: "stale policy version 0" }),
+      rejection(409, { error: "conflict", reason_code: "stale_version", message: "stale policy version 0" }),
     );
     renderWithProviders(<NetworkAccessPage />);
     await userEvent.click(await screen.findByRole("button", { name: "Change the cap" }));

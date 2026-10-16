@@ -47,7 +47,40 @@ describe("networkErrorMessage", () => {
     expect(text).not.toContain("Missing permission");
   });
 
-  it("says a 409 is someone else's write, and adds the server's sentence unless stale-only", () => {
+  it("words a stale_version 409 alone, whatever the message says", () => {
+    const err = failure(409, {
+      error: "conflict",
+      reason_code: "stale_version",
+      message: "the network segment changed since it was read; read it again and retry",
+    });
+    expect(networkErrorMessage(err, options)).toBe(
+      "Changed by someone else — reload and try again.",
+    );
+  });
+
+  it("shows the server's sentence alone for every other reason_code", () => {
+    const strands = failure(409, {
+      error: "conflict",
+      reason_code: "strands_profile",
+      message: "the segment's reply profile p1 uses filter_id 'a'; change or delete the profile first",
+    });
+    expect(networkErrorMessage(strands, options)).toBe(
+      "the segment's reply profile p1 uses filter_id 'a'; change or delete the profile first",
+    );
+    const vlan = failure(409, {
+      error: "already_exists",
+      reason_code: "duplicate_vlan",
+      message: "Entity already exists: network_segment: the site already has a segment with this vlan_id",
+    });
+    expect(networkErrorMessage(vlan, { ...options, staleOnly: true })).toMatch(/^Entity already exists/);
+    expect(networkErrorMessage(vlan, options)).not.toContain("Changed by someone else");
+    // A code the console does not know is still not someone else's write.
+    expect(networkErrorMessage(failure(409, { reason_code: "something_new" }), options)).toBe(
+      "This change conflicts with the current network settings.",
+    );
+  });
+
+  it("without a reason_code, says a 409 is someone else's write and adds the sentence unless stale-only", () => {
     const err = failure(409, { error: "conflict", message: "VLAN 10 is taken at this site" });
     expect(networkErrorMessage(err, options)).toBe(
       "Changed by someone else — reload and try again. VLAN 10 is taken at this site",

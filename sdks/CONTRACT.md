@@ -12870,9 +12870,27 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
    replace whose `filter_ids` would leave its profile's `filter_id` outside the envelope (the
    message names the profile — a **stranding** write is refused, never applied); a site that
    already has a segment of that name, VLAN or rank; a segment that already has a profile; a
-   segment that still has child resources. An SDK sends the version it read, exactly; MUST NOT
-   retry a `409`; and its composed read-modify-write form (§27.4 rule 5), where it offers one,
-   reads the segment (and, for a profile, the profile) and sends both versions from that read.
+   segment that still has child resources. **Every `409` says which in `reason_code`**, a member
+   beside `error` (§36.4; added 2026-10-16, the 409 sub-code decision): the `error` slug is
+   unchanged, and `reason_code` is one of
+
+   | `reason_code` | `error` | Raised by | Meaning |
+   |---|---|---|---|
+   | `stale_version` | `conflict` | every write | The row changed since `version` (or `segment_version`) was read — including a reply profile written on a segment between the read and a `replace_segment` that moves its placement (rule 1). Read again, decide again |
+   | `strands_profile` | `conflict` | `replace_segment` | The new `filter_ids` would leave the profile's `filter_id` outside the envelope |
+   | `has_children` | `conflict` | `delete_segment` | The segment still has child resources |
+   | `site_gone` | `conflict` | `create_segment` | The site node was removed while the segment was being created |
+   | `duplicate_name` | `already_exists` | `create_segment` | The site already has a segment of that name |
+   | `duplicate_vlan` | `already_exists` | `create_segment`, `replace_segment` | The site already has a segment with that VLAN |
+   | `duplicate_rank` | `already_exists` | `create_segment`, `replace_segment` | The site already has a segment with that rank |
+   | `profile_exists` | `already_exists` | `create_profile` | The segment already has a profile |
+   | `other` | either | — | A `409` none of the above names; none is raised today |
+
+   The vocabulary is **open** for decoding (§27.13): an SDK surfaces a value it does not know
+   verbatim, and treats it as a conflict whose `message` is for a human. An SDK sends the version
+   it read, exactly; MUST NOT retry a `409`; and its composed read-modify-write form (§27.4 rule 5),
+   where it offers one, reads the segment (and, for a profile, the profile) and sends both versions
+   from that read.
 3. **The records are closed.** Every request body is `deny_unknown_fields`: an unknown member is a
    `400 validation_error` naming it. An SDK MUST NOT send a member §36.2 does not name, and omits
    an optional member the caller did not set rather than sending `null`.
@@ -12919,6 +12937,16 @@ where the body has them), `401` `AuthError` — including the `401` a service-ac
 which no refresh can cure — and `429` `NetworkError`. An SDK MUST NOT parse a `message` to recover
 the rule.
 
+**The `409` sub-code** (2026-10-16). A `409` of the twelve operations has the body
+`NetworkConflictResponse`: `error` (`conflict` or `already_exists`, as before), `message` (for a
+human) and **`reason_code`**, one of the values of §36.3 rule 2. An SDK's `ConflictError` from
+these operations **surfaces `reason_code`** as a string accessor (named `reasonCode` /
+`ReasonCode` / `reason_code` in the language's own casing, absent when a server predating it omits
+it), and a caller branches on it — never on `message`, which an SDK MUST NOT parse. It is not the
+`reason` of an authorization decision (§3), which is a human string; the name follows that
+decision's own `reason_code`, the field a client branches on. Both `error` slugs map to
+`ConflictError`, as before.
+
 ### §36.5 `Sensitive<T>` applicability
 
 None. Segments, profiles and the policy carry no secret and no personal data (the note's §3.5 and
@@ -12954,7 +12982,9 @@ Five per SDK that ships the namespace, against a mocked HTTP server:
    `delete_profile` send `?version=` and cannot be called without one; `create_profile` sends
    `segment_version`, `replace_profile` sends `version` and `segment_version`, `replace_policy`
    sends `version` — each exactly as given. A `409` to each is `ConflictError` after exactly one
-   request.
+   request, exposing the body's `reason_code` (`stale_version` in the mock), and a `409` with
+   `error: "already_exists"` and `reason_code: "duplicate_vlan"` is `ConflictError` exposing it
+   too.
 3. **Closed bodies.** The serialized `CreateNetworkSegmentRequest`, `ReplaceNetworkSegmentRequest`,
    `CreateNetworkReplyProfileRequest` and `ReplaceNetworkPolicyRequest` carry exactly the keys §36.2 names
    for the members set (an unset `rank`, `idle_timeout_secs`, `filter_id` or `service_type` is

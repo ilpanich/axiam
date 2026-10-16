@@ -49,7 +49,10 @@
 //!    `network.pre_profile_write`, X1): a four-eyes rule on network policy. It is
 //!    asked only about a write the gate cleared;
 //! 4. the write, **conditional on the `version` the caller read** — `409` when it
-//!    is stale. A profile write is also conditional on the owning segment's
+//!    is stale. Every `409` of these routes carries a closed `reason_code`
+//!    beside `error` ([`NetworkConflictReason`]: `stale_version`,
+//!    `strands_profile`, `has_children`, …; §36.4), so that no client parses
+//!    `message`. A profile write is also conditional on the owning segment's
 //!    `version` (the envelope it was checked against), and an envelope write that
 //!    would strand the segment's profile outside its new `filter_ids` is `409`
 //!    naming the profile;
@@ -357,6 +360,163 @@ pub struct ReplaceNetworkPolicyRequest {
 }
 
 // ---------------------------------------------------------------------------
+// The 409 sub-code (§36.4)
+// ---------------------------------------------------------------------------
+
+/// Why a network route answered `409`: the `reason_code` member of the body,
+/// beside `error` (`sdks/CONTRACT.md` §36.3 rule 2, §36.4).
+///
+/// The vocabulary a client branches on, so that it never has to parse
+/// `message` (which stays for a human); open for decoding (§27.13), so a
+/// client surfaces a value it does not know. The `error` slug is unchanged:
+/// `conflict` for a state conflict, `already_exists` for a uniqueness clash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkConflictReason {
+    /// The segment, profile or policy changed since `version` (or
+    /// `segment_version`) was read — including a reply profile written on a
+    /// segment between the gate's read and the write (R110W6-03). Read again
+    /// and decide again.
+    StaleVersion,
+    /// A segment replace whose `filter_ids` would leave its profile's
+    /// `filter_id` outside the envelope (the message names the profile).
+    StrandsProfile,
+    /// A segment delete while the segment has child resources.
+    HasChildren,
+    /// The site already has a segment of this name (`already_exists`).
+    DuplicateName,
+    /// The site already has a segment with this VLAN (`already_exists`).
+    DuplicateVlan,
+    /// The site already has a segment with this rank (`already_exists`).
+    DuplicateRank,
+    /// The segment already has a reply profile (`already_exists`).
+    ProfileExists,
+    /// The site node was removed while the segment was being created.
+    SiteGone,
+    /// A `409` none of the above names. None is raised today; a client treats
+    /// it, and any value it does not know, as a conflict to show the
+    /// `message` of.
+    Other,
+}
+
+impl NetworkConflictReason {
+    /// The wire value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleVersion => "stale_version",
+            Self::StrandsProfile => "strands_profile",
+            Self::HasChildren => "has_children",
+            Self::DuplicateName => "duplicate_name",
+            Self::DuplicateVlan => "duplicate_vlan",
+            Self::DuplicateRank => "duplicate_rank",
+            Self::ProfileExists => "profile_exists",
+            Self::SiteGone => "site_gone",
+            Self::Other => "other",
+        }
+    }
+
+    /// The reason of a `409`; `None` for every other error.
+    ///
+    /// Read off the fixed sentences the network repositories and
+    /// [`name_the_stranded_profile`] write — the server's own words, matched
+    /// in one place on the server, so no client has to. Every value is pinned
+    /// end to end by `network_routes_test::every_network_409_carries_its_reason_code`.
+    #[must_use]
+    pub fn of(error: &AxiamError) -> Option<Self> {
+        match error {
+            AxiamError::Conflict { reason } => {
+                Some(if reason.contains("changed since it was read") {
+                    Self::StaleVersion
+                } else if reason.contains("change or delete the profile first") {
+                    Self::StrandsProfile
+                } else if reason.contains("child resources") {
+                    Self::HasChildren
+                } else if reason.contains("network site was removed") {
+                    Self::SiteGone
+                } else {
+                    Self::Other
+                })
+            }
+            AxiamError::AlreadyExists { entity } => Some(if entity.contains("this vlan_id") {
+                Self::DuplicateVlan
+            } else if entity.contains("this rank") {
+                Self::DuplicateRank
+            } else if entity.contains("of this name") {
+                Self::DuplicateName
+            } else if entity.contains("reply_profile") {
+                Self::ProfileExists
+            } else {
+                Self::Other
+            }),
+            _ => None,
+        }
+    }
+
+    /// The internal rule a refusal's audit row records for it (§5.4).
+    fn audit_rule(self) -> &'static str {
+        match self {
+            Self::StaleVersion => "version:stale",
+            Self::StrandsProfile => "5.2:strands-profile",
+            Self::HasChildren => "conflict:children",
+            Self::DuplicateName
+            | Self::DuplicateVlan
+            | Self::DuplicateRank
+            | Self::ProfileExists => "exists",
+            Self::SiteGone | Self::Other => "conflict",
+        }
+    }
+}
+
+/// The body of a network route's `409`, as the OpenAPI document shows it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NetworkConflictResponse {
+    /// `conflict` for a state conflict, `already_exists` for a uniqueness
+    /// clash — the crate's slugs, unchanged.
+    pub error: String,
+    /// A sentence for a human. Never parsed: `reason_code` is what to branch on.
+    pub message: String,
+    /// Why the write conflicts.
+    pub reason_code: NetworkConflictReason,
+}
+
+/// The error every network route answers with: the crate's body, plus
+/// `reason_code` on a `409` (§36.4). Everything that is not a `409` renders
+/// exactly as [`AxiamApiError`] does.
+#[derive(Debug)]
+pub struct NetworkApiError(pub AxiamApiError);
+
+impl std::fmt::Display for NetworkApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<AxiamApiError> for NetworkApiError {
+    fn from(error: AxiamApiError) -> Self {
+        Self(error)
+    }
+}
+
+impl From<AxiamError> for NetworkApiError {
+    fn from(error: AxiamError) -> Self {
+        Self(AxiamApiError(error))
+    }
+}
+
+impl actix_web::ResponseError for NetworkApiError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        self.0.status_code()
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        self.0.error_response_with_reason_code(
+            NetworkConflictReason::of(&self.0.0).map(NetworkConflictReason::as_str),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Extractor configuration
 // ---------------------------------------------------------------------------
 
@@ -540,22 +700,20 @@ async fn refused<C: Connection + Clone>(
     principal: &AuthenticatedPrincipal,
     refusal: Refusal,
     error: AxiamApiError,
-) -> AxiamApiError {
+) -> NetworkApiError {
+    let conflict = NetworkConflictReason::of(&error.0);
     let (rule, status, reason) = match &error.0 {
         AxiamError::NotFound { .. } => ("not_found", 404, error.0.to_string()),
-        AxiamError::AlreadyExists { entity } => ("exists", 409, entity.clone()),
-        AxiamError::Conflict { reason } => {
-            let rule = if reason.contains("change or delete the profile first") {
-                "5.2:strands-profile"
-            } else if reason.contains("child resources") {
-                "conflict:children"
-            } else if reason.contains("changed since it was read") {
-                "version:stale"
-            } else {
-                "conflict"
-            };
-            (rule, 409, reason.clone())
-        }
+        AxiamError::AlreadyExists { entity } => (
+            conflict.map_or("exists", NetworkConflictReason::audit_rule),
+            409,
+            entity.clone(),
+        ),
+        AxiamError::Conflict { reason } => (
+            conflict.map_or("conflict", NetworkConflictReason::audit_rule),
+            409,
+            reason.clone(),
+        ),
         AxiamError::Validation { message } => ("validation", 400, message.clone()),
         AxiamError::AuthorizationDenied { reason, .. } => {
             let rule = if reason.starts_with("refused by a reactor") {
@@ -565,7 +723,7 @@ async fn refused<C: Connection + Clone>(
             };
             (rule, 403, reason.clone())
         }
-        _ => return error,
+        _ => return error.into(),
     };
     append(
         state,
@@ -588,7 +746,7 @@ async fn refused<C: Connection + Clone>(
         },
     )
     .await;
-    error
+    error.into()
 }
 
 /// What the gate returned instead of a clearance.
@@ -603,11 +761,11 @@ async fn after_gate<C: Connection + Clone>(
     principal: &AuthenticatedPrincipal,
     refusal: Refusal,
     error: AxiamApiError,
-) -> AxiamApiError {
+) -> NetworkApiError {
     if matches!(error.0, AxiamError::NotFound { .. }) {
         refused(state, http_req, principal, refusal, error).await
     } else {
-        error
+        error.into()
     }
 }
 
@@ -693,7 +851,7 @@ pub async fn list_segments<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
     site: web::Query<SiteQuery>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     RequirePermission::new(NETWORK_READ, network_root_id(user.tenant_id))
         .check(&user, authz.get_ref().as_ref())
         .await?;
@@ -735,7 +893,7 @@ pub async fn get_segment<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let id = path.into_inner();
     RequirePermission::new(NETWORK_READ, id)
         .check(&user, authz.get_ref().as_ref())
@@ -760,8 +918,12 @@ pub async fn get_segment<C: Connection + Clone>(
         (status = 403, description = "The caller lacks `network:segments_write` at the parent \
                                       node (the response names the permission and the node), or \
                                       a reactor vetoed the write"),
-        (status = 409, description = "The site already has a segment with this name, VLAN or \
-                                      rank"),
+        (status = 409, description = "`already_exists` with `reason_code` `duplicate_name`, \
+                                      `duplicate_vlan` or `duplicate_rank`: the site already has \
+                                      a segment with this name, VLAN or rank; or `conflict` with \
+                                      `site_gone`: the site node was removed while the segment \
+                                      was being created",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -772,7 +934,7 @@ pub async fn create_segment<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     http_req: HttpRequest,
     body: web::Json<CreateNetworkSegmentRequest>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let req = body.into_inner();
     let input = NewNetworkSegment {
@@ -861,10 +1023,14 @@ pub async fn create_segment<C: Connection + Clone>(
                                       write. The response names the missing permission and \
                                       node"),
         (status = 404, description = "No such segment in this tenant"),
-        (status = 409, description = "The segment changed since `version` was read, the new \
+        (status = 409, description = "`reason_code` says which: `stale_version` — the segment \
+                                      changed since `version` was read, or a reply profile was \
+                                      written on it since; `strands_profile` — the new \
                                       `filter_ids` would leave its reply profile outside the \
-                                      envelope (the message names the profile), or the site \
-                                      already has a segment with this VLAN or rank"),
+                                      envelope (the message names the profile); \
+                                      `duplicate_vlan` / `duplicate_rank` (`already_exists`) — \
+                                      the site already has a segment with this VLAN or rank",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -876,7 +1042,7 @@ pub async fn replace_segment<C: Connection + Clone>(
     http_req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<ReplaceNetworkSegmentRequest>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let id = path.into_inner();
     let req = body.into_inner();
@@ -1016,8 +1182,10 @@ async fn name_the_stranded_profile<C: Connection + Clone>(
         (status = 403, description = "The caller lacks `network:segments_write` on the segment, \
                                       or a reactor vetoed the write"),
         (status = 404, description = "No such segment in this tenant"),
-        (status = 409, description = "The segment changed since `version` was read, or it has \
-                                      child resources"),
+        (status = 409, description = "`reason_code` `stale_version`: the segment changed since \
+                                      `version` was read; or `has_children`: it has child \
+                                      resources",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -1029,7 +1197,7 @@ pub async fn delete_segment<C: Connection + Clone>(
     http_req: HttpRequest,
     path: web::Path<Uuid>,
     query: web::Query<VersionQuery>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let id = path.into_inner();
     let expected_version = query.version;
@@ -1131,7 +1299,7 @@ pub async fn list_profiles<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     query: web::Query<Pagination>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     RequirePermission::new(NETWORK_READ, network_root_id(user.tenant_id))
         .check(&user, authz.get_ref().as_ref())
         .await?;
@@ -1162,7 +1330,7 @@ pub async fn get_profile<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<Uuid>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let segment_id = path.into_inner();
     RequirePermission::new(NETWORK_READ, segment_id)
         .check(&user, authz.get_ref().as_ref())
@@ -1194,8 +1362,10 @@ pub async fn get_profile<C: Connection + Clone>(
                                       response names the permission and the node when one is \
                                       missing — or a reactor vetoed the write"),
         (status = 404, description = "No such segment in this tenant"),
-        (status = 409, description = "The segment already has a profile, or the segment changed \
-                                      since `segment_version` was read"),
+        (status = 409, description = "`reason_code` `profile_exists` (`already_exists`): the \
+                                      segment already has a profile; or `stale_version`: the \
+                                      segment changed since `segment_version` was read",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -1206,7 +1376,7 @@ pub async fn create_profile<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     http_req: HttpRequest,
     body: web::Json<CreateReplyProfileRequest>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let req = body.into_inner();
     let segment_id = req.segment_id;
@@ -1297,8 +1467,9 @@ pub async fn create_profile<C: Connection + Clone>(
         (status = 403, description = "The write gate refused it (H1 … H6, as for create), or a \
                                       reactor vetoed the write"),
         (status = 404, description = "No such segment in this tenant, or it has no profile"),
-        (status = 409, description = "The profile changed since `version` was read, or the \
-                                      segment since `segment_version`"),
+        (status = 409, description = "`reason_code` `stale_version`: the profile changed since \
+                                      `version` was read, or the segment since `segment_version`",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -1310,7 +1481,7 @@ pub async fn replace_profile<C: Connection + Clone>(
     http_req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<ReplaceReplyProfileRequest>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let segment_id = path.into_inner();
     let req = body.into_inner();
@@ -1421,7 +1592,9 @@ pub async fn replace_profile<C: Connection + Clone>(
         (status = 403, description = "The caller lacks `network:profiles_write` on the segment, \
                                       or a reactor vetoed the write"),
         (status = 404, description = "No such segment in this tenant, or it has no profile"),
-        (status = 409, description = "The profile changed since `version` was read"),
+        (status = 409, description = "`reason_code` `stale_version`: the profile changed since \
+                                      `version` was read",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -1433,7 +1606,7 @@ pub async fn delete_profile<C: Connection + Clone>(
     http_req: HttpRequest,
     path: web::Path<Uuid>,
     query: web::Query<VersionQuery>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let segment_id = path.into_inner();
     let expected_version = query.version;
@@ -1542,7 +1715,7 @@ pub async fn get_policy<C: Connection + Clone>(
     user: AuthenticatedUser,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     RequirePermission::new(NETWORK_READ, network_root_id(user.tenant_id))
         .check(&user, authz.get_ref().as_ref())
         .await?;
@@ -1576,7 +1749,9 @@ pub async fn get_policy<C: Connection + Clone>(
         (status = 401, description = "Not authenticated, or a service-account token"),
         (status = 403, description = "The caller lacks `network:segments_write` on `/network` (the \
                                       response names the permission and the node)"),
-        (status = 409, description = "The policy changed since `version` was read"),
+        (status = 409, description = "`reason_code` `stale_version`: the policy changed since \
+                                      `version` was read",
+         body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -1587,7 +1762,7 @@ pub async fn replace_policy<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     http_req: HttpRequest,
     body: web::Json<ReplaceNetworkPolicyRequest>,
-) -> Result<HttpResponse, AxiamApiError> {
+) -> Result<HttpResponse, NetworkApiError> {
     let principal = AuthenticatedPrincipal::from(user);
     let req = body.into_inner();
     let tenant_id = principal.tenant_id;
@@ -1666,4 +1841,114 @@ pub async fn replace_policy<C: Connection + Clone>(
     )
     .await;
     Ok(HttpResponse::Ok().json(NetworkPolicyResponse::from(written)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conflict(reason: &str) -> AxiamError {
+        AxiamError::Conflict {
+            reason: reason.into(),
+        }
+    }
+
+    fn exists(entity: &str) -> AxiamError {
+        AxiamError::AlreadyExists {
+            entity: entity.into(),
+        }
+    }
+
+    /// The sentences the network repositories and this module write, each to
+    /// its value; the route test pins the paths that reach them end to end,
+    /// and this pins the two a route test cannot provoke on demand (a site
+    /// removed mid-create, a profile written between the gate and the write).
+    #[test]
+    fn each_409_sentence_has_its_reason_code() {
+        use NetworkConflictReason as R;
+        for (error, want) in [
+            (
+                conflict("the network segment changed since it was read; read it again and retry"),
+                R::StaleVersion,
+            ),
+            (
+                conflict(
+                    "the network segment changed since it was read (a reply profile was \
+                     written on it); read it again and retry",
+                ),
+                R::StaleVersion,
+            ),
+            (
+                conflict("the reply profile changed since it was read; read it again and retry"),
+                R::StaleVersion,
+            ),
+            (
+                conflict("the network policy changed since it was read; read it again and retry"),
+                R::StaleVersion,
+            ),
+            (
+                conflict(
+                    "the segment's reply profile 1 uses filter_id 'a', which the new \
+                     filter_ids remove; change or delete the profile first",
+                ),
+                R::StrandsProfile,
+            ),
+            (
+                conflict(
+                    "the new filter_ids would leave the segment's reply profile outside its \
+                     envelope; change or delete the profile first",
+                ),
+                R::StrandsProfile,
+            ),
+            (
+                conflict("the network segment has child resources"),
+                R::HasChildren,
+            ),
+            (
+                conflict("the network site was removed while the segment was being written; retry"),
+                R::SiteGone,
+            ),
+            (conflict("something new"), R::Other),
+            (
+                exists("network_segment: the site already has a segment with this vlan_id"),
+                R::DuplicateVlan,
+            ),
+            (
+                exists("network_segment: the site already has a segment with this rank"),
+                R::DuplicateRank,
+            ),
+            (
+                exists("network_segment: the site already has a segment of this name"),
+                R::DuplicateName,
+            ),
+            (exists("reply_profile"), R::ProfileExists),
+            (exists("network_segment"), R::Other),
+        ] {
+            assert_eq!(NetworkConflictReason::of(&error), Some(want), "{error}");
+        }
+        assert_eq!(
+            NetworkConflictReason::of(&AxiamError::Validation {
+                message: "x".into()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn the_wire_values_are_snake_case_and_match_as_str() {
+        use NetworkConflictReason as R;
+        for r in [
+            R::StaleVersion,
+            R::StrandsProfile,
+            R::HasChildren,
+            R::DuplicateName,
+            R::DuplicateVlan,
+            R::DuplicateRank,
+            R::ProfileExists,
+            R::SiteGone,
+            R::Other,
+        ] {
+            assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
+        }
+    }
 }

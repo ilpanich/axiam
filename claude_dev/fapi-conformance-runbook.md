@@ -181,6 +181,9 @@ baselines, and exits non-zero on a regression only:
 | `WAITING` in a plan the unattended baseline does not name | red for every module in it |
 | `SKIPPED` | tolerated and named |
 | a module the baseline has never heard of | red if it failed outright or parked; otherwise tolerated |
+| a `--plan` (or a result file) whose plan `baseline.json` does not name, without `--new-plan <plan>` | red: a typo, or a new plan nobody recorded (R101W4-10, #630) |
+| `--new-plan <plan>` for a plan `baseline.json` names, or one that is not also a `--plan` | red: the flag would only weaken the checks |
+| `--new-plan <plan>` for a plan `baseline.json` does not name | the plan is checked for outright failures only (not `WAITING`), and the summary says `NEW PLAN`; record it, then drop the flag |
 | an unreadable or malformed baseline of either kind, or an unreadable result file | red: the gate fails closed, it never falls back to tolerating |
 
 The workflow's last step runs it over the three FAPI plans and appends its output
@@ -205,6 +208,13 @@ follows the same rule. A missing, unparsable or wrongly shaped
 baseline"), as does an unreadable `baseline.json`. There is no flag that makes a
 missing file mean "tolerate every `WAITING`": that reading is the bug R1W2-06
 named. A plan the file does not list therefore tolerates no `WAITING` at all.
+
+**A plan the baseline does not name (R101W4-10, #630).** The gate used to check such a plan for
+outright failures only and say so in a note, which was green: a typo in `--plan`, or a plan added to the
+workflow and never baselined, passed. It is now refused unless `--new-plan <plan>` (repeatable) says the
+plan is new, and the flag is as narrow as it can be (see the table). The workflow's three plans are in both
+baselines and pass no flag; a fourth plan needs its baselines recorded in the same change, or a temporary
+`--new-plan` that the recording removes.
 
 To re-record the baseline after the maintainer's final run (alongside, not over:
 keep the dated reports), point the script at that run's results:
@@ -238,6 +248,19 @@ and had left out `par-ensure-jwt-client-assertions-nbf-8-seconds-in-the-future-i
 continues to the authorization endpoint once PAR accepts the assertion and so needs a browser.
 Re-record after any change to the plans the workflow runs or to which modules AXIAM completes
 without a browser.
+
+**How the provenance is kept.** The file's `source` field is the provenance: the workflow run (id and
+URL), the job, the branch and commit, the dispatch inputs (`axiam_image` empty or the digest,
+`module_timeout`), when it completed, and whether the lists were *recorded* by `--record-unattended`
+over the run's artifact or *transcribed* from the gate step's log. A transcription is weaker evidence
+than a recording, so when the artifact is available it is re-run and the result compared with the
+committed lists (`jq -S .plans` of both, `diff`): if they are identical the lists stay as they are and
+`source` gains one sentence naming the verification (date, the artifact `fapi-conformance-<run id>`, the
+command); if they differ, the difference is explained before anything is recorded (see above), and
+`source` is rewritten to say it is now a recording from that run. `gate.py --record-unattended` writes its
+own generic `source`/`note` (the directory and today's date), so its output is never committed as is:
+only its `plans` object is compared with, or merged into, the committed file, and `source` is hand-kept.
+`test_gate.py` pins that `source` names a run id and `--record-unattended`.
 
 The gate's rules are unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
 CI's docs job); the workflow also passes every `workflow_dispatch` input through

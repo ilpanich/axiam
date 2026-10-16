@@ -840,6 +840,7 @@ async fn the_purge_bound_never_exceeds_the_receipts_timestamp() {
                 audit_exported_through: Some(receipt.timestamp),
                 audit_rows_deleted: 2,
                 audit_rows_kept: 2,
+                orphan: false,
             },
             "{slug}: the bound is the receipt's timestamp, not its claim"
         );
@@ -878,6 +879,7 @@ async fn a_deletion_whose_receipt_is_not_in_the_tenants_log_keeps_the_whole_trai
                 audit_exported_through: None,
                 audit_rows_deleted: 0,
                 audit_rows_kept: 1,
+                orphan: false,
             },
             "{slug}"
         );

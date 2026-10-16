@@ -190,6 +190,10 @@ pub struct CleanupTask<C: Connection> {
     /// **Test seam, never set in production** (#598): a step run first in each
     /// tick, so a test can hold a tick open across a stop.
     step_for_tests: Option<CleanupStepForTests>,
+    /// #655, #624: the tenant purges and erasures, each a task of its own that
+    /// the composition root waits for after the cleanup task (see
+    /// [`AuditedWork`]).
+    audited: AuditedWork,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -225,8 +229,11 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// after a replica dies holding a claim: the tenant waits at most an hour for
 /// another replica, an erasure of data already out of every read path. Clock
 /// skew between replicas, which the stamp is written by, is seconds against an
-/// hour. A purge that fails releases its claim, so a failure is retried at the
-/// next tick as before.
+/// hour. A purge that does not finish releases its claim — one that fails, one
+/// given up because the process is stopping, and (#655) one aborted or
+/// panicking, from a drop guard — so the next tick, or the next start, resumes
+/// it at once; only a process that ends before the release is written (a
+/// `SIGKILL`, or a stop that runs out of time) leaves the tenant to the lease.
 pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 
 // ---------------------------------------------------------------------------
@@ -350,16 +357,18 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 ///
 /// A free function, and public, for the reason [`run_erasure_pipeline`] is
 /// one. Each tenant is purged by
-/// [`SurrealTenantRepository::purge_tombstoned`] — every tenant-scoped table in
-/// the order user erasure uses, of its audit trail the rows at or before the
-/// time of the export the deletion required (T-118, R1W1-04), then the tenant
-/// row — or, for an orphan, by [`SurrealTenantRepository::purge_orphan`], which
-/// leaves the audit trail to the retention sweep. Audit rows the purge keeps
-/// name a tenant that no longer exists and are deleted by the audit retention
-/// sweep (T-119) like any other. Each completed purge is recorded in the
-/// **system** log as `tenants.purged`, beside the `tenants.deleted` record the
-/// deletion wrote, with the export time used and the audit rows deleted and
-/// kept; neither record is ever purged.
+/// [`SurrealTenantRepository::purge_tombstoned_rows`] — every tenant-scoped
+/// table in the order user erasure uses, of its audit trail the rows at or
+/// before the time of the export the deletion required (T-118, R1W1-04) — and
+/// then [`SurrealTenantRepository::remove_purged_tenant`], its tenant row; or,
+/// for an orphan, under its claim marker, by
+/// [`SurrealTenantRepository::purge_orphan_rows`], which leaves the audit
+/// trail to the retention sweep, and then by the same removal of the marker.
+/// Audit rows the purge keeps name a tenant that no longer exists and are
+/// deleted by the audit retention sweep (T-119) like any other. Each completed purge is recorded in the **system**
+/// log as `tenants.purged`, beside the `tenants.deleted` record the deletion
+/// wrote, with the export time used and the audit rows deleted and kept;
+/// neither record is ever purged.
 ///
 /// Every replica runs this sweep (#610). A tombstoned tenant is purged only by
 /// the replica whose [`SurrealTenantRepository::claim_purge`] wins it; the
@@ -373,11 +382,20 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// predates another replica's finished purge finds nothing left and records
 /// nothing.
 ///
+/// Each tenant's purge, from its claim to its record, is one unit of
+/// [`AuditedWork`] (#655): a task of its own, which aborting the cleanup task
+/// does not cut. The sweep starts no purge once the process is stopping
+/// (checked between tenants); a purge under way gives itself up at the stop as
+/// long as its tenant row is still there, releasing its claim, and once the row
+/// is removed it runs on to its record.
+///
 /// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
 ///   fail, naming how many failed and never a tenant's data. The failed tenant
 ///   stays tombstoned, its claim is released, and the next pass resumes it
 ///   (every step is idempotent).
+/// * A stop ends the pass early with `Ok`: the tenants left stay tombstoned and
+///   unclaimed, and the next start purges them.
 ///
 /// # Errors
 ///
@@ -385,13 +403,14 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// tombstoned tenants or the orphans from being listed (the tombstoned tenants
 /// are still purged when only the orphans could not be).
 pub async fn sweep_tenant_purge<C, S>(
-    tenant_repo: &SurrealTenantRepository<C>,
-    audit: &S,
+    tenant_repo: &Arc<SurrealTenantRepository<C>>,
+    audit: &Arc<S>,
     scan_orphans: bool,
+    work: &AuditedWork,
 ) -> Result<u64, AxiamError>
 where
     C: Connection,
-    S: AuditWriteSink,
+    S: AuditWriteSink + 'static,
 {
     let mut due: Vec<(Uuid, bool)> = tenant_repo
         .list_tombstoned()
@@ -412,86 +431,54 @@ where
     let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE)
         .map_err(|e| AxiamError::Internal(format!("tenant purge lease: {e}")))?;
     let (mut purged, mut failed) = (0u64, 0u64);
-    for (tenant_id, orphan) in due {
+    let due_count = due.len();
+    for (started, (tenant_id, orphan)) in due.into_iter().enumerate() {
+        // #655: no purge starts once the process is stopping; the tenants left
+        // stay tombstoned, and the next start purges them.
+        if work.stopping() {
+            tracing::info!(
+                purged,
+                left = due_count - started,
+                "tenant purge sweep stopped: the process is stopping (the rest stay tombstoned)"
+            );
+            break;
+        }
+        let (tenants, sink, unit) = (Arc::clone(tenant_repo), Arc::clone(audit), work.clone());
         let outcome = if orphan {
-            match tenant_repo.purge_orphan(tenant_id).await {
-                // Claimed by another replica, or purged by one since this
-                // replica's scan (R101W1-09 (a)): recorded by that purge.
-                Ok(None) => continue,
-                Ok(Some(report)) => Ok(report),
-                Err(e) => Err(e),
-            }
+            work.run(purge_orphan_unit(tenants, sink, tenant_id, unit))
+                .await
         } else {
-            let claimed_at = Utc::now();
-            match tenant_repo.claim_purge(tenant_id, claimed_at, lease).await {
-                // Another replica holds it, or it is already gone.
-                Ok(false) => continue,
-                Ok(true) => match tenant_repo.purge_tombstoned(tenant_id).await {
-                    // Purged by an overlapping replica: done, and recorded
-                    // by the purge that removed the row.
-                    Err(AxiamError::NotFound { .. }) => continue,
-                    Err(e) => {
-                        // Let the next tick (any replica's) retry it now
-                        // rather than after the lease; a failed release
-                        // leaves the lease to expire.
-                        if let Err(release) =
-                            tenant_repo.release_purge_claim(tenant_id, claimed_at).await
-                        {
-                            tracing::warn!(
-                                error = %release,
-                                %tenant_id,
-                                "could not release the tenant purge claim; it lapses with its lease"
-                            );
-                        }
-                        Err(e)
-                    }
-                    Ok(report) => Ok(report),
-                },
-                Err(e) => Err(e),
-            }
+            work.run(purge_tombstoned_unit(tenants, sink, tenant_id, lease, unit))
+                .await
         };
-        let report = match outcome {
-            Ok(report) => report,
-            Err(e) => {
+        match outcome {
+            Some(Ok(PurgeOutcome::Purged)) => purged += 1,
+            // Another replica holds it, or it is already gone.
+            Some(Ok(PurgeOutcome::Skipped)) => {}
+            // Given up at the stop (or still running, and left to the
+            // teardown's join): the loop's check above ends the pass.
+            Some(Ok(PurgeOutcome::Abandoned)) | None if work.stopping() => {}
+            Some(Ok(PurgeOutcome::Abandoned)) => {}
+            // The unit panicked; its claim guard released the claim.
+            None => {
                 failed += 1;
                 tracing::warn!(
-                error = %e,
-                %tenant_id,
-                orphan,
+                    %tenant_id,
+                    orphan,
+                    "tenant purge ended without an outcome; the tenant stays tombstoned and the \
+                     next sweep resumes it"
+                );
+            }
+            Some(Err(e)) => {
+                failed += 1;
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    orphan,
                     "tenant purge incomplete; the tenant stays tombstoned and the next sweep resumes it"
                 );
-                continue;
             }
-        };
-        purged += 1;
-        write_audit_with_dead_letter(
-            audit,
-            CreateAuditLogEntry {
-                tenant_id: Uuid::nil(),
-                actor_id: Uuid::nil(),
-                actor_type: ActorType::System,
-                action: axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.to_string(),
-                resource_id: Some(tenant_id),
-                outcome: AuditOutcome::Success,
-                ip_address: None,
-                metadata: Some(serde_json::json!({
-                    // An orphan's claim marker taken over after its claimant
-                    // died is purged as a tombstoned row, and is still an orphan.
-                    "orphan": orphan || report.orphan,
-                    "audit_exported_through": report.audit_exported_through,
-                    "audit_rows_deleted": report.audit_rows_deleted,
-                    "audit_rows_kept": report.audit_rows_kept,
-                })),
-            },
-        )
-        .await;
-        tracing::info!(
-            %tenant_id,
-            orphan = orphan || report.orphan,
-            audit_rows_deleted = report.audit_rows_deleted,
-            audit_rows_kept = report.audit_rows_kept,
-            "deleted tenant's data purged"
-        );
+        }
     }
 
     if failed > 0 {
@@ -504,6 +491,458 @@ where
         return Err(e);
     }
     Ok(purged)
+}
+
+/// How one tenant's purge unit ended, when it did not fail.
+enum PurgeOutcome {
+    /// This unit purged the tenant and wrote `tenants.purged`.
+    Purged,
+    /// Another replica holds the claim, or the tenant is already purged (for
+    /// an orphaned id: a scan that predates its finished purge).
+    Skipped,
+    /// Given up because the process is stopping, before the point of no
+    /// return; the tenant stays tombstoned and unclaimed.
+    Abandoned,
+}
+
+/// One tombstoned tenant's purge, from its claim to its `tenants.purged`
+/// record: one unit of [`AuditedWork`] (#655).
+///
+/// The point of no return is the removal of the tenant row: before it every
+/// step is idempotent and the tenant stays tombstoned, so the unit gives up at
+/// the stop and releases its claim; it never removes the row once the process
+/// is stopping. After it, the record is the only thing left, and the unit
+/// writes it whatever the stop says.
+///
+/// The tombstoned row may be an orphan purge's claim marker whose claimant
+/// died or gave it up (R101W1-09 (a)): its rows are then purged as an orphan's
+/// and the record says `orphan: true` (the report's `orphan`).
+async fn purge_tombstoned_unit<C, S>(
+    tenants: Arc<SurrealTenantRepository<C>>,
+    audit: Arc<S>,
+    tenant_id: Uuid,
+    lease: chrono::TimeDelta,
+    work: AuditedWork,
+) -> Result<PurgeOutcome, AxiamError>
+where
+    C: Connection,
+    S: AuditWriteSink,
+{
+    let claimed_at = Utc::now();
+    if !tenants.claim_purge(tenant_id, claimed_at, lease).await? {
+        return Ok(PurgeOutcome::Skipped);
+    }
+    // From here every exit but a removed tenant row releases the claim — the
+    // awaited release below, or, for an abort or a panic, the guard's drop.
+    let claim = PurgeClaim {
+        tenants: Arc::clone(&tenants),
+        tenant_id,
+        claimed_at,
+        held: true,
+    };
+    let rows = work
+        .until_stopped(async {
+            let report = tenants.purge_tombstoned_rows(tenant_id).await?;
+            work.step(UnitStep::TenantRowsPurged(tenant_id)).await;
+            Ok::<_, AxiamError>(report)
+        })
+        .await;
+    let report = match rows {
+        Some(Ok(report)) => report,
+        // Purged by an overlapping replica: done, and recorded by the purge
+        // that removed the row.
+        Some(Err(AxiamError::NotFound { .. })) => {
+            claim.settle();
+            return Ok(PurgeOutcome::Skipped);
+        }
+        // Let the next tick (any replica's) retry it now rather than after
+        // the lease.
+        Some(Err(e)) => {
+            claim.release().await;
+            return Err(e);
+        }
+        None => {
+            claim.release().await;
+            return Ok(PurgeOutcome::Abandoned);
+        }
+    };
+    // The point of no return is never crossed once the process is stopping.
+    if work.stopping() {
+        claim.release().await;
+        return Ok(PurgeOutcome::Abandoned);
+    }
+    match tenants.remove_purged_tenant(tenant_id).await {
+        Ok(()) => claim.settle(),
+        Err(AxiamError::NotFound { .. }) => {
+            claim.settle();
+            return Ok(PurgeOutcome::Skipped);
+        }
+        Err(e) => {
+            claim.release().await;
+            return Err(e);
+        }
+    }
+    record_tenant_purged(audit.as_ref(), tenant_id, false, &report).await;
+    Ok(PurgeOutcome::Purged)
+}
+
+/// One orphaned tenant id's purge and its `tenants.purged` record: one unit of
+/// [`AuditedWork`] (#655), claimed by a marker row (R101W1-09 (a)).
+///
+/// [`SurrealTenantRepository::begin_orphan_purge`] claims the id by writing
+/// its marker, a tombstoned tenant row, and finds whether it still has rows:
+/// another replica's claim, or a scan that predates a finished purge, is
+/// skipped and records nothing. Then the unit runs as
+/// [`purge_tombstoned_unit`] does: the rows
+/// ([`SurrealTenantRepository::purge_orphan_rows`]), then the removal of the
+/// marker ([`SurrealTenantRepository::remove_purged_tenant`]) as the point of
+/// no return, and the record only when this unit removed it. Given up at the
+/// stop, or cut, the marker stays tombstoned with its claim released, and the
+/// tombstoned-tenant sweep purges it as the orphan it is.
+async fn purge_orphan_unit<C, S>(
+    tenants: Arc<SurrealTenantRepository<C>>,
+    audit: Arc<S>,
+    tenant_id: Uuid,
+    work: AuditedWork,
+) -> Result<PurgeOutcome, AxiamError>
+where
+    C: Connection,
+    S: AuditWriteSink,
+{
+    let Some(claimed_at) = tenants.begin_orphan_purge(tenant_id).await? else {
+        return Ok(PurgeOutcome::Skipped);
+    };
+    // As in `purge_tombstoned_unit`: every exit but a removed marker releases
+    // the claim, so the marker is the tombstoned-tenant sweep's at once.
+    let claim = PurgeClaim {
+        tenants: Arc::clone(&tenants),
+        tenant_id,
+        claimed_at,
+        held: true,
+    };
+    let report = match work
+        .until_stopped(tenants.purge_orphan_rows(tenant_id, claimed_at))
+        .await
+    {
+        Some(Ok(report)) => report,
+        // The failed purge dropped its marker (R101W1-09 (a)): the next scan
+        // finds the id again.
+        Some(Err(e)) => {
+            claim.settle();
+            return Err(e);
+        }
+        None => {
+            claim.release().await;
+            return Ok(PurgeOutcome::Abandoned);
+        }
+    };
+    // The point of no return is never crossed once the process is stopping.
+    if work.stopping() {
+        claim.release().await;
+        return Ok(PurgeOutcome::Abandoned);
+    }
+    match tenants.remove_purged_tenant(tenant_id).await {
+        Ok(()) => claim.settle(),
+        // The marker was taken over and removed by another purge, which
+        // records it.
+        Err(AxiamError::NotFound { .. }) => {
+            claim.settle();
+            return Ok(PurgeOutcome::Skipped);
+        }
+        Err(e) => {
+            claim.release().await;
+            return Err(e);
+        }
+    }
+    record_tenant_purged(audit.as_ref(), tenant_id, true, &report).await;
+    Ok(PurgeOutcome::Purged)
+}
+
+/// Write `tenants.purged` to the system log for a purge that finished.
+async fn record_tenant_purged<S: AuditWriteSink>(
+    audit: &S,
+    tenant_id: Uuid,
+    orphan: bool,
+    report: &axiam_db::repository::tenant_purge::TenantPurgeReport,
+) {
+    write_audit_with_dead_letter(
+        audit,
+        CreateAuditLogEntry {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.to_string(),
+            resource_id: Some(tenant_id),
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                // An orphan's claim marker taken over after its claimant
+                // died is purged as a tombstoned row, and is still an orphan.
+                "orphan": orphan || report.orphan,
+                "audit_exported_through": report.audit_exported_through,
+                "audit_rows_deleted": report.audit_rows_deleted,
+                "audit_rows_kept": report.audit_rows_kept,
+            })),
+        },
+    )
+    .await;
+    tracing::info!(
+        %tenant_id,
+        orphan = orphan || report.orphan,
+        audit_rows_deleted = report.audit_rows_deleted,
+        audit_rows_kept = report.audit_rows_kept,
+        "deleted tenant's data purged"
+    );
+}
+
+/// A replica's claim on a tombstoned tenant's purge (#610), released on every
+/// exit but a removed tenant row (#655).
+///
+/// The purge releases it itself, awaited, where it can — a failure, or giving
+/// up at the stop. Every other exit — the unit aborted at the teardown's bound,
+/// a panic, a release that was itself cut — drops the guard still holding the
+/// claim, and the drop spawns the release on the runtime. Without that, the
+/// next start's sweep found a claim younger than [`TENANT_PURGE_LEASE`] and
+/// skipped the tenant for up to an hour. A drop during the runtime's own
+/// shutdown cannot write anything; the claim then lapses with its lease.
+struct PurgeClaim<C: Connection> {
+    tenants: Arc<SurrealTenantRepository<C>>,
+    tenant_id: Uuid,
+    claimed_at: chrono::DateTime<Utc>,
+    held: bool,
+}
+
+impl<C: Connection> PurgeClaim<C> {
+    /// Release the claim, awaited. A release cut mid-way is retried by the
+    /// drop, since the claim counts as held until it has answered.
+    async fn release(mut self) {
+        if let Err(e) = self
+            .tenants
+            .release_purge_claim(self.tenant_id, self.claimed_at)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                tenant_id = %self.tenant_id,
+                "could not release the tenant purge claim; it lapses with its lease"
+            );
+        }
+        self.held = false;
+    }
+
+    /// The tenant row is gone (this purge removed it, or another did): there is
+    /// nothing left to claim.
+    fn settle(mut self) {
+        self.held = false;
+    }
+}
+
+impl<C: Connection> Drop for PurgeClaim<C> {
+    fn drop(&mut self) {
+        if !self.held {
+            return;
+        }
+        let (tenants, tenant_id, claimed_at) =
+            (Arc::clone(&self.tenants), self.tenant_id, self.claimed_at);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(e) = tenants.release_purge_claim(tenant_id, claimed_at).await {
+                        tracing::warn!(
+                            error = %e,
+                            %tenant_id,
+                            "could not release the claim of a tenant purge that was cut; it \
+                             lapses with its lease"
+                        );
+                    }
+                });
+            }
+            Err(_) => tracing::warn!(
+                %tenant_id,
+                "the claim of a tenant purge that was cut outside a runtime lapses with its lease"
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Units of work that end in an audit row (#655, #624)
+// ---------------------------------------------------------------------------
+
+/// Where a unit of [`AuditedWork`] is, for a test that holds it there
+/// ([`AuditedWork::with_step_for_tests`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitStep {
+    /// A tombstoned tenant's purge has removed the tenant's rows and not yet
+    /// its tenant row: before the purge's point of no return.
+    TenantRowsPurged(Uuid),
+    /// An erasure has anonymized the account (and written its proof) and has
+    /// not yet completed its `account_deletion` row or written
+    /// `gdpr.user_pseudonymized`: past the erasure's point of no return.
+    ErasureAnonymized(Uuid),
+}
+
+/// A step [`AuditedWork::with_step_for_tests`] runs at each [`UnitStep`].
+#[doc(hidden)]
+pub type UnitStepForTests = Arc<
+    dyn Fn(UnitStep) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The cleanup task's units of work that must end in an audit row (#655,
+/// #624): a tombstoned tenant's purge through its `tenants.purged` record, an
+/// orphaned tenant id's purge through its record, and one account's erasure
+/// through its `account_deletion` completion and its `gdpr.user_pseudonymized`
+/// row.
+///
+/// The cleanup task runs them one at a time, each as a `tokio::spawn`ed task of
+/// its own ([`Self::run`]), so aborting the cleanup task — the composition
+/// root's bounded join — does not cut one. The root then waits for the unit in
+/// flight with [`Self::join`], within the same bound, and aborts it past that,
+/// so a replica that lost its lease writes nothing after its stop's budget.
+///
+/// Each unit has a **point of no return** — the write after which no later
+/// sweep finds the work again: the removal of the tenant row; the anonymization
+/// of the account. Before it, the unit gives itself up as soon as the process
+/// is stopping (the tenant stays tombstoned, its claim released; the account
+/// stays due), and it never crosses it once the stop is requested. So the only
+/// unit a stop can find past its point of no return crossed it before the stop
+/// was requested, and it has the whole of the teardown's window for its last
+/// statements — from the stop signal through the gRPC stop, the lease release
+/// and the outbound and audit drains to the end of the cleanup bound: 5 to 18 s
+/// for `SIGTERM`, 2 to 13 s after a lost lease, whose stop signal comes at the
+/// loss (#628). One that outlasts even that is cut, and its record is lost
+/// (T-444).
+#[derive(Clone)]
+pub struct AuditedWork {
+    stop: watch::Receiver<bool>,
+    in_flight: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    step_for_tests: Option<UnitStepForTests>,
+}
+
+impl AuditedWork {
+    /// Units that give themselves up when `stop` reads `true` — the cleanup
+    /// task's shutdown signal. A `stop` whose sender is gone while it reads
+    /// `false` never stops anything.
+    #[must_use]
+    pub fn new(stop: watch::Receiver<bool>) -> Self {
+        Self {
+            stop,
+            in_flight: Arc::default(),
+            step_for_tests: None,
+        }
+    }
+
+    /// **Test seam, never set in production** (#655, #624): run `step` at each
+    /// [`UnitStep`], so a test can hold a unit there across a stop.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_step_for_tests(mut self, step: Option<UnitStepForTests>) -> Self {
+        self.step_for_tests = step;
+        self
+    }
+
+    /// Whether the process has asked the cleanup task to stop.
+    #[must_use]
+    pub fn stopping(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// Resolves once the process is stopping; never, when it cannot be.
+    async fn stopped(&self) {
+        let mut stop = self.stop.clone();
+        if stop.wait_for(|stopping| *stopping).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// `work`'s output, or `None` when the process is stopping first: `work`
+    /// is then dropped where it is. For the steps before a unit's point of no
+    /// return only.
+    async fn until_stopped<F: std::future::Future>(&self, work: F) -> Option<F::Output> {
+        tokio::select! {
+            biased;
+            output = work => Some(output),
+            () = self.stopped() => None,
+        }
+    }
+
+    /// The test step at `at`, if one is set.
+    async fn step(&self, at: UnitStep) {
+        if let Some(step) = &self.step_for_tests {
+            step(at).await;
+        }
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<tokio::task::JoinHandle<()>>> {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Spawn `unit` as a task of its own and wait for its output.
+    ///
+    /// `None` when the process is stopping — before the unit was started, or
+    /// while it runs: it is then left running for [`Self::join`] — or when the
+    /// unit panicked (logged here). One unit at a time: the caller awaits this
+    /// before it starts the next.
+    pub async fn run<T: Send + 'static>(
+        &self,
+        unit: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> Option<T> {
+        if self.stopping() {
+            return None;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.slot() = Some(tokio::spawn(async move {
+            let _ = tx.send(unit.await);
+        }));
+        tokio::select! {
+            biased;
+            output = rx => {
+                let handle = self.slot().take();
+                match output {
+                    Ok(output) => Some(output),
+                    Err(_) => {
+                        if let Some(handle) = handle
+                            && let Err(e) = handle.await
+                        {
+                            tracing::error!(error = %e, "a cleanup unit ended without an outcome");
+                        }
+                        None
+                    }
+                }
+            }
+            // Left to the teardown, which waits for it.
+            () = self.stopped() => None,
+        }
+    }
+
+    /// Wait until `deadline` for the unit in flight, if any; past it, abort the
+    /// unit — it is cut where it is — and say so with `false`. The composition
+    /// root calls this once the cleanup task itself has ended or been aborted
+    /// (#655, #624).
+    pub async fn join(&self, deadline: tokio::time::Instant) -> bool {
+        let Some(mut handle) = self.slot().take() else {
+            return true;
+        };
+        match tokio::time::timeout_at(deadline, &mut handle).await {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "a cleanup unit ended without an outcome");
+                true
+            }
+            Err(_) => {
+                handle.abort();
+                // Once this returns the unit has been dropped: it writes
+                // nothing more, and its claim guard has run.
+                let _ = handle.await;
+                false
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,8 +1582,10 @@ where
         pseudonym,
         email_hash,
         None,
+        None,
     )
     .await
+    .map(|_erased| ())
 }
 
 /// The three steps of [`run_erasure_pipeline`], with the SSF report (G-5, D-52)
@@ -1154,6 +1595,11 @@ where
 /// account gone — whether or not the erasure proof is then written. A proof that
 /// fails to write leaves an anonymized account that no sweep selects again, so a
 /// report that waited for the proof would never be sent.
+///
+/// With `work` (#624), the steps give up before the anonymization — the point of
+/// no return — once the process is stopping, and answer `Ok(false)`: the audit
+/// scrub is idempotent and the account stays due. `Ok(true)` once the account
+/// is anonymized and its proof written.
 #[allow(clippy::too_many_arguments)]
 async fn erasure_steps<A, EP, U>(
     audit_repo: &A,
@@ -1164,16 +1610,30 @@ async fn erasure_steps<A, EP, U>(
     pseudonym: &str,
     email_hash: &str,
     report: Option<(&dyn SsfSystemAccountSink, axiam_core::models::user::User)>,
-) -> Result<(), AxiamError>
+    work: Option<&AuditedWork>,
+) -> Result<bool, AxiamError>
 where
     A: AuditLogRepository,
     EP: ErasureProofRepository,
     U: UserRepository,
 {
     // FATAL now (was: `if let Err(e) = ... { tracing::warn!(...) }`).
-    audit_repo
-        .pseudonymize_actor(tenant_id, user_id, pseudonym)
-        .await?;
+    let scrub = audit_repo.pseudonymize_actor(tenant_id, user_id, pseudonym);
+    match work {
+        Some(work) => match work.until_stopped(scrub).await {
+            Some(scrubbed) => {
+                scrubbed?;
+            }
+            None => return Ok(false),
+        },
+        None => {
+            scrub.await?;
+        }
+    }
+    // #624: the anonymization is never started once the process is stopping.
+    if work.is_some_and(AuditedWork::stopping) {
+        return Ok(false);
+    }
 
     // Clears `deletion_pending` — the re-selection anchor. Must run before
     // the proof so a failure here (unreachable in practice since this is
@@ -1197,7 +1657,7 @@ where
         })
         .await?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// [`run_erasure_pipeline`] and an SSF `account-purged` for the erased account
@@ -1229,6 +1689,40 @@ where
     EP: ErasureProofRepository,
     U: UserRepository,
 {
+    erasure_pipeline(
+        audit_repo,
+        erasure_proof_repo,
+        user_repo,
+        tenant_id,
+        user_id,
+        pseudonym,
+        email_hash,
+        sink,
+        None,
+    )
+    .await
+    .map(|_erased| ())
+}
+
+/// [`run_erasure_pipeline_reporting`], giving up before the anonymization once
+/// `work` is stopping (`Ok(false)`; see [`erasure_steps`]).
+#[allow(clippy::too_many_arguments)]
+async fn erasure_pipeline<A, EP, U>(
+    audit_repo: &A,
+    erasure_proof_repo: &EP,
+    user_repo: &U,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    pseudonym: &str,
+    email_hash: &str,
+    sink: Option<&dyn SsfSystemAccountSink>,
+    work: Option<&AuditedWork>,
+) -> Result<bool, AxiamError>
+where
+    A: AuditLogRepository,
+    EP: ErasureProofRepository,
+    U: UserRepository,
+{
     let report = match sink {
         Some(sink) if sink.is_active() => user_repo
             .get_by_id(tenant_id, user_id)
@@ -1246,8 +1740,304 @@ where
         pseudonym,
         email_hash,
         report,
+        work,
     )
     .await
+}
+
+/// The account an erasure is for, and what [`erase_and_record`] writes about
+/// it.
+#[derive(Debug, Clone, Copy)]
+pub struct ErasureSubject<'a> {
+    /// The account's tenant.
+    pub tenant_id: Uuid,
+    /// The account.
+    pub user_id: Uuid,
+    /// Its GDPR pseudonym (D-02).
+    pub pseudonym: &'a str,
+    /// What its address is overwritten with.
+    pub email_hash: &'a str,
+    /// How many of its certificates the purge revoked (#533), for the audit
+    /// row.
+    pub certificates_revoked: u64,
+}
+
+/// An erasure through its point of no return to its record (#624): the erasure
+/// pipeline ([`run_erasure_pipeline_reporting`]: audit scrub, anonymization,
+/// proof), then the `account_deletion` row marked completed, then the
+/// `gdpr.user_pseudonymized` audit row. Run inside a unit of [`AuditedWork`],
+/// so a cut of the cleanup task does not reach it.
+///
+/// The anonymization is the point of no return: it clears `deletion_pending`,
+/// so no later sweep selects the account again, and nothing but this call
+/// writes the completion and the audit row. Until then — the audit scrub —
+/// the call gives up once `work` is stopping and answers `Ok(false)`: the
+/// account stays due. Past it, it runs on to the audit row whatever the stop
+/// says, and answers `Ok(true)`. A free function, and public, for the reason
+/// [`run_erasure_pipeline`] is one.
+///
+/// # Errors
+///
+/// Those of [`run_erasure_pipeline_reporting`], before anything is recorded.
+/// The completion and the audit row are not fallible here: a failed completion
+/// is logged, and a failed audit write is dead-lettered (SECHRD-12).
+pub async fn erase_and_record<A, EP, U, C>(
+    audit_repo: &A,
+    erasure_proof_repo: &EP,
+    user_repo: &U,
+    account_deletion_repo: &SurrealAccountDeletionRepository<C>,
+    sink: Option<&dyn SsfSystemAccountSink>,
+    subject: ErasureSubject<'_>,
+    work: &AuditedWork,
+) -> Result<bool, AxiamError>
+where
+    A: AuditLogRepository + AuditWriteSink,
+    EP: ErasureProofRepository,
+    U: UserRepository,
+    C: Connection,
+{
+    let ErasureSubject {
+        tenant_id,
+        user_id,
+        pseudonym,
+        email_hash,
+        certificates_revoked,
+    } = subject;
+    // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
+    // (now FATAL, was swallowed) -> anonymize the user row -> write the
+    // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
+    // anywhere in this call propagates with `?` and aborts the purge:
+    // `anonymize_user` (the only step that clears `deletion_pending`)
+    // never ran, so the user stays due for a retry via
+    // `find_due_for_purge`, and NO erasure proof is ever written for an
+    // incomplete erasure.
+    if !erasure_pipeline(
+        audit_repo,
+        erasure_proof_repo,
+        user_repo,
+        tenant_id,
+        user_id,
+        pseudonym,
+        email_hash,
+        sink,
+        Some(work),
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    work.step(UnitStep::ErasureAnonymized(user_id)).await;
+
+    // (f) Mark the account_deletion row as completed (lookup by user_id).
+    // Run AFTER the erasure pipeline succeeds — if the pipeline failed
+    // above, this is never reached and the deletion row stays pending
+    // for the next retry too.
+    match account_deletion_repo
+        .find_pending_by_user_id(tenant_id, user_id)
+        .await
+    {
+        Ok(Some(deletion)) => {
+            if let Err(e) = account_deletion_repo
+                .mark_completed(tenant_id, deletion.id)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    deletion_id = %deletion.id,
+                    "cleanup: failed to mark account_deletion completed"
+                );
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(user_id = %user_id, "no pending account_deletion row found at purge time");
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, user_id = %user_id, "failed to find account_deletion row");
+        }
+    }
+
+    // (h) Emit gdpr.user_pseudonymized audit event. actor_id is the
+    // erased subject's own (now-anonymized) row id — a real, resolvable
+    // identifier rather than a fabricated nil UUID (Task 1 fix); the row
+    // still exists (anonymize-in-place preserves referential integrity),
+    // so this is a legitimate audit-trail reference, not PII leakage.
+    // A DB-write failure here is dead-lettered to BOTH an append-only
+    // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
+    // this legally-significant record must never be silently lost.
+    write_audit_with_dead_letter(
+        audit_repo,
+        CreateAuditLogEntry {
+            tenant_id,
+            actor_id: user_id,
+            actor_type: ActorType::System,
+            action: "gdpr.user_pseudonymized".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "pseudonym": pseudonym,
+                // #533: the account's certificates this purge revoked; a
+                // count, as directory linking records its own.
+                "certificates_revoked": certificates_revoked,
+            })),
+        },
+    )
+    .await;
+
+    tracing::info!(
+        pseudonym = %pseudonym,
+        tenant_id = %tenant_id,
+        "user purged and pseudonymized"
+    );
+    Ok(true)
+}
+
+/// What one account's purge needs, owned, so that it runs as a unit of
+/// [`AuditedWork`] — a task of its own (#624).
+struct ErasureUnit<C: Connection> {
+    auth_svc: Arc<AuthSvc<C>>,
+    federation_link_repo: Arc<SurrealFederationLinkRepository<C>>,
+    webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
+    password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
+    group_repo: Arc<SurrealGroupRepository<C>>,
+    role_repo: Arc<SurrealRoleRepository<C>>,
+    cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
+    audit_repo: Arc<SurrealAuditLogRepository<C>>,
+    erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
+    user_repo: Arc<SurrealUserRepository<C>>,
+    account_deletion_repo: Arc<SurrealAccountDeletionRepository<C>>,
+    ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
+}
+
+impl<C: Connection> ErasureUnit<C> {
+    /// The purge of `user` (steps listed at `CleanupTask::sweep_pending_purges`):
+    /// `Ok(true)` once erased and recorded, `Ok(false)` when given up at the
+    /// stop before the point of no return — the account stays due.
+    async fn purge(
+        self,
+        user: axiam_core::models::user::User,
+        pepper: [u8; 32],
+        work: AuditedWork,
+    ) -> Result<bool, AxiamError> {
+        // Steps (a)…(b4) are idempotent and leave the account due: given up
+        // where they are once the process is stopping.
+        let Some(certificates_revoked) = work.until_stopped(self.prepare(&user)).await else {
+            return Ok(false);
+        };
+        let certificates_revoked = certificates_revoked?;
+        if work.stopping() {
+            return Ok(false);
+        }
+
+        let (user_id, tenant_id) = (user.id, user.tenant_id);
+        // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
+        let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);
+
+        // Derive email hash for anonymize_user from tenant+user IDs (original email
+        // is no longer accessible at purge time — user already marked deletion_pending).
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(tenant_id.as_bytes());
+        h.update(user_id.as_bytes());
+        let email_hash = hex::encode(h.finalize());
+
+        // The anonymization inside is the point of no return; it is never
+        // started once the process is stopping (#624).
+        erase_and_record(
+            self.audit_repo.as_ref(),
+            self.erasure_proof_repo.as_ref(),
+            self.user_repo.as_ref(),
+            self.account_deletion_repo.as_ref(),
+            self.ssf_sink.as_deref(),
+            ErasureSubject {
+                tenant_id,
+                user_id,
+                pseudonym: &pseudonym,
+                email_hash: &email_hash,
+                certificates_revoked,
+            },
+            &work,
+        )
+        .await
+    }
+
+    /// Steps (a)…(b4): sessions, federation links, credentials, the
+    /// authorization graph and the account's certificates. Returns how many
+    /// certificates were revoked.
+    async fn prepare(&self, user: &axiam_core::models::user::User) -> Result<u64, AxiamError> {
+        let (user_id, tenant_id) = (user.id, user.tenant_id);
+        // (a) Revoke all sessions and OAuth2 refresh tokens.
+        self.auth_svc
+            .revoke_all_sessions(tenant_id, user_id)
+            .await?;
+
+        // (b) Hard-delete federation identity links.
+        match self
+            .federation_link_repo
+            .get_by_user_id(tenant_id, user_id)
+            .await
+        {
+            Ok(links) => {
+                for link in links {
+                    if let Err(e) = self.federation_link_repo.delete(tenant_id, link.id).await {
+                        tracing::warn!(
+                            error = %e,
+                            %tenant_id,
+                            link_id = %link.id,
+                            "cleanup: failed to delete expired federation link; will retry next cycle"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, user_id = %user_id, "failed to list federation links for purge");
+            }
+        }
+
+        // (b2) Hard-delete stored credential material (SEC-056). Done with `?`
+        // (fail-closed): erasure must not be certified while a user's passkeys or
+        // password hashes remain. A transient failure aborts the purge and it is
+        // retried next sweep — every step here is idempotent.
+        let webauthn_creds = self.webauthn_repo.list_by_user(tenant_id, user_id).await?;
+        for cred in webauthn_creds {
+            self.webauthn_repo.delete(tenant_id, cred.id).await?;
+        }
+        // Prune the entire password-history chain (keep_count = 0 deletes all).
+        self.password_history_repo
+            .prune(tenant_id, user_id, 0)
+            .await?;
+
+        // (b3) Prune authorization-graph edges so the anonymized row is left as
+        // an isolated tombstone — no dangling `member_of` / `has_role` relations
+        // skewing group-member queries or leaving live authorization paths.
+        // Remove group memberships first so the subsequent role pass only sees
+        // the user's *direct* has_role edges (inherited ones vanish with the
+        // membership). Fail-closed (`?`): the tombstone must not be created while
+        // graph edges survive; every delete is idempotent and retried on failure.
+        let groups = self.group_repo.get_user_groups(tenant_id, user_id).await?;
+        for group in groups {
+            self.group_repo
+                .remove_member(tenant_id, user_id, group.id)
+                .await?;
+        }
+        let assignments = self
+            .role_repo
+            .get_user_role_assignments(tenant_id, user_id)
+            .await?;
+        for a in assignments {
+            self.role_repo
+                .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
+                .await?;
+        }
+
+        // (b4) Revoke the account's `User` certificates (#533) and clear their
+        // `metadata` (R101W1-05), while its username and email — which the
+        // convention for a certificate issued without a `user_id` reads — are
+        // still on the row. Fail-closed, like the steps above; idempotent (an
+        // already revoked row is not matched, a cleared one is not rewritten).
+        revoke_erased_users_certificates(self.cert_repo.as_ref(), user).await
+    }
 }
 
 /// The Art. 15 `profile` section of one user's export.
@@ -1386,6 +2176,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             vault_revocations: None,
             last_orphan_scan: None,
             step_for_tests: None,
+            audited: AuditedWork::new(shutdown.clone()),
             shutdown,
         }
     }
@@ -1473,6 +2264,23 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         self
     }
 
+    /// **Test seam, never set in production** (#655, #624): run `step` at each
+    /// [`UnitStep`] of a tenant purge or an erasure.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_unit_step_for_tests(mut self, step: Option<UnitStepForTests>) -> Self {
+        self.audited = self.audited.with_step_for_tests(step);
+        self
+    }
+
+    /// The handle the composition root joins the unit in flight through once
+    /// the task has stopped ([`AuditedWork::join`]; #655, #624). Take it before
+    /// [`Self::run`] consumes the task.
+    #[must_use]
+    pub fn audited_work(&self) -> AuditedWork {
+        self.audited.clone()
+    }
+
     /// Run the cleanup loop until a shutdown signal is received.
     ///
     /// Never returns `Err` — all sweep errors are logged at `warn` level and
@@ -1513,11 +2321,15 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// One tick: every sweep, in order.
     ///
     /// A stop request is checked between sweeps (#598): once the process is
-    /// stopping no further sweep starts, and the GDPR purge and export sweeps
-    /// check it between users and jobs too. The sweep that is running when the
-    /// stop arrives finishes, or is cut where it is if it outlasts the
-    /// composition root's bounded join (`ShutdownBudget::cleanup`); every sweep
-    /// is re-run by the next tick, so the next start resumes what a stop left.
+    /// stopping no further sweep starts, and the GDPR purge, export and tenant
+    /// purge sweeps check it between users, jobs and tenants too (#655). The
+    /// sweep that is running when the stop arrives finishes, or is cut where it
+    /// is if it outlasts the composition root's bounded join
+    /// (`ShutdownBudget::cleanup`); every sweep is re-run by the next tick, so
+    /// the next start resumes what a stop left. An erasure or a tenant purge
+    /// under way is a unit of [`AuditedWork`] that the cut of this task does not
+    /// reach: it gives itself up at the stop before its point of no return, and
+    /// after it runs on to its audit row, waited for within the same bound.
     async fn tick(&mut self) {
         if let Some(step) = &self.step_for_tests {
             step().await;
@@ -1791,9 +2603,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .last_orphan_scan
             .is_none_or(|at| at.elapsed() >= ORPHAN_TENANT_SCAN_INTERVAL);
         let outcome = sweep_tenant_purge(
-            self.tenant_repo.as_ref(),
-            self.audit_repo.as_ref(),
+            &self.tenant_repo,
+            &self.audit_repo,
             scan_orphans,
+            &self.audited,
         )
         .await;
         if scan_orphans && outcome.is_ok() {
@@ -2136,212 +2949,68 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 );
                 break;
             }
-            if let Err(e) = self.purge_single_user(&user, pepper).await {
-                tracing::warn!(
+            match self.purge_single_user(&user, pepper).await {
+                Some(Ok(true)) => purged += 1,
+                // Given up at the stop before the account was anonymized (it
+                // stays due), or still running and left to the teardown's join
+                // (#624): the check above ends the loop.
+                Some(Ok(false)) => {}
+                None if self.stop_requested() => {}
+                None => tracing::warn!(
+                    user_id = %user.id,
+                    tenant_id = %user.tenant_id,
+                    "purge ended without an outcome — skipping"
+                ),
+                Some(Err(e)) => tracing::warn!(
                     error = ?e,
                     user_id = %user.id,
                     tenant_id = %user.tenant_id,
                     "purge failed for user — skipping"
-                );
-            } else {
-                purged += 1;
+                ),
             }
         }
 
         Ok(purged)
     }
 
-    /// Run the full purge pipeline for a single user.
+    /// Run the full purge pipeline for a single user, as one unit of
+    /// [`AuditedWork`] (#624): a task of its own, which a cut of the cleanup
+    /// task does not reach.
+    ///
+    /// `Some(Ok(true))` once the account is erased and recorded,
+    /// `Some(Ok(false))` when the purge gave itself up at the stop before the
+    /// account was anonymized (it stays due), `None` when the process is
+    /// stopping while it runs (the teardown waits for it) or it panicked.
     ///
     /// G-5 (D-52): the session revocations and the `account-purged` event are
-    /// one cause, and the platform's own (`system`).
+    /// one cause, and the platform's own (`system`) — set inside the unit's
+    /// task, which is where they run.
     async fn purge_single_user(
         &self,
         user: &axiam_core::models::user::User,
         pepper: [u8; 32],
-    ) -> Result<(), AxiamError> {
-        with_cause(
-            Some(InitiatingEntity::System),
-            self.purge_single_user_inner(user, pepper),
-        )
-        .await
-    }
-
-    async fn purge_single_user_inner(
-        &self,
-        user: &axiam_core::models::user::User,
-        pepper: [u8; 32],
-    ) -> Result<(), AxiamError> {
-        let (user_id, tenant_id) = (user.id, user.tenant_id);
-        // (a) Revoke all sessions and OAuth2 refresh tokens.
-        self.auth_svc
-            .revoke_all_sessions(tenant_id, user_id)
-            .await?;
-
-        // (b) Hard-delete federation identity links.
-        match self
-            .federation_link_repo
-            .get_by_user_id(tenant_id, user_id)
+    ) -> Option<Result<bool, AxiamError>> {
+        let unit = ErasureUnit {
+            auth_svc: Arc::clone(&self.auth_svc),
+            federation_link_repo: Arc::clone(&self.federation_link_repo),
+            webauthn_repo: Arc::clone(&self.webauthn_repo),
+            password_history_repo: Arc::clone(&self.password_history_repo),
+            group_repo: Arc::clone(&self.group_repo),
+            role_repo: Arc::clone(&self.role_repo),
+            cert_repo: Arc::clone(&self.cert_repo),
+            audit_repo: Arc::clone(&self.audit_repo),
+            erasure_proof_repo: Arc::clone(&self.erasure_proof_repo),
+            user_repo: Arc::clone(&self.user_repo),
+            account_deletion_repo: Arc::clone(&self.account_deletion_repo),
+            ssf_sink: self.ssf_sink.clone(),
+        };
+        let (user, work) = (user.clone(), self.audited.clone());
+        self.audited
+            .run(with_cause(
+                Some(InitiatingEntity::System),
+                unit.purge(user, pepper, work),
+            ))
             .await
-        {
-            Ok(links) => {
-                for link in links {
-                    if let Err(e) = self.federation_link_repo.delete(tenant_id, link.id).await {
-                        tracing::warn!(
-                            error = %e,
-                            %tenant_id,
-                            link_id = %link.id,
-                            "cleanup: failed to delete expired federation link; will retry next cycle"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, user_id = %user_id, "failed to list federation links for purge");
-            }
-        }
-
-        // (b2) Hard-delete stored credential material (SEC-056). Done with `?`
-        // (fail-closed): erasure must not be certified while a user's passkeys or
-        // password hashes remain. A transient failure aborts the purge and it is
-        // retried next sweep — every step here is idempotent.
-        let webauthn_creds = self.webauthn_repo.list_by_user(tenant_id, user_id).await?;
-        for cred in webauthn_creds {
-            self.webauthn_repo.delete(tenant_id, cred.id).await?;
-        }
-        // Prune the entire password-history chain (keep_count = 0 deletes all).
-        self.password_history_repo
-            .prune(tenant_id, user_id, 0)
-            .await?;
-
-        // (b3) Prune authorization-graph edges so the anonymized row is left as
-        // an isolated tombstone — no dangling `member_of` / `has_role` relations
-        // skewing group-member queries or leaving live authorization paths.
-        // Remove group memberships first so the subsequent role pass only sees
-        // the user's *direct* has_role edges (inherited ones vanish with the
-        // membership). Fail-closed (`?`): the tombstone must not be created while
-        // graph edges survive; every delete is idempotent and retried on failure.
-        let groups = self.group_repo.get_user_groups(tenant_id, user_id).await?;
-        for group in groups {
-            self.group_repo
-                .remove_member(tenant_id, user_id, group.id)
-                .await?;
-        }
-        let assignments = self
-            .role_repo
-            .get_user_role_assignments(tenant_id, user_id)
-            .await?;
-        for a in assignments {
-            self.role_repo
-                .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
-                .await?;
-        }
-
-        // (b4) Revoke the account's `User` certificates (#533) and clear their
-        // `metadata` (R101W1-05), while its username and email — which the
-        // convention for a certificate issued without a `user_id` reads — are
-        // still on the row. Fail-closed, like the steps above; idempotent (an
-        // already revoked row is not matched, a cleared one is not rewritten).
-        let certificates_revoked =
-            revoke_erased_users_certificates(self.cert_repo.as_ref(), user).await?;
-
-        // (c) Compute deterministic pseudonym (keyed HMAC-SHA256, D-02).
-        let pseudonym = gdpr_pseudonym(&pepper, tenant_id, user_id);
-
-        // Derive email hash for anonymize_user from tenant+user IDs (original email
-        // is no longer accessible at purge time — user already marked deletion_pending).
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(tenant_id.as_bytes());
-        h.update(user_id.as_bytes());
-        let email_hash = hex::encode(h.finalize());
-
-        // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
-        // (now FATAL, was swallowed) -> anonymize the user row -> write the
-        // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
-        // anywhere in this call propagates with `?` and aborts the purge:
-        // `anonymize_user` (the only step that clears `deletion_pending`)
-        // never ran, so the user stays due for a retry via
-        // `find_due_for_purge`, and NO erasure proof is ever written for an
-        // incomplete erasure.
-        run_erasure_pipeline_reporting(
-            self.audit_repo.as_ref(),
-            self.erasure_proof_repo.as_ref(),
-            self.user_repo.as_ref(),
-            tenant_id,
-            user_id,
-            &pseudonym,
-            &email_hash,
-            self.ssf_sink.as_deref(),
-        )
-        .await?;
-
-        // (f) Mark the account_deletion row as completed (lookup by user_id).
-        // Run AFTER the erasure pipeline succeeds — if the pipeline failed
-        // above, this is never reached and the deletion row stays pending
-        // for the next retry too.
-        match self
-            .account_deletion_repo
-            .find_pending_by_user_id(tenant_id, user_id)
-            .await
-        {
-            Ok(Some(deletion)) => {
-                if let Err(e) = self
-                    .account_deletion_repo
-                    .mark_completed(tenant_id, deletion.id)
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        %tenant_id,
-                        deletion_id = %deletion.id,
-                        "cleanup: failed to mark account_deletion completed"
-                    );
-                }
-            }
-            Ok(None) => {
-                tracing::debug!(user_id = %user_id, "no pending account_deletion row found at purge time");
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, user_id = %user_id, "failed to find account_deletion row");
-            }
-        }
-
-        // (h) Emit gdpr.user_pseudonymized audit event. actor_id is the
-        // erased subject's own (now-anonymized) row id — a real, resolvable
-        // identifier rather than a fabricated nil UUID (Task 1 fix); the row
-        // still exists (anonymize-in-place preserves referential integrity),
-        // so this is a legitimate audit-trail reference, not PII leakage.
-        // A DB-write failure here is dead-lettered to BOTH an append-only
-        // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
-        // this legally-significant record must never be silently lost.
-        write_audit_with_dead_letter(
-            self.audit_repo.as_ref(),
-            CreateAuditLogEntry {
-                tenant_id,
-                actor_id: user_id,
-                actor_type: ActorType::System,
-                action: "gdpr.user_pseudonymized".into(),
-                resource_id: None,
-                outcome: AuditOutcome::Success,
-                ip_address: None,
-                metadata: Some(serde_json::json!({
-                    "pseudonym": pseudonym,
-                    // #533: the account's certificates this purge revoked; a
-                    // count, as directory linking records its own.
-                    "certificates_revoked": certificates_revoked,
-                })),
-            },
-        )
-        .await;
-
-        tracing::info!(
-            pseudonym = %pseudonym,
-            tenant_id = %tenant_id,
-            "user purged and pseudonymized"
-        );
-
-        Ok(())
     }
 
     // -----------------------------------------------------------------------

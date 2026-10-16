@@ -1146,4 +1146,119 @@ describe("SettingsPage — SAML IdP and SSF switches", () => {
     expect(body.saml_idp_enabled).toBe(false);
     expect(body).not.toHaveProperty("ssf_enabled");
   });
+  // #627 — a switch turned on under an organization `false` saves, and then
+  // reads back `false`; the page has to say so.
+  describe("a switch turned on under an organization 'off'", () => {
+    const HELD = /saved — the organization has this surface off; it stays off until an organization administrator turns it on/;
+
+    /** `GET /settings` answers `before` until the first PUT, `after` from then on. */
+    function readBack(
+      before: { saml: boolean; ssf: boolean },
+      after: { saml: boolean; ssf: boolean },
+      override: TenantSettingsOverride
+    ) {
+      const at = (v: { saml: boolean; ssf: boolean }): SecuritySettings => ({
+        ...settings,
+        oidc: {
+          saml_idp_enabled: v.saml,
+          ssf_enabled: v.ssf,
+          dynamic_registration: "disabled",
+          dcr_allowed_scopes: [],
+          dcr_allowed_redirect_hosts: [],
+          external_client_allowed_resources: [],
+          dcr_max_clients: 20,
+          dcr_unused_client_ttl_days: 30,
+        },
+      });
+      apiMock.get.mockImplementation((url: string) => {
+        if (url === "/api/v1/settings")
+          return Promise.resolve(
+            res(apiMock.put.mock.calls.length === 0 ? at(before) : at(after))
+          );
+        if (url === "/api/v1/tenants/t1/settings") return Promise.resolve(res(override));
+        return Promise.reject(new Error(`unexpected GET ${url}`));
+      });
+      apiMock.put.mockResolvedValue(res(at(after)));
+    }
+
+    async function switchOnAndSave(label: RegExp) {
+      await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+      await screen.findByText(/Turned off for this tenant/);
+      await userEvent.click(screen.getByLabelText(label, { exact: false }));
+      await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+      await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    }
+
+    it("says the organization keeps it off when the read-back is still 'off'", async () => {
+      const off = { saml: false, ssf: true };
+      readBack(off, off, { saml_idp_enabled: false });
+      renderWithProviders(<SettingsPage />);
+      await switchOnAndSave(SAML);
+
+      const alert = await screen.findByText(HELD);
+      expect(alert).toHaveTextContent(/^SAML 2\.0 identity provider: saved/);
+      // The success line is replaced, not shown beside it.
+      expect(screen.queryByText("Settings saved successfully.")).not.toBeInTheDocument();
+    });
+
+    it("says nothing extra when the effective value follows the switch", async () => {
+      readBack(
+        { saml: false, ssf: true },
+        { saml: true, ssf: true },
+        { saml_idp_enabled: false }
+      );
+      renderWithProviders(<SettingsPage />);
+      await switchOnAndSave(SAML);
+
+      expect(await screen.findByText("Settings saved successfully.")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText("Edit Settings")).toBeInTheDocument());
+      expect(screen.queryByText(HELD)).not.toBeInTheDocument();
+    });
+
+    it("says nothing extra after a save that did not turn a switch on", async () => {
+      const off = { saml: false, ssf: true };
+      readBack(off, off, { saml_idp_enabled: false });
+      renderWithProviders(<SettingsPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+      await screen.findByText(/Turned off for this tenant/);
+      await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+      expect(await screen.findByText("Settings saved successfully.")).toBeInTheDocument();
+      await waitFor(() => expect(apiMock.get.mock.calls.length).toBeGreaterThan(2));
+      expect(screen.queryByText(HELD)).not.toBeInTheDocument();
+    });
+
+    it("says nothing extra after switching a surface off", async () => {
+      readBack(
+        { saml: true, ssf: true },
+        { saml: true, ssf: false },
+        {}
+      );
+      renderWithProviders(<SettingsPage />);
+      await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+      await userEvent.click(screen.getByLabelText(SSF, { exact: false }));
+      await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+      expect(await screen.findByText("Settings saved successfully.")).toBeInTheDocument();
+      expect(screen.queryByText(HELD)).not.toBeInTheDocument();
+    });
+
+    it("does not claim it when the read-back itself failed", async () => {
+      const off = { saml: false, ssf: true };
+      readBack(off, off, { saml_idp_enabled: false });
+      const ok = apiMock.get.getMockImplementation()!;
+      apiMock.get.mockImplementation((url: string) =>
+        url === "/api/v1/settings" && apiMock.put.mock.calls.length > 0
+          ? Promise.reject({ response: { status: 500 } })
+          : ok(url)
+      );
+      renderWithProviders(<SettingsPage />);
+      await switchOnAndSave(SAML);
+
+      // The page itself falls to its load-error state; the point is that the
+      // stale pre-save data is not read as "the organization kept it off".
+      expect(await screen.findByText(/Failed to load system settings/)).toBeInTheDocument();
+      expect(screen.queryByText(HELD)).not.toBeInTheDocument();
+    });
+  });
 });

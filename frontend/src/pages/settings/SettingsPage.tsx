@@ -61,6 +61,7 @@ import { DcrPolicyFields, DcrPolicySummary } from "./dcrPolicy";
 import { CimdPolicyFields, CimdPolicySummary } from "./cimdPolicy";
 import { ServerNamesFields, ServerNamesSummary } from "./serverNamesPolicy";
 import { SurfaceSwitches } from "./surfaceSwitches";
+import { SURFACE_LABELS } from "./policyText";
 import { useAuthStore } from "@/stores/auth";
 
 // ─── Flat editable view-model (minutes where presented as minutes) ────────────
@@ -195,6 +196,18 @@ function toForm(s: SecuritySettings): SettingsForm {
     saml_idp_enabled: readOidcPolicy(s).saml_idp_enabled,
     ssf_enabled: readOidcPolicy(s).ssf_enabled,
   };
+}
+
+const SURFACE_KEYS: SurfaceKey[] = ["saml_idp_enabled", "ssf_enabled"];
+
+/** Said after a save that switched a surface on and the read-back is still off. */
+const HELD_OFF_NOTICE =
+  "saved — the organization has this surface off; it stays off until an organization administrator turns it on.";
+
+/** One save: the override to PUT, and the surfaces this save switched on. */
+interface SaveRequest {
+  payload: TenantSettingsOverride;
+  turnedOn: SurfaceKey[];
 }
 
 /** What `toOverride` needs to know about the two disable-only switches. */
@@ -339,7 +352,7 @@ export function SettingsPage() {
   const [editing, setEditing] = useState(false);
   const [formOverrides, setFormOverrides] = useState<Partial<SettingsForm>>({});
   const [feedback, setFeedback] = useState<{
-    type: "success" | "error";
+    type: "success" | "error" | "notice";
     message: string;
   } | null>(null);
 
@@ -369,12 +382,9 @@ export function SettingsPage() {
   }, [settings, formOverrides]);
 
   const updateMutation = useMutation({
-    mutationFn: (payload: TenantSettingsOverride) =>
+    mutationFn: ({ payload }: SaveRequest) =>
       settingsService.updateSettings(payload),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["system-settings"],
-      });
+    onSuccess: async (_saved, { turnedOn }) => {
       void queryClient.invalidateQueries({
         queryKey: ["tenant-settings-override"],
       });
@@ -385,7 +395,40 @@ export function SettingsPage() {
         type: "success",
         message: "Settings saved successfully.",
       });
-      setTimeout(() => setFeedback(null), 4000);
+      // The refetch is what says whether the switch took: a tenant can only
+      // enable what the organization has on, so a surface switched on under an
+      // organization `false` saves, drops the tenant's own `false`, and still
+      // reads back `false`. Say so, rather than let the save look like it worked.
+      let message = "Settings saved successfully.";
+      let type: "success" | "notice" = "success";
+      let refetched = true;
+      try {
+        await queryClient.invalidateQueries({ queryKey: ["system-settings"] });
+      } catch {
+        refetched = false;
+      }
+      const state = queryClient.getQueryState<SecuritySettings>([
+        "system-settings",
+      ]);
+      // A failed refetch leaves the previous (pre-save) data in place; it says
+      // nothing about the organization, so it must not produce the notice.
+      if (
+        refetched &&
+        state?.status === "success" &&
+        state.data &&
+        !state.isInvalidated
+      ) {
+        const fresh = readOidcPolicy(state.data);
+        const held = turnedOn.filter((key) => !fresh[key]);
+        if (held.length > 0) {
+          type = "notice";
+          message = held
+            .map((key) => `${SURFACE_LABELS[key]}: ${HELD_OFF_NOTICE}`)
+            .join(" ");
+        }
+      }
+      setFeedback({ type, message });
+      setTimeout(() => setFeedback(null), type === "notice" ? 10000 : 4000);
     },
     onError: (err: unknown) => {
       // The 400 from `validate_tenant_override` lists exactly which field was
@@ -432,12 +475,15 @@ export function SettingsPage() {
       setFeedback({ type: "error", message: cimdErrors[0].message });
       return;
     }
-    updateMutation.mutate(
-      toOverride(form, {
-        effective: readOidcPolicy(settings!),
+    const effective = readOidcPolicy(settings!);
+    updateMutation.mutate({
+      payload: toOverride(form, {
+        effective,
         override: overrideQuery.isSuccess ? overrideQuery.data : undefined,
-      })
-    );
+      }),
+      // Switched on by this save: off when the form was seeded, on now.
+      turnedOn: SURFACE_KEYS.filter((key) => form[key] && !effective[key]),
+    });
   }
 
   function handleCancel() {
@@ -529,7 +575,9 @@ export function SettingsPage() {
           className={
             feedback.type === "success"
               ? "flex items-center gap-2 p-3 rounded-md bg-emerald-400/10 border border-emerald-400/30 text-emerald-400 text-sm"
-              : "flex items-center gap-2 p-3 rounded-md bg-destructive/10 border border-destructive/30 text-destructive text-sm"
+              : feedback.type === "notice"
+                ? "flex items-center gap-2 p-3 rounded-md bg-amber-400/10 border border-amber-400/30 text-amber-400 text-sm"
+                : "flex items-center gap-2 p-3 rounded-md bg-destructive/10 border border-destructive/30 text-destructive text-sm"
           }
         >
           {feedback.type === "success" ? (

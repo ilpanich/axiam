@@ -2731,7 +2731,9 @@ where
     }
 
     // Spawn the periodic cleanup task (D-09, D-24).
-    // Shutdown channel: main sends `true` after HttpServer returns on SIGTERM.
+    // Shutdown channel: the teardown sends `true` once the REST listener has
+    // returned, before the gRPC stop and the lease release; after a lost lease
+    // the lease-loss stop sends it at the loss (#628).
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
     // Mail publisher for export-ready notifications from the cleanup task.
     let cleanup_mail_publisher: Arc<MailTransportPublisher> = Arc::new(match &amqp {
@@ -2827,6 +2829,9 @@ where
     // T-470: `vault_pki` revocations a revoke request could not forward.
     .with_vault_revocations(Arc::new(cert_service.clone()))
     .with_step_for_tests(opts.cleanup_step_for_tests.take());
+    // #655, #624: the tenant purges and erasures run as tasks of their own,
+    // which the teardown joins after the cleanup task (`join_cleanup`).
+    let cleanup_units = cleanup.audited_work();
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -3156,11 +3161,12 @@ where
 
     // How long a stop waits for requests in flight (#569). actix's default is
     // 30 s; it is set so that the whole `ORDERLY_STOP` — this, then gRPC, the
-    // outbound and audit drains and the cleanup join — adds up to less than the
-    // container's stop grace period (40 s in the shipped Compose files and
-    // Kubernetes manifests), or a stop with a request still running is killed
-    // during the audit drain. It is fixed here, at bind time, for every stop; a
-    // lost lease's shorter drain is an outer cut (`LEASE_LOSS_STOP`, below).
+    // lease release, the outbound and audit drains and the cleanup join — adds
+    // up to less than the container's stop grace period (40 s in the shipped
+    // Compose files and Kubernetes manifests), or a stop with a request still
+    // running is killed during the audit drain. It is fixed here, at bind time,
+    // for every stop; a lost lease's shorter drain is an outer cut
+    // (`LEASE_LOSS_STOP`, below).
     http_server = http_server.shutdown_timeout(ORDERLY_STOP.rest.as_secs());
 
     // Bind plaintext (proxy-terminated TLS, the default) or, when
@@ -3205,12 +3211,21 @@ where
     // Its requests in flight get `LEASE_LOSS_STOP.rest`, not the 20 s actix was
     // bound with (#598): the cut below ends them, so the teardown — the audit
     // drain above all — runs before the lease's backstop instead of with it.
+    //
+    // The cleanup task is told to stop at the loss itself, not once the REST
+    // drain, the cut and the gRPC stop are over (#628): from the loss on a
+    // successor may hold the lease, and this instance starts no further sweep,
+    // erasure, export or tenant purge beside it. A unit already past its point
+    // of no return runs on to its audit row within the stop's budget
+    // (`join_cleanup`).
     let (rest_cut_tx, rest_cut) = tokio::sync::oneshot::channel::<()>();
     let lease_loss_stop = lease_renewal.as_ref().map(|_| {
         let handle = http_server.handle();
+        let cleanup_stop = cleanup_shutdown_tx.clone();
         profile::spawn_lease_loss_stop(
             lease_lost.clone(),
             move || {
+                cleanup_stop.send_replace(true);
                 // `stop` sends its command eagerly; the returned future only
                 // reports completion, which the teardown below observes.
                 tokio::spawn(handle.stop(true));
@@ -3275,6 +3290,17 @@ where
         ORDERLY_STOP
     };
 
+    // Signal the cleanup task first, so it winds down while gRPC stops and the
+    // queues drain: it starts no further sweep, erasure, export or tenant purge,
+    // and finishes the one it is in if that ends before the bounded join below
+    // (#598). An erasure or a tenant purge under way gives itself up here if it
+    // has not reached its point of no return, and otherwise runs on, in a task
+    // of its own, to its audit row (#655, #624). It comes before the lease
+    // release (#628): once the lease is given up a successor may start, and
+    // this instance must not start work beside it. (After a lost lease the
+    // lease-loss stop sent it at the loss; sending it again is a no-op.)
+    cleanup_shutdown_tx.send_replace(true);
+
     // The REST listener has stopped: stop gRPC after it, and wait for it before
     // the audit drain below, so a call that audits through gRPC is not cut off
     // by the drain (P23W5-A11). Bounded: a client holding a stream open cannot
@@ -3289,24 +3315,19 @@ where
 
     // An orderly stop gives the minimal profile's lease up, so a successor (a
     // rolling update's next instance) does not wait out the TTL. A lost lease
-    // is not ours to release (and the release is conditional on the holder).
+    // is not ours to release (and the release is conditional on the holder);
+    // the flag is read again here, so a loss the renewal saw during the gRPC
+    // stop skips the release too. Bounded (#628): a datastore that does not
+    // answer at the stop cannot hold the teardown past `budget.lease_release`,
+    // and the successor then waits out the TTL instead.
     if let Some(renewal) = lease_renewal {
         renewal.abort();
-        if !lease_was_lost
-            && let Err(e) = axiam_db::SurrealMinimalProfileLeaseRepository::new(db_handle.clone())
-                .release(&instance_id.to_string())
-                .await
-        {
-            tracing::warn!(error = %e, "could not release the minimal-profile lease");
+        if !*lease_lost.borrow() {
+            let leases = axiam_db::SurrealMinimalProfileLeaseRepository::new(db_handle.clone());
+            let holder = instance_id.to_string();
+            profile::release_lease_within(leases.release(&holder), budget.lease_release).await;
         }
     }
-
-    // Signal the cleanup task first, so it winds down while the queues drain:
-    // it starts no further sweep, erasure or export, and finishes the one it is
-    // in if that ends before the bounded join below (an erasure and its
-    // `gdpr.user_pseudonymized` row are written together unless the join's
-    // bound cuts them apart — #598).
-    let _ = cleanup_shutdown_tx.send(true);
 
     // The minimal profile's in-process outbound queues hold deliveries that die
     // with this process: say so in the audit trail, one `delivery_abandoned` row
@@ -3342,15 +3363,19 @@ where
     // nothing new, but a sweep already running — a GDPR erasure, an export, a
     // tenant purge, a statement against a slow datastore — could otherwise hold
     // the stop past the grace period, where the orchestrator's SIGKILL ends it
-    // anyway and the backstops are moot. At the bound it is cut where it is.
-    join_cleanup(cleanup_handle, budget.cleanup).await;
+    // anyway and the backstops are moot. At the bound it is cut where it is,
+    // and so is the erasure or tenant purge it left in flight (#655, #624).
+    join_cleanup(cleanup_handle, &cleanup_units, budget.cleanup).await;
 
     // The teardown is done: disarm the backstops.
     component_died_stop.abort();
     if let Some(stop) = lease_loss_stop {
         stop.abort();
     }
-    if lease_was_lost {
+    // Read again, not `lease_was_lost`: a loss the renewal saw after the REST
+    // listener returned (during a `SIGTERM` stop's gRPC stop) is a lost lease
+    // too, and exits non-zero as the deployment guide says (#628).
+    if *lease_lost.borrow() {
         return Err(std::io::Error::other(
             "the minimal-profile lease was taken by another instance; this instance stopped \
              in order and exits non-zero (AXIAM__AMQP__ENABLED=false is single-instance by \
@@ -3379,6 +3404,11 @@ pub struct ShutdownBudget {
     /// How long the teardown waits for the gRPC server to finish its calls once
     /// the REST listener has stopped (P23W5-A11).
     pub grpc: Duration,
+    /// How long the teardown waits for the minimal profile's lease to be given
+    /// up (#628). The release is one conditional `DELETE`; past this bound it
+    /// is abandoned and the successor waits out the lease's TTL instead. Zero
+    /// where there is nothing to release: a lost lease is not this instance's.
+    pub lease_release: Duration,
     /// How long the teardown waits for the in-process outbound consumers to
     /// write the `delivery_abandoned` rows of what they still hold (P23W5-A4,
     /// minimal profile). A consumer gives the attempt it is in
@@ -3389,9 +3419,13 @@ pub struct ShutdownBudget {
     /// time against a healthy datastore that is well under this.
     pub audit: Duration,
     /// How long the teardown waits for the cleanup task once the audit queue is
-    /// drained (#598). The task was told to stop before the outbound drain, and
-    /// starts no sweep (nor erasure, nor export) after that; a sweep still
-    /// running at this bound is cut where it is.
+    /// drained (#598). The task was told to stop before the gRPC stop and the
+    /// lease release — after a lost lease, at the loss (#628) — and starts no
+    /// sweep (nor erasure, nor export, nor tenant purge) after that;
+    /// a sweep still running at this bound is cut where it is. The same bound
+    /// covers the erasure or tenant purge the task leaves in flight, a task of
+    /// its own (`cleanup::AuditedWork`, #655, #624): it is waited for until
+    /// then, and cut at it.
     pub cleanup: Duration,
 }
 
@@ -3402,6 +3436,7 @@ impl ShutdownBudget {
         Duration::from_millis(
             (self.rest.as_millis()
                 + self.grpc.as_millis()
+                + self.lease_release.as_millis()
                 + self.outbound.as_millis()
                 + self.audit.as_millis()
                 + self.cleanup.as_millis()) as u64,
@@ -3410,19 +3445,24 @@ impl ShutdownBudget {
 }
 
 /// The stop for `SIGTERM` and for a dead consumer or gRPC server: REST 20 s,
-/// gRPC 5, outbound 2, audit 5, cleanup 5 — 37 s, inside the shipped 40 s grace
-/// period with a 3 s margin that [`FATAL_STOP_BACKSTOP`] sits in.
+/// gRPC 5, lease release 1, outbound 2, audit 5, cleanup 5 — 38 s, inside the
+/// shipped 40 s grace period with a 2 s margin that [`FATAL_STOP_BACKSTOP`]
+/// sits in. The lease release (#628) was unbounded until 1.1.0 and outside this
+/// sum; its 1 s came out of the margin, which was 3 s.
 pub const ORDERLY_STOP: ShutdownBudget = ShutdownBudget {
     // actix's default is 30 s; set explicitly so the whole stop fits the grace.
     rest: Duration::from_secs(20),
     grpc: Duration::from_secs(5),
+    // The minimal profile only; one conditional `DELETE` (#628).
+    lease_release: Duration::from_secs(1),
     outbound: Duration::from_secs(2),
     audit: Duration::from_secs(5),
     cleanup: Duration::from_secs(5),
 };
 
 /// The stop after a lost minimal-profile lease (#598): REST 5 s, gRPC 2,
-/// outbound 1, audit 3, cleanup 2 — 13 s, inside
+/// outbound 1, audit 3, cleanup 2 — 13 s (no lease release: the lease is no
+/// longer this instance's), inside
 /// [`LeaseTiming::lost_stop_deadline`] (15 s), which is tied to lease safety —
 /// how long the instance may run beside its successor — and is not lengthened
 /// for it. The REST drain is actix's, fixed at bind time at
@@ -3432,36 +3472,59 @@ pub const ORDERLY_STOP: ShutdownBudget = ShutdownBudget {
 pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
     rest: Duration::from_secs(5),
     grpc: Duration::from_secs(2),
+    lease_release: Duration::ZERO,
     outbound: Duration::from_secs(1),
     audit: Duration::from_secs(3),
     cleanup: Duration::from_secs(2),
 };
 
 /// Wait for the cleanup task for at most `bound` (#598); past it, abort the task
-/// — it is cut at the await it is in — and say so.
+/// — it is cut at the await it is in — and say so. Then wait, until the same
+/// deadline, for the unit of audited work it left in flight (an erasure, a
+/// tenant purge: `cleanup::AuditedWork`, #655, #624), which the abort does not
+/// reach; past the deadline, abort that too, so a replica that lost its lease
+/// writes nothing after its budget.
 ///
 /// What a cut leaves behind is for the next start to resume: every sweep's
 /// writes are idempotent or a compare-and-set, and every sweep is re-run by the
-/// next tick, with three exceptions listed in T-444 — an erasure cut after the
-/// user row was anonymized and before `gdpr.user_pseudonymized` was written
-/// (the proof exists, the audit row does not, and the next start does not redo
-/// the user), an export cut after it was marked ready and before its mail
-/// was queued (a download nobody was told about, which expires), and a tenant
-/// purge cut mid-way (its one-hour claim is not released, so the next start's
-/// sweep skips the tenant until the lease ends; a cut before `tenants.purged`
-/// was written loses that record).
-async fn join_cleanup<T>(mut handle: tokio::task::JoinHandle<T>, bound: Duration) {
-    match tokio::time::timeout(bound, &mut handle).await {
+/// next tick. An erasure or tenant purge that has not reached its point of no
+/// return (the anonymization; the removal of the tenant row) gives itself up at
+/// the stop — the account stays due, the tenant tombstoned and its claim
+/// released — so the next start redoes it at once. The states a cut can still
+/// leave, listed in T-444: an erasure or tenant purge that crossed its point of
+/// no return before the stop and still had not written its audit row
+/// (`gdpr.user_pseudonymized`; `tenants.purged`) when the bound ran out — the
+/// whole teardown window after the stop, for its last statements — and an
+/// export cut after it was marked ready and before its mail was queued (a
+/// download nobody was told about, which expires).
+async fn join_cleanup<T>(
+    mut handle: tokio::task::JoinHandle<T>,
+    units: &cleanup::AuditedWork,
+    bound: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + bound;
+    match tokio::time::timeout_at(deadline, &mut handle).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(error = ?e, "cleanup task join error"),
         Err(_) => {
             handle.abort();
+            // Once the abort has landed the task can no longer hand a unit
+            // over, so the join below sees the last one.
+            let _ = handle.await;
             tracing::error!(
                 deadline_secs = bound.as_secs_f64(),
                 "the cleanup task's sweep did not finish in time — it is cut where it is (the \
-                 next start resumes it; see T-444 for the two steps a cut can leave unfinished)"
+                 next start resumes it; see T-444 for what a cut can leave unfinished)"
             );
         }
+    }
+    if !units.join(deadline).await {
+        tracing::error!(
+            deadline_secs = bound.as_secs_f64(),
+            "an erasure or tenant purge that had passed its point of no return did not reach \
+             its audit row in time — it is cut where it is, and its `gdpr.user_pseudonymized` \
+             or `tenants.purged` row may be missing (see T-444)"
+        );
     }
 }
 
@@ -3471,8 +3534,8 @@ async fn join_cleanup<T>(mut handle: tokio::task::JoinHandle<T>, bound: Duration
 const SHIPPED_STOP_GRACE_PERIOD: Duration = Duration::from_secs(40);
 
 /// When the backstop ends a process stopped by a dead consumer or gRPC server
-/// (#554): the whole of [`ORDERLY_STOP`] and 1 s, so it only runs for a stop
-/// that has overrun, and still 2 s before the orchestrator's `SIGKILL`. A lost
+/// (#554): the whole of [`ORDERLY_STOP`] and 1 s (39 s), so it only runs for a
+/// stop that has overrun, and still 1 s before the orchestrator's `SIGKILL`. A lost
 /// lease keeps its own `LeaseTiming::lost_stop_deadline`.
 const FATAL_STOP_BACKSTOP: Duration =
     Duration::from_millis(ORDERLY_STOP.total().as_millis() as u64 + 1_000);
@@ -3486,6 +3549,8 @@ const _: () = assert!(FATAL_STOP_BACKSTOP.as_millis() < SHIPPED_STOP_GRACE_PERIO
 const _: () = assert!(
     LEASE_LOSS_STOP.total().as_millis() < LeaseTiming::PRODUCTION.lost_stop_deadline.as_millis()
 );
+// A lost lease is not released (#628): its stop has no such step.
+const _: () = assert!(LEASE_LOSS_STOP.lease_release.is_zero());
 // The lease-loss cut is only a cut if it comes before actix's own timeout.
 const _: () = assert!(LEASE_LOSS_STOP.rest.as_millis() < ORDERLY_STOP.rest.as_millis());
 // actix takes the timeout in whole seconds.

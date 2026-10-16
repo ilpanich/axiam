@@ -1838,21 +1838,33 @@ In audit terms, a restart loses the following, and nothing else:
 
 An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
 finishes the requests in flight, tells the cleanup task to stop (it starts no
-further sweep, GDPR erasure or export) and then **writes the audit rows the
-audit middleware still holds**, before the process exits. Before that drain, in
-the minimal profile, each in-process outbound queue is closed and one
-`<kind>.delivery_abandoned` row is written for every delivery still queued or
-waiting for a retry. A `SIGKILL` or an out-of-memory kill does none of that and
-loses what is queued.
+further sweep, GDPR erasure, export or tenant purge), stops gRPC, gives the
+minimal profile's singleton lease up so that a successor need not wait out its
+TTL, and then **writes the audit rows the audit middleware still holds**, before
+the process exits. Before that drain, in the minimal profile, each in-process
+outbound queue is closed and one `<kind>.delivery_abandoned` row is written for
+every delivery still queued or waiting for a retry. A `SIGKILL` or an
+out-of-memory kill does none of that and loses what is queued.
+
+The cleanup task is told to stop **before** the lease is given up: once it is,
+a successor may start, and this instance must not start work beside it. After a
+lost lease it is told at the loss itself, not once the requests in flight have
+been drained or cut. (Corrected 2026-10-15, #628: before 1.1.0 the cleanup task
+was told only after the lease release — and after a lost lease, after the REST
+cut and the gRPC stop, up to 7 s in, so the old instance could still start an
+erasure or a tenant purge beside its successor — and the release itself was an
+unbounded datastore call outside the stop's budget.)
 
 **Give the container a termination grace period of at least 40 s.** A
-`SIGTERM` stop has five bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
+`SIGTERM` stop has six bounded steps (`ORDERLY_STOP` in `boot.rs`, whose
 arithmetic is checked when the server is built). The REST listener waits up to
 **20 s** for requests in flight (`shutdown_timeout`, set explicitly; actix's own
 default is 30 s). The gRPC server then gets up to **5 s** to finish its calls,
-the in-process outbound queues up to **2 s** to account for what they hold, the
-audit queue up to **5 s** to be written, and the cleanup task up to **5 s** to
-finish the sweep it was in. That is 37 s, and 40 s leaves a 3 s margin. A
+the lease release up to **1 s** (minimal profile; past it the release is
+abandoned and a successor waits out the lease's TTL instead), the in-process
+outbound queues up to **2 s** to account for what they hold, the audit queue up
+to **5 s** to be written, and the cleanup task up to **5 s** to finish the sweep
+it was in. That is 38 s, and 40 s leaves a 2 s margin. A
 shorter grace period lets the orchestrator kill the process during the drain,
 which loses exactly the audit rows the orderly stop exists to keep. Compose's
 default is 10 s and Kubernetes' is 30 s, so both are set:
@@ -1866,32 +1878,46 @@ finished rather than wait for it:
 
 * **The cleanup task, in every stop.** A sweep still running at its bound (5 s
   after the audit drain for `SIGTERM`, 2 s after a lost lease) is cut where it
-  is. Every sweep is re-run by the next tick, so the next start resumes it,
-  with three exceptions: a GDPR erasure cut after the user row was anonymized and
-  before `gdpr.user_pseudonymized` was written leaves the erasure and its proof
-  without that audit row (the user is no longer due, so nothing writes it
-  later); a data export cut after it was marked ready and before its mail
-  was queued leaves a download nobody was told about, which expires after 24 h;
-  and a tenant purge cut mid-way is claimed for a one-hour lease that a cut does
-  not release, so the next start's sweep skips that tenant until the lease ends
-  (every step of the purge is idempotent, so it resumes then, and a deployment
-  that restarts more often than hourly can keep pushing it back), and one cut
-  while the tenant row's final `DELETE` is in flight, or before the system log's
-  `tenants.purged` record is written, leaves no tenant row for a later sweep to
-  find, so that record — the export time the purge used and how many audit
-  entries it deleted and kept — is never written (corrected 2026-10-14, R101-03,
-  #655; before then this list had two exceptions). (A SCIM target whose
-  reconciliation is cut mid-run is reconciled again at its next daily run.)
-  All three need a sweep that was already running when the cleanup task was told
-  to stop and is still running when its bound runs out — 5 to 12 s later for
-  `SIGTERM` (the drains before the join take up to 7 s), 2 to 6 s after a lost
-  lease. The log says `the cleanup task's sweep did not finish in time` when it
-  happens.
+  is. Every sweep is re-run by the next tick, so the next start resumes it.
+  A GDPR erasure and a tenant purge are each a task of their own, which the cut
+  of the cleanup task does not reach; the stop waits for the one under way
+  within the same bound, and cuts it there. Each has a point of no return — the
+  erasure's anonymization of the account, the purge's removal of the tenant
+  row — after which no later sweep finds the work again. Before it, the work
+  gives itself up as soon as the stop begins: the account stays due, the tenant
+  stays deleted and its purge claim is released, so the next start does the
+  work at once; it never crosses that point once the stop has begun. So a stop
+  can leave unfinished only:
+  - an erasure or a tenant purge that crossed its point of no return **before**
+    the stop began and still had not written its audit row when the bound ran
+    out — `gdpr.user_pseudonymized` (and the completion of the deletion request)
+    for an erasure, `tenants.purged` (the export time the purge used and how many
+    audit entries it deleted and kept) for a tenant purge. The erasure and its
+    proof, or the purge, stand; the row is never written. It takes a datastore
+    that did not answer the handful of statements left in the whole window after
+    the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
+    says `an erasure or tenant purge that had passed its point of no return did
+    not reach its audit row in time`;
+  - a data export cut after it was marked ready and before its mail was queued:
+    a download nobody was told about, which expires after 24 h.
+
+  A tenant purge cut or failing anywhere else releases its claim (from a drop
+  guard, for a cut or a panic), so the next start's sweep no longer skips the
+  tenant for the claim's one-hour lease; only a process that ends before the
+  release is written (a `SIGKILL`) still leaves the tenant to the lease.
+  (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
+  erasure and the purge wherever they were, so an erasure cut between the
+  anonymization and its audit row lost the row, a cut purge held its tenant for
+  up to an hour, and one cut around the removal of the tenant row lost
+  `tenants.purged`.) A SCIM target whose reconciliation is cut mid-run is
+  reconciled again at its next daily run. The log says `the cleanup task's
+  sweep did not finish in time` when the cleanup task itself is cut.
 * **The requests in flight, after a lost lease.** An instance that loses its
   lease must not run beside its successor for longer than **15 s**
   (`LeaseTiming::lost_stop_deadline`), so its stop has a budget of its own
   (`LEASE_LOSS_STOP`): requests in flight **5 s**, gRPC 2 s, outbound queues
-  1 s, audit drain 3 s, cleanup 2 s — 13 s. actix's drain is fixed at 20 s when
+  1 s, audit drain 3 s, cleanup 2 s — 13 s; there is no lease release, as the
+  lease is no longer this instance's. actix's drain is fixed at 20 s when
   the listener is bound and cannot be shortened for one stop, so a request still
   running 5 s after the loss is **cut** (the connection is closed without a
   response) and the teardown runs on; the log says `requests still in flight
@@ -1901,7 +1927,7 @@ finished rather than wait for it:
 
 An instance that loses its lease, or whose consumer or gRPC server dies, exits
 non-zero after the stop. A backstop ends the process regardless if the stop
-overruns: 15 s after it began for a lost lease, 38 s — the whole `SIGTERM`
+overruns: 15 s after it began for a lost lease, 39 s — the whole `SIGTERM`
 budget and 1 s, inside the grace period — for a dead consumer or gRPC server.
 A lease lost while a `SIGTERM` stop is already past its REST drain keeps the
 `SIGTERM` bounds for the steps left, so its 15 s backstop can end that stop up

@@ -8,7 +8,11 @@
 //! placed there gives**:
 //!
 //! * a reply-profile write, against H1–H6 of §5.2;
-//! * a segment write (`network:segments_write` at the parent or the node);
+//! * a segment write (`network:segments_write` at the parent or the node; a
+//!   replace that changes `vlan_id`, `rank` or `enabled` of a segment that has
+//!   a profile also needs `network:grant` there, and on a quarantine segment at
+//!   its quarantine site — H2 and H5 applied to the envelope, correction
+//!   R110W6-03 of the note);
 //! * a role assignment, unassignment, permission grant or revoke, role update
 //!   or delete that touches a **network-sensitive** role, against the §5.3
 //!   table and the three write-time rules of §4.2, and against H6 where the
@@ -417,6 +421,15 @@ pub enum NetworkWrite<'a> {
         input: &'a NewNetworkSegment,
     },
     /// Rewrite a segment's envelope (`network:segments_write` at the node).
+    ///
+    /// A change of `vlan_id`, `rank` or `enabled` on a segment that has a
+    /// reply profile re-places every device that may join it, so it also
+    /// needs `network:grant` at the segment (`H2:placement`) and, on a
+    /// quarantine segment, at `/network/quarantine/<site>` (`H5:placement`).
+    /// `filter_ids` alone needs `network:segments_write` only. A replace
+    /// cleared without the grant carries a
+    /// [frozen](NetworkWriteClearance::freeze_profiled_placement) token, so the
+    /// write re-checks the profile inside its own transaction (R110W6-03).
     SegmentUpdate {
         /// The segment.
         segment_id: Uuid,
@@ -590,6 +603,17 @@ impl GateClearance {
         }
     }
 
+    /// Narrow the token (R110W6-03): see
+    /// [`NetworkWriteClearance::freeze_profiled_placement`].
+    fn freeze_profiled_placement(self) -> Self {
+        Self {
+            network_sensitive: self.network_sensitive,
+            token: self
+                .token
+                .map(NetworkWriteClearance::freeze_profiled_placement),
+        }
+    }
+
     /// Whether the write touched the network namespace at all. `false` for a
     /// role, permission or resource write the function had nothing to add to.
     #[must_use]
@@ -631,6 +655,8 @@ pub struct GateRefusal {
     /// `403` or `400`.
     pub status: RefusalStatus,
     /// The internal reason, for the audit row: `H1` … `H6`, `H3:envelope:…`,
+    /// `H2:placement`, `H5:placement` (a segment replace that re-places the
+    /// devices of a profiled segment, R110W6-03),
     /// `4.1:reserved-subtree`, `4.2:rule-1` … `4.2:rule-3`,
     /// `4.2:reserved-namespace`, `4.2:not-grantable`, `4.2:scoped-grant`,
     /// `5.3:assign`, `5.3:unassign`, `5.3:permission`, `5.3:role-delete`,
@@ -1274,6 +1300,38 @@ where
         {
             return Ok(Err(with_values(r)));
         }
+        // R110W6-03: on a segment that has a profile, `vlan_id`, `rank` and
+        // `enabled` decide where every device that may join it lands — a new
+        // VLAN for all of them, another winner among the site's access
+        // candidates, a candidate more or less. Changing them is a placement
+        // write, so it asks what a profile write asks for the same reason: H2
+        // at the segment, and H5 on a quarantine segment, which every
+        // quarantined device of the site reaches. `filter_ids` is not one of
+        // them: it bounds what a profile may name, and removing the name the
+        // profile uses is the repository's `409` (§5.2).
+        let moves_placement = update.vlan_id != seg.vlan_id
+            || update.rank != seg.rank
+            || update.enabled != seg.enabled;
+        let profiled =
+            moves_placement && self.store.profile(self.tenant(), seg.id).await?.is_some();
+        if profiled {
+            if let Some(r) = self
+                .require_all(&[NETWORK_GRANT], seg.id, "H2:placement", audit)
+                .await?
+            {
+                return Ok(Err(with_values(r)));
+            }
+            if seg.kind == NetworkSegmentKind::Quarantine {
+                let site =
+                    site_node_id(self.tenant(), NetworkSegmentKind::Quarantine, &seg.site_key);
+                if let Some(r) = self
+                    .require_all(&[NETWORK_GRANT], site, "H5:placement", audit)
+                    .await?
+                {
+                    return Ok(Err(with_values(r)));
+                }
+            }
+        }
         // H6's reasoning applies to the envelope as much as to the profile: the
         // VLAN is what joining the segment gives.
         if self.holds(NETWORK_JOIN, seg.id).await? {
@@ -1284,9 +1342,15 @@ where
                 "a subject that may be placed on this segment cannot rewrite its envelope",
             ))));
         }
-        Ok(Ok(self.clearance(NetworkWriteTarget::SegmentUpdate {
-            segment_id,
-        })))
+        let cleared = self.clearance(NetworkWriteTarget::SegmentUpdate { segment_id });
+        if profiled {
+            return Ok(Ok(cleared));
+        }
+        // Cleared without asking `network:grant`, on this read: no placement
+        // change, or no profile. The write's transaction re-checks both against
+        // the row it replaces, so a profile created in between is a `409`
+        // (the stale read it is), never a placement moved without the grant.
+        Ok(Ok(cleared.freeze_profiled_placement()))
     }
 
     async fn segment_delete(&self, segment_id: Uuid) -> AxiamResult<GateVerdict> {

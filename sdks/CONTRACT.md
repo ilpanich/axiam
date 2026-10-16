@@ -12847,7 +12847,7 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
    | `list_segments`, `list_profiles`, `get_policy` | `network:read` at the `/network` root |
    | `get_segment`, `get_profile` | `network:read` on the segment (or above it) |
    | `create_segment` | `network:segments_write` at the nearest existing parent of the new node |
-   | `replace_segment` | `network:segments_write` on the segment, and **not** `network:join` on it (H6) |
+   | `replace_segment` | `network:segments_write` on the segment, and **not** `network:join` on it (H6). If the segment **has a reply profile** and the replace changes `vlan_id`, `rank` or `enabled` — the fields that move every device placed there — also `network:grant` on the segment (H2) and, for a quarantine segment, on `/network/quarantine/<site>` (H5). A change of `filter_ids` alone, or of a segment with no profile, needs `network:segments_write` only |
    | `delete_segment` | `network:segments_write` on the segment |
    | `create_profile`, `replace_profile` | `network:profiles_write` (H1) **and** `network:grant` (H2) on the segment; every value inside the segment's envelope and the tenant cap (H3); for a quarantine segment, `network:grant` on `/network/quarantine/<site>` too (H5); and **not** `network:join` on the segment (H6) |
    | `delete_profile` | `network:profiles_write` on the segment (H1 only) |

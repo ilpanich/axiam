@@ -29,7 +29,12 @@
 //! write invalidates, so without the shared write a segment's `filter_ids` could
 //! change between the profile's envelope check and its commit (the T-416
 //! lesson, design note §3.5). For the same reason the segment's own update
-//! re-reads the stored profile inside its transaction. The shared write follows
+//! re-reads the stored profile inside its transaction — both for the stranding
+//! rule and for the placement rule of R110W6-03: a replace the gate cleared
+//! without `network:grant` (its clearance is
+//! [frozen](NetworkWriteClearance::freeze_profiled_placement)) may not change
+//! `vlan_id`, `rank` or `enabled` of a segment that has a profile when the
+//! transaction runs, so a profile created after the gate's read is not missed. The shared write follows
 //! `resource`'s `claim_parent` (#308); the racing-writers test pins the invariant
 //! on the engine production deploys, and did not distinguish this write from a
 //! plain read of the version on that engine, so it is the precedent's
@@ -83,6 +88,7 @@ const POLICY_ENTITY: &str = "network_policy";
 const STALE_SEGMENT: &str = "axiam:network_segment_version_stale";
 const STALE_PROFILE: &str = "axiam:reply_profile_version_stale";
 const STRANDS_PROFILE: &str = "axiam:segment_update_strands_profile";
+const PLACEMENT_RACED: &str = "axiam:segment_update_moves_a_profiled_placement";
 const HAS_CHILDREN: &str = "axiam:network_segment_has_children";
 const SITE_GONE: &str = "axiam:network_site_gone";
 
@@ -159,6 +165,15 @@ fn tx_outcome(errors: HashMap<usize, surrealdb::Error>, entity: &str) -> Result<
     if combined.contains(STALE_PROFILE) {
         return Err(conflict(
             "the reply profile changed since it was read; read it again and retry",
+        ));
+    }
+    if combined.contains(PLACEMENT_RACED) {
+        // The gate cleared the replace on a read that found no profile (or no
+        // placement change); the row the write replaces says otherwise. A read
+        // again goes back through the gate, which now asks `network:grant`.
+        return Err(conflict(
+            "the network segment changed since it was read (a reply profile was written on \
+             it); read it again and retry",
         ));
     }
     if combined.contains(STRANDS_PROFILE) {
@@ -370,15 +385,28 @@ impl<C: Connection> SurrealNetworkSegmentRepository<C> {
         tenant_id: Uuid,
         id: Uuid,
         update: &NetworkSegmentUpdate,
+        profiled_placement_frozen: bool,
     ) -> Result<(), TxFail> {
         // The profile is read inside the transaction, and the segment row is
         // written by it: a profile writer bumps the same row (`profile_epoch`),
-        // so the two cannot both commit (module documentation).
+        // so the two cannot both commit (module documentation). The same read
+        // backs the gate's placement rule (R110W6-03): when the gate cleared
+        // the replace without `network:grant`, a change of `vlan_id`, `rank` or
+        // `enabled` against the row replaced here is refused if a profile
+        // exists now. `??` folds NONE and NULL, the two shapes an absent rank
+        // takes between the stored row and the bound value.
         let query = format!(
             "BEGIN TRANSACTION; \
-             LET $current = (SELECT VALUE version FROM type::record('network_segment', $id) \
+             LET $current = (SELECT vlan_id, rank, enabled \
+                 FROM type::record('network_segment', $id) \
                  WHERE tenant_id = $tenant_id AND version = $expected); \
              IF array::len($current) = 0 {{ THROW '{STALE_SEGMENT}'; }}; \
+             LET $profiled = array::len((SELECT VALUE id FROM type::record('reply_profile', $id) \
+                 WHERE tenant_id = $tenant_id)) > 0; \
+             LET $moves = $current[0].vlan_id != $vlan_id \
+                 OR ($current[0].rank ?? -1) != ($rank ?? -1) \
+                 OR $current[0].enabled != $enabled; \
+             IF $frozen AND $profiled AND $moves {{ THROW '{PLACEMENT_RACED}'; }}; \
              LET $used = (SELECT VALUE filter_id FROM type::record('reply_profile', $id) \
                  WHERE tenant_id = $tenant_id); \
              IF array::len($used) > 0 AND $used[0] != NONE \
@@ -404,6 +432,7 @@ impl<C: Connection> SurrealNetworkSegmentRepository<C> {
             .bind(("filter_ids", update.filter_ids.clone()))
             .bind(("rank", update.rank.map(i64::from)))
             .bind(("enabled", update.enabled))
+            .bind(("frozen", profiled_placement_frozen))
             .bind(("actor", update.actor.to_string()))
             .await?;
         tx_outcome(result.take_errors(), SEGMENT_ENTITY)
@@ -611,7 +640,8 @@ impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository
         // stored one, because it does not change here.
         let stored = self.fetch(tenant_id, id).await?;
         validate_segment_fields(stored.kind, update.vlan_id, &update.filter_ids, update.rank)?;
-        retry_on_write_conflict(|| self.update_tx(tenant_id, id, &update))
+        let frozen = clearance.profiled_placement_frozen();
+        retry_on_write_conflict(|| self.update_tx(tenant_id, id, &update, frozen))
             .await
             .map_err(AxiamError::from)?;
         self.fetch(tenant_id, id).await

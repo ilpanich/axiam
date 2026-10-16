@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:16b96d68c61a8b59000a207b4857811fe8e2b0e1914bd38311335201ba77157c"
+    "x-axiam-spec-digest": "sha256:b6af2365d8693dd0ddc75c690c78ccf2f350e3da5a2f09d075ba31903e28ecd5"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -5237,7 +5237,7 @@
             "description": "Not authenticated, or a service-account token"
           },
           "403": {
-            "description": "The caller lacks `network:segments_write` on the segment, holds `network:join` on it (H6), or a reactor vetoed the write"
+            "description": "The caller lacks `network:segments_write` on the segment; or the segment has a reply profile, the replace changes `vlan_id`, `rank` or `enabled`, and the caller lacks `network:grant` on the segment (and, for a quarantine segment, on `/network/quarantine/<site>`) — that change re-places every device that may join it; or the caller holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
           },
           "404": {
             "description": "No such segment in this tenant"

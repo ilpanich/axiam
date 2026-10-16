@@ -87,6 +87,22 @@ impl Cleared<SurrealNetworkSegmentRepository<Db>> {
         );
         self.0.update(tenant_id, id, update, &c).await
     }
+    /// As the gate clears a replace it did not check `network:grant` for
+    /// (R110W6-03): the placement of a profiled segment is frozen.
+    async fn update_frozen(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: NetworkSegmentUpdate,
+    ) -> AxiamResult<NetworkSegment> {
+        let c = cleared(
+            tenant_id,
+            update.actor,
+            NetworkWriteTarget::SegmentUpdate { segment_id: id },
+        )
+        .freeze_profiled_placement();
+        self.0.update(tenant_id, id, update, &c).await
+    }
     async fn delete(&self, tenant_id: Uuid, id: Uuid, expected_version: u64) -> AxiamResult<()> {
         let c = cleared(
             tenant_id,
@@ -1207,6 +1223,134 @@ async fn a_profile_and_an_envelope_change_racing_never_leave_a_stranded_profile(
             updated.is_ok() || created.is_ok(),
             "round {round}: at least one writer wins: {updated:?} / {created:?}"
         );
+    }
+}
+
+/// R110W6-03, the datastore's half: a replace the gate cleared without
+/// `network:grant` (a frozen clearance) does not change `vlan_id`, `rank` or
+/// `enabled` of a segment that has a profile **when the write runs** — the gate's
+/// read is not trusted for it — and changes everything else.
+#[tokio::test]
+async fn a_frozen_replace_does_not_move_a_profiled_segments_placement() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let seg = segments(&db).create(corp(tenant)).await.unwrap();
+    // The stored envelope, as a replace that changes nothing.
+    let same = |seg: &NetworkSegment| NetworkSegmentUpdate {
+        expected_version: seg.version,
+        vlan_id: seg.vlan_id,
+        filter_ids: seg.filter_ids.clone(),
+        rank: seg.rank,
+        enabled: seg.enabled,
+        actor: Uuid::new_v4(),
+    };
+
+    // No profile: every field moves under a frozen clearance.
+    let mut moved = same(&seg);
+    moved.vlan_id = 11;
+    let seg = segments(&db)
+        .update_frozen(tenant, seg.id, moved)
+        .await
+        .unwrap();
+    assert_eq!(seg.vlan_id, 11);
+
+    // A profile appears (the gate's read is now stale).
+    profiles(&db)
+        .create(tenant, seg.id, new_profile(seg.version, profile()))
+        .await
+        .unwrap();
+
+    // Each placement field: 409, nothing written.
+    let mut vlan = same(&seg);
+    vlan.vlan_id = 12;
+    let mut rank = same(&seg);
+    rank.rank = Some(5);
+    let mut disabled = same(&seg);
+    disabled.enabled = false;
+    for update in [vlan.clone(), rank, disabled] {
+        let err = segments(&db)
+            .update_frozen(tenant, seg.id, update)
+            .await
+            .unwrap_err();
+        assert!(is_conflict(&err), "{err:?}");
+        assert!(
+            err.to_string().contains("changed since it was read"),
+            "{err}"
+        );
+    }
+    assert_eq!(segments(&db).get(tenant, seg.id).await.unwrap(), seg);
+
+    // A non-placement field still moves under a frozen clearance...
+    let mut acl = same(&seg);
+    acl.filter_ids.push("iot-acl".into());
+    let seg = segments(&db)
+        .update_frozen(tenant, seg.id, acl)
+        .await
+        .unwrap();
+    assert_eq!(seg.filter_ids.len(), 3);
+
+    // ...and a clearance the gate checked the grant for moves the VLAN.
+    vlan.expected_version = seg.version;
+    let seg = segments(&db).update(tenant, seg.id, vlan).await.unwrap();
+    assert_eq!(seg.vlan_id, 12);
+
+    // A quarantine segment (no rank) is compared as stored: an unchanged
+    // replace is not a move.
+    let mut q = corp(tenant);
+    q.path = "/network/quarantine/hq/q".into();
+    q.kind = NetworkSegmentKind::Quarantine;
+    q.vlan_id = 999;
+    q.rank = None;
+    let q = segments(&db).create(q).await.unwrap();
+    profiles(&db)
+        .create(tenant, q.id, new_profile(q.version, profile()))
+        .await
+        .unwrap();
+    let mut unchanged = same(&q);
+    unchanged.filter_ids.push("q-acl".into());
+    segments(&db)
+        .update_frozen(tenant, q.id, unchanged)
+        .await
+        .unwrap();
+}
+
+/// R110W6-03 under the engine production runs: a profile created while a
+/// frozen replace moves the VLAN never leaves the profiled segment on a VLAN
+/// no `network:grant` holder chose.
+#[tokio::test]
+async fn a_profile_racing_a_frozen_vlan_change_never_lands_both() {
+    let fixture = common::serialising_db().await;
+    let db = fixture.handle();
+    let tenant = Uuid::new_v4();
+
+    for round in 0..8u16 {
+        let mut input = corp(tenant);
+        input.path = format!("/network/zones/hq/race{round}");
+        input.vlan_id = 200 + round;
+        input.rank = Some(200 + u32::from(round));
+        let seg = segments(&db).create(input).await.unwrap();
+
+        let (segment_repo, profile_repo) = (segments(&db), profiles(&db));
+        let move_the_vlan = NetworkSegmentUpdate {
+            expected_version: seg.version,
+            vlan_id: 300 + round,
+            filter_ids: seg.filter_ids.clone(),
+            rank: seg.rank,
+            enabled: true,
+            actor: Uuid::new_v4(),
+        };
+        let (updated, created) = tokio::join!(
+            segment_repo.update_frozen(tenant, seg.id, move_the_vlan),
+            profile_repo.create(tenant, seg.id, new_profile(seg.version, profile())),
+        );
+        assert!(
+            !(updated.is_ok() && created.is_ok()),
+            "round {round}: a profile and a frozen VLAN change both landed"
+        );
+        let vlan = segments(&db).get(tenant, seg.id).await.unwrap().vlan_id;
+        if profiles(&db).get_by_segment(tenant, seg.id).await.is_ok() {
+            assert_eq!(vlan, 200 + round, "round {round}: the profiled VLAN moved");
+        }
     }
 }
 

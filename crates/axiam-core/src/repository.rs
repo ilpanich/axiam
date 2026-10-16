@@ -4340,7 +4340,10 @@ pub trait NetworkSegmentRepository: Send + Sync {
     /// * `NotFound` when it does not exist in this tenant.
     /// * `Conflict` when `expected_version` is stale, or when the new
     ///   `filter_ids` would leave the segment's stored profile outside its
-    ///   envelope.
+    ///   envelope, or when the clearance is
+    ///   [frozen](crate::models::network::NetworkWriteClearance::freeze_profiled_placement)
+    ///   and the write would change `vlan_id`, `rank` or `enabled` of a
+    ///   segment that has a profile now (R110W6-03).
     /// * `Validation` / `AlreadyExists` as for [`Self::create`].
     fn update(
         &self,

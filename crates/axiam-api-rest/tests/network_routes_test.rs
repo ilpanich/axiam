@@ -1172,6 +1172,182 @@ async fn an_envelope_write_that_would_strand_a_profile_is_409_naming_it() {
     assert_eq!(status, 200, "{ok}");
 }
 
+/// R110W6-03: on a segment that has a reply profile, `vlan_id`, `rank` and
+/// `enabled` re-place every device that may join it, so a replace that changes
+/// one of them needs `network:grant` at the segment as a profile write does
+/// (H2), and on a quarantine segment at `/network/quarantine/<site>` too (H5).
+/// `network:segments_write` alone still changes an unprofiled segment's
+/// placement and a profiled segment's `filter_ids`.
+#[actix_rt::test]
+async fn changing_a_profiled_segments_vlan_needs_network_grant() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let profiled = make_segment(&app, &admin, "corp", 10, &["a"]).await;
+    let bare = make_segment(&app, &admin, "lab", 30, &["a"]).await;
+    let (status, _) = call(
+        &app,
+        &admin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&profiled, 1800, Some("a"))),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let pid: Uuid = profiled["id"].as_str().unwrap().parse().unwrap();
+    let replace = |version: u64, vlan: u16, rank: u32, filters: Value, enabled: bool| {
+        json!({"version": version, "vlan_id": vlan, "filter_ids": filters, "rank": rank,
+               "enabled": enabled})
+    };
+
+    let segwriter = w.user_with(&[NETWORK_READ, NETWORK_SEGMENTS_WRITE]).await;
+
+    // A VLAN, a rank and an enabled change on the profiled segment: 403 naming
+    // network:grant at the segment, one refusal row each, nothing written.
+    for body in [
+        replace(1, 99, 10, json!(["a"]), true),
+        replace(1, 10, 5, json!(["a"]), true),
+        replace(1, 10, 10, json!(["a"]), false),
+    ] {
+        let (status, err) = call(
+            &app,
+            &segwriter,
+            "PUT",
+            &format!("{SEGMENTS}/{pid}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 403, "{err}");
+        assert_eq!(err["action"], NETWORK_GRANT);
+        assert_eq!(err["resource_id"], pid.to_string());
+    }
+    let rows = w.audit("network_segment.write_refused").await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.outcome, AuditOutcome::Denied);
+        assert_eq!(row.metadata["rule"], "H2:placement");
+        assert_eq!(row.metadata["write"], "segment_update");
+        assert_eq!(row.metadata["missing_permission"], NETWORK_GRANT);
+        assert_eq!(row.metadata["node"], pid.to_string());
+        assert_eq!(row.metadata["before"]["vlan_id"], "10");
+    }
+    let (_, got) = call(&app, &admin, "GET", &format!("{SEGMENTS}/{pid}"), None).await;
+    assert_eq!(
+        (got["vlan_id"].as_u64(), got["version"].as_u64()),
+        (Some(10), Some(1))
+    );
+
+    // The same holder: 200 for a non-placement field of the profiled segment...
+    let (status, ok) = call(
+        &app,
+        &segwriter,
+        "PUT",
+        &format!("{SEGMENTS}/{pid}"),
+        Some(replace(1, 10, 10, json!(["a", "b"]), true)),
+    )
+    .await;
+    assert_eq!(status, 200, "{ok}");
+    // ...and for every placement field of a segment with no profile.
+    let bid = bare["id"].as_str().unwrap();
+    let (status, ok) = call(
+        &app,
+        &segwriter,
+        "PUT",
+        &format!("{SEGMENTS}/{bid}"),
+        Some(replace(1, 98, 3, json!(["a"]), false)),
+    )
+    .await;
+    assert_eq!(status, 200, "{ok}");
+
+    // With network:grant at the segment (and segments_write tenant-wide): 200.
+    let segw = w
+        .role(w.tenant, "segw", &[NETWORK_READ, NETWORK_SEGMENTS_WRITE])
+        .await;
+    let grant = w.role(w.tenant, "grant-here", &[NETWORK_GRANT]).await;
+    let granter = w.user(w.tenant, &[(segw, None), (grant, Some(pid))]).await;
+    let (status, ok) = call(
+        &app,
+        &w.token(w.tenant, granter),
+        "PUT",
+        &format!("{SEGMENTS}/{pid}"),
+        Some(replace(2, 99, 10, json!(["a", "b"]), true)),
+    )
+    .await;
+    assert_eq!(status, 200, "{ok}");
+    assert_eq!(ok["vlan_id"], 99);
+    assert_eq!(w.audit("network_segment.write_refused").await.len(), 3);
+}
+
+/// R110W6-03 on the quarantine segment: its VLAN reaches every quarantined
+/// device of the site, so a replace that moves it needs H5's `network:grant` on
+/// `/network/quarantine/<site>` besides the segment's own.
+#[actix_rt::test]
+async fn changing_a_profiled_quarantine_segments_vlan_also_needs_h5() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let (status, q) = call(
+        &app,
+        &admin,
+        "POST",
+        SEGMENTS,
+        Some(
+            json!({"kind": "quarantine", "site_key": "hq", "name": "q", "vlan_id": 999,
+                    "filter_ids": ["q-acl"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201, "{q}");
+    let (status, _) = call(
+        &app,
+        &admin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&q, 600, Some("q-acl"))),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let qid: Uuid = q["id"].as_str().unwrap().parse().unwrap();
+    let site = site_node_id(w.tenant, NetworkSegmentKind::Quarantine, "hq");
+    let move_it = json!({"version": 1, "vlan_id": 99, "filter_ids": ["q-acl"],
+                         "enabled": true});
+
+    // segments_write and network:grant at the segment only: 403 naming the
+    // quarantine site.
+    let segw = w
+        .role(w.tenant, "segw", &[NETWORK_READ, NETWORK_SEGMENTS_WRITE])
+        .await;
+    let grant = w.role(w.tenant, "grant", &[NETWORK_GRANT]).await;
+    let at_segment = w.user(w.tenant, &[(segw, None), (grant, Some(qid))]).await;
+    let (status, err) = call(
+        &app,
+        &w.token(w.tenant, at_segment),
+        "PUT",
+        &format!("{SEGMENTS}/{qid}"),
+        Some(move_it.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_GRANT);
+    assert_eq!(err["resource_id"], site.to_string());
+    let rows = w.audit("network_segment.write_refused").await;
+    assert_eq!(the_row(&rows).metadata["rule"], "H5:placement");
+
+    // With network:grant on the quarantine site (which cascades to the
+    // segment): 200.
+    let at_site = w.user(w.tenant, &[(segw, None), (grant, Some(site))]).await;
+    let (status, ok) = call(
+        &app,
+        &w.token(w.tenant, at_site),
+        "PUT",
+        &format!("{SEGMENTS}/{qid}"),
+        Some(move_it),
+    )
+    .await;
+    assert_eq!(status, 200, "{ok}");
+    assert_eq!(ok["vlan_id"], 99);
+}
+
 // ---------------------------------------------------------------------------
 // The reactor's veto hooks
 // ---------------------------------------------------------------------------

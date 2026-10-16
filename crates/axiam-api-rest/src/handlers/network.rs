@@ -27,7 +27,11 @@
 //!   segment for a get (§4.2: "`/network` or below");
 //! * a write needs what the **write gate** asks for, not a route-level guess:
 //!   `network:segments_write` at the parent (create) or the node (replace,
-//!   delete) and H6; `network:profiles_write` **and** `network:grant` on the
+//!   delete) and H6 — and for a replace that changes `vlan_id`, `rank` or
+//!   `enabled` of a segment that has a profile, `network:grant` at the segment
+//!   and, on a quarantine segment, at its quarantine site (R110W6-03: that
+//!   replace re-places every device that may join it);
+//!   `network:profiles_write` **and** `network:grant` on the
 //!   segment, the envelope, the quarantine site's `network:grant` and H6 for a
 //!   profile write (§5.2 H1–H6). `axiam_authz::network_gate` is the one place
 //!   that logic lives.
@@ -847,9 +851,15 @@ pub async fn create_segment<C: Connection + Clone>(
         (status = 200, description = "The segment's new envelope", body = NetworkSegmentResponse),
         (status = 400, description = "A value rule — the message names the field"),
         (status = 401, description = "Not authenticated, or a service-account token"),
-        (status = 403, description = "The caller lacks `network:segments_write` on the segment, \
-                                      holds `network:join` on it (H6), or a reactor vetoed the \
-                                      write"),
+        (status = 403, description = "The caller lacks `network:segments_write` on the segment; \
+                                      or the segment has a reply profile, the replace changes \
+                                      `vlan_id`, `rank` or `enabled`, and the caller lacks \
+                                      `network:grant` on the segment (and, for a quarantine \
+                                      segment, on `/network/quarantine/<site>`) — that change \
+                                      re-places every device that may join it; or the caller \
+                                      holds `network:join` on it (H6); or a reactor vetoed the \
+                                      write. The response names the missing permission and \
+                                      node"),
         (status = 404, description = "No such segment in this tenant"),
         (status = 409, description = "The segment changed since `version` was read, the new \
                                       `filter_ids` would leave its reply profile outside the \

@@ -162,6 +162,26 @@ put a device on VLAN 99 is to write the profile of the segment that owns VLAN 99
 which takes permissions on *that* segment (§5.2). This is the structural answer to
 "a VLAN outside what the writer may grant".
 
+*Correction of 2026-10-16 (R110W6-03).* As built through W6, the sentence above
+was not true: the envelope writer (`network:segments_write`, §4.2) could give an
+existing profiled segment VLAN 99 instead, and so re-place every device that may
+join it without `network:grant`. The maintainer's decision closes it rather than
+narrowing the claim: on a segment **that has a reply profile**, a replace that
+changes a **placement field** also needs `network:grant` at the segment (H2
+applied to the envelope) and, on a quarantine segment, `network:grant` on
+`/network/quarantine/<site>` (H5) — §5.2. The placement fields are exactly the
+three that decide where a device lands under §4.3: `vlan_id` (what every device
+placed there gets), `rank` (which access candidate wins), and `enabled` (whether
+the segment is a candidate at all, in either direction: a disable moves every
+device placed there to the next candidate, to quarantine or to a reject).
+`filter_ids` is not one: it bounds what a profile may name, and removing the
+name the profile uses is already the stranding `409`; `kind`, the name and the
+place in the tree are not writable by a replace. A segment with no profile is
+no candidate (§4.3 step 2), so its envelope still needs `network:segments_write`
+only. The sentence above now holds: the only ways to put a device on VLAN 99
+are to write the profile of the segment that owns it, or to give a profiled
+segment VLAN 99, and both need `network:grant` there.
+
 ### 3.2 The dictionary: `axiam-radius-reply/1`
 
 The dictionary is **named and versioned**. Every profile records the version it
@@ -318,7 +338,7 @@ cannot mint a look-alike.
 | `network:join` | the device's **service account** | a segment (cascades from site and branch) | may be placed on this segment |
 | `network:admin` | — | — | admin login to the segment's NAS devices. **Defined, not grantable under option B** (§3.3) |
 | `network:read` | administrators | `/network` or below | read segments and profiles |
-| `network:segments_write` | network administrators | the parent (create), the node (update/delete), both parents (move) | the tree and each segment's envelope: `kind`, `vlan_id`, `filter_ids`, `rank`, `enabled` |
+| `network:segments_write` | network administrators | the parent (create), the node (update/delete), both parents (move) | the tree and each segment's envelope: `kind`, `vlan_id`, `filter_ids`, `rank`, `enabled`. On a segment that has a profile, changing `vlan_id`, `rank` or `enabled` also needs `network:grant` (§5.2, R110W6-03) |
 | `network:profiles_write` | network administrators | the segment | create, replace, delete its reply profile — **the profile's own permission** (R17) |
 | `network:grant` | network administrators | the node an assignment names | confer `network:join` there: write a profile, or assign or unassign a role carrying a `network:*` grant (§5.3) |
 | `network:grant_admin` | — | — | confer the admin class. Option A only |
@@ -453,7 +473,7 @@ audit row records the refusal:
 | **H2** | `W` holds `network:grant` on `S` | `P` confers `conf_join`. Writing it is a grant, and only someone who may grant joining `S` may shape what joining `S` gives |
 | **H3** | every value lies inside `S`'s envelope: `filter_id ∈ S.filter_ids`, `session_timeout_secs ≤` the tenant cap, the VLAN derived from `S` and never chosen | The envelope is written under `network:segments_write` on `S`'s parent, a **separate** permission. A profile writer cannot widen the set of ACL names or the VLAN they choose from, and a tenant can split the two duties between two people |
 | **H4** | if `conf_admin(P, S)`: `W` holds `network:grant_admin` **and** `network:admin` on `S` | Literally "no more than the writer holds": conferring administrative login on a segment's equipment requires holding it. Vacuous under option B |
-| **H5** | `S.kind` is not changed by this write, and a write to a `kind = quarantine` segment's profile also needs `network:grant` on `/network/quarantine/<site>` | The quarantine profile is reached by every quarantined device of a site. Shaping it is a grant to all of them |
+| **H5** | `S.kind` is not changed by this write, and a write to a `kind = quarantine` segment's profile — or to the placement fields of its envelope while it has one (R110W6-03, below) — also needs `network:grant` on `/network/quarantine/<site>` | The quarantine profile is reached by every quarantined device of a site. Shaping it is a grant to all of them |
 | **H6** | `W ≠` a subject that is itself `network:join`-able on `S` through the same write | A service account that writes its own segment's profile is a device configuring its own access. Refused, whatever it holds. The same holds for binding (§5.3): a subject may not bind a certificate to itself, nor one authenticated through a certificate bound to the account being written |
 
 A **delete** of `P` needs H1 only: no profile means no candidate, which only
@@ -462,6 +482,27 @@ an existing profile outside the new envelope (removing the profile's `filter_id`
 or turning `access` into `quarantine`) is refused `409`, naming the profile.
 Lowering the tenant cap is allowed, because §3.4 clamps at read time and that only
 narrows.
+
+**The envelope's placement fields** (correction of 2026-10-16, R110W6-03; §3.1).
+A segment envelope write that changes `vlan_id`, `rank` or `enabled` of a segment
+**that has a profile** confers what the profile confers, on every subject that
+may join the segment, so it asks the profile's grant rules too: H2
+(`network:grant` on `S`, refused `403` under rule `H2:placement`) and, for a
+quarantine segment, H5 (`network:grant` on `/network/quarantine/<site>`, rule
+`H5:placement`), each audited as `network_segment.write_refused` naming the
+permission and the node, before H6. A change of `filter_ids` alone, and any
+change to a segment with no profile, still needs `network:segments_write` only.
+The profile's existence is read by the gate and **again inside the write's
+transaction**: a replace the gate cleared without the grant carries a
+narrowed clearance, and the transaction refuses it (`409`, the stale read it is)
+if a profile exists by then and the row it replaces differs in a placement field.
+The profile transaction writes the segment row (`profile_epoch`, §3.5), so the
+two cannot both commit, and a profile created between the gate's read and the
+write is not missed. Deleting a segment (and its profile with it) stays
+`network:segments_write` only, like deleting a profile (H1): it removes a
+candidate. A disable (`enabled` true → false) has the same effect on placement
+and is still classed with the placement fields, by the decision's wording; the
+asymmetry is deliberate for 1.1.0 and recorded, not resolved, here.
 
 **What the rule deliberately is not.** "Holds" is a **write-time** condition. A
 profile does not lapse when its writer later loses `network:grant`, just as a role

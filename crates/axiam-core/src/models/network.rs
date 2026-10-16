@@ -868,11 +868,17 @@ pub enum NetworkWriteTarget {
 /// call sites are pinned by `network_gate_enumeration_test` in `axiam-api-rest`
 /// to the function's own module and to tests. The type is neither `Clone` nor
 /// `Default`, so a clearance cannot be copied into a second write.
+///
+/// A clearance can be **narrowed** after it is minted, never widened:
+/// [`NetworkWriteClearance::freeze_profiled_placement`] hands a condition the
+/// gate could not settle on its own read to the write's transaction
+/// (R110W6-03).
 #[derive(Debug, PartialEq, Eq)]
 pub struct NetworkWriteClearance {
     tenant_id: Uuid,
     actor: Uuid,
     target: NetworkWriteTarget,
+    profiled_placement_frozen: bool,
 }
 
 impl NetworkWriteClearance {
@@ -889,7 +895,32 @@ impl NetworkWriteClearance {
             tenant_id,
             actor,
             target,
+            profiled_placement_frozen: false,
         }
+    }
+
+    /// Narrow a segment replace's clearance: the write may not change the
+    /// segment's `vlan_id`, `rank` or `enabled` **if the segment has a reply
+    /// profile**, as the write's own transaction finds them (design note §5.2,
+    /// correction R110W6-03).
+    ///
+    /// The gate sets it when it cleared the replace without checking
+    /// `network:grant` at the segment — because the replace moves no
+    /// placement, or because the segment had no profile when the gate read it.
+    /// The repository then re-checks both facts against the row it replaces,
+    /// so a profile created between the gate's read and the write is not
+    /// missed. It only ever adds a condition, so calling it cannot widen what
+    /// the gate cleared.
+    #[must_use]
+    pub fn freeze_profiled_placement(mut self) -> Self {
+        self.profiled_placement_frozen = true;
+        self
+    }
+
+    /// Whether [`Self::freeze_profiled_placement`] narrowed this clearance.
+    #[must_use]
+    pub fn profiled_placement_frozen(&self) -> bool {
+        self.profiled_placement_frozen
     }
 
     /// The tenant the write was cleared in.

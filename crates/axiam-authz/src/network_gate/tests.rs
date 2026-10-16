@@ -679,6 +679,237 @@ async fn a_segment_update_needs_segments_write_at_the_node_and_not_joinable() {
     refused(w.decide(&joinable, write).await, "H6");
 }
 
+// -- R110W6-03: a replace that re-places a profiled segment's devices --------
+
+impl World {
+    /// Give `seg` a stored profile.
+    fn profile_on(&mut self, seg: &NetworkSegment) {
+        let now = Utc::now();
+        self.store.profiles.insert(
+            seg.id,
+            ReplyProfile {
+                segment_id: seg.id,
+                tenant_id: self.tenant,
+                dictionary: REPLY_DICTIONARY_V1.into(),
+                session_timeout_secs: 900,
+                session_timeout_clamped: false,
+                termination_action: TerminationAction::RadiusRequest,
+                idle_timeout_secs: None,
+                filter_id: Some("iot-acl".into()),
+                service_type: Some(ServiceType::FramedUser),
+                version: 1,
+                created_by: Uuid::new_v4(),
+                updated_by: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+    }
+}
+
+/// The segment's envelope as stored, as a replace that changes nothing.
+fn same_envelope(w: &World, seg: &NetworkSegment) -> NetworkSegmentUpdate {
+    NetworkSegmentUpdate {
+        expected_version: seg.version,
+        vlan_id: seg.vlan_id,
+        filter_ids: seg.filter_ids.clone(),
+        rank: seg.rank,
+        enabled: seg.enabled,
+        actor: w.writer,
+    }
+}
+
+/// Whether the clearance hands the placement check to the write's
+/// transaction.
+#[track_caller]
+fn frozen(v: GateVerdict) -> bool {
+    cleared(v)
+        .into_write_clearance()
+        .expect("a segment replace carries a token")
+        .profiled_placement_frozen()
+}
+
+#[tokio::test]
+async fn r110w6_03_moving_a_profiled_segments_placement_needs_network_grant_at_it() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&seg);
+    let segments_writer = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id);
+
+    // Each placement field on its own: 403 naming network:grant at the segment.
+    let mut vlan = same_envelope(&w, &seg);
+    vlan.vlan_id = 99;
+    let mut rank = same_envelope(&w, &seg);
+    rank.rank = Some(5);
+    let mut disabled = same_envelope(&w, &seg);
+    disabled.enabled = false;
+    for update in [&vlan, &rank, &disabled] {
+        let write = NetworkWrite::SegmentUpdate {
+            segment_id: seg.id,
+            update,
+        };
+        let r = refused(w.decide(&segments_writer, write).await, "H2:placement");
+        assert_eq!(r.status, RefusalStatus::Forbidden);
+        assert_eq!(r.audit_action, AUDIT_SEGMENT_WRITE_REFUSED);
+        assert_eq!(
+            r.missing,
+            Some(MissingPermission {
+                action: NETWORK_GRANT.into(),
+                node: seg.id,
+            })
+        );
+        assert!(r.before.iter().any(|(k, _)| *k == "vlan_id"));
+    }
+
+    // Positive: with network:grant at the segment, the same writes clear, and
+    // the token is not frozen (the gate checked the grant).
+    let granter = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, seg.id);
+    for update in [&vlan, &rank, &disabled] {
+        let write = NetworkWrite::SegmentUpdate {
+            segment_id: seg.id,
+            update,
+        };
+        assert!(!frozen(w.decide(&granter, write).await));
+    }
+
+    // A grant elsewhere (the site, another segment) is not a grant here: the
+    // oracle answers per node, as the engine's cascade would for a grant below.
+    let elsewhere = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, Uuid::new_v4());
+    refused(
+        w.decide(
+            &elsewhere,
+            NetworkWrite::SegmentUpdate {
+                segment_id: seg.id,
+                update: &vlan,
+            },
+        )
+        .await,
+        "H2:placement",
+    );
+}
+
+#[tokio::test]
+async fn r110w6_03_a_non_placement_field_or_an_unprofiled_segment_needs_segments_write_only() {
+    let mut w = World::new();
+    let profiled = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&profiled);
+    let bare = w.segment(NetworkSegmentKind::Access);
+    let oracle = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, profiled.id)
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, bare.id);
+
+    // filter_ids on a profiled segment: not a placement field.
+    let mut acl = same_envelope(&w, &profiled);
+    acl.filter_ids.push("guest-acl".into());
+    let write = NetworkWrite::SegmentUpdate {
+        segment_id: profiled.id,
+        update: &acl,
+    };
+    assert!(
+        frozen(w.decide(&oracle, write).await),
+        "cleared without the grant, so the transaction re-checks"
+    );
+
+    // Every placement field on a segment without a profile.
+    let mut moved = same_envelope(&w, &bare);
+    moved.vlan_id = 99;
+    moved.rank = Some(5);
+    moved.enabled = false;
+    let write = NetworkWrite::SegmentUpdate {
+        segment_id: bare.id,
+        update: &moved,
+    };
+    assert!(frozen(w.decide(&oracle, write).await));
+    // Nothing asked network:grant.
+    assert!(
+        oracle
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, action, _)| action != NETWORK_GRANT)
+    );
+}
+
+#[tokio::test]
+async fn r110w6_03_a_quarantine_segments_placement_also_needs_h5() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Quarantine);
+    w.profile_on(&seg);
+    let site = site_node_id(w.tenant, NetworkSegmentKind::Quarantine, "hq");
+    let mut vlan = same_envelope(&w, &seg);
+    vlan.vlan_id = 999;
+    let write = NetworkWrite::SegmentUpdate {
+        segment_id: seg.id,
+        update: &vlan,
+    };
+
+    // network:grant at the segment is not enough: H5 names the quarantine site.
+    let at_segment = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, seg.id);
+    let r = refused(w.decide(&at_segment, write).await, "H5:placement");
+    assert_eq!(
+        r.missing,
+        Some(MissingPermission {
+            action: NETWORK_GRANT.into(),
+            node: site,
+        })
+    );
+    // Nor is the site alone: H2 at the segment comes first.
+    let at_site = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, site);
+    refused(w.decide(&at_site, write).await, "H2:placement");
+
+    // Both: cleared, not frozen.
+    let both = at_segment.allow(w.writer, NETWORK_GRANT, site);
+    assert!(!frozen(w.decide(&both, write).await));
+
+    // A non-placement change of the quarantine segment needs neither.
+    let mut acl = same_envelope(&w, &seg);
+    acl.filter_ids.push("q-acl".into());
+    let only = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id);
+    assert!(frozen(
+        w.decide(
+            &only,
+            NetworkWrite::SegmentUpdate {
+                segment_id: seg.id,
+                update: &acl,
+            },
+        )
+        .await
+    ));
+}
+
+#[tokio::test]
+async fn r110w6_03_h6_still_refuses_a_joinable_writer_that_holds_the_grant() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&seg);
+    let mut vlan = same_envelope(&w, &seg);
+    vlan.vlan_id = 99;
+    let oracle = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, seg.id)
+        .allow(w.writer, NETWORK_JOIN, seg.id);
+    refused(
+        w.decide(
+            &oracle,
+            NetworkWrite::SegmentUpdate {
+                segment_id: seg.id,
+                update: &vlan,
+            },
+        )
+        .await,
+        "H6",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Role assignment (§5.3, §4.2)
 // ---------------------------------------------------------------------------

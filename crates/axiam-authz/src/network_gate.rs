@@ -678,7 +678,12 @@ pub struct GateRefusal {
     /// `5.3:bind`.
     pub rule: &'static str,
     /// For a `403`, the permission and node the response names.
-    pub missing: Option<MissingPermission>,
+    ///
+    /// Boxed to keep [`GateVerdict`]'s `Err` under
+    /// `clippy::result_large_err`'s 128-byte threshold: inline, this field
+    /// alone is 40 bytes and the refusal 152, which every caller would carry
+    /// on the clearance path too. Do not unbox it back for tidiness.
+    pub missing: Option<Box<MissingPermission>>,
     /// A message for the response body. Names no other subject's grants.
     pub message: String,
     /// The audit action the refusal is recorded under (§5.4).
@@ -1039,10 +1044,10 @@ where
                     audit_action,
                     format!("this write needs {action} on resource {node}"),
                 );
-                r.missing = Some(MissingPermission {
+                r.missing = Some(Box::new(MissingPermission {
                     action: (*action).to_owned(),
                     node,
-                });
+                }));
                 return Ok(Some(r));
             }
         }

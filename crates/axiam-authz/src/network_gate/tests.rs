@@ -384,8 +384,8 @@ async fn h1_without_profiles_write_is_403_naming_it() {
     );
     assert_eq!(r.status, RefusalStatus::Forbidden);
     assert_eq!(
-        r.missing,
-        Some(MissingPermission {
+        r.missing.as_deref(),
+        Some(&MissingPermission {
             action: NETWORK_PROFILES_WRITE.into(),
             node: seg.id
         })
@@ -589,8 +589,8 @@ async fn a_profile_delete_needs_h1_then_the_placing_right() {
     assert_eq!(r.status, RefusalStatus::Forbidden);
     assert_eq!(r.audit_action, AUDIT_PROFILE_WRITE_REFUSED);
     assert_eq!(
-        r.missing,
-        Some(MissingPermission {
+        r.missing.as_deref(),
+        Some(&MissingPermission {
             action: NETWORK_GRANT.into(),
             node: seg.id,
         })
@@ -763,8 +763,8 @@ async fn r110w6_03_moving_a_profiled_segments_placement_needs_network_grant_at_i
         assert_eq!(r.status, RefusalStatus::Forbidden);
         assert_eq!(r.audit_action, AUDIT_SEGMENT_WRITE_REFUSED);
         assert_eq!(
-            r.missing,
-            Some(MissingPermission {
+            r.missing.as_deref(),
+            Some(&MissingPermission {
                 action: NETWORK_GRANT.into(),
                 node: seg.id,
             })
@@ -865,8 +865,8 @@ async fn r110w6_03_a_quarantine_segments_placement_also_needs_h5() {
         .allow(w.writer, NETWORK_GRANT, seg.id);
     let r = refused(w.decide(&at_segment, write).await, "H5:placement");
     assert_eq!(
-        r.missing,
-        Some(MissingPermission {
+        r.missing.as_deref(),
+        Some(&MissingPermission {
             action: NETWORK_GRANT.into(),
             node: site,
         })
@@ -936,8 +936,8 @@ async fn placing_right_deleting_a_profiled_segment_needs_network_grant_at_it() {
     assert_eq!(r.status, RefusalStatus::Forbidden);
     assert_eq!(r.audit_action, AUDIT_SEGMENT_WRITE_REFUSED);
     assert_eq!(
-        r.missing,
-        Some(MissingPermission {
+        r.missing.as_deref(),
+        Some(&MissingPermission {
             action: NETWORK_GRANT.into(),
             node: seg.id,
         })
@@ -1002,8 +1002,8 @@ async fn placing_right_a_quarantine_segment_or_profile_delete_also_needs_h5() {
         let r = refused(w.decide(&at_segment, delete).await, "H5:placement");
         assert_eq!(r.audit_action, audit);
         assert_eq!(
-            r.missing,
-            Some(MissingPermission {
+            r.missing.as_deref(),
+            Some(&MissingPermission {
                 action: NETWORK_GRANT.into(),
                 node: site,
             })
@@ -1075,8 +1075,8 @@ async fn assigning_a_join_allow_at_n_needs_network_grant_at_n() {
     let r = refused(w.decide(&Oracle::default(), write).await, "5.3:assign");
     assert_eq!(r.status, RefusalStatus::Forbidden);
     assert_eq!(
-        r.missing,
-        Some(MissingPermission {
+        r.missing.as_deref(),
+        Some(&MissingPermission {
             action: NETWORK_GRANT.into(),
             node: n
         })

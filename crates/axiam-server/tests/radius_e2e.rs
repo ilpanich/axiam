@@ -39,6 +39,15 @@
 //!    list AXIAM publishes is in FreeRADIUS's `ca_path` and FreeRADIUS has
 //!    re-read it, the device is refused and the others are not;
 //!
+//! the revocation list reaches FreeRADIUS through `docker/radius/fetch-crl.sh`,
+//! the file the guide sends an operator to, run here on the host against a
+//! local stand-in for the CRL route (#643, R101W6-04). Beside the refresh the
+//! test shows what the script refuses: a list re-signed under **another key
+//! with the CA's name** (which `openssl crl -verify` waves through with exit
+//! status 0), a **lower-numbered** list that the CA did sign (a replay of the
+//! empty list the run started with), and, on a `304`, that the installed list
+//! is left alone;
+//!
 //! and the settings the guide stands behind: a valid certificate that is not in
 //! the placement table is refused — also when the table holds a bound
 //! certificate whose subject is `DEFAULT`, because the table is keyed on the
@@ -65,7 +74,8 @@
 //! server certificate, every device key and the CA are minted per run into
 //! `docker/.secrets/radius/` (gitignored).
 
-use std::net::{SocketAddr, UdpSocket};
+use std::io::{Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -73,7 +83,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use actix_web::{App, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
@@ -125,6 +135,11 @@ fn gate() -> bool {
             "openssl",
             vec!["version"],
             "install openssl (sudo apt-get install -y openssl)",
+        ),
+        (
+            "curl",
+            vec!["--version"],
+            "install curl (the CRL fetch script, docker/radius/fetch-crl.sh, needs it)",
         ),
         (
             "eapol_test",
@@ -451,8 +466,13 @@ impl Radius<'_> {
 type Reply = (u16, Vec<u8>);
 type ReplyFuture = Pin<Box<dyn Future<Output = Reply>>>;
 
+/// A reply with the `ETag` header: the CRL route's status, body and tag.
+type TaggedReply = (u16, Vec<u8>, Option<String>);
+type TaggedFuture = Pin<Box<dyn Future<Output = TaggedReply>>>;
+
 struct Api {
     call: Box<dyn Fn(test::TestRequest) -> ReplyFuture>,
+    call_tagged: Box<dyn Fn(test::TestRequest) -> TaggedFuture>,
 }
 
 impl Api {
@@ -468,6 +488,7 @@ impl Api {
         )
         .await;
         let app = Rc::new(app);
+        let tagged = Rc::clone(&app);
         Self {
             call: Box::new(move |req| {
                 let app = Rc::clone(&app);
@@ -476,6 +497,20 @@ impl Api {
                     let status = resp.status().as_u16();
                     let body = test::read_body(resp).await.to_vec();
                     (status, body)
+                })
+            }),
+            call_tagged: Box::new(move |req| {
+                let app = Rc::clone(&tagged);
+                Box::pin(async move {
+                    let resp = test::call_service(&*app, req.to_request()).await;
+                    let status = resp.status().as_u16();
+                    let etag = resp
+                        .headers()
+                        .get(actix_web::http::header::ETAG)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let body = test::read_body(resp).await.to_vec();
+                    (status, body, etag)
                 })
             }),
         }
@@ -521,14 +556,20 @@ impl Api {
 
     /// `GET /pki/v1/{org}/ca/{ca}/crl`, with no credential, as a relying party
     /// calls it. Returns the DER list.
+    /// `GET /pki/v1/{org}/ca/{ca}/crl`, optionally conditional: the status, the
+    /// body and the `ETag` the route answered with.
+    async fn crl_tagged(&self, org: Uuid, ca: &str, if_none_match: Option<&str>) -> TaggedReply {
+        let mut req = test::TestRequest::get()
+            .uri(&format!("/pki/v1/{org}/ca/{ca}/crl"))
+            .peer_addr(CRL_PEER.parse().expect("a peer address"));
+        if let Some(tag) = if_none_match {
+            req = req.insert_header((actix_web::http::header::IF_NONE_MATCH, tag));
+        }
+        (self.call_tagged)(req).await
+    }
+
     async fn crl(&self, org: Uuid, ca: &str) -> Vec<u8> {
-        let (status, body) = self
-            .send(
-                test::TestRequest::get()
-                    .uri(&format!("/pki/v1/{org}/ca/{ca}/crl"))
-                    .peer_addr(CRL_PEER.parse().expect("a peer address")),
-            )
-            .await;
+        let (status, body, _) = self.crl_tagged(org, ca, None).await;
         assert_eq!(status, 200, "the CRL route answers a relying party");
         body
     }
@@ -878,8 +919,8 @@ async fn placement_from_axiam(
             // The comment names the certificate by AXIAM's id, never by its
             // subject: a subject may hold a newline, which would end the comment.
             table.push_str(&format!(
-                "# certificate {id}\n{serial}\n\tTunnel-Type = VLAN,\n\
-                 \tTunnel-Medium-Type = IEEE-802,\n\tTunnel-Private-Group-Id = \"{VLAN}\",\n\
+                "# certificate {id}\n{serial}\n\tTunnel-Type:0 = VLAN,\n\
+                 \tTunnel-Medium-Type:0 = IEEE-802,\n\tTunnel-Private-Group-Id:0 = \"{VLAN}\",\n\
                  \tSession-Timeout = 3600,\n\tTermination-Action = RADIUS-Request\n\n"
             ));
             placed.push(item["subject"].as_str().expect("a subject").to_string());
@@ -889,22 +930,297 @@ async fn placement_from_axiam(
     (table, placed, keys)
 }
 
-/// Fetch the signing CA's list from AXIAM and put it where FreeRADIUS reads it:
-/// DER to PEM, named by the hash of the issuer's name (`<hash>.r0`), moved into
-/// place so FreeRADIUS never reads a half-written file. Returns the PEM list's
-/// `openssl crl -text`.
-async fn refresh_crl(api: &Api, org: Uuid, ca: &SigningCa, capath: &Path) -> String {
-    let der = api.crl(org, &ca.id).await;
-    let pem = openssl_in(&["crl", "-inform", "DER", "-outform", "PEM"], &der);
-    let hash = String::from_utf8(openssl_in(&["crl", "-hash", "-noout"], &pem))
-        .expect("a hash")
+// ---------------------------------------------------------------------------
+// The fetch job: docker/radius/fetch-crl.sh, and the server it fetches from
+// ---------------------------------------------------------------------------
+
+/// What the stand-in for the CRL route serves, and the `If-None-Match` of every
+/// request it has answered.
+struct Served {
+    der: Vec<u8>,
+    etag: Option<String>,
+    seen: Vec<Option<String>>,
+}
+
+/// A plain-HTTP server on a loopback port, standing in for the CRL route on the
+/// fetch script's side of the wire: the script is a `curl` client, and the
+/// route lives in the in-process test service, so the test hands this server
+/// the bytes and the `ETag` the route answered with, and it answers as the
+/// route does: `200` with the list, or `304` when `If-None-Match` is the tag
+/// it holds. It also serves what the route never would (a forged list, an older
+/// one), which is the point.
+struct Mirror {
+    port: u16,
+    served: Arc<Mutex<Served>>,
+}
+
+impl Mirror {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("its address").port();
+        let served = Arc::new(Mutex::new(Served {
+            der: Vec::new(),
+            etag: None,
+            seen: Vec::new(),
+        }));
+        let shared = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                Self::answer(stream, &shared);
+            }
+        });
+        Self { port, served }
+    }
+
+    fn answer(mut stream: TcpStream, served: &Mutex<Served>) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+            if request.len() > 16 * 1024 {
+                return;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let if_none_match = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("if-none-match")
+                .then(|| value.trim().to_string())
+        });
+        let mut served = served.lock().expect("the stand-in's state");
+        served.seen.push(if_none_match.clone());
+        let tag = served
+            .etag
+            .as_ref()
+            .map(|t| format!("ETag: {t}\r\n"))
+            .unwrap_or_default();
+        let reply = if served.etag.is_some() && if_none_match == served.etag {
+            format!("HTTP/1.1 304 Not Modified\r\n{tag}Connection: close\r\n\r\n").into_bytes()
+        } else {
+            let mut reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/pkix-crl\r\n{tag}\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                served.der.len()
+            )
+            .into_bytes();
+            reply.extend_from_slice(&served.der);
+            reply
+        };
+        let _ = stream.write_all(&reply);
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/crl", self.port)
+    }
+
+    fn serve(&self, der: &[u8], etag: Option<&str>) {
+        let mut served = self.served.lock().expect("the stand-in's state");
+        served.der = der.to_vec();
+        served.etag = etag.map(str::to_string);
+    }
+
+    /// The `If-None-Match` of the most recent request, `None` if it sent none.
+    fn last_if_none_match(&self) -> Option<String> {
+        self.served
+            .lock()
+            .expect("the stand-in's state")
+            .seen
+            .last()
+            .cloned()
+            .expect("the stand-in has been asked for a list")
+    }
+}
+
+/// What one run of `docker/radius/fetch-crl.sh` did.
+struct Fetch {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl Fetch {
+    fn report(&self) -> String {
+        format!(
+            "exit ok: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.ok, self.stdout, self.stderr
+        )
+    }
+}
+
+/// Run the fetch script the guide ships, as an operator's cron job would:
+/// `fetch-crl.sh <url> <ca.pem> <capath>`, under the host's `sh`. The stand-in
+/// for the route is plain HTTP on a loopback port, which the script refuses
+/// unless `FETCH_CRL_ALLOW_HTTP=1` is in its environment (R110W5-03): `allow_http`
+/// says whether this run sets it.
+fn fetch_crl_with(mirror: &Mirror, ca_file: &Path, capath: &Path, allow_http: bool) -> Fetch {
+    let script = repo_root().join("docker/radius/fetch-crl.sh");
+    let mut command = Command::new("sh");
+    command
+        .arg(&script)
+        .arg(mirror.url())
+        .arg(ca_file)
+        .arg(capath)
+        .env_remove("FETCH_CRL_ALLOW_HTTP");
+    if allow_http {
+        command.env("FETCH_CRL_ALLOW_HTTP", "1");
+    }
+    let out = command.output().expect("`sh` can run the fetch script");
+    Fetch {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// [`fetch_crl_with`] as the end-to-end runs it: the plain-HTTP stand-in allowed.
+fn fetch_crl(mirror: &Mirror, ca_file: &Path, capath: &Path) -> Fetch {
+    fetch_crl_with(mirror, ca_file, capath, true)
+}
+
+/// One field of a DER list, as `openssl crl -noout <flag>` prints it.
+fn crl_field(der: &[u8], flag: &str) -> String {
+    String::from_utf8(openssl_in(&["crl", "-inform", "DER", "-noout", flag], der))
+        .expect("openssl prints text")
         .trim()
-        .to_string();
-    let staged = capath.join(".incoming");
-    std::fs::write(&staged, &pem).expect("the list can be staged");
-    set_readable(&staged);
-    std::fs::rename(&staged, capath.join(format!("{hash}.r0"))).expect("the list moves into place");
-    String::from_utf8(openssl_in(&["crl", "-noout", "-text"], &pem)).expect("CRL text")
+        .to_string()
+}
+
+/// The CRL number of a DER list.
+fn crl_number(der: &[u8]) -> u128 {
+    let field = crl_field(der, "-crlnumber");
+    let hex = field
+        .strip_prefix("crlNumber=0x")
+        .unwrap_or_else(|| panic!("a CRL number, got `{field}`"));
+    u128::from_str_radix(hex, 16).expect("a hexadecimal CRL number")
+}
+
+/// A list AXIAM answered with, as the run installed it.
+struct Refreshed {
+    /// `openssl crl -text` of the installed list.
+    text: String,
+    der: Vec<u8>,
+    etag: String,
+    /// `capath/<hash>.r0`.
+    installed: PathBuf,
+}
+
+/// Fetch the signing CA's list from AXIAM and put it where FreeRADIUS reads it,
+/// the way the guide does it: `docker/radius/fetch-crl.sh` fetches (here from the
+/// stand-in, serving what the route answered with), checks the CA's signature
+/// and the CRL number, and moves the list into `capath` as `<hash>.r0`.
+async fn refresh_crl(
+    api: &Api,
+    org: Uuid,
+    ca: &SigningCa,
+    ca_file: &Path,
+    capath: &Path,
+    mirror: &Mirror,
+) -> Refreshed {
+    let (status, der, etag) = api.crl_tagged(org, &ca.id, None).await;
+    assert_eq!(status, 200, "the CRL route answers a relying party");
+    let etag = etag.expect("the CRL route names its list with an ETag");
+    mirror.serve(&der, Some(&etag));
+    let run = fetch_crl(mirror, ca_file, capath);
+    assert!(
+        run.ok && run.stdout.contains("installed"),
+        "the fetch script installs the list:\n{}",
+        run.report()
+    );
+    let hash = crl_field(&der, "-hash");
+    let installed = capath.join(format!("{hash}.r0"));
+    let pem = std::fs::read(&installed).expect("the list is in ca_path");
+    Refreshed {
+        text: String::from_utf8(openssl_in(&["crl", "-noout", "-text"], &pem)).expect("CRL text"),
+        der,
+        etag,
+        installed,
+    }
+}
+
+/// A DER list that names the CA and was signed by another key, with a CRL
+/// number above `above` and no entries: whoever can answer the fetch (a
+/// TLS-intercepting proxy, a compromised mirror) can serve it, and it would
+/// un-revoke everything. `openssl crl -verify` prints `verify failure` for it
+/// and, on OpenSSL 3.0, still exits 0 (R101W6-04): the case the script's text
+/// check exists for.
+fn forged_list(work: &Path, ca_pem: &str, above: u128) -> Vec<u8> {
+    let dir = work.join("forged");
+    std::fs::create_dir_all(&dir).expect("a directory for the forgery");
+    let genuine = dir.join("genuine-ca.pem");
+    let key = dir.join("key.pem");
+    let request = dir.join("ca.csr");
+    let cert = dir.join("ca.pem");
+    let pem_list = dir.join("crl.pem");
+    std::fs::write(&genuine, ca_pem).expect("the CA can be written");
+    run_ok(
+        "openssl",
+        &["genpkey", "-algorithm", "ed25519", "-out", path_str(&key)],
+    );
+    // A certificate over another key with the CA's own subject: the same name,
+    // so the list's issuer matches the trusted CA's and OpenSSL goes on to check
+    // the signature, which is the step that fails.
+    run_ok(
+        "openssl",
+        &[
+            "x509",
+            "-in",
+            path_str(&genuine),
+            "-x509toreq",
+            "-signkey",
+            path_str(&key),
+            "-out",
+            path_str(&request),
+        ],
+    );
+    run_ok(
+        "openssl",
+        &[
+            "x509",
+            "-req",
+            "-in",
+            path_str(&request),
+            "-signkey",
+            path_str(&key),
+            "-days",
+            "2",
+            "-out",
+            path_str(&cert),
+        ],
+    );
+    std::fs::write(dir.join("index.txt"), "").expect("an empty database");
+    std::fs::write(dir.join("crlnumber"), format!("{:032X}\n", above + 1))
+        .expect("a CRL number file");
+    let config = dir.join("ca.cnf");
+    std::fs::write(
+        &config,
+        format!(
+            "[ca]\ndefault_ca = forged\n[forged]\ndatabase = {0}/index.txt\n\
+             crlnumber = {0}/crlnumber\ndefault_md = default\ndefault_crl_days = 1\n",
+            dir.display()
+        ),
+    )
+    .expect("a CA configuration");
+    run_ok(
+        "openssl",
+        &[
+            "ca",
+            "-config",
+            path_str(&config),
+            "-cert",
+            path_str(&cert),
+            "-keyfile",
+            path_str(&key),
+            "-gencrl",
+            "-out",
+            path_str(&pem_list),
+        ],
+    );
+    let pem = std::fs::read(&pem_list).expect("the forged list");
+    openssl_in(&["crl", "-inform", "PEM", "-outform", "DER"], &pem)
 }
 
 /// A `client_cert` file holding a leaf and the certificates above it, in order.
@@ -937,6 +1253,17 @@ fn set_readable(path: &Path) {
         .expect("permissions can be set");
 }
 
+/// The octets of one RADIUS attribute as `eapol_test` dumps an Access-Accept
+/// (`Attribute 81 (Tunnel-Private-Group-Id) length=4` and, below it,
+/// `Value: 3230`), as lowercase hex. `None` when the attribute is not there.
+fn attribute_octets(output: &str, number: u8, name: &str) -> Option<String> {
+    let header = format!("Attribute {number} ({name})");
+    let mut lines = output.lines();
+    lines.find(|l| l.trim_start().starts_with(&header))?;
+    let value = lines.next()?.trim().strip_prefix("Value:")?;
+    Some(value.trim().to_ascii_lowercase())
+}
+
 fn certificate_serial(pem: &str) -> String {
     let out = openssl_in(&["x509", "-noout", "-serial"], pem.as_bytes());
     String::from_utf8(out)
@@ -948,6 +1275,135 @@ fn certificate_serial(pem: &str) -> String {
 
 fn certificate_text(pem: &str) -> String {
     String::from_utf8(openssl_in(&["x509", "-noout", "-text"], pem.as_bytes())).expect("text")
+}
+
+/// What the fetch script refuses, with the list in `ca_path` the one AXIAM
+/// published after the revocation (`current`): each refusal leaves that file as
+/// it was, byte for byte, and each of them is a case the guide's earlier snippet
+/// failed (R101W6-04, #643).
+#[allow(clippy::too_many_arguments)]
+async fn fetch_script_cases(
+    api: &Api,
+    org: Uuid,
+    ca: &SigningCa,
+    work: &Path,
+    ca_file: &Path,
+    capath: &Path,
+    mirror: &Mirror,
+    initial: &Refreshed,
+    current: &Refreshed,
+) {
+    let held = std::fs::read(&current.installed).expect("the installed list");
+    let unchanged = |what: &str| {
+        assert_eq!(
+            std::fs::read(&current.installed).expect("the installed list"),
+            held,
+            "{what}: the installed list is as it was"
+        );
+    };
+
+    // The script sent the tag of the list it held, and the list it fetched
+    // after the revocation is the new one: the tags differ, so a 200.
+    assert_eq!(
+        mirror.last_if_none_match().as_deref(),
+        Some(initial.etag.as_str()),
+        "the script sends the ETag of the list it installed as If-None-Match"
+    );
+
+    // ---- a 304 keeps the installed list --------------------------------
+    // AXIAM's own route answers the current tag with 304 and no body ...
+    let (status, body, _) = api.crl_tagged(org, &ca.id, Some(&current.etag)).await;
+    assert_eq!(status, 304, "the CRL route answers its own tag with 304");
+    assert!(body.is_empty(), "a 304 has no body");
+    // ... and the script, which holds that tag, sends it and reads the 304 as
+    // "unchanged".
+    mirror.serve(&current.der, Some(&current.etag));
+    let run = fetch_crl(mirror, ca_file, capath);
+    assert!(
+        run.ok && run.stdout.contains("unchanged (304)"),
+        "a 304 is \"unchanged\":\n{}",
+        run.report()
+    );
+    assert_eq!(
+        mirror.last_if_none_match().as_deref(),
+        Some(current.etag.as_str()),
+        "the script revalidates with the ETag it stored"
+    );
+    unchanged("304");
+    say("fetch script", "304: unchanged, the installed list stays");
+
+    // ---- plain HTTP is refused unless the operator allows it -------------
+    // The script's default is HTTPS only (R110W5-03): the stand-in's `http://`
+    // URL is refused before curl runs, and nothing is touched.
+    let run = fetch_crl_with(mirror, ca_file, capath, false);
+    assert!(
+        !run.ok && run.stderr.contains("plain HTTP"),
+        "an http:// URL without FETCH_CRL_ALLOW_HTTP=1 is refused:\n{}",
+        run.report()
+    );
+    unchanged("plain HTTP without the opt-in");
+    say(
+        "fetch script",
+        "http:// without FETCH_CRL_ALLOW_HTTP=1 is refused; the installed list stays",
+    );
+
+    // ---- a list another key signed, under the CA's name -----------------
+    let forged = forged_list(work, &ca.pem, crl_number(&current.der));
+    assert_eq!(
+        crl_field(&forged, "-hash"),
+        crl_field(&current.der, "-hash"),
+        "the forged list names the CA: the same issuer name, so the same file name"
+    );
+    assert!(
+        crl_number(&forged) > crl_number(&current.der),
+        "the forged list's number is higher: only its signature can stop it"
+    );
+    mirror.serve(&forged, Some("\"forged\""));
+    let run = fetch_crl(mirror, ca_file, capath);
+    assert!(
+        !run.ok && run.stderr.contains("not signed by"),
+        "a list another key signed is refused:\n{}",
+        run.report()
+    );
+    unchanged("forged");
+    // What the guide's earlier snippet relied on, for the record: OpenSSL's own
+    // verdict and exit status on the same file.
+    let forged_file = work.join("forged/crl.der");
+    std::fs::write(&forged_file, &forged).expect("the forged list can be written");
+    let naive = Command::new("openssl")
+        .args(["crl", "-inform", "DER", "-in", path_str(&forged_file)])
+        .args(["-CAfile", path_str(ca_file), "-noout", "-verify"])
+        .output()
+        .expect("openssl can be run");
+    say(
+        "fetch script",
+        &format!(
+            "forged list refused; `openssl crl -verify` says {:?}, exit {}",
+            String::from_utf8_lossy(&naive.stderr).trim(),
+            naive.status.code().unwrap_or(-1)
+        ),
+    );
+
+    // ---- a list the CA signed, but older than the one installed ---------
+    assert!(
+        crl_number(&initial.der) < crl_number(&current.der),
+        "the list the run started with is numbered below the one after the revocation"
+    );
+    mirror.serve(&initial.der, Some(&initial.etag));
+    let run = fetch_crl(mirror, ca_file, capath);
+    assert!(
+        !run.ok && run.stderr.contains("lower than the installed"),
+        "a lower-numbered list is refused:\n{}",
+        run.report()
+    );
+    unchanged("lower number");
+    say(
+        "fetch script",
+        "an older list the CA signed is refused; the installed list stays",
+    );
+
+    // Back to what AXIAM serves now.
+    mirror.serve(&current.der, Some(&current.etag));
 }
 
 // ===========================================================================
@@ -1206,10 +1662,20 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     std::fs::write(trust.join("placement"), table).expect("the placement table can be written");
     set_readable(&trust.join("ca.pem"));
     set_readable(&trust.join("placement"));
-    let initial = refresh_crl(&api, plant_a.id, &line1, &capath).await;
+    // The list reaches `ca_path` the way the guide says: through the fetch
+    // script, from a stand-in for the CRL route.
+    let mirror = Mirror::start();
+    let ca_file = trust.join("ca.pem");
+    let initial = refresh_crl(&api, plant_a.id, &line1, &ca_file, &capath, &mirror).await;
     assert!(
-        initial.contains("No Revoked Certificates"),
-        "the list starts empty:\n{initial}"
+        initial.text.contains("No Revoked Certificates"),
+        "the list starts empty:\n{}",
+        initial.text
+    );
+    assert_eq!(
+        mirror.last_if_none_match(),
+        None,
+        "the first fetch holds no ETag to send"
     );
     std::fs::set_permissions(&capath, {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1258,6 +1724,40 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
                 .output
                 .contains(&format!("Attribute {number} ({name})")),
             "accept: the Access-Accept carries {name} (RFC 3580): {}",
+            accept.output
+        );
+    }
+    // The wire encoding, read from the attribute's own octets: RFC 2868 puts a
+    // tag octet before a tagged integer's value, and FreeRADIUS 3.2.8 writes the
+    // placement's `:0` as 0x00 there; a tagged string with tag 0 carries no tag
+    // octet at all (its first octet, a digit, is above 0x1F, which RFC 2868 §3.6
+    // reads as the start of the string). A tag other than 0 would show as one
+    // more octet in front of the VLAN, and a NAS would read it as another tunnel.
+    let vlan_hex: String = VLAN.bytes().map(|b| format!("{b:02x}")).collect();
+    for (number, name, expected, what) in [
+        (
+            64,
+            "Tunnel-Type",
+            "0000000d".to_string(),
+            "tag 0x00, VLAN (13)",
+        ),
+        (
+            65,
+            "Tunnel-Medium-Type",
+            "00000006".to_string(),
+            "tag 0x00, IEEE-802 (6)",
+        ),
+        (
+            81,
+            "Tunnel-Private-Group-Id",
+            vlan_hex,
+            "the VLAN string and no tag octet",
+        ),
+    ] {
+        assert_eq!(
+            attribute_octets(&accept.output, number, name).as_deref(),
+            Some(expected.as_str()),
+            "accept: {name} is encoded as {what}: {}",
             accept.output
         );
     }
@@ -1471,11 +1971,21 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     );
 
     // The refresh: fetch the list from AXIAM into ca_path ...
-    let fetched = refresh_crl(&api, plant_a.id, &line1, &capath)
-        .await
-        .to_ascii_lowercase();
-    assert!(fetched.contains(&certificate_serial(&press09.pem)));
-    say("refresh", "list fetched from AXIAM into ca_path");
+    let current = refresh_crl(&api, plant_a.id, &line1, &ca_file, &capath, &mirror).await;
+    assert!(
+        current
+            .text
+            .to_ascii_lowercase()
+            .contains(&certificate_serial(&press09.pem))
+    );
+    say(
+        "refresh",
+        "list fetched from AXIAM into ca_path by fetch-crl.sh",
+    );
+    fetch_script_cases(
+        &api, plant_a.id, &line1, &work, &ca_file, &capath, &mirror, &initial, &current,
+    )
+    .await;
 
     // ... and FreeRADIUS reads it: by its own ca_path_reload_interval, or, for
     // a quick local run, by a restart.

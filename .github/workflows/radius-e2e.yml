@@ -36,11 +36,15 @@ on:
       - "crates/axiam-pki/src/crl*"
       - "crates/axiam-pki/src/cert.rs"
       - "crates/axiam-pki/src/ca.rs"
+      - "crates/axiam-pki/src/crypto.rs"
+      - "crates/axiam-pki/src/subject.rs"
+      - "crates/axiam-api-rest/src/server.rs"
       - "crates/axiam-api-rest/src/handlers/crl.rs"
       - "crates/axiam-api-rest/src/handlers/certificates.rs"
       - "crates/axiam-api-rest/src/handlers/ca_certificates.rs"
       - "docker/radius/**"
       - "docker/docker-compose.radius.yml"
+      - "scripts/check-radius-vendors-nothing.py"
       - "docs/pki/freeradius.md"
       - ".github/workflows/radius-e2e.yml"
   workflow_dispatch:
@@ -74,6 +78,15 @@ jobs:
 
       - name: eapol_test is installed
         run: command -v eapol_test
+
+      # The fetch script's own cases (R110W5-01 ...): a stand-in for the CRL route
+      # and a throwaway CA, no docker and no AXIAM. Under both shells an operator's
+      # cron might run it with (`sh` is dash on Debian and Ubuntu).
+      - name: fetch-crl.sh cases
+        run: |
+          for shell in dash bash; do
+            docker/radius/tests/fetch-crl-test.sh "$shell"
+          done
 
       # The image is named once, in the compose file, by digest; pull exactly that,
       # with a retry, since Docker Hub rate-limits anonymous pulls.

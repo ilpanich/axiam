@@ -64,6 +64,18 @@ jobs:
         if: always()
         run: python3 scripts/check-crate-layering.py --graph
 
+      # T-454 -- the FreeRADIUS recipe REFERENCES an upstream (GPLv2) image and
+      # vendors nothing. radius_e2e.rs pulls the digest and runs; nothing it
+      # asserts would fail if a Dockerfile or a FROM line entered docker/radius/,
+      # or if the compose file's image: slid back to a movable tag (R101W6-11).
+      # It is a tripwire on that shape, not a scan for vendored code: binaries,
+      # sources and files outside docker/radius/ are not looked at (R110W5-04).
+      # The crate half is cargo-deny's licence allow-list (deny.toml).
+      - name: RADIUS recipe vendors-nothing self-test (fixtures)
+        run: python3 scripts/check-radius-vendors-nothing.py --self-test
+      - name: RADIUS recipe vendors nothing and pins its image by digest
+        run: python3 scripts/check-radius-vendors-nothing.py
+
       # F5 -- UNIQUE-violation detection is a security decision (a replayed
       # assertion refused or accepted), and D-09 already said it may live in
       # exactly one place. Five call sites had their own copy anyway. This is

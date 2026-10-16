@@ -608,9 +608,23 @@ What changes with it:
 | | 1.0.1 (D3) | §6.2 export | D4 |
 |---|---|---|---|
 | Who owns VLAN policy | the FreeRADIUS operator | AXIAM | AXIAM |
-| Revocation reaches the NAS | CRL refresh (`nextUpdate` ≤ 1 day by default) + `Session-Timeout` | the earlier of CRL and export pull, + `Session-Timeout` | next authentication, bounded by `Session-Timeout` |
+| Revocation reaches the NAS | fetch interval + `ca_path_reload_interval` (≥ 300 s) + `Session-Timeout` | the earlier of CRL and export pull, + `Session-Timeout` | next authentication, bounded by `Session-Timeout` |
 | Quarantine reaches the NAS | operator edits config | pull interval + `Session-Timeout` | `Session-Timeout` |
 | New AXIAM surface | none | one bulk read (T-468's bindings) | one decision route (T-468) |
+
+> **Corrected 2026-10-15 (R101W6-06, #645; the W6 F4 review).** The first column's
+> revocation cell read "CRL refresh (`nextUpdate` ≤ 1 day by default) +
+> `Session-Timeout`". That is neither the mechanism nor the guide's figure.
+> AXIAM publishes a revocation at once, in the next response of the CRL route; what
+> sets the lag is the operator's fetch cadence, then FreeRADIUS's reload of its
+> store (`ca_path_reload_interval`, whose smallest accepted value is 300 s), then
+> the `Session-Timeout` of a session already admitted. The bound is
+> `docs/pki/freeradius.md`'s: **fetch interval + `ca_path_reload_interval`
+> (≥ 300 s) + `Session-Timeout`**, plus any shared cache's `max-age` when the fetch
+> is not direct (the route answers `Cache-Control: public, max-age`, up to half
+> `nextUpdate`). `nextUpdate` bounds only how long a list that is *never* refreshed
+> stays usable, after which FreeRADIUS refuses every device of the tenant
+> (fail-closed). The other cells are unchanged.
 
 The D4 trigger the spike set ("only once D3 shows the CRL interval or the
 attribute model inadequate") reads, against this table: if an adopter cannot live

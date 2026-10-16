@@ -924,7 +924,7 @@ the socket peer. Therefore:
 
 | Topology | Header the server sees | Value |
 |---|---|---|
-| Direct, no proxy | *(absent)* → `peer_addr()` | `0` |
+| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything; *(absent)* → `peer_addr()` | `0` — see below |
 | `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
 | Compose/Pi — Caddy → server | `<client>` | **`0`** |
 | Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
@@ -935,6 +935,22 @@ Behind exactly one appending proxy, `0` selects the real client **whether or not
 the client sends a forged `X-Forwarded-For`** — the proxy appends the real peer
 to the right of the forgery and the extractor reads from the right. That
 property is why `0` is the shipped default rather than merely a convenient one.
+
+**With no appending proxy, the header is the caller's.** The first row of the
+table holds only for a caller that sends no `X-Forwarded-For`. Nothing appends
+to the header on a direct connection, or through a layer-4 pass-through, so the
+rightmost entry — the one `0` selects — is whatever the caller wrote, and a
+caller who rotates it gets a fresh bucket per request on every per-address
+limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS decision
+route's backstop) and one more entry in each limiter's in-process map. No value
+of `TRUSTED_HOPS` repairs that. Do not expose the listener to the internet
+without the appending proxy; where a client must reach it directly — the
+FreeRADIUS recipe's D4 profile, whose mutual TLS has to end at AXIAM
+([`docs/pki/freeradius.md`](../pki/freeradius.md#the-connection-mutual-tls-that-ends-at-axiam))
+— admit only that client to it with a firewall or a network policy. A setting
+that names the proxies whose header is honoured is planned for `1.1.x`
+([#711](https://github.com/ilpanich/axiam/issues/711); T-212). *(Corrected
+2026-10-16: the row said the header was absent on a direct connection, R110-05.)*
 
 Setting the value to the proxy *count* instead makes
 `trusted_hops >= hops.len()`; the extractor then discards the header entirely

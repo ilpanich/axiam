@@ -2,7 +2,7 @@
 
 **Milestone:** `1.0.1`; [section 5, the decision per authentication](#5-the-decision-per-authentication-d4),
 `1.1.0`
-**Last verified:** 2026-10-13 (sections 1 to 4), 2026-10-15 (section 5), against
+**Last verified:** 2026-10-15 (sections 1 to 5), against
 FreeRADIUS 3.2.8 and `eapol_test` from `wpa_supplicant` 2.10 (see [What the
 end-to-end test proves](#what-the-end-to-end-test-proves) and [What the D4 test
 proves](#what-the-d4-test-proves))
@@ -151,9 +151,32 @@ The cost is stated plainly: with the signing CA as the trust anchor nothing abov
 it is looked at, so **a revoked signing CA is not noticed by FreeRADIUS**. The
 organization CA's list is what names it, and this configuration does not load
 that list (`check_all_crl = no`). When you revoke a signing CA, remove or
-replace `ca.pem` and restart FreeRADIUS; the devices under it should be
-re-issued under a new one in any case ([Revoke a
+replace `ca.pem` ([as below](#replacing-or-removing-capem)) and restart
+FreeRADIUS, so that the old trust is gone at once and not at the next reload;
+the devices under it should be re-issued under a new one in any case ([Revoke a
 certificate](README.md#revoke-a-certificate)).
+
+### Replacing or removing `ca.pem`
+
+`ca_path_reload_interval` ([below](#4-keep-the-revocation-list-fresh)) makes
+FreeRADIUS build a new certificate store from `ca_file` **and** `ca_path`, so a
+reload re-reads `ca.pem` as well as the lists. Three consequences:
+
+- **Replace `ca.pem` atomically.** Write the new file in the same directory under
+  another name and `mv` it over `ca.pem` (a rename within one filesystem is
+  atomic). A `cp`, or a redirect that truncates the file in place, can be read
+  half written by a reload that fires in between, and that reload then fails.
+- **Never delete `ca.pem`, or leave it unreadable, without restarting
+  FreeRADIUS.** A reload that cannot read it fails, logs `Error replacing X509
+  store`, and **keeps the old store, which still trusts the CA you removed**; it
+  retries at every new EAP conversation until the process restarts. Removing the
+  file does not withdraw the trust.
+- **A logged `Error replacing X509 store` means the old trust is still in force**:
+  the CA, and the lists, that FreeRADIUS last read successfully. It is not a
+  harmless warning, so alert on it. What you do is repair the file (put the
+  intended `ca.pem` back, or the new one) and restart FreeRADIUS, which reads
+  everything at once; after any change to the trusted CA, a restart is the only
+  way to be sure which one is trusted.
 
 ## 3. The FreeRADIUS configuration
 
@@ -208,9 +231,11 @@ eap {
   [monitor the fetch](#the-revocation-lag).
 - **`cache { enable = no }`**: no TLS session cache. A resumed session skips the
   certificate check, so a revoked device could be admitted again from a ticket.
-- **`ca_path_reload_interval = 300`** is how FreeRADIUS re-reads the lists
-  ([below](#4-keep-the-revocation-list-fresh)). FreeRADIUS raises any smaller
-  value to 300.
+- **`ca_path_reload_interval = 300`** is how FreeRADIUS re-reads what it trusts:
+  it rebuilds the store from `ca_file` **and** `ca_path`, so a replaced `ca.pem`
+  and the lists are read afresh ([below](#4-keep-the-revocation-list-fresh); how to
+  replace `ca.pem` is [above](#replacing-or-removing-capem)). FreeRADIUS raises
+  any smaller value to 300.
 
 ### `clients.conf` — who may send requests, and what they must send
 
@@ -234,6 +259,15 @@ client nas-line-1 {
   client whose first packet lacks the attribute). With it set to `yes`,
   `limit_proxy_state` is ignored, which is what you want behind a wireless
   controller that acts as a proxy and adds `Proxy-State`.
+- **The NAS must do its half.** The forgery is of the *response*, so FreeRADIUS
+  requiring and sending the attribute protects nothing on a NAS that does not
+  check it. For each NAS, confirm that its firmware has the Blast-RADIUS fix
+  (CVE-2024-3596): it sends `Message-Authenticator` in every Access-Request and
+  **requires and verifies** it in every Access-Accept, Access-Reject and
+  Access-Challenge. The setting's name differs by vendor. A NAS whose vendor has no
+  such firmware is not protected by anything in this recipe: serve it over
+  [RadSec](#radsec-where-the-nas-allows), or keep an on-path attacker away from
+  the segment between it and FreeRADIUS.
 - **The shared secret** is per NAS, at least 128 bits from a CSPRNG
   (`openssl rand -base64 24`), and not in a file you commit — FreeRADIUS reads
   `$ENV{...}`. The secret keys the MD5 constructs described under
@@ -266,9 +300,9 @@ certificate, named by the certificate's serial as FreeRADIUS spells
 ```
 # certificate 6f1c2a90-3d4e-4b7a-9c1d-2e5f8a7b6c01
 1b5e0c9a47d2f3086e4a1c7b9d0e2f5a6c8b3d41
-	Tunnel-Type = VLAN,
-	Tunnel-Medium-Type = IEEE-802,
-	Tunnel-Private-Group-Id = "20",
+	Tunnel-Type:0 = VLAN,
+	Tunnel-Medium-Type:0 = IEEE-802,
+	Tunnel-Private-Group-Id:0 = "20",
 	Session-Timeout = 3600,
 	Termination-Action = RADIUS-Request
 ```
@@ -285,7 +319,15 @@ certificate, named by the certificate's serial as FreeRADIUS spells
   `HUP`; the EAP module's lists need the interval in section 4.)
 - **The VLAN is the three attributes RFC 3580 §3.31 prescribes**: `Tunnel-Type =
   VLAN`, `Tunnel-Medium-Type = IEEE-802`, `Tunnel-Private-Group-Id` a decimal
-  string between `1` and `4094` with tag `0`. Use these and no other attributes
+  string between `1` and `4094`. Each is written with the tag `:0`, FreeRADIUS 3's
+  spelling of a tagged attribute (RFC 2868 §3.1). On the wire that is a `0x00` tag
+  octet in front of the two integers' values; the string carries **no** tag
+  octet, because FreeRADIUS 3.2.8 encodes tag `0` on a string exactly as it
+  encodes no tag, and RFC 2868 §3.6 reads a first octet above `0x1F` (every digit
+  is) as the start of the string. The test reads the octets from the Accept
+  (`00 00 00 0d`, `00 00 00 06`, `32 30`). A tag other than `0` puts another octet
+  in front of the VLAN, which a NAS reads as one tunnel of several; do not write
+  one. Use these and no other attributes
   in a placement: the reply-profile design note
   ([`radius-reply-profile-design.md`](../../claude_dev/radius-reply-profile-design.md))
   keeps the set closed so that a hand-written table here is already an instance
@@ -374,8 +416,8 @@ while read -r id; do
   # A serial is lowercase hex and nothing else; anything else stops the run.
   case "$serial" in *[!0-9a-f]*|'') echo "certificate $id: bad serial" >&2; exit 1 ;; esac
   printf '# certificate %s\n%s\n' "$id" "$serial"
-  printf '\tTunnel-Type = VLAN,\n\tTunnel-Medium-Type = IEEE-802,\n'
-  printf '\tTunnel-Private-Group-Id = "20",\n\tSession-Timeout = 3600,\n'
+  printf '\tTunnel-Type:0 = VLAN,\n\tTunnel-Medium-Type:0 = IEEE-802,\n'
+  printf '\tTunnel-Private-Group-Id:0 = "20",\n\tSession-Timeout = 3600,\n'
   printf '\tTermination-Action = RADIUS-Request\n\n'
 done < "$tmp/ids" > "$tmp/placement"
 
@@ -398,35 +440,104 @@ AXIAM publishes each issuing CA's list at
 certificate AXIAM signs, as its CRL distribution point. Details:
 [Certificate revocation lists](README.md#certificate-revocation-lists).
 
-FreeRADIUS reads lists from files. Fetch the tenant signing CA's list on a
-schedule, convert it, check that the CA you trust signed it, and move it into
-`ca_path` under the name OpenSSL looks it up by (`<issuer-name-hash>.r0`):
+FreeRADIUS reads lists from files. [`docker/radius/fetch-crl.sh`](../../docker/radius/fetch-crl.sh)
+fetches the tenant signing CA's list, checks it, and moves it into `ca_path` under
+the name OpenSSL looks it up by (`<issuer-name-hash>.r0`). The file is the recipe:
+this page does not copy it, so that what you read cannot drift from what the
+end-to-end test runs. Run it from cron or a systemd timer, every five minutes:
 
 ```sh
-#!/bin/sh
-# Run from cron or a systemd timer every 5 minutes.
-set -eu
-URL="https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl"
-DIR=/etc/freeradius/axiam/capath
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-
-curl -fsS --max-time 20 -o "$tmp/crl.der" "$URL"
-openssl crl -inform DER -in "$tmp/crl.der" -outform PEM -out "$tmp/crl.pem"
-# Never install a list the trusted CA did not sign.
-openssl crl -in "$tmp/crl.pem" -CAfile /etc/freeradius/axiam/ca.pem -noout -verify
-hash=$(openssl crl -in "$tmp/crl.pem" -noout -hash)
-install -m 0644 "$tmp/crl.pem" "$DIR/.incoming"
-mv "$DIR/.incoming" "$DIR/$hash.r0"          # atomic: never a half-written list
+fetch-crl.sh "https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl" \
+    /etc/freeradius/axiam/ca.pem /etc/freeradius/axiam/capath
 ```
 
-Use HTTPS. The signature check stops a list the CA did not sign; it does not
-stop a replay of an older, validly signed one, so a script that holds the CRL number
-should also refuse a list whose number is lower than the one on disk.
+It installs a list only if all of these hold, and otherwise exits 1, says why on
+stderr and leaves the installed list alone:
+
+- **The CA you trust signed it.** The check is the *text* `openssl crl -verify`
+  prints, which must be exactly `verify OK`, not its exit status: OpenSSL 3.0
+  prints `verify failure` and exits **0** when a list names the CA but another key
+  signed it, so a script that trusts the exit status installs a list forged under
+  the CA's name (R101W6-04, [#643](https://github.com/ilpanich/axiam/issues/643))
+  — and FreeRADIUS then refuses the whole tenant, with the genuine list gone from
+  disk.
+  ```sh
+  out=$(openssl crl -in "$work/crl.pem" -CAfile "$ca_file" -noout -verify 2>&1) || rc=$?
+  { [ "$rc" -eq 0 ] && [ "$out" = "verify OK" ]; } || fail "…not signed by $ca_file"
+  ```
+- **Its CRL number is not lower than the installed list's.** A validly signed
+  but older list is a replay that would undo a revocation. A number is compared
+  as the hex integer it is (`openssl crl -noout -crlnumber`); an equal number is
+  accepted, since the same list again is not a replay.
+  **Expect this refusal once after AXIAM's list interval
+  (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`) changes.** AXIAM's CRL number is derived
+  from the refresh epoch, and a new interval cuts new epochs, so the number can
+  step back once; the lower list withdraws nothing the installed one revoked,
+  only entries that expired. The script then exits 1 with `its CRL number … is
+  lower than the installed list's` and keeps the installed list, and if the
+  interval followed the [PKI guide's rule](README.md#certificate-revocation-lists)
+  (lower it in one step; raise it to at most twice the current value at a time)
+  AXIAM serves a greater number again before the installed list's `nextUpdate`,
+  and the next run installs it. A refusal that lasts until the installed list
+  expires means the interval was raised in one larger step, and FreeRADIUS then
+  refuses every device of the tenant (`check_crl`) until AXIAM's number passes
+  the installed one, up to half the new interval: raise it in steps.
+- **The server said `200`.** The script sends the `ETag` of the list it
+  installed as `If-None-Match`; a `304` whose own `ETag` is the tag it sent means
+  "unchanged", and nothing is touched. The tag is stored (in `ca_path`, as
+  `.fetch-crl.*`, a name OpenSSL never looks up) only after its list is in place,
+  only if it is one entity-tag (`"…"` or `W/"…"`: never `*`, which AXIAM's route
+  matches against every list, and never a list of tags), and beside the SHA-256 of
+  the file it was installed as. The script fetches the whole list, with no
+  `If-None-Match`, when the file in `ca_path` is no longer that one (replaced,
+  deleted, corrupted) and when a `304` carries another tag or none; a `304` to
+  that request is refused. A tag stored as `*` would otherwise make every later
+  run read "unchanged" for as long as the list lasts, after whoever answered one
+  fetch was gone (R110W5-01).
+
+and it installs atomically: written beside its destination, then renamed, so
+FreeRADIUS never reads a half-written list.
+
+It runs one at a time per URL. The whole run, from reading the stored tag to
+writing it, holds a lock in `ca_path` (`flock` on `.fetch-crl.*.lock` where
+`flock` exists; otherwise a directory of that name plus `.d`, which a later run
+breaks when its owner is gone or it is older than 120 seconds). A run that finds
+the lock held prints that, exits **0** and touches nothing: it is not a failure,
+so a timer that overlaps its own previous run, a manual run beside the cron entry
+or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. Without
+the lock, two runs that fetch different lists can leave the older one in place
+under the newer one's tag, and a revocation then waits until AXIAM's list next
+changes, up to half its lifetime, with a file fresh enough to silence the
+age alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
+looks it up.
+
+Use HTTPS, and the script holds you to it: the URL must start with `https://`,
+and an `http://` URL is refused unless `FETCH_CRL_ALLOW_HTTP=1` is set in the
+script's environment. The list is signed, so plain HTTP costs no integrity, which
+is why there is a switch at all (a lab, or a loopback stand-in, as the
+end-to-end test uses); but the signature check stops a list the CA did not sign,
+and the number check a replay of an older one, and neither stops whoever answers
+the fetch from serving the genuine current list again after a newer one exists,
+which only lengthens [the lag](#the-revocation-lag). Over HTTP anyone on the path
+can do that; over HTTPS only the server and anything that terminates TLS for it
+can. Any other scheme (`file:`, `ftp:`, ...) is refused, and so is a URL that
+starts with `-`.
+
+The script's `curl` runs as `curl -q … --url <url>`: `-q` so that it does not read
+the `~/.curlrc` of the user whose cron job this is (a `location` or `insecure`
+line there would turn a refused redirect into a followed one, or TLS verification
+off), `--proto` pinned to the URL's scheme, and no redirect followed (a `3xx` is
+reported as the status it is and the installed list stays). Before curl 8.4,
+`--max-filesize` does not stop a chunked body without a declared size; only
+`--max-time` (20 seconds) does (R110W5-03).
+
+The alert on a list that is older than half its lifetime
+([below](#the-revocation-lag)) is what catches a fetch that no longer moves.
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request
-with `304` (send `If-None-Match`), and the route's limiter is 60 requests a minute
-per address.
+with `304` (the script sends `If-None-Match`), and the route's limiter is 60
+requests a minute per address.
 
 ### The revocation lag
 
@@ -435,7 +546,15 @@ order:
 
 1. **AXIAM publishes it.** At once: the next response from the CRL route names the
    serial. The test checks this.
-2. **Your job fetches the list.** At most the fetch interval.
+2. **Your job fetches the list.** At most the fetch interval, **provided it
+   fetches AXIAM directly, or through a cache told `no-cache`**. The CRL route
+   answers `Cache-Control: public, max-age=N`, with N running to the next
+   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. A
+   shared cache or CDN on the path may therefore serve the list from before the
+   revocation for that long. Leave one out, or have it revalidate every request;
+   that is cheap, because [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) sends
+   the `ETag` of the list it installed as `If-None-Match`, so a revalidation that
+   finds nothing new costs a `304` and no list body.
 3. **FreeRADIUS reads it.** OpenSSL does not re-read `ca_path` by itself. With
    `ca_path_reload_interval`, FreeRADIUS replaces its certificate store at the
    first *new* EAP conversation after the interval has elapsed, and the new store
@@ -448,9 +567,9 @@ order:
    of it.
 
 So a revoked device can keep its port for as long as **the fetch interval, plus
-300 seconds, plus the `Session-Timeout`** — with the figures above, roughly an
-hour and ten minutes in the worst case, and a few minutes for a device that is not
-connected. The end-to-end test shows the middle of that: it revokes a device,
+300 seconds, plus the `Session-Timeout`, plus any shared cache's `max-age`** — with
+the figures above and no cache on the fetch path, roughly an hour and ten minutes
+in the worst case, and a few minutes for a device that is not connected. The end-to-end test shows the middle of that: it revokes a device,
 shows AXIAM serving the new list, shows FreeRADIUS **still admitting the device**
 because it holds the old one, and then times the refusal after the list is in
 `ca_path`.
@@ -467,8 +586,10 @@ Two ways this goes wrong:
   `allow_expired_crl` is left at its default, `no`. That is fail-closed, and a
   full outage a day later. Alert when the file in `capath` is older than half
   the list's lifetime.
-- **FreeRADIUS is not restarted after you replace `ca.pem`.** The file is read
-  at start-up, and the lists are the only thing the interval re-reads.
+- **`ca.pem` is replaced non-atomically, or deleted without a restart.** The
+  reload re-reads it as well as the lists; a reload that cannot read it logs `Error
+  replacing X509 store` and leaves the old trust in force
+  ([above](#replacing-or-removing-capem)).
 
 ## 5. The decision per authentication (D4)
 
@@ -531,6 +652,22 @@ behind it is not bound, because AXIAM could not check the binding again later, a
 the decision route refuses every token that is not bound with a `401`, so every
 device is refused. A layer-4 proxy that passes the TLS connection through
 untouched is fine. The same holds for the token request in the next paragraph.
+
+**Expose that listener to the FreeRADIUS servers only.** AXIAM has one listener,
+and it serves every route, not just the decision. Reached without an appending
+proxy in front (directly, or through a layer-4 pass-through), nothing appends to
+`X-Forwarded-For`, so every per-address rate limiter — `/auth/login`'s,
+`/auth/device`'s, the decision route's per-address backstop, `/oauth2/token`'s —
+keys on whatever entry a caller writes there, also at the default
+`AXIAM__RATE_LIMIT__TRUSTED_HOPS = 0` ([the deployment guide's
+table](../deployment/README.md#deriving-trusted_hops)), and a caller who
+rotates the header gets a fresh bucket per request. Per-account lockout, the
+decision route's own allowance (keyed on the authenticated service account) and
+the per-client limits are not affected. So let a firewall or a network policy
+admit only the FreeRADIUS servers to the native listener, and keep the HTTP
+ingress, with its appending proxy, for every other client. A setting that names
+the proxies whose header is honoured is planned for `1.1.x`
+([#711](https://github.com/ilpanich/axiam/issues/711); T-212, T-486).
 
 **How FreeRADIUS gets its token.** It logs in as the service account the way a
 device does: `POST /api/v1/auth/device` over that mutual TLS connection, with its
@@ -758,6 +895,8 @@ exercised), more than one site, a NAS that retransmits, and anything about speed
 ### What D4 leaves to you
 
 - **mTLS to AXIAM with nothing in between that ends it**, and AXIAM's availability.
+- **Who else reaches that listener**: the FreeRADIUS servers only
+  ([above](#the-connection-mutual-tls-that-ends-at-axiam)).
 - **FreeRADIUS's own certificate**: issue it short-lived, renew it before it ends,
   restart FreeRADIUS to use the new one (the token cache goes with the restart),
   and revoke it in AXIAM if the server is compromised: the next request is a
@@ -808,12 +947,15 @@ clients radsec-nas {
 		ipaddr = 192.0.2.10
 		proto = tls
 		secret = radsec
+		require_message_authenticator = yes
 	}
 }
 ```
 
 This is the shape of the image's own `sites-available/tls`, with TLS 1.3 asked
-for. Three cautions:
+for. `require_message_authenticator = yes` stands on this client as on every
+other, and the NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
+applies to it equally. Three cautions:
 
 - **Not exercised by the end-to-end test.** `eapol_test` speaks UDP only; the
   block above is a starting point to adapt, not a tested configuration.
@@ -837,9 +979,10 @@ they produce into the shipped FreeRADIUS configuration, and authenticates with
 |---|---|
 | **issue** | an organization CA, two tenants' signing CAs beneath it and a `Device` certificate are issued; the leaf carries `clientAuth` and its issuer's CRL distribution point; the CA is exported |
 | **bind** | the certificate is bound to a service account and listed as bound; the placement table generated from that list is keyed on the bound certificates' serials, and no entry on anything else |
-| **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept |
+| **accept** | the bound device is admitted, with `Tunnel-Type`, `Tunnel-Medium-Type`, `Tunnel-Private-Group-Id`, `Session-Timeout` and `Termination-Action` in the Accept; the octets of the three VLAN attributes are read from it: tag `0x00` before each integer, none before the VLAN string |
 | **wrong CA** | a device of another tenant of the same organization — whose signing CA is under the same organization CA as the trusted one — is refused presenting its leaf, its leaf and signing CA (`unable to get local issuer certificate`) and its whole chain up to the shared root (`self-signed certificate in certificate chain`); a device of another organization is refused; the tenant's own device presenting its whole chain is admitted |
 | **revoked after the CRL refresh** | a revoked device is still admitted while FreeRADIUS holds the old list; once AXIAM's list is in `ca_path` and FreeRADIUS has read it, the device is refused with `certificate revoked` and another device is not |
+| **the fetch script** | the revocation list reaches `ca_path` through [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) itself, run on the host against a local stand-in for the CRL route. A list another key signed under the CA's name (with a higher number, so only its signature can stop it) is refused, although `openssl crl -verify` exits 0 on it; a list the CA signed with a lower CRL number is refused; a `304` to the stored `ETag` leaves the list alone; each refusal leaves the installed list byte for byte as it was |
 | unplaced | a valid, unrevoked, unbound device is refused, although the table also holds a bound certificate whose subject is `DEFAULT` (which is admitted, as itself) |
 | TLS 1.2 | a supplicant offering only TLS 1.2 is refused |
 | EAP-MD5 | a supplicant that asks for EAP-MD5 gets an EAP-Failure |
@@ -852,29 +995,47 @@ Not covered, and said so: RadSec (above); supplicants other than `eapol_test`;
 a NAS that proxies; the lag of step 4 (the session) — the test does not connect a
 session and revoke it under it; and anything about performance. The latency
 figures in [§6.3 of the reply-profile note](../../claude_dev/radius-reply-profile-design.md)
-that compare this recipe with the designs that would replace it are read from the
-defaults (a list valid for a day), not measured; this page's bound, with a
-five-minute fetch, is tighter.
+that compare this recipe with the designs that would replace it are reasoned from
+the mechanism above, not measured.
 
 ## Which threat-model entries this covers
 
-The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md))
-holds the RADIUS entries the declined native front end was written for. Four of
-them are mitigated by this recipe's configuration, with the end-to-end test above
-as their test: **T-449** (`Message-Authenticator` required), **T-456** (EAP-TLS
-only, TLS 1.3 only), **T-459** (one tenant's signing CA as the only anchor) and
-**T-454** (the recipe references an upstream image by digest and vendors
-nothing). Two are **open** for the recipe, as residuals the operator carries
-(model 2.41.0, 2026-10-14): **T-450** (on plain UDP the EAP-TLS keys travel under
-MD5 obfuscation; use [RadSec](#radsec-where-the-nas-allows)) and **T-462** (the
+The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md),
+model 2.42.0) holds the RADIUS entries the declined native front end was written
+for, and since 1.1.0 the entries of the D4 profile. For the **D3 profile**, four
+are mitigated by this recipe: **T-449** (`Message-Authenticator` required),
+**T-456** (EAP-TLS only, TLS 1.3 only) and **T-459** (one tenant's signing CA as
+the only anchor), each with the end-to-end test above as its test, and **T-454**
+(the recipe references an upstream image by digest and vendors nothing), whose
+tests are `scripts/check-radius-vendors-nothing.py` and `cargo-deny`'s licence
+list, not the end-to-end. Two are **open** for the recipe, as residuals the
+operator carries (since model 2.41.0, 2026-10-14): **T-450** (on plain UDP the
+EAP-TLS keys travel under MD5 obfuscation; use
+[RadSec](#radsec-where-the-nas-allows)) and **T-462** (the
 [revocation lag](#the-revocation-lag) above, and no way to end a session already
-admitted). The remaining fifteen stay *not applicable*, each saying why: they
-are about code AXIAM would have to write, or about a FreeRADIUS control this
-recipe does not test. That is the D3 profile's account. The D4 profile
-([section 5](#5-the-decision-per-authentication-d4)) adds a route, a caller and a
-write surface to AXIAM, and the model's entries for them (the decision oracle and
-the segment and profile writes) are recorded with the contract section for the
-route, not here: this guide claims no mitigation the model does not yet state.
+admitted).
+
+The **D4 profile** ([section 5](#5-the-decision-per-authentication-d4)) adds a
+route, a caller and a write surface to AXIAM, and the model states them (1.1.0):
+**T-468** (the decision route answers only a certificate-bound FreeRADIUS
+service account), **T-457** (one negative answer, whatever the cause), **T-461**
+(the bounded reply-profile model), **T-463** (one audit row per decision) and
+**T-464** (no MAC address or user name reaches AXIAM) are mitigated for the
+route; **T-459** gains the route's own tenant check; **T-487** (only the
+dictionary's attributes reach the Accept) is mitigated for this recipe by the D4
+test; the segment and profile write surface is **T-478** … **T-480**, **T-482**
+and **T-485**. Open for D4: **T-462** keeps its D4 column (refused at the next
+authentication; a connected session lasts until `Session-Timeout`), **T-486**
+(AXIAM unavailable, or reached through a proxy that ends TLS, refuses every
+device — the operator's to carry, with the listener exposed to the FreeRADIUS
+servers only, [above](#the-connection-mutual-tls-that-ends-at-axiam)), and three
+Low residuals of the write gate (**T-481**, **T-483**, **T-484**). The remaining
+ten entries stay *not applicable*, each saying why: they are about the native
+listener, EAP state machine and NAS registry AXIAM would have to write, or about
+a decision surface D4 does not build. *(Corrected 2026-10-16: this paragraph
+said all four mitigated entries had the end-to-end as their test, true of three
+since 2026-10-15, and that the guide claimed no D4 mitigation the model did not
+yet state — the model states them since W6.6.)*
 
 ## Operating notes
 

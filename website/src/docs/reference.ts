@@ -301,7 +301,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 28 namespaces and names the 190 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
+        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 29 namespaces and names the 202 that make up the administrative surface (since contract 1.62's \`network\` namespace; 190 across 28 before it), deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
       },
       { type: "h", id: "matrix", text: "What each SDK ships" },
       {
@@ -435,7 +435,7 @@ export const REFERENCE_PAGES: DocPage[] = [
           ],
           [
             "1.57",
-            `[§31](${contractLink("31")}) — AXIAM as a SCIM 2.0 client of downstream service providers: the \`scim_targets\` management namespace (\`list\`, \`create\`, \`get\`, \`update\`, \`delete\`, \`reconcile\`), with \`ScimTargetInput.credential\` \`Sensitive\` from the first version, bringing the registry to 190 operations across 28 namespaces.`,
+            `[§31](${contractLink("31")}) — AXIAM as a SCIM 2.0 client of downstream service providers: the \`scim_targets\` management namespace (\`list\`, \`create\`, \`get\`, \`update\`, \`delete\`, \`reconcile\`), with \`ScimTargetInput.credential\` \`Sensitive\` from the first version, bringing the registry to 190 operations across 28 namespaces (202 across 29 since 1.62).`,
             "**yes** — merged in all eleven repositories on 2026-10-09",
           ],
           [

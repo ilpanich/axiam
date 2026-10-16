@@ -1,11 +1,28 @@
 # RADIUS reply profiles and the network-segment resource pattern (D5)
 
-**Status: DESIGN NOTE — nothing is built.** No crate, schema, route, permission,
-contract section or setting accompanies this document, and **no threat entry
-changes status in W6.1**: T-448 … T-468 stay *Not applicable*
-([`threat-model-stride.md`](threat-model-stride.md) §5.10). Statuses move in W6.2,
-with the `eapol_test` end-to-end as the test for the entries the recipe's
-configuration mitigates, or later, with the code that builds an element.
+**Status (2026-10-16, release 1.1.0): BUILT — this note is the design record of
+D4.** Release 1.1.0 (W6.1 … W6.5 of
+[`release-1.1.0-plan.md`](release-1.1.0-plan.md) §7) builds what it describes:
+the `network_segment`, `reply_profile` and `network_policy` tables (schema v100),
+the `axiam-radius-reply/1` dictionary (`crates/axiam-core/src/models/radius_reply.rs`),
+the write gate H1 … H6 (`crates/axiam-authz/src/network_gate.rs`), the
+management routes and `POST /api/v1/network/decide`, contract
+[§36](../sdks/CONTRACT.md) (1.62) and the recipe's D4 profile
+([`docs/pki/freeradius.md`](../docs/pki/freeradius.md) section 5). The threat
+entries it names are judged for that code: T-457, T-461, T-463, T-464 and T-468
+are Mitigated, T-478 … T-487 entered with it, and T-458, T-460 and T-465 stay
+*Not applicable* ([`threat-model-stride.md`](threat-model-stride.md) §5.10, model
+2.42.0). Where the code departs from the text below, the text carries a dated
+correction in place (in §2, §3, §4, §5 and §6). The phrases "when built", and
+§6.1's "nothing consumes it", are as written on 2026-10-13.
+
+*As first written (2026-10-13):* **Status: DESIGN NOTE — nothing is built.** No
+crate, schema, route, permission, contract section or setting accompanies this
+document, and **no threat entry changes status in W6.1**: T-448 … T-468 stay
+*Not applicable* ([`threat-model-stride.md`](threat-model-stride.md) §5.10).
+Statuses move in W6.2, with the `eapol_test` end-to-end as the test for the
+entries the recipe's configuration mitigates, or later, with the code that
+builds an element.
 
 Written 2026-10-13 on `claude/release-1.0.1-w6` (cut from the plan branch at
 `55c3e3072`). It is deferred item **D5** of the RADIUS spike

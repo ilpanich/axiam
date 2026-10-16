@@ -1016,7 +1016,7 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             label: "802.1X with an AXIAM-issued Device certificate",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/pki/freeradius.md",
-            note: "A FreeRADIUS recipe, not a native RADIUS front end: EAP-TLS over TLS 1.3 against the tenant signing CA, its revocation list and the lag it implies, RadSec where the NAS allows, and an eapol_test end-to-end.",
+            note: "A FreeRADIUS recipe, not a native RADIUS front end: EAP-TLS over TLS 1.3 against the tenant signing CA, its revocation list (fetched by a checked script) and the lag it implies, RadSec where the NAS allows, and an eapol_test end-to-end. Since 1.1.0 its D4 profile asks AXIAM's decision route once per authentication, placing the device from its segment's reply profile and refusing a revoked or quarantined one at its next authentication.",
           },
           {
             label: "Vault deployment guide",

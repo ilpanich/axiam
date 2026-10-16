@@ -189,7 +189,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
       {
         type: "p",
-        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **28 namespaces** and names the **190** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **29 namespaces** and names the **202** that make up the surface (190 across 28 until contract 1.62 added the `network` namespace), and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
       },
       {
         type: "p",

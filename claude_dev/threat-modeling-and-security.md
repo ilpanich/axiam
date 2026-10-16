@@ -14,9 +14,10 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-10-14 (the `1.0.1` release branch, model
-> 2.41.0 — the 1.0.1 release's four waves, its RADIUS recipe and the
-> reconciliation pass recorded below, on top of Phase 23, the competitor-gap
+> **Status: source current as of 2026-10-16 (the `1.1.0` release branch, model
+> 2.42.0 — the 1.1.0 release's six waves, among them RADIUS D4, and the
+> reconciliation pass recorded below, on top of the 1.0.1 release's four waves
+> and its RADIUS recipe (model 2.41.0, 2026-10-14), Phase 23, the competitor-gap
 > closure of `1.0.0-beta18`, the contract 1.58 SDK fan-out, and the 1.0.0
 > release wave's fixes, both halves).** The Phase 23 paragraphs below record the waves;
 > this plan
@@ -534,6 +535,128 @@
 > built. Open at High or Critical are now eleven: T-148 and T-306 (Critical),
 > T-18, T-94, T-124, T-133, T-135, T-146, T-180, T-216 and T-450 (High), none of
 > them a defect awaiting a fix in AXIAM's code.
+>
+> **The 1.1.0 release, W1 (model 2.42.0 — T-102, T-187, T-336, T-461, T-470,
+> T-472 and T-476 amended; no status change; 2026-10-14).** A list's
+> `thisUpdate` is clamped inside its refresh epoch and no entry is dated after
+> it, so a datastore clock ahead of the signing replica no longer lowers the
+> next epoch's CRL number; what remains is an interval change, which can step
+> the number back once and is safe while the new interval is at most twice the
+> old (#615; T-102, and the PKI guide's rule). Each CA's re-sign is one shared
+> flight that a caller's hang-up no longer cancels (#616; T-102). The Vault
+> revocation sweep re-releases a revoked CA's own issuer when Vault refuses its
+> forward because it is still an issuer, and Vault's error text is sanitised
+> before it reaches an audit row or a log (#617, #619; T-470). An erased
+> account's certificates lose their `metadata`, and a new
+> `certificate_retention` sweep deletes certificate rows eight days past
+> `notAfter`; the retention's legal basis is restated as Art. 6(1)(f) and Art.
+> 32, not Art. 17(3)(b) (#618; T-187). The startup secret provider's bootstrap
+> client comes from one public no-redirect builder, shared with the private-CA
+> client (#620; T-476). An orphaned tenant id's purge claims a marker row, so
+> replicas whose scans coincide record it once, and both issuance routes re-read
+> the account after the create and revoke when it is gone (#622; T-472, T-336).
+> Serials are 20 random octets, unique per issuer, and a certificate's subject
+> is validated on the local and the Vault paths alike (#653, #649, R110W1-02;
+> T-461).
+>
+> **The 1.1.0 release, W2 (model 2.42.0 — T-102, T-474 and T-477 amended;
+> 2026-10-15).** Every SAML verification waits for the crypto gate at most
+> `hash_acquire_timeout_secs`: past it the ACS answers as for a bad signature
+> and the identity provider's receivers `503` with `Retry-After`, with no state
+> written (#654; T-477, T-102, T-474). The five federation flow routes have
+> buckets of their own, keyed on the verified principal, with a per-address
+> backstop kept outermost (#632, #633, R110W2-01; T-474), and the identity
+> provider's self-checks parse with the receiver's options (#634).
+>
+> **The 1.1.0 release, W3 (model 2.42.0 — T-118, T-289, T-422, T-424 and T-472
+> amended; 2026-10-15).** The device grant authenticates a confidential client
+> at both endpoints by the path every other grant uses, refuses a foreign
+> `client_id` before it counts a poll, and binds its tokens for DPoP and mTLS
+> clients (#635; T-289); an administrator's `PUT` can no longer give a `dcr` or
+> `cimd` client a scope beyond the tenant's ceiling (#636, a `422`; T-289); a
+> tenant purge's audit bound is the receipt's own datastore timestamp, and the
+> AMQP ingestion refuses every `tenants.*` and `gdpr.*` action (#637; T-118,
+> T-472); the export is bounded by the datastore's clock (#640; T-118); the
+> per-hint `bc-authorize` cap is a setting, counts no refused call and holds
+> across replicas (#638, #639; T-424, T-422); a tombstoned tenant's device
+> grants go at the tombstone and its service account authenticates nowhere
+> (#641; T-472); the public-client token bucket keys on the limiter's client
+> address, not the transport peer (R110W3-01; T-289); and a boot warning counts
+> the confidential clients that hold the device grant (#675; T-289).
+>
+> **The 1.1.0 release, W4 (model 2.42.0 — T-108 and T-444 amended;
+> 2026-10-15).** A tenant purge, an orphan purge and an account's erasure each
+> run as a unit the cleanup task's abort does not reach, with a point of no
+> return they never cross once the stop is requested, and a tenant purge's claim
+> is released at every exit but success, so a cut purge resumes at the next
+> start (#655, #624; T-444). The lease release is a 1 s step of the stop's
+> budget — `SIGTERM` is now 38 s under a 39 s backstop and the shipped 40 s
+> grace — and the cleanup task is told to stop when the REST listener returns,
+> and at the loss itself after a lost lease (#628; T-444). The audit DLQ event
+> is emitted before the dead-letter file is written (#625; T-108).
+>
+> **The 1.1.0 release, W5 (model 2.42.0 — T-454 and T-462 amended;
+> 2026-10-15).** The recipe's revocation fetch ships as
+> `docker/radius/fetch-crl.sh`: it installs a list only when `openssl crl
+> -verify` prints exactly `verify OK`, its CRL number is not lower than the
+> installed one's and the server answered `200`, stores one entity-tag bound to
+> the installed file, holds a lock for the whole run, and runs `curl -q` with a
+> pinned scheme and no redirect (#643, R110W5-01 … -03; T-462). The guide adds
+> any shared cache's `max-age` to the revocation lag and says how `ca.pem` is
+> replaced (#645, #644; T-462), the NAS's half of Blast-RADIUS (#646), and the
+> VLAN attributes' tags as FreeRADIUS 3.2.8 puts them on the wire (#652).
+> T-454's tests are `scripts/check-radius-vendors-nothing.py` and `cargo-deny`'s
+> licence list, not the end-to-end (#648, #650, R110W5-04).
+>
+> **The 1.1.0 release, W6 (model 2.42.0 — RADIUS D4, #563: T-457, T-461, T-463,
+> T-464 and T-468 move from Not applicable to Mitigated; T-478 … T-487 enter;
+> T-459 and T-462 amended; 2026-10-15 and 2026-10-16).** The operator's
+> FreeRADIUS now asks AXIAM where a device goes, once per EAP-TLS authentication
+> (`POST /api/v1/network/decide`), over mutual TLS that ends at AXIAM, as a
+> certificate-bound service account; a tenant describes its network as segments
+> of a reserved `/network` resource subtree with typed reply profiles, through a
+> management API whose every write passes one gate (H1 … H6, uncached,
+> deny-override in force). The decision has one negative answer, writes one
+> audit row, takes a closed body that carries no MAC address or user name, and
+> checks the caller's tenant itself (T-468, T-457, T-463, T-464, T-459); the
+> reply is rendered from the closed `axiam-radius-reply/1` dictionary and
+> clamped to the tenant's cap (T-461, T-485), and the recipe sets each attribute
+> itself rather than copying the answer (T-487). The write surface enters as
+> T-478 … T-480 and T-485, Mitigated with their tests; T-482 (a writer placing
+> itself) entered Open and was closed by the W6 F4 review's fix (R110W6-01);
+> T-481, T-483 and T-484, three Low residuals of the gate, were kept Open by
+> that review (#701 … #703); T-486 (AXIAM's availability is the network's) is
+> Open, the operator's to carry. T-462 gains its D4 column: a revoked
+> certificate or a disabled account is refused at the next authentication, and a
+> connected session still lasts until `Session-Timeout`, so it stays Open (plan
+> §12 Q9).
+>
+> **The 1.1.0 release, reconciliation (model 2.42.0, 2026-10-16).** The model is
+> **487 threats, 454 mitigated / 23 open / 10 not applicable** (Critical 43 with
+> 2 open; High 201, 9 open, 6 not applicable; Medium 204, 8 and 3; Low 39, 4 and
+> 1), derived once from `Axiam.json` and stated in the five copies. No status
+> changes in this pass; it records what it found as corrections, dated in the
+> entries' own text. **T-444** said an orphaned id's purge had no point of no
+> return; since W1's marker sits inside W4's purge it has one, the marker's
+> removal, and one given up leaves the marker to the tombstoned-tenant sweep.
+> **T-472** no longer says #655 is unfixed, and its "recorded once" is qualified
+> by the 1.1.0 combined review's R110-04 (#714): a cut before the orphan unit
+> holds its guard can, for a stale scan, write a second `tenants.purged`.
+> **T-462**'s "the recipe does not call AXIAM per authentication" is the D3
+> profile's. **T-212** gains the other direction of its rule, and **T-486** what
+> it means for D4 (R110-01, #711): with no appending proxy in front of AXIAM's
+> one listener, every per-address limiter keys on a caller-written
+> `X-Forwarded-For`, so the listener FreeRADIUS reaches is exposed to the
+> FreeRADIUS servers alone. **T-481**'s segment, profile and cap transactions
+> re-check the row, not the writer's rights (R110-05 (d), #715); **T-478**'s
+> administrative `Service-Type` is a `403` naming `network:grant_admin`, not a
+> `400` (R110W6-02, #700); **T-483** and **T-484** record the W6 review's
+> decision. The recipe guide is back in step with the entries: the W5 merge had
+> kept its 1.0.1 text, and this pass restores the fetch script, the `ca.pem`
+> rules, the NAS's half of Blast-RADIUS and the tagged placement table. Open at
+> High or Critical are still eleven, none of them a defect awaiting a fix in
+> AXIAM's code; open in AXIAM's own request path are the three Low residuals of
+> the network write gate.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1864,7 +1987,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 477 threats** and a
+The system is verified against a **STRIDE threat model of 487 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1887,9 +2010,9 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 477 |
-| Mitigated / Open | 443 / 19 |
-| Not applicable (specified, not built) | 15 |
+| Threats identified | 487 |
+| Mitigated / Open | 454 / 23 |
+| Not applicable (specified, not built) | 10 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1903,7 +2026,9 @@ each becomes mitigated or open in the commit that builds what it describes. It
 is never a way to park a threat against something that exists: where a recipe
 AXIAM ships stands in for part of that surface (the operator-run FreeRADIUS
 recipe of `1.0.1`), the entries it answers are judged for the recipe, and are
-mitigated or open like any other.
+mitigated or open like any other; and where AXIAM builds part of it (the
+decision route and network management API of `1.1.0`), the entries of what it
+built are judged for that code.
 
 ### Coverage by area
 
@@ -1918,13 +2043,13 @@ mitigated or open like any other.
 | Audit, webhooks, email & notifications | 56 | 2 | 0 |
 | Deployment & platform (Kubernetes) | 30 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
-| RADIUS front end (native listener not built — G-11, declined; FreeRADIUS recipe, 1.0.1) | 21 | 2 | 15 |
+| RADIUS front end (native listener not built — G-11, declined; FreeRADIUS recipe, 1.0.1; decision route, 1.1.0) | 31 | 6 | 10 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.41.0, all
+authorization, PKI — carry **four** open items at model 2.42.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -2022,7 +2147,16 @@ tenant's signing CA as the only anchor) and two are open for it, with their
 bounds stated in the guide (T-450, the EAP-TLS keys under MD5 obfuscation on
 plain UDP, where RadSec is the operator's choice; T-462, the revocation lag of a
 fetch interval plus 300 s plus `Session-Timeout`, with no way to end a session
-already admitted). Fifteen stay not applicable and each says why. The same pass re-judged T-102 and reopened it: AXIAM publishes no
+already admitted). Fifteen stayed not applicable at `1.0.1`, each saying why.
+Since `1.1.0` (RADIUS D4) AXIAM decides for the recipe once per authentication
+and manages network segments and their reply profiles itself, and the entries
+of what it built are judged for that code: five more of the diagram's entries
+are mitigated for the decision route (T-457, T-461, T-463, T-464, T-468), and
+ten enter (T-478 … T-487) — six mitigated, and four open: three Low residuals
+of the network write gate (T-481, T-483, T-484) and the price of a check per
+authentication, AXIAM's availability being the network's (T-486). Ten stay not
+applicable: the native listener, EAP state machine and NAS registry, and three
+decision entries D4 does not build. The same pass re-judged T-102 and reopened it: AXIAM publishes no
 certificate revocation list, so a relying party that validates AXIAM-issued
 certificates itself cannot learn of a revocation, and inside AXIAM only device
 authentication by certificate reads a certificate's status (not the TLS
@@ -2052,25 +2186,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open | Not built |
 |---|---|---|---|
-| Spoofing | 105 | 4 | 3 |
-| Tampering | 93 | 1 | 2 |
-| Repudiation | 16 | 1 | 1 |
-| Information disclosure | 113 | 7 | 3 |
-| Denial of service | 60 | 3 | 4 |
-| Elevation of privilege | 90 | 3 | 2 |
+| Spoofing | 105 | 4 | 2 |
+| Tampering | 96 | 1 | 2 |
+| Repudiation | 17 | 2 | 0 |
+| Information disclosure | 113 | 7 | 1 |
+| Denial of service | 61 | 4 | 4 |
+| Elevation of privilege | 95 | 5 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 0 |
-| High | 198 | 9 | 7 |
-| Medium | 200 | 7 | 7 |
-| Low | 36 | 1 | 1 |
+| High | 201 | 9 | 6 |
+| Medium | 204 | 8 | 3 |
+| Low | 39 | 4 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 19 still-open items are listed one by one in
+the weight the control carries. The 23 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2081,7 +2215,8 @@ with the element it sits on and where responsibility for it lands.
 Ten trust boundaries recur across the system as built, and the table closes with
 an eleventh that is drawn but whose native side is not built: the RADIUS front
 end the G-11 spike declined, for which an operator-run FreeRADIUS recipe has
-stood in since `1.0.1`. A data flow that crosses one is a
+stood in since `1.0.1`, and which since `1.1.0` asks AXIAM's own decision route
+once per authentication. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -2097,7 +2232,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **AXIAM ↔ SCIM downstream** | AXIAM's outbound SCIM client ↔ the SCIM 2.0 service providers a tenant registered as targets | Every request — the OAuth2 token request too — only to an `https` host resolved fresh to public addresses and pinned, with no redirect followed; a sealed credential bound to the URL it was registered for and opened only after the target is read again unchanged; only references on the queue and a fixed attribute set on the wire; nothing a downstream answers written into AXIAM's directory, and no downstream account touched unless its `externalId` is an id of this tenant |
 | **CIBA consumption device ↔ authentication device** | The device a CIBA client runs on ↔ the user's own device, where AXIAM authenticates them | The client authenticated as at the token endpoint and never standing in for the user: only the request's own user, after a full sign-in, approves it; the hint resolves silently; the binding message bounded and printable; the request identifier stored hashed and redeemable once, by the client that started it; prompts throttled per user; a ping only to a registered `https` endpoint under the outbound address policy |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
-| **NAS ↔ AXIAM — not built** | The switches, access points and VPN gateways a tenant would register ↔ a RADIUS front end AXIAM does not have (G-11, declined 2026-10-06); the operator-run FreeRADIUS recipe of `1.0.1` terminates RADIUS in its place | Specified for any build, from its first commit: `Message-Authenticator` required on every profile with a shared secret and verified before anything else; the per-NAS secret sealed, write-only and bound to the address it was registered for; the tenant the authenticated NAS's alone; one Access-Reject for every failure; the listener's own limiter and the console's lockout |
+| **NAS ↔ AXIAM — native side not built** | The switches, access points and VPN gateways a tenant would register ↔ a RADIUS front end AXIAM does not have (G-11, declined 2026-10-06); the operator-run FreeRADIUS recipe of `1.0.1` terminates RADIUS in its place, and since `1.1.0` asks AXIAM's decision route per authentication | Specified for any native build, from its first commit: `Message-Authenticator` required on every profile with a shared secret and verified before anything else; the per-NAS secret sealed, write-only and bound to the address it was registered for; the tenant the authenticated NAS's alone; one Access-Reject for every failure; the listener's own limiter and the console's lockout. Built for the decision route (`1.1.0`): mutual TLS that ends at AXIAM and a certificate-bound FreeRADIUS service account as the only caller; the caller's tenant the only tenant; one negative answer whatever the cause; a reply rendered from a closed dictionary and clamped to the tenant's cap; the listener exposed to the FreeRADIUS servers alone |
 
 ### The assets worth protecting
 
@@ -2994,8 +3129,10 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   rate-limited `GET /pki/v1/{org_id}/ca/{ca_id}/crl`, with `nextUpdate` a
   configured interval ahead (a day by default), the same bytes, CRL number and
   `ETag` from every replica, and caching headers to the next scheduled re-sign
-  (at most half that interval, so a shared cache revalidates rather than serving
-  a list from before a revocation), and every certificate AXIAM signs from then
+  (at most half that interval — so a shared cache on a relying party's fetch
+  path may serve the list from before a revocation for that long, and the
+  FreeRADIUS recipe fetches directly or through a cache told `no-cache`; #645,
+  T-462), and every certificate AXIAM signs from then
   on names that list in a CRL distribution point — so a FreeRADIUS server, a VPN
   gateway or a peer service learns of a revocation at its next fetch (T-102,
   mitigated). Two things are deferred to `1.0.x`: neither listener's TLS
@@ -3406,7 +3543,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 19 of 477. The 15
+Every threat the model records as open, most severe first — 23 of 487. The 10
 entries recorded *not applicable*, for the native RADIUS front end that is not
 built, are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -3426,19 +3563,25 @@ each.
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
-| T-450 — MD5-only attribute hiding gives up the Wi-Fi session key or a password to whoever holds the shared secret | High | Access-Request / Accept / Reject / Challenge · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1)* |
+| T-450 — MD5-only attribute hiding gives up the Wi-Fi session key or a password to whoever holds the shared secret | High | Access-Request / Accept / Reject / Challenge · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
-| T-462 — A revoked certificate or disabled account keeps its network port until the session re-authenticates | Medium | RADIUS decision (tenant, authN, reply attributes) · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1)* |
+| T-462 — A revoked certificate or disabled account keeps its network port until the session re-authenticates | Medium | RADIUS decision (tenant, authN, reply attributes) · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
+| T-486 — AXIAM unavailable, or reached through a proxy that ends TLS, refuses every device's authentication | Medium | authorize (rlm_rest) · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
+| T-481 — The network gate clears a write on a state that changes before the write lands | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
+| T-483 — An organization-level administrator carries the network meta permissions into every tenant of its organization | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
+| T-484 — A cleared network-sensitive assignment, grant or binding leaves no row of its own, only the route's | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
 
-None of these is an unhandled defect in AXIAM's own request path: they are
-accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-and gaps on the SDK and distribution side. That holds for the eleven open at
+None of these is an unhandled defect in AXIAM's own request path, save three
+Low residuals of the network write gate that `1.1.0` entered and its W6 review
+kept open for `1.1.x` (T-481, T-483, T-484): they are accepted design
+trade-offs, responsibilities that land on whoever deploys AXIAM, and gaps on
+the SDK and distribution side. That holds for the eleven open at
 High or Critical severity — T-148 and T-306 (Critical), T-18, T-94, T-124,
 T-133, T-135, T-146, T-180, T-216 and T-450 (High) — with no exception: T-102
 and T-108, the two High entries open when the 1.0.0 work began, are mitigated,
@@ -3525,7 +3668,12 @@ by who does it.
   a connected device keeps its port until `Session-Timeout`; nothing in AXIAM or
   the recipe ends a session (T-462). The fetch interval, `Session-Timeout` and a
   shorter `validity_days` are the levers, and a fetch that stops refuses every
-  device of the tenant.
+  device of the tenant. In the recipe's D4 profile (`1.1.0`) a revoked device is
+  refused at its next authentication, and AXIAM's availability is the network's:
+  every authentication asks it and fails closed (T-486). Its mutual TLS must end
+  at AXIAM's own listener, which serves every route; expose that listener to the
+  FreeRADIUS servers alone, since a caller reaching it without the appending
+  proxy chooses its own rate-limit bucket (T-212, #711).
 - **Run SurrealDB on a persistent storage engine — `surrealkv:` or `rocksdb:`,
   never `memory:`.** This is a correctness control, not a durability preference.
   AXIAM's three single-use credentials — UMA permission tickets, RFC 8628 device
@@ -3654,8 +3802,9 @@ by who does it.
   rather than as a conformance detail.
 
 Everything in this document was last re-derived from source at the
-**`1.0.1`** release branch (model 2.41.0) on 2026-10-14; the handoff block at the top of this file says
-what that pass covered and what it changed. The website carries its own stamp,
+**`1.0.1`** release branch (model 2.41.0) on 2026-10-14, and reconciled with the
+**`1.1.0`** release branch's model (2.42.0) on 2026-10-16; the handoff block at
+the top of this file says what each pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.
 

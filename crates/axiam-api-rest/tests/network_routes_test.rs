@@ -1550,6 +1550,241 @@ async fn changing_a_profiled_quarantine_segments_vlan_also_needs_h5() {
     assert_eq!(ok["vlan_id"], 99);
 }
 
+/// The decision of 2026-10-16: deleting a segment that has a reply profile
+/// removes every device placed on it, so it needs `network:grant` at the
+/// segment as moving its placement does (`H2:placement`); deleting a segment
+/// with no profile still needs `network:segments_write` only.
+#[actix_rt::test]
+async fn deleting_a_profiled_segment_needs_network_grant() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let profiled = make_segment(&app, &admin, "corp", 10, &["a"]).await;
+    let bare = make_segment(&app, &admin, "lab", 30, &["a"]).await;
+    let (status, _) = call(
+        &app,
+        &admin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&profiled, 1800, Some("a"))),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let pid: Uuid = profiled["id"].as_str().unwrap().parse().unwrap();
+    let segwriter = w.user_with(&[NETWORK_READ, NETWORK_SEGMENTS_WRITE]).await;
+
+    // segments_write alone: 403 naming network:grant at the segment, one row,
+    // nothing removed.
+    let (status, err) = call(
+        &app,
+        &segwriter,
+        "DELETE",
+        &format!("{SEGMENTS}/{pid}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_GRANT);
+    assert_eq!(err["resource_id"], pid.to_string());
+    let rows = w.audit("network_segment.write_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.outcome, AuditOutcome::Denied);
+    assert_eq!(row.metadata["rule"], "H2:placement");
+    assert_eq!(row.metadata["write"], "segment_delete");
+    assert_eq!(row.metadata["missing_permission"], NETWORK_GRANT);
+    assert_eq!(row.metadata["node"], pid.to_string());
+    let (status, _) = call(&app, &admin, "GET", &format!("{SEGMENTS}/{pid}"), None).await;
+    assert_eq!(status, 200);
+    let (status, _) = call(&app, &admin, "GET", &format!("{PROFILES}/{pid}"), None).await;
+    assert_eq!(status, 200);
+
+    // The same holder deletes a segment with no profile.
+    let bid = bare["id"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        &segwriter,
+        "DELETE",
+        &format!("{SEGMENTS}/{bid}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+
+    // With network:grant at the segment: 204, the profile goes with it.
+    let segw = w
+        .role(w.tenant, "segw", &[NETWORK_READ, NETWORK_SEGMENTS_WRITE])
+        .await;
+    let grant = w.role(w.tenant, "grant-here", &[NETWORK_GRANT]).await;
+    let granter = w.user(w.tenant, &[(segw, None), (grant, Some(pid))]).await;
+    let (status, body) = call(
+        &app,
+        &w.token(w.tenant, granter),
+        "DELETE",
+        &format!("{SEGMENTS}/{pid}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+    let (_, list) = call(&app, &admin, "GET", PROFILES, None).await;
+    assert_eq!(list["total"], 0);
+    assert_eq!(w.audit("network_segment.write_refused").await.len(), 1);
+}
+
+/// The decision of 2026-10-16: deleting a reply profile makes its segment no
+/// candidate, which removes every device placed there, so it needs
+/// `network:grant` at the segment beside `network:profiles_write` (H1).
+#[actix_rt::test]
+async fn deleting_a_profile_needs_network_grant() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let segment = make_segment(&app, &admin, "corp", 10, &["a"]).await;
+    let (status, _) = call(
+        &app,
+        &admin,
+        "POST",
+        PROFILES,
+        Some(profile_body(&segment, 1800, Some("a"))),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id: Uuid = segment["id"].as_str().unwrap().parse().unwrap();
+
+    // profiles_write alone: 403 naming network:grant at the segment.
+    let profwriter = w.user_with(&[NETWORK_READ, NETWORK_PROFILES_WRITE]).await;
+    let (status, err) = call(
+        &app,
+        &profwriter,
+        "DELETE",
+        &format!("{PROFILES}/{id}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(err["action"], NETWORK_GRANT);
+    assert_eq!(err["resource_id"], id.to_string());
+    let rows = w.audit("reply_profile.write_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.metadata["rule"], "H2:placement");
+    assert_eq!(row.metadata["write"], "profile_delete");
+    assert_eq!(row.metadata["missing_permission"], NETWORK_GRANT);
+    let (status, _) = call(&app, &admin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(status, 200);
+
+    // With network:grant at the segment: 204.
+    let profw = w
+        .role(w.tenant, "profw", &[NETWORK_READ, NETWORK_PROFILES_WRITE])
+        .await;
+    let grant = w.role(w.tenant, "grant-here", &[NETWORK_GRANT]).await;
+    let granter = w.user(w.tenant, &[(profw, None), (grant, Some(id))]).await;
+    let (status, body) = call(
+        &app,
+        &w.token(w.tenant, granter),
+        "DELETE",
+        &format!("{PROFILES}/{id}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+}
+
+/// The decision of 2026-10-16 on the quarantine segment: deleting it, or its
+/// profile, removes every quarantined device of the site from it, so both also
+/// need H5's `network:grant` on `/network/quarantine/<site>`.
+#[actix_rt::test]
+async fn deleting_a_profiled_quarantine_segment_or_its_profile_also_needs_h5() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let (status, q) = call(
+        &app,
+        &admin,
+        "POST",
+        SEGMENTS,
+        Some(
+            json!({"kind": "quarantine", "site_key": "hq", "name": "q", "vlan_id": 999,
+                    "filter_ids": ["q-acl"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201, "{q}");
+    let make_profile = || async {
+        let (status, body) = call(
+            &app,
+            &admin,
+            "POST",
+            PROFILES,
+            Some(profile_body(&q, 600, Some("q-acl"))),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+    };
+    make_profile().await;
+    let qid: Uuid = q["id"].as_str().unwrap().parse().unwrap();
+    let site = site_node_id(w.tenant, NetworkSegmentKind::Quarantine, "hq");
+    let writes = w
+        .role(
+            w.tenant,
+            "writes",
+            &[NETWORK_READ, NETWORK_SEGMENTS_WRITE, NETWORK_PROFILES_WRITE],
+        )
+        .await;
+    let grant = w.role(w.tenant, "grant", &[NETWORK_GRANT]).await;
+
+    // network:grant at the segment only: 403 naming the quarantine site, for
+    // both deletes, one H5:placement row each.
+    let at_segment = w.token(
+        w.tenant,
+        w.user(w.tenant, &[(writes, None), (grant, Some(qid))])
+            .await,
+    );
+    for (path, action) in [
+        (
+            format!("{PROFILES}/{qid}?version=1"),
+            "reply_profile.write_refused",
+        ),
+        (
+            format!("{SEGMENTS}/{qid}?version=1"),
+            "network_segment.write_refused",
+        ),
+    ] {
+        let (status, err) = call(&app, &at_segment, "DELETE", &path, None).await;
+        assert_eq!(status, 403, "{err}");
+        assert_eq!(err["action"], NETWORK_GRANT);
+        assert_eq!(err["resource_id"], site.to_string());
+        let rows = w.audit(action).await;
+        assert_eq!(the_row(&rows).metadata["rule"], "H5:placement");
+    }
+
+    // With network:grant on the quarantine site (which cascades to the
+    // segment): the profile delete is 204, and so is the delete of the
+    // segment once it has a profile again.
+    let at_site = w.token(
+        w.tenant,
+        w.user(w.tenant, &[(writes, None), (grant, Some(site))])
+            .await,
+    );
+    let (status, body) = call(
+        &app,
+        &at_site,
+        "DELETE",
+        &format!("{PROFILES}/{qid}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+    make_profile().await;
+    let (status, body) = call(
+        &app,
+        &at_site,
+        "DELETE",
+        &format!("{SEGMENTS}/{qid}?version=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+}
+
 // ---------------------------------------------------------------------------
 // The reactor's veto hooks
 // ---------------------------------------------------------------------------

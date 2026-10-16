@@ -4355,7 +4355,10 @@ pub trait NetworkSegmentRepository: Send + Sync {
 
     /// Remove a segment **and its profile and its resource node**, in one
     /// transaction. `NotFound` when it does not exist in this tenant,
-    /// `Conflict` on a stale `expected_version` or when the node has children.
+    /// `Conflict` on a stale `expected_version`, when the node has children,
+    /// or when the clearance is
+    /// [frozen](crate::models::network::NetworkWriteClearance::freeze_profiled_placement)
+    /// and the segment has a profile now (the decision of 2026-10-16).
     fn delete(
         &self,
         tenant_id: Uuid,

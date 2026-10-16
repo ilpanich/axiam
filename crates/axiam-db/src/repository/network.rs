@@ -34,7 +34,10 @@
 //! without `network:grant` (its clearance is
 //! [frozen](NetworkWriteClearance::freeze_profiled_placement)) may not change
 //! `vlan_id`, `rank` or `enabled` of a segment that has a profile when the
-//! transaction runs, so a profile created after the gate's read is not missed. The shared write follows
+//! transaction runs, so a profile created after the gate's read is not missed.
+//! The segment's delete re-reads it too, for the decision of 2026-10-16: a
+//! delete cleared without `network:grant` may not remove a segment that has a
+//! profile when the transaction runs. The shared write follows
 //! `resource`'s `claim_parent` (#308); the racing-writers test pins the invariant
 //! on the engine production deploys, and did not distinguish this write from a
 //! plain read of the version on that engine, so it is the precedent's
@@ -168,9 +171,10 @@ fn tx_outcome(errors: HashMap<usize, surrealdb::Error>, entity: &str) -> Result<
         ));
     }
     if combined.contains(PLACEMENT_RACED) {
-        // The gate cleared the replace on a read that found no profile (or no
-        // placement change); the row the write replaces says otherwise. A read
-        // again goes back through the gate, which now asks `network:grant`.
+        // The gate cleared the replace or delete on a read that found no
+        // profile (or no placement change); the row the write replaces or
+        // deletes says otherwise. A read again goes back through the gate,
+        // which now asks `network:grant`.
         return Err(conflict(
             "the network segment changed since it was read (a reply profile was written on \
              it); read it again and retry",
@@ -444,14 +448,22 @@ impl<C: Connection> SurrealNetworkSegmentRepository<C> {
         tenant_id: Uuid,
         id: Uuid,
         expected_version: u64,
+        profiled_placement_frozen: bool,
     ) -> Result<(), TxFail> {
         // Edges are matched by the exact record id: the segment was shown to be
-        // this tenant's by `$current`, in the same transaction.
+        // this tenant's by `$current`, in the same transaction. The profile is
+        // read here for the decision of 2026-10-16: a delete the gate cleared
+        // without `network:grant` (it read no profile) is refused if one exists
+        // now. The profile writer bumps the segment row this deletes, so the
+        // two cannot both commit (module documentation).
         let query = format!(
             "BEGIN TRANSACTION; \
              LET $current = (SELECT VALUE version FROM type::record('network_segment', $id) \
                  WHERE tenant_id = $tenant_id AND version = $expected); \
              IF array::len($current) = 0 {{ THROW '{STALE_SEGMENT}'; }}; \
+             LET $profiled = array::len((SELECT VALUE id FROM type::record('reply_profile', $id) \
+                 WHERE tenant_id = $tenant_id)) > 0; \
+             IF $frozen AND $profiled {{ THROW '{PLACEMENT_RACED}'; }}; \
              LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:`{id}`); \
              IF array::len($children) > 0 {{ THROW '{HAS_CHILDREN}'; }}; \
              DELETE reply_profile WHERE segment_id = $id AND tenant_id = $tenant_id; \
@@ -473,6 +485,7 @@ impl<C: Connection> SurrealNetworkSegmentRepository<C> {
                 "expected",
                 i64::try_from(expected_version).unwrap_or(i64::MAX),
             ))
+            .bind(("frozen", profiled_placement_frozen))
             .await?;
         tx_outcome(result.take_errors(), SEGMENT_ENTITY)
     }
@@ -661,7 +674,8 @@ impl<C: Connection> NetworkSegmentRepository for SurrealNetworkSegmentRepository
             &NetworkWriteTarget::SegmentDelete { segment_id: id },
         )?;
         self.fetch(tenant_id, id).await?;
-        retry_on_write_conflict(|| self.delete_tx(tenant_id, id, expected_version))
+        let frozen = clearance.profiled_placement_frozen();
+        retry_on_write_conflict(|| self.delete_tx(tenant_id, id, expected_version, frozen))
             .await
             .map_err(AxiamError::from)
     }

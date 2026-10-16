@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:f948fbe2a02a5a982df2727e9969aab92d57c2ee2776ed4f573e505dfb3c3453"
+    "x-axiam-spec-digest": "sha256:9acd592dfab9afaceb40c1ab311d97fca1edab90f1d09c9ac59cc8eb3f841bb8"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4856,7 +4856,7 @@
           "network"
         ],
         "summary": "`DELETE /api/v1/network/profiles/{segment_id}?version=`",
-        "description": "No profile means the segment is not a placement candidate, which only\nnarrows; the write gate asks `network:profiles_write` alone (H1).",
+        "description": "No profile means the segment is not a placement candidate, so the delete\nremoves every device placed on it: the write gate asks\n`network:profiles_write` (H1) and the placing right, `network:grant` on the\nsegment (and on `/network/quarantine/<site>` for a quarantine segment), and\nrefuses a caller that may join the segment (H6).",
         "operationId": "delete_profile",
         "parameters": [
           {
@@ -4892,7 +4892,7 @@
             "description": "Not authenticated, or a service-account token"
           },
           "403": {
-            "description": "The caller lacks `network:profiles_write` on the segment, or a reactor vetoed the write"
+            "description": "The caller lacks `network:profiles_write` on the segment, or `network:grant` on it (and, for a quarantine segment, on `/network/quarantine/<site>`) — deleting the profile removes every device placed there; or holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
           },
           "404": {
             "description": "No such segment in this tenant, or it has no profile"
@@ -5302,7 +5302,7 @@
           "network"
         ],
         "summary": "`DELETE /api/v1/network/segments/{id}?version=`",
-        "description": "The segment, **its reply profile** and its resource node, in one\ntransaction. Role assignments and grants naming the node are not touched;\nthe node is simply gone.",
+        "description": "The segment, **its reply profile** and its resource node, in one\ntransaction. Role assignments and grants naming the node are not touched;\nthe node is simply gone. A segment that has a profile takes the devices\nplaced on it along, so the write gate asks the placing right too\n(`network:grant` on the segment, and on `/network/quarantine/<site>` for a\nquarantine segment).",
         "operationId": "delete_segment",
         "parameters": [
           {
@@ -5338,13 +5338,13 @@
             "description": "Not authenticated, or a service-account token"
           },
           "403": {
-            "description": "The caller lacks `network:segments_write` on the segment, or a reactor vetoed the write"
+            "description": "The caller lacks `network:segments_write` on the segment; or the segment has a reply profile and the caller lacks `network:grant` on the segment (and, for a quarantine segment, on `/network/quarantine/<site>`) — deleting it removes every device placed there; or it has a profile and the caller holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
           },
           "404": {
             "description": "No such segment in this tenant"
           },
           "409": {
-            "description": "`reason_code` `stale_version`: the segment changed since `version` was read; or `has_children`: it has child resources",
+            "description": "`reason_code` `stale_version`: the segment changed since `version` was read (a reply profile written on it since counts); or `has_children`: it has child resources",
             "content": {
               "application/json": {
                 "schema": {

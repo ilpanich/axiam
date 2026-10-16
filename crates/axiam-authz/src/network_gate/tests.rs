@@ -573,22 +573,33 @@ async fn h6_a_writer_that_may_join_the_segment_cannot_write_its_profile() {
 }
 
 #[tokio::test]
-async fn a_profile_delete_needs_h1_only() {
+async fn a_profile_delete_needs_h1_then_the_placing_right() {
+    // The decision of 2026-10-16: deleting a profile removes every device
+    // placed on the segment, so H1 alone no longer clears it.
     let mut w = World::new();
-    let seg = w.segment(NetworkSegmentKind::Quarantine);
-    refused(
-        w.decide(
-            &Oracle::default(),
-            NetworkWrite::ProfileDelete { segment_id: seg.id },
-        )
-        .await,
-        "H1",
+    let seg = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&seg);
+    let delete = NetworkWrite::ProfileDelete { segment_id: seg.id };
+    let r = refused(w.decide(&Oracle::default(), delete).await, "H1");
+    assert_eq!(r.audit_action, AUDIT_PROFILE_WRITE_REFUSED);
+
+    // H1 without network:grant: 403 naming network:grant at the segment.
+    let h1_only = Oracle::default().allow(w.writer, NETWORK_PROFILES_WRITE, seg.id);
+    let r = refused(w.decide(&h1_only, delete).await, "H2:placement");
+    assert_eq!(r.status, RefusalStatus::Forbidden);
+    assert_eq!(r.audit_action, AUDIT_PROFILE_WRITE_REFUSED);
+    assert_eq!(
+        r.missing,
+        Some(MissingPermission {
+            action: NETWORK_GRANT.into(),
+            node: seg.id,
+        })
     );
-    let oracle = Oracle::default().allow(w.writer, NETWORK_PROFILES_WRITE, seg.id);
-    let c = cleared(
-        w.decide(&oracle, NetworkWrite::ProfileDelete { segment_id: seg.id })
-            .await,
-    );
+    assert!(r.before.iter().any(|(k, _)| *k == "session_timeout_secs"));
+    assert!(r.before.iter().any(|(k, _)| *k == "vlan_id"));
+
+    // Both: cleared, with a token for exactly this write.
+    let c = cleared(w.decide(&profile_writer(&w, &seg), delete).await);
     assert!(c.into_write_clearance().is_some());
 }
 
@@ -907,6 +918,140 @@ async fn r110w6_03_h6_still_refuses_a_joinable_writer_that_holds_the_grant() {
         )
         .await,
         "H6",
+    );
+}
+
+// -- 2026-10-16: a delete that removes placed devices needs the placing right --
+
+#[tokio::test]
+async fn placing_right_deleting_a_profiled_segment_needs_network_grant_at_it() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&seg);
+    let delete = NetworkWrite::SegmentDelete { segment_id: seg.id };
+
+    // segments_write alone: 403 naming network:grant at the segment.
+    let segments_writer = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id);
+    let r = refused(w.decide(&segments_writer, delete).await, "H2:placement");
+    assert_eq!(r.status, RefusalStatus::Forbidden);
+    assert_eq!(r.audit_action, AUDIT_SEGMENT_WRITE_REFUSED);
+    assert_eq!(
+        r.missing,
+        Some(MissingPermission {
+            action: NETWORK_GRANT.into(),
+            node: seg.id,
+        })
+    );
+    assert!(r.before.iter().any(|(k, _)| *k == "vlan_id"));
+    assert_eq!(r.after, vec![("segment", "deleted".to_owned())]);
+
+    // The base permission comes first: network:grant alone is 4.2.
+    let grant_only = Oracle::default().allow(w.writer, NETWORK_GRANT, seg.id);
+    refused(w.decide(&grant_only, delete).await, "4.2:segments_write");
+
+    // Both: cleared, and not frozen (the gate checked the grant).
+    let granter = segments_writer.allow(w.writer, NETWORK_GRANT, seg.id);
+    assert!(!frozen(w.decide(&granter, delete).await));
+}
+
+#[tokio::test]
+async fn placing_right_an_unprofiled_segment_delete_needs_segments_write_only() {
+    let mut w = World::new();
+    let bare = w.segment(NetworkSegmentKind::Quarantine);
+    let delete = NetworkWrite::SegmentDelete {
+        segment_id: bare.id,
+    };
+    refused(
+        w.decide(&Oracle::default(), delete).await,
+        "4.2:segments_write",
+    );
+    let oracle = Oracle::default().allow(w.writer, NETWORK_SEGMENTS_WRITE, bare.id);
+    assert!(
+        frozen(w.decide(&oracle, delete).await),
+        "cleared without the grant, so the transaction re-checks the profile"
+    );
+    // Neither network:grant (H2, H5) nor network:join (H6) was asked.
+    assert!(
+        oracle
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, action, _)| action == NETWORK_SEGMENTS_WRITE)
+    );
+}
+
+#[tokio::test]
+async fn placing_right_a_quarantine_segment_or_profile_delete_also_needs_h5() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Quarantine);
+    w.profile_on(&seg);
+    let site = site_node_id(w.tenant, NetworkSegmentKind::Quarantine, "hq");
+    let seg_delete = NetworkWrite::SegmentDelete { segment_id: seg.id };
+    let profile_delete = NetworkWrite::ProfileDelete { segment_id: seg.id };
+
+    // network:grant at the segment is not enough: H5 names the quarantine site.
+    let at_segment = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_PROFILES_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, seg.id);
+    for (delete, audit) in [
+        (seg_delete, AUDIT_SEGMENT_WRITE_REFUSED),
+        (profile_delete, AUDIT_PROFILE_WRITE_REFUSED),
+    ] {
+        let r = refused(w.decide(&at_segment, delete).await, "H5:placement");
+        assert_eq!(r.audit_action, audit);
+        assert_eq!(
+            r.missing,
+            Some(MissingPermission {
+                action: NETWORK_GRANT.into(),
+                node: site,
+            })
+        );
+    }
+    // Nor is the site alone: H2 at the segment comes first.
+    let at_site = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_PROFILES_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, site);
+    refused(w.decide(&at_site, seg_delete).await, "H2:placement");
+    refused(w.decide(&at_site, profile_delete).await, "H2:placement");
+
+    // Both: cleared; the segment delete is not frozen.
+    let both = at_segment.allow(w.writer, NETWORK_GRANT, site);
+    assert!(!frozen(w.decide(&both, seg_delete).await));
+    passes(w.decide(&both, profile_delete).await);
+}
+
+#[tokio::test]
+async fn placing_right_h6_still_refuses_a_joinable_writer_deleting() {
+    let mut w = World::new();
+    let seg = w.segment(NetworkSegmentKind::Access);
+    w.profile_on(&seg);
+    let seg_delete = NetworkWrite::SegmentDelete { segment_id: seg.id };
+    let profile_delete = NetworkWrite::ProfileDelete { segment_id: seg.id };
+
+    // Every right, and join on the segment: H6, whatever it holds.
+    let joinable = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_PROFILES_WRITE, seg.id)
+        .allow(w.writer, NETWORK_GRANT, seg.id)
+        .allow(w.writer, NETWORK_JOIN, seg.id);
+    refused(w.decide(&joinable, seg_delete).await, "H6");
+    refused(w.decide(&joinable, profile_delete).await, "H6");
+
+    // The order is 9dff2aa's: the base permission, the placing right, then H6.
+    let joinable_without_grant = Oracle::default()
+        .allow(w.writer, NETWORK_SEGMENTS_WRITE, seg.id)
+        .allow(w.writer, NETWORK_PROFILES_WRITE, seg.id)
+        .allow(w.writer, NETWORK_JOIN, seg.id);
+    refused(
+        w.decide(&joinable_without_grant, seg_delete).await,
+        "H2:placement",
+    );
+    refused(
+        w.decide(&joinable_without_grant, profile_delete).await,
+        "H2:placement",
     );
 }
 

@@ -12848,9 +12848,9 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
    | `get_segment`, `get_profile` | `network:read` on the segment (or above it) |
    | `create_segment` | `network:segments_write` at the nearest existing parent of the new node |
    | `replace_segment` | `network:segments_write` on the segment, and **not** `network:join` on it (H6). If the segment **has a reply profile** and the replace changes `vlan_id`, `rank` or `enabled` — the fields that move every device placed there — also `network:grant` on the segment (H2) and, for a quarantine segment, on `/network/quarantine/<site>` (H5). A change of `filter_ids` alone, or of a segment with no profile, needs `network:segments_write` only |
-   | `delete_segment` | `network:segments_write` on the segment |
+   | `delete_segment` | `network:segments_write` on the segment. If the segment **has a reply profile** (the delete takes it along, and with it every device placed there), also `network:grant` on the segment (H2) and, for a quarantine segment, on `/network/quarantine/<site>` (H5), and **not** `network:join` on it (H6). A segment with no profile needs `network:segments_write` only |
    | `create_profile`, `replace_profile` | `network:profiles_write` (H1) **and** `network:grant` (H2) on the segment; every value inside the segment's envelope and the tenant cap (H3); for a quarantine segment, `network:grant` on `/network/quarantine/<site>` too (H5); and **not** `network:join` on the segment (H6) |
-   | `delete_profile` | `network:profiles_write` on the segment (H1 only) |
+   | `delete_profile` | `network:profiles_write` (H1) **and** `network:grant` (H2) on the segment — with no profile the segment is no candidate, so the delete removes every device placed there; for a quarantine segment, `network:grant` on `/network/quarantine/<site>` too (H5); and **not** `network:join` on the segment (H6) |
    | `replace_policy` | `network:segments_write` **at the `/network` root** — a grant at a site below does not count, and a deny at the root refuses |
 
    The OpenAPI document names the first permission of each row; the gate decides all of them, on
@@ -12876,7 +12876,7 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
 
    | `reason_code` | `error` | Raised by | Meaning |
    |---|---|---|---|
-   | `stale_version` | `conflict` | every write | The row changed since `version` (or `segment_version`) was read — including a reply profile written on a segment between the read and a `replace_segment` that moves its placement (rule 1). Read again, decide again |
+   | `stale_version` | `conflict` | every write | The row changed since `version` (or `segment_version`) was read — including a reply profile written on a segment between the read and a `replace_segment` that moves its placement or a `delete_segment` (rule 1). Read again, decide again |
    | `strands_profile` | `conflict` | `replace_segment` | The new `filter_ids` would leave the profile's `filter_id` outside the envelope |
    | `has_children` | `conflict` | `delete_segment` | The segment still has child resources |
    | `site_gone` | `conflict` | `create_segment` | The site node was removed while the segment was being created |

@@ -28,13 +28,14 @@
 //! * a write needs what the **write gate** asks for, not a route-level guess:
 //!   `network:segments_write` at the parent (create) or the node (replace,
 //!   delete) and H6 — and for a replace that changes `vlan_id`, `rank` or
-//!   `enabled` of a segment that has a profile, `network:grant` at the segment
-//!   and, on a quarantine segment, at its quarantine site (R110W6-03: that
-//!   replace re-places every device that may join it);
+//!   `enabled` of a segment that has a profile, or a delete of such a segment,
+//!   `network:grant` at the segment and, on a quarantine segment, at its
+//!   quarantine site (R110W6-03 and the decision of 2026-10-16: that write
+//!   moves or removes every device that may join it);
 //!   `network:profiles_write` **and** `network:grant` on the
 //!   segment, the envelope, the quarantine site's `network:grant` and H6 for a
-//!   profile write (§5.2 H1–H6). `axiam_authz::network_gate` is the one place
-//!   that logic lives.
+//!   profile write (§5.2 H1–H6), and the same minus the envelope for a profile
+//!   delete. `axiam_authz::network_gate` is the one place that logic lives.
 //!
 //! # What every write does, in this order
 //!
@@ -378,8 +379,9 @@ pub struct ReplaceNetworkPolicyRequest {
 pub enum NetworkConflictReason {
     /// The segment, profile or policy changed since `version` (or
     /// `segment_version`) was read — including a reply profile written on a
-    /// segment between the gate's read and the write (R110W6-03). Read again
-    /// and decide again.
+    /// segment between the gate's read and a replace that moves its placement
+    /// (R110W6-03) or a delete of it (2026-10-16). Read again and decide
+    /// again.
     StaleVersion,
     /// A segment replace whose `filter_ids` would leave its profile's
     /// `filter_id` outside the envelope (the message names the profile).
@@ -1172,7 +1174,10 @@ async fn name_the_stranded_profile<C: Connection + Clone>(
 ///
 /// The segment, **its reply profile** and its resource node, in one
 /// transaction. Role assignments and grants naming the node are not touched;
-/// the node is simply gone.
+/// the node is simply gone. A segment that has a profile takes the devices
+/// placed on it along, so the write gate asks the placing right too
+/// (`network:grant` on the segment, and on `/network/quarantine/<site>` for a
+/// quarantine segment).
 #[utoipa::path(
     delete,
     path = "/api/v1/network/segments/{id}",
@@ -1182,12 +1187,18 @@ async fn name_the_stranded_profile<C: Connection + Clone>(
         (status = 204, description = "The segment and its profile were deleted"),
         (status = 400, description = "`version` is missing or not a number"),
         (status = 401, description = "Not authenticated, or a service-account token"),
-        (status = 403, description = "The caller lacks `network:segments_write` on the segment, \
-                                      or a reactor vetoed the write"),
+        (status = 403, description = "The caller lacks `network:segments_write` on the segment; \
+                                      or the segment has a reply profile and the caller lacks \
+                                      `network:grant` on the segment (and, for a quarantine \
+                                      segment, on `/network/quarantine/<site>`) — deleting it \
+                                      removes every device placed there; or it has a profile \
+                                      and the caller holds `network:join` on it (H6); or a \
+                                      reactor vetoed the write. The response names the missing \
+                                      permission and node"),
         (status = 404, description = "No such segment in this tenant"),
         (status = 409, description = "`reason_code` `stale_version`: the segment changed since \
-                                      `version` was read; or `has_children`: it has child \
-                                      resources",
+                                      `version` was read (a reply profile written on it since \
+                                      counts); or `has_children`: it has child resources",
          body = NetworkConflictResponse),
         (status = 429, description = "Rate limit"),
     ),
@@ -1583,8 +1594,11 @@ pub async fn replace_profile<C: Connection + Clone>(
 
 /// `DELETE /api/v1/network/profiles/{segment_id}?version=`
 ///
-/// No profile means the segment is not a placement candidate, which only
-/// narrows; the write gate asks `network:profiles_write` alone (H1).
+/// No profile means the segment is not a placement candidate, so the delete
+/// removes every device placed on it: the write gate asks
+/// `network:profiles_write` (H1) and the placing right, `network:grant` on the
+/// segment (and on `/network/quarantine/<site>` for a quarantine segment), and
+/// refuses a caller that may join the segment (H6).
 #[utoipa::path(
     delete,
     path = "/api/v1/network/profiles/{segment_id}",
@@ -1598,7 +1612,11 @@ pub async fn replace_profile<C: Connection + Clone>(
         (status = 400, description = "`version` is missing or not a number"),
         (status = 401, description = "Not authenticated, or a service-account token"),
         (status = 403, description = "The caller lacks `network:profiles_write` on the segment, \
-                                      or a reactor vetoed the write"),
+                                      or `network:grant` on it (and, for a quarantine segment, \
+                                      on `/network/quarantine/<site>`) — deleting the profile \
+                                      removes every device placed there; or holds \
+                                      `network:join` on it (H6); or a reactor vetoed the write. \
+                                      The response names the missing permission and node"),
         (status = 404, description = "No such segment in this tenant, or it has no profile"),
         (status = 409, description = "`reason_code` `stale_version`: the profile changed since \
                                       `version` was read",

@@ -538,7 +538,7 @@ export function NetworkAccessPage() {
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget && deleteMutation.mutate(deleteTarget)}
         title="Delete network segment"
-        description={`Delete "${deleteTarget?.name}"? Its reply profile is deleted with it. Role assignments and grants that name the segment are not touched; the segment is simply gone.`}
+        description={`Delete "${deleteTarget?.name}"? Its reply profile is deleted with it, and every device placed on it with the profile, so a segment that has one also needs network:grant on it (on a quarantine segment, on its quarantine site too). Role assignments and grants that name the segment are not touched; the segment is simply gone.`}
         isLoading={deleteMutation.isPending}
         error={deleteError}
       />

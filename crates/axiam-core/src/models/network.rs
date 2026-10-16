@@ -872,7 +872,7 @@ pub enum NetworkWriteTarget {
 /// A clearance can be **narrowed** after it is minted, never widened:
 /// [`NetworkWriteClearance::freeze_profiled_placement`] hands a condition the
 /// gate could not settle on its own read to the write's transaction
-/// (R110W6-03).
+/// (R110W6-03, and the decision of 2026-10-16 for a segment delete).
 #[derive(Debug, PartialEq, Eq)]
 pub struct NetworkWriteClearance {
     tenant_id: Uuid,
@@ -899,18 +899,20 @@ impl NetworkWriteClearance {
         }
     }
 
-    /// Narrow a segment replace's clearance: the write may not change the
-    /// segment's `vlan_id`, `rank` or `enabled` **if the segment has a reply
-    /// profile**, as the write's own transaction finds them (design note §5.2,
-    /// correction R110W6-03).
+    /// Narrow a segment replace's or delete's clearance: **if the segment has
+    /// a reply profile**, as the write's own transaction finds it, a replace
+    /// may not change the segment's `vlan_id`, `rank` or `enabled`
+    /// (design note §5.2, correction R110W6-03) and a delete may not happen at
+    /// all (the decision of 2026-10-16: deleting a profiled segment removes
+    /// every device placed there).
     ///
-    /// The gate sets it when it cleared the replace without checking
+    /// The gate sets it when it cleared the write without checking
     /// `network:grant` at the segment — because the replace moves no
     /// placement, or because the segment had no profile when the gate read it.
-    /// The repository then re-checks both facts against the row it replaces,
-    /// so a profile created between the gate's read and the write is not
-    /// missed. It only ever adds a condition, so calling it cannot widen what
-    /// the gate cleared.
+    /// The repository then re-checks both facts against the row it replaces
+    /// or deletes, so a profile created between the gate's read and the write
+    /// is not missed. It only ever adds a condition, so calling it cannot
+    /// widen what the gate cleared.
     #[must_use]
     pub fn freeze_profiled_placement(mut self) -> Self {
         self.profiled_placement_frozen = true;

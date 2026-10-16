@@ -1562,7 +1562,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "DELETE",
     "path": "/api/v1/network/profiles/{segment_id}",
-    "summary": "No profile means the segment is not a placement candidate, which only narrows; the write gate asks `network:profiles_write` alone (H1)."
+    "summary": "No profile means the segment is not a placement candidate, so the delete removes every device placed on it: the write gate asks `network:profiles_write` (H1) and the placing right, `network:grant` on the segment (and on `/network/quarantine/<site>` for a quarantine segment), and refuses a caller that may join the segment (H6)."
    },
    {
     "method": "GET",

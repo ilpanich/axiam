@@ -463,6 +463,8 @@ describe("NetworkAccessPage — delete segment", () => {
     const dialog = await openDelete();
     apiMock.delete.mockResolvedValue(res(undefined));
     expect(dialog).toHaveTextContent("Its reply profile is deleted with it");
+    // A profiled segment's delete also needs the placing right (2026-10-16).
+    expect(dialog).toHaveTextContent("also needs network:grant on it");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
       expect(apiMock.delete).toHaveBeenCalledWith(`${SEGMENTS}/seg-corp`, {
@@ -705,6 +707,42 @@ describe("NetworkAccessPage — reply profile", () => {
     await userEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
     expect(await within(confirm).findByRole("alert")).toHaveTextContent(
       "Missing permission network:profiles_write",
+    );
+  });
+
+  it("offers Delete profile only to a holder of network:grant as well", async () => {
+    // Deleting a profile removes every device placed on the segment, so the
+    // server asks network:grant beside network:profiles_write (2026-10-16).
+    as("network:read", "network:profiles_write");
+    const dialog = await openProfile("corp", { profiles: { "seg-corp": profile() } });
+    await within(dialog).findByTestId("profile-effective-timeout");
+    expect(within(dialog).getByRole("button", { name: "Save profile" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Delete profile" })).not.toBeInTheDocument();
+  });
+
+  it("offers Delete profile to a holder of network:profiles_write and network:grant", async () => {
+    as("network:read", "network:profiles_write", "network:grant");
+    const dialog = await openProfile("corp", { profiles: { "seg-corp": profile() } });
+    await within(dialog).findByTestId("profile-effective-timeout");
+    expect(within(dialog).getByRole("button", { name: "Delete profile" })).toBeInTheDocument();
+  });
+
+  it("names network:grant when the server refuses a profile delete for it", async () => {
+    await openProfile("corp", { profiles: { "seg-corp": profile() } });
+    await screen.findByTestId("profile-effective-timeout");
+    apiMock.delete.mockImplementation(() =>
+      rejection(403, {
+        error: "authorization_denied",
+        message: "Permission denied",
+        action: "network:grant",
+        resource_id: "seg-corp",
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Delete profile" }));
+    const confirm = await screen.findByRole("dialog");
+    await userEvent.click(within(confirm).getByRole("button", { name: "Delete" }));
+    expect(await within(confirm).findByRole("alert")).toHaveTextContent(
+      "Missing permission network:grant on /network/zones/hq/corp.",
     );
   });
 

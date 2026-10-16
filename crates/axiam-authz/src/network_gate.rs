@@ -10,9 +10,11 @@
 //! * a reply-profile write, against H1–H6 of §5.2;
 //! * a segment write (`network:segments_write` at the parent or the node; a
 //!   replace that changes `vlan_id`, `rank` or `enabled` of a segment that has
-//!   a profile also needs `network:grant` there, and on a quarantine segment at
-//!   its quarantine site — H2 and H5 applied to the envelope, correction
-//!   R110W6-03 of the note);
+//!   a profile, or a delete of such a segment, also needs `network:grant`
+//!   there, and on a quarantine segment at its quarantine site — H2 and H5
+//!   applied to the envelope, correction R110W6-03 of the note and the
+//!   decision of 2026-10-16: every write that moves or removes placed devices
+//!   needs the placing right);
 //! * a role assignment, unassignment, permission grant or revoke, role update
 //!   or delete that touches a **network-sensitive** role, against the §5.3
 //!   table and the three write-time rules of §4.2, and against H6 where the
@@ -410,7 +412,11 @@ pub enum NetworkWrite<'a> {
         /// The profile as it would be stored.
         input: &'a ReplyProfileInput,
     },
-    /// Delete a segment's reply profile (H1 only: it narrows).
+    /// Delete a segment's reply profile: H1, and — because it removes every
+    /// device placed on the segment (no profile, no candidate) — `network:grant`
+    /// at the segment (`H2:placement`), on a quarantine segment at
+    /// `/network/quarantine/<site>` too (`H5:placement`), then H6 (the decision
+    /// of 2026-10-16).
     ProfileDelete {
         /// The owning segment.
         segment_id: Uuid,
@@ -437,6 +443,14 @@ pub enum NetworkWrite<'a> {
         update: &'a NetworkSegmentUpdate,
     },
     /// Delete a segment (`network:segments_write` at the node).
+    ///
+    /// A segment that has a reply profile takes its placed devices with it, so
+    /// its delete also needs `network:grant` at the segment (`H2:placement`),
+    /// on a quarantine segment at `/network/quarantine/<site>` too
+    /// (`H5:placement`), then H6 (the decision of 2026-10-16). A delete cleared
+    /// without the grant (no profile on the gate's read) carries a
+    /// [frozen](NetworkWriteClearance::freeze_profiled_placement) token, so the
+    /// write re-checks the profile inside its own transaction.
     SegmentDelete {
         /// The segment.
         segment_id: Uuid,
@@ -656,7 +670,8 @@ pub struct GateRefusal {
     pub status: RefusalStatus,
     /// The internal reason, for the audit row: `H1` … `H6`, `H3:envelope:…`,
     /// `H2:placement`, `H5:placement` (a segment replace that re-places the
-    /// devices of a profiled segment, R110W6-03),
+    /// devices of a profiled segment, R110W6-03; a delete of a profiled segment
+    /// or of a profile, 2026-10-16),
     /// `4.1:reserved-subtree`, `4.2:rule-1` … `4.2:rule-3`,
     /// `4.2:reserved-namespace`, `4.2:not-grantable`, `4.2:scoped-grant`,
     /// `5.3:assign`, `5.3:unassign`, `5.3:permission`, `5.3:role-delete`,
@@ -1184,23 +1199,69 @@ where
 
     async fn profile_delete(&self, segment_id: Uuid) -> AxiamResult<GateVerdict> {
         let seg = self.store.segment(self.tenant(), segment_id).await?;
-        if let Some(mut r) = self
-            .require_all(
-                &[NETWORK_PROFILES_WRITE],
-                seg.id,
-                "H1",
-                AUDIT_PROFILE_WRITE_REFUSED,
-            )
+        let audit = AUDIT_PROFILE_WRITE_REFUSED;
+        let refused = |mut r: GateRefusal, stored: Option<&ReplyProfile>| {
+            r.before = describe_stored_profile(stored);
+            r.before.extend(describe_segment(&seg));
+            r.after = vec![("profile", "deleted".to_owned())];
+            r
+        };
+        if let Some(r) = self
+            .require_all(&[NETWORK_PROFILES_WRITE], seg.id, "H1", audit)
             .await?
         {
             let stored = self.store.profile(self.tenant(), segment_id).await?;
-            r.before = describe_stored_profile(stored.as_ref());
-            r.after = vec![("profile", "deleted".to_owned())];
-            return Ok(Err(r));
+            return Ok(Err(refused(r, stored.as_ref())));
+        }
+        // The decision of 2026-10-16: no profile means no candidate, so the
+        // delete removes every device placed on the segment — a placement
+        // write, which asks the placing right as the profile write does (H2,
+        // and H5 on a quarantine segment). The segment's kind does not change,
+        // so nothing here depends on a read a concurrent write could falsify.
+        if let Some(r) = self.placement_rights(&seg, audit).await? {
+            let stored = self.store.profile(self.tenant(), segment_id).await?;
+            return Ok(Err(refused(r, stored.as_ref())));
+        }
+        if self.holds(NETWORK_JOIN, seg.id).await? {
+            let stored = self.store.profile(self.tenant(), segment_id).await?;
+            return Ok(Err(refused(
+                refuse(
+                    RefusalStatus::Forbidden,
+                    "H6",
+                    audit,
+                    "a subject that may be placed on this segment cannot delete its profile",
+                ),
+                stored.as_ref(),
+            )));
         }
         Ok(Ok(self.clearance(NetworkWriteTarget::ProfileDelete {
             segment_id,
         })))
+    }
+
+    /// `Some(refusal)` unless the writer holds the **placing right** for `seg`:
+    /// `network:grant` at the segment (`H2:placement`) and, on a quarantine
+    /// segment, on `/network/quarantine/<site>` (`H5:placement`). Asked of
+    /// every write that moves or removes the devices placed on a profiled
+    /// segment (R110W6-03; the decision of 2026-10-16).
+    async fn placement_rights(
+        &self,
+        seg: &NetworkSegment,
+        audit: &'static str,
+    ) -> AxiamResult<Option<GateRefusal>> {
+        if let Some(r) = self
+            .require_all(&[NETWORK_GRANT], seg.id, "H2:placement", audit)
+            .await?
+        {
+            return Ok(Some(r));
+        }
+        if seg.kind == NetworkSegmentKind::Quarantine {
+            let site = site_node_id(self.tenant(), NetworkSegmentKind::Quarantine, &seg.site_key);
+            return self
+                .require_all(&[NETWORK_GRANT], site, "H5:placement", audit)
+                .await;
+        }
+        Ok(None)
     }
 
     // -- segments ----------------------------------------------------------
@@ -1314,23 +1375,8 @@ where
             || update.enabled != seg.enabled;
         let profiled =
             moves_placement && self.store.profile(self.tenant(), seg.id).await?.is_some();
-        if profiled {
-            if let Some(r) = self
-                .require_all(&[NETWORK_GRANT], seg.id, "H2:placement", audit)
-                .await?
-            {
-                return Ok(Err(with_values(r)));
-            }
-            if seg.kind == NetworkSegmentKind::Quarantine {
-                let site =
-                    site_node_id(self.tenant(), NetworkSegmentKind::Quarantine, &seg.site_key);
-                if let Some(r) = self
-                    .require_all(&[NETWORK_GRANT], site, "H5:placement", audit)
-                    .await?
-                {
-                    return Ok(Err(with_values(r)));
-                }
-            }
+        if profiled && let Some(r) = self.placement_rights(&seg, audit).await? {
+            return Ok(Err(with_values(r)));
         }
         // H6's reasoning applies to the envelope as much as to the profile: the
         // VLAN is what joining the segment gives.
@@ -1355,22 +1401,52 @@ where
 
     async fn segment_delete(&self, segment_id: Uuid) -> AxiamResult<GateVerdict> {
         let seg = self.store.segment(self.tenant(), segment_id).await?;
-        if let Some(mut r) = self
+        let audit = AUDIT_SEGMENT_WRITE_REFUSED;
+        let with_values = |mut r: GateRefusal| {
+            r.before = describe_segment(&seg);
+            r.after = vec![("segment", "deleted".to_owned())];
+            r
+        };
+        if let Some(r) = self
             .require_all(
                 &[NETWORK_SEGMENTS_WRITE],
                 seg.id,
                 "4.2:segments_write",
-                AUDIT_SEGMENT_WRITE_REFUSED,
+                audit,
             )
             .await?
         {
-            r.before = describe_segment(&seg);
-            r.after = vec![("segment", "deleted".to_owned())];
-            return Ok(Err(r));
+            return Ok(Err(with_values(r)));
         }
-        Ok(Ok(self.clearance(NetworkWriteTarget::SegmentDelete {
-            segment_id,
-        })))
+        // The decision of 2026-10-16: a segment that has a profile is a
+        // placement candidate, and deleting it (its profile goes with it)
+        // removes every device placed there — the same placement write as a
+        // replace that moves it (R110W6-03), so the same rights, in the same
+        // order: the placing right, then H6. A segment with no profile is no
+        // candidate (§4.3), so deleting it needs `network:segments_write` only.
+        let profiled = self.store.profile(self.tenant(), seg.id).await?.is_some();
+        if profiled {
+            if let Some(r) = self.placement_rights(&seg, audit).await? {
+                return Ok(Err(with_values(r)));
+            }
+            if self.holds(NETWORK_JOIN, seg.id).await? {
+                return Ok(Err(with_values(refuse(
+                    RefusalStatus::Forbidden,
+                    "H6",
+                    audit,
+                    "a subject that may be placed on this segment cannot delete it",
+                ))));
+            }
+        }
+        let cleared = self.clearance(NetworkWriteTarget::SegmentDelete { segment_id });
+        if profiled {
+            return Ok(Ok(cleared));
+        }
+        // Cleared without asking `network:grant`, on a read that found no
+        // profile. The delete's transaction re-reads it, so a profile created
+        // in between is a `409` (the stale read it is), never a profiled
+        // segment removed without the grant.
+        Ok(Ok(cleared.freeze_profiled_placement()))
     }
 
     // -- the tenant's policy (§3.4) ------------------------------------------

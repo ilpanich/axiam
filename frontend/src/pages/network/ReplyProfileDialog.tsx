@@ -92,6 +92,10 @@ export function ReplyProfileDialog({ segment, cap, nodeName, onClose }: ReplyPro
   const queryClient = useQueryClient();
   const { can } = usePermissions();
   const canWrite = can("network:profiles_write");
+  // Deleting the profile removes every device placed on the segment (no
+  // profile, no candidate), so the server asks the placing right too
+  // (network:grant, 2026-10-16). Cosmetic: the server decides, per node.
+  const canDelete = canWrite && can("network:grant");
   const segmentId = segment?.id;
 
   const profile = useQuery({
@@ -334,11 +338,11 @@ export function ReplyProfileDialog({ segment, cap, nodeName, onClose }: ReplyPro
 
             <p className="text-xs text-muted-foreground">
               Dictionary {REPLY_DICTIONARY}: these five attributes are the whole
-              record. Writing it needs <code>network:profiles_write</code> and{" "}
-              <code>network:grant</code> on the segment.
+              record. Writing or deleting it needs <code>network:profiles_write</code>{" "}
+              and <code>network:grant</code> on the segment.
             </p>
 
-            {stored && (
+            {stored && canDelete && (
               <Button
                 type="button"
                 variant="destructive"

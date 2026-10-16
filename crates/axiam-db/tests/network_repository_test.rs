@@ -111,6 +111,23 @@ impl Cleared<SurrealNetworkSegmentRepository<Db>> {
         );
         self.0.delete(tenant_id, id, expected_version, &c).await
     }
+    /// As the gate clears a delete it did not check `network:grant` for (the
+    /// decision of 2026-10-16: it read no profile): a profiled segment is not
+    /// deleted.
+    async fn delete_frozen(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+    ) -> AxiamResult<()> {
+        let c = cleared(
+            tenant_id,
+            Uuid::new_v4(),
+            NetworkWriteTarget::SegmentDelete { segment_id: id },
+        )
+        .freeze_profiled_placement();
+        self.0.delete(tenant_id, id, expected_version, &c).await
+    }
     async fn get(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<NetworkSegment> {
         self.0.get(tenant_id, id).await
     }
@@ -1350,6 +1367,84 @@ async fn a_profile_racing_a_frozen_vlan_change_never_lands_both() {
         let vlan = segments(&db).get(tenant, seg.id).await.unwrap().vlan_id;
         if profiles(&db).get_by_segment(tenant, seg.id).await.is_ok() {
             assert_eq!(vlan, 200 + round, "round {round}: the profiled VLAN moved");
+        }
+    }
+}
+
+/// The decision of 2026-10-16, the datastore's half: a delete the gate cleared
+/// without `network:grant` (a frozen clearance) does not remove a segment that
+/// has a profile **when the write runs**, and removes one that has none.
+#[tokio::test]
+async fn a_frozen_delete_does_not_remove_a_profiled_segment() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+
+    // No profile: a frozen delete removes it.
+    let bare = segments(&db).create(corp(tenant)).await.unwrap();
+    segments(&db)
+        .delete_frozen(tenant, bare.id, bare.version)
+        .await
+        .unwrap();
+    assert!(segments(&db).get(tenant, bare.id).await.is_err());
+
+    // A profile appears after the gate's read: 409, nothing removed.
+    let seg = segments(&db).create(corp(tenant)).await.unwrap();
+    profiles(&db)
+        .create(tenant, seg.id, new_profile(seg.version, profile()))
+        .await
+        .unwrap();
+    let err = segments(&db)
+        .delete_frozen(tenant, seg.id, seg.version)
+        .await
+        .unwrap_err();
+    assert!(is_conflict(&err), "{err:?}");
+    assert!(
+        err.to_string().contains("changed since it was read"),
+        "{err}"
+    );
+    assert_eq!(segments(&db).get(tenant, seg.id).await.unwrap(), seg);
+    assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_ok());
+
+    // A clearance the gate checked the grant for removes both.
+    segments(&db)
+        .delete(tenant, seg.id, seg.version)
+        .await
+        .unwrap();
+    assert!(segments(&db).get(tenant, seg.id).await.is_err());
+    assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_err());
+}
+
+/// The decision of 2026-10-16 under the engine production runs: a profile
+/// created while a frozen delete runs never leaves a profiled segment removed
+/// by a writer no one asked `network:grant` of.
+#[tokio::test]
+async fn a_profile_racing_a_frozen_delete_never_lands_both() {
+    let fixture = common::serialising_db().await;
+    let db = fixture.handle();
+    let tenant = Uuid::new_v4();
+
+    for round in 0..8u16 {
+        let mut input = corp(tenant);
+        input.path = format!("/network/zones/hq/del{round}");
+        input.vlan_id = 400 + round;
+        input.rank = Some(400 + u32::from(round));
+        let seg = segments(&db).create(input).await.unwrap();
+
+        let (segment_repo, profile_repo) = (segments(&db), profiles(&db));
+        let (deleted, created) = tokio::join!(
+            segment_repo.delete_frozen(tenant, seg.id, seg.version),
+            profile_repo.create(tenant, seg.id, new_profile(seg.version, profile())),
+        );
+        assert!(
+            !(deleted.is_ok() && created.is_ok()),
+            "round {round}: a profile and a frozen delete both landed"
+        );
+        if created.is_ok() {
+            assert!(
+                segments(&db).get(tenant, seg.id).await.is_ok(),
+                "round {round}: the profiled segment was removed"
+            );
+            assert!(profiles(&db).get_by_segment(tenant, seg.id).await.is_ok());
         }
     }
 }

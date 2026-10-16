@@ -893,7 +893,10 @@ it. Rules 6–10 close that. The name is §1's.
       mid-session when a device login was refused still has a working session.
     - **On success, the device token is the credential of every request the client
       makes**: authz, management, self-service, WebAuthn, logout, and the gRPC channel
-      (rule 4). No request carries a cookie from before. An empty `Cookie` header and no
+      (rule 4) — **except a request to `/oauth2/*`** (contract 1.62; maintainer, 2026-10-16), to
+      which an SDK never attaches the device token or any other session's or adopted
+      credential ([§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3, last
+      paragraph; [§14.6](#§146-required-tests)). No request carries a cookie from before. An empty `Cookie` header and no
       header both conform. A left-over `X-CSRF-Token` is harmless, because the server
       checks it only against a cookie session.
     - **It is held until something replaces it.** `logout` clears it. So does any later
@@ -2016,6 +2019,21 @@ verifier, at the `jwks_uri` the discovery document advertises.
    has it ignored — the header is never a second way in. An SDK therefore cannot acquire Basic
    authentication by accident, and an application that genuinely needs it registers the client
    for `client_secret_basic` and uses a plain HTTP client rather than an AXIAM SDK.
+
+   **No session or adopted credential on `/oauth2/*` (contract 1.62; maintainer, 2026-10-16).** An
+   SDK never attaches a session's bearer credential, an adopted one (a device login's token under
+   [§6.1](#§61-client-certificate-authentication-mtls) rule 11, a client-credentials adoption), or
+   any other `Authorization` header to a request to `/oauth2/*`, beyond what **that request's own
+   authentication** requires. Nothing at the token, device-authorization, introspection,
+   revocation, PAR or CIBA endpoints requires one: the client's credential travels in the form
+   body, as an assertion or on the connection (this rule 3 and [§14.1](#§141-canonical-operation-set-and-endpoint-map)
+   rule 2), and `Basic` is forbidden above. The one thing that is not excluded is a credential the
+   caller hands to a single call as that call's own authentication, such as the RFC 7591 initial
+   access token and the RFC 7592 `registration_access_token` of
+   [§28.12](#§2812-rfc-7592-client-configuration-operations-contract-153): it is not the client's session. The
+   server ignores a non-`Basic` header at the token and device endpoints, so a client that sends
+   one fails nothing; the rule keeps an access token off an endpoint that reads none, which is the
+   reasoning of the `Basic` prohibition above.
 4. **`introspect` and `revoke` require confidential-client credentials.** `IntrospectRequest`
    and `RevokeRequest` both mark `token` and `client_id` as required (non-nullable);
    `token_type_hint` is optional. A public client cannot call them.
@@ -2984,7 +3002,8 @@ and terminal:
    sends the proof here as it does at `/oauth2/token`, and reads `token_type` as the response
    says (§21.7.1: never assuming `Bearer`); one that declines it (§21.7.3) cannot drive such a
    client and surfaces the refusal as rule 5 says. A `fapi2` client meets its profile's
-   token-request rules as at every other grant.
+   token-request rules as at every other grant. *(Contract 1.62, 2026-10-16: no SDK generates
+   proofs, [§21.9](#§219-per-sdk-dpop-posture), so this sentence binds none of the eleven today.)*
 
 ### §14.3 `device_login` — the composed helper
 
@@ -3047,6 +3066,15 @@ a `500` mid-poll is retried rather than treated as terminal; `device_login` surf
 code before its first poll (assert ordering, not just presence); a successful `device_login`
 returns a token set carrying the access token.
 
+**Contract 1.62, no session or adopted credential on `/oauth2/*`** (maintainer, 2026-10-16;
+[§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3, last paragraph), against a mocked
+server: **adopt a credential** (a device login, [§6.1](#§61-client-certificate-authentication-mtls)
+rule 11) and, in a second run, **sign in** (a password login, so that a session exists), then run
+`device_authorize`, `device_poll` and one token request (`oidc_refresh` or `login_client_credentials`),
+and assert that **none of the three requests carries an `Authorization` header**. As the control, the
+same client's next management request carries the adopted credential or the session, so the assertion
+cannot pass for want of one.
+
 **Contract 1.62, §14.1 and §14.2 rules 5 and 8**, against a mocked server: a client configured with
 a secret sends it (`client_secret`, in the body) at **both** `device_authorize` and every
 `device_poll`, and sends **no `Authorization` header** at either, whichever of `client_secret_post`
@@ -3054,8 +3082,8 @@ and `client_secret_basic` the client is registered for (maintainer, 2026-10-16);
 credential at either, and is not refused client-side; `device_poll` sends `client_id` on every
 poll; a `401` with `{"error":"invalid_client"}` from either operation raises `OAuthProtocolError`
 with that `error`, makes exactly one request (no retry), and does not enter the §9 refresh guard;
-and, for an SDK that generates DPoP proofs, a bound client's poll carries a proof and a response
-with `token_type: DPoP` is surfaced as such.
+and, for an SDK that generates DPoP proofs (none does at 1.62, [§21.9](#§219-per-sdk-dpop-posture)), a
+bound client's poll carries a proof and a response with `token_type: DPoP` is surfaced as such.
 
 An SDK that implements the [§14.3](#§143-device_login--the-composed-helper) rule-4 adoption
 MAY additionally assert the client is authenticated afterwards, and an SDK that gates adoption
@@ -4032,6 +4060,16 @@ An SDK states it only after porting it from the merge commit that carries the ro
 ([§33.10](#§3310-per-sdk-posture)); all eleven do at contract 1.59, and an SDK that signs with a
 subset of the three algorithms names them ([§34.2](#§342-clarifications-normative-from-159) P12.7). The §21.3.1 amendment of the same version is
 not part of that claim: every SDK that pins vector A re-vendors it.
+
+§36 (network segments, reply profiles and the RADIUS decision, contract 1.62) is a §27 namespace
+too, stated by name for the `409` `reason_code` accessor and §36.3's call-site documentation
+(maintainer, 2026-10-16):
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12, §29, §30, §31, §32, §33 and §36."
+
+An SDK states it only after porting it from the merge commit that carries the routes
+([§36.10](#§3610-per-sdk-posture)); all eleven do at contract 1.62. §36.11's decision route is
+not SDK surface and is no part of the claim.
 
 Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
@@ -5668,17 +5706,31 @@ unrecorded row is not.
 
 | SDK | Verifies proofs (RS role) | Generates proofs (client role) |
 |---|---|---|
-| rust | yes | yes |
-| typescript | yes | yes |
-| python | yes | yes |
-| go | yes | yes |
-| java | yes | yes |
-| kotlin | yes | yes |
-| csharp | yes | yes |
+| rust | yes | no — see its README |
+| typescript | yes | no — see its README |
+| python | yes | no — see its README |
+| go | yes | no — see its README |
+| java | yes | no — see its README |
+| kotlin | yes | no — see its README |
+| csharp | yes | no — see its README |
 | php | yes | no — see its README |
 | swift | yes | no — see its README |
 | c | verification of `cnf` shape only; declines §21.7.2 | no |
 | cplusplus | verification of `cnf` shape only; declines §21.7.2 | no |
+
+**Corrected in contract 1.62 (maintainer, 2026-10-16; normative).** Through contract 1.61 the
+"Generates proofs" cell of Rust, TypeScript, Python, Go, Java, Kotlin and C# read "yes". The row
+was wrong, not the code: no SDK has a `dpop+jwt` signer in any non-test source (the conformance
+review of the eleven 1.62 ports read each repository,
+[`claude_dev/sdk-contract-1.62-conformance-review.md`](../claude_dev/sdk-contract-1.62-conformance-review.md)
+§5 Q10), each of the seven carries a verifier only, and their READMEs and device-grant
+documentation say "generates no DPoP proof". **No SDK generates DPoP proofs**, which §21.7.3 makes a
+supported answer. Two sentences were written for an SDK that does, and so **bind no current SDK**:
+the proof sentence of [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) rule 8
+("An SDK that implements the client role of §21.7 sends the proof here …") and the closing clause of
+[§14.6](#§146-required-tests) ("for an SDK that generates DPoP proofs, a bound client's poll carries
+a proof …"). Each is conditional and vacuous until an SDK adds a signer; that SDK changes its row in
+this table in the same release, and the two sentences then bind it.
 
 The two "declines" rows are not oversights. Both SDKs' role in this contract is
 resource-server-side validation, and verifying a DPoP proof (§21.7.2) needs the **HTTP
@@ -8108,7 +8160,9 @@ client.tenants().create(spec)    client.certificates().generate(spec)
 
 Three reasons this is normative rather than stylistic:
 
-1. **The names collide.** Eighteen namespaces have a `list`; seventeen have a `get`. Flattened,
+1. **The names collide.** Nineteen namespaces have a `list`; nineteen have a `get` (the registry's
+   29 namespaces, counted by the bare operation names `list` and `get` on 2026-10-16; the text of
+   contract 1.51 said eighteen and seventeen). Flattened,
    every one needs a disambiguating prefix, and `listUsers`/`listRoles`/`listRolePermissions`
    is a naming scheme that has to be invented once per operation and remembered by every
    caller. Namespaced, `list` means `list` everywhere.
@@ -8472,11 +8526,15 @@ wrong the second time it runs. The declarative layer is one object and one call.
    assertion that it should be cleared. This is what makes `apply` safe to run against a
    tenant that also has hand-made state in it.
 
-4. **Deletion is opt-in, per namespace, and never a default.** An `apply` MUST NOT delete
-   anything unless the caller explicitly enables pruning, and pruning MUST be selectable
-   per namespace rather than globally. A manifest is usually a *subset* of a tenant's
-   truth; a global prune turns "make sure these three roles exist" into "delete the other
-   forty".
+4. **Deletion is opt-in, per namespace, and never a default; offering pruning is a MAY
+   (contract 1.62; maintainer, 2026-10-16).** An `apply` MUST NOT delete anything unless the
+   caller explicitly enables pruning, and an SDK that offers pruning MUST make it selectable
+   per namespace rather than globally. **An SDK MAY offer a per-namespace prune option, and none
+   of the eleven does**: in every SDK, in every namespace, `apply` never deletes, and that
+   satisfies this rule. A manifest is usually a *subset* of a
+   tenant's truth; a global prune turns "make sure these three roles exist" into "delete the other
+   forty". An SDK that offers none records that in its README with the rest of its
+   [§27.10](#§2710-per-sdk-posture) posture.
 
 5. **Ordering is derived, and dependencies are real.** Actions are ordered
    resources → scopes → permissions → roles → role/permission grants → groups →
@@ -8660,7 +8718,7 @@ paragraph says.
 |---|---|---|---|
 | `Create` | `create_segment` | `create_profile` | — |
 | `Update` | `replace_segment` | `replace_profile` | `replace_policy` |
-| `Delete` (pruning only) | `delete_segment` | `delete_profile` | — |
+| `Delete` (only an SDK that offers pruning, item 6) | `delete_segment` | `delete_profile` | — |
 
 **Judged on the read (maintainer, 2026-10-16).** Every stated member is compared with the value as
 the read returns it; for a profile that is the **effective** profile ([§36.2](#§362-shapes-normative)).
@@ -8691,12 +8749,38 @@ saying:
 
 - **The body of an `Update` is built from the read.** Every member the manifest states replaces the
   read's; every member it does not state is **carried from the read** (silence is not an assertion,
-  rule 3, and a replacement would otherwise clear it); a member stated as `null` is "none" and is
-  left **out** of the body, which is how a replacement clears an optional member. The `version` is
+  rule 3, and a replacement would otherwise clear it) — **with one exception, the next bullet**; a
+  member stated as `null` is "none" and is left **out** of the body, which is how a replacement clears
+  an optional member **that has no server default** (`rank`, `idle_timeout_secs`, `filter_id`,
+  `service_type`; the bullet after the next says why the others cannot). The `version` is
   the one `plan` read, sent exactly. A segment's `kind`, `site_key` and `name` are not in the
   replacement body ([§36.2](#§362-shapes-normative)). A profile's carried `session_timeout_secs` is the
   read's effective value, so an `Update` of a clamped profile that does not state its timeout stores
   the clamped value from then on (§36.3 rule 6).
+- **An open-enum value the read returned and the SDK does not know is never carried
+  (maintainer, 2026-10-16).** `termination_action` and `service_type` are open enumerations
+  ([§36.2](#§362-shapes-normative)): an SDK decodes a value it has no name for and never re-sends
+  one it decoded as unknown (§36.2; [§34.2](#§342-clarifications-normative-from-159) P12.2(a)).
+  Carrying the read (the bullet above) would re-send it, so when the read carries such a value in a
+  member the manifest **does not state**, and the entity's action would be an `Update` (the only
+  action that carries a read member into a body), **`plan` refuses**: it raises the SDK's validation
+  error (`ValidationError`; `std::invalid_argument` in C++; `NULL` with a validation `axiam_error_t`
+  in C, as P12.2(a)), **naming the member and the value**, before any write (`plan` sends none, rule 1)
+  and so with no write sent, and returns no plan. Nothing is re-sent, left out, defaulted or omitted
+  in its place: leaving the member out would make the server write its default over a value nobody
+  stated. **A manifest that states the member resolves it**: the stated value replaces the unknown one
+  and the `Update` proceeds. A `Create` carries nothing from a read, and a `NoChange` writes nothing,
+  so neither is refused for it. The refusal is at `plan`, not at the action in `apply`, so that no
+  manifest is half-applied for it.
+- **A stated "none" for a member with a server default is refused (maintainer, 2026-10-16).**
+  `termination_action` has no "none" in a manifest: the server always stores a value for it, and a
+  replacement that leaves it out gets the default (`radius_request`), so a manifest stating "none"
+  could never converge (rule 6) or would silently mean "the default". **A stated `null` for it is
+  refused at `plan`, with zero wire calls** (it is judged on the manifest alone, like a duplicate
+  natural key, item 1), with rule 2's client-side error. **The same holds for any member that has a
+  server default** (a segment's `enabled`, default `true`, and `filter_ids`, default `[]`, state a
+  value or say nothing; the profile's `dictionary` has one too and is never a manifest member). A
+  language whose manifest type for the member cannot state "none" at all has nothing to refuse.
 - **A profile also carries `segment_version`**, the owning segment's version. When the same `apply`
   created or replaced that segment earlier, it is the `version` of **that write's response**, not
   the one `plan` read: the segment write moved it, and the stale one would be `409 stale_version`
@@ -8729,8 +8813,10 @@ segment that has a profile, every profile write, and the `Delete` of a profiled 
 `network:grant` on the segment beside the write permission, which a caller who can write segments
 may not hold.
 
-**6. Pruning** (rule 4) is selectable for `network` like any other namespace and is **off by
-default**. When on, a segment the manifest does not state is `Delete`d with `?version=` as `plan`
+**6. Pruning** (rule 4) is a MAY (maintainer, 2026-10-16): an SDK MAY offer a per-namespace prune
+option, **none of the eleven does**, and one that offers none never emits a `Delete` for `network` or
+any other namespace, which conforms. An SDK that does offer it makes it selectable for `network` like
+any other namespace and **off by default**. When on, a segment the manifest does not state is `Delete`d with `?version=` as `plan`
 read it, and a profile the manifest does not state for a segment it does state is `Delete`d the
 same way. A segment's delete **takes its profile with it** ([§36.3](#§363-server-rules-every-sdk-can-observe-normative)
 rule 9), so `plan` emits no separate `Delete` for the profile of a segment it deletes (a second one
@@ -8867,7 +8953,9 @@ this section.
 - Ordering: a resource is created before its child, and a role before the binding that
   uses it.
 - A failure at action *n* reports outcomes for `1..n` and does not attempt `n+1..`.
-- Pruning is off by default: a manifest omitting an existing role produces no `Delete`.
+- Nothing is pruned by default: a manifest omitting an existing role produces no `Delete`. An SDK
+  that offers no pruning (all eleven at contract 1.62, [§27.6](#§276-declarative-management--the-manifest)
+  rule 4) passes this by never emitting one; an SDK that offers it asserts it is off unless enabled.
 - Two `plan` calls against unchanged state produce equal plans in the same order.
 
 **Manifest additions (contract 1.51, §27.6.1)** — required of an SDK that implements the
@@ -8894,18 +8982,29 @@ rule 6's idempotence test, which covers it:
   `segment_version` (assert the body); `plan` afterwards is all `NoChange`.
 - A segment `Update` sends the **full** replacement body: `version` as read, the stated members, and
   every unstated one carried from the read, with **no** `kind`, `site_key` or `name` (assert the exact
-  key set). A stated `null` on an optional profile member leaves the key out.
+  key set). A stated `null` on `idle_timeout_secs`, `filter_id` or `service_type` leaves the key out.
 - A manifest that changes a segment and its profile in one `apply` sends `replace_segment` and then
   `replace_profile`, and the profile's `segment_version` is the `replace_segment` response's
   `version`, not the one read by `plan`.
 - A `409` with `reason_code: "stale_version"` on any network write makes exactly **one** request,
   stops the `apply` (later actions are not attempted), and the outcome exposes `reason_code`; a
   `409` with `already_exists` and `duplicate_vlan` does the same.
-- Pruning is off by default (no `Delete`); with it on for `network`, a segment absent from the manifest
-  is deleted with `?version=` and **no** separate profile `Delete` is made for it, and the policy is
-  never deleted.
+- Nothing is pruned by default: a manifest that omits an existing segment produces no `Delete`. **Only
+  an SDK that offers pruning** ([§27.6](#§276-declarative-management--the-manifest) rule 4, a MAY; none of
+  the eleven does at contract 1.62) asserts the rest, with it on for `network`: a segment absent from the
+  manifest is deleted with `?version=` and **no** separate profile `Delete` is made for it, and the policy
+  is never deleted.
 - Two segments with one site, kind and name, and a profile whose `segment` names no segment spec,
   are each refused with zero wire calls.
+- A profile read with an **unknown** `termination_action` (a value such as `"future_value"`; assert the
+  same for `service_type`), and a manifest that changes another member of that profile and does **not**
+  state the unknown one: `plan` raises the validation error naming the member and the value, no non-`GET`
+  request was sent, and no plan is returned (§27.6.2 item 4). The same read with a manifest that **states**
+  the member is an `Update` whose replacement body carries the stated value and never the unknown one; and
+  the same read with nothing that differs is `NoChange`, with no write.
+- A manifest that states `termination_action` as `null`/none is refused at `plan` with **zero** wire calls
+  (assert the mock saw no request at all), in a language whose type can express it; so is any member with
+  a server default that a manifest could state as none (§27.6.2 item 4).
 - A segment whose `kind` is stated as `access` is `NoChange` against a read that says `"access"`, and
   its `create_segment` body carries `"kind": "access"` (assert the string); the SDK has no `zones`
   value anywhere in a manifest.
@@ -8976,7 +9075,15 @@ that vendors contract 1.50. The C-12 review (§27.14) re-read it from each repos
 | resource-scoped binding, `inherit` (1.51) | yes | yes | yes |
 | `service_accounts`, with role bindings (1.51) | yes | yes | yes |
 | `webhooks` | no | no | no |
-| `network` (1.62, [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162)) | pending: SHOULD of every SDK that ships §27.6; the ports record theirs | pending | pending |
+| `network` (1.62, [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162)) | yes; no pruning | yes; no pruning | yes; no pruning |
+
+**`network` and pruning, read 2026-10-16.** The `network` row was "pending" until the conformance
+review of the eleven `claude/contract-1.62` branches
+([`claude_dev/sdk-contract-1.62-conformance-review.md`](../claude_dev/sdk-contract-1.62-conformance-review.md)):
+**all eleven implement [§36](#§36-network-segments-reply-profiles-and-the-radius-decision-contract-162) and
+the §27.6.2 manifest namespace**. **None offers pruning**, in `network` or in any other namespace (true
+since contract 1.30): pruning is a MAY ([§27.6](#§276-declarative-management--the-manifest) rule 4,
+maintainer, 2026-10-16), so "no pruning" is the posture of all eleven and conforms.
 
 **The three defects the 1.50 reading recorded are fixed** by the 1.51 ports.
 
@@ -13203,6 +13310,68 @@ an implementer finds it where the surface it touches is described.
   every SDK that ships §27.6).** §27.6.2 item 1: `access` or `quarantine`, the value the API reads and
   writes; the natural key is site + kind + name, and no SDK maps to or from `zones`, which is a
   server-side path segment. Item (n) above is reworded to match; a test is added to §27.9.
+- **(x) The review's contract corrections: the DPoP rows and the counts (maintainer, 2026-10-16;
+  normative for the table, informative for the counts; no SDK changes code).**
+  [§21.9](#§219-per-sdk-dpop-posture): the seven rows (Rust, TypeScript, Python, Go, Java, Kotlin, C#)
+  that said the SDK **generates** proofs now read "no — see its README". No SDK has a `dpop+jwt`
+  signer, and each of the seven documents "generates no DPoP proof"; the contract was wrong, not the
+  code. [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) rule 8's proof sentence and
+  [§14.6](#§146-required-tests)'s "for an SDK that generates DPoP proofs" bind no current SDK.
+  [§27.2](#§272-the-surface-is-namespaced-not-flat) rule 1 counts **nineteen** namespaces with a `list`
+  and **nineteen** with a `get` (it said eighteen and seventeen; recounted from
+  `management-registry.json`). [§27.10](#§2710-per-sdk-posture)'s `network` row ("pending") and
+  [§36.10](#§3610-per-sdk-posture) ("none implements §36 yet") now record that **all eleven** implement
+  §36 and the §27.6.2 `network` namespace, and that none prunes. (Conformance review C162-14, Q10.)
+- **(y) A Conformance Statement sentence for §36 (maintainer, 2026-10-16; normative; every SDK that
+  ships §36).** The Conformance Statement gains §36's sentence, in the form of §30's, §31's and §32's:
+  a §27 namespace, stated by name for the `409` `reason_code` accessor and §36.3's call-site
+  documentation. Rust, Go, Java, Kotlin, C#, C and Swift add it to their README's statement (TypeScript,
+  Python, PHP and C++ already name §36). (Conformance review C162-12, Q6.)
+- **(z) Pruning is a MAY (maintainer, 2026-10-16; normative).** [§27.6](#§276-declarative-management--the-manifest)
+  rule 4 and [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162) item 6: an SDK MAY offer a
+  per-namespace prune option; **none of the eleven does**, in any namespace, and that conforms, since
+  the rule is met by never deleting. §27.9's "with pruning on" assertions (the `network` one) apply only
+  to an SDK that offers it; the "off by default" assertions are met by never emitting a `Delete`.
+  [§27.10](#§2710-per-sdk-posture) records "no pruning" for all eleven. (C162-11, Q5.)
+- **(aa) No session or adopted credential on `/oauth2/*` (maintainer, 2026-10-16; normative; every SDK
+  that ships §14).** An SDK never attaches a session's bearer credential, an
+  adopted one (device login, [§6.1](#§61-client-certificate-authentication-mtls) rule 11), or any
+  `Authorization` header other than what the request's own authentication requires (and
+  [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3 already forbids `Basic`) to any
+  `/oauth2/*` request. Amended: §6.1 rule 11 (the adopted credential is "of every request the client
+  makes" except `/oauth2/*`), §12.1 rule 3 (the rule itself, with the one exception: a credential the
+  caller passes to a single call as that call's authentication, §28.12's registration tokens), and
+  §14.6, which gains the required test: adopt a credential and sign in, run both device operations and a
+  token request, assert no `Authorization` header on any of them. The SDKs that attach one today
+  (TypeScript, Python, Java, C#, and Kotlin on its other `/oauth2/*` routes) change; Go and PHP already
+  exclude every `/oauth2/*` path. (C162-05, Q1.)
+- **(ab) An unknown open-enum value on a member a manifest does not state: `plan` refuses
+  (maintainer, 2026-10-16; normative; every SDK that ships §27.6.2).** §27.6.2 item 4: a value of
+  `termination_action` or `service_type` that the read returned and the SDK does not know is never
+  carried into a replacement; when the manifest does not state the member and the entity would be an
+  `Update`, `plan` raises the validation error naming the member and the value, before any write; a
+  manifest that states the member resolves it. Item 4's "carried from the read" no longer covers such a
+  value, consistent with [§36.2](#§362-shapes-normative) and
+  [§34.2](#§342-clarifications-normative-from-159) P12.2(a). New required test in §27.9. SDKs that
+  re-sent the value, refused only at `apply` or left the member out change; the review's C162-06 and
+  C162-07 list them. (Q2.)
+- **(ac) `termination_action` has no "none" in a manifest (maintainer, 2026-10-16; normative; every SDK
+  that ships §27.6.2).** §27.6.2 item 4: a stated `null`/none for it is refused at `plan` with zero wire
+  calls, and so is a stated none for any member that has a server default (the server would write the
+  default and read it back, so the manifest could never converge). The "none" of item 4 applies to the
+  members without a default (`rank`, `idle_timeout_secs`, `filter_id`, `service_type`). New required test
+  in §27.9. Python and TypeScript change. (C162-08, Q3.)
+- **(ad) Two orderings confirmed as written (maintainer, 2026-10-16; informative).** §27.6.2 item 5's
+  `strands_profile` (the SDK does not reorder to avoid it: narrowing an envelope while moving a profile's
+  `filter_id` takes two applies) and item 2's policy-first order are confirmed. No text changes.
+  (Q8, Q9.)
+- **(ae) Deferred to contract 1.63 (informative; nothing for an SDK to do in 1.62).** Two questions of the
+  review are answered "later": **(Q4)** (g) is to extend to the SCIM read-modify-write
+  ([§31.3](#§313-server-rules-every-sdk-can-observe-normative) rule 4), so that every helper that builds an
+  `expected_updated_at` from a read sends the response's own `updated_at` string, as for SSF; until then
+  an instant-preserving rendering conforms for §31 (Java, Kotlin), and C sends none; **(Q7)** an AMQP
+  producer MAY refuse the reserved `tenants.` and `gdpr.` audit actions locally, with a validation error
+  before publishing; until then §8's account stands and none of the seven AMQP SDKs refuses them.
 
 **What changes in `openapi.json` and the registry.** `openapi.json` gains the `network` paths and
 schemas (`NetworkSegmentResponse`, `NetworkReplyProfile`, `NetworkPolicyResponse`, the create and
@@ -13604,10 +13773,15 @@ identified by site + kind + name, a profile by its segment, and the policy is a 
 
 ### §36.10 Per-SDK posture
 
-**None of the eleven SDKs implements §36 yet.** Every SDK reaches it the same way, by regenerating
-its §27 surface from the 1.62 `management-registry.json` in the W7 fan-out; all eleven are in scope,
-since it is management REST, which Kotlin, Swift, C and C++ carry. The conformance review records
-each SDK's posture here when the ports land.
+**All eleven SDKs implement §36** (read on 2026-10-16 at the eleven `claude/contract-1.62` branches,
+[`claude_dev/sdk-contract-1.62-conformance-review.md`](../claude_dev/sdk-contract-1.62-conformance-review.md)):
+each regenerated its §27 surface from the 1.62 `management-registry.json`, carries the twelve
+operations and no method for the decision route, and exposes a `409`'s `reason_code` and a `403`'s
+`action` and `resource_id`. **All eleven also implement the §27.6.2 `network` manifest namespace**
+(Kotlin, Swift, C and C++ included, since it is management REST), in the order policy, segments,
+profiles. **None prunes**: pruning is a MAY ([§27.6](#§276-declarative-management--the-manifest) rule 4;
+[§27.10](#§2710-per-sdk-posture) records "no pruning" for all eleven). The Conformance Statement
+names §36 (it states §36 "by name", as it does §30–§32).
 
 ### §36.11 The decision route — not SDK work (informative, except rule 6)
 

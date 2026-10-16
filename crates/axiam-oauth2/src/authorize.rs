@@ -873,6 +873,13 @@ mod tests {
             unimplemented!()
         }
 
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
+            unimplemented!()
+        }
+
         async fn list_all_by_managed_by(
             &self,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
@@ -990,6 +997,13 @@ mod tests {
             _tid: Uuid,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
         ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
             unimplemented!()
         }
 
@@ -1177,6 +1191,13 @@ mod tests {
             _tid: Uuid,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
         ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
             unimplemented!()
         }
 

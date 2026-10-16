@@ -111,7 +111,9 @@ let device = null;
 function obtainDeviceCode() {
   const res = http.post(
     `${baseUrl()}/oauth2/device_authorization?tenant_id=${cfg.tenantId}`,
-    formBody({ client_id: cfg.clientId, scope: 'openid' }),
+    // The seeded bench client is confidential, so it authenticates at both
+    // endpoints of the grant (#635); `formBody` drops an empty secret.
+    formBody({ client_id: cfg.clientId, client_secret: cfg.clientSecret, scope: 'openid' }),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
   );
   if (res.status !== 200) {
@@ -136,6 +138,7 @@ export default function () {
       grant_type: DEVICE_CODE_GRANT_TYPE,
       device_code: device.device_code,
       client_id: cfg.clientId,
+      client_secret: cfg.clientSecret,
     }),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
   );

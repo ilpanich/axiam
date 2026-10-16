@@ -39,8 +39,8 @@ pub use handle::DbHandle;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use pool::{DbCheckout, DbPool};
 pub use rate_limit_counter::{
-    SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreIncrementFuture,
-    WindowMode,
+    SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreDecrementFuture,
+    StoreIncrementFuture, StorePeekFuture, WindowMode,
 };
 pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, ReadReplicaConfig};
 pub use repository::{

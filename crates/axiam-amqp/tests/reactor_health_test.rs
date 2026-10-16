@@ -47,6 +47,9 @@ struct AuditTrail {
 }
 
 impl AuditLogRepository for AuditTrail {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         unreachable!("not exercised by this test")
     }

@@ -194,6 +194,9 @@ async fn cleanup_does_not_propagate_db_errors_as_panics() {
 struct FailingAuditRepo;
 
 impl AuditLogRepository for FailingAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
     }
@@ -2170,12 +2173,18 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
         }
     };
     // The tombstoned tenant's trail: one row the export holds, then the
-    // export, then one row it does not hold.
+    // export, then one row it does not hold — its receipt, which the deletion
+    // record names and whose timestamp caps the bound (R101W3-03, #637).
     entry(tombstoned, "users.updated", None).await;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let exported_through = Utc::now();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let late = entry(tombstoned, "users.created", None).await;
+    let late = entry(
+        tombstoned,
+        axiam_api_rest::handlers::tenants::AUDIT_EXPORT_ACTION,
+        Some(serde_json::json!({ "exported_through": exported_through })),
+    )
+    .await;
     tenants.delete(tombstoned).await.unwrap();
     audit
         .append(CreateAuditLogEntry {
@@ -2186,7 +2195,10 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
             resource_id: Some(tombstoned),
             outcome: AuditOutcome::Success,
             ip_address: None,
-            metadata: Some(serde_json::json!({ "audit_exported_through": exported_through })),
+            metadata: Some(serde_json::json!({
+                "audit_export_receipt_id": late.id,
+                "audit_exported_through": exported_through,
+            })),
         })
         .await
         .unwrap();
@@ -2913,4 +2925,142 @@ async fn the_certificate_sweep_is_bounded_and_two_replicas_remove_each_row_once(
             .unwrap(),
         1
     );
+}
+
+// ---------------------------------------------------------------------------
+// rate_limit_bucket sweep (#638)
+// ---------------------------------------------------------------------------
+
+mod rate_limit_bucket {
+    use super::*;
+    use axiam_db::SurrealRateLimitBucketRepository;
+    use axiam_server::cleanup::{
+        RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS, RATE_LIMIT_BUCKET_RETENTION,
+        RATE_LIMIT_BUCKET_SWEEP_BATCH, sweep_rate_limit_buckets,
+    };
+
+    /// Set a bucket's `updated_at` to `age` before `now`.
+    async fn age(db: &Surreal<surrealdb::engine::local::Db>, key: &str, age: Duration) {
+        let at = Utc::now() - chrono::Duration::from_std(age).unwrap();
+        db.query("UPDATE type::record('rate_limit_bucket', $key) SET updated_at = $at")
+            .bind(("key", key.to_owned()))
+            .bind(("at", at))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    async fn keys(db: &Surreal<surrealdb::engine::local::Db>) -> Vec<String> {
+        let mut r = db
+            .query("SELECT VALUE meta::id(id) FROM rate_limit_bucket ORDER BY id")
+            .await
+            .unwrap();
+        r.take(0).unwrap()
+    }
+
+    /// The longest window is the hint cap's, and the retention is twice it
+    /// plus the margin: longer than two of every window a writer counts in.
+    #[test]
+    fn the_retention_is_derived_from_the_windows_in_use() {
+        assert_eq!(
+            RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS,
+            axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS
+        );
+        for window in [
+            axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS,
+            axiam_db::rate_limit_counter::DEFAULT_WINDOW_SECS,
+            axiam_api_grpc::middleware::rate_limit::WINDOW_SECS as u64,
+        ] {
+            assert!(window <= RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS);
+            assert!(RATE_LIMIT_BUCKET_RETENTION.as_secs() > 2 * window);
+        }
+        assert_eq!(RATE_LIMIT_BUCKET_RETENTION, Duration::from_secs(21 * 60));
+    }
+
+    /// The sweep removes the rows nobody can read and keeps every row a
+    /// limiter still can: the hint cap's previous window (the oldest row it
+    /// reads, up to two windows old), a counter's bucket, a fresh one.
+    #[tokio::test]
+    async fn the_sweep_removes_stale_rows_and_keeps_current_ones() {
+        let db = setup_db().await;
+        let repo = SurrealRateLimitBucketRepository::new(db.clone());
+        let w = Utc::now();
+        let hint_window = Duration::from_secs(axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS);
+        let retention = RATE_LIMIT_BUCKET_RETENTION;
+        let second = Duration::from_secs(1);
+        for k in [
+            "ciba_hint_cap:t:dead:0",
+            "login:203.0.113.1",
+            "ciba_hint_cap:t:previous:1",
+            "ciba_hint_cap:t:edge:0",
+            "authz_check:203.0.113.2",
+            "ciba_hint_cap:t:current:0",
+        ] {
+            repo.increment_by(k, w, 1).await.unwrap();
+        }
+        age(&db, "ciba_hint_cap:t:dead:0", retention + second).await;
+        age(&db, "login:203.0.113.1", retention + hint_window).await;
+        // Written in the window before this one: read as `previous` right now.
+        age(&db, "ciba_hint_cap:t:previous:1", hint_window).await;
+        // Two windows old: no longer read, but inside the margin.
+        age(&db, "ciba_hint_cap:t:edge:0", 2 * hint_window + second).await;
+        age(&db, "authz_check:203.0.113.2", retention - 5 * second).await;
+
+        assert_eq!(
+            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            keys(&db).await,
+            [
+                "authz_check:203.0.113.2",
+                "ciba_hint_cap:t:current:0",
+                "ciba_hint_cap:t:edge:0",
+                "ciba_hint_cap:t:previous:1",
+            ]
+        );
+        assert_eq!(
+            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
+            0
+        );
+        // A kept bucket still counts where it was.
+        assert_eq!(
+            repo.peek_count("ciba_hint_cap:t:current:0", w)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    /// More stale rows than a batch are all removed, by two replicas sweeping
+    /// at once: neither fails, every row goes exactly once and the fresh one
+    /// stays.
+    #[tokio::test]
+    async fn two_replicas_sweeping_at_once_remove_each_row_once() {
+        let db = setup_db().await;
+        let repo = SurrealRateLimitBucketRepository::new(db.clone());
+        let stale = 2 * RATE_LIMIT_BUCKET_SWEEP_BATCH as usize + 37;
+        db.query(
+            "FOR $i IN 0..$n { CREATE type::record('rate_limit_bucket', string::concat('old:', $i)) \
+             SET count = 1, window_start = d'2000-01-01T00:00:00Z', \
+                 updated_at = d'2000-01-01T00:00:00Z'; }",
+        )
+        .bind(("n", stale as i64))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        repo.increment_by("fresh", Utc::now(), 1).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            sweep_rate_limit_buckets(&repo, Utc::now()),
+            sweep_rate_limit_buckets(&repo, Utc::now())
+        );
+        // A sweeper that loses a contended commit leaves the rows to the
+        // winner or to the next pass; no row is removed twice, none is missed.
+        let rest = sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap();
+        assert_eq!(a.unwrap() + b.unwrap() + rest, stale as u64);
+        assert_eq!(keys(&db).await, ["fresh"]);
+    }
 }

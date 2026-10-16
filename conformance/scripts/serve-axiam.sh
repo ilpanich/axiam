@@ -291,10 +291,21 @@ export AXIAM__RATE_LIMIT__LOGIN_PER_MIN="${AXIAM__RATE_LIMIT__LOGIN_PER_MIN:-600
 # authorization-endpoint throughput. Overridable for the same reason.
 export AXIAM__RATE_LIMIT__END_SESSION_PER_MIN="${AXIAM__RATE_LIMIT__END_SESSION_PER_MIN:-600}"
 
+# CIBA per-hint allowance — raised for the harness (#639).
+#
+# A client may have three `bc-authorize` calls admitted per hint in any ten
+# minutes (#599, T-424). A CIBA plan runs module after module for one client and
+# one test user's `login_hint`, so the fourth module would meet `429 slow_down`
+# and read it as a protocol failure. No module tests the per-hint allowance.
+# See docs/conformance/README.md, "The CIBA hint cap, and a CIBA run".
+# Overridable for the same reason as the two above.
+export AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT="${AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT:-1000}"
+
 echo "[serve] issuer    $AXIAM__AUTH__OAUTH2_ISSUER_URL (served by the nginx sidecar)"
 echo "[serve] mTLS base $AXIAM__AUTH__OAUTH2_MTLS_BASE_URL"
 echo "[serve] login/min $AXIAM__RATE_LIMIT__LOGIN_PER_MIN (raised for the harness; see the comment)"
 echo "[serve] authorize/min $AXIAM__RATE_LIMIT__END_SESSION_PER_MIN (browser-endpoint preset, raised for the harness; see the comment)"
+echo "[serve] CIBA calls/hint/10 min $AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT (raised for the harness; see the comment)"
 echo "[serve] tenant    ${AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID:-<none — authorizations will fail>}"
 echo "[serve] listener  https://$AXIAM__SERVER__HOST:$AXIAM__SERVER__PORT (client_auth=$AXIAM__SERVER__TLS__CLIENT_AUTH)"
 echo "[serve] cert      $CERT"

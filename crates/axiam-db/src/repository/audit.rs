@@ -276,6 +276,23 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
 }
 
 impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
+    async fn datastore_now(&self) -> AxiamResult<DateTime<Utc>> {
+        // The same function that stamps `audit_log.timestamp` (`DEFAULT
+        // time::now()`), read from the same server: a bound taken here and a
+        // row stamped by an append share one clock, whatever the application
+        // host's says.
+        let mut result = self
+            .db
+            .current()
+            .query("RETURN time::now()")
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let now: Option<DateTime<Utc>> = result.take(0).map_err(DbError::from)?;
+        Ok(now.ok_or_else(|| DbError::Migration("RETURN time::now() returned no value".into()))?)
+    }
+
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         let id = new_id();
         let id_str = id.to_string();

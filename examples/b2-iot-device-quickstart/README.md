@@ -39,19 +39,22 @@ AXIAM_URL=http://localhost:8090 ./examples/b2-iot-device-quickstart/device-quick
 
 1. Logs in as the tenant admin — this stands in for "the person with the
    sensor picks up their phone" later in the flow.
-2. Registers the device as an OAuth2 client (`grant_types: ["urn:ietf:params:oauth:grant-type:device_code"]`,
-   no `redirect_uris` — a device never receives a browser redirect). Real
-   fleets do this once, ahead of time, from provisioning tooling, not on
-   every boot.
-3. **Device side:** `POST /oauth2/device_authorization` — unauthenticated,
-   gets back a `device_code`, a short `user_code`, and a polling `interval`.
+2. Registers the device as a public OAuth2 client (`grant_types: ["urn:ietf:params:oauth:grant-type:device_code"]`,
+   `token_endpoint_auth_method: "none"`, no `redirect_uris` — a device keeps
+   no secret and never receives a browser redirect). Real fleets do this once,
+   ahead of time, from provisioning tooling, not on every boot. A confidential
+   client would send its `client_secret` at both device endpoints (#635).
+3. **Device side:** `POST /oauth2/device_authorization` with its `client_id`
+   alone, gets back a `device_code`, a short `user_code`, and a polling
+   `interval`.
 4. **Human side:** `GET /api/v1/device/verify?user_code=…` to see what's
    being asked for, then `POST /api/v1/device/decide {"approved": true}` —
    both authenticated and CSRF-protected, because approval is an act of
    authorization by a specific human (see the design rationale in the
    handler docs, `crates/axiam-api-rest/src/handlers/device.rs`).
 5. **Device side:** polls `POST /oauth2/token` with
-   `grant_type=urn:ietf:params:oauth:grant-type:device_code`, treating
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code`, the
+   `device_code` and its `client_id` (RFC 8628 §3.4), treating
    `authorization_pending` as "keep going" and `slow_down` as "wait longer"
    per RFC 8628 §3.5 — both are normal, expected answers, not errors. Stops
    the moment tokens come back.

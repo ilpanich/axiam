@@ -26,8 +26,13 @@
 //! * **Pushed authorization requests** — deleted, spent or not.
 //! * **Device grants** (RFC 8628) — deleted in every status. An *approved*
 //!   grant is the dangerous one: the device holds the device code and is
-//!   polling, and a re-materialised CIMD client authenticates that poll, so
-//!   the grant would redeem for the new row (#610 (d)). A poll in flight when
+//!   polling, and the poll authenticated no client (R101W3-01), so the grant
+//!   redeemed whether or not its client still existed (#610 (d)). (This module
+//!   used to give a re-materialised CIMD client as the reason. That was wrong:
+//!   a CIMD client registers only the code grants and can hold neither this
+//!   grant nor CIBA, #642 (a). The poll now authenticates the client, #635, and
+//!   refuses `invalid_client` while no row names the `client_id`; deleting the
+//!   grant is what refuses a row that names it again.) A poll in flight when
 //!   the delete lands is safe in the same way: `redeem` is one guarded
 //!   `UPDATE … WHERE status = 'approved'`, so once the row is gone it matches
 //!   nothing, however recently the poll read the grant. A poll whose redeem
@@ -35,10 +40,10 @@
 //!   holds a refresh token the second revoke pass (run by every caller after
 //!   the row is gone) voids, unless it was written after that pass too — the
 //!   window every flow shares, bounded by the access-token lifetime.
-//! * **CIBA requests** (OpenID CIBA) — deleted in every status, for the same
-//!   reason: an approved one redeems against a re-materialised client, and a
-//!   pending one would stay on the user's approval surface naming a client
-//!   that no longer exists. `redeem` is guarded the same way.
+//! * **CIBA requests** (OpenID CIBA) — deleted in every status: an approved
+//!   one would otherwise outlive its client, and a pending one would stay on
+//!   the user's approval surface naming a client that no longer exists.
+//!   `redeem` is guarded the same way.
 //! * **Access tokens** — self-contained JWTs, revoked by nothing in AXIAM;
 //!   they expire within the access-token lifetime.
 //! * **The end user's AXIAM sessions** — not the client's to end: they are

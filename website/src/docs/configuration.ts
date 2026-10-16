@@ -428,6 +428,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "60",
           ],
           [
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT",
+            "Max CIBA backchannel authentication requests one client may have admitted for one hint (a login_hint as sent, or an id_token_hint's subject) in any ten-minute stretch \u2014 the longest a request may live, so also the most open requests one client can hold for one person. Not a per-minute rate. A call past it is refused 429 slow_down before the hint is looked up, whoever it names; a refused call is not counted. Shared by every replica through the rate-limit table (set them alike); no profile preset moves it. Raise it only for a conformance or SDK integration run, which drives many flows for one test user from one client (docs/conformance/README.md). Must be at least 1.",
+            "3",
+          ],
+          [
             "AXIAM__RATE_LIMIT__DCR_PER_MIN",
             "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
             "5",

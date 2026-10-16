@@ -266,6 +266,9 @@ struct MockAuditRepo {
 }
 
 impl AuditLogRepository for MockAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         *self.appends.lock().unwrap() += 1;
         if self.fail_append {

@@ -1411,6 +1411,19 @@ pub struct AuditLogFilter {
 }
 
 pub trait AuditLogRepository: Send + Sync {
+    /// The datastore's own clock, read now.
+    ///
+    /// `audit_log.timestamp` is stamped by the datastore (`DEFAULT time::now()`),
+    /// never by the application. Anything that compares a bound with those
+    /// stamps — the tenant audit export's `exported_through`, which the purge
+    /// later deletes up to (T-118) — must therefore take the bound from the
+    /// same clock: an application host whose clock leads the datastore's by
+    /// δ would otherwise claim rows that were never paged, and a receipt
+    /// whose bound is later than its own stamp is refused by the deletion.
+    ///
+    /// An implementation that is not backed by a datastore returns its own
+    /// process clock; a wrapper must forward to the repository it wraps.
+    fn datastore_now(&self) -> impl Future<Output = AxiamResult<DateTime<Utc>>> + Send;
     /// Append a new audit log entry. No update or delete operations exist.
     fn append(
         &self,
@@ -1555,6 +1568,25 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         managed_by: ManagedBy,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// How many **confidential** clients hold any of `grant_types`, across
+    /// every **live** tenant, and in how many tenants (R110W3-02).
+    ///
+    /// Confidential means `token_endpoint_auth_method` is anything but `none`,
+    /// an absent value (a row older than the column) included: that is the
+    /// client the device grant has authenticated since 1.1.0 (#635). A client
+    /// of a tombstoned tenant is not counted, and neither is an orphaned row
+    /// whose tenant no longer exists: the purge is about to remove both.
+    ///
+    /// `grant_types` lists the spellings of one grant, so a caller that
+    /// accepts a URN and a bare name asks once. Deployment-wide and
+    /// tenant-free for the same reason as [`Self::list_all_by_managed_by`],
+    /// and answered by the datastore as two numbers: the caller never pages
+    /// a table, and no row of any client leaves the database.
+    fn count_confidential_with_grant(
+        &self,
+        grant_types: &[&str],
+    ) -> impl Future<Output = AxiamResult<crate::models::oauth2_client::ConfidentialGrantCount>> + Send;
 
     /// Every client with the given provenance, across **all** tenants
     /// (T21.4's sweeper).
@@ -1830,9 +1862,11 @@ pub trait DeviceGrantRepository: Send + Sync {
     /// status — pending, approved, denied or redeemed (#517, #610). Returns
     /// the number deleted.
     ///
-    /// Called when the client is removed: a `managed_by: cimd` client is
-    /// re-materialised under the same `client_id`, and an approved grant left
-    /// behind would redeem against the new row. Scoped by tenant **and**
+    /// Called when the client is removed: the poll did not authenticate a
+    /// client before #635 (R101W3-01), so an approved grant left behind
+    /// redeemed whether or not its client existed, and it still must not
+    /// redeem against a row that names the `client_id` again. (A
+    /// `managed_by: cimd` client cannot hold this grant, #642 (a).) Scoped by tenant **and**
     /// client id, never by client id alone — the id is unique only within its
     /// tenant. Idempotent.
     ///
@@ -1979,8 +2013,7 @@ pub trait CibaRequestRepository: Send + Sync {
     ///
     /// Called when the client is removed: a pending request would otherwise
     /// stay listed on the approval surface for a client that no longer exists,
-    /// and an approved one could be redeemed once a `managed_by: cimd` client
-    /// is re-materialised under the same `client_id`. Scoped by tenant **and**
+    /// and an approved one must not outlive its client. Scoped by tenant **and**
     /// client id. Idempotent. A [`Self::redeem`] racing this delete either
     /// wrote first (and minted for the old client) or matches nothing.
     fn delete_all_for_client(

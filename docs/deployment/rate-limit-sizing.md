@@ -146,6 +146,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | 60 | 300 | 3000 |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | 60 | 600 | 6000 |
+| `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` | 3 | 3 | 3 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | 5 | 5 |
@@ -180,6 +181,22 @@ stored and answered, so the response reveals nothing about the user), and each
 `auth_req_id` carries its own polling interval at the token endpoint, raised by
 `slow_down`. The CIBA grant's token requests are counted by `TOKEN_PER_MIN`
 like every other grant.
+
+`BC_AUTHORIZE_PER_HINT` (#599, #639) is not a per-minute rate: it is how many
+`bc-authorize` calls one client may have **admitted for one hint** (one
+`login_hint` as sent, or one `id_token_hint`'s subject) in any **ten-minute**
+stretch — the longest a CIBA request may live, so it is also the most open
+requests one client can hold for one person. A call past it is refused
+`429 slow_down` before the hint is looked up, whoever the hint names; a refused
+call is **not counted**, so a client that waits out the window after the one
+in which it used its allowance is admitted again. It is counted in the shared
+`rate_limit_bucket` table, so it holds across replicas (set every replica
+alike), and no preset moves it: it bounds one person's attention, not the
+server's capacity. The shipped three is sized for production. **A conformance
+or SDK integration run** — the OpenID FAPI-CIBA plan, an SDK's CIBA suite —
+drives many flows for one test user from one client within minutes and needs
+more; set it for that deployment only (`docs/conformance/README.md`). It must be
+at least 1; `0` stops the server at startup.
 
 The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
 bucket per gRPC **method family** (see §3.1). Leave `GRPC_IDENTITY_PER_SEC`

@@ -25,15 +25,30 @@
 //! `denied` being distinct from `pending` is what lets a device stop
 //! immediately instead of polling out the full ten minutes after a user has
 //! already refused — which is both a better experience and less load.
+//!
+//! # Who may poll (#635, R101W3-01)
+//!
+//! The device code is a credential, but it is not the only one. RFC 8628 §3.4's
+//! token request is an RFC 6749 token request, so it names its `client_id`, and
+//! RFC 6749 §3.2.1 has a confidential client authenticate at the token endpoint
+//! whatever the grant. Both endpoints of this grant therefore take a
+//! [`DeviceClient`], which only `crate::token::TokenService` makes, after the
+//! client authenticated by its **registered** method (a public client, by
+//! presenting nothing), its tenant was found live, and — at the poll — the
+//! profile's request-time rules passed and the token binding was decided. The
+//! poll then answers a grant issued to another client exactly as it answers an
+//! unknown device code, before it records the poll or looks at the grant's
+//! state: a caller holding a leaked device code learns nothing about it, and
+//! cannot spend it, slow it down or redeem it under a client it can
+//! authenticate as.
 
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_USER, issue_access_token};
+use axiam_auth::token::{AUD_USER, CnfClaim, issue_access_token_bound};
 use axiam_core::error::AxiamError;
-use axiam_core::models::oauth2_client::{CreateDeviceGrant, CreateRefreshToken, DeviceGrantStatus};
-use axiam_core::repository::{
-    DeviceGrantRepository, OAuth2ClientRepository, RefreshTokenRepository, TenantRepository,
-    UserRepository,
+use axiam_core::models::oauth2_client::{
+    CreateDeviceGrant, CreateRefreshToken, DeviceGrantStatus, OAuth2Client,
 };
+use axiam_core::repository::{DeviceGrantRepository, RefreshTokenRepository, UserRepository};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -48,19 +63,99 @@ use crate::token::TokenResponse;
 /// The grant type this service handles.
 pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
+/// Both spellings of the device grant the admin API accepts in a client's
+/// `grant_types`: the URN, and the bare `device_code`.
+pub const DEVICE_CODE_GRANT_SPELLINGS: [&str; 2] = [DEVICE_CODE_GRANT_TYPE, "device_code"];
+
+/// Whether a client's `grant_types` hold the device grant, in either spelling
+/// the admin API accepts (the URN, or the bare `device_code`).
+pub fn holds_device_grant(grant_types: &[String]) -> bool {
+    grant_types
+        .iter()
+        .any(|g| DEVICE_CODE_GRANT_SPELLINGS.contains(&g.as_str()))
+}
+
+/// A client [`crate::token::TokenService`] authenticated for the device grant
+/// (#635, R101W3-01).
+///
+/// Its fields are private and only the token service constructs one, so
+/// neither [`DeviceAuthorizationService::authorize`] nor
+/// [`DeviceAuthorizationService::poll_at`] can be reached with a client that
+/// did not authenticate: the type is the proof that it did. What it carries is
+/// what the two operations need from that authentication and nothing they
+/// would otherwise have to read again — the registration (scopes, allowed
+/// resources, provenance), the organization of the tenant found live, and, at
+/// the poll, the `cnf` the token must carry.
+pub struct DeviceClient {
+    client: OAuth2Client,
+    organization_id: Uuid,
+    cnf: Option<CnfClaim>,
+}
+
+impl DeviceClient {
+    /// Only the token service calls this, once the checks the type stands
+    /// for have passed.
+    pub(crate) fn new(client: OAuth2Client, organization_id: Uuid, cnf: Option<CnfClaim>) -> Self {
+        Self {
+            client,
+            organization_id,
+            cnf,
+        }
+    }
+
+    /// The authenticated client's identifier.
+    pub fn client_id(&self) -> &str {
+        &self.client.client_id
+    }
+}
+
 /// `POST /oauth2/device_authorization` request (RFC 8628 §3.1).
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+///
+/// `Debug` is written by hand so that the credentials never reach a log line.
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeviceAuthorizationRequest {
     pub client_id: String,
+    /// The client's secret, for a client registered for `client_secret_post`
+    /// (#635, RFC 8628 §3.1 → RFC 6749 §2.3). A public client
+    /// (`token_endpoint_auth_method: none`) sends none, and is refused if it
+    /// does.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// RFC 7523 client assertion, for a client registered for
+    /// `private_key_jwt` (#635).
+    #[serde(default)]
+    pub client_assertion: Option<String>,
+    /// RFC 7521 §4.2 assertion type; must accompany `client_assertion`.
+    #[serde(default)]
+    pub client_assertion_type: Option<String>,
     pub scope: Option<String>,
     /// T21.3 / RFC 8707 §2 — the target service this device wants a token for.
     ///
-    /// Named here, where the device makes its request, because the poll that
-    /// redeems the grant carries nothing but a `device_code`. Validated
-    /// against the client's `allowed_resources` and stored on the grant;
-    /// absent leaves the flow exactly as it was (I2).
+    /// Named here, where the device makes its request, because a grant's
+    /// audience is decided when the grant is made: the poll that redeems it
+    /// may only repeat it. Validated against the client's `allowed_resources`
+    /// and stored on the grant; absent leaves the flow exactly as it was (I2).
     #[serde(default)]
     pub resource: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceAuthorizationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceAuthorizationRequest")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_assertion",
+                &self.client_assertion.as_ref().map(|_| "<redacted>"),
+            )
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("scope", &self.scope)
+            .field("resource", &self.resource)
+            .finish()
+    }
 }
 
 /// `POST /oauth2/device_authorization` response (RFC 8628 §3.2).
@@ -87,10 +182,8 @@ pub struct DeviceAuthorizationResponse {
 /// cheap repository handle or configuration, so a clone is a handful of
 /// `Arc` bumps rather than a copy of anything.
 #[derive(Clone)]
-pub struct DeviceAuthorizationService<DG, OC, TR, RT, UR> {
+pub struct DeviceAuthorizationService<DG, RT, UR> {
     device_repo: DG,
-    client_repo: OC,
-    tenant_repo: TR,
     refresh_token_repo: RT,
     user_repo: UR,
     auth_config: AuthConfig,
@@ -101,19 +194,17 @@ pub struct DeviceAuthorizationService<DG, OC, TR, RT, UR> {
     scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
-impl<DG, OC, TR, RT, UR> DeviceAuthorizationService<DG, OC, TR, RT, UR>
+impl<DG, RT, UR> DeviceAuthorizationService<DG, RT, UR>
 where
     DG: DeviceGrantRepository,
-    OC: OAuth2ClientRepository,
-    TR: TenantRepository,
     RT: RefreshTokenRepository,
     UR: UserRepository,
 {
-    #[allow(clippy::too_many_arguments)]
+    /// The client and tenant repositories it once held are gone (#635): the
+    /// client is read, authenticated and its tenant checked by
+    /// `crate::token::TokenService`, which hands over a [`DeviceClient`].
     pub fn new(
         device_repo: DG,
-        client_repo: OC,
-        tenant_repo: TR,
         refresh_token_repo: RT,
         user_repo: UR,
         auth_config: AuthConfig,
@@ -122,8 +213,6 @@ where
     ) -> Self {
         Self {
             device_repo,
-            client_repo,
-            tenant_repo,
             refresh_token_repo,
             user_repo,
             auth_config,
@@ -144,36 +233,23 @@ where
 
     /// RFC 8628 §3.1–3.2 — issue a device code and a user code.
     ///
-    /// The client is authenticated only by `client_id`: RFC 8628 is designed
-    /// for public clients (a TV cannot keep a secret), so there is no secret
-    /// to check. What *is* checked is that the client exists, belongs to this
-    /// tenant, and is registered for this grant type — otherwise any string
-    /// could mint a pending grant and consume the user-code space.
+    /// `client` is the client the token service authenticated at this
+    /// endpoint (#635): by its registered method, so a public client — a TV
+    /// cannot keep a secret — by presenting nothing, and a confidential one by
+    /// its credential (RFC 8628 §3.1 applies RFC 6749 §3.2.1 here); in a
+    /// tenant that is still live (#641 (a)); holding this grant. Without the
+    /// last two any string could mint a pending grant and consume the
+    /// user-code space.
     pub async fn authorize(
         &self,
         tenant_id: Uuid,
+        client: DeviceClient,
         req: DeviceAuthorizationRequest,
     ) -> Result<DeviceAuthorizationResponse, OAuth2Error> {
-        let client = self
-            .client_repo
-            .get_by_client_id(tenant_id, &req.client_id)
-            .await
-            .map_err(|_| OAuth2Error::InvalidClient("unknown client".into()))?;
-
-        if !client
-            .grant_types
-            .iter()
-            .any(|g| g == DEVICE_CODE_GRANT_TYPE || g == "device_code")
-        {
-            return Err(OAuth2Error::UnauthorizedClient(
-                "client is not registered for the device authorization grant".into(),
-            ));
-        }
-
         // #613 (T-289) — for an externally registered client, "what the client
         // is registered for" is bounded by the tenant's current
         // `dcr_allowed_scopes`. No read for an administrator's client.
-        let mut client = client;
+        let mut client = client.client;
         crate::scope_ceiling::apply_to_client(self.scope_policy.as_ref(), &mut client).await?;
 
         // Scopes are narrowed to what the client is registered for. A device
@@ -203,7 +279,7 @@ where
         self.device_repo
             .create(CreateDeviceGrant {
                 tenant_id,
-                client_id: req.client_id,
+                client_id: client.client_id,
                 device_code_hash: hash_device_code(&device_code),
                 user_code: user_code.clone(),
                 scopes,
@@ -227,20 +303,6 @@ where
         })
     }
 
-    /// RFC 8628 §3.4–3.5 — the device polls with its `device_code`.
-    ///
-    /// Order matters here and is worth stating: the poll interval is enforced
-    /// **before** the state is examined. A device hammering the endpoint gets
-    /// `slow_down` whatever its grant's state, so the corrective signal is not
-    /// something it can outrun by being in a lucky state.
-    ///
-    /// `resource` is RFC 8707's parameter on the token request (T21.3). The
-    /// device already named its target when it started the flow, so the only
-    /// thing a poll may do with the parameter is **repeat it**: a poll that
-    /// names a different resource — or names one at all when the grant is
-    /// bound to none — is `invalid_target`. See
-    /// [`crate::resource::resolve_bound`] for why a grant's audience is
-    /// decided when the grant is made and never at redemption.
     /// The config the device grant's access token is signed under (T21.6).
     ///
     /// See `TokenService::minting_config`.
@@ -254,31 +316,62 @@ where
         }
     }
 
-    /// [`Self::poll_at`] for a device polling the deployment-wide token
-    /// endpoint.
-    pub async fn poll(
-        &self,
-        tenant_id: Uuid,
-        device_code: &str,
-        resource: Option<&str>,
-    ) -> Result<TokenResponse, OAuth2Error> {
-        self.poll_at(tenant_id, device_code, resource, None).await
-    }
-
-    /// [`Self::poll`], told which issuer the request arrived under (T21.6).
+    /// RFC 8628 §3.4–3.5 — the device polls with its `device_code`.
     ///
-    /// `issuer` is `None` for `/oauth2/token` and `Some("{root}/t/{tenant}")`
-    /// for the per-tenant path. It decides the `iss` of the minted access
-    /// token and nothing else — the device code is still the only credential,
-    /// and it is still looked up in the tenant the path or the query named.
+    /// `client` is the client the token service authenticated on this request
+    /// (#635) — see the module documentation. `issuer` is `None` for
+    /// `/oauth2/token` and `Some("{root}/t/{tenant}")` for the per-tenant path
+    /// (T21.6); it decides the `iss` of the minted access token and nothing
+    /// else.
+    ///
+    /// # Order, and what each step may write
+    ///
+    /// 1. The grant is read by the device code's hash, in this tenant. A grant
+    ///    issued to **another client** is `invalid_grant`, the answer an
+    ///    unknown code gets, and nothing has been written for it: a caller
+    ///    that holds a leaked device code and authenticates as some client it
+    ///    controls neither learns the grant's state nor records a poll that
+    ///    would `slow_down` the real device. (A wrong credential for the
+    ///    grant's own client never got this far.)
+    /// 2. Only now is the poll recorded, and the interval enforced **before**
+    ///    the state is examined: a device hammering the endpoint gets
+    ///    `slow_down` whatever its grant's state, so the corrective signal is
+    ///    not something it can outrun by being in a lucky state.
+    /// 3. Expired → `expired_token`; a `resource` that does not repeat the
+    ///    grant's → `invalid_target`; then pending, denied and redeemed.
+    /// 4. Approved → redeemed atomically; the subject is re-read after the
+    ///    approval is spent; tokens are minted bound by the `cnf` the client's
+    ///    registration asked for.
+    ///
+    /// `resource` is RFC 8707's parameter on the token request (T21.3). The
+    /// device already named its target when it started the flow, so the only
+    /// thing a poll may do with the parameter is **repeat it**: a poll that
+    /// names a different resource — or names one at all when the grant is
+    /// bound to none — is `invalid_target`. See
+    /// [`crate::resource::resolve_bound`] for why a grant's audience is
+    /// decided when the grant is made and never at redemption.
     pub async fn poll_at(
         &self,
         tenant_id: Uuid,
+        client: &DeviceClient,
         device_code: &str,
         resource: Option<&str>,
         issuer: Option<&str>,
     ) -> Result<TokenResponse, OAuth2Error> {
         let hash = hash_device_code(device_code);
+
+        let grant = self
+            .device_repo
+            .get_by_device_code_hash(tenant_id, &hash)
+            .await
+            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
+            // An unknown device code, an already-redeemed one and another
+            // client's are all `invalid_grant`. They are genuinely the same
+            // answer: in each case this code will never produce a token for
+            // this caller, and distinguishing them would tell a caller which
+            // codes have existed.
+            .filter(|g| g.client_id == client.client_id())
+            .ok_or_else(|| OAuth2Error::InvalidGrant("unknown device code".into()))?;
 
         let (_interval, too_fast) = self
             .device_repo
@@ -289,17 +382,6 @@ where
             return Err(OAuth2Error::SlowDown);
         }
 
-        let grant = self
-            .device_repo
-            .get_by_device_code_hash(tenant_id, &hash)
-            .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
-            // An unknown device code and an already-redeemed one are both
-            // `invalid_grant`. They are genuinely the same answer: in both
-            // cases this code will never produce a token, and distinguishing
-            // them would tell a caller which codes have existed.
-            .ok_or_else(|| OAuth2Error::InvalidGrant("unknown device code".into()))?;
-
         if grant.expires_at <= Utc::now() {
             return Err(OAuth2Error::ExpiredToken);
         }
@@ -309,9 +391,9 @@ where
         // gets the actionable answer on its first poll instead of an hour of
         // `authorization_pending` followed by a refusal that has already spent
         // the user's approval. There is no oracle in answering early: the
-        // caller holds the device code, so it is the device, and the value it
-        // is being told about is the one it sent itself at
-        // `/oauth2/device_authorization`.
+        // caller holds the device code and authenticated as its client, so it
+        // is the device, and the value it is being told about is the one it
+        // sent itself at `/oauth2/device_authorization`.
         let _ = crate::resource::resolve_bound(grant.resource.as_deref(), resource)?;
 
         match grant.status {
@@ -345,11 +427,13 @@ where
             OAuth2Error::ServerError("approved device grant has no subject".into())
         })?;
 
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // The tenant is not read here any more (#635, #641 (b)): the client's
+        // authentication read it, found it live, and handed over its
+        // organization. A tombstoned tenant is therefore the `invalid_client`
+        // every other grant answers, decided before the grant is touched,
+        // where this read used to answer `server_error` after the approval was
+        // spent.
+        //
         // The subject is re-read after the approval is spent, and asked the
         // same question every other grant asks (R1W1-06 / #604): may this
         // account act, and is it free of brute-force lockout? A user
@@ -411,14 +495,22 @@ where
         // what every device grant minted before T21.3 and what every grant
         // that sends no `resource` still mints, byte for byte (I2).
         let audience = redeemed.resource.as_deref().unwrap_or(AUD_USER);
-        let access_token = issue_access_token(
+        // #635 — the binding the client's registration asks for, decided by
+        // the token service from this request's certificate and DPoP proof
+        // (`TokenService::certificate_binding_for`, as for every other grant).
+        // `None` for a client that asked for none, which mints exactly the
+        // token this grant always minted. Read before `cnf` is moved: RFC 9449
+        // §5 announces a DPoP-bound token as such.
+        let token_type = crate::dpop::token_type_for(client.cnf.as_ref());
+        let access_token = issue_access_token_bound(
             user.id,
             tenant_id,
-            tenant.organization_id,
+            client.organization_id,
             &redeemed.scopes,
             &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             audience,
+            client.cnf.clone(),
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -430,7 +522,7 @@ where
 
         Ok(TokenResponse {
             access_token,
-            token_type: "Bearer".into(),
+            token_type,
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: Some(refresh_token),
             scope,

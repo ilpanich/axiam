@@ -48,7 +48,7 @@
 //! sent: answering it would let any registered CIBA client enumerate the
 //! tenant's usernames and e-mail addresses at the endpoint's rate limit.
 //!
-//! The per-(client, hint) cap (#599, T-424, [`MAX_REQUESTS_PER_CLIENT_HINT`])
+//! The per-(client, hint) cap (#599, T-424, [`DEFAULT_REQUESTS_PER_CLIENT_HINT`])
 //! keeps to this. It counts the client's `bc-authorize` calls for the hint as
 //! the request carried it — a `login_hint` as sent, a verified
 //! `id_token_hint`'s subject — in a shared counter, before the hint is looked
@@ -67,6 +67,7 @@ use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile, OAuth2C
 use axiam_core::models::session::Amr;
 use axiam_core::models::user::User;
 use axiam_core::repository::{CibaRequestRepository, UserRepository};
+use axiam_db::helpers::retry_on_write_conflict;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -781,44 +782,52 @@ pub struct CibaApproval {
 /// ([`CibaPendingPage::total_pending`]).
 pub const MAX_PENDING_LIST: u32 = 50;
 
-/// The most `bc-authorize` calls one client may make for one hint in any
-/// [`HINT_CAP_WINDOW_SECS`] (#599, T-424). A fourth is refused before the hint
-/// is looked up, stored or mailed, with the `slow_down` the per-client limiter
-/// answers.
+/// The shipped allowance of `bc-authorize` calls one client may have admitted
+/// for one hint in any [`HINT_CAP_WINDOW_SECS`] (#599, T-424). The deployment
+/// sets its own with `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (#639,
+/// [`CibaHintCap::with_per_hint`]); a call past the allowance is refused before
+/// the hint is looked up, stored or mailed, with the `slow_down` the
+/// per-client limiter answers.
 ///
 /// `requested_expiry` is the client's to choose, so without a per-client bound
 /// a client that may address a user could keep the whole list full of
 /// short-lived requests of its own. Three is room for a retry or two while the
 /// first is still on the user's phone; a client that needs more is waiting on
-/// a user who has not answered.
+/// a user who has not answered. A conformance suite or an SDK's integration
+/// suite, which runs many flows for one test user from one client within
+/// minutes, needs more, and sets the knob for the deployment it tests.
 ///
-/// **What is counted is calls, not open requests.** The count is keyed on
-/// (tenant, client, a keyed digest of the hint) — never on the user the hint
+/// **What is counted is admitted calls, not open requests.** The count is keyed
+/// on (tenant, client, a keyed digest of the hint) — never on the user the hint
 /// resolves to — so a hint that names nobody, a user who may not sign in and a
 /// real user are refused at the same call, and the refusal says nothing about
 /// the hint (D-63, T-422). A request that has been approved, denied or has
-/// expired therefore still counts until its window has passed, and a refused
-/// call counts too: a client that keeps calling for a hint stays refused until
-/// it has stopped for a window. The hint is the one the request carried, as
-/// hint resolution normalises it (a `login_hint` trimmed and otherwise exact,
-/// as the username and e-mail lookups match it; an `id_token_hint` reduced to
-/// its verified subject), so one user named by username, by e-mail address
-/// and by ID token is three hints — up to nine calls a window from one client.
+/// expired therefore still counts until its window has passed. A **refused**
+/// call does not count (#639; until 1.1.0 it did, so a client that kept
+/// retrying stayed refused): a client that stops for the rest of the window
+/// after the one in which it used its allowance is admitted again. The hint is
+/// the one the request carried, as hint resolution normalises it (a
+/// `login_hint` trimmed and otherwise exact, as the username and e-mail lookups
+/// match it; an `id_token_hint` reduced to its verified subject), so one user
+/// named by username, by e-mail address and by ID token is three hints — three
+/// allowances a window from one client.
 ///
-/// Admission requires the calls in this window and the one before it to come
-/// to at most three, so any [`HINT_CAP_WINDOW_SECS`]-long stretch admits at
-/// most three; as no request outlives that, one client never has more than
-/// three open requests for one hint. The price is coarseness: a client that has
-/// made three calls in one window is refused for the whole of the next, so it
-/// waits between one and two windows. The counter is the shared rate-limit
-/// table, incremented atomically in the datastore on every call, so the cap
-/// holds across replicas and under concurrent calls (see [`CibaHintCap`]).
-pub const MAX_REQUESTS_PER_CLIENT_HINT: u64 = 3;
+/// Admission requires the admitted calls in this window and the one before it,
+/// this call included, to come to at most the allowance, so any
+/// [`HINT_CAP_WINDOW_SECS`]-long stretch admits at most the allowance; as no
+/// request outlives that, one client never holds more open requests for one
+/// hint than the allowance. The price is coarseness: a client that has used the
+/// allowance in one window is refused for the whole of the next, so it waits
+/// between one and two windows. The count is the shared rate-limit table,
+/// written atomically in the datastore, so the bound holds across replicas and
+/// under concurrent calls (see [`CibaHintCap`] for the protocol and the
+/// argument).
+pub const DEFAULT_REQUESTS_PER_CLIENT_HINT: u32 = 3;
 
-/// The window of [`MAX_REQUESTS_PER_CLIENT_HINT`]: the longest a request may
-/// live ([`MAX_REQUESTED_EXPIRY_SECS`]), not the default
-/// ([`DEFAULT_EXPIRES_IN_SECS`]), so a client that asks for the longest expiry
-/// still cannot hold a fourth open request for one hint.
+/// The window of the per-hint allowance ([`DEFAULT_REQUESTS_PER_CLIENT_HINT`]):
+/// the longest a request may live ([`MAX_REQUESTED_EXPIRY_SECS`]), not the
+/// default ([`DEFAULT_EXPIRES_IN_SECS`]), so a client that asks for the longest
+/// expiry still cannot hold more open requests for one hint than the allowance.
 pub const HINT_CAP_WINDOW_SECS: u64 = MAX_REQUESTED_EXPIRY_SECS;
 
 /// What a hint names, as the cap counts it and the lookup reads it: a
@@ -833,40 +842,110 @@ enum HintName {
 }
 
 /// The per-(client, hint) cap on `bc-authorize` (#599, T-424): see
-/// [`MAX_REQUESTS_PER_CLIENT_HINT`].
+/// [`DEFAULT_REQUESTS_PER_CLIENT_HINT`].
 ///
 /// Counted in the deployment's shared rate-limit table (`rate_limit_bucket`)
-/// through [`axiam_db::SharedRateLimitStore::increment_by`], one atomic upsert
-/// per call — not through the write-behind
+/// through [`axiam_db::SharedRateLimitStore`] — not through the write-behind
 /// [`axiam_db::SharedRateLimitCounter`], whose window is the limiters' minute
 /// and whose local buckets are pruned after two of them. Two buckets per
 /// (tenant, client, hint), one for even and one for odd windows, so the table
-/// holds two rows per hint a client has named, however long it keeps naming
-/// it.
+/// holds at most two rows per hint a client has named, however long it keeps
+/// naming it.
 ///
 /// The bucket key is `ciba_hint_cap:{tenant}:` followed by an HMAC-SHA256,
 /// under a key only the deployment holds, of the client and the hint: the
 /// table is not a dictionary of hashes of the usernames and addresses clients
 /// have tried.
+///
+/// # The protocol, and the bound it guarantees (#639)
+///
+/// A call stamped in window `s` (its own clock) does three things, each one
+/// statement on one record:
+///
+/// 1. **counts itself**: an atomic increment of window `s`'s bucket, which
+///    answers the count after it, `v`;
+/// 2. **reads** window `s − 1`'s bucket (a `SELECT`, which writes nothing): its
+///    count when the bucket still holds `s − 1`, zero when it holds an older
+///    window or does not exist, and **overtaken** when it already holds
+///    `s + 1` — a call stamped in the next window has written, so this one is
+///    late;
+/// 3. is **admitted** when it was not overtaken and `v` plus the previous
+///    window's count is at most the allowance; otherwise it is refused and
+///    **takes its count back** with a conditional decrement (which only
+///    touches the bucket while it still holds window `s`).
+///
+/// *The bound.* For every two consecutive windows the admitted calls stamped
+/// in them come to at most the allowance, so any window-long stretch admits at
+/// most the allowance — exactly, under concurrent calls and across replicas,
+/// with no overshoot. Within one window: the admitted call whose increment
+/// came last counted every admitted call of its window before it (admitted
+/// counts are never taken back; a refused call's count is taken back only
+/// after it was made, so it can only inflate `v`), so `v` is at least the
+/// window's admissions. Across a boundary: a call stamped `s − 1` that is
+/// admitted read window `s`'s bucket (its "previous" bucket by parity) before
+/// any call stamped `s` had counted itself — had one done so, the bucket would
+/// hold `s` and the call would be overtaken and refused. So every call stamped
+/// `s − 1` that is admitted counted itself before any call stamped `s` read
+/// window `s − 1`'s bucket, and the last admitted call of window `s` saw all of
+/// them. Two calls racing across a boundary can both be refused (each sees the
+/// other); they cannot both be admitted past the allowance.
+///
+/// *What it assumes.* No call stays in flight — from its clock read to its
+/// last statement — while a call stamped two windows later writes; that is,
+/// a call's latency plus the replicas' clock skew stays under one window (ten
+/// minutes). Beyond that the error is still on the strict side: a call whose
+/// own bucket has been taken over adds to the newer window's count and its
+/// previous bucket reads as overtaken.
+///
+/// *What it costs.* A refusal may be spurious only while another call for the
+/// same hint is between its count and its take-back, or when a call is
+/// overtaken at a window boundary (or by a replica whose clock runs ahead).
+/// A store error after the count leaves the count in place (strict: the
+/// allowance is one smaller until the window passes) and the call fails with
+/// `server_error`; a take-back that fails leaves it in place too, and the call
+/// is refused as decided.
+///
+/// A row is read until the end of the window after the one it was written in,
+/// so the server's `rate_limit_bucket` sweep deletes a row once it is more
+/// than twice [`HINT_CAP_WINDOW_SECS`] old (with a margin), which bounds the
+/// table by the hints named in that stretch instead of every hint ever named.
 #[derive(Clone)]
 pub struct CibaHintCap {
     store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
     key: [u8; 32],
+    per_hint: u64,
 }
 
 impl std::fmt::Debug for CibaHintCap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CibaHintCap").finish_non_exhaustive()
+        f.debug_struct("CibaHintCap")
+            .field("per_hint", &self.per_hint)
+            .finish_non_exhaustive()
     }
+}
+
+/// What [`CibaHintCap`] read in the previous window's bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviousWindow {
+    /// The admitted (and not yet taken back) calls of the previous window.
+    Counted(u64),
+    /// The bucket already holds the window after this call's: this call is
+    /// late, and the previous window's count is gone.
+    Overtaken,
 }
 
 impl CibaHintCap {
     /// The domain label of [`Self::derived_from`]'s derivation.
     const KEY_LABEL: &'static [u8] = b"axiam/ciba/hint-cap/v1";
 
-    /// A cap over `store`, keying its buckets with `key`.
+    /// A cap over `store`, keying its buckets with `key`, with the shipped
+    /// allowance ([`DEFAULT_REQUESTS_PER_CLIENT_HINT`]).
     pub fn new(store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>, key: [u8; 32]) -> Self {
-        Self { store, key }
+        Self {
+            store,
+            key,
+            per_hint: u64::from(DEFAULT_REQUESTS_PER_CLIENT_HINT),
+        }
     }
 
     /// A cap whose bucket key is derived from a secret every replica already
@@ -879,6 +958,18 @@ impl CibaHintCap {
         deployment_secret: &[u8],
     ) -> Self {
         Self::new(store, hmac_sha256(deployment_secret, &[Self::KEY_LABEL]))
+    }
+
+    /// The allowance per (client, hint) per [`HINT_CAP_WINDOW_SECS`] (#639):
+    /// `RateLimitConfig::bc_authorize_per_hint`,
+    /// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT`. At least one by type; the
+    /// configuration refuses `0` at startup. Every replica sharing the table
+    /// must be given the same allowance (each enforces its own against the
+    /// shared counts). Builder-style.
+    #[must_use]
+    pub fn with_per_hint(mut self, per_hint: std::num::NonZeroU32) -> Self {
+        self.per_hint = u64::from(per_hint.get());
+        self
     }
 
     /// The bucket base for (tenant, client, hint); the window's parity is
@@ -903,12 +994,10 @@ impl CibaHintCap {
         format!("ciba_hint_cap:{tenant_id}:{}", hex::encode(mac))
     }
 
-    /// Count this call and say whether it is admitted.
-    ///
-    /// Increments this window's bucket and reads the previous window's (an
-    /// upsert of zero, which also resets a bucket left from an older window
-    /// of the same parity), then admits when the two come to at most
-    /// [`MAX_REQUESTS_PER_CLIENT_HINT`]. A refused call is counted too.
+    /// Count this call, decide, and take the count back if it is refused: the
+    /// protocol in [`CibaHintCap`]'s documentation. A hint's first call
+    /// creates one row, its window's; the read of the previous window writes
+    /// nothing, and a take-back never creates a row.
     async fn admit(
         &self,
         tenant_id: Uuid,
@@ -922,17 +1011,38 @@ impl CibaHintCap {
         let base = self.bucket(tenant_id, client_id, hint);
         let slot = |i: i64| format!("{base}:{}", i.rem_euclid(2));
         let failed = |e: axiam_db::DbError| OAuth2Error::ServerError(e.to_string());
-        let current = self
-            .store
-            .increment_by(&slot(index), start(index), 1)
+        let own = slot(index);
+        // Concurrent calls for one hint write one record: the datastore
+        // aborts all but one with a retryable write conflict, and an aborted
+        // statement wrote nothing, so it is replayed (not counted twice).
+        let current = retry_on_write_conflict(|| self.store.increment_by(&own, start(index), 1))
             .await
             .map_err(failed)?;
-        let previous = self
-            .store
-            .increment_by(&slot(index - 1), start(index - 1), 0)
-            .await
-            .map_err(failed)?;
-        Ok(current.saturating_add(previous) <= MAX_REQUESTS_PER_CLIENT_HINT)
+        let previous = match self.store.peek_bucket(&slot(index - 1)).await {
+            Ok(None) => PreviousWindow::Counted(0),
+            Ok(Some((stored, count))) => match stored.cmp(&start(index - 1)) {
+                std::cmp::Ordering::Less => PreviousWindow::Counted(0),
+                std::cmp::Ordering::Equal => PreviousWindow::Counted(count),
+                std::cmp::Ordering::Greater => PreviousWindow::Overtaken,
+            },
+            // The count stays: strict, never lenient.
+            Err(e) => return Err(failed(e)),
+        };
+        let admitted = match previous {
+            PreviousWindow::Counted(count) => current.saturating_add(count) <= self.per_hint,
+            PreviousWindow::Overtaken => false,
+        };
+        if !admitted {
+            // A refused call does not consume the allowance (#639). A failed
+            // take-back leaves the count in place, which is strict; the call
+            // is refused either way.
+            if let Err(e) =
+                retry_on_write_conflict(|| self.store.decrement(&own, start(index))).await
+            {
+                tracing::warn!(error = %e, "the CIBA hint cap could not take back a refused call's count");
+            }
+        }
+        Ok(admitted)
     }
 }
 
@@ -1217,8 +1327,10 @@ where
     /// # Errors
     ///
     /// CIBA Core §13's codes for a malformed request; `slow_down` when the
-    /// client has already made [`MAX_REQUESTS_PER_CLIENT_HINT`] requests for
-    /// this hint in the cap's window (#599), whoever the hint names;
+    /// client has already been admitted its allowance for this hint
+    /// ([`CibaHintCap::with_per_hint`], default
+    /// [`DEFAULT_REQUESTS_PER_CLIENT_HINT`]) in the cap's window (#599, #639),
+    /// whoever the hint names;
     /// `server_error` for a datastore failure (or a
     /// ping request with no sealing key).
     pub async fn initiate(
@@ -1307,8 +1419,9 @@ where
         // #599 (T-424): the per-(client, hint) cap, before the hint is looked
         // up and before anything is stored or mailed. It counts the hint, not
         // the user it names, so it refuses a hint naming nobody at the same
-        // call as a real user's and its answer — and its cost, the same two
-        // counter writes either way — says nothing about the hint (D-63).
+        // call as a real user's and its answer — and its cost, a count and a
+        // read, and a take-back when refused, whoever the hint names — says
+        // nothing about the hint (D-63).
         // `slow_down` is the answer the per-client limiter gives; the handler
         // renders it as that limiter's 429.
         if !self
@@ -1666,7 +1779,7 @@ mod tests {
         assert!(!page(0, 0).truncated());
         assert!(!page(3, 3).truncated());
         assert!(page(3, 4).truncated());
-        assert_eq!(MAX_REQUESTS_PER_CLIENT_HINT, 3);
+        assert_eq!(DEFAULT_REQUESTS_PER_CLIENT_HINT, 3);
     }
 
     #[test]
@@ -2025,9 +2138,14 @@ mod tests {
         assert!(hash_auth_req_id(&a) != a, "the digest is not the id");
     }
 
-    /// The rate-limit table's windowed upsert, in memory: a new window resets
-    /// the bucket, an older one adds to the stored window (as the datastore's
-    /// `UPSERT` does).
+    /// The rate-limit table's three statements, in memory, with the
+    /// datastore's semantics: the windowed upsert (a newer window resets the
+    /// bucket, an older one adds to the stored window), the plain read, and
+    /// the conditional take-back (only while the bucket holds the window
+    /// named, never below zero, never creating a bucket). Each statement
+    /// yields first, so concurrent calls interleave between statements as
+    /// they do against the datastore; each is atomic, as one statement on one
+    /// record is.
     #[derive(Default)]
     struct MemStore(std::sync::Mutex<std::collections::HashMap<String, (DateTime<Utc>, u64)>>);
 
@@ -2038,14 +2156,40 @@ mod tests {
             window_start: DateTime<Utc>,
             delta: u64,
         ) -> axiam_db::StoreIncrementFuture<'a> {
-            let mut map = self.0.lock().unwrap();
-            let entry = map.entry(key.to_owned()).or_insert((window_start, 0));
-            if entry.0 < window_start {
-                *entry = (window_start, 0);
-            }
-            entry.1 += delta;
-            let count = entry.1;
-            Box::pin(async move { Ok(count) })
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                let mut map = self.0.lock().unwrap();
+                let entry = map.entry(key.to_owned()).or_insert((window_start, 0));
+                if entry.0 < window_start {
+                    *entry = (window_start, 0);
+                }
+                entry.1 += delta;
+                Ok(entry.1)
+            })
+        }
+
+        fn peek_bucket<'a>(&'a self, key: &'a str) -> axiam_db::StorePeekFuture<'a> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                Ok(self.0.lock().unwrap().get(key).copied())
+            })
+        }
+
+        fn decrement<'a>(
+            &'a self,
+            key: &'a str,
+            window_start: DateTime<Utc>,
+        ) -> axiam_db::StoreDecrementFuture<'a> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                match self.0.lock().unwrap().get_mut(key) {
+                    Some((stored, count)) if *stored == window_start && *count > 0 => {
+                        *count -= 1;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            })
         }
     }
 
@@ -2098,10 +2242,17 @@ mod tests {
         // One second later is the next window, but the stretch holds three.
         assert!(!cap.admit(tenant, "oa_a", &hint, at(8, 0)).await.unwrap());
         assert!(!cap.admit(tenant, "oa_a", &hint, at(8, late)).await.unwrap());
-        // Window 9's odd bucket held window 7 and starts over; window 8's two
-        // refused calls are the window before it, so one more is admitted.
-        assert!(cap.admit(tenant, "oa_a", &hint, at(9, 0)).await.unwrap());
-        assert!(!cap.admit(tenant, "oa_a", &hint, at(9, 1)).await.unwrap());
+        // Window 9's odd bucket held window 7 and starts over; window 8 is the
+        // window before it, and its two refused calls were taken back (#639),
+        // so window 9 has the whole allowance.
+        for offset in 0..3 {
+            assert!(
+                cap.admit(tenant, "oa_a", &hint, at(9, offset))
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(9, 5)).await.unwrap());
         // A hint left alone for a whole window starts afresh.
         for _ in 0..3 {
             assert!(cap.admit(tenant, "oa_a", &hint, at(11, 0)).await.unwrap());
@@ -2143,5 +2294,228 @@ mod tests {
         }
         let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
         assert_eq!(keys.len(), 2, "{keys:?}");
+    }
+
+    /// #638: the first call for a hint writes one bucket, the current
+    /// window's; reading the previous window's creates none. The second
+    /// bucket exists only once a later window has counted a call.
+    #[tokio::test]
+    async fn a_new_hint_writes_one_bucket() {
+        let (cap, store) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("carol".into());
+        assert!(cap.admit(tenant, "oa_a", &hint, at(40, 3)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 1);
+        assert!(cap.admit(tenant, "oa_a", &hint, at(40, 4)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 1, "same window, same row");
+        assert!(cap.admit(tenant, "oa_a", &hint, at(41, 0)).await.unwrap());
+        assert_eq!(store.0.lock().unwrap().len(), 2, "the next window's own");
+    }
+    /// #639: the allowance is the configured one. With the knob at four, a
+    /// fourth call is admitted and a fifth refused; at one, a second is.
+    #[tokio::test]
+    async fn the_allowance_is_the_configured_one() {
+        let (cap, store) = cap();
+        let four = cap.with_per_hint(std::num::NonZeroU32::new(4).unwrap());
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("conformance-user".into());
+        for _ in 0..4 {
+            assert!(four.admit(tenant, "oa_a", &hint, at(60, 1)).await.unwrap());
+        }
+        assert!(!four.admit(tenant, "oa_a", &hint, at(60, 2)).await.unwrap());
+
+        let one = CibaHintCap::derived_from(store, b"secret")
+            .with_per_hint(std::num::NonZeroU32::new(1).unwrap());
+        let other = HintName::Login("someone".into());
+        assert!(one.admit(tenant, "oa_a", &other, at(60, 1)).await.unwrap());
+        assert!(!one.admit(tenant, "oa_a", &other, at(60, 2)).await.unwrap());
+        // The shipped allowance is the default.
+        let shipped = CibaHintCap::new(std::sync::Arc::new(MemStore::default()), [0; 32]);
+        assert_eq!(
+            shipped.per_hint,
+            u64::from(DEFAULT_REQUESTS_PER_CLIENT_HINT)
+        );
+    }
+
+    /// #639: a refused call does not consume the allowance. Retrying through
+    /// the window after a used allowance (when every call is refused) leaves
+    /// that window's count at zero, so the window after it is admitted in
+    /// full; under the old rule those refusals counted, and the retrying
+    /// client stayed refused.
+    #[tokio::test]
+    async fn refused_calls_do_not_consume_the_allowance() {
+        let (cap, store) = cap();
+        let tenant = Uuid::new_v4();
+        let hint = HintName::Login("retrying".into());
+        for _ in 0..3 {
+            assert!(cap.admit(tenant, "oa_a", &hint, at(50, 0)).await.unwrap());
+        }
+        for offset in 1..6 {
+            assert!(
+                !cap.admit(tenant, "oa_a", &hint, at(50, offset))
+                    .await
+                    .unwrap()
+            );
+        }
+        let bucket = cap.bucket(tenant, "oa_a", &hint);
+        let count = |parity: u8| store.0.lock().unwrap()[&format!("{bucket}:{parity}")].1;
+        assert_eq!(count(0), 3, "refusals in the window took their count back");
+        // Window 51 has window 50's three behind it: every call is refused.
+        for offset in 0..10 {
+            assert!(
+                !cap.admit(tenant, "oa_a", &hint, at(51, offset * 50))
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(count(1), 0, "window 51's refusals are not counted");
+        // Window 52: window 51 is the one before it and holds nothing, so the
+        // first call is admitted at once, and the allowance is whole.
+        for offset in 0..3 {
+            assert!(
+                cap.admit(tenant, "oa_a", &hint, at(52, offset))
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(!cap.admit(tenant, "oa_a", &hint, at(52, 9)).await.unwrap());
+    }
+
+    /// Runs `stamps.len()` concurrent calls for one hint, alternating between
+    /// two replicas' caps over one store (each with the allowance `per_hint`),
+    /// and answers which were admitted, by stamp.
+    async fn concurrent_calls(
+        store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
+        per_hint: u32,
+        stamps: &[DateTime<Utc>],
+    ) -> Vec<(DateTime<Utc>, Result<bool, String>)> {
+        let per_hint = std::num::NonZeroU32::new(per_hint).unwrap();
+        let replicas = [
+            CibaHintCap::derived_from(store.clone(), b"secret").with_per_hint(per_hint),
+            CibaHintCap::derived_from(store, b"secret").with_per_hint(per_hint),
+        ];
+        let tenant = Uuid::from_u128(7);
+        let hint = HintName::Login("contended".into());
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(stamps.len()));
+        let tasks: Vec<_> = stamps
+            .iter()
+            .enumerate()
+            .map(|(i, stamp)| {
+                let cap = replicas[i % 2].clone();
+                let hint = hint.clone();
+                let barrier = barrier.clone();
+                let stamp = *stamp;
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let admitted = cap.admit(tenant, "oa_a", &hint, stamp).await;
+                    (stamp, admitted.map_err(|e| e.to_string()))
+                })
+            })
+            .collect();
+        let mut out = Vec::new();
+        for task in tasks {
+            out.push(task.await.unwrap());
+        }
+        out
+    }
+
+    /// #639: N concurrent calls in one window, on two replicas, against an
+    /// allowance of k admit exactly k — never more (two calls that both see
+    /// k − 1 cannot both be admitted) and, with nothing else in flight, no
+    /// fewer — and leave the count at k. Repeated, so that many interleavings
+    /// are tried.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_calls_admit_at_most_the_allowance() {
+        for round in 0..200 {
+            let store = std::sync::Arc::new(MemStore::default());
+            let stamps = vec![at(70, 3); 12];
+            let admitted = concurrent_calls(store.clone(), 4, &stamps).await;
+            let n = admitted.iter().filter(|(_, ok)| *ok == Ok(true)).count();
+            assert_eq!(n, 4, "round {round}: {admitted:?}");
+            let counts: Vec<u64> = store.0.lock().unwrap().values().map(|v| v.1).collect();
+            assert_eq!(counts, [4], "round {round}: refusals took their count back");
+        }
+    }
+
+    /// #639: concurrent calls straddling a window boundary — a third stamped
+    /// at the start of window 81, the rest at the end of window 80, on two
+    /// replicas, with two calls already admitted at the end of window 79 —
+    /// keep both pairs of windows within k, whatever the interleaving. The
+    /// pair (79, 80) is the one a late call could break: a call of window 80
+    /// reads window 79 in the bucket window 81 takes over, so once a call of
+    /// window 81 has counted itself, a call of window 80 that comes to read is
+    /// overtaken and refused rather than admitted against window 81's count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_calls_across_a_boundary_admit_at_most_the_allowance() {
+        let late = HINT_CAP_WINDOW_SECS as i64 - 1;
+        for round in 0..300 {
+            let store = std::sync::Arc::new(MemStore::default());
+            let before = concurrent_calls(store.clone(), 4, &[at(79, late); 2]).await;
+            assert!(before.iter().all(|(_, ok)| *ok == Ok(true)));
+            let stamps: Vec<DateTime<Utc>> = (0..12)
+                .map(|i| if i % 3 == 0 { at(81, 0) } else { at(80, late) })
+                .collect();
+            let admitted = concurrent_calls(store.clone(), 4, &stamps).await;
+            let in_window = |stamp: DateTime<Utc>| {
+                admitted
+                    .iter()
+                    .filter(|(s, ok)| *ok == Ok(true) && *s == stamp)
+                    .count()
+            };
+            let (w80, w81) = (in_window(at(80, late)), in_window(at(81, 0)));
+            assert!(2 + w80 <= 4, "round {round}: (79, 80): {admitted:?}");
+            assert!(w80 + w81 <= 4, "round {round}: (80, 81): {admitted:?}");
+            // Window 81 took over window 79's bucket; what is left counted is
+            // exactly what windows 80 and 81 admitted.
+            let counted: u64 = store.0.lock().unwrap().values().map(|v| v.1).sum();
+            assert_eq!(counted, (w80 + w81) as u64, "round {round}");
+        }
+    }
+
+    /// #639: the same bound against the datastore's own statements — the
+    /// in-memory engine, two replicas' repositories over one database.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_bound_holds_against_the_datastore_under_concurrency() {
+        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+            .await
+            .unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        axiam_db::run_migrations(&db).await.unwrap();
+        let late = HINT_CAP_WINDOW_SECS as i64 - 1;
+        for round in 0..20 {
+            let store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore> =
+                std::sync::Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(db.clone()));
+            // A window of its own per round, so rounds do not see each other.
+            let stamps = vec![at(1000 + 4 * round, 3); 10];
+            let admitted = concurrent_calls(store.clone(), 4, &stamps).await;
+            let n = admitted.iter().filter(|(_, ok)| *ok == Ok(true)).count();
+            assert!(n <= 4, "round {round}: {admitted:?}");
+            // A call whose write conflict outlived its retries fails with
+            // `server_error` and admits nothing; with none, exactly four.
+            if admitted.iter().all(|(_, ok)| ok.is_ok()) {
+                assert_eq!(n, 4, "round {round}: {admitted:?}");
+            }
+
+            let stamps: Vec<DateTime<Utc>> = (0..10)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        at(1002 + 4 * round, 0)
+                    } else {
+                        at(1001 + 4 * round, late)
+                    }
+                })
+                .collect();
+            let admitted = concurrent_calls(store, 4, &stamps).await;
+            let n = admitted.iter().filter(|(_, ok)| *ok == Ok(true)).count();
+            // Window 1001's previous is window 1000, which holds four: none of
+            // its calls can be admitted, and window 1002's may take up to four.
+            assert!(n <= 4, "round {round}: {admitted:?}");
+            assert!(
+                admitted
+                    .iter()
+                    .all(|(stamp, ok)| *ok != Ok(true) || *stamp == at(1002 + 4 * round, 0)),
+                "round {round}: {admitted:?}"
+            );
+        }
     }
 }

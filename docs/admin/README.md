@@ -211,7 +211,10 @@ DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}
 ```
 
 Outside that window — or with no export at all — the delete answers `409` and
-changes nothing. There is no override parameter and the window is not
+changes nothing. So does a receipt whose `exported_through` is later than the
+receipt itself, which no export writes (an export starts before its receipt);
+export again. Only the server writes receipts: the AMQP audit ingestion refuses
+every `tenants.*` and `gdpr.*` action (#637). There is no override parameter and the window is not
 configurable: an export taken last quarter is not evidence that anyone thought
 about *this* deletion.
 

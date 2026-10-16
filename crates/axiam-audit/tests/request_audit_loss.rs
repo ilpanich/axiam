@@ -74,6 +74,9 @@ impl Datastore {
 }
 
 impl AuditLogRepository for Datastore {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;

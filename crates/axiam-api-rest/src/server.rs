@@ -11,7 +11,9 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
 use crate::config::rate_limit::RateLimitKeyMode;
-use crate::extractors::rate_limit::{ClientAwareKeyExtractor, XForwardedForKeyExtractor};
+use crate::extractors::rate_limit::{
+    ClientAwareKeyExtractor, XForwardedForKeyExtractor, configured_trusted_hops,
+};
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
@@ -66,10 +68,7 @@ pub fn build_governor(
     // client on the internet to that proxy's address. The rule is
     // `trusted_hops = proxies - 1`; the derivation and the table live on
     // `extractors::rate_limit`.
-    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let trusted_hops = configured_trusted_hops();
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
@@ -99,10 +98,7 @@ fn build_client_aware_governor(
     requests_per_min: u32,
     key_mode: RateLimitKeyMode,
 ) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
-    let trusted_hops: usize = std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let trusted_hops = configured_trusted_hops();
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)

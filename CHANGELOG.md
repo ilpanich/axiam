@@ -455,11 +455,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   administrator's `DELETE /api/v1/oauth2-clients/{id}`, RFC 7592's
   `DELETE /oauth2/register/{client_id}` and the unused-client sweep share,
   revoked refresh tokens and deleted authorization codes and pushed requests, but
-  left the client's device grants and CIBA requests. The device poll authenticates
-  nothing but the device code, so an approved grant still redeemed for a token
-  set after its client was deleted, and again once a `managed_by: cimd` client
-  was re-materialised under the same `client_id`; a pending CIBA request stayed on
-  its user's approval surface naming a client that was gone. `revoke` now also
+  left the client's device grants and CIBA requests. The device poll authenticated
+  no client (R101W3-01), so an approved grant still redeemed for a token set
+  after its client was deleted; a pending CIBA request stayed on its user's
+  approval surface naming a client that was gone. (This entry first gave a
+  re-materialised `managed_by: cimd` client as the reason for the device grant;
+  that was wrong, as a CIMD client registers only the code grants and can hold
+  neither grant.) `revoke` now also
   deletes both, in every status, scoped by tenant and client id
   (`DeviceGrantRepository::delete_all_for_client`,
   `CibaRequestRepository::delete_all_for_client`). The stores are visited in a

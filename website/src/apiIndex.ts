@@ -23,7 +23,7 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.1";
+export const API_VERSION = "1.1.0";
 export const API_OPERATION_COUNT = 291;
 export const API_PATH_COUNT = 197;
 

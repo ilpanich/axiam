@@ -25,6 +25,21 @@ use crate::openapi::api_doc;
 /// one NAT.
 const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 
+/// R110W2-01: how many times the per-principal allowance of the five
+/// authenticated federation flow routes (`end_session_per_min`) their
+/// per-address backstop admits.
+///
+/// #633 keyed those routes on the verified principal, which dropped every
+/// per-address bound for a caller holding a valid token: one address holding
+/// *K* principals (self-registration, service accounts) would get *K* x the
+/// allowance. The backstop restores a bound on the address, sized like
+/// [`CIBA_LIST_BACKSTOP_FACTOR`] for the same reason: NAT-sized, so an
+/// application relaying ten users at full speed (and far more at human speed)
+/// never meets it, while a party holding hundreds of principals behind one
+/// address does. A separate constant, not a shared one, because each factor
+/// scales a different knob and the two are tuned apart.
+const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -79,6 +94,7 @@ pub fn build_governor(
 ///
 /// **Never call this for `/auth/login`** (or any other endpoint without a
 /// client identity) — use [`build_governor`] there instead, unconditionally.
+/// Its one other caller is [`build_principal_governor`] (#633).
 fn build_client_aware_governor(
     requests_per_min: u32,
     key_mode: RateLimitKeyMode,
@@ -97,6 +113,37 @@ fn build_client_aware_governor(
         .finish()
         .expect("valid governor config");
     Governor::new(&config)
+}
+
+/// #633: the in-process governor for a route keyed on its **verified**
+/// principal `(tenant, sub)`, with the address as the pre-authentication
+/// fallback — the five authenticated federation flow routes.
+///
+/// The partner of [`RateLimitShared::keyed_on_principal`] on the same
+/// resource: both derive their key through
+/// `extractors::rate_limit::bucket_key_part` from the identity the audit
+/// middleware verified, so the route keys the same way whether the shared
+/// counter is on or off (`AXIAM__RATE_LIMIT__SHARED`).
+fn build_principal_governor(
+    requests_per_min: u32,
+) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
+    build_client_aware_governor(requests_per_min, RateLimitKeyMode::Principal)
+}
+
+/// R110W2-01: the outermost layer of each authenticated federation flow route,
+/// an **address**-keyed governor at [`FEDERATION_FLOW_BACKSTOP_FACTOR`] times
+/// the principal's allowance (`requests_per_min`).
+///
+/// It is an in-process governor and nothing else, exactly as the CIBA list's
+/// backstop is: it runs the same whether `AXIAM__RATE_LIMIT__SHARED` is on or
+/// off, carries no shared-counter bucket (so it takes no name for
+/// `rate_limit_bucket_names_test.rs` to check), and is per replica. The
+/// principal layers beneath it are the ones that go cross-replica; this one
+/// only has to bound how many principals one address can spend at once.
+fn build_federation_flow_backstop(
+    requests_per_min: u32,
+) -> Governor<XForwardedForKeyExtractor, NoOpMiddleware> {
+    build_governor(requests_per_min.saturating_mul(FEDERATION_FLOW_BACKSTOP_FACTOR))
 }
 
 /// Register health and readiness routes.
@@ -1415,21 +1462,47 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             //
             // #614 (D-3): the five authenticated federation flow routes — these
             // two and the three SAML ones registered at the end — carry the
-            // browser-endpoint preset (`end_session_per_min`, per IP), each
+            // browser-endpoint preset (`end_session_per_min`), each
             // under a bucket of its own (`federation_oidc_authorize`,
-            // `federation_oidc_callback`, `federation_saml_authn_request`,
-            // `federation_saml_acs`, `federation_saml_metadata`), so one
-            // route's exhaustion never spends another's allowance. A person's
+            // `federation_link_oidc_callback`, `federation_saml_authn_request`,
+            // `federation_link_saml_acs`, `federation_saml_metadata`), so one
+            // route's exhaustion never spends another's allowance. The two
+            // callback buckets carry `link` because the public first-time SSO
+            // routes above already own `federation_oidc_callback` and
+            // `federation_saml_acs`; the shared counter keys `{endpoint}:{ip}`,
+            // so a repeated name is one counter with two limits (R101W2-03).
+            // `tests/rate_limit_bucket_names_test.rs` fails on any repeat. A person's
             // sign-in drives them, relayed by the application that holds the
             // bearer token; none is an IdP back-channel (the IdP sends the
             // *browser* to the application, which then calls these). No new
             // knob, so `rl_prod_check.py` needs no row.
+            //
+            // #633 (R101W2-05): each bucket is keyed on the caller's verified
+            // principal `(tenant, sub)`, not its address — one token used from
+            // many addresses shares one allowance, and an application relaying
+            // many users gives each their own. A request whose token does not
+            // verify is keyed on its address. Both layers key alike:
+            // `build_principal_governor` and `keyed_on_principal`, through one
+            // key function; neither verifies a signature (the audit middleware
+            // already did, and they read its result).
+            //
+            // R110W2-01: that key dropped every per-address bound for a caller
+            // with a valid token (one address holding K principals got K x the
+            // allowance), so each of the five resources also carries, outermost,
+            // `build_federation_flow_backstop`: an address-keyed in-process
+            // governor at `FEDERATION_FLOW_BACKSTOP_FACTOR` (10) times the
+            // allowance, the CIBA list's precedent. It is a governor only, so it
+            // applies with `AXIAM__RATE_LIMIT__SHARED` on or off, takes no
+            // shared-counter bucket name, and is per replica.
             .service(
                 web::resource("/federation/oidc/authorize")
-                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                     .wrap(RateLimitShared::<C>::browser_preset(
                         "federation_oidc_authorize",
                         rate_limit_cfg,
+                    ).keyed_on_principal())
+                    .wrap(build_federation_flow_backstop(
+                        rate_limit_cfg.end_session_per_min,
                     ))
                     .route(
                         web::post().to(handlers::federation::oidc_authorize::<C>),
@@ -1437,10 +1510,13 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             )
             .service(
                 web::resource("/federation/oidc/callback")
-                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                     .wrap(RateLimitShared::<C>::browser_preset(
-                        "federation_oidc_callback",
+                        "federation_link_oidc_callback",
                         rate_limit_cfg,
+                    ).keyed_on_principal())
+                    .wrap(build_federation_flow_backstop(
+                        rate_limit_cfg.end_session_per_min,
                     ))
                     .route(
                         web::post().to(handlers::federation::oidc_callback::<C>),
@@ -1867,28 +1943,37 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
         // note on the OIDC flow routes above.
         .service(
             web::resource("/federation/saml/authn-request")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
                     "federation_saml_authn_request",
                     rate_limit_cfg,
+                ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
                 ))
                 .route(web::post().to(handlers::federation::saml_authn_request::<C>)),
         )
         .service(
             web::resource("/federation/saml/acs")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
-                    "federation_saml_acs",
+                    "federation_link_saml_acs",
                     rate_limit_cfg,
+                ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
                 ))
                 .route(web::post().to(handlers::federation::saml_acs::<C>)),
         )
         .service(
             web::resource("/federation/saml/metadata")
-                .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                .wrap(build_principal_governor(rate_limit_cfg.end_session_per_min))
                 .wrap(RateLimitShared::<C>::browser_preset(
                     "federation_saml_metadata",
                     rate_limit_cfg,
+                ).keyed_on_principal())
+                .wrap(build_federation_flow_backstop(
+                    rate_limit_cfg.end_session_per_min,
                 ))
                 .route(web::get().to(handlers::federation::saml_metadata::<C>)),
         );

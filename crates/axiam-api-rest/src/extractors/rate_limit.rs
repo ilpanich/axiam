@@ -56,6 +56,10 @@ use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
 use actix_web::http::header::{ContentType, RETRY_AFTER};
 use std::net::IpAddr;
+use std::sync::Arc;
+
+use axiam_auth::token::CachedUserIdentity;
+use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
 
@@ -223,6 +227,94 @@ pub fn extract_client_id(body: &[u8], authorization: Option<&str>) -> Option<Str
     extract_form_client_id(body).or_else(|| authorization.and_then(extract_basic_client_id))
 }
 
+// ---------------------------------------------------------------------------
+// #633 — principal keying (the authenticated federation flow routes only)
+// ---------------------------------------------------------------------------
+
+/// The principal a [`RateLimitKeyMode::Principal`] bucket is keyed on: the
+/// `(tenant, sub)` of an access token whose signature, expiry and issuer were
+/// **verified** for this request.
+///
+/// Built only by [`verified_principal`], from the
+/// [`CachedUserIdentity`] that `axiam_audit::middleware::AuditMiddleware`
+/// leaves on every request whose token verifies. That middleware wraps the
+/// whole application (`axiam-server`'s `boot.rs`), so it has run before any
+/// limiter here, and reusing its result is what keeps the principal key free:
+/// no limiter verifies a signature, so a refused credential still costs the
+/// verifications it cost before (§10, "one verify per refusal").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitPrincipal {
+    /// The tenant the token was issued in (its `tenant_id` claim).
+    pub tenant_id: Uuid,
+    /// The token's subject (its `sub` claim).
+    pub subject: Uuid,
+    /// Whether the token is sender-constrained (`cnf`, RFC 8705 / RFC 9449).
+    /// Its proof of possession is checked by the extractor, after the limiter,
+    /// so here the token alone does not yet show its holder is the principal.
+    pub sender_constrained: bool,
+}
+
+/// The verified principal of this request, or `None` when no token verified.
+///
+/// **Reads, never verifies.** `None` covers "no token", "a token that did not
+/// verify" (forged, expired, another issuer's) and "no audit middleware in this
+/// composition" alike, and every one of them keys on the address — the
+/// pre-authentication fallback, which is what every route keyed on before
+/// #633. A caller cannot reach this with a claim it wrote itself: request
+/// extensions are written by server code only, and the one writer of this
+/// extension inserts it after `validate_access_token` succeeded.
+pub fn verified_principal(req: &ServiceRequest) -> Option<RateLimitPrincipal> {
+    let extensions = req.extensions();
+    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
+    Some(RateLimitPrincipal {
+        tenant_id: cached.tenant_id,
+        subject: cached.user_id,
+        sender_constrained: cached.claims.0.cnf.is_some(),
+    })
+}
+
+/// The identity part of a bucket key — `{endpoint}:{this}` in the shared
+/// counter, the whole key in the in-memory governor — for every key mode.
+///
+/// One function for both layers, so the shared counter
+/// ([`crate::middleware::rate_limit_shared::RateLimitShared`]) and the
+/// in-process governor ([`ClientAwareKeyExtractor`]) can never disagree about
+/// which bucket a request belongs to: with `AXIAM__RATE_LIMIT__SHARED` on or
+/// off, a route keys the same way.
+///
+/// `None` only when the key needs the address and there is none; the caller
+/// then fails open (shared layer) or refuses the key (governor), as before.
+pub fn bucket_key_part(
+    key_mode: RateLimitKeyMode,
+    ip: Option<IpAddr>,
+    client_id: Option<&str>,
+    principal: Option<&RateLimitPrincipal>,
+) -> Option<String> {
+    match (key_mode, client_id, principal) {
+        // #633. A verified bearer token: the principal alone, from whichever
+        // address it comes — one token used from many addresses is one
+        // bucket, and one address relaying many users is many.
+        (RateLimitKeyMode::Principal, _, Some(p)) if !p.sender_constrained => {
+            Some(format!("principal:{}:{}", p.tenant_id, p.subject))
+        }
+        // A sender-constrained token, whose possession is not yet proved: the
+        // address and the principal together, so a copy replayed from
+        // elsewhere spends a bucket of its own and never its principal's.
+        (RateLimitKeyMode::Principal, _, Some(p)) => {
+            ip.map(|ip| format!("{ip}:principal:{}:{}", p.tenant_id, p.subject))
+        }
+        // No verified token (pre-authentication fallback), `ip` mode, or no
+        // client_id available (fail-safe fallback): the address alone.
+        (RateLimitKeyMode::Principal, _, None)
+        | (RateLimitKeyMode::Ip, _, _)
+        | (RateLimitKeyMode::ClientId | RateLimitKeyMode::IpClientId, None, _) => {
+            ip.map(|ip| ip.to_string())
+        }
+        (RateLimitKeyMode::ClientId, Some(cid), _) => Some(format!("client:{cid}")),
+        (RateLimitKeyMode::IpClientId, Some(cid), _) => ip.map(|ip| format!("{ip}:client:{cid}")),
+    }
+}
+
 /// D8 key extractor for the token/introspect/revoke endpoints: honors
 /// `AXIAM__RATE_LIMIT__KEY` (`ip` | `client_id` | `ip_client_id`) to key the
 /// in-memory `Governor` bucket on the OAuth2 `client_id`, the `(ip,
@@ -232,6 +324,10 @@ pub fn extract_client_id(body: &[u8], authorization: Option<&str>) -> Option<Str
 /// client identity** — see [`crate::config::rate_limit::RateLimitKeyMode`]
 /// for why login is structurally excluded (it authenticates a user, not an
 /// OAuth2 client; there is no `client_id` to key on at that point).
+///
+/// The same extractor in [`RateLimitKeyMode::Principal`] keys the five
+/// authenticated federation flow routes on their verified principal (#633);
+/// see [`verified_principal`]. It never reads a body in that mode.
 #[derive(Debug, Clone)]
 pub struct ClientAwareKeyExtractor {
     /// Always computed alongside the client_id — used verbatim in `Ip`
@@ -260,14 +356,20 @@ impl KeyExtractor for ClientAwareKeyExtractor {
             .extensions()
             .get::<RateLimitClientId>()
             .and_then(|c| c.0.clone());
+        let principal = match self.key_mode {
+            RateLimitKeyMode::Principal => verified_principal(req),
+            _ => None,
+        };
 
-        Ok(match (self.key_mode, client_id) {
-            // `ip` mode, or no client_id available (fail-safe fallback):
-            // identical to the pre-D8 IP-only key.
-            (RateLimitKeyMode::Ip, _) | (_, None) => ip.to_string(),
-            (RateLimitKeyMode::ClientId, Some(cid)) => format!("client:{cid}"),
-            (RateLimitKeyMode::IpClientId, Some(cid)) => format!("{ip}:client:{cid}"),
-        })
+        // With an address in hand every mode yields a key; `ok_or` is for the
+        // type, not a reachable branch.
+        bucket_key_part(
+            self.key_mode,
+            Some(ip),
+            client_id.as_deref(),
+            principal.as_ref(),
+        )
+        .ok_or_else(|| SimpleKeyExtractionError::new("no bucket key"))
     }
 
     /// Same 429 contract as [`XForwardedForKeyExtractor`] — clients must
@@ -522,6 +624,99 @@ mod client_aware_tests {
             actix_web::http::StatusCode::TOO_MANY_REQUESTS
         );
         assert!(resp.headers().contains_key(RETRY_AFTER));
+    }
+
+    fn principal(tenant: u128, subject: u128, sender_constrained: bool) -> RateLimitPrincipal {
+        RateLimitPrincipal {
+            tenant_id: Uuid::from_u128(tenant),
+            subject: Uuid::from_u128(subject),
+            sender_constrained,
+        }
+    }
+
+    /// #633: a verified bearer principal is one bucket from any address, and
+    /// two principals behind one address are two buckets.
+    #[test]
+    fn principal_mode_keys_on_the_principal_alone() {
+        let ip_a: IpAddr = "203.0.113.9".parse().unwrap();
+        let ip_b: IpAddr = "203.0.113.10".parse().unwrap();
+        let alice = principal(1, 10, false);
+        let bob = principal(1, 11, false);
+        let key = |ip, p| bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(p));
+
+        assert_eq!(
+            key(ip_a, &alice),
+            key(ip_b, &alice),
+            "one token, two addresses"
+        );
+        assert_ne!(key(ip_a, &alice), key(ip_a, &bob), "one address, two users");
+        assert!(!key(ip_a, &alice).unwrap().contains("203.0.113.9"));
+        assert_ne!(
+            key(ip_a, &principal(1, 10, false)),
+            key(ip_a, &principal(2, 10, false)),
+            "the tenant is part of the key"
+        );
+    }
+
+    /// #633: without a verified token the key is the address — byte for byte
+    /// the key `build_governor` gives — and a sender-constrained token keys on
+    /// the address and the principal together.
+    #[test]
+    fn principal_mode_falls_back_to_the_address_and_pairs_a_bound_token_with_it() {
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, None).as_deref(),
+            Some("203.0.113.9")
+        );
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, None, None, None),
+            None
+        );
+
+        let bound = principal(1, 10, true);
+        let unbound = principal(1, 10, false);
+        let other_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let bound_here = bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(&bound));
+        let bound_there = bucket_key_part(
+            RateLimitKeyMode::Principal,
+            Some(other_ip),
+            None,
+            Some(&bound),
+        );
+        let unbound_here =
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(&unbound));
+        assert_ne!(
+            bound_here, bound_there,
+            "a bound token's key carries the address"
+        );
+        assert_ne!(
+            bound_here, unbound_here,
+            "and is never the bearer principal's key"
+        );
+        assert_ne!(bound_here.as_deref(), Some("203.0.113.9"));
+    }
+
+    /// The principal mode ignores a client_id, and the other modes ignore a
+    /// principal: each key is what it was before #633.
+    #[test]
+    fn the_modes_do_not_read_each_others_identity() {
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let p = principal(1, 10, false);
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), Some("c"), None).as_deref(),
+            Some("203.0.113.9")
+        );
+        for (mode, expected) in [
+            (RateLimitKeyMode::Ip, "203.0.113.9"),
+            (RateLimitKeyMode::ClientId, "client:c"),
+            (RateLimitKeyMode::IpClientId, "203.0.113.9:client:c"),
+        ] {
+            assert_eq!(
+                bucket_key_part(mode, Some(ip), Some("c"), Some(&p)).as_deref(),
+                Some(expected),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]

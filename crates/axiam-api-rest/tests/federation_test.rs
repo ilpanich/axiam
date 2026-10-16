@@ -3179,12 +3179,15 @@ fn federation_flow_request(
             "/api/v1/federation/saml/authn-request",
         )
         .set_json(serde_json::json!({ "config_id": config_id, "acs_url": "" })),
-        "federation_saml_acs" => base(test::TestRequest::post(), "/api/v1/federation/saml/acs")
-            .set_json(serde_json::json!({
-                "config_id": config_id,
-                "saml_response": "",
-                "acs_url": "https://sp.example.com/acs"
-            })),
+        "federation_link_saml_acs" => {
+            base(test::TestRequest::post(), "/api/v1/federation/saml/acs").set_json(
+                serde_json::json!({
+                    "config_id": config_id,
+                    "saml_response": "",
+                    "acs_url": "https://sp.example.com/acs"
+                }),
+            )
+        }
         "federation_saml_metadata" => base(
             test::TestRequest::get(),
             &format!("/api/v1/federation/saml/metadata?config_id={config_id}&acs_url="),
@@ -3199,7 +3202,7 @@ fn federation_flow_request(
             "state": "some-state",
             "nonce": "some-nonce"
         })),
-        "federation_oidc_callback" => base(
+        "federation_link_oidc_callback" => base(
             test::TestRequest::post(),
             "/api/v1/federation/oidc/callback",
         )
@@ -3217,20 +3220,25 @@ fn federation_flow_request(
 
 /// #614 (D-3): each of the five authenticated federation flow routes — SAML
 /// `authn-request`, `acs`, `metadata` and OIDC `authorize`, `callback` — is
-/// under the browser-endpoint preset (`end_session_per_min`, per IP) in a bucket
-/// of its own. Past the bucket a route answers `429`; another address still
-/// gets through that route, and the other four routes' buckets are untouched
-/// (each answers its own `400`, not `429`, and then runs out on its own count).
+/// under the browser-endpoint preset (`end_session_per_min`) in a bucket of
+/// its own. Past the bucket a route answers `429`; another address still gets
+/// through that route, and the other four routes' buckets are untouched (each
+/// answers its own `400`, not `429`, and then runs out on its own count).
+///
+/// This app has no audit middleware, so no request carries a verified
+/// identity and the routes key on the address — their pre-authentication
+/// fallback. The principal keying of #633 is proved, with the audit middleware
+/// in place, by `rate_limit_principal_test.rs`.
 #[cfg(feature = "saml")]
 #[actix_rt::test]
 async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
     const PER_MIN: u32 = 3;
     const ROUTES: [&str; 5] = [
         "federation_saml_authn_request",
-        "federation_saml_acs",
+        "federation_link_saml_acs",
         "federation_saml_metadata",
         "federation_oidc_authorize",
-        "federation_oidc_callback",
+        "federation_link_oidc_callback",
     ];
     const PEER: &str = "203.0.113.61:4000";
     const OTHER_PEER: &str = "203.0.113.62:4000";
@@ -3263,7 +3271,8 @@ async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
     assert_eq!(resp.status().as_u16(), 429, "{} past its bucket", ROUTES[0]);
     assert!(resp.headers().contains_key("retry-after"));
 
-    // The bucket is per address.
+    // The bucket is per address (the fallback: nothing here verified the
+    // token for the limiter to key on — see the doc comment).
     let status = call(ROUTES[0], OTHER_PEER).await.status().as_u16();
     assert_eq!(status, 400, "another address is not charged");
 
@@ -3277,4 +3286,155 @@ async fn the_federation_flow_routes_are_rate_limited_each_in_its_own_bucket() {
         let status = call(route, PEER).await.status().as_u16();
         assert_eq!(status, 429, "{route} past its bucket");
     }
+}
+
+// ---------------------------------------------------------------------------
+// #654 (R101-02): the public SAML ACS's wait for the crypto gate is bounded
+// ---------------------------------------------------------------------------
+
+/// **#654 (R101-02).** With every crypto permit held, a post to the public SAML
+/// ACS gives up after `hash_acquire_timeout_secs` and answers exactly what it
+/// answers for a signature that does not verify — same status, same body — so a
+/// busy gate is no oracle. A bounded waiter (the CRL re-sign's shape) that
+/// queued behind the post gets the next permit once one is released.
+#[cfg(feature = "saml")]
+#[actix_rt::test]
+async fn r101_02_the_saml_acs_gives_up_on_a_held_crypto_gate_and_reads_like_an_invalid_signature() {
+    use axiam_core::repository::FederationLoginState;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    const WAIT_SECS: u64 = 1;
+    const FIXTURES_DIR: &str = "../axiam-federation/tests/fixtures/saml";
+    let fixture = |name: &str| {
+        std::fs::read_to_string(std::path::Path::new(FIXTURES_DIR).join(name))
+            .unwrap_or_else(|e| panic!("failed to load SAML fixture {name}: {e}"))
+    };
+
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let auth = AuthConfig {
+        hash_acquire_timeout_secs: WAIT_SECS,
+        ..test_auth_config()
+    };
+    let config_id = Uuid::new_v4();
+    db.query(
+        "CREATE type::record('federation_config', $id) SET \
+         tenant_id = $tenant_id, provider = 'test-saml-idp', protocol = 'Saml', \
+         metadata_url = 'https://idp.example.com/metadata', client_id = $client_id, \
+         client_secret = '', attribute_map = {}, enabled = true, \
+         allowed_algorithms = ['RS256'], idp_signing_cert_pem = $cert, \
+         created_at = time::now(), updated_at = time::now()",
+    )
+    .bind(("id", config_id.to_string()))
+    .bind(("tenant_id", tenant_id.to_string()))
+    .bind(("client_id", "https://sp.example.com".to_string()))
+    .bind(("cert", fixture("signing_cert.pem")))
+    .await
+    .expect("insert federation_config")
+    .check()
+    .expect("check insert");
+
+    let state = AppState::for_test(db.clone(), auth.clone());
+    let gate = Arc::clone(&state.crypto_semaphore);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(state.clone()))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    // One state row per post: the ACS consumes it.
+    let post = |fixture_name: &'static str, relay: &'static str| {
+        let state = state.clone();
+        let app = &app;
+        let response = STANDARD.encode(fixture(fixture_name));
+        async move {
+            state
+                .federation
+                .federation_login_state_repo
+                .insert(&FederationLoginState {
+                    state: relay.into(),
+                    nonce: String::new(),
+                    tenant_id,
+                    federation_config_id: config_id,
+                    redirect_uri: "https://spa.example.com/callback".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+                    request_id: "_axiam-req-1".into(),
+                    code_verifier: None,
+                    idp_redirect_uri: None,
+                })
+                .await
+                .expect("seed federation_login_state");
+            let req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri("/api/v1/auth/federation/saml/acs")
+                .set_json(serde_json::json!({
+                    "relay_state": relay,
+                    "saml_response_b64": response,
+                }))
+                .to_request();
+            let started = std::time::Instant::now();
+            let resp = test::call_service(app, req).await;
+            let took = started.elapsed();
+            let status = resp.status().as_u16();
+            let body = test::read_body(resp).await;
+            (status, body, took)
+        }
+    };
+
+    // The reference: a signature that does not verify, with the gate free.
+    let (invalid_status, invalid_body, _) = post("tampered_response.xml", "relay-invalid").await;
+    assert_eq!(invalid_status, 401, "an invalid signature is a 401");
+
+    // Every permit held: the post waits the bound and no longer.
+    let total = gate.available_permits();
+    let held = Arc::clone(&gate)
+        .acquire_many_owned(u32::try_from(total).unwrap())
+        .await
+        .unwrap();
+    let waiter = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let permit =
+            axiam_auth::crypto_gate::acquire_hash_permit(&gate, std::time::Duration::from_secs(10))
+                .await
+                .map(|_| ());
+        (permit, started.elapsed())
+    };
+    let release = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1_800)).await;
+        drop(held);
+    };
+    let ((status, body, took), (permit, waited), ()) = tokio::join!(
+        post("scd_valid_response.xml", "relay-busy"),
+        waiter,
+        release
+    );
+
+    assert_eq!(
+        status, invalid_status,
+        "a busy gate reads like an invalid signature"
+    );
+    assert_eq!(
+        body, invalid_body,
+        "same body: a busy gate is no oracle for the signature"
+    );
+    assert!(
+        took >= std::time::Duration::from_secs(WAIT_SECS),
+        "the post waited the bound ({took:?})"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(WAIT_SECS + 3),
+        "and not much longer ({took:?})"
+    );
+    permit.expect("the queued waiter gets a permit once one is released");
+    assert!(
+        waited >= std::time::Duration::from_millis(1_500),
+        "it was served by the release, not before ({waited:?})"
+    );
+    assert_eq!(gate.available_permits(), total, "no permit is lost");
 }

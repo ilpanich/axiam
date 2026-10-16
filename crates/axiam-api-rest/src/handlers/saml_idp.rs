@@ -89,6 +89,7 @@ use axiam_core::repository::{
     SamlServiceProviderRepository, SamlSpSessionRepository, SessionRepository, SettingsRepository,
     TenantRepository, UserRepository,
 };
+use axiam_federation::saml_gate::{CryptoGate, GateRefusal};
 use axiam_federation::saml_idp::request::{
     self as saml_request, BINDING_HTTP_POST, ParsedAuthnRequest, RedirectQuery, RequestError,
 };
@@ -632,12 +633,26 @@ struct Incoming<'q> {
 /// hold an async worker. The transform allow-list inside it bounds that work;
 /// this bounds how much of it runs at once. A task that does not complete is a
 /// signature that did not verify.
+///
+/// The wait for a permit is bounded by the same `hash_acquire_timeout_secs`
+/// the Argon2id path uses (#654): both endpoints are unauthenticated, and an
+/// unbounded wait would queue ahead of every login and every CRL re-sign. A
+/// busy gate is [`PostVerifyFailure::Busy`], answered `503` ([`busy_page`]):
+/// the permit is taken before the document is evaluated, so the answer says
+/// nothing about the signature, and the SP can retry. A closed semaphore (it
+/// never is) is the signature that did not verify.
 pub(crate) async fn verify_post_signature_off_worker<C: Connection + Clone>(
     state: &AppState<C>,
     document: &str,
     sp_cert_der: &[u8],
-) -> Result<(), RequestError> {
-    let permit = state.crypto_semaphore.clone().acquire_owned().await;
+) -> Result<(), PostVerifyFailure> {
+    let permit = crypto_gate(state)
+        .acquire("saml_idp_receiver")
+        .await
+        .map_err(|refusal| match refusal {
+            GateRefusal::Busy => PostVerifyFailure::Busy,
+            GateRefusal::Closed => PostVerifyFailure::Request(RequestError::SignatureInvalid),
+        })?;
     let document = document.to_owned();
     let sp_cert_der = sp_cert_der.to_vec();
     tokio::task::spawn_blocking(move || {
@@ -646,6 +661,37 @@ pub(crate) async fn verify_post_signature_off_worker<C: Connection + Clone>(
     })
     .await
     .unwrap_or(Err(RequestError::SignatureInvalid))
+    .map_err(PostVerifyFailure::Request)
+}
+
+/// Why [`verify_post_signature_off_worker`] did not verify a signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostVerifyFailure {
+    /// The receiver's verdict on the message.
+    Request(RequestError),
+    /// No crypto permit came free within `hash_acquire_timeout_secs`.
+    Busy,
+}
+
+/// The deployment's crypto semaphore with the wait every bounded waiter on it
+/// gives (`hash_acquire_timeout_secs`, #654).
+fn crypto_gate<C: Connection + Clone>(state: &AppState<C>) -> CryptoGate {
+    CryptoGate::new(
+        std::sync::Arc::clone(&state.crypto_semaphore),
+        std::time::Duration::from_secs(state.auth_config.hash_acquire_timeout_secs),
+    )
+}
+
+/// `503`, for a verification that found the crypto gate saturated (#654): not
+/// a verdict on the request, so not one of [`RequestError`]'s `400`s. Asks the
+/// SP to retry shortly.
+pub(crate) fn busy_page(tenant_id: Uuid) -> HttpResponse {
+    let mut response = refusal_page(StatusCode::SERVICE_UNAVAILABLE, "busy", tenant_id);
+    response.headers_mut().insert(
+        actix_web::http::header::RETRY_AFTER,
+        actix_web::http::header::HeaderValue::from_static("5"),
+    );
+    response
 }
 
 /// Everything the first leg decides, in the order the module docs give.
@@ -698,11 +744,15 @@ async fn accept<C: Connection + Clone>(
     let verified = match (&sp_cert, signed) {
         (Some(cert), true) => {
             let outcome = match &incoming.redirect {
-                Some(query) => query.verify_signature(cert),
+                Some(query) => query
+                    .verify_signature(cert)
+                    .map_err(PostVerifyFailure::Request),
                 None => verify_post_signature_off_worker(state, &incoming.document, cert).await,
             };
-            if let Err(e) = outcome {
-                return request_refused(e, tenant_id);
+            match outcome {
+                Ok(()) => {}
+                Err(PostVerifyFailure::Request(e)) => return request_refused(e, tenant_id),
+                Err(PostVerifyFailure::Busy) => return busy_page(tenant_id),
             }
             true
         }

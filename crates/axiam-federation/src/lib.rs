@@ -22,6 +22,10 @@ pub mod oidc;
 pub mod pkce;
 #[cfg(feature = "saml")]
 pub mod saml;
+/// The bounded wait SAML signature verification gives the deployment's crypto
+/// semaphore (#654).
+#[cfg(feature = "saml")]
+pub mod saml_gate;
 /// SAML 2.0 identity provider: assertion issuance — `NameID` policy, attribute
 /// mapping, enveloped XML-DSig, the response envelope (G-2, T23.2.2). A library;
 /// the SSO, SLO and metadata endpoints are `axiam-api-rest`'s.

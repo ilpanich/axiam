@@ -335,6 +335,111 @@ async fn the_subject_is_the_csr_s_and_comes_from_nowhere_else() {
     );
 }
 
+/// An Ed25519 CSR whose subject is exactly `attributes`, in order. A repeated
+/// common name is spelt as a custom DN type (OID 2.5.4.3): rcgen keys a
+/// distinguished name by type and would replace the first.
+fn csr_with_subject(attributes: &[(rcgen::DnType, &str)]) -> String {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("key");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+    for (kind, value) in attributes {
+        params.distinguished_name.push(kind.clone(), *value);
+    }
+    params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem")
+}
+
+#[tokio::test]
+async fn a_csr_with_two_common_names_is_refused_on_the_local_path_too() {
+    // R110W1-02. The local path would sign only the first name, but the rule is
+    // the same on every custodian: a CSR is not accepted here and refused where
+    // a remote signer would have copied its whole subject.
+    let f = fixture().await;
+    let csr = csr_with_subject(&[
+        (rcgen::DnType::CommonName, "device-001"),
+        (rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "second-name"),
+    ]);
+    let err = f
+        .certs
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
+        .await
+        .expect_err("two common names are refused");
+    assert!(validation_message(&err).contains("more than one common name"));
+}
+
+#[tokio::test]
+async fn a_csr_attribute_that_is_not_printable_is_refused_on_the_local_path_too() {
+    // R110W1-02: the value rules run on every attribute, not only the name.
+    let f = fixture().await;
+    for (what, value) in [
+        ("a bidi override", "evil \u{202E}gnp.exe"),
+        ("a newline", "line\nbreak"),
+        ("an over-long value", &"x".repeat(65)),
+    ] {
+        let csr = csr_with_subject(&[
+            (rcgen::DnType::CommonName, "device-001"),
+            (rcgen::DnType::OrganizationalUnitName, value),
+        ]);
+        let err = f
+            .certs
+            .sign_csr(
+                f.org_id,
+                IssuingScope::Organization,
+                f.request(csr),
+                None,
+                &[],
+            )
+            .await
+            .expect_err(what);
+        let message = validation_message(&err);
+        assert!(message.contains("subject attribute"), "{what}: {message}");
+        assert!(
+            !message.contains(value),
+            "{what}: the value is not repeated"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_ordinary_organisation_attribute_is_still_signed_and_dropped() {
+    // The other side of the rule: `openssl req -subj /C=../O=../CN=..` is how
+    // most CSRs are made, so an attribute that passes the value rules is not
+    // refused. The local path keeps the common name and nothing else.
+    let f = fixture().await;
+    let csr = csr_with_subject(&[
+        (rcgen::DnType::CountryName, "GB"),
+        (rcgen::DnType::OrganizationName, "Acme Corp"),
+        (rcgen::DnType::CommonName, "device-001"),
+    ]);
+    let cert = f
+        .certs
+        .sign_csr(
+            f.org_id,
+            IssuingScope::Organization,
+            f.request(csr),
+            None,
+            &[],
+        )
+        .await
+        .expect("a printable O and C are no reason to refuse a CSR");
+    assert_eq!(cert.subject, "device-001");
+    with_cert(&cert.public_cert_pem, |c| {
+        assert_eq!(
+            c.subject().iter_attributes().count(),
+            1,
+            "the certificate's subject is the one common name"
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Rule 2 — key policy (D-4, T-96)
 // ---------------------------------------------------------------------------

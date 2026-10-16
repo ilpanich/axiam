@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:cfa1f4582c9ebe66815213022c4c561ff532859044667da6ef77210579bf3502"
+    "x-axiam-spec-digest": "sha256:3f79943312766ed3304d0059c0d991bac0ec2a691b46a66cec50dc32cdf155df"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -5608,7 +5608,7 @@
           "ca-certificates"
         ],
         "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates`",
-        "description": "Generate a CA. What that means depends on the configured key custodian, and\ndeliberately not on the request:\n\n* Under `database` or `vault` custody, AXIAM generates a self-signed root\n  and returns its private key once, in `private_key_pem`.\n* Under `vault_pki` custody, Vault generates a root and a signing\n  intermediate beneath it, and the response has **no** `private_key_pem`\n  because the key never existed outside Vault. The root's certificate comes\n  back in `chain_pem`, which is the only copy anything outside Vault will\n  see.",
+        "description": "Generate a CA. What that means depends on the configured key custodian, and\ndeliberately not on the request:\n\n* Under `database` or `vault` custody, AXIAM generates a self-signed root\n  and returns its private key once, in `private_key_pem`: an unencrypted\n  PKCS#8 `PRIVATE KEY` block, which for Ed25519 is RFC 8410 version 1 (the\n  seed alone, no public-key attribute) so that OpenSSL 3.0 can read it.\n* Under `vault_pki` custody, Vault generates a root and a signing\n  intermediate beneath it, and the response has **no** `private_key_pem`\n  because the key never existed outside Vault. The root's certificate comes\n  back in `chain_pem`, which is the only copy anything outside Vault will\n  see.",
         "operationId": "generate",
         "parameters": [
           {
@@ -14647,7 +14647,7 @@
           "pki"
         ],
         "summary": "`GET`/`HEAD /pki/v1/{org_id}/ca/{ca_id}/crl`",
-        "description": "The CA's current CRL (RFC 5280 §5), DER, as `application/pkix-crl`:\nsigned with the CA's own key, `nextUpdate` a configured interval after\n`thisUpdate` (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, one day by default), with\na CRL number and an authority key identifier, and an entry for every\ncertificate the CA signed and revoked that has not expired. Every\ncertificate AXIAM signs names this URL in its CRL distribution points\nextension when the deployment has a public base URL.\n\nUnauthenticated, because a relying party fetches the list before it can\nvalidate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).\n`ETag` is the list's digest and `Last-Modified` its `thisUpdate`; a matching\n`If-None-Match` answers `304`. `Cache-Control: public, max-age` runs to the\norigin's next scheduled re-sign — at most half the `nextUpdate` interval —\nand not to `nextUpdate` (#608): a shared cache revalidates with the `ETag`\nthat often rather than serving a list from before a revocation for the\nwhole interval. Every replica signs the same state in the same refresh\nepoch to the same bytes, CRL number and `ETag`, so revalidating behind a\nload balancer answers `304` wherever it lands.\n\n`404` for a CA that does not exist in that organization and, alike, for one\nthat publishes no list: a revoked or expired CA (its status is on its\nparent's list), an imported trust anchor AXIAM holds no key for, and a CA\nwhose key Vault's PKI engine holds.\n\n`503` when the list has to be re-signed and no permit of the crypto\nsemaphore — shared with issuance and password hashing — came free within\nfive seconds (#607). A list that has not changed is served from the cache\nand needs no permit, so the route keeps answering relying parties that\nalready hold the current list while the gate is saturated.",
+        "description": "The CA's current CRL (RFC 5280 §5), DER, as `application/pkix-crl`:\nsigned with the CA's own key, `nextUpdate` a configured interval after\n`thisUpdate` (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, one day by default), with\na CRL number and an authority key identifier, and an entry for every\ncertificate the CA signed and revoked that has not expired. Every\ncertificate AXIAM signs names this URL in its CRL distribution points\nextension when the deployment has a public base URL.\n\nUnauthenticated, because a relying party fetches the list before it can\nvalidate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).\n`ETag` is the list's digest and `Last-Modified` its `thisUpdate`; a matching\n`If-None-Match` answers `304`. `Cache-Control: public, max-age` runs to the\norigin's next scheduled re-sign — at most half the `nextUpdate` interval —\nand not to `nextUpdate` (#608): a shared cache revalidates with the `ETag`\nthat often rather than serving a list from before a revocation for the\nwhole interval. Every replica signs the same state in the same refresh\nepoch to the same bytes, CRL number and `ETag`, so revalidating behind a\nload balancer answers `304` wherever it lands.\n\n`404` for a CA that does not exist in that organization and, alike, for one\nthat publishes no list: a revoked or expired CA (its status is on its\nparent's list), an imported trust anchor AXIAM holds no key for, and a CA\nwhose key Vault's PKI engine holds.\n\n`503` when the list has to be re-signed and no permit of the crypto\nsemaphore — shared with issuance and password hashing — came free within\nfive seconds (#607), and also when the request waited that long (`permit_wait`)\non another request's in-flight re-sign of the same CA, since waiters share\nthat re-sign's outcome, failure included. A list that has not changed is served\nfrom the cache and needs no permit, so the route keeps answering relying\nparties that already hold the current list while the gate is saturated.",
         "operationId": "get_crl",
         "parameters": [
           {
@@ -16931,7 +16931,7 @@
           },
           "subject": {
             "type": "string",
-            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`."
+            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`, as is a name of more than\n64 characters (RFC 5280 `ub-common-name`) or one holding a control\ncharacter, a tab or line break, an invisible or bidirectional formatting\ncharacter, or two spaces in a row."
           },
           "validity_days": {
             "type": "integer",
@@ -17016,7 +17016,8 @@
           },
           "metadata": {},
           "subject": {
-            "type": "string"
+            "type": "string",
+            "description": "The certificate's common name, e.g. `device-001`: a bare name or one\n`CN=` component, at most 64 characters (RFC 5280 `ub-common-name`),\nprintable — a control character, tab or line break, an invisible or\nbidirectional formatting character, or two spaces in a row is refused\nwith `400`. A name that is to be written into another system's\nconfiguration (a FreeRADIUS table, an ACL) should match\n`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`."
           },
           "subject_alt_names": {
             "type": [
@@ -18963,7 +18964,7 @@
                   "string",
                   "null"
                 ],
-                "description": "PEM-encoded private key — returned only on generation, and only when\nthere is one to return.\n\nAbsent under `vault_pki` custody, where the key was generated inside\nVault and no API exports it. The field is omitted rather than sent as\n`null` so a client that has always read it keeps working unchanged for\nevery custodian that does produce a key."
+                "description": "PEM-encoded private key — returned only on generation, and only when\nthere is one to return.\n\nAn unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key is RFC 8410\nversion 1 (`version` INTEGER 0, the 32-byte seed and no embedded public\nkey), which OpenSSL 3.0 reads; an RSA-4096 key is the usual PKCS#8\n`RSAPrivateKey`.\n\nAbsent under `vault_pki` custody, where the key was generated inside\nVault and no API exports it. The field is omitted rather than sent as\n`null` so a client that has always read it keeps working unchanged for\nevery custodian that does produce a key."
               }
             }
           }
@@ -18990,7 +18991,7 @@
               },
               "private_key_pem": {
                 "type": "string",
-                "description": "PEM-encoded private key — returned only on generation."
+                "description": "PEM-encoded private key — returned only on generation.\n\nAn unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key AXIAM\ngenerated is RFC 8410 version 1 (`version` INTEGER 0, the 32-byte seed\nand no embedded public key), which OpenSSL 3.0 reads; the longer\nRFC 5958 v2 form it does not. An RSA-4096 key is the usual PKCS#8\n`RSAPrivateKey`."
               }
             }
           }
@@ -24962,7 +24963,7 @@
       },
       "SignCertificateCsrRequest": {
         "type": "object",
-        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange.",
+        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange. The CSR's common name meets the rules of `subject` on\n`POST /api/v1/certificates` (printable, at most 64 characters) and is\nrefused, not rewritten, when it does not. So does the value of every other\nattribute of the CSR's subject, and a subject with more than one common\nname is refused.",
         "required": [
           "issuer_ca_id",
           "csr_pem",

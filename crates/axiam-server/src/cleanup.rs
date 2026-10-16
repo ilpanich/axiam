@@ -226,6 +226,14 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// next tick as before.
 pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 
+/// Rows one batch of the `certificate_retention` sweep deletes (R101W1-05).
+pub const CERTIFICATE_RETENTION_BATCH: u32 = 500;
+
+/// Batches one run of the `certificate_retention` sweep may take: at most
+/// `BATCH * MAX_BATCHES` rows a tick, the rest at the next. Bounds a first run
+/// over a deployment that has never deleted a certificate row.
+pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
+
 /// One pass of the `tenant_purge` job: purge every tombstoned tenant and, when
 /// `scan_orphans`, every orphaned tenant id.
 ///
@@ -247,7 +255,12 @@ pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 /// others skip it for [`TENANT_PURGE_LEASE`]. A tenant the purge finds already
 /// purged — gone before the claim, or removed by an overlapping purge after a
 /// lease ran out — is success, not a failure, and is not recorded again: only
-/// the purge that removed the tenant row writes `tenants.purged`.
+/// the purge that removed the tenant row writes `tenants.purged`. An orphaned
+/// id is claimed the same way, by a marker row
+/// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): replicas
+/// whose daily scans coincide purge and record it once, and a scan that
+/// predates another replica's finished purge finds nothing left and records
+/// nothing.
 ///
 /// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
@@ -290,7 +303,13 @@ where
     let (mut purged, mut failed) = (0u64, 0u64);
     for (tenant_id, orphan) in due {
         let outcome = if orphan {
-            tenant_repo.purge_orphan(tenant_id).await
+            match tenant_repo.purge_orphan(tenant_id).await {
+                // Claimed by another replica, or purged by one since this
+                // replica's scan (R101W1-09 (a)): recorded by that purge.
+                Ok(None) => continue,
+                Ok(Some(report)) => Ok(report),
+                Err(e) => Err(e),
+            }
         } else {
             let claimed_at = Utc::now();
             match tenant_repo.claim_purge(tenant_id, claimed_at, lease).await {
@@ -345,7 +364,9 @@ where
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: Some(serde_json::json!({
-                    "orphan": orphan,
+                    // An orphan's claim marker taken over after its claimant
+                    // died is purged as a tombstoned row, and is still an orphan.
+                    "orphan": orphan || report.orphan,
                     "audit_exported_through": report.audit_exported_through,
                     "audit_rows_deleted": report.audit_rows_deleted,
                     "audit_rows_kept": report.audit_rows_kept,
@@ -355,7 +376,7 @@ where
         .await;
         tracing::info!(
             %tenant_id,
-            orphan,
+            orphan = orphan || report.orphan,
             audit_rows_deleted = report.audit_rows_deleted,
             audit_rows_kept = report.audit_rows_kept,
             "deleted tenant's data purged"
@@ -412,6 +433,52 @@ pub async fn sweep_scim_reconciliation(
         )));
     }
     Ok(sweep.reconciled)
+}
+
+/// The `certificate_retention` job (R101W1-05, #618): delete certificate rows
+/// of live tenants more than eight days past their `notAfter`, in bounded
+/// batches, and return how many.
+///
+/// A revoked row is kept for as long as its issuer's revocation list can name
+/// it (the tenant purge's `KEPT_REVOCATION`, whose grace this sweep shares);
+/// past it the CRL is the same without the row. Nothing deleted a certificate
+/// row in a live tenant before, so a revoked one — and the PEM, subject and
+/// `metadata` in it, of an account the Art. 17 purge had erased — outlived any
+/// purpose for the tenant's lifetime. A deleted tenant's rows are the tenant
+/// purge's, not this sweep's. Two replicas may run it at once: each batch is
+/// chosen and deleted by id, and a row the other replica removed first is not
+/// counted. Touches no audit row.
+///
+/// Runs at most [`CERTIFICATE_RETENTION_MAX_BATCHES`] batches of
+/// [`CERTIFICATE_RETENTION_BATCH`] rows, and stops between batches on a
+/// shutdown signal; the next tick continues. A free function, and public, for
+/// the reason [`run_erasure_pipeline`] is.
+///
+/// # Errors
+///
+/// The repository's error from the batch that failed; batches already deleted
+/// stay deleted.
+pub async fn sweep_certificate_retention<CR>(
+    cert_repo: &CR,
+    shutdown: &watch::Receiver<bool>,
+) -> Result<u64, AxiamError>
+where
+    CR: axiam_core::repository::CertificateRepository,
+{
+    let mut removed = 0_u64;
+    for _ in 0..CERTIFICATE_RETENTION_MAX_BATCHES {
+        if *shutdown.borrow() {
+            break;
+        }
+        let batch = cert_repo
+            .delete_past_retention(CERTIFICATE_RETENTION_BATCH)
+            .await?;
+        removed += batch;
+        if batch < u64::from(CERTIFICATE_RETENTION_BATCH) {
+            break;
+        }
+    }
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -854,7 +921,9 @@ where
 // ---------------------------------------------------------------------------
 
 /// Revoke the still-active `User` certificates of an account the Art. 17 purge
-/// is erasing, returning how many (#533) — the purge's step (b4).
+/// is erasing, and clear the free-form `metadata` of all its `User`
+/// certificates, returning how many were revoked (#533, R101W1-05) — the
+/// purge's step (b4).
 ///
 /// Revoked, not deleted: each row carries `revoked_at`, so it stays on its
 /// issuer's revocation list until it expires, and a `vault_pki` issuer's list
@@ -863,14 +932,27 @@ where
 /// outside AXIAM — the retention `docs/compliance/gdpr-compliance.md` records
 /// for a deleted tenant's certificates, here for one account's.
 ///
+/// What the list does not need is cleared, as the tenant purge clears it:
+/// `metadata` is set to `{}` on every row that is the account's, in any status
+/// (R101W1-05). What stays is the PEM, `subject`, `fingerprint`, the dates and
+/// `user_id`; the first three are what the list is computed from and what a
+/// relying party matches an entry against, and `user_id` is an internal random
+/// id of an account that is anonymized in place by the next step, so it names
+/// nobody once this purge has run — and it is the key a retried purge finds
+/// the rows by. The rows go when a certificate retention sweep
+/// ([`CleanupTask`]'s `certificate_retention`) finds them more than eight days
+/// past `notAfter`.
+///
 /// Matches the binding (`certificate.user_id`, schema v98) and, for a row
 /// without one, the older convention on the account's username and email —
 /// limited to certificates created since the account was and to names no other
 /// account of the tenant holds (R101W1-01), so a holder erasing their own
 /// account cannot revoke a namesake's certificate — so it must run **before** `anonymize_user` overwrites them, which the purge
-/// does by calling it ahead of [`run_erasure_pipeline_reporting`]. Fatal there
-/// (`?`), like the credential deletions beside it: the account stays due and
-/// the next sweep retries, with its names still in place.
+/// does by calling it ahead of [`run_erasure_pipeline_reporting`]. The
+/// revocation comes first and the clearing second: `metadata.user_id` is one of
+/// the things the convention reads. Fatal there (`?`), like the credential
+/// deletions beside it: the account stays due and the next sweep retries, with
+/// its names in place; both writes are idempotent.
 ///
 /// A free function, and public, for the reason [`run_erasure_pipeline`] is.
 pub async fn revoke_erased_users_certificates<CR>(
@@ -880,7 +962,7 @@ pub async fn revoke_erased_users_certificates<CR>(
 where
     CR: axiam_core::repository::CertificateRepository,
 {
-    cert_repo
+    let revoked = cert_repo
         .revoke_user_certificates(
             user.tenant_id,
             user.id,
@@ -888,7 +970,17 @@ where
             &user.email,
             user.created_at,
         )
-        .await
+        .await?;
+    cert_repo
+        .clear_user_certificates_metadata(
+            user.tenant_id,
+            user.id,
+            &user.username,
+            &user.email,
+            user.created_at,
+        )
+        .await?;
+    Ok(revoked)
 }
 
 /// Run the GDPR erasure pipeline for a single user: pseudonymize audit actor
@@ -1580,6 +1672,22 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         if self.stop_requested() {
             return;
         }
+        // R101W1-05 (#618) — delete certificate rows more than
+        // eight days past `notAfter` in live tenants: the revocation
+        // list no longer names them, and they carry the PEM and
+        // subject of people the Art. 17 purge has since erased.
+        // INFO, for the audit sweep's reason: it destroys rows
+        // nothing can rebuild (though nothing can need them).
+        Self::record(
+            &self.job_health,
+            "certificate_retention",
+            self.sweep_certificate_retention().await,
+            tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
         // T21.4 — drop expired initial access tokens, spent or
         // not. DEBUG: an expired token authorises nothing, and
         // the evidence a spent one carried is in the audit log,
@@ -1747,6 +1855,15 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     }
 
     // -----------------------------------------------------------------------
+    // Certificate retention sweep (R101W1-05, #618)
+    // -----------------------------------------------------------------------
+
+    /// The `certificate_retention` job: see [`sweep_certificate_retention`].
+    async fn sweep_certificate_retention(&self) -> Result<u64, AxiamError> {
+        sweep_certificate_retention(self.cert_repo.as_ref(), &self.shutdown).await
+    }
+
+    // -----------------------------------------------------------------------
     // Dynamic client registration sweeps (T21.4)
     // -----------------------------------------------------------------------
 
@@ -1832,8 +1949,10 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// (b) Hard-delete federation links.
     /// (b2) Hard-delete WebAuthn credentials and password history (SEC-056).
     /// (b3) Prune `member_of` and `has_role` graph edges (isolated tombstone).
-    /// (b4) Revoke the account's `User` certificates (#533) — kept, on their
-    ///     issuers' revocation lists, never deleted.
+    /// (b4) Revoke the account's `User` certificates (#533) and clear their
+    ///     `metadata` (R101W1-05) — kept, on their issuers' revocation lists,
+    ///     until the certificate retention sweep deletes them eight days past
+    ///     `notAfter`.
     /// (c) Compute deterministic GDPR pseudonym via `gdpr_pseudonym`.
     /// (d)/(e)/(g) Run [`run_erasure_pipeline`]: pseudonymize all audit
     ///     entries for this user (now FATAL, D-01/D-03/D-04) -> anonymize the
@@ -1971,10 +2090,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 .await?;
         }
 
-        // (b4) Revoke the account's `User` certificates (#533), while its
-        // username and email — which the convention for a certificate issued
-        // without a `user_id` reads — are still on the row. Fail-closed, like
-        // the steps above; idempotent (an already revoked row is not matched).
+        // (b4) Revoke the account's `User` certificates (#533) and clear their
+        // `metadata` (R101W1-05), while its username and email — which the
+        // convention for a certificate issued without a `user_id` reads — are
+        // still on the row. Fail-closed, like the steps above; idempotent (an
+        // already revoked row is not matched, a cleared one is not rewritten).
         let certificates_revoked =
             revoke_erased_users_certificates(self.cert_repo.as_ref(), user).await?;
 

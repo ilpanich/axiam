@@ -489,6 +489,104 @@ async fn a_newly_issued_certificate_carries_the_crl_distribution_point() {
     );
 }
 
+/// #653 — a serial is drawn per certificate, not derived from the key. The same
+/// CSR (one public key) signed twice yields two serials, so revoking one leaves
+/// the other off the list; every issuance path draws at most 20 octets with the
+/// top bit clear (RFC 5280 §4.1.2.2); and the value in the database is the one
+/// the list encodes.
+#[tokio::test]
+async fn the_same_csr_signed_twice_gets_two_serials_and_one_revocation_lists_one() {
+    let f = Fixture::new().await;
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "same-key");
+    let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+    let mut signed = Vec::new();
+    for _ in 0..2 {
+        signed.push(
+            f.certs
+                .sign_csr(
+                    f.org,
+                    IssuingScope::Organization,
+                    SignCertificateCsr {
+                        tenant_id: f.tenant,
+                        issuer_ca_id: root.certificate.id,
+                        csr_pem: csr_pem.clone(),
+                        cert_type: CertificateType::Device,
+                        validity_days: 30,
+                        metadata: None,
+                        subject_alt_names: vec![],
+                        user_id: None,
+                    },
+                    None,
+                    &[],
+                )
+                .await
+                .expect("the same CSR may be signed twice"),
+        );
+    }
+    let (first, second) = (&signed[0], &signed[1]);
+    assert_ne!(
+        serial_of(&first.public_cert_pem),
+        serial_of(&second.public_cert_pem),
+        "two certificates on one key must not share a serial"
+    );
+
+    // Every local issuance path: leaf (generated and CSR-signed), root,
+    // intermediate.
+    let tenant_ca = f.tenant_ca(root.certificate.id).await;
+    let generated = f.leaf(tenant_ca.certificate.id, "device-generated").await;
+    for pem in [
+        &first.public_cert_pem,
+        &second.public_cert_pem,
+        &generated.public_cert_pem,
+        &root.certificate.public_cert_pem,
+        &tenant_ca.certificate.public_cert_pem,
+    ] {
+        let der = der_of(pem);
+        let (_, cert) = X509Certificate::from_der(&der).unwrap();
+        let raw = cert.raw_serial();
+        assert!(raw.len() <= 20, "at most 20 octets, got {}", raw.len());
+        assert_eq!(raw[0] & 0x80, 0, "positive: the top bit is clear");
+        assert!(raw.iter().any(|b| *b != 0), "non-zero");
+    }
+
+    // The column the unique index is on holds what the list encodes.
+    let mut rows =
+        f.db.query("SELECT VALUE serial FROM certificate WHERE issuer_ca_id = $ca")
+            .bind(("ca", root.certificate.id.to_string()))
+            .await
+            .unwrap();
+    let mut stored: Vec<Option<String>> = rows.take(0).unwrap();
+    stored.sort();
+    let mut expected: Vec<Option<String>> = [first, second]
+        .iter()
+        .map(|c| Some(hex::encode(serial_of(&c.public_cert_pem))))
+        .collect();
+    expected.sort();
+    assert_eq!(stored, expected);
+
+    f.certs
+        .revoke(f.tenant, first.id)
+        .await
+        .expect("revoke one of the two");
+    let crl = f
+        .crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS)
+        .current(f.org, root.certificate.id)
+        .await
+        .expect("the CA publishes a list");
+    let serials = verified_serials(&crl, &root.certificate.public_cert_pem);
+    assert_eq!(serials, vec![serial_of(&first.public_cert_pem)]);
+    assert!(
+        !serials.contains(&serial_of(&second.public_cert_pem)),
+        "revoking one certificate must not revoke its same-key twin"
+    );
+}
+
 /// R1W1-01: deleting a tenant revokes its certificates and signing CAs, and
 /// the purge keeps every revoked, unexpired one — so each stays on its
 /// issuer's list after the tombstone, after the purge, and until it expires.
@@ -1111,4 +1209,353 @@ async fn the_crl_number_grows_across_revocations_epochs_and_an_expiry() {
         .await
         .unwrap();
     assert_eq!(other.der, fourth.der);
+}
+
+/// #615, the issue's test: a revocation dated past the end of the epoch — the
+/// datastore's clock ahead of the replica's — beside an entry that expires at
+/// the boundary. The list signed before the boundary states its epoch's last
+/// second as `thisUpdate` and no entry later than that; the list signed after
+/// it, one entry fewer, has a greater number. Before the fix the first list
+/// stated the future date as `thisUpdate` and the second, with the same
+/// `thisUpdate` and one entry fewer, a lower number.
+#[tokio::test]
+async fn a_revocation_dated_past_the_epoch_cannot_lower_the_number_across_the_boundary() {
+    const SECS: u64 = 3_600;
+    let half = Duration::seconds(1_800);
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let expiring = f
+        .leaf(ca.certificate.id, "device-expiring-at-boundary")
+        .await;
+    let ahead = f.leaf(ca.certificate.id, "device-revoked-ahead").await;
+    f.certs.revoke(f.tenant, expiring.id).await.unwrap();
+    f.certs.revoke(f.tenant, ahead.id).await.unwrap();
+
+    let start = next_epoch_start(i64::try_from(SECS).unwrap());
+    let end = start + half;
+    let set = |field: &'static str, fp: String, t: chrono::DateTime<Utc>| {
+        let db = f.db.clone();
+        async move {
+            db.query(format!(
+                "UPDATE certificate SET {field} = $t WHERE fingerprint = $fp"
+            ))
+            .bind(("t", t))
+            .bind(("fp", fp))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        }
+    };
+    // Expired a second before the epoch began: listed in it (RFC 5280 §3.3),
+    // gone from the next.
+    set(
+        "not_after",
+        expiring.fingerprint.clone(),
+        start - Duration::seconds(1),
+    )
+    .await;
+    // Revoked, by the datastore's clock, ten seconds past the epoch's end.
+    let revoked_at = end + Duration::seconds(10);
+    set("revoked_at", ahead.fingerprint.clone(), revoked_at).await;
+
+    let crls = f.crl_service(SECS);
+    let before = crls
+        .current_at(f.org, ca.certificate.id, end - Duration::seconds(12))
+        .await
+        .unwrap();
+    assert!(
+        before.this_update < end,
+        "thisUpdate stays inside its epoch"
+    );
+    assert_eq!(before.this_update, end - Duration::seconds(1));
+    assert_eq!(
+        before.next_update - before.this_update,
+        Duration::seconds(i64::try_from(SECS).unwrap())
+    );
+    let (_, list) = CertificateRevocationList::from_der(&before.der).unwrap();
+    assert_eq!(
+        list.last_update().timestamp(),
+        before.this_update.timestamp()
+    );
+    let dates: Vec<i64> = list
+        .iter_revoked_certificates()
+        .map(|e| e.revocation_date.timestamp())
+        .collect();
+    assert_eq!(
+        dates.len(),
+        2,
+        "both entries are listed before the boundary"
+    );
+    assert!(
+        dates.iter().all(|d| *d <= before.this_update.timestamp()),
+        "no entry is stated later than the list itself: {dates:?}"
+    );
+    verified_serials(&before, &ca.certificate.public_cert_pem);
+
+    // Another replica, earlier in the same epoch, signs the same bytes.
+    let early = f
+        .crl_service(SECS)
+        .current_at(f.org, ca.certificate.id, start + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        early.der, before.der,
+        "the clamp is a function of the epoch"
+    );
+
+    let after = crls
+        .current_at(f.org, ca.certificate.id, end + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        verified_serials(&after, &ca.certificate.public_cert_pem),
+        vec![serial_of(&ahead.public_cert_pem)],
+        "the expired entry left at the boundary"
+    );
+    assert_eq!(
+        after.this_update, revoked_at,
+        "its own date, inside this epoch"
+    );
+    assert!(
+        after.crl_number > before.crl_number,
+        "the number grows across the boundary: {} then {}",
+        before.crl_number,
+        after.crl_number
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #616: a re-sign in flight is waited on for a bounded time, and shared
+// ---------------------------------------------------------------------------
+
+type Crls = CrlService<SurrealCaCertificateRepository<Db>, SurrealCertificateRepository<Db>>;
+
+/// A `CrlService` over `f`'s store in which CA `held_ca` keeps its key in the
+/// fake Vault — so its re-sign stops inside the custodian `load` until the test
+/// answers — and every other CA in the database.
+async fn crls_with_a_held_custodian(
+    f: &Fixture,
+    vault: &HeldVault,
+    held_ca: Uuid,
+    permit_wait: std::time::Duration,
+) -> Crls {
+    use axiam_core::ca_keys::CaKeyCustody;
+    use axiam_pki::{DatabaseCaKeyStore, VaultCaKeyConfig, VaultCaKeyStore};
+
+    f.db.query(
+        "UPDATE type::record('ca_certificate', $id) SET key_custody = 'vault', \
+         key_locator = 'axiam/ca-keys/held'",
+    )
+    .bind(("id", held_ca.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let custodians = Arc::new(
+        CaKeyCustodians::new(
+            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(
+                VaultCaKeyStore::new(VaultCaKeyConfig {
+                    address: vault.address(),
+                    token: "hvs.test-only-not-a-real-token".into(), // gitleaks:allow
+                    mount: "secret".into(),
+                    prefix: "axiam/ca-keys".into(),
+                    ca_cert_path: None,
+                })
+                .unwrap(),
+            ),
+            None,
+            Some(CaKeyCustody::Database),
+        )
+        .unwrap(),
+    );
+    CrlService::new(
+        SurrealCaCertificateRepository::new(f.db.clone()),
+        SurrealCertificateRepository::new(f.db.clone()),
+        f.semaphore.clone(),
+        custodians,
+        DEFAULT_CRL_NEXT_UPDATE_SECS,
+    )
+    .with_permit_wait(permit_wait)
+}
+
+/// The issue's test: eight concurrent requests for a list that has to be
+/// signed, with every crypto permit held. One flight waits the permit wait and
+/// fails; the seven requests that joined it receive its `503` rather than each
+/// starting a wait of its own in turn. Before the fix the k-th caller answered
+/// after about k permit waits (the review's probe: 253 … 1714 ms at 200 ms).
+#[tokio::test]
+async fn eight_requests_under_a_held_gate_all_answer_within_about_the_permit_wait() {
+    use std::time::Duration as StdDuration;
+
+    const WAIT: StdDuration = StdDuration::from_millis(1_000);
+    // A second permit wait is what the old queue cost the second caller; the
+    // margin is for eight light reads and the scheduler.
+    const BOUND: StdDuration = StdDuration::from_millis(1_750);
+
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let revoked = f.leaf(ca.certificate.id, "device-under-a-held-gate").await;
+    f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+    let crls = f
+        .crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS)
+        .with_permit_wait(WAIT);
+
+    let permits = u32::try_from(f.semaphore.available_permits()).unwrap();
+    let held = f
+        .semaphore
+        .clone()
+        .acquire_many_owned(permits)
+        .await
+        .unwrap();
+
+    let started = tokio::time::Instant::now();
+    let requests: Vec<_> = (0..8)
+        .map(|_| {
+            let crls = crls.clone();
+            let (org, ca) = (f.org, ca.certificate.id);
+            tokio::spawn(async move {
+                let answer = crls.current(org, ca).await;
+                (answer, started.elapsed())
+            })
+        })
+        .collect();
+    let mut slowest = StdDuration::ZERO;
+    for request in requests {
+        let (answer, elapsed) = request.await.unwrap();
+        assert!(
+            matches!(answer, Err(AxiamError::ServiceUnavailable(_))),
+            "every caller is told to come back: {answer:?}"
+        );
+        assert!(
+            elapsed < BOUND,
+            "a caller answered after {elapsed:?}, more than about one permit wait ({WAIT:?})"
+        );
+        slowest = slowest.max(elapsed);
+    }
+    assert!(slowest >= WAIT, "the flight did wait for a permit");
+
+    drop(held);
+    let crl = crls
+        .current(f.org, ca.certificate.id)
+        .await
+        .expect("signed once a permit is free");
+    assert_eq!(
+        verified_serials(&crl, &ca.certificate.public_cert_pem),
+        vec![serial_of(&revoked.public_cert_pem)]
+    );
+}
+
+/// A request for a list whose re-sign is held inside its custodian waits for
+/// it at most the permit wait, then answers `503`; the flight goes on, and its
+/// list is the next answer. Before the fix the second request queued on the
+/// CA's signing lock for as long as the custodian took. Deterministic: the test
+/// knows the flight is inside `load` because the fake Vault has read its
+/// request.
+#[tokio::test]
+async fn a_request_behind_a_held_re_sign_answers_503_within_the_permit_wait() {
+    use std::time::Duration as StdDuration;
+
+    const GUARD: StdDuration = StdDuration::from_secs(30);
+    const WAIT: StdDuration = StdDuration::from_millis(300);
+
+    let f = Fixture::new().await;
+    let vault = HeldVault::start().await;
+    let a = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let revoked = f
+        .leaf(a.certificate.id, "device-under-a-held-re-sign")
+        .await;
+    f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+    let crls = crls_with_a_held_custodian(&f, &vault, a.certificate.id, WAIT).await;
+
+    let first = tokio::spawn({
+        let crls = crls.clone();
+        let (org, ca) = (f.org, a.certificate.id);
+        async move { crls.current(org, ca).await }
+    });
+    let held = tokio::time::timeout(GUARD, vault.next_request())
+        .await
+        .expect("the re-sign reaches its custodian");
+
+    let started = tokio::time::Instant::now();
+    let second = tokio::time::timeout(GUARD, crls.current(f.org, a.certificate.id))
+        .await
+        .expect("a request behind the held re-sign is not queued for as long as it is held");
+    let waited = started.elapsed();
+    assert!(
+        matches!(second, Err(AxiamError::ServiceUnavailable(_))),
+        "{second:?}"
+    );
+    assert!(
+        waited >= WAIT,
+        "it waited for the flight first ({waited:?})"
+    );
+    assert!(!first.is_finished(), "the flight is still held");
+
+    HeldVault::answer(held, a.private_key_pem.as_deref().expect("A's key")).await;
+    let signed = tokio::time::timeout(GUARD, first)
+        .await
+        .expect("the flight lands once its custodian answers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        verified_serials(&signed, &a.certificate.public_cert_pem),
+        vec![serial_of(&revoked.public_cert_pem)]
+    );
+    let next = tokio::time::timeout(GUARD, crls.current(f.org, a.certificate.id))
+        .await
+        .expect("the cached list answers")
+        .unwrap();
+    assert_eq!(next.etag, signed.etag, "the flight's list, from the cache");
+}
+
+/// The flight is the CA's, not the caller's: the request that started a
+/// re-sign hangs up while it is held in its custodian, and the list is still
+/// signed and cached — the next request is answered without a second read of
+/// the key. Before the fix the re-sign ran inside the request and died with it.
+#[tokio::test]
+async fn a_re_sign_outlives_the_request_that_started_it() {
+    use std::time::Duration as StdDuration;
+
+    const GUARD: StdDuration = StdDuration::from_secs(30);
+
+    let f = Fixture::new().await;
+    let vault = HeldVault::start().await;
+    let a = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let revoked = f.leaf(a.certificate.id, "device-after-a-hang-up").await;
+    f.certs.revoke(f.tenant, revoked.id).await.unwrap();
+    let crls = crls_with_a_held_custodian(
+        &f,
+        &vault,
+        a.certificate.id,
+        axiam_pki::crl::DEFAULT_CRL_PERMIT_WAIT,
+    )
+    .await;
+
+    let caller = tokio::spawn({
+        let crls = crls.clone();
+        let (org, ca) = (f.org, a.certificate.id);
+        async move { crls.current(org, ca).await }
+    });
+    let held = tokio::time::timeout(GUARD, vault.next_request())
+        .await
+        .expect("the re-sign reaches its custodian");
+    caller.abort();
+    assert!(
+        caller.await.unwrap_err().is_cancelled(),
+        "the caller hung up"
+    );
+
+    HeldVault::answer(held, a.private_key_pem.as_deref().expect("A's key")).await;
+    // A second key read would never be answered: this request would hang
+    // until the guard, and fail.
+    let next = tokio::time::timeout(GUARD, crls.current(f.org, a.certificate.id))
+        .await
+        .expect("answered from the abandoned flight, without a second key read")
+        .unwrap();
+    assert_eq!(
+        verified_serials(&next, &a.certificate.public_cert_pem),
+        vec![serial_of(&revoked.public_cert_pem)]
+    );
 }

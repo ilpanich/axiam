@@ -396,6 +396,7 @@ async fn the_purge_refuses_a_live_tenant_and_empties_a_tombstoned_one() {
             audit_exported_through: Some(exported_through),
             audit_rows_deleted: 1,
             audit_rows_kept: 0,
+            orphan: false,
         }
     );
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
@@ -443,7 +444,11 @@ async fn an_orphaned_tenants_rows_are_found_and_purged_but_its_audit_trail_is_ke
         Err(AxiamError::Conflict { .. })
     ));
 
-    tenants.purge_orphan(orphan).await.unwrap();
+    let report = tenants.purge_orphan(orphan).await.unwrap();
+    assert!(
+        report.is_some_and(|r| r.orphan),
+        "this call purged the orphan"
+    );
     for step in TENANT_PURGE_ORDER {
         let expected = u64::from(step.table == "audit_log");
         assert_eq!(
@@ -528,6 +533,79 @@ async fn one_replica_claims_a_tombstoned_tenants_purge_and_a_second_purge_is_not
     assert_eq!(rows(&db, "user", doomed).await, 0);
 }
 
+/// R101W1-09 (a): an orphaned tenant id has no row to stamp, so its purge is
+/// claimed by a marker row under its id. Of eight replicas whose scans name the
+/// same orphan, exactly one claim wins (on the engine production runs); while
+/// the marker stands the id is no orphan and another purge answers `None`
+/// without touching a row; the purge that holds it removes the rows and the
+/// marker; and a purge after that — a scan that predates it — finds nothing,
+/// answers `None` and leaves no marker behind.
+#[tokio::test]
+async fn one_replica_claims_an_orphans_purge_and_a_stale_scan_records_nothing() {
+    // The engine production runs: `kv-mem` may admit two winners (common/).
+    let db = common::serialising_db().await;
+    let org = SurrealOrganizationRepository::new(db.handle())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "orphan-claim".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenants = SurrealTenantRepository::new(db.handle());
+    let orphan = tenant(&db, org, "orphan").await;
+    populate(&db, orphan).await;
+    db.query("DELETE type::record('tenant', $id)")
+        .bind(("id", orphan.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(tenants.orphaned_tenant_ids().await.unwrap(), vec![orphan]);
+
+    let now = Utc::now();
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let tenants = tenants.clone();
+        tasks.push(tokio::spawn(async move {
+            tenants.claim_orphan_purge(orphan, now).await.unwrap()
+        }));
+    }
+    let mut won = 0;
+    for task in tasks {
+        won += usize::from(task.await.unwrap());
+    }
+    assert_eq!(won, 1, "exactly one concurrent claim wins");
+    assert!(
+        tenants.orphaned_tenant_ids().await.unwrap().is_empty(),
+        "a claimed orphan is no orphan to another scan"
+    );
+    assert!(
+        tenants.purge_orphan(orphan).await.unwrap().is_none(),
+        "another replica's claim is not this call's to purge"
+    );
+    assert_eq!(
+        rows(&db, "user", orphan).await,
+        1,
+        "and nothing was touched"
+    );
+
+    // The claimant died: its marker is a tombstone taken over after the lease,
+    // purged as the orphan it is.
+    let report = tenants.purge_tombstoned(orphan).await.unwrap();
+    assert!(report.orphan);
+    assert_eq!(report.audit_exported_through, None);
+    assert_eq!(rows(&db, "user", orphan).await, 0);
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+
+    // A scan that predates that purge: nothing left, nothing recorded, and no
+    // marker left behind.
+    assert!(tenants.purge_orphan(orphan).await.unwrap().is_none());
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
+}
+
 /// The issue's test (R1W1-04, #602, D-5): the purge deletes the audit rows at
 /// or before the export the deletion required and keeps every later one —
 /// the receipt, what happened before the deletion, what the deletion and the
@@ -570,6 +648,7 @@ async fn a_row_written_after_the_export_survives_the_purge() {
             audit_exported_through: Some(exported_through),
             audit_rows_deleted: 2,
             audit_rows_kept: 3,
+            orphan: false,
         }
     );
     assert_eq!(
@@ -628,6 +707,7 @@ async fn without_an_export_time_the_purge_keeps_the_whole_audit_trail() {
             audit_exported_through: None,
             audit_rows_deleted: 0,
             audit_rows_kept: 1,
+            orphan: false,
         }
     );
     assert_eq!(rows(&db, "audit_signature", unrecorded).await, 1);
@@ -685,6 +765,7 @@ async fn without_an_export_time_the_purge_keeps_the_whole_audit_trail() {
             audit_exported_through: Some(exported_through),
             audit_rows_deleted: 1,
             audit_rows_kept: 1,
+            orphan: false,
         }
     );
     assert_eq!(audit_actions(&db, legacy).await, ["tenants.audit_exported"]);

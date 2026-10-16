@@ -59,9 +59,11 @@ pub struct CrlPath {
 ///
 /// `503` when the list has to be re-signed and no permit of the crypto
 /// semaphore — shared with issuance and password hashing — came free within
-/// five seconds (#607). A list that has not changed is served from the cache
-/// and needs no permit, so the route keeps answering relying parties that
-/// already hold the current list while the gate is saturated.
+/// five seconds (#607), and also when the request waited that long (`permit_wait`)
+/// on another request's in-flight re-sign of the same CA, since waiters share
+/// that re-sign's outcome, failure included. A list that has not changed is served
+/// from the cache and needs no permit, so the route keeps answering relying
+/// parties that already hold the current list while the gate is saturated.
 #[utoipa::path(
     get,
     path = "/pki/v1/{org_id}/ca/{ca_id}/crl",

@@ -192,8 +192,29 @@ pub enum Retain {
     CoveringKeptEntries,
 }
 
+/// How many days after its `notAfter` a revoked certificate's row is kept: the
+/// longest an issuer's list can keep an expired entry (one `nextUpdate`
+/// interval, at most seven days, #608) and a day's margin for the datastore's
+/// clock. One spelling, a macro, because it feeds [`REVOCATION_GRACE_SECS`] and
+/// the two `concat!`ed SurrealQL conditions [`KEPT_REVOCATION`] and
+/// [`PAST_REVOCATION_GRACE`], so the number and the queries cannot drift apart.
+/// The `axiam-server` test `kept_revocation_covers_the_longest_crl_interval`
+/// ties it to `axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS` (#621).
+macro_rules! revocation_grace_days {
+    () => {
+        8
+    };
+}
+
+/// [`KEPT_REVOCATION`]'s grace in seconds: eight days past `notAfter`.
+///
+/// Public so a test in a crate that sees both this one and `axiam-pki` can
+/// check it against the longest list interval instead of repeating the number
+/// (#621).
+pub const REVOCATION_GRACE_SECS: u64 = revocation_grace_days!() * 86_400;
+
 /// The condition a row the purge keeps satisfies: revoked, and expired for
-/// less than eight days.
+/// less than eight days ([`REVOCATION_GRACE_SECS`]).
 ///
 /// Not "unexpired" (#608). An issuing CA's list keeps an expired entry until it
 /// has appeared on a list issued after the expiry — RFC 5280 §3.3 requires
@@ -203,7 +224,24 @@ pub enum Retain {
 /// epoch, which changes the list without moving its `thisUpdate` and so breaks
 /// the CRL number every replica derives from them. The eighth day is margin
 /// for the datastore's clock against the replicas'.
-const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now() - 8d";
+///
+/// Public, with [`PAST_REVOCATION_GRACE`], for the same test (#621); the text
+/// is SurrealQL for this crate's own queries, not an API.
+pub const KEPT_REVOCATION: &str = concat!(
+    "status = 'Revoked' AND not_after > time::now() - ",
+    revocation_grace_days!(),
+    "d"
+);
+
+/// A certificate row no revocation list names any more and no relying party
+/// can need: `notAfter` passed more than [`KEPT_REVOCATION`]'s grace ago,
+/// whatever its status (W1.4, #618). What the cleanup job's certificate
+/// retention sweep deletes in a live tenant — and what the tenant purge's
+/// orphan scan has always waited for, now for every certificate rather than
+/// only for the kept ones of a deleted tenant. The grace is spelled once, in
+/// `revocation_grace_days!`, so the two cannot drift apart.
+pub const PAST_REVOCATION_GRACE: &str =
+    concat!("not_after <= time::now() - ", revocation_grace_days!(), "d");
 
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]
@@ -427,6 +465,11 @@ pub struct TenantPurgeReport {
     /// Audit rows of the tenant left for the retention sweep (T-119): those
     /// written after the export, or all of them when there is no export time.
     pub audit_rows_kept: u64,
+    /// The id had no tenant row of its own: an orphaned tenant id
+    /// ([`PurgeScope::Orphan`]), purged under the marker row its claim wrote
+    /// (R101W1-09 (a)) — by the replica that claimed it, or, after that
+    /// replica died, by the tombstoned-tenant purge that took the marker over.
+    pub orphan: bool,
 }
 
 /// Remove `tenant_id`'s rows from every table of [`TENANT_PURGE_ORDER`], in
@@ -444,6 +487,7 @@ pub(crate) async fn purge_rows<C: Connection>(
     };
     let mut report = TenantPurgeReport {
         audit_exported_through: exported_through,
+        orphan: scope == PurgeScope::Orphan,
         ..TenantPurgeReport::default()
     };
     for step in TENANT_PURGE_ORDER {
@@ -568,6 +612,48 @@ async fn audit_export_cutoff<C: Connection>(
         .into_iter()
         .next()
         .and_then(|r| time_at(r.metadata.as_ref(), RECEIPT_EXPORTED_THROUGH)))
+}
+
+/// Whether `tenant_id` still owns a row the orphan scan counts — a row of a
+/// tenant-scoped table but the audit trail, other than revocation evidence the
+/// purge keeps ([`PurgeStep::purgeable`]) — so that the orphan purge records
+/// only a purge that had something to remove (R101W1-09 (a)): a replica whose
+/// scan predates another replica's purge of the same id finds nothing here.
+///
+/// One `LIMIT 1` read per table, stopping at the first row found.
+pub(crate) async fn has_purgeable_rows<C: Connection>(
+    db: &DbHandle<C>,
+    tenant_id: Uuid,
+) -> Result<bool, DbError> {
+    for step in TENANT_PURGE_ORDER {
+        if step.stage == AuditTrail {
+            continue;
+        }
+        let statement = match step.key {
+            TenantKey::TenantId => format!(
+                "SELECT VALUE true FROM {} \
+                 WHERE tenant_id = $id AND ({}) LIMIT 1",
+                step.table,
+                step.purgeable()
+            ),
+            TenantKey::Scope => format!(
+                "SELECT VALUE true FROM {} \
+                 WHERE scope = 'tenant' AND scope_id = $id LIMIT 1",
+                step.table
+            ),
+        };
+        let mut result = db
+            .current()
+            .query(statement)
+            .bind(("id", tenant_id.to_string()))
+            .await?
+            .check()?;
+        let found: Vec<bool> = result.take(0)?;
+        if !found.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Tenant ids that own rows in a tenant-scoped table (the audit trail aside,

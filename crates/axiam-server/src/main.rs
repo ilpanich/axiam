@@ -149,10 +149,8 @@ async fn main() -> std::io::Result<()> {
             .unwrap_or_else(|e| panic!("secret provider configuration is invalid: {e}"));
         // A short-lived client: this runs once, before the shared one exists.
         // It carries the Vault token, so it never follows a redirect (T-476).
-        let bootstrap_http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("failed to build the bootstrap HTTP client");
+        let bootstrap_http =
+            axiam_auth::secrets::bootstrap_client().unwrap_or_else(|e| panic!("{e}"));
         let provider = kind
             .build(&bootstrap_http, keys::ALL_KEYS, keys::ALL_SECRETS)
             .await

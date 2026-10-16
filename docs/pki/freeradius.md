@@ -92,30 +92,23 @@ What each choice does for this recipe:
 - **`cert_type: Device`** gives the leaf `clientAuth` and `digitalSignature`
   ([what every leaf may be used for](README.md#what-every-leaf-may-be-used-for)),
   which is what an EAP-TLS peer certificate needs. Its subject is the common
-  name; choose one that is unique in the tenant (`press-07`). The placement
-  table does **not** key on it ([below](#the-key-is-the-serial)).
+  name; choose one that is unique in the tenant (`press-07`) and matches
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (AXIAM refuses control characters and more
+  than 64 characters; this narrower pattern is the recommendation, not a check).
+  The placement table does **not** key on it ([below](#the-key-is-the-serial)).
 - **A short `validity_days`** is the only bound that does not depend on a list
   being fresh. A device that is replaced every month cannot be admitted for
   longer than a month by a missed revocation.
 - **Ed25519 or RSA-4096** both authenticate: the end-to-end test uses Ed25519
-  for the signing CA, the leaves and the lists. There is one catch on the
-  device's side. AXIAM returns an Ed25519 private key as PKCS#8 *version 2*
-  (RFC 5958: the seed followed by the public key), and OpenSSL 3.0 — the library
-  behind `wpa_supplicant` on Ubuntu 24.04, and so behind `eapol_test` — cannot
-  read it (`DECODER routines::unsupported`, and the supplicant then asks for a
-  passphrase that does not exist). Either issue RSA-4096 leaves for such
-  devices (not what the test runs), or re-encode the key to version 1, which is the same seed without the
-  public key and changes no key material (the test does exactly this):
-
-  ```sh
-  # The 32-byte seed follows the `04 20` tag of the version-2 encoding.
-  sed '/^-----/d' press-07.key.pem | base64 -d | tail -c +17 | head -c 32 > seed.bin
-  { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20'; cat seed.bin; } \
-    | openssl pkey -inform DER -out press-07.key
-  ```
-
-  Check your supplicant's TLS library before choosing; some older ones do not
-  support Ed25519 certificates at all.
+  for the signing CA, the leaves and the lists. AXIAM returns an Ed25519 private
+  key as PKCS#8 **version 1** (RFC 8410: the seed alone), which is the form
+  OpenSSL 3.0 — the library behind `wpa_supplicant` on Ubuntu 24.04, and so
+  behind `eapol_test` — reads, so the returned `private_key_pem` is written to
+  the key file as it is, with no re-encoding ([why](README.md#the-form-of-a-returned-private-key)).
+  A key issued by AXIAM before 1.1.0 is in the longer RFC 5958 form, which that
+  library refuses (`DECODER routines::unsupported`); re-issue the certificate
+  rather than converting the key. Check your supplicant's TLS library before
+  choosing; some older ones do not support Ed25519 certificates at all.
 - **Binding** is how AXIAM knows which service account a device is. FreeRADIUS
   does not read it. It matters for two things: it is the list you build the
   placement table from (below), and revoking the certificate in AXIAM ends the
@@ -308,18 +301,29 @@ the first of which is the one that matters:
 - **A subject is chosen by whoever requests the certificate, and the `files`
   module reads some names as something else.** An entry named `DEFAULT` matches
   **every** key, and a certificate whose name is missing is looked up as `NONE`.
-  AXIAM accepts `DEFAULT` as a subject, and a subject with spaces or a newline.
+  AXIAM accepts `DEFAULT` as a subject, and a subject with spaces. Until 1.1.0 it
+  also accepted a newline or a tab; since #649 a control character, other
+  whitespace, a bidirectional or zero-width character, or more than 64
+  characters is a `400` ([the rules](README.md#issue-an-organization-ca-certificate)),
+  which closes the newline but not `DEFAULT`, `NONE` or a space: certificates
+  issued before 1.1.0 keep the names they have, and the narrower pattern below
+  is still yours to enforce.
   A table keyed on the subject therefore lets one bound certificate named
   `DEFAULT` place every certificate the tenant signing CA ever issued — bound or
   not, listed or not — and, if that entry comes first, move every device onto
   its VLAN; a subject with a newline breaks the file or writes an entry of its
   own. A serial is hex: it cannot spell `DEFAULT` or `NONE`, and holds no space.
-- **AXIAM assigns the serial; the requester does not choose it.** AXIAM derives
-  it from the certificate's public key, so an entry places whoever holds the key
-  of the certificate AXIAM listed as bound, and nobody else (a second certificate
-  over the same key, from a CSR signed again, carries the same serial). Keyed on
-  a name, whoever can obtain a certificate from the tenant signing CA with
-  `press-07` as its subject gets `press-07`'s VLAN.
+- **AXIAM assigns the serial; the requester does not choose it.** AXIAM draws
+  it from 20 random octets for every certificate it signs, so an entry places
+  the one certificate AXIAM listed as bound, and no other (a second certificate
+  over the same key, from a CSR signed again, carries a serial of its own).
+  Keyed on a name, whoever can obtain a certificate from the tenant signing CA
+  with `press-07` as its subject gets `press-07`'s VLAN.
+  *Correction (2026-10-14, #653):* up to 1.0.1 the serial was derived from the
+  public key, so a second certificate over the same key carried the same serial
+  and an entry placed both. Certificates issued before 1.1.0 keep that serial; a
+  pair that already shares one is still placed together, and both belong to the
+  holder of one key.
 - **This server trusts one issuing CA** (section 2), so the serial needs no
   issuer beside it.
 

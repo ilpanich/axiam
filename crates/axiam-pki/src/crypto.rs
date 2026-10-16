@@ -14,7 +14,8 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::KeyAlgorithm;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use rsa::RsaPrivateKey;
-use rsa::pkcs8::EncodePrivateKey;
+use rsa::pkcs8::der::Encode as _;
+use rsa::pkcs8::{EncodePrivateKey, PrivateKeyInfo};
 use sha2::{Digest, Sha256};
 
 /// Modulus size, in bits, of the RSA keys AXIAM issues.
@@ -101,6 +102,47 @@ fn generate_rsa_keypair() -> AxiamResult<KeyPair> {
     })
 }
 
+/// The PEM an operator receives for a key AXIAM generated, and the PEM AXIAM
+/// stores for it.
+///
+/// RSA keys are what rcgen serialises. An Ed25519 key is not: *ring* emits the
+/// RFC 8410 `OneAsymmetricKey` that RFC 5958 calls **v2** (`version` INTEGER 1,
+/// the 32-byte seed followed by a `[1] publicKey` attribute), and OpenSSL 3.0 —
+/// the library behind Ubuntu 24.04's `wpa_supplicant`, and so behind
+/// `eapol_test` and many IoT supplicants — does not decode it
+/// ("DECODER routines::unsupported"). It reads only **v1** (`version` INTEGER 0,
+/// the seed alone, no public-key attribute), so that is what is returned (#651).
+/// The public key is derivable from the seed, so dropping it loses nothing, and
+/// every reader that takes the longer form (ring, rcgen, OpenSSL 3.2+,
+/// `jsonwebtoken`) also takes the shorter one.
+///
+/// The structure is built with the `pkcs8` crate's `PrivateKeyInfo::new`, which
+/// encodes `version` 0 and no attribute; nothing is assembled by hand.
+pub(crate) fn private_key_pem(key_pair: &KeyPair) -> AxiamResult<String> {
+    let der = zeroize::Zeroizing::new(key_pair.serialize_der());
+    if !key_pair.is_compatible(&rcgen::PKCS_ED25519) {
+        return Ok(key_pair.serialize_pem());
+    }
+    let info = PrivateKeyInfo::try_from(der.as_slice())
+        .map_err(|e| AxiamError::Certificate(format!("Ed25519 key is not PKCS#8: {e}")))?;
+    // `new` builds a version-0 structure: no `[1] publicKey` attribute.
+    let v1 = PrivateKeyInfo::new(info.algorithm, info.private_key);
+    let v1_der =
+        zeroize::Zeroizing::new(v1.to_der().map_err(|e| {
+            AxiamError::Certificate(format!("Ed25519 key re-encoding failed: {e}"))
+        })?);
+    let mut pem = pem::encode_config(
+        &pem::Pem::new("PRIVATE KEY", v1_der.to_vec()),
+        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+    );
+    // rcgen's own PEM ends in a newline; keep that, so a file written from
+    // either form is a well-formed text file.
+    if !pem.ends_with('\n') {
+        pem.push('\n');
+    }
+    Ok(pem)
+}
+
 /// Compute SHA-256 fingerprint from DER-encoded certificate bytes.
 pub(crate) fn compute_fingerprint(der: &[u8]) -> String {
     let hash = Sha256::digest(der);
@@ -150,6 +192,74 @@ mod tests {
         let kp = generate_keypair(&KeyAlgorithm::Ed25519).expect("ed25519 keygen must succeed");
         let pem = kp.serialize_pem();
         assert!(pem.contains("PRIVATE KEY"));
+    }
+
+    /// The DER of a PEM's single block.
+    fn der_of(pem_text: &str) -> Vec<u8> {
+        pem::parse(pem_text).expect("a PEM block").into_contents()
+    }
+
+    #[test]
+    fn ed25519_private_key_is_returned_as_pkcs8_v1_without_a_public_key() {
+        // #651: OpenSSL 3.0 refuses RFC 5958's v2 (ring's `version` INTEGER 1 plus
+        // a `[1] publicKey`). The returned key must be the seed-only v1.
+        let kp = generate_keypair(&KeyAlgorithm::Ed25519).expect("keygen");
+        let pem_text = private_key_pem(&kp).expect("encode");
+        assert!(pem_text.starts_with("-----BEGIN PRIVATE KEY-----\n"));
+        assert!(pem_text.ends_with("-----END PRIVATE KEY-----\n"));
+
+        let der = der_of(&pem_text);
+        // SEQUENCE(46) { INTEGER 0, SEQUENCE { OID 1.3.101.112 },
+        //                OCTET STRING { OCTET STRING (32-byte seed) } }
+        assert_eq!(der.len(), 48, "v1 is 48 octets; ring's v2 is 83");
+        assert_eq!(
+            &der[..16],
+            &[
+                0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+                0x04, 0x20
+            ],
+            "version INTEGER 0, Ed25519 OID, then the seed"
+        );
+        // And the same fact through a DER parser rather than a byte prefix.
+        let info = PrivateKeyInfo::try_from(der.as_slice()).expect("parses as PKCS#8");
+        assert!(info.public_key.is_none(), "no [1] publicKey attribute");
+        assert_eq!(
+            info.private_key.len(),
+            34,
+            "OCTET STRING wrapping 32 octets"
+        );
+
+        // ring's own serialisation is the v2 this replaces: same seed, longer.
+        let ring_der = kp.serialize_der();
+        assert_eq!(ring_der.len(), 83);
+        assert_eq!(ring_der[4], 0x01, "ring emits version INTEGER 1 (v2)");
+        assert_eq!(der[16..48], ring_der[16..48], "the seed is unchanged");
+    }
+
+    #[test]
+    fn ed25519_pkcs8_v1_round_trips_to_the_same_signing_key() {
+        let kp = generate_keypair(&KeyAlgorithm::Ed25519).expect("keygen");
+        let pem_text = private_key_pem(&kp).expect("encode");
+        let back = KeyPair::from_pem(&pem_text).expect("rcgen/ring must read the v1 form");
+        assert_eq!(
+            back.public_key_raw(),
+            kp.public_key_raw(),
+            "same seed, same public key"
+        );
+        // Loading is not signing: the stored form is what later signs a CRL.
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("empty SAN list is valid");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "v1-roundtrip");
+        let cert = params.self_signed(&back).expect("a v1-loaded key signs");
+        assert!(cert.pem().contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn rsa_private_key_is_left_as_rcgen_serialises_it() {
+        let kp = generate_keypair(&KeyAlgorithm::Rsa4096).expect("keygen");
+        assert_eq!(private_key_pem(&kp).expect("encode"), kp.serialize_pem());
     }
 
     #[test]

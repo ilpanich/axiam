@@ -714,43 +714,6 @@ async fn signing_ca(
     SigningCa { id, pem }
 }
 
-/// AXIAM returns an Ed25519 private key as PKCS#8 **version 2** (RFC 5958): the
-/// 32-byte seed followed by the public key. OpenSSL 3.0 — the library behind
-/// Ubuntu 24.04's `wpa_supplicant` and so `eapol_test` — refuses that encoding
-/// ("DECODER routines::unsupported") and reads only version 1, which is the same
-/// seed without the public key. This re-encodes the key the way an operator has
-/// to for such a supplicant (docs/pki/freeradius.md, "Issue and bind"); it
-/// changes no key material. A key that is not in the expected shape is returned
-/// as it is, and the supplicant says why it cannot read it.
-fn supplicant_readable_key(pem: &str) -> String {
-    use base64::Engine as _;
-    const V2_PREFIX: [u8; 16] = [
-        0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
-        0x20,
-    ];
-    const V1_PREFIX: [u8; 16] = [
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
-        0x20,
-    ];
-    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-    let Ok(der) = base64::engine::general_purpose::STANDARD.decode(body.trim()) else {
-        return pem.to_string();
-    };
-    if der.len() != 83 || der[..16] != V2_PREFIX {
-        return pem.to_string();
-    }
-    let mut v1 = V1_PREFIX.to_vec();
-    v1.extend_from_slice(&der[16..48]);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(v1);
-    let mut out = String::from("-----BEGIN PRIVATE KEY-----\n");
-    for chunk in encoded.as_bytes().chunks(64) {
-        out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-        out.push('\n');
-    }
-    out.push_str("-----END PRIVATE KEY-----\n");
-    out
-}
-
 /// A device certificate and its key, written where `eapol_test` reads them.
 struct Device {
     /// The subject with everything but `[A-Za-z0-9-]` replaced, for file and
@@ -814,11 +777,11 @@ fn write_device(leaf: &Value, subject: &str, dir: &Path) -> Device {
         .as_str()
         .expect("the certificate")
         .to_string();
-    let key = supplicant_readable_key(
-        leaf["private_key_pem"]
-            .as_str()
-            .expect("the key is returned once, at issuance"),
-    );
+    // The returned PEM goes to the supplicant as it is: an Ed25519 key comes
+    // back as PKCS#8 version 1, which OpenSSL 3.0 reads (#651).
+    let key = leaf["private_key_pem"]
+        .as_str()
+        .expect("the key is returned once, at issuance");
     let cert_path = dir.join(format!("{name}.pem"));
     let key_path = dir.join(format!("{name}.key"));
     std::fs::write(&cert_path, &pem).expect("the certificate can be written");
@@ -1155,8 +1118,9 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
     // table keyed on the subject would read as something else (R101W6-02):
     // `DEFAULT`, which `rlm_files` matches for every key, and a subject that
     // carries a newline and a second entry. AXIAM issues the first. The second
-    // it issues today (R101W6-12); if a later release refuses it, there is
-    // nothing to inject and the case still holds.
+    // it refused from 1.1.0 (R101W6-12, #649: a control character is a `400`),
+    // so there is nothing to inject; the branch below keeps the case honest
+    // for a build that issues it again.
     let default_named = issue_device(&api, &plant_a, 0, &line1, "DEFAULT", &work).await;
     let injected_subject = "lamp-04\nDEFAULT";
     let (status, injected) = try_issue_device(&api, &plant_a, 0, &line1, injected_subject).await;

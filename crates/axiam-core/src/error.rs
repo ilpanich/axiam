@@ -2,7 +2,10 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+/// Every variant carries only owned text, so an error can be cloned: one
+/// outcome handed to several waiters (the CRL re-sign shared by every request
+/// for the same CA's list, #616) is one value, not one per waiter.
+#[derive(Debug, Clone, Error)]
 pub enum AxiamError {
     #[error("Entity not found: {entity} with id {id}")]
     NotFound { entity: String, id: String },

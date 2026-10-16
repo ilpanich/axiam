@@ -391,6 +391,11 @@ pub struct AppState<C: Connection + Clone> {
     /// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything. One per
     /// process, like the counter. See [`crate::ciba_list_limiter`].
     pub ciba_list_limiter: Arc<crate::ciba_list_limiter::CibaListLimiter>,
+    /// RADIUS D4 (W6.4): the decision route's per-caller limiter (spent when
+    /// the shared counter is off) and its one-row-per-window record of
+    /// defective reply profiles. One per process. See
+    /// [`crate::network_decide_guard`].
+    pub network_decide: Arc<crate::network_decide_guard::NetworkDecideGuards>,
     /// B3: the token endpoint serves every grant behind one route, so a
     /// per-grant limit cannot be route middleware — the grant is not knowable
     /// until the body has been read. The exchange arm reads its ceiling from
@@ -884,6 +889,7 @@ impl<C: Connection + Clone> AppState<C> {
             // `flush_once()` itself.
             rate_limit_cfg: crate::config::rate_limit::RateLimitConfig::default(),
             ciba_list_limiter: Arc::new(Default::default()),
+            network_decide: Arc::new(Default::default()),
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),

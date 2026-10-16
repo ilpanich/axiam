@@ -10,7 +10,9 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedPrincipal;
+use crate::network_gate;
 use crate::state::AppState;
+use axiam_authz::network_gate::NetworkWrite;
 
 // -----------------------------------------------------------------------
 // Request types
@@ -57,6 +59,18 @@ pub async fn create<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    // §4.1: the reserved `/network` subtree is written only through the network
+    // routes — no `network_*` type, nothing under a reserved node.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::ResourceCreate {
+            resource_type: &req.resource_type,
+            parent_id: req.parent_id,
+        },
+    )
+    .await?;
     let input = CreateResource {
         tenant_id: principal.tenant_id,
         name: req.name,
@@ -186,6 +200,21 @@ pub async fn update<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let req = body.into_inner();
+    let resource_id = path.into_inner();
+    // §4.1: moving a resource is the one way to change access under
+    // deny-override without changing a rule, so nothing moves into, out of or
+    // within `/network`, and no type changes into or out of the reserved set.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::ResourceUpdate {
+            resource_id,
+            resource_type: req.resource_type.as_deref(),
+            parent_id: req.parent_id,
+        },
+    )
+    .await?;
     let input = UpdateResource {
         name: req.name,
         resource_type: req.resource_type,
@@ -194,7 +223,7 @@ pub async fn update<C: Connection + Clone>(
     };
     let resource = state
         .resource_repo
-        .update(principal.tenant_id, path.into_inner(), input)
+        .update(principal.tenant_id, resource_id, input)
         .await?;
     // D7 (REVOCATION — security critical): a resource update can re-parent it,
     // changing which ancestor-scoped roles cascade down and thereby NARROWING
@@ -228,9 +257,19 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("resources:delete", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
         .await?;
+    let resource_id = path.into_inner();
+    // §4.1: a broad `resources:*` administrator cannot delete the quarantine
+    // branch.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::ResourceDelete { resource_id },
+    )
+    .await?;
     state
         .resource_repo
-        .delete(principal.tenant_id, path.into_inner())
+        .delete(principal.tenant_id, resource_id)
         .await?;
     // D7 (REVOCATION — security critical): deleting a resource removes it (and
     // its subtree scoping) from the hierarchy, narrowing access. Flush tenant.

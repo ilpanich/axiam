@@ -109,6 +109,14 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "be one no SDK client can reach, handing out that map if it ever "
         "were. Operators scrape it from inside the network"
     ),
+    ("POST", "/api/v1/network/decide"): (
+        "RADIUS D4 (W6.4) -- the placement decision a FreeRADIUS server asks for once "
+        "per EAP-TLS authentication through rlm_rest, not administration. Its caller "
+        "is that server's service account with a token bound to its own certificate, "
+        "over mTLS; an SDK client is neither, and a generated method could only ever "
+        "be refused. The twelve network management operations beside it ARE the "
+        "`network` namespace"
+    ),
     ("POST", "/api/v1/users/me/resend-verification"): (
         "§25 account lifecycle, not §27 management -- this is self-service on "
         "the caller's OWN record, the authenticated sibling of the excluded "
@@ -476,6 +484,32 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("update", "PUT", "/api/v1/scim-targets/{id}"),
             ("delete", "DELETE", "/api/v1/scim-targets/{id}"),
             ("reconcile", "POST", "/api/v1/scim-targets/{id}/reconcile"),
+        ],
+    },
+    "network": {
+        "doc": "A tenant's network segments and the RADIUS reply profile each owns "
+               "(RADIUS D4): a segment is a node of the reserved /network subtree "
+               "of the resource tree (kind, VLAN, Filter-Id envelope, placement "
+               "rank), and its profile is the typed `axiam-radius-reply/1` record a "
+               "decision renders. Every write is conditional on the `version` the "
+               "caller read and passes the server's write gate. The tenant's "
+               "Session-Timeout cap is one more row of it (get_policy, "
+               "replace_policy): lowering it is always allowed, raising it is "
+               "allowed and audited. The decision route FreeRADIUS calls is not "
+               "in this registry.",
+        "operations": [
+            ("list_segments", "GET", "/api/v1/network/segments"),
+            ("create_segment", "POST", "/api/v1/network/segments"),
+            ("get_segment", "GET", "/api/v1/network/segments/{id}"),
+            ("replace_segment", "PUT", "/api/v1/network/segments/{id}"),
+            ("delete_segment", "DELETE", "/api/v1/network/segments/{id}"),
+            ("list_profiles", "GET", "/api/v1/network/profiles"),
+            ("create_profile", "POST", "/api/v1/network/profiles"),
+            ("get_profile", "GET", "/api/v1/network/profiles/{segment_id}"),
+            ("replace_profile", "PUT", "/api/v1/network/profiles/{segment_id}"),
+            ("delete_profile", "DELETE", "/api/v1/network/profiles/{segment_id}"),
+            ("get_policy", "GET", "/api/v1/network/policy"),
+            ("replace_policy", "PUT", "/api/v1/network/policy"),
         ],
     },
     "settings": {

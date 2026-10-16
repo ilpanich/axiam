@@ -45,6 +45,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "33": "#§33-ciba--client-initiated-backchannel-authentication-contract-158",
  "34": "#§34-cross-sdk-conformance-review-of-the-phase-23-ports-contract-159",
  "35": "#§35-certificate-revocation-lists-informative",
+ "36": "#§36-network-segments-reply-profiles-and-the-radius-decision-contract-162",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
@@ -264,7 +265,18 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34.2": "#§342-clarifications-normative-from-159",
  "34.3": "#§343-divergences",
  "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned",
- "34.5": "#§345-contract-161--the-101-fields"
+ "34.5": "#§345-contract-161--the-101-fields",
+ "36.1": "#§361-canonical-operation-set",
+ "36.2": "#§362-shapes-normative",
+ "36.3": "#§363-server-rules-every-sdk-can-observe-normative",
+ "36.4": "#§364-error-mapping",
+ "36.5": "#§365-sensitivet-applicability",
+ "36.6": "#§366-per-language-naming-map",
+ "36.7": "#§367-retry",
+ "36.8": "#§368-required-tests",
+ "36.9": "#§369-what-an-sdk-does-not-do",
+ "36.10": "#§3610-per-sdk-posture",
+ "36.11": "#§3611-the-decision-route--not-sdk-work-informative-except-rule-6"
 };
 
 /**

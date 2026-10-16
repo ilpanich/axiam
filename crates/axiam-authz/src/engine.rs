@@ -484,6 +484,22 @@ where
         Ok(decision)
     }
 
+    /// Evaluate a check **from the datastore**, bypassing the decision cache.
+    ///
+    /// For write-time gates (`crate::network_gate`): a decision that authorizes
+    /// a *write* must reflect the grants as they are now. The cache is
+    /// invalidated by every mutation on the replica that made it, but across
+    /// replicas without the broadcast channel it is only TTL-bounded, and a
+    /// write cleared on a stale allow is a grant made on authority already
+    /// revoked. Same algorithm, same deny-override, same answer as a cache miss
+    /// of [`Self::check_access`]; the result is not inserted into the cache.
+    pub async fn check_access_uncached(
+        &self,
+        request: &AccessRequest,
+    ) -> AxiamResult<AccessDecision> {
+        self.evaluate(request).await
+    }
+
     /// Uncached RBAC evaluation — the actual algorithm (3–4 sequential DB
     /// round-trips). Kept as a separate method so the [`Self::check_access`]
     /// cache wrapper can never alter decision or deny-reason semantics: a cache

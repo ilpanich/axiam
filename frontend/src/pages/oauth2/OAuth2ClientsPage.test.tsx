@@ -852,3 +852,137 @@ describe("OAuth2ClientsPage — T21.4 registration-token issuance", () => {
     expect(apiMock.post).not.toHaveBeenCalled();
   });
 });
+
+// ─── 1.1.0 touches (W6.8) ────────────────────────────────────────────────────
+
+/** What axios rejects with for an HTTP error: an Error that carries `response`. */
+function httpFailure(status: number, data: Record<string, unknown>) {
+  return Object.assign(new Error(`Request failed with status code ${status}`), {
+    response: { status, data },
+  });
+}
+
+const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+
+const deviceClient = {
+  ...clients[0],
+  id: "c-dev",
+  client_id: "client-dev-1",
+  name: "Kiosk",
+  grant_types: ["authorization_code", DEVICE_GRANT],
+  token_endpoint_auth_method: "client_secret_basic" as const,
+};
+
+describe("OAuth2ClientsPage — scope ceiling refusal (422 scope_exceeds_ceiling)", () => {
+  it("shows the server's message naming the scopes, in the edit form", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.put.mockRejectedValue(
+      httpFailure(422, {
+        error: "scope_exceeds_ceiling",
+        message:
+          "scope(s) offline_access, uma_protection are outside this tenant's dcr_allowed_scopes",
+      }),
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "scope(s) offline_access, uma_protection are outside this tenant's dcr_allowed_scopes",
+    );
+    expect(alert).not.toHaveTextContent("Request failed with status code");
+    // The dialog stays open so the scopes can be unticked.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("says so on create too, and has a sentence of its own if the body has none", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockRejectedValue(httpFailure(422, { error: "scope_exceeds_ceiling" }));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Over");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "outside the tenant's allowed scopes (dcr_allowed_scopes)",
+    );
+  });
+
+  it("leaves every other failure as it was", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    // A 422 with another slug, and a 400 naming the same slug, are not this refusal.
+    apiMock.put.mockRejectedValueOnce(httpFailure(422, { error: "something_else", message: "nope" }));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Request failed with status code 422",
+    );
+  });
+});
+
+describe("OAuth2ClientsPage — device-code grant on a confidential client (1.1.0)", () => {
+  it("warns in the edit form that the credential is now required at both endpoints", async () => {
+    apiMock.get.mockResolvedValue(res([deviceClient]));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Kiosk" }),
+    );
+    const notice = within(screen.getByRole("dialog")).getByTestId("device-grant-notice");
+    expect(notice).toHaveTextContent("/oauth2/device_authorization");
+    expect(notice).toHaveTextContent("token poll");
+    expect(notice).toHaveTextContent("401 invalid_client");
+    expect(notice).toHaveTextContent("Register device apps as public clients");
+    expect(notice).toHaveTextContent("token_endpoint_auth_method = none");
+    expect(notice).toHaveTextContent(DEVICE_GRANT);
+  });
+
+  it("treats a client the server sent no method for as confidential", async () => {
+    const { token_endpoint_auth_method: _omitted, ...bare } = deviceClient;
+    apiMock.get.mockResolvedValue(res([bare]));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Kiosk" }),
+    );
+    expect(within(screen.getByRole("dialog")).getByTestId("device-grant-notice")).toBeInTheDocument();
+  });
+
+  it("does not warn a public client", async () => {
+    apiMock.get.mockResolvedValue(
+      res([{ ...deviceClient, token_endpoint_auth_method: "none" as const }]),
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Kiosk" }),
+    );
+    expect(screen.queryByTestId("device-grant-notice")).not.toBeInTheDocument();
+  });
+
+  it("does not warn a confidential client without the device-code grant", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" }),
+    );
+    expect(screen.queryByTestId("device-grant-notice")).not.toBeInTheDocument();
+  });
+
+  it("warns in the read-only view of a self-registered client too", async () => {
+    mockGetByUrl({
+      clients: [{ ...deviceClient, managed_by: "dcr" as const, name: "Self Kiosk" }],
+    });
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View OAuth2 client Self Kiosk" }),
+    );
+    expect(within(screen.getByRole("dialog")).getByTestId("device-grant-notice")).toHaveTextContent(
+      "401 invalid_client",
+    );
+  });
+});

@@ -12718,6 +12718,410 @@ mTLS terminator — knows where the revocation list is and what it says.
 
 ---
 
+## §36 Network segments, reply profiles and the RADIUS decision (contract 1.62)
+
+**Requirement level: SHOULD, as part of §27 (a namespace `network`), in all eleven SDKs, for
+the twelve management operations of §36.1–§36.10. Informative for the decision route of §36.11,
+which is not SDK surface, except the shape of its answer (§36.11 rule 6), which is normative for
+the server and for whatever maps it.** Additive: nothing in §1–§35 changes. Server design: the
+reply-profile note ([`radius-reply-profile-design.md`](../claude_dev/radius-reply-profile-design.md),
+item D5 of the RADIUS spike) and RADIUS D4 (ilpanich/axiam#563; release 1.1.0, wave W6). Threat
+model: §5.10 of the STRIDE model — T-457, T-459, T-461 … T-464 and T-468 for the decision, T-478
+onward for the write surface. Operator documentation:
+[`docs/pki/freeradius.md`](../docs/pki/freeradius.md) section 5. **The record of this addition is
+§34.6 (contract 1.62), written with the SDK fan-out; this section is the surface it records.**
+
+AXIAM can decide, for an operator-run FreeRADIUS, which network segment a device that has just
+completed EAP-TLS is placed on, and what the Access-Accept gives it. A tenant administrator
+describes the network as **segments** — nodes of a reserved `/network` subtree of the resource
+tree, each with a VLAN and an envelope — and gives each segment at most one **reply profile**, a
+typed record of a closed RADIUS dictionary (`axiam-radius-reply/1`). Who may be placed where is
+ordinary RBAC: a device's service account holds `network:join` on a segment, and quarantine is a
+**deny** of it (deny-override). What this section adds to an SDK is the administration of
+segments, profiles and the tenant's `Session-Timeout` cap — plain management CRUD in the shape of
+§30 and §31. **An SDK never asks for a decision**: FreeRADIUS does (§36.11).
+
+**Status: the routes follow the text.** The twelve operations, their OpenAPI entries and their
+`management-registry.json` entries landed with the server tasks of wave W6 (W6.3, and W6.3b for the
+cap), which regenerated both files: 202 operations across 29 namespaces, and
+`POST /api/v1/network/decide` in the registry's `excluded_operations` with its reason. An SDK
+implements §36 from the merge commit that carries them (the 1.49 rule), in the W7 fan-out; none had
+when it was written (§36.10).
+
+### §36.1 Canonical operation set
+
+A new §27 namespace, **`network`**, OpenAPI tag `network`. The tenant is the **token's**: no path
+carries `{tenant_id}`, and a segment or profile of another tenant is `404`, exactly as one that does
+not exist. A profile is **owned by its segment** and addressed by the segment's id. The namespace is
+**human-only**: every one of the twelve answers a service-account token `401`, whatever it holds
+(the `network` permission family is on the human side of the machine-audience list).
+
+| Operation | HTTP | Request body | Response | `update_style` |
+|---|---|---|---|---|
+| `network.list_segments` | `GET /api/v1/network/segments` | — (`offset`, `limit`, `search`, `site`) | `200` page of `NetworkSegmentResponse` | — |
+| `network.create_segment` | `POST /api/v1/network/segments` | `CreateNetworkSegmentRequest` | `201` `NetworkSegmentResponse` | — |
+| `network.get_segment` | `GET /api/v1/network/segments/{id}` | — | `200` `NetworkSegmentResponse` | — |
+| `network.replace_segment` | `PUT /api/v1/network/segments/{id}` | `ReplaceNetworkSegmentRequest` | `200` `NetworkSegmentResponse` | **`replace`** |
+| `network.delete_segment` | `DELETE /api/v1/network/segments/{id}?version=` | — | `204` | — |
+| `network.list_profiles` | `GET /api/v1/network/profiles` | — (`offset`, `limit`, `search`) | `200` page of `NetworkReplyProfile` | — |
+| `network.create_profile` | `POST /api/v1/network/profiles` | `CreateNetworkReplyProfileRequest` | `201` `NetworkReplyProfile` | — |
+| `network.get_profile` | `GET /api/v1/network/profiles/{segment_id}` | — | `200` `NetworkReplyProfile` | — |
+| `network.replace_profile` | `PUT /api/v1/network/profiles/{segment_id}` | `ReplaceNetworkReplyProfileRequest` | `200` `NetworkReplyProfile` | **`replace`** |
+| `network.delete_profile` | `DELETE /api/v1/network/profiles/{segment_id}?version=` | — | `204` | — |
+| `network.get_policy` | `GET /api/v1/network/policy` | — | `200` `NetworkPolicyResponse` | — |
+| `network.replace_policy` | `PUT /api/v1/network/policy` | `ReplaceNetworkPolicyRequest` | `200` `NetworkPolicyResponse` | **`replace`** |
+
+Both lists are §27.4 rule 4's paginated shape (`{ items, total, offset, limit }`). `search` is
+matched before paging: against a segment's name, site key and id, and against a profile's
+`filter_id` and segment id. `site` narrows the segment list to one site key. The three `replace`
+operations are **replacements** (§27.4 rule 5): every member is required and what is omitted is
+not preserved. The PUT verbs therefore stay `replace_*` — full-body and version-conditional, like
+§27.4 rule 5's existing replace operations — and are not renamed `update_*`. The registry is the
+vocabulary (§27.0); the names above are rendered from it.
+
+### §36.2 Shapes (normative)
+
+Field names are the server's. Every enumeration below is **open** for decoding (§27.13's rule): an
+SDK decodes a value it does not know and never re-sends one it decoded as unknown.
+
+**`NetworkSegmentResponse`** — what every segment read and write returns:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id`, `tenant_id` | UUID | `id` is also the id of the segment's node in the resource tree and of its profile. |
+| `path` | string | `/network/{zones\|quarantine}/<site_key>/<name>`. |
+| `name`, `site_key` | string | Each `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`; a single-site tenant uses `default`. |
+| `kind` | `"access"` \| `"quarantine"` | Fixed for the segment's life. An access segment lives under `/network/zones`, a quarantine segment under `/network/quarantine`. |
+| `vlan_id` | integer | 1–4094, unique within the site. |
+| `filter_ids` | [string] | The segment's **envelope**: the `Filter-Id` names its profile may choose from (at most 32, the same pattern). |
+| `rank` | integer \| null | Placement order among the site's access segments, lowest first; unique within the site; null for a quarantine segment. |
+| `enabled` | bool | Whether the segment is a placement candidate. |
+| `version` | integer | The version the next `replace_segment` or `delete_segment` must name (§36.3 rule 2). |
+| `created_by`, `updated_by` | UUID | |
+| `created_at`, `updated_at` | RFC 3339 | |
+
+**`CreateNetworkSegmentRequest`**: `kind` (required), `site_key` (required), `name` (required),
+`vlan_id` (required), `filter_ids` (default `[]`), `rank` (required for `access`, absent for
+`quarantine`), `enabled` (default `true`). **`ReplaceNetworkSegmentRequest`**: `version`,
+`vlan_id`, `filter_ids`, `enabled` (all required) and `rank` (as for create). It has no `kind`,
+`site_key` or `name`: a segment's kind and place in the tree do not change (§36.3 rule 4).
+
+**`NetworkReplyProfile`** — what every profile read and write returns, as the **effective** profile:
+
+| Field | Type | Notes |
+|---|---|---|
+| `segment_id`, `tenant_id` | UUID | The owning segment. |
+| `dictionary` | string | `"axiam-radius-reply/1"`. |
+| `session_timeout_secs` | integer | The value a decision would render: the stored value, **lowered to the tenant's current cap** when it is above it (§36.3 rule 6). |
+| `session_timeout_clamped` | bool | Whether `session_timeout_secs` was lowered. |
+| `termination_action` | `"default"` \| `"radius_request"` | `RadiusTerminationAction`. |
+| `idle_timeout_secs` | integer \| null | Never above `session_timeout_secs`. |
+| `filter_id` | string \| null | One of the segment's `filter_ids`. |
+| `service_type` | `"framed_user"` \| null | `RadiusServiceType`, whose only value under option B is `framed_user`. The schema lists no other value; a request that names `administrative_user` or `nas_prompt_user` is refused with a `400` (§36.3 rule 5). |
+| `version` | integer | The version the next `replace_profile` or `delete_profile` must name. |
+| `created_by`, `updated_by` | UUID | |
+| `created_at`, `updated_at` | RFC 3339 | |
+
+**`NetworkReplyProfileInput`** — the profile as written: `dictionary` (default `"axiam-radius-reply/1"`),
+`session_timeout_secs` (required), `termination_action` (default `"radius_request"`),
+`idle_timeout_secs`, `filter_id`, `service_type` (each optional). **There is no VLAN member**: the
+VLAN is the segment's. **`CreateNetworkReplyProfileRequest`**: `segment_id`, `segment_version` (the
+segment's `version` as the caller read it) and `profile`, all required.
+**`ReplaceNetworkReplyProfileRequest`**: `version` (the profile's), `segment_version` and `profile`, all
+required.
+
+**`NetworkPolicyResponse`**: `tenant_id`, `session_timeout_max_secs` (the cap, 300–86 400; 3600
+until the tenant first writes one), `version` (`0` until then), `updated_by` and `updated_at`
+(absent or null while it is the default). **`ReplaceNetworkPolicyRequest`**:
+`session_timeout_max_secs` and `version`, both required.
+
+### §36.3 Server rules every SDK can observe (normative)
+
+1. **The write gate decides, and a `403` names what was missing.** Every write passes one
+   server-side function (the note's §5.1–§5.3), evaluated at write time, uncached, with
+   deny-override in force and the writer's own subject scope (an organization-level writer carries
+   only its global grants). What it asks:
+
+   | Operation | The caller must hold |
+   |---|---|
+   | `list_segments`, `list_profiles`, `get_policy` | `network:read` at the `/network` root |
+   | `get_segment`, `get_profile` | `network:read` on the segment (or above it) |
+   | `create_segment` | `network:segments_write` at the nearest existing parent of the new node |
+   | `replace_segment` | `network:segments_write` on the segment, and **not** `network:join` on it (H6). If the segment **has a reply profile** and the replace changes `vlan_id`, `rank` or `enabled` — the fields that move every device placed there — also `network:grant` on the segment (H2) and, for a quarantine segment, on `/network/quarantine/<site>` (H5). A change of `filter_ids` alone, or of a segment with no profile, needs `network:segments_write` only |
+   | `delete_segment` | `network:segments_write` on the segment. If the segment **has a reply profile** (the delete takes it along, and with it every device placed there), also `network:grant` on the segment (H2) and, for a quarantine segment, on `/network/quarantine/<site>` (H5), and **not** `network:join` on it (H6). A segment with no profile needs `network:segments_write` only |
+   | `create_profile`, `replace_profile` | `network:profiles_write` (H1) **and** `network:grant` (H2) on the segment; every value inside the segment's envelope and the tenant cap (H3); for a quarantine segment, `network:grant` on `/network/quarantine/<site>` too (H5); and **not** `network:join` on the segment (H6) |
+   | `delete_profile` | `network:profiles_write` (H1) **and** `network:grant` (H2) on the segment — with no profile the segment is no candidate, so the delete removes every device placed there; for a quarantine segment, `network:grant` on `/network/quarantine/<site>` too (H5); and **not** `network:join` on the segment (H6) |
+   | `replace_policy` | `network:segments_write` **at the `/network` root** — a grant at a site below does not count, and a deny at the root refuses |
+
+   The OpenAPI document names the first permission of each row; the gate decides all of them, on
+   the node the row names. A refusal is `403 authorization_denied` whose body carries, beside `message`, the
+   missing permission in `action` and the node it was checked on in `resource_id` (§2's SDK-Q02
+   members). **H3 is a `403`**, although it is a rule about a value, because it is about what the
+   writer may confer. The internal rule that refused (`H2`, `5.3:assign`, `4.2:policy_write`, …)
+   is never in the body; it is in the audit row. A reactor veto (rule 10) is a `403` too. An SDK
+   surfaces the two members where §2 says and MUST NOT parse `message`.
+2. **Every write is conditional on the version the caller read.** `replace_segment` and
+   `replace_profile` carry `version` in the body, `delete_segment` and `delete_profile` carry it as
+   the required query parameter `version` (missing: `400`), and `replace_policy` carries the
+   policy's `version` (`0` for a tenant that has never written one, which is the first write).
+   A profile write also carries `segment_version`, the owning segment's version as the caller read
+   it: a profile is checked against an envelope, and a segment written since makes the profile
+   write `409`. A stale version is **`409 conflict`** and writes nothing. Other `409`s: a segment
+   replace whose `filter_ids` would leave its profile's `filter_id` outside the envelope (the
+   message names the profile — a **stranding** write is refused, never applied); a site that
+   already has a segment of that name, VLAN or rank; a segment that already has a profile; a
+   segment that still has child resources. **Every `409` says which in `reason_code`**, a member
+   beside `error` (§36.4; added 2026-10-16, the 409 sub-code decision): the `error` slug is
+   unchanged, and `reason_code` is one of
+
+   | `reason_code` | `error` | Raised by | Meaning |
+   |---|---|---|---|
+   | `stale_version` | `conflict` | every write | The row changed since `version` (or `segment_version`) was read — including a reply profile written on a segment between the read and a `replace_segment` that moves its placement or a `delete_segment` (rule 1). Read again, decide again |
+   | `strands_profile` | `conflict` | `replace_segment` | The new `filter_ids` would leave the profile's `filter_id` outside the envelope |
+   | `has_children` | `conflict` | `delete_segment` | The segment still has child resources |
+   | `site_gone` | `conflict` | `create_segment` | The site node was removed while the segment was being created |
+   | `duplicate_name` | `already_exists` | `create_segment` | The site already has a segment of that name |
+   | `duplicate_vlan` | `already_exists` | `create_segment`, `replace_segment` | The site already has a segment with that VLAN |
+   | `duplicate_rank` | `already_exists` | `create_segment`, `replace_segment` | The site already has a segment with that rank |
+   | `profile_exists` | `already_exists` | `create_profile` | The segment already has a profile |
+   | `other` | either | — | A `409` none of the above names; none is raised today |
+
+   The vocabulary is **open** for decoding (§27.13): an SDK surfaces a value it does not know
+   verbatim, and treats it as a conflict whose `message` is for a human. An SDK sends the version
+   it read, exactly; MUST NOT retry a `409`; and its composed read-modify-write form (§27.4 rule 5),
+   where it offers one, reads the segment (and, for a profile, the profile) and sends both versions
+   from that read.
+3. **The records are closed.** Every request body is `deny_unknown_fields`: an unknown member is a
+   `400 validation_error` naming it. An SDK MUST NOT send a member §36.2 does not name, and omits
+   an optional member the caller did not set rather than sending `null`.
+4. **Kind and place are fixed.** A segment's `kind`, `site_key` and `name` do not change; there is
+   no move operation. To move a segment, create the new one and delete the old.
+5. **The values are the server's to check** (informative; the server is the authority, and an
+   SDK MUST NOT validate beyond §27.4's UUID rule). VLAN 1–4094 and unique per site; at most 32
+   `filter_ids`, each matching the pattern of §36.2; `rank` required for an access segment, absent
+   for a quarantine one, unique per site; `session_timeout_secs` from 300 to the tenant cap (never
+   `0`); `idle_timeout_secs` from 60 to `session_timeout_secs`; `filter_id` one of the segment's
+   `filter_ids`; `service_type` `framed_user` or absent — the administrative values are not in the
+   schema and are refused under option B; `dictionary` a version the server knows. A failure is `400` (or `403` for H3,
+   rule 1).
+6. **Reads clamp; the stored value is kept.** Lowering the cap never rewrites a profile. A read
+   of a reply profile — `get_profile`, `list_profiles`, the answer of a profile write, and the
+   decision — returns the **effective** `Session-Timeout`, `min(stored, cap)`, not the stored
+   value, and `session_timeout_clamped: true` says that it was lowered. A write of a
+   `session_timeout_secs` above the **current** cap is refused (`403`, H3; rule 1). So a
+   read-modify-write of a clamped profile **cannot restore the stored value**: it can send at most
+   the cap, and what it sends is what is stored — the clamped value, which from then on is the
+   stored one. Raising the cap **first**, with the profile left alone, restores the stored value at
+   read. There is no member that carries the stored value while it is clamped. An SDK that offers
+   the composed form (§27.4 rule 5) documents this beside it. (Amended 2026-10-16, R110W6-12; the
+   rule is unchanged, its consequence now stated.)
+7. **The cap** (`network.session_timeout_max_secs`). `get_policy` answers the default (3600,
+   `version` 0) until the tenant writes one. `replace_policy` takes 300 to 86 400 (`400`
+   otherwise). **Lowering is always allowed; raising is allowed and audited** as a raise; neither
+   asks more than rule 1's permission. The response does not carry the range.
+8. **The limiter.** Every write is metered per client address by `network_admin_per_min`
+   (`AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN`, default 30 a minute, moved by no posture preset),
+   each of the seven write operations in a bucket of its own (`network_segment_create`,
+   `network_segment_replace`, `network_segment_delete`, `network_profile_create`,
+   `network_profile_replace`, `network_profile_delete`, `network_policy_replace`); the five reads
+   carry no route limiter of their own. Past it the answer is `429`.
+9. **Deletes.** Deleting a segment deletes its profile with it. Deleting a profile leaves its
+   segment, which is then no placement candidate.
+10. **Audit and veto** (informative). Every write and every refusal leaves exactly one audit row:
+    `network_segment.created` / `.updated` / `.deleted`, `reply_profile.created` / `.replaced` /
+    `.deleted`, `network_policy.raised` / `.lowered` / `.unchanged`, each with the values before
+    and after and the versions, and a `*.write_refused` row with the internal rule for a refusal.
+    A tenant may configure the reactor's veto hooks `network.pre_segment_write` and
+    `network.pre_profile_write` (fail closed; §22); a vetoed write is `403` and writes nothing.
+    The cap has no hook.
+
+### §36.4 Error mapping
+
+§2 and §27.4 rule 7, unchanged: `400` is `ValidationError` (carrying the server's `message`), `404`
+`NotFoundError`, `409` `ConflictError`, `403` `AuthzError` (carrying `action` and `resource_id`
+where the body has them), `401` `AuthError` — including the `401` a service-account token gets,
+which no refresh can cure — and `429` `NetworkError`. An SDK MUST NOT parse a `message` to recover
+the rule.
+
+**The `409` sub-code** (2026-10-16). A `409` of the twelve operations has the body
+`NetworkConflictResponse`: `error` (`conflict` or `already_exists`, as before), `message` (for a
+human) and **`reason_code`**, one of the values of §36.3 rule 2. An SDK's `ConflictError` from
+these operations **surfaces `reason_code`** as a string accessor (named `reasonCode` /
+`ReasonCode` / `reason_code` in the language's own casing, absent when a server predating it omits
+it), and a caller branches on it — never on `message`, which an SDK MUST NOT parse. It is not the
+`reason` of an authorization decision (§3), which is a human string; the name follows that
+decision's own `reason_code`, the field a client branches on. Both `error` slugs map to
+`ConflictError`, as before.
+
+### §36.5 `Sensitive<T>` applicability
+
+None. Segments, profiles and the policy carry no secret and no personal data (the note's §3.5 and
+§8); the registry lists no sensitive field in the namespace, and §27.5's table gains no row.
+
+### §36.6 Per-language naming map
+
+§27.3 applies unchanged. For the record, three of the twelve (the others follow the same casing):
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `network.list_segments` | `network().list_segments` | `network.listSegments` | `network.list_segments` | `network().listSegments` | `network.listSegments` | `Network.ListSegmentsAsync` | `network()->listSegments` | `Network().ListSegments` | `network.listSegments` | `axiam_network_list_segments` | `network().list_segments` |
+| `network.replace_profile` | `network().replace_profile` | `network.replaceProfile` | `network.replace_profile` | `network().replaceProfile` | `network.replaceProfile` | `Network.ReplaceProfileAsync` | `network()->replaceProfile` | `Network().ReplaceProfile` | `network.replaceProfile` | `axiam_network_replace_profile` | `network().replace_profile` |
+| `network.replace_policy` | `network().replace_policy` | `network.replacePolicy` | `network.replace_policy` | `network().replacePolicy` | `network.replacePolicy` | `Network.ReplacePolicyAsync` | `network()->replacePolicy` | `Network().ReplacePolicy` | `network.replacePolicy` | `axiam_network_replace_policy` | `network().replace_policy` |
+
+All twelve perform I/O, so §27.3's async discipline applies to each.
+
+### §36.7 Retry
+
+§27.4 rule 8 governs and is not widened: the five reads MAY be retried per §16; the seven writes
+MUST NOT be, on any status or transport error. A lost answer to a write is recovered by reading the
+row and comparing its `version`, never by repeating the write: a repeated conditional write is a
+`409` at best.
+
+### §36.8 Required tests
+
+Five per SDK that ships the namespace, against a mocked HTTP server:
+
+1. **The surface.** The twelve operations exist on the `network` handle with the paths and
+   methods of §36.1, and **no** method reaches `POST /api/v1/network/decide` (the registry excludes
+   it; the SDK's §27.8 regeneration check is what keeps it out).
+2. **Versions.** `replace_segment` sends `version` in the body; `delete_segment` and
+   `delete_profile` send `?version=` and cannot be called without one; `create_profile` sends
+   `segment_version`, `replace_profile` sends `version` and `segment_version`, `replace_policy`
+   sends `version` — each exactly as given. A `409` to each is `ConflictError` after exactly one
+   request, exposing the body's `reason_code` (`stale_version` in the mock), and a `409` with
+   `error: "already_exists"` and `reason_code: "duplicate_vlan"` is `ConflictError` exposing it
+   too.
+3. **Closed bodies.** The serialized `CreateNetworkSegmentRequest`, `ReplaceNetworkSegmentRequest`,
+   `CreateNetworkReplyProfileRequest` and `ReplaceNetworkPolicyRequest` carry exactly the keys §36.2 names
+   for the members set (an unset `rank`, `idle_timeout_secs`, `filter_id` or `service_type` is
+   absent, not `null`); a `NetworkReplyProfileInput` has no VLAN member; the replace types cannot be built
+   without their required members (or their builder refuses, in a language without the
+   compile-time check).
+4. **Open decoding and pagination.** A `NetworkSegmentResponse` with an unknown `kind` and a
+   `NetworkReplyProfile` with an unknown `termination_action` and `service_type` decode; a `NetworkReplyProfile`
+   with `session_timeout_clamped: true` decodes with both members; both lists return `Page<T>`
+   with `total`, the auto-pager carrying `search` (and `site`) on every request.
+5. **Errors.** A `403` whose body carries `action: "network:grant"` and a `resource_id` is
+   `AuthzError` exposing both; `400` → `ValidationError` with the `message`; `404` on `get_profile`
+   → `NotFoundError`; `401` → `AuthError`; `429` and `503` on each write → `NetworkError` after
+   exactly one request.
+
+The server's own tests cover every rule of §36.3 (`crates/axiam-api-rest/tests/network_routes_test.rs`,
+`network_gate_test.rs`, `network_gate_enumeration_test.rs`); they are not an SDK's to duplicate.
+
+### §36.9 What an SDK does not do
+
+It does not ask for a placement decision, offer a helper that would, or model the decision's
+request or answer (§36.11). It does not validate a segment or a profile locally beyond §27.4's
+UUID rule, and does not render a reply profile into RADIUS attributes: the server's dictionary and
+bounds are the authority, and a client-side copy would drift from them. It does not cache a
+segment, a profile or the cap (§27.4 rule 10). It does not hide the two-version rule of a profile
+write behind a helper that re-reads and retries on `409`: a `409` means another administrator
+wrote, and the administrator decides. And `network` **is** a §27.6 manifest namespace in 1.62, with natural keys: a segment is
+identified by site + kind + name, a profile by its segment, and the policy is a singleton (§27.6's
+own text is the W7.1 record's).
+
+### §36.10 Per-SDK posture
+
+**None of the eleven SDKs implements §36 yet.** Every SDK reaches it the same way, by regenerating
+its §27 surface from the 1.62 `management-registry.json` in the W7 fan-out; all eleven are in scope,
+since it is management REST, which Kotlin, Swift, C and C++ carry. The conformance review records
+each SDK's posture here when the ports land.
+
+### §36.11 The decision route — not SDK work (informative, except rule 6)
+
+`POST /api/v1/network/decide` is described here for completeness, so that an SDK author knows why
+there is no method for it and an operator knows what FreeRADIUS is talking to. **An SDK carries
+nothing for it**: its caller is a FreeRADIUS server's service account, over mutual TLS, with a token
+bound to that server's own certificate, which no SDK client is and none can hold. The registry
+excludes it by name (§27.0), and the route refuses every other kind of caller.
+
+1. **The caller.** A service account (`aud` `axiam:m2m`, `sub_kind` service account) whose access
+   token carries `cnf.x5t#S256` and is presented over an mTLS connection whose TLS-verified client
+   certificate is the one the token is bound to — the connection must end at AXIAM's own listener,
+   so a proxy that terminates TLS cannot stand in. FreeRADIUS gets that token from
+   `POST /api/v1/auth/device` over the same connection, with no secret; the certificate is one AXIAM
+   issued (the recipe issues a **`Service`** certificate) and bound to the service account. On
+   every request the certificate must still resolve through `DeviceAuthService::authenticate_der`
+   to the same account in the same tenant, and the account be `Active`: a revoked FreeRADIUS
+   certificate stops at its next request, not at its token's expiry. A plain bearer token of the
+   same account, a token bound only by DPoP or to another certificate, a request without a client
+   certificate, a person's token and an OAuth2 client's are `401` before the body is read. The
+   `network` family stays human-only; this route is its one named machine exception.
+2. **The site, and `network:decide`.** The caller must hold `network:decide` on every site node
+   the decision reads — `/network/zones/<site>` and `/network/quarantine/<site>` where they exist
+   (the zones node for a site with no segment yet) — else `403 authorization_denied` naming
+   `network:decide` and the node, with a `network_decision.refused` audit row. A FreeRADIUS
+   credential for one site answers nothing about another. The site key comes from FreeRADIUS's own
+   client configuration, never from the RADIUS packet.
+3. **The request** is closed: `{"site": <site key>, "certificate": <base64 DER>}` or
+   `{"site": <site key>, "fingerprint": <SHA-256 of the DER, 64 hex digits>}` — exactly one of the
+   two, `site` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`, at most 32 KiB. An unknown member — a
+   `Calling-Station-Id`, a `User-Name` — is a `400` naming it, so nothing personal can be posted into
+   the audit trail. The fingerprint is matched case-insensitively.
+4. **Three states.** The answer is one of: **an allow** — `200` with `allow: true` and the reply;
+   **a refusal** — `200` with exactly `{"allow":false}` and **no reason**, whatever it was (unknown,
+   another tenant's, revoked, expired, unbound or refused certificate, an inactive account, no
+   candidate segment, a profile that no longer validates); or **an error status** — `400` (the
+   body), `401` (the caller, rule 1), `403` (the site, rule 2), `429` (the caller's allowance, rule
+   7, body `{"error":"rate_limit_exceeded"}` with `Retry-After: 60`) or a `5xx`. Whoever maps the
+   answer treats everything but an allow as a refusal; the recipe does, and has no fallback
+   placement and no cached decision.
+5. **The decision** (the note's §4.3). The certificate is resolved in the caller's tenant only;
+   another tenant's is refused like an unknown one (§7 of the note). The candidates are the site's
+   enabled segments on which the certificate's service account holds `network:join` — one
+   `check_access_batch` through the decision cache, deny-override in force, so a deny on the access
+   branch quarantines — whose profile re-validates against its dictionary, its segment's envelope
+   and the current cap. The lowest-ranked access candidate wins; a quarantine candidate is used only
+   when no access candidate remains; no candidate is a refusal. Every request that gets past rules 1
+   and 2 costs the same reads and the same batch, whatever the answer. Revocation and quarantine
+   therefore take effect at the device's next authentication; a device already connected keeps its
+   port until `Session-Timeout` — there is no dynamic authorization (CoA).
+6. **The answer's shape (normative).** The server writes compact JSON, members in this order:
+   - a refusal is exactly `{"allow":false}`;
+   - an allow is `{"allow":true,"reply":{"dictionary":"axiam-radius-reply/1","attributes":[…]}}`
+     — `allow` first, then `reply`; in `reply`, `dictionary` then `attributes`;
+   - each attribute is an object with the members `name`, `number`, `value` and, on
+     `Tunnel-Type` and `Tunnel-Medium-Type` only, `tag` — in that order; `value` is a JSON number
+     for an integer attribute and a JSON string for `Tunnel-Private-Group-Id` and `Filter-Id`;
+   - the attributes come in dictionary order, the first five always and the last three when the
+     profile sets them: `Tunnel-Type` (64, `13`, `tag` `0`), `Tunnel-Medium-Type` (65, `6`, `tag`
+     `0`), `Tunnel-Private-Group-Id` (81, the segment's VLAN as a decimal string with no sign and no
+     leading zero, **no `tag` member**), `Session-Timeout` (27, clamped to the tenant cap),
+     `Termination-Action` (29, `0` or `1`), `Idle-Timeout` (28), `Filter-Id` (11), `Service-Type`
+     (6, `2`).
+
+   ```json
+   {"allow":true,"reply":{"dictionary":"axiam-radius-reply/1","attributes":[{"name":"Tunnel-Type","number":64,"value":13,"tag":0},{"name":"Tunnel-Medium-Type","number":65,"value":6,"tag":0},{"name":"Tunnel-Private-Group-Id","number":81,"value":"20"},{"name":"Session-Timeout","number":27,"value":900},{"name":"Termination-Action","number":29,"value":1},{"name":"Idle-Timeout","number":28,"value":600},{"name":"Filter-Id","number":11,"value":"iot-acl"},{"name":"Service-Type","number":6,"value":2}]}}
+   ```
+
+   **The tags are what goes on the wire.** `Tunnel-Type` and `Tunnel-Medium-Type` carry the RFC 2868
+   tag octet `0x00`; `Tunnel-Private-Group-Id` carries **no** tag octet (RFC 2868 §3.6 makes it
+   optional for a string whose first octet is above `0x1F`), which is what FreeRADIUS 3.2.8 emits for
+   it written untagged or `:0`. The member order is pinned because FreeRADIUS 3.2.8 has no JSON
+   decoding for an array of objects and the recipe's mapping reads the body with regular expressions
+   that expect it (any whitespace between tokens is accepted). A change to a member's name, order
+   or type, or a new attribute, is a new dictionary version (`axiam-radius-reply/2`) or a new
+   contract version, never a silent one; until the mapping follows, every device is refused.
+7. **The limiter.** `network_decide_per_min` (`AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN`, **6 000
+   a minute**, the same in the `gateway` and `mesh` presets) is keyed on the **authenticated
+   caller** (`network_decide:{tenant}:{sub}`), not on the address, and spent before anything is
+   read for the caller; it is the shared counter when that is on, else an in-process bucket per
+   replica. The route also carries a per-address backstop of ten times that allowance for tokens
+   that do not authenticate. Six thousand a minute is a site's power-restore storm.
+8. **The audit row** (informative). One per decision — `network_decision.allowed` or
+   `network_decision.denied` — with the site, the certificate's SHA-256 fingerprint, how it was
+   presented, the method (`eap_tls`), the transport (`rlm_rest`), the internal reason, and, for a
+   certificate of the caller's tenant, its id and the account it is bound to; never its subject or
+   alternative names. A certificate of another tenant is recorded by fingerprint alone. A stored
+   profile that no longer validates is recorded once per window (`reply_profile.invalid`).
+
+The FreeRADIUS side of this route — the `rlm_rest` configuration, the token cache, the mapping of
+rule 6 into the Access-Accept and what it refuses — is the operator recipe's
+([`docs/pki/freeradius.md`](../docs/pki/freeradius.md) section 5), not this contract's.
+
+---
+
 ### OpenAPI Export Feature Flag
 
 `openapi.json` (kept in this directory, and mirrored into every SDK repo) is generated with `--no-default-features` (SAML endpoints excluded). Both the committed spec and the CI drift gate use identical flags. SDK consumers requiring SAML endpoint documentation should build AXIAM with the `saml` feature enabled and export locally.

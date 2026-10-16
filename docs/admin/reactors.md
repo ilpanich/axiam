@@ -49,7 +49,7 @@ mature and its transport (HTTPS) needs no AMQP client.
 server **waits** for the reactor's reply (up to `timeout_ms`, capped at
 5 000 ms server-side, §22.8) and applies it — `allow`, `deny` with a
 reason, or (on a mutable event) a merged `patch` restricted to that
-event's allow-list. Five events are interceptable in v1 (§22.5):
+event's allow-list. Seven events are interceptable (§22.5; the two `network.*` events arrived with the network-segment routes):
 
 | Event | Can it veto? | Can it mutate? | Default failure policy |
 |---|---|---|---|
@@ -58,6 +58,8 @@ event's allow-list. Five events are interceptable in v1 (§22.5):
 | `user.pre_create` | yes | `username`, `email`, `metadata.` | `fail_closed` |
 | `user.pre_update` | yes | `username`, `email`, `metadata.` | `fail_closed` |
 | `grant.pre_assign` | yes | no | `fail_closed` |
+| `network.pre_profile_write` | yes | no | `fail_closed` |
+| `network.pre_segment_write` | yes | no | `fail_closed` |
 
 **What is deliberately absent:** `authz.check`, `authz.check_batch`, and
 `token.introspect`. These run at 1 000–12 000 req/s in the benchmark
@@ -83,7 +85,8 @@ in one closed set: **every member resolves the same way.**
 - **`fail_closed`** — deny the underlying operation, with an audited
   reason naming the failure. The safe default for every veto-capable
   security hook: `login.post_auth`, `user.pre_create`, `user.pre_update`,
-  `grant.pre_assign`. An unreachable fraud check has not passed.
+  `grant.pre_assign`, `network.pre_profile_write`, `network.pre_segment_write`.
+  An unreachable fraud check has not passed.
 
 Two operational consequences worth planning around, not just knowing:
 

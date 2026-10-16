@@ -20,7 +20,9 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedPrincipal;
+use crate::network_gate;
 use crate::state::AppState;
+use axiam_authz::network_gate::{Grantee, NetworkWrite};
 
 // -----------------------------------------------------------------------
 // Request types
@@ -338,9 +340,22 @@ pub async fn update<C: Connection + Clone>(
     RequirePermission::new("roles:update", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
         .await?;
+    let role_id = path.into_inner();
+    let update = body.into_inner();
+    // §4.2 rule 1: a network-sensitive role is never made global.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleUpdate {
+            role_id,
+            is_global: update.is_global,
+        },
+    )
+    .await?;
     let role = state
         .role_repo
-        .update(principal.tenant_id, path.into_inner(), body.into_inner())
+        .update(principal.tenant_id, role_id, update)
         .await?;
     // D7: a role change (e.g. is_global, name) can narrow effective access for
     // an unknown set of subjects — flush the whole tenant so no stale allow
@@ -374,10 +389,17 @@ pub async fn delete<C: Connection + Clone>(
     RequirePermission::new("roles:delete", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
         .await?;
-    state
-        .role_repo
-        .delete(principal.tenant_id, path.into_inner())
-        .await?;
+    let role_id = path.into_inner();
+    // §5.3: deleting a role that carries a network: deny releases every
+    // assignment of it at once.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleDelete { role_id },
+    )
+    .await?;
+    state.role_repo.delete(principal.tenant_id, role_id).await?;
     // D7: deleting a role revokes it from every subject holding it — flush the
     // tenant so no cached allow granted through this role can survive.
     authz
@@ -610,6 +632,20 @@ pub async fn assign_to_user<C: Connection + Clone>(
         )
         .await?
     };
+    // §5.3 / §4.2: a network-sensitive role is assigned only by someone who
+    // holds what it confers at the node it is assigned at.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleAssign {
+            role_id,
+            grantee: Grantee::User(req.user_id),
+            resource_id: req.resource_id,
+            inherit: scope.inherit,
+        },
+    )
+    .await?;
     state
         .role_repo
         .assign_to_user(principal.tenant_id, req.user_id, role_id, scope)
@@ -651,6 +687,18 @@ pub async fn unassign_from_user<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
+    // §5.3: removing a network: deny widens access.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleUnassign {
+            role_id: p.role_id,
+            grantee: Grantee::User(p.user_id),
+            resource_id: query.resource_id,
+        },
+    )
+    .await?;
     state
         .role_repo
         .unassign_from_user(principal.tenant_id, p.user_id, p.role_id, query.resource_id)
@@ -753,6 +801,19 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
         )
         .await?
     };
+    // §5.3 / §4.2: this is how a device is given `network:join`.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleAssign {
+            role_id,
+            grantee: Grantee::ServiceAccount(req.service_account_id),
+            resource_id: req.resource_id,
+            inherit: scope.inherit,
+        },
+    )
+    .await?;
     state
         .role_repo
         .assign_to_service_account(principal.tenant_id, req.service_account_id, role_id, scope)
@@ -794,6 +855,18 @@ pub async fn unassign_from_service_account<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
+    // §5.3: releasing a device from a quarantine deny widens access.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleUnassign {
+            role_id: p.role_id,
+            grantee: Grantee::ServiceAccount(p.service_account_id),
+            resource_id: query.resource_id,
+        },
+    )
+    .await?;
     state
         .role_repo
         .unassign_from_service_account(
@@ -969,6 +1042,19 @@ pub async fn assign_to_group<C: Connection + Clone>(
         )
         .await?
     };
+    // §4.2 rule 2: a network-sensitive role is never assigned to a group.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleAssign {
+            role_id,
+            grantee: Grantee::Group(req.group_id),
+            resource_id: req.resource_id,
+            inherit: scope.inherit,
+        },
+    )
+    .await?;
     state
         .role_repo
         .assign_to_group(principal.tenant_id, req.group_id, role_id, scope)
@@ -1009,6 +1095,19 @@ pub async fn unassign_from_group<C: Connection + Clone>(
         .check(&principal, authz.get_ref().as_ref())
         .await?;
     let p = path.into_inner();
+    // Rule 2 keeps network roles off groups; checked anyway, so that a group
+    // edge that predates the rule cannot be released around §5.3.
+    let _cleared = network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        NetworkWrite::RoleUnassign {
+            role_id: p.role_id,
+            grantee: Grantee::Group(p.group_id),
+            resource_id: query.resource_id,
+        },
+    )
+    .await?;
     state
         .role_repo
         .unassign_from_group(

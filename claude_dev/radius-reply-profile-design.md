@@ -80,7 +80,8 @@ and the `crates.io` API answered `403`. Three hosts answered:
 | 11 | TACACS+ is the alternative network-administration protocol operators choose | **Not verifiable from this session** | RFC 8907 was unreachable. Corroboration only: FreeRADIUS `master` implements TACACS+ (`src/protocols/tacacs/tacacs.h`, citing "3.4. The TACACS+ Packet Header"). Which protocol operators choose is a market claim no source settles. |
 
 **What the re-read changes.** For this note: §3's dictionary uses the RFC
-3580 encoding as read (decimal string, tag 0, VLAN 1–4094) and its Session-Timeout
+3580 encoding as read (decimal string, tag 0, VLAN 1–4094; tag 0 on the string means
+no tag octet on the wire — corrected 2026-10-15, see §3.2) and its Session-Timeout
 floor follows from the §3.17 zero case. For the record and the model: the duplicate
 cache key (1j) and the `Proxy-State` rule (5b) are corrected, and §10 hands both to
 the review. Everything that stays unverifiable (1k, 3, 8, 9, 10, 11) concerns
@@ -161,6 +162,26 @@ put a device on VLAN 99 is to write the profile of the segment that owns VLAN 99
 which takes permissions on *that* segment (§5.2). This is the structural answer to
 "a VLAN outside what the writer may grant".
 
+*Correction of 2026-10-16 (R110W6-03).* As built through W6, the sentence above
+was not true: the envelope writer (`network:segments_write`, §4.2) could give an
+existing profiled segment VLAN 99 instead, and so re-place every device that may
+join it without `network:grant`. The maintainer's decision closes it rather than
+narrowing the claim: on a segment **that has a reply profile**, a replace that
+changes a **placement field** also needs `network:grant` at the segment (H2
+applied to the envelope) and, on a quarantine segment, `network:grant` on
+`/network/quarantine/<site>` (H5) — §5.2. The placement fields are exactly the
+three that decide where a device lands under §4.3: `vlan_id` (what every device
+placed there gets), `rank` (which access candidate wins), and `enabled` (whether
+the segment is a candidate at all, in either direction: a disable moves every
+device placed there to the next candidate, to quarantine or to a reject).
+`filter_ids` is not one: it bounds what a profile may name, and removing the
+name the profile uses is already the stranding `409`; `kind`, the name and the
+place in the tree are not writable by a replace. A segment with no profile is
+no candidate (§4.3 step 2), so its envelope still needs `network:segments_write`
+only. The sentence above now holds: the only ways to put a device on VLAN 99
+are to write the profile of the segment that owns it, or to give a profiled
+segment VLAN 99, and both need `network:grant` there.
+
 ### 3.2 The dictionary: `axiam-radius-reply/1`
 
 The dictionary is **named and versioned**. Every profile records the version it
@@ -175,7 +196,7 @@ dictionary change is a code change with review. No API adds an entry.
 |---|---|---|---|---|---|
 | `Tunnel-Type` | 64 | `ATTRIBUTE Tunnel-Type 64 integer has_tag` | 2868 §3.1; 3580 §3.31 | derived from the segment | exactly `VLAN` (13), tag `0x00` |
 | `Tunnel-Medium-Type` | 65 | `ATTRIBUTE Tunnel-Medium-Type 65 integer has_tag` | 2868 §3.2; 3580 §3.31 | derived | exactly `802` (6), tag `0x00` |
-| `Tunnel-Private-Group-Id` | 81 | `ATTRIBUTE Tunnel-Private-Group-Id 81 string has_tag` | 2868 §3.6; 3580 §3.31 | derived from `segment.vlan_id` | decimal `1`–`4094`, no sign, no leading zero, tag `0x00` |
+| `Tunnel-Private-Group-Id` | 81 | `ATTRIBUTE Tunnel-Private-Group-Id 81 string has_tag` | 2868 §3.6; 3580 §3.31 | derived from `segment.vlan_id` | decimal `1`–`4094`, no sign, no leading zero, tag 0: **no tag octet** on the wire (corrected 2026-10-15, below) |
 | `Session-Timeout` | 27 | `ATTRIBUTE Session-Timeout 27 integer` | 2865 §5.27; 3580 §3.17 | profile field `session_timeout_secs` | `300` ≤ v ≤ the tenant cap (§3.4); never `0` |
 | `Termination-Action` | 29 | `ATTRIBUTE Termination-Action 29 integer` | 2865 §5.29; 3580 §3.17 | profile field `termination_action` | `RADIUS-Request` (1, the default) or `Default` (0) |
 | `Idle-Timeout` | 28 | `ATTRIBUTE Idle-Timeout 28 integer` | 2865 §5.28 | profile field `idle_timeout_secs` | `60` ≤ v ≤ `session_timeout_secs` |
@@ -186,6 +207,25 @@ Every attribute in this table is allowed in an Access-Accept by RFC 2865's §5.4
 table (Service-Type `0-1`, Filter-Id `0+`, Session-Timeout / Idle-Timeout /
 Termination-Action `0-1`) or RFC 2868's (Tunnel-Private-Group-ID `0+`), read in
 the copies of §1.
+
+**Correction of 2026-10-15 (W6.4; the finding is W5.4's, commit `63fc3d7`, measured
+on the wire with FreeRADIUS 3.2.8).** The table said "tag `0x00`" for
+`Tunnel-Private-Group-Id`, reading RFC 3580 §3.31's "the tag field SHOULD be set to
+zero (0x00) in all tunnel attributes" as "a `0x00` octet precedes the VLAN string".
+That is not what FreeRADIUS emits, and not what RFC 2868 requires. For the two
+**integer** tunnel attributes the tag is a fixed octet of the attribute's value, so
+`Tunnel-Type` and `Tunnel-Medium-Type` always carry `0x00` (with or without `:0`
+written in FreeRADIUS's syntax). For the **string** `Tunnel-Private-Group-Id`,
+RFC 2868 §3.6 makes the tag octet optional — a first octet above `0x1F` is the start
+of the string — and FreeRADIUS 3.2.8 encodes the attribute written `:0` exactly as
+the untagged one: `20` goes on the wire as `32 30` (length 4), with no `0x00` in
+front; only a non-zero tag adds an octet (`:1` gives `01 32 30`). A decimal VLAN
+starts with `0x31`…`0x39`, so the untagged form is unambiguous. The decision route
+renders accordingly: `"tag": 0` on the two integers and **no** `tag` on the VLAN
+string (`ReplyAttribute::tag`, `crates/axiam-core/src/models/radius_reply.rs`), and
+the dictionary row's `tagged` flag now says only that FreeRADIUS's dictionary marks
+the attribute `has_tag`. The `rlm_rest` mapping that turns the reply into FreeRADIUS
+attributes is W6.5's.
 
 ### 3.3 What the dictionary excludes, and why
 
@@ -298,8 +338,8 @@ cannot mint a look-alike.
 | `network:join` | the device's **service account** | a segment (cascades from site and branch) | may be placed on this segment |
 | `network:admin` | — | — | admin login to the segment's NAS devices. **Defined, not grantable under option B** (§3.3) |
 | `network:read` | administrators | `/network` or below | read segments and profiles |
-| `network:segments_write` | network administrators | the parent (create), the node (update/delete), both parents (move) | the tree and each segment's envelope: `kind`, `vlan_id`, `filter_ids`, `rank`, `enabled` |
-| `network:profiles_write` | network administrators | the segment | create, replace, delete its reply profile — **the profile's own permission** (R17) |
+| `network:segments_write` | network administrators | the parent (create), the node (update/delete), both parents (move) | the tree and each segment's envelope: `kind`, `vlan_id`, `filter_ids`, `rank`, `enabled`. On a segment that has a profile, changing `vlan_id`, `rank` or `enabled`, or deleting it, also needs `network:grant` (§5.2, R110W6-03 and 2026-10-16) |
+| `network:profiles_write` | network administrators | the segment | create, replace, delete its reply profile — **the profile's own permission** (R17); every one of them also needs `network:grant` (§5.2; for a delete since 2026-10-16) |
 | `network:grant` | network administrators | the node an assignment names | confer `network:join` there: write a profile, or assign or unassign a role carrying a `network:*` grant (§5.3) |
 | `network:grant_admin` | — | — | confer the admin class. Option A only |
 | `network:decide` | the FreeRADIUS caller's service account (D4) | a site | ask for decisions for that site (§6.3) |
@@ -371,7 +411,9 @@ assigned to the device at `/network/zones` (inheritable). A baseline role
 deny-override buys (deny-override §2.1, "adding a deny rule can never widen
 access, and can never be undone by adding allows") is exactly the property a
 quarantine needs: no administrator who can grant `network:join` somewhere in
-`zones` can release a device by granting more.
+`zones` can release a device by granting more. Nor does the quarantined subject
+release itself, whatever it holds — by unassigning the deny, revoking it from the
+role or deleting the role (H6 on §5.3; correction of 2026-10-16, R110W6-01).
 
 When it takes effect: in the authorization engine, on the next decision after the
 assignment's cache invalidation (the existing hooks). On the wire, at the device's
@@ -431,15 +473,62 @@ audit row records the refusal:
 | **H2** | `W` holds `network:grant` on `S` | `P` confers `conf_join`. Writing it is a grant, and only someone who may grant joining `S` may shape what joining `S` gives |
 | **H3** | every value lies inside `S`'s envelope: `filter_id ∈ S.filter_ids`, `session_timeout_secs ≤` the tenant cap, the VLAN derived from `S` and never chosen | The envelope is written under `network:segments_write` on `S`'s parent, a **separate** permission. A profile writer cannot widen the set of ACL names or the VLAN they choose from, and a tenant can split the two duties between two people |
 | **H4** | if `conf_admin(P, S)`: `W` holds `network:grant_admin` **and** `network:admin` on `S` | Literally "no more than the writer holds": conferring administrative login on a segment's equipment requires holding it. Vacuous under option B |
-| **H5** | `S.kind` is not changed by this write, and a write to a `kind = quarantine` segment's profile also needs `network:grant` on `/network/quarantine/<site>` | The quarantine profile is reached by every quarantined device of a site. Shaping it is a grant to all of them |
+| **H5** | `S.kind` is not changed by this write, and a write to a `kind = quarantine` segment's profile — or to the placement fields of its envelope while it has one (R110W6-03, below), or a delete of either (2026-10-16, below) — also needs `network:grant` on `/network/quarantine/<site>` | The quarantine profile is reached by every quarantined device of a site. Shaping it is a grant to all of them |
 | **H6** | `W ≠` a subject that is itself `network:join`-able on `S` through the same write | A service account that writes its own segment's profile is a device configuring its own access. Refused, whatever it holds. The same holds for binding (§5.3): a subject may not bind a certificate to itself, nor one authenticated through a certificate bound to the account being written |
 
-A **delete** of `P` needs H1 only: no profile means no candidate, which only
-narrows. A segment **envelope** write (`network:segments_write`) that would leave
+A **delete** of `P` needs H1 and the placing right (H2, and H5 on a quarantine
+segment), and is refused under H6 — corrected 2026-10-16, below: as first
+written it needed H1 only, on the reading that no profile means no candidate,
+which only narrows. A segment **envelope** write (`network:segments_write`) that would leave
 an existing profile outside the new envelope (removing the profile's `filter_id`,
 or turning `access` into `quarantine`) is refused `409`, naming the profile.
 Lowering the tenant cap is allowed, because §3.4 clamps at read time and that only
 narrows.
+
+**The envelope's placement fields** (correction of 2026-10-16, R110W6-03; §3.1).
+A segment envelope write that changes `vlan_id`, `rank` or `enabled` of a segment
+**that has a profile** confers what the profile confers, on every subject that
+may join the segment, so it asks the profile's grant rules too: H2
+(`network:grant` on `S`, refused `403` under rule `H2:placement`) and, for a
+quarantine segment, H5 (`network:grant` on `/network/quarantine/<site>`, rule
+`H5:placement`), each audited as `network_segment.write_refused` naming the
+permission and the node, before H6. A change of `filter_ids` alone, and any
+change to a segment with no profile, still needs `network:segments_write` only.
+The profile's existence is read by the gate and **again inside the write's
+transaction**: a replace the gate cleared without the grant carries a
+narrowed clearance, and the transaction refuses it (`409`, the stale read it is)
+if a profile exists by then and the row it replaces differs in a placement field.
+The profile transaction writes the segment row (`profile_epoch`, §3.5), so the
+two cannot both commit, and a profile created between the gate's read and the
+write is not missed.
+
+**Deletes that remove placed devices** (the maintainer's decision of
+2026-10-16, closing the asymmetry R110W6-03's fix left). *Every write that moves
+or removes placed devices needs the placing right.* No profile means no
+candidate, so a delete does not merely narrow: every device placed on the
+segment is moved to the next candidate, to quarantine or to a reject — exactly
+what a disable does, which the rule above already asks `network:grant` for. So:
+
+- deleting a segment **that has a profile** (its profile goes with it) needs,
+  after `network:segments_write` on `S`, `network:grant` on `S` (rule
+  `H2:placement`) and, for a quarantine segment, `network:grant` on
+  `/network/quarantine/<site>` (rule `H5:placement`), then H6. A segment with no
+  profile is no candidate, so its delete still needs `network:segments_write`
+  only. (A profiled segment can be deleted: the delete cascades to the profile;
+  the only `409`s of a delete are a stale version and child resources.)
+- deleting a **profile** needs, after H1, the same placing right (`H2:placement`,
+  `H5:placement` on a quarantine segment), then H6.
+
+Each refusal is a `403` naming the permission and the node, with one
+`network_segment.write_refused` or `reply_profile.write_refused` row carrying the
+rule; the order is the replace's: the base permission, the placing right, H6.
+The race is closed as for the replace: a segment delete the gate cleared
+without the grant (it read no profile) carries the same narrowed clearance, and
+the delete's transaction refuses it (`409`, `stale_version`) if a profile exists
+by then — the profile transaction writes the segment row the delete removes, so
+the two cannot both commit. A profile delete's rights depend on nothing a
+concurrent write can change (a segment's kind is fixed), so it needs no such
+check.
 
 **What the rule deliberately is not.** "Holds" is a **write-time** condition. A
 profile does not lapse when its writer later loses `network:grant`, just as a role
@@ -467,6 +556,7 @@ only (§4.2), in addition to `roles:assign` / `roles:unassign`:
 | `roles:delete` of a role carrying a `network:` **deny** | as unassign, at `/network` |
 | **Bind** a certificate to a service account `A` (or re-bind it from another account), at `certificates:bind`, where `A` holds any `network:join` **allow** at a node `N`, directly or through a role | `W` holds `network:grant` at **every such `N`**. `A`'s `network:join` allows are read at write time with `check_access`'s own evaluation, deny-override in force, so an allow that a deny already beats is not one `W` must hold. Binding to an account with no `network:join` allow, or only a deny, asks nothing extra |
 | Any other path that issues a certificate already bound to an account (none exists today: `certificates:generate` and `sign-csr` bind nothing) | the same row, evaluated at issuance. Such a path is not built until it calls the §5.1 function |
+| **H6 (added 2026-10-16, R110W6-01):** any of the above that would **widen the writer's own** placement — assign a role carrying a `network:join` **allow** to `W`; unassign a role carrying a `network:` **deny** from `W`, or from a group `W` is a member of; delete such a role while `W` holds it; grant a `network:join` **allow** to a role `W` holds; revoke a `network:` **deny** from a role `W` holds ("holds" counts a group's edge) | **Refused (`403`, rule `H6`), whatever `W` holds**, for users and service accounts alike. Narrowing itself (taking on a deny, giving up an allow) stays allowed |
 
 **Correction of 2026-10-13 (R101W6-03, F4 review of W6).** This note first said
 that the assignment side is the whole of the leak ("joining is a role
@@ -494,6 +584,26 @@ for any future path that binds at issuance. The permission names
 (`certificates:generate`, `certificates:bind`, `network:grant`'s tenant-wide
 `Uuid::nil()` checks) match `crates/axiam-api-rest/src/permissions.rs:76ff`.
 `network:*` is not in the tree yet (nothing is built).
+
+**Correction of 2026-10-16 (R110W6-01, F4 review of W6, release 1.1.0).** H6 was
+applied to the profile write, the segment envelope write and the bind, and the
+first five rows of this table never compared the grantee, or the role's holders, with
+the writer. Those are the doors a machine reaches (`roles` and `permissions` are
+machine-to-machine route families): a service account holding `roles:assign` and
+`network:grant` at a node assigned itself `network:join` there, and, once
+quarantined, unassigned its own deny — the compromised credential lifting the
+quarantine §4.4 exists to impose. Revoking the deny from a quarantine role it holds,
+deleting that role, and granting `network:join` to a role it holds were the same gap.
+The delegation bound was satisfied in each case; H6 is the rule for exactly that
+case, and the H6 row above applies it to every §5.3 write. It is **subject-agnostic**
+(a user writer is refused too), so D6 needs no revisit of it. Group paths: assigning a
+join to a group, or granting `network:` to a role a group holds, is already rule 2's
+`400` (§4.2), so adding `W` to a group can confer no network grant; the row's group
+arm (a deny unassigned from `W`'s own group, a role `W` holds through a group) covers
+the state rule 2 forbids but cannot rule out — an edge predating the rule, or the
+T-481 interleaving. Tests: `network_gate_test::a_service_account_cannot_place_itself_or_release_its_own_quarantine`,
+`network_gate_test::a_member_cannot_release_a_deny_its_group_carries`, and the
+`h6_*` unit tests of `axiam-authz`'s `network_gate`.
 
 This is a **namespace-limited** delegation bound. AXIAM today has no general "you
 cannot assign more than you hold" rule, and this note does not propose one. That
@@ -719,7 +829,8 @@ Under option B there is no NAS registry in AXIAM. The "authenticated NAS" is the
   A's FreeRADIUS is rejected" falls out of the wrong-CA case if the recipe issues
   under two tenants.
 - Any VLAN example uses only §3.2's attributes, encoded per RFC 3580 §3.31 (decimal
-  string, tag 0), with `Termination-Action = RADIUS-Request` and a bounded
+  string, tag 0 — no tag octet on the string, corrected 2026-10-15 in §3.2), with
+  `Termination-Action = RADIUS-Request` and a bounded
   `Session-Timeout`. The guide states the revocation and quarantine latency of
   §6.3's first column.
 - An unplaced device is rejected, not dropped onto the NAS's default VLAN.

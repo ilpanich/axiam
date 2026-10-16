@@ -4,6 +4,9 @@ import { Plus, Pencil, Trash2, KeyRound } from "lucide-react";
 import {
   oauth2ClientService,
   validateClientPosture,
+  deviceGrantNeedsCredential,
+  scopeCeilingMessage,
+  DEVICE_CODE_GRANT,
   GRANT_TYPES,
   OAUTH2_SCOPES,
   OAUTH2_SCOPE_HINTS,
@@ -51,6 +54,48 @@ function GrantTypeBadge({ type }: { type: string }) {
     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-400 border border-blue-500/30">
       {GRANT_TYPE_LABELS[type] ?? type}
     </span>
+  );
+}
+
+/**
+ * 1.1.0 — a confidential client that holds the device-code grant.
+ *
+ * Before 1.1.0 the device-code grant authenticated nobody: a device app could
+ * hold a client secret and never send it. Now `/oauth2/device_authorization`
+ * and the token poll both run the client's credential check, so a confidential
+ * client that does not send its credential at both is refused `401
+ * invalid_client`. The way out for a device app, which usually cannot keep a
+ * secret, is to be a public client.
+ *
+ * Renders nothing for any other client, so a caller can place it unconditionally.
+ */
+function DeviceGrantNotice({
+  grantTypes,
+  method,
+}: {
+  grantTypes: readonly string[];
+  method: ClientAuthMethod | undefined;
+}) {
+  if (!deviceGrantNeedsCredential(grantTypes, method)) return null;
+  return (
+    <div
+      role="note"
+      data-testid="device-grant-notice"
+      className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-1"
+    >
+      <p className="font-medium">Device-code grant on a confidential client</p>
+      <p>
+        This client holds the device-code grant (<code>{DEVICE_CODE_GRANT}</code>
+        ) and authenticates with a credential. Since 1.1.0 it must send that
+        credential at both <code>/oauth2/device_authorization</code> and the
+        token poll, otherwise the server answers <code>401 invalid_client</code>.
+      </p>
+      <p>
+        Register device apps as public clients (
+        <code>token_endpoint_auth_method = none</code>): they cannot keep a
+        secret, and a public client is not asked for one.
+      </p>
+    </div>
   );
 }
 
@@ -587,6 +632,10 @@ function ClientFormFields({
         selected={grantTypes}
         onChange={onGrantTypesChange}
       />
+      <DeviceGrantNotice
+        grantTypes={grantTypes}
+        method={posture.token_endpoint_auth_method}
+      />
 
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-redirect-uris`}>Redirect URIs</Label>
@@ -768,6 +817,10 @@ function ReadOnlyClientDialog({
           <DetailRow label="Grant Types">
             {client.grant_types.join(", ") || "—"}
           </DetailRow>
+          <DeviceGrantNotice
+            grantTypes={client.grant_types}
+            method={client.token_endpoint_auth_method}
+          />
           <DetailRow label="Redirect URIs">
             {client.redirect_uris.length > 0
               ? client.redirect_uris.join(", ")
@@ -1168,8 +1221,12 @@ export function OAuth2ClientsPage() {
       }
     },
     onError: (err: unknown) => {
+      // A scope above the tenant's ceiling is a 422 whose message names the
+      // scopes; show it as the server wrote it. Anything else keeps the
+      // message it always had.
       createForm.setError(
-        err instanceof Error ? err.message : "Failed to create OAuth2 client."
+        scopeCeilingMessage(err) ??
+          (err instanceof Error ? err.message : "Failed to create OAuth2 client.")
       );
     },
   });
@@ -1229,8 +1286,11 @@ export function OAuth2ClientsPage() {
       setEditClient(null);
     },
     onError: (err: unknown) => {
+      // See the create handler: a 422 `scope_exceeds_ceiling` names the scopes
+      // outside the tenant's `dcr_allowed_scopes`.
       editForm.setError(
-        err instanceof Error ? err.message : "Failed to update OAuth2 client."
+        scopeCeilingMessage(err) ??
+          (err instanceof Error ? err.message : "Failed to update OAuth2 client.")
       );
     },
   });

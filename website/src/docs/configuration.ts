@@ -463,6 +463,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the network-segment management API: create, replace and delete a segment under /api/v1/network/segments, a segment's reply profile under /api/v1/network/profiles, and PUT /api/v1/network/policy, the tenant's Session-Timeout cap. A segment write decides which VLAN a device is placed on and a profile write shapes what the placement gives. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN",
+            "Max requests per minute to POST /api/v1/network/decide, the RADIUS placement decision a FreeRADIUS server asks for once per EAP-TLS authentication, per authenticated caller (the token's sub, a service account whose token is bound to its own certificate), not per address. Six thousand is a site's power-restore storm. A per-address backstop of ten times this covers tokens that do not authenticate. 6000 under every profile preset.",
+            "6000",
+          ],
+          [
             "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN",
             "Max requests per minute, per IP, to each CIBA approval route under /api/v1/ciba/requests: read a pending request, approve it, refuse it. One bucket per route, so reads cannot starve decisions. Human-driven, behind a session and a CSRF token; a request id that is not the caller's own answers 404. Never moved by a profile preset.",
             "30",

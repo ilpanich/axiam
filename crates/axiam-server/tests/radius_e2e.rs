@@ -55,7 +55,37 @@
 //! EAP-MD5 is refused, and an Access-Request without a `Message-Authenticator`
 //! is discarded.
 //!
+//! # D4: the decision per authentication
+//!
+//! A second test, [`a_decision_per_authentication_places_revokes_and_quarantines`],
+//! runs the same FreeRADIUS with the D4 profile
+//! (`docker/docker-compose.radius-d4.yml`, `docker/radius/raddb/d4/`): no placement
+//! table, but `rlm_rest` calling `POST /api/v1/auth/device` and
+//! `POST /api/v1/network/decide` on an AXIAM that this process runs behind a REAL
+//! TLS listener, the production one (`axiam_server::tls`: TLS 1.3, client
+//! certificates verified against the organization CA flagged as an mTLS trust
+//! anchor, the verified certificate lifted into the connection exactly as
+//! `boot.rs` does). The token must be bound to the caller's certificate, so the
+//! handshake has to end at AXIAM; nothing here stands in for it.
+//!
+//! * **placement from a profile** — the device is admitted onto the VLAN of the
+//!   segment AXIAM chose, with the profile's `Session-Timeout`; the Access-Accept's
+//!   tunnel attributes are `0000000d`, `00000006` and `3230` on the wire (the
+//!   integer attributes carry the tag octet, the VLAN string does not);
+//! * **revocation at the next authentication** — a revoked device is refused
+//!   while FreeRADIUS still holds the old CRL, with no wait for one;
+//! * **quarantine** — a deny at the segments puts the device on the quarantine
+//!   segment, or refuses it where the site has no baseline for it;
+//! * **a wrong site key**, and **AXIAM unreachable**, are refused;
+//! * **no free attribute copy** — against a stand-in that answers whatever this
+//!   file tells it to, the mapping copies only the dictionary's attributes and
+//!   refuses a body that is not exactly the allow it knows.
+//!
+//! The two tests share one directory and one container name, so they run one
+//! after the other (`SERIAL`), whatever `--test-threads` says.
+//!
 //! # Gating
+//!
 //!
 //! `cargo test` needs no container, no `eapol_test` and no `docker`: without
 //! `AXIAM_E2E_RADIUS=1` the test prints `SKIPPED` and returns. With it set the
@@ -85,21 +115,41 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use actix_web::{App, test, web};
+use actix_web::dev::ServerHandle;
+use actix_web::{App, HttpResponse, HttpServer, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::config::{ClientAuth, TlsConfig};
+use axiam_api_rest::permissions::PERMISSION_REGISTRY;
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::{RateLimitConfig, register_api_v1_routes};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
-use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::tenant::{CreateTenant, TenantKind};
-use axiam_core::models::user::CreateUser;
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
-use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+use axiam_authz::AuthorizationEngine;
+use axiam_core::models::audit::AuditLogEntry;
+use axiam_core::models::network::{
+    NETWORK_DECIDE, NETWORK_GRANT, NETWORK_JOIN, NETWORK_PROFILES_WRITE, NETWORK_READ,
+    NETWORK_SEGMENTS_WRITE, NetworkSegmentKind, branch_node_id, site_node_id,
 };
+use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::permission::PermissionEffect;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
+use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
+use axiam_core::repository::{
+    AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, PermissionRepository,
+    RoleRepository, TenantRepository, UserRepository,
+};
+use axiam_db::repository::{
+    SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
+};
+use axiam_db::{seed_default_roles, seed_permissions};
 use axiam_test_support::test_password;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -110,8 +160,19 @@ const CONTAINER: &str = "axiam-radius-e2e-freeradius";
 const CSRF_TOKEN: &str = "radius-e2e-csrf-token";
 /// The CRL route is metered per IP; the test says which one it is.
 const CRL_PEER: &str = "203.0.113.30:4000";
+/// The address the management calls come from, for the routes metered per IP.
+const MGMT_PEER: &str = "203.0.113.31:4000";
 /// The VLAN the placement table puts every device on.
 const VLAN: &str = "20";
+/// The name AXIAM's TLS certificate carries and the D4 override maps, inside the
+/// container, to the host (docker/docker-compose.radius-d4.yml).
+const AXIAM_HOST: &str = "axiam.radius.test";
+/// The AXIAM site key of the D4 cases: the `shortname` of FreeRADIUS's client.
+const SITE: &str = "hq";
+
+/// One stack at a time: the two tests share a work directory, a container name
+/// and an address. Asynchronous, so that a test waiting its turn blocks nothing.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ===========================================================================
 // The gate, and the commands the test shells out to
@@ -240,21 +301,37 @@ fn unix_now() -> u64 {
 // ===========================================================================
 
 struct Stack {
-    compose: PathBuf,
+    /// The compose files, in the order `docker compose -f` reads them: the base
+    /// file, and for the D4 profile its override.
+    files: Vec<PathBuf>,
     env_file: PathBuf,
 }
 
 impl Stack {
     fn new(work: &Path) -> Self {
         Self {
-            compose: repo_root().join("docker/docker-compose.radius.yml"),
+            files: vec![repo_root().join("docker/docker-compose.radius.yml")],
             env_file: work.join("env"),
         }
     }
 
+    /// The D4 profile: the base file with the override beside it.
+    fn d4(work: &Path) -> Self {
+        let mut stack = Self::new(work);
+        stack
+            .files
+            .push(repo_root().join("docker/docker-compose.radius-d4.yml"));
+        stack
+    }
+
     fn compose(&self, args: &[&str]) -> std::process::Output {
-        Command::new("docker")
-            .args(["compose", "-f", path_str(&self.compose), "--env-file"])
+        let mut command = Command::new("docker");
+        command.arg("compose");
+        for file in &self.files {
+            command.arg("-f").arg(file);
+        }
+        command
+            .arg("--env-file")
             .arg(&self.env_file)
             .args(args)
             .output()
@@ -269,6 +346,21 @@ impl Stack {
             out.status.success(),
             "FreeRADIUS did not come up (docker compose up -d --wait -f \
              docker/docker-compose.radius.yml):\n{}\n{}\n--- container log ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout),
+            self.log_tail()
+        );
+    }
+
+    /// Replace the environment file and re-create the container from it: the
+    /// D4 cases that change what FreeRADIUS is configured with (the site key, the
+    /// address of AXIAM) do it through the variables the override reads.
+    fn recreate_with(&self, env: &str) {
+        std::fs::write(&self.env_file, env).expect("the env file can be written");
+        let out = self.compose(&["up", "-d", "--wait", "--force-recreate"]);
+        assert!(
+            out.status.success(),
+            "re-creating FreeRADIUS failed:\n{}\n{}\n--- container log ---\n{}",
             String::from_utf8_lossy(&out.stderr),
             String::from_utf8_lossy(&out.stdout),
             self.log_tail()
@@ -364,6 +456,66 @@ impl Attempt {
     }
 }
 
+/// Whether `eapol_test` ended with its `SUCCESS` line.
+fn eapol_succeeded(output: &str) -> bool {
+    output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim() == "SUCCESS")
+}
+
+impl Attempt {
+    /// The attributes of the Access-Accept `eapol_test` printed, as
+    /// `(number, name, value)`: the value as `eapol_test` prints it (hex for the
+    /// tagged and the string attributes, decimal for the plain integers), empty
+    /// where it prints none. Empty for a refused attempt.
+    fn accept_attributes(&self) -> Vec<(u8, String, String)> {
+        let mut lines = self
+            .output
+            .lines()
+            .skip_while(|l| !l.starts_with("RADIUS message: code=2 (Access-Accept)"))
+            .skip(1)
+            .peekable();
+        let mut attributes = Vec::new();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.trim().strip_prefix("Attribute ") else {
+                break;
+            };
+            let number: u8 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .expect("an attribute number");
+            let name = rest
+                .split_once('(')
+                .and_then(|(_, tail)| tail.split_once(')'))
+                .map_or_else(String::new, |(name, _)| name.to_string());
+            let value = match lines.peek() {
+                Some(next) if next.trim().starts_with("Value:") => lines
+                    .next()
+                    .and_then(|v| {
+                        v.trim()
+                            .strip_prefix("Value:")
+                            .map(|v| v.trim().to_string())
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            attributes.push((number, name, value));
+        }
+        attributes
+    }
+
+    /// The printed value of attribute `number` in the Access-Accept, if it is there.
+    fn accept_value(&self, number: u8) -> Option<String> {
+        self.accept_attributes()
+            .into_iter()
+            .find(|(n, _, _)| *n == number)
+            .map(|(_, _, value)| value)
+    }
+}
+
 struct Radius<'a> {
     stack: &'a Stack,
     work: PathBuf,
@@ -374,6 +526,45 @@ struct Radius<'a> {
 impl Radius<'_> {
     /// Authenticate with EAP-TLS and the given device files.
     fn eap_tls(&self, name: &str, cert: &str, key: &str, tls13: bool) -> Attempt {
+        let conf = self.supplicant_conf(name, cert, key, tls13);
+        self.run_eapol(&conf)
+    }
+
+    /// [`Self::eap_tls`] for the D4 cases, which must not block the thread:
+    /// FreeRADIUS calls AXIAM while `eapol_test` runs, and AXIAM — the database
+    /// engine and the test application with it — runs on this thread's runtime.
+    async fn eap_tls_d4(&self, name: &str, cert: &str, key: &str) -> Attempt {
+        let conf = self.supplicant_conf(name, cert, key, true);
+        // FreeRADIUS logs with one-second resolution: start each attempt in a
+        // second of its own so a reason read from the log is this attempt's.
+        actix_web::rt::time::sleep(Duration::from_millis(1100)).await;
+        let since = unix_now();
+        let (ip, secret) = (self.ip.clone(), self.secret.clone());
+        let out = actix_web::rt::task::spawn_blocking(move || {
+            Command::new("eapol_test")
+                .args(["-c", path_str(&conf), "-a", &ip, "-p", "1812", "-s"])
+                .arg(&secret)
+                .args(["-t", "20"])
+                .output()
+        })
+        .await
+        .expect("the supplicant's thread finishes")
+        .expect("eapol_test can be run");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Let the server finish writing the decision.
+        actix_web::rt::time::sleep(Duration::from_millis(300)).await;
+        Attempt {
+            accepted: eapol_succeeded(&output),
+            output,
+            log: self.stack.log_since(since),
+        }
+    }
+
+    fn supplicant_conf(&self, name: &str, cert: &str, key: &str, tls13: bool) -> PathBuf {
         let conf = self.work.join(format!("supplicant-{name}.conf"));
         std::fs::write(
             &conf,
@@ -386,7 +577,7 @@ impl Radius<'_> {
             ),
         )
         .expect("the supplicant configuration can be written");
-        self.run_eapol(&conf)
+        conf
     }
 
     /// Authenticate with EAP-MD5 (a method this server does not offer).
@@ -419,13 +610,8 @@ impl Radius<'_> {
         );
         // Let the server finish writing the decision.
         std::thread::sleep(Duration::from_millis(300));
-        let accepted = output
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .is_some_and(|l| l.trim() == "SUCCESS");
         Attempt {
-            accepted,
+            accepted: eapol_succeeded(&output),
             output,
             log: self.stack.log_since(since),
         }
@@ -531,6 +717,8 @@ impl Api {
         let mut req = test::TestRequest::default()
             .method(method)
             .uri(uri)
+            // The per-address limiters of the network routes need one.
+            .peer_addr(MGMT_PEER.parse().expect("a peer address"))
             .insert_header(("Authorization", format!("Bearer {token}")))
             .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN));
@@ -789,13 +977,25 @@ async fn try_issue_device(
     ca: &SigningCa,
     subject: &str,
 ) -> (u16, Value) {
+    try_issue(api, org, tenant, ca, subject, "Device").await
+}
+
+/// A leaf of `cert_type` (`Device`, or `Service` for a machine that calls AXIAM).
+async fn try_issue(
+    api: &Api,
+    org: &Org,
+    tenant: usize,
+    ca: &SigningCa,
+    subject: &str,
+    cert_type: &str,
+) -> (u16, Value) {
     api.post(
         "/api/v1/certificates",
         &org.tenants[tenant].1,
         json!({
             "issuer_ca_id": ca.id,
             "subject": subject,
-            "cert_type": "Device",
+            "cert_type": cert_type,
             "key_algorithm": "Ed25519",
             "validity_days": 30,
         }),
@@ -1414,13 +1614,22 @@ fn say(step: &str, what: &str) {
     eprintln!("[radius-e2e] {step:<22} {what}");
 }
 
-#[actix_web::test]
-async fn eap_tls_with_an_axiam_issued_device_certificate() {
-    if !gate() {
-        return;
-    }
+/// What every run starts from: its directory, the secret, FreeRADIUS's address and
+/// the CA that signs the TLS certificates the SUPPLICANT is shown (FreeRADIUS's
+/// own, and in D4 AXIAM's).
+struct Run {
+    work: PathBuf,
+    trust: PathBuf,
+    capath: PathBuf,
+    secret: String,
+    ip: String,
+    server_ca_key: PathBuf,
+    server_ca: PathBuf,
+}
 
-    // ---- the run's directory, the server's own certificate, the secret ----
+/// Wipe and recreate the run's directory, mint the shared secret and the server
+/// CA, and issue FreeRADIUS's server certificate from it.
+fn prepare_run() -> Run {
     let work = work_dir();
     let _ = std::fs::remove_dir_all(&work);
     let trust = work.join("trust");
@@ -1460,7 +1669,36 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
             path_str(&server_ca),
         ],
     );
-    let server_csr = work.join("server.csr");
+    mint_server_leaf(
+        &work,
+        &server_ca_key,
+        &server_ca,
+        "radius.example.test",
+        &trust.join("server.key"),
+        &trust.join("server.pem"),
+    );
+    Run {
+        work,
+        trust,
+        capath,
+        secret,
+        ip,
+        server_ca_key,
+        server_ca,
+    }
+}
+
+/// A TLS server certificate for `dns`, signed by the test's server CA, with its
+/// key. World-readable, because the container reads it as another user.
+fn mint_server_leaf(
+    work: &Path,
+    ca_key: &Path,
+    ca_pem: &Path,
+    dns: &str,
+    key_out: &Path,
+    pem_out: &Path,
+) {
+    let csr = work.join(format!("{dns}.csr"));
     run_ok(
         "openssl",
         &[
@@ -1469,18 +1707,20 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
             "ed25519",
             "-nodes",
             "-subj",
-            "/CN=radius.example.test",
+            &format!("/CN={dns}"),
             "-keyout",
-            path_str(&trust.join("server.key")),
+            path_str(key_out),
             "-out",
-            path_str(&server_csr),
+            path_str(&csr),
         ],
     );
-    let server_ext = work.join("server.ext");
+    let ext = work.join(format!("{dns}.ext"));
     std::fs::write(
-        &server_ext,
-        "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n\
-         extendedKeyUsage=serverAuth\nsubjectAltName=DNS:radius.example.test\n",
+        &ext,
+        format!(
+            "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n\
+             extendedKeyUsage=serverAuth\nsubjectAltName=DNS:{dns}\n"
+        ),
     )
     .expect("the extension file can be written");
     run_ok(
@@ -1489,22 +1729,41 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
             "x509",
             "-req",
             "-in",
-            path_str(&server_csr),
+            path_str(&csr),
             "-CA",
-            path_str(&server_ca),
+            path_str(ca_pem),
             "-CAkey",
-            path_str(&server_ca_key),
+            path_str(ca_key),
             "-CAcreateserial",
             "-days",
             "2",
             "-extfile",
-            path_str(&server_ext),
+            path_str(&ext),
             "-out",
-            path_str(&trust.join("server.pem")),
+            path_str(pem_out),
         ],
     );
-    set_readable(&trust.join("server.key"));
-    set_readable(&trust.join("server.pem"));
+    set_readable(key_out);
+    set_readable(pem_out);
+}
+
+#[actix_web::test]
+async fn eap_tls_with_an_axiam_issued_device_certificate() {
+    if !gate() {
+        return;
+    }
+
+    let _one_stack_at_a_time = SERIAL.lock().await;
+
+    // ---- the run's directory, the server's own certificate, the secret ----
+    let Run {
+        work,
+        trust,
+        capath,
+        secret,
+        ip,
+        ..
+    } = prepare_run();
 
     // ---- AXIAM -----------------------------------------------------------
     let db = Surreal::new::<Mem>(())
@@ -2038,4 +2297,989 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
         still.log
     );
     say("done", "press-07 still admitted");
+}
+
+// ===========================================================================
+// D4: a decision per authentication
+// ===========================================================================
+
+fn page() -> Pagination {
+    Pagination {
+        offset: 0,
+        limit: 1000,
+        search: None,
+    }
+}
+
+/// The SHA-256 of a certificate's DER in lowercase hex: what the D4 hook leaves
+/// for the decision, what the route is posted, and what the audit row records.
+fn certificate_fingerprint(pem: &str) -> String {
+    hex::encode(Sha256::digest(openssl_in(
+        &["x509", "-outform", "DER"],
+        pem.as_bytes(),
+    )))
+}
+
+/// The host as the container sees it: the gateway of the network FreeRADIUS is on.
+fn gateway_of(ip: &str) -> String {
+    let (network, _) = ip.rsplit_once('.').expect("a dotted address");
+    format!("{network}.1")
+}
+
+/// The environment file of the D4 override (docker/docker-compose.radius-d4.yml).
+fn d4_env(secret: &str, url: &str, site: &str, host_ip: &str) -> String {
+    format!(
+        "RADIUS_E2E_SHARED_SECRET={secret}\nRADIUS_E2E_AXIAM_URL={url}\n\
+         RADIUS_E2E_SITE={site}\nRADIUS_E2E_AXIAM_HOST_IP={host_ip}\n"
+    )
+}
+
+/// What the test sets up straight in the database: the roles and the
+/// assignments that are the subject of `network_gate_test.rs` and not of this
+/// file, and the audit trail it reads back.
+struct Network<'a> {
+    db: &'a Surreal<TestDb>,
+    auth: &'a AuthConfig,
+    org: Uuid,
+    tenant: Uuid,
+}
+
+impl Network<'_> {
+    async fn permission_id(&self, action: &str) -> Uuid {
+        SurrealPermissionRepository::new(self.db.clone())
+            .list(self.tenant, page())
+            .await
+            .expect("the permissions")
+            .items
+            .into_iter()
+            .find(|p| p.action == action)
+            .unwrap_or_else(|| panic!("permission {action} is not seeded"))
+            .id
+    }
+
+    /// A role of the tenant carrying `grants`.
+    async fn role(&self, grants: &[(&str, PermissionEffect)]) -> Uuid {
+        let role = SurrealRoleRepository::new(self.db.clone())
+            .create(CreateRole {
+                tenant_id: self.tenant,
+                name: format!("r-{}", Uuid::new_v4().simple()),
+                description: String::new(),
+                is_global: false,
+            })
+            .await
+            .expect("a role");
+        let permissions = SurrealPermissionRepository::new(self.db.clone());
+        for (action, effect) in grants {
+            permissions
+                .grant_to_role_with_effect(
+                    self.tenant,
+                    role.id,
+                    self.permission_id(action).await,
+                    vec![],
+                    *effect,
+                )
+                .await
+                .expect("a grant");
+        }
+        role.id
+    }
+
+    /// Give service account `account` `grants` at resource `node`.
+    async fn grant(&self, account: Uuid, grants: &[(&str, PermissionEffect)], node: Uuid) {
+        let role = self.role(grants).await;
+        SurrealRoleRepository::new(self.db.clone())
+            .assign_to_service_account(
+                self.tenant,
+                account,
+                role,
+                AssignmentScope::from(Some(node)),
+            )
+            .await
+            .expect("an assignment");
+    }
+
+    /// An active network administrator's token: read, both writes and `grant`,
+    /// tenant-wide.
+    async fn netadmin(&self) -> String {
+        let role = self
+            .role(&[
+                (NETWORK_READ, PermissionEffect::Allow),
+                (NETWORK_SEGMENTS_WRITE, PermissionEffect::Allow),
+                (NETWORK_PROFILES_WRITE, PermissionEffect::Allow),
+                (NETWORK_GRANT, PermissionEffect::Allow),
+            ])
+            .await;
+        let users = SurrealUserRepository::new(self.db.clone());
+        let user = users
+            .create(CreateUser {
+                tenant_id: self.tenant,
+                username: format!("u{}", Uuid::new_v4().simple()),
+                email: format!("{}@example.test", Uuid::new_v4().simple()),
+                password: test_password(),
+                metadata: None,
+            })
+            .await
+            .expect("a network administrator");
+        users
+            .update(
+                self.tenant,
+                user.id,
+                UpdateUser {
+                    status: Some(UserStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("an active administrator");
+        SurrealRoleRepository::new(self.db.clone())
+            .assign_to_user(self.tenant, user.id, role, AssignmentScope::from(None))
+            .await
+            .expect("the administrator's role");
+        issue_access_token(
+            user.id,
+            self.tenant,
+            self.org,
+            &[],
+            self.auth,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .expect("a token")
+    }
+
+    async fn audit(&self, action: &str) -> Vec<AuditLogEntry> {
+        SurrealAuditLogRepository::new(self.db.clone())
+            .list(
+                self.tenant,
+                AuditLogFilter {
+                    action: Some(action.into()),
+                    ..Default::default()
+                },
+                page(),
+            )
+            .await
+            .expect("the audit trail")
+            .items
+    }
+
+    /// The decision rows that name `fingerprint`, oldest first.
+    async fn decisions_for(&self, fingerprint: &str) -> Vec<AuditLogEntry> {
+        let mut rows = self.audit("network_decision.allowed").await;
+        rows.extend(self.audit("network_decision.denied").await);
+        rows.retain(|r| r.metadata["certificate_fingerprint"] == fingerprint);
+        rows.sort_by_key(|r| r.timestamp);
+        rows
+    }
+}
+
+/// The segments of a site, made through the management routes, each with a
+/// profile: `corp` (VLAN 10, rank 10), `iot` (VLAN 20, rank 20) and the
+/// quarantine segment `q` (VLAN 999). The profiles' `Session-Timeout`s are not
+/// the placement table's 3600, so a reply that came from AXIAM is recognisable.
+struct Site {
+    iot: Value,
+    quarantine: Value,
+}
+
+async fn make_site(api: &Api, admin: &str, key: &str) -> Site {
+    let mut made = Vec::new();
+    for (kind, name, vlan, rank, filter, session, idle) in [
+        ("access", "corp", 10, Some(10), "corp-acl", 1800, 600),
+        ("access", "iot", 20, Some(20), "iot-acl", 1800, 600),
+        ("quarantine", "q", 999, None, "quarantine-acl", 600, 300),
+    ] {
+        let (status, segment) = api
+            .post(
+                "/api/v1/network/segments",
+                admin,
+                json!({
+                    "kind": kind,
+                    "site_key": key,
+                    "name": name,
+                    "vlan_id": vlan,
+                    "filter_ids": [filter],
+                    "rank": rank,
+                }),
+            )
+            .await;
+        assert_eq!(status, 201, "segment {name}: {segment}");
+        let (status, profile) = api
+            .post(
+                "/api/v1/network/profiles",
+                admin,
+                json!({
+                    "segment_id": segment["id"],
+                    "segment_version": segment["version"],
+                    "profile": {
+                        "session_timeout_secs": session,
+                        "idle_timeout_secs": idle,
+                        "filter_id": filter,
+                        "service_type": "framed_user",
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(status, 201, "profile of {name}: {profile}");
+        made.push(segment);
+    }
+    Site {
+        quarantine: made.pop().expect("q"),
+        iot: made.pop().expect("iot"),
+    }
+}
+
+fn uuid_of(value: &Value) -> Uuid {
+    value["id"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .expect("an id")
+}
+
+/// AXIAM behind its real TLS listener (D4): the production route table, the
+/// production `on_connect` hook, rustls verifying client certificates.
+struct Axiam {
+    handle: ServerHandle,
+    port: u16,
+}
+
+fn serve_axiam(
+    state: AppState<TestDb>,
+    auth: AuthConfig,
+    authz: Arc<dyn AuthzChecker>,
+    tls: rustls::ServerConfig,
+) -> Axiam {
+    // All interfaces: the container reaches the host at its network's gateway.
+    let listener = TcpListener::bind("0.0.0.0:0").expect("a port for AXIAM");
+    let port = listener.local_addr().expect("its address").port();
+    let server = HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(authz.clone()))
+            .app_data(web::Data::new(state.clone()))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default()))
+    })
+    // What boot.rs installs: the certificate rustls verified becomes the
+    // connection's VerifiedClientCert, which the token's `cnf` is checked against.
+    .on_connect(axiam_server::tls::lift_verified_client_certificate)
+    .workers(1)
+    .listen_rustls_0_23(listener, tls)
+    .expect("the listener takes AXIAM's TLS configuration")
+    .run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    Axiam { handle, port }
+}
+
+/// A server that answers `/api/v1/auth/device` and `/api/v1/network/decide` with
+/// whatever the test has put in `answer` (a status and a body): the stand-in for
+/// an AXIAM that sends what AXIAM never should, to show what the mapping does
+/// with it. Server-auth TLS only; it asks for no client certificate.
+struct Stub {
+    handle: ServerHandle,
+    port: u16,
+    answer: Arc<Mutex<(u16, String)>>,
+}
+
+fn serve_stub(cert: &Path, key: &Path) -> Stub {
+    let certs = CertificateDer::pem_file_iter(cert)
+        .expect("the stub's certificate")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("a certificate");
+    let key = PrivateKeyDer::from_pem_file(key).expect("the stub's key");
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS 1.3")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("the stub's certificate and key");
+    let answer = Arc::new(Mutex::new((200, String::new())));
+    let shared = Arc::clone(&answer);
+    let listener = TcpListener::bind("0.0.0.0:0").expect("a port for the stub");
+    let port = listener.local_addr().expect("its address").port();
+    let server = HttpServer::new(move || {
+        let answer = Arc::clone(&shared);
+        App::new()
+            .route(
+                "/api/v1/auth/device",
+                web::post().to(|| async {
+                    HttpResponse::Ok().content_type("application/json").body(
+                        r#"{"access_token":"stub-token","token_type":"Bearer","expires_in":900}"#,
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/network/decide",
+                web::post().to(move || {
+                    let (status, body) = answer.lock().expect("the answer").clone();
+                    async move {
+                        HttpResponse::build(
+                            actix_web::http::StatusCode::from_u16(status).expect("a status"),
+                        )
+                        .content_type("application/json")
+                        .body(body)
+                    }
+                }),
+            )
+    })
+    .workers(1)
+    .listen_rustls_0_23(listener, tls)
+    .expect("the stub's listener")
+    .run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    Stub {
+        handle,
+        port,
+        answer,
+    }
+}
+
+impl Stub {
+    /// What `/api/v1/network/decide` answers from now on.
+    fn answers(&self, status: u16, body: impl Into<String>) {
+        *self.answer.lock().expect("the stub's answer") = (status, body.into());
+    }
+}
+
+/// The three tunnel attributes of an Access-Accept for
+/// `vlan`, as they are on the wire: `Tunnel-Type` and `Tunnel-Medium-Type` carry
+/// their tag octet (`0x00`) in front of the integer, and `Tunnel-Private-Group-Id`
+/// carries no tag octet, the VLAN string alone (RFC 2868 section 3.6).
+fn assert_tunnel(attempt: &Attempt, vlan: &str, what: &str) {
+    assert_eq!(
+        attempt.accept_value(64).as_deref(),
+        Some("0000000d"),
+        "{what}: Tunnel-Type is VLAN (13) behind a tag octet:\n{}",
+        attempt.report()
+    );
+    assert_eq!(
+        attempt.accept_value(65).as_deref(),
+        Some("00000006"),
+        "{what}: Tunnel-Medium-Type is 802 (6) behind a tag octet:\n{}",
+        attempt.report()
+    );
+    assert_eq!(
+        attempt.accept_value(81).as_deref(),
+        Some(hex::encode(vlan.as_bytes()).as_str()),
+        "{what}: Tunnel-Private-Group-Id is the VLAN string, with no tag octet:\n{}",
+        attempt.report()
+    );
+}
+
+/// A refusal the decision made: the certificate was valid for EAP-TLS, and the
+/// virtual server rejected it, with nothing else in the answer.
+fn assert_refused_by_the_decision(attempt: &Attempt, what: &str) {
+    assert!(
+        !attempt.accepted
+            && attempt
+                .log
+                .contains("Certificate rejected by the virtual server"),
+        "{what}: the decision refuses the device:\n{}",
+        attempt.report()
+    );
+    assert!(
+        attempt.accept_attributes().is_empty(),
+        "{what}: a refusal carries no reply attribute"
+    );
+}
+
+/// The D4 case is one long `async fn`; in a debug build its state is far larger
+/// than the 2 MiB a test thread gets, so it runs on a thread of its own with room
+/// for it, on the same kind of runtime `#[actix_web::test]` would have made.
+// `test` is `actix_web::test` in this file, so the attribute is spelt in full.
+#[::core::prelude::v1::test]
+fn a_decision_per_authentication_places_revokes_and_quarantines() {
+    let thread = std::thread::Builder::new()
+        .name("radius-e2e-d4".into())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| actix_web::rt::System::new().block_on(decision_per_authentication()))
+        .expect("a thread for the D4 case");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn decision_per_authentication() {
+    if !gate() {
+        return;
+    }
+    let _one_stack_at_a_time = SERIAL.lock().await;
+    let started = Instant::now();
+
+    let Run {
+        work,
+        trust,
+        capath,
+        secret,
+        ip,
+        server_ca_key,
+        server_ca,
+    } = prepare_run();
+    // AXIAM's own TLS certificate, from the same test CA: what FreeRADIUS checks
+    // AXIAM by (`axiam-ca.pem`), under the name the override maps to the host.
+    mint_server_leaf(
+        &work,
+        &server_ca_key,
+        &server_ca,
+        AXIAM_HOST,
+        &work.join("axiam.key"),
+        &work.join("axiam.pem"),
+    );
+    std::fs::copy(&server_ca, trust.join("axiam-ca.pem")).expect("the CA can be copied");
+    set_readable(&trust.join("axiam-ca.pem"));
+
+    // ---- AXIAM -----------------------------------------------------------
+    let db = Surreal::new::<Mem>(())
+        .await
+        .expect("an in-memory database");
+    db.use_ns("test").use_db("test").await.expect("a namespace");
+    axiam_db::run_migrations(&db).await.expect("migrations");
+    let auth = auth_config();
+    let state = AppState::for_test(db.clone(), auth.clone());
+    // The PKI calls need no roles (as in the D3 case); the network routes and the
+    // decision are authorized by the real engine, which is what D4 is about.
+    let api = Api::new(
+        state.clone(),
+        auth.clone(),
+        Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>,
+    )
+    .await;
+    let engine: Arc<dyn AuthzChecker> = Arc::new(AuthorizationEngine::new(
+        SurrealRoleRepository::new(db.clone()),
+        SurrealPermissionRepository::new(db.clone()),
+        SurrealResourceRepository::new(db.clone()),
+        SurrealScopeRepository::new(db.clone()),
+        SurrealGroupRepository::new(db.clone()),
+    ));
+    let network_api = Api::new(state.clone(), auth.clone(), Arc::clone(&engine)).await;
+
+    let plant = organization(&db, &auth, "plant-a", &["line-1"]).await;
+    let tenant = plant.tenants[0].0;
+    seed_permissions(&db, tenant, PERMISSION_REGISTRY)
+        .await
+        .expect("the permission registry");
+    seed_default_roles(&db, tenant, PERMISSION_REGISTRY)
+        .await
+        .expect("the default roles");
+    let net = Network {
+        db: &db,
+        auth: &auth,
+        org: plant.id,
+        tenant,
+    };
+
+    // ---- issue: the PKI, and the mTLS trust anchor AXIAM's listener reads -----
+    let root = org_root(&api, &plant, "Plant A root").await;
+    let (status, flagged) = api
+        .json(
+            actix_web::http::Method::PUT,
+            &format!(
+                "/api/v1/organizations/{}/ca-certificates/{}/mtls-trust-anchor",
+                plant.id, root.id
+            ),
+            &plant.ca_admin,
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "issue: the organization CA is flagged: {flagged}"
+    );
+    let line1 = signing_ca(&api, &plant, &root, 0, "Plant A line 1 devices").await;
+
+    // FreeRADIUS's own identity towards AXIAM: a Service certificate of the
+    // tenant's signing CA, bound to the service account that will hold
+    // `network:decide`, sent as a chain (leaf, then its signing CA) because the
+    // listener's anchor is the organization CA above both.
+    let (status, leaf) = try_issue(&api, &plant, 0, &line1, "freeradius-hq", "Service").await;
+    assert_eq!(status, 201, "issue: FreeRADIUS's certificate: {leaf}");
+    let caller = write_device(&leaf, "freeradius-hq", &work);
+    let caller_account: Uuid = bind(&api, &plant, 0, &caller)
+        .await
+        .parse()
+        .expect("the service account id");
+    let chain = write_chain(&work, "freeradius-hq-chain", &[&caller.pem, &line1.pem]);
+    std::fs::copy(&chain, trust.join("rest-chain.pem")).expect("the chain can be copied");
+    std::fs::copy(&caller.key, trust.join("rest.key")).expect("the key can be copied");
+    set_readable(&trust.join("rest-chain.pem"));
+    set_readable(&trust.join("rest.key"));
+
+    // ---- the site, and the devices ------------------------------------------
+    let admin = net.netadmin().await;
+    let site = make_site(&network_api, &admin, SITE).await;
+    let iot = uuid_of(&site.iot);
+    let quarantine = uuid_of(&site.quarantine);
+    let zones = branch_node_id(tenant, NetworkSegmentKind::Access);
+    // The caller decides for this site and no other: both of the site's nodes.
+    for kind in [NetworkSegmentKind::Access, NetworkSegmentKind::Quarantine] {
+        net.grant(
+            caller_account,
+            &[(NETWORK_DECIDE, PermissionEffect::Allow)],
+            site_node_id(tenant, kind, SITE),
+        )
+        .await;
+    }
+    let allow = PermissionEffect::Allow;
+    let deny = PermissionEffect::Deny;
+
+    let press07 = issue_device(&api, &plant, 0, &line1, "press-07", &work).await;
+    let press08 = issue_device(&api, &plant, 0, &line1, "press-08", &work).await;
+    let press09 = issue_device(&api, &plant, 0, &line1, "press-09", &work).await;
+    let press10 = issue_device(&api, &plant, 0, &line1, "press-10", &work).await;
+    let press11 = issue_device(&api, &plant, 0, &line1, "press-11", &work).await;
+    let account07: Uuid = bind(&api, &plant, 0, &press07).await.parse().expect("id");
+    let account08: Uuid = bind(&api, &plant, 0, &press08).await.parse().expect("id");
+    let account09: Uuid = bind(&api, &plant, 0, &press09).await.parse().expect("id");
+    let account11: Uuid = bind(&api, &plant, 0, &press11).await.parse().expect("id");
+    // press-10 is issued and valid, and bound to nothing.
+    for account in [account07, account08, account09, account11] {
+        net.grant(account, &[(NETWORK_JOIN, allow)], iot).await;
+    }
+    // press-08 has a baseline on the quarantine segment: where a deny leaves it.
+    net.grant(account08, &[(NETWORK_JOIN, allow)], quarantine)
+        .await;
+    say(
+        "issue",
+        "organization CA flagged as the mTLS anchor; FreeRADIUS's Service certificate bound to \
+         an account that decides for site hq only; segments corp, iot and q with profiles; five \
+         devices (press-10 unbound)",
+    );
+
+    // ---- AXIAM's listener, and the stack -----------------------------------
+    let client_ca = work.join("client-ca.pem");
+    std::fs::write(&client_ca, &root.pem).expect("the client CA bundle can be written");
+    let tls = axiam_server::tls::build_rustls_server_config(&TlsConfig {
+        enabled: true,
+        cert_path: Some(work.join("axiam.pem")),
+        key_path: Some(work.join("axiam.key")),
+        client_auth: ClientAuth::Optional,
+        client_ca_path: Some(client_ca),
+        ..TlsConfig::default()
+    })
+    .expect("AXIAM's TLS configuration");
+    let axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
+    let host_ip = gateway_of(&ip);
+    let axiam_url = format!("https://{AXIAM_HOST}:{}", axiam.port);
+
+    // The trust FreeRADIUS needs for EAP-TLS, as in D3, but no placement table.
+    std::fs::write(trust.join("ca.pem"), &line1.pem).expect("the CA can be written");
+    set_readable(&trust.join("ca.pem"));
+    // The list reaches `ca_path` through the fetch script, as in D3.
+    let mirror = Mirror::start();
+    refresh_crl(
+        &api,
+        plant.id,
+        &line1,
+        &trust.join("ca.pem"),
+        &capath,
+        &mirror,
+    )
+    .await;
+    std::fs::set_permissions(&capath, {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(0o755)
+    })
+    .expect("permissions");
+
+    std::fs::write(
+        work.join("env"),
+        d4_env(&secret, &axiam_url, SITE, &host_ip),
+    )
+    .expect("the env file can be written");
+    // The override names no image: it is the base file's, pinned once.
+    let stack = Stack::d4(&work);
+    stack.up();
+    let radius = Radius {
+        stack: &stack,
+        work: work.clone(),
+        ip: ip.clone(),
+        secret: secret.clone(),
+    };
+    say(
+        "stack",
+        &format!(
+            "FreeRADIUS 3.2.8 with the D4 profile up; AXIAM on {axiam_url}, mutual TLS, no table"
+        ),
+    );
+
+    // ---- placement from a profile -------------------------------------------
+    let fp07 = certificate_fingerprint(&press07.pem);
+    let first = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        first.accepted,
+        "placement: AXIAM places press-07 on the iot segment:\n{}",
+        first.report()
+    );
+    assert_tunnel(&first, "20", "placement");
+    // Everything below came from AXIAM's profile of the segment, not from a table
+    // (the D3 table says 3600, no Idle-Timeout and no Filter-Id).
+    assert_eq!(first.accept_value(27).as_deref(), Some("1800"));
+    assert_eq!(first.accept_value(29).as_deref(), Some("1"));
+    assert_eq!(first.accept_value(28).as_deref(), Some("600"));
+    assert_eq!(first.accept_value(6).as_deref(), Some("2"));
+    assert!(
+        first.accept_value(11).is_some(),
+        "placement: the profile's Filter-Id is in the Accept:\n{}",
+        first.report()
+    );
+    assert!(
+        first.log.contains(&format!(
+            "{{\"site\":\"{SITE}\",\"fingerprint\":\"{fp07}\"}}"
+        )),
+        "placement: the body posted is the site key and the fingerprint and nothing else:\n{}",
+        first.log
+    );
+    let rows = net.decisions_for(&fp07).await;
+    assert_eq!(rows.len(), 1, "placement: one audit row: {rows:?}");
+    assert_eq!(rows[0].action, "network_decision.allowed");
+    assert_eq!(rows[0].metadata["reason"], "placement:access");
+    assert_eq!(rows[0].metadata["segment_id"], site.iot["id"]);
+    assert_eq!(rows[0].metadata["transport"], "rlm_rest");
+    say(
+        "placement",
+        "press-07 admitted onto VLAN 20 from the iot segment's profile; Tunnel-Type 0000000d, \
+         Tunnel-Medium-Type 00000006, Tunnel-Private-Group-Id 3230",
+    );
+
+    // The token is cached: the next authentication does not log in again.
+    let second = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        second.accepted,
+        "token: still admitted:\n{}",
+        second.report()
+    );
+    assert!(
+        second
+            .log
+            .contains("Found entry for \"axiam-decide-caller\"")
+            && !second.log.contains("/api/v1/auth/device"),
+        "token: the second authentication uses the cached token:\n{}",
+        second.log
+    );
+    assert!(
+        first.log.contains("/api/v1/auth/device"),
+        "token: the first logged in with FreeRADIUS's certificate:\n{}",
+        first.log
+    );
+    say("token", "the second authentication reused the cached token");
+
+    // ---- an unbound certificate ----------------------------------------------
+    let unbound = radius
+        .eap_tls_d4("press-10", path_str(&press10.cert), path_str(&press10.key))
+        .await;
+    assert_refused_by_the_decision(&unbound, "unbound");
+    let rows = net
+        .decisions_for(&certificate_fingerprint(&press10.pem))
+        .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "network_decision.denied");
+    assert_eq!(rows[0].metadata["reason"], "certificate:refused");
+    say(
+        "unbound",
+        "press-10 (valid for EAP-TLS, bound to nothing) refused by the decision",
+    );
+
+    // ---- revocation at the next authentication ---------------------------------
+    let before = radius
+        .eap_tls_d4("press-09", path_str(&press09.cert), path_str(&press09.key))
+        .await;
+    assert!(
+        before.accepted,
+        "revoked: admitted before:\n{}",
+        before.report()
+    );
+    let (status, _) = api
+        .post(
+            &format!("/api/v1/certificates/{}/revoke", press09.id),
+            &plant.tenants[0].1,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "revoked: AXIAM revokes press-09");
+    let revoked_at = Instant::now();
+    // FreeRADIUS has not been given a new list (the D3 case waits for one):
+    // EAP-TLS still trusts the certificate, and the decision refuses it.
+    let after = radius
+        .eap_tls_d4("press-09", path_str(&press09.cert), path_str(&press09.key))
+        .await;
+    assert_refused_by_the_decision(&after, "revoked");
+    assert!(
+        !after.log.contains("certificate revoked"),
+        "revoked: the refusal is the decision's, not the CRL's:\n{}",
+        after.log
+    );
+    let rows = net
+        .decisions_for(&certificate_fingerprint(&press09.pem))
+        .await;
+    assert_eq!(
+        rows.last().map(|r| r.metadata["reason"].clone()),
+        Some(json!("certificate:revoked")),
+        "revoked: the audit row says why: {rows:?}"
+    );
+    let lag = revoked_at.elapsed();
+    assert!(
+        lag < Duration::from_secs(60),
+        "revoked: refused at the very next authentication, not after a CRL interval ({lag:?})"
+    );
+    let other = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        other.accepted,
+        "revoked: another device is not affected:\n{}",
+        other.report()
+    );
+    say(
+        "revoked",
+        &format!(
+            "press-09 refused {}s after the revocation, FreeRADIUS still holding the old CRL",
+            lag.as_secs()
+        ),
+    );
+
+    // ---- quarantine ------------------------------------------------------------
+    let free = radius
+        .eap_tls_d4("press-08", path_str(&press08.cert), path_str(&press08.key))
+        .await;
+    assert!(
+        free.accepted,
+        "quarantine: placed first:\n{}",
+        free.report()
+    );
+    assert_tunnel(&free, "20", "quarantine, before the deny");
+    // The deny that quarantines: on the whole access branch. Deny-override makes
+    // it beat the allow on the iot segment, and the baseline on the quarantine
+    // segment is untouched.
+    net.grant(account08, &[(NETWORK_JOIN, deny)], zones).await;
+    let quarantined = radius
+        .eap_tls_d4("press-08", path_str(&press08.cert), path_str(&press08.key))
+        .await;
+    assert!(
+        quarantined.accepted,
+        "quarantine: placed on the quarantine segment:\n{}",
+        quarantined.report()
+    );
+    assert_tunnel(&quarantined, "999", "quarantine");
+    assert_eq!(quarantined.accept_value(27).as_deref(), Some("600"));
+    assert_eq!(quarantined.accept_value(28).as_deref(), Some("300"));
+    let rows = net
+        .decisions_for(&certificate_fingerprint(&press08.pem))
+        .await;
+    let last = rows.last().expect("a decision row");
+    assert_eq!(last.metadata["reason"], "placement:quarantine");
+    assert_eq!(last.metadata["segment_id"], site.quarantine["id"]);
+    // No baseline, a deny: no candidate, no default VLAN.
+    net.grant(account11, &[(NETWORK_JOIN, deny)], zones).await;
+    let nowhere = radius
+        .eap_tls_d4("press-11", path_str(&press11.cert), path_str(&press11.key))
+        .await;
+    assert_refused_by_the_decision(&nowhere, "denied, no baseline");
+    let rows = net
+        .decisions_for(&certificate_fingerprint(&press11.pem))
+        .await;
+    assert_eq!(rows[0].metadata["reason"], "placement:no_candidate");
+    say(
+        "quarantine",
+        "press-08: VLAN 20, then VLAN 999 after a deny at the access branch; press-11 (a deny, no \
+         baseline) refused",
+    );
+
+    // ---- a wrong site key ------------------------------------------------------
+    // The key is FreeRADIUS's own configuration (the client's `shortname`), and
+    // the caller's grant is for hq alone: another site is a 403 and a refusal.
+    let decisions_before = net.decisions_for(&fp07).await.len();
+    stack.recreate_with(&d4_env(&secret, &axiam_url, "elsewhere", &host_ip));
+    let wrong = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert_refused_by_the_decision(&wrong, "wrong site key");
+    assert!(
+        wrong.log.contains("\"site\":\"elsewhere\""),
+        "wrong site key: FreeRADIUS posted its own client's key:\n{}",
+        wrong.log
+    );
+    let refusals = net.audit("network_decision.refused").await;
+    assert_eq!(refusals.len(), 1, "wrong site key: audited: {refusals:?}");
+    assert_eq!(refusals[0].metadata["site"], "elsewhere");
+    assert_eq!(
+        net.decisions_for(&fp07).await.len(),
+        decisions_before,
+        "wrong site key: no decision was asked"
+    );
+    say(
+        "wrong site",
+        "a client whose shortname is another site: 403, audited, Access-Reject",
+    );
+
+    // ---- AXIAM unreachable -----------------------------------------------------
+    stack.recreate_with(&d4_env(&secret, &axiam_url, SITE, &host_ip));
+    axiam.handle.stop(false).await;
+    let down = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert_refused_by_the_decision(&down, "AXIAM unreachable");
+    say(
+        "fail closed",
+        "AXIAM stopped: press-07, admitted a minute ago, is refused",
+    );
+
+    // ---- no free attribute copy ------------------------------------------------
+    let stub = serve_stub(&work.join("axiam.pem"), &work.join("axiam.key"));
+    let stub_url = format!("https://{AXIAM_HOST}:{}", stub.port);
+    stack.recreate_with(&d4_env(&secret, &stub_url, SITE, &host_ip));
+    // The bodies are written out by hand, members in the order AXIAM serializes
+    // them (`name`, `number`, `value`, `tag`): the mapping reads that order, and
+    // `serde_json::json!` would sort the keys.
+    let attribute = |name: &str, number: u32, value: &str, tag: Option<u8>| {
+        let tag = tag.map_or_else(String::new, |t| format!(",\"tag\":{t}"));
+        format!("{{\"name\":\"{name}\",\"number\":{number},\"value\":{value}{tag}}}")
+    };
+    let tunnel = |vlan: &str, session: &str| {
+        vec![
+            attribute("Tunnel-Type", 64, "13", Some(0)),
+            attribute("Tunnel-Medium-Type", 65, "6", Some(0)),
+            attribute("Tunnel-Private-Group-Id", 81, &format!("\"{vlan}\""), None),
+            attribute("Session-Timeout", 27, session, None),
+            attribute("Termination-Action", 29, "1", None),
+        ]
+    };
+    let allow_with = |attributes: Vec<String>| {
+        (
+            200u16,
+            format!(
+                "{{\"allow\":true,\"reply\":{{\"dictionary\":\"axiam-radius-reply/1\",\
+                 \"attributes\":[{}]}}}}",
+                attributes.join(",")
+            ),
+        )
+    };
+    let mut hostile = tunnel("30", "900");
+    hostile.extend([
+        attribute("Reply-Message", 18, "\"welcome\"", None),
+        attribute("Class", 25, "\"opaque\"", None),
+        attribute("Tunnel-Password", 69, "\"hunter2\"", None),
+        attribute("Cisco-AVPair", 26, "\"shell:priv-lvl=15\"", None),
+        attribute("Vendor-Specific", 26, "\"anything\"", None),
+    ]);
+    let (status, body) = allow_with(hostile);
+    stub.answers(status, body);
+    let copied = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        copied.accepted,
+        "mapping: a well-formed allow with extra attributes is admitted:\n{}",
+        copied.report()
+    );
+    assert_tunnel(&copied, "30", "mapping");
+    assert_eq!(copied.accept_value(27).as_deref(), Some("900"));
+    let numbers: Vec<u8> = copied
+        .accept_attributes()
+        .into_iter()
+        .filter(|(number, _, value)| {
+            // The two MS-MPPE keys FreeRADIUS adds are vendor-specific attributes
+            // of vendor 311 (Microsoft); any other vendor's would show here.
+            *number != 26 || !value.starts_with("00000137")
+        })
+        .map(|(number, _, _)| number)
+        .filter(|number| !matches!(number, 1 | 79 | 80))
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![64, 65, 81, 27, 29],
+        "mapping: only the dictionary's attributes reach the Accept (no Reply-Message, Class, \
+         Tunnel-Password or vendor attribute):\n{}",
+        copied.report()
+    );
+    say(
+        "no free copy",
+        "Reply-Message, Class, Tunnel-Password and two vendor attributes in the body: none copied",
+    );
+
+    // The same member order with whitespace between the tokens is the same answer.
+    let (status, body) = allow_with(tunnel("30", "900"));
+    stub.answers(status, body.replace(',', ", ").replace(':', " : "));
+    let spaced = radius
+        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        spaced.accepted,
+        "mapping: whitespace between tokens is not a difference:\n{}",
+        spaced.report()
+    );
+
+    let mut admin_service = tunnel("30", "900");
+    admin_service.push(attribute("Service-Type", 6, "6", None));
+    let mut idle_zero = tunnel("30", "900");
+    idle_zero.push(attribute("Idle-Timeout", 28, "0", None));
+    let mut bad_filter = tunnel("30", "900");
+    bad_filter.push(attribute("Filter-Id", 11, "\"a\\\"b\"", None));
+    let mut no_timeout = tunnel("30", "900");
+    no_timeout.remove(3);
+    let mut no_action = tunnel("30", "900");
+    no_action.remove(4);
+    let mut other_dictionary = allow_with(tunnel("30", "900"));
+    other_dictionary.1 = other_dictionary
+        .1
+        .replace("axiam-radius-reply/1", "axiam-radius-reply/2");
+    let mut reordered = allow_with(vec![attribute("Tunnel-Type", 64, "13", Some(0))]);
+    reordered.1 = reordered.1.replace(
+        "\"name\":\"Tunnel-Type\",\"number\":64,\"value\":13,\"tag\":0",
+        "\"tag\":0,\"name\":\"Tunnel-Type\",\"number\":64,\"value\":13",
+    );
+    let refusals: Vec<(&str, (u16, String))> = vec![
+        ("an administrative Service-Type", allow_with(admin_service)),
+        ("a zero Idle-Timeout", allow_with(idle_zero)),
+        ("a Filter-Id that is no identifier", allow_with(bad_filter)),
+        ("VLAN 0", allow_with(tunnel("0", "900"))),
+        ("VLAN 4095", allow_with(tunnel("4095", "900"))),
+        ("VLAN 020", allow_with(tunnel("020", "900"))),
+        ("a zero Session-Timeout", allow_with(tunnel("30", "0"))),
+        ("no Session-Timeout", allow_with(no_timeout)),
+        ("no Termination-Action", allow_with(no_action)),
+        ("another dictionary version", other_dictionary),
+        ("members in another order", reordered),
+        (
+            "an allow with no reply",
+            (200, r#"{"allow":true}"#.to_string()),
+        ),
+        (
+            "an allow that is a string",
+            (200, r#"{"allow":"true"}"#.to_string()),
+        ),
+        ("allow: false", (200, r#"{"allow":false}"#.to_string())),
+        ("a body that is not JSON", (200, "<html>ok</html>".into())),
+        ("no content", (204, String::new())),
+        (
+            "a 403",
+            (403, r#"{"error":"authorization_denied"}"#.to_string()),
+        ),
+        ("a 500", (500, r#"{"error":"boom"}"#.to_string())),
+    ];
+    let count = refusals.len();
+    for (what, (status, body)) in refusals {
+        stub.answers(status, body);
+        let attempt = radius
+            .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+            .await;
+        assert_refused_by_the_decision(&attempt, what);
+    }
+    say(
+        "mapping",
+        &format!(
+            "{count} answers that are not exactly the allow the recipe knows: every one refused"
+        ),
+    );
+
+    stub.handle.stop(false).await;
+    say(
+        "done",
+        &format!("D4 cases passed in {}s", started.elapsed().as_secs()),
+    );
 }

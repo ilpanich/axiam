@@ -1,4 +1,9 @@
 import api from "@/lib/api";
+import {
+  getApiErrorCode,
+  getApiErrorMessage,
+  getApiErrorStatus,
+} from "@/lib/apiError";
 import { fetchAllPages } from "@/services/_pagination";
 
 // ─── Domain Models ────────────────────────────────────────────────────────────
@@ -450,6 +455,60 @@ export function validateClientPosture(
   }
 
   return null;
+}
+
+// ─── 1.1.0 — device grant and scope ceiling ───────────────────────────────────
+
+/** The device-code grant's identifier (RFC 8628 §3.4). */
+export const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+
+/**
+ * Whether a client is one the 1.1.0 device-code change catches: confidential
+ * (`token_endpoint_auth_method` is anything but `none`) and holding the
+ * device-code grant. Since 1.1.0 such a client must authenticate at both
+ * `/oauth2/device_authorization` and the token poll, and is refused
+ * `401 invalid_client` when it does not.
+ *
+ * An absent method is the backend's default, `client_secret_post`, which is
+ * confidential — the same fallback every other reader of the field uses.
+ */
+export function deviceGrantNeedsCredential(
+  grantTypes: readonly string[],
+  method: ClientAuthMethod | undefined,
+): boolean {
+  return (
+    grantTypes.includes(DEVICE_CODE_GRANT) &&
+    !isPublicAuthMethod(method ?? "client_secret_post")
+  );
+}
+
+/** The `error` slug of the `422` an admin write answers for a scope above the ceiling. */
+export const SCOPE_EXCEEDS_CEILING = "scope_exceeds_ceiling";
+
+/**
+ * The server's own sentence when a client write was refused for a scope outside
+ * the tenant's `dcr_allowed_scopes`, or `null` for any other failure.
+ *
+ * The message is the instruction: it names the scopes that are outside the
+ * ceiling, which only the server knows (the effective list is the organization's
+ * ceiling intersected with the tenant's). The slug, not the wording, decides
+ * that this is that refusal.
+ */
+export function scopeCeilingMessage(err: unknown): string | null {
+  if (
+    getApiErrorStatus(err) !== 422 ||
+    getApiErrorCode(err) !== SCOPE_EXCEEDS_CEILING
+  ) {
+    return null;
+  }
+  // Only `message` is the sentence: `getApiErrorMessage` would fall back to the
+  // `error` slug (`scope_exceeds_ceiling`) when the body carried no message,
+  // which is not something to show a person.
+  const message = (err as { response?: { data?: { message?: unknown } } }).response?.data
+    ?.message;
+  return typeof message === "string" && message.length > 0
+    ? getApiErrorMessage(err)
+    : "A requested scope is outside the tenant's allowed scopes (dcr_allowed_scopes).";
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────

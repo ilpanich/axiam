@@ -42,6 +42,12 @@ const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 /// scales a different knob and the two are tuned apart.
 const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
 
+/// RADIUS D4 (W6.4): how many times the per-caller allowance of the decision
+/// route (`network_decide_per_min`) its per-address backstop admits. Sized so
+/// that several FreeRADIUS servers behind one address never meet it, while a
+/// burst of calls with a token that does not authenticate does.
+pub const NETWORK_DECIDE_BACKSTOP_FACTOR: u32 = 10;
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -1800,6 +1806,129 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             .wrap(RateLimitShared::<C>::new(
                                 "scim_target_reconcile",
                                 rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
+            // --- Network segments and RADIUS reply profiles (RADIUS D4, W6.3;
+            // `claude_dev/radius-reply-profile-design.md` §5.1). The tenant is
+            // the token's. Reads are unlimited; each of the six writes has a
+            // bucket of its own under `network_admin_per_min`, named
+            // `network_*`. `.to()` first, then `.wrap()`. Each write passes the
+            // write gate (`crate::network_gate`) before it reaches a repository.
+            .service(
+                web::resource("/network/segments")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::list_segments::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::network::create_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_create",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/segments/{id}")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::get_segment::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::network::delete_segment::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_segment_delete",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/profiles")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::list_profiles::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::network::create_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_create",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            .service(
+                web::resource("/network/profiles/{segment_id}")
+                    .app_data(handlers::network::json_config())
+                    .app_data(handlers::network::query_config())
+                    .route(web::get().to(handlers::network::get_profile::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::network::delete_profile::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_profile_delete",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    )
+            )
+            // The tenant's `Session-Timeout` cap: a read, and one write in a
+            // bucket of its own, `network_policy_replace`, under the same
+            // `network_admin_per_min` (plan §13.6).
+            .service(
+                web::resource("/network/policy")
+                    .app_data(handlers::network::json_config())
+                    .route(web::get().to(handlers::network::get_policy::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::network::replace_policy::<C>)
+                            .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "network_policy_replace",
+                                rate_limit_cfg.network_admin_per_min,
+                            )),
+                    ),
+            )
+            // --- The RADIUS placement decision (RADIUS D4, W6.4; design note
+            // §6.3, T-468). The caller is FreeRADIUS's service account with a
+            // certificate-bound token, so its bucket is the caller's `sub`
+            // (`network_decide_per_min`, D-6), spent by the handler once the
+            // token has authenticated: the key does not exist before that, as
+            // for the CIBA pending list. The route's limiter from its first
+            // commit is therefore a per-address backstop ten times the per-caller
+            // allowance, for a token that does not authenticate; two callers
+            // behind one address keep a bucket each.
+            .service(
+                web::resource("/network/decide")
+                    .app_data(handlers::network_decide::json_config())
+                    .route(
+                        web::post()
+                            .to(handlers::network_decide::decide::<C>)
+                            .wrap(build_governor(
+                                rate_limit_cfg
+                                    .network_decide_per_min
+                                    .saturating_mul(NETWORK_DECIDE_BACKSTOP_FACTOR),
                             )),
                     ),
             )

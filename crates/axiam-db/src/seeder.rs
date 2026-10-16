@@ -9,6 +9,7 @@
 //! tenant. On startup, if the hash matches the stored value the UPSERT loop is
 //! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
+use axiam_core::models::network::{SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, is_network_action};
 use axiam_core::models::role::CreateRole;
 use axiam_core::permission_scope::is_organization_level_action;
 use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository, TenantRepository};
@@ -332,6 +333,20 @@ async fn tenant_may_hold_organization_actions<C: Connection>(
 /// (B-04) — so the grant is not made in the first place. The organization's
 /// own scope is seeded with everything.
 ///
+/// # The reserved `network:` namespace (RADIUS D4, W6.2)
+///
+/// The two global administrative roles are **not** given the whole `network:`
+/// namespace. `super-admin` gets
+/// [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`] — `network:read` and the five meta
+/// permissions, never `network:join` nor the administrative class — and
+/// `admin` gets none. Design note §4.2 rule 1 forbids a network-sensitive role
+/// to be global; the seeded super-admin is the one exemption, because under the
+/// §5.3 delegation bound a network administrator can only be made by someone
+/// who already holds `network:grant` and every meta permission conferred, and a
+/// tenant whose bootstrap role held none of them could never administer its
+/// network. That constant's documentation gives the exemption's limits; the API
+/// refuses a `network:` grant to any global role, this one included.
+///
 /// This is the second of two layers. `require_organization_principal` in
 /// `axiam-api-rest` is the load-bearing one and refuses such a caller whatever
 /// grants it holds; withholding the grant means the two layers agree instead of
@@ -446,8 +461,9 @@ pub async fn seed_default_roles<C: Connection>(
             continue;
         }
 
-        // super-admin gets ALL permissions.
-        if !super_admin_have.contains(&perm.id) {
+        // super-admin gets ALL permissions, except the parts of the reserved
+        // `network:` namespace a bootstrap role must not carry (see above).
+        if super_admin_may_hold(&perm.action) && !super_admin_have.contains(&perm.id) {
             grant_to_role_idempotent(&perm_repo, tenant_id, super_admin_id, perm.id)
                 .await
                 .map_err(|e| {
@@ -458,8 +474,9 @@ pub async fn seed_default_roles<C: Connection>(
                 })?;
         }
 
-        // admin gets every permission EXCEPT admin:bootstrap.
-        if perm.action != "admin:bootstrap" && !admin_have.contains(&perm.id) {
+        // admin gets every permission EXCEPT admin:bootstrap and the reserved
+        // `network:` namespace.
+        if admin_may_hold(&perm.action) && !admin_have.contains(&perm.id) {
             grant_to_role_idempotent(&perm_repo, tenant_id, admin_id, perm.id)
                 .await
                 .map_err(|e| {
@@ -490,6 +507,21 @@ pub async fn seed_default_roles<C: Connection>(
         admin_role_id: admin_id,
         viewer_role_id: viewer_id,
     })
+}
+
+/// Whether the seeded `super-admin` may hold `action`: everything outside the
+/// reserved `network:` namespace, and [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`]
+/// inside it.
+fn super_admin_may_hold(action: &str) -> bool {
+    !is_network_action(action) || SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&action)
+}
+
+/// Whether the seeded `admin` may hold `action`: everything but
+/// `admin:bootstrap` and the reserved `network:` namespace. A tenant
+/// administrator is not a network administrator; the super-admin makes one
+/// (design note §5.3).
+fn admin_may_hold(action: &str) -> bool {
+    action != "admin:bootstrap" && !is_network_action(action)
 }
 
 /// Find an existing role by name, or create it — tolerating a CONCURRENT
@@ -653,8 +685,12 @@ impl ReconcileOutcome {
 /// * the three seeded default roles, found by name — a role an operator
 ///   created is theirs, and this function has no business editing it;
 /// * actions in
-///   [`ORGANIZATION_LEVEL_ACTIONS`](axiam_core::permission_scope::ORGANIZATION_LEVEL_ACTIONS);
-/// * tenants that are **not** the organization's own scope.
+///   [`ORGANIZATION_LEVEL_ACTIONS`](axiam_core::permission_scope::ORGANIZATION_LEVEL_ACTIONS),
+///   in tenants that are **not** the organization's own scope;
+/// * actions of the reserved `network:` namespace that
+///   [`seed_default_roles`] does not give the role (every one for `admin`,
+///   `network:join` and the administrative class for `super-admin`), in every
+///   tenant.
 ///
 /// It is not a general "make the grants match the seeding rules" pass: an
 /// operator who deliberately granted `users:delete` to `viewer` keeps it. Only
@@ -725,6 +761,47 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 
     let mut outcome = ReconcileOutcome::default();
     for perm in &permissions.items {
+        // The reserved `network:` namespace: grant what the seeded roles may
+        // hold, and take back what an earlier build of this branch granted them
+        // (W6.1 gave both roles the whole namespace). Only the two seeded
+        // administrative roles are touched, as for the organization-level
+        // actions below.
+        if is_network_action(&perm.action)
+            && (!super_admin_may_hold(&perm.action) || !admin_may_hold(&perm.action))
+        {
+            for (role_id, have, role, may) in [
+                (
+                    super_admin_id,
+                    &sa_have,
+                    "super-admin",
+                    super_admin_may_hold(&perm.action),
+                ),
+                (admin_id, &admin_have, "admin", admin_may_hold(&perm.action)),
+            ] {
+                if !may && have.contains(&perm.id) {
+                    perm_repo
+                        .revoke_from_role(tenant_id, role_id, perm.id)
+                        .await
+                        .map_err(|e| {
+                            DbError::Migration(format!(
+                                "reconcile revoke reserved {} from {role} failed: {e}",
+                                perm.action
+                            ))
+                        })?;
+                    outcome.revoked += 1;
+                }
+            }
+            if super_admin_may_hold(&perm.action) && !sa_have.contains(&perm.id) {
+                perm_repo
+                    .grant_to_role(tenant_id, super_admin_id, perm.id)
+                    .await
+                    .map_err(|e| {
+                        DbError::Migration(format!("reconcile grant super-admin failed: {e}"))
+                    })?;
+                outcome.granted += 1;
+            }
+            continue;
+        }
         if !may_hold_org_actions && is_organization_level_action(&perm.action) {
             // Withhold, and undo the grant if an earlier version made it.
             // Only super-admin and admin are considered: viewer is seeded

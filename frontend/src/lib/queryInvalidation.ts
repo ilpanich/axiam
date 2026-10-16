@@ -139,6 +139,14 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
   "saml-idp-credentials": ["saml-idp-credentials", "saml-idp"],
   "saml-service-providers": ["saml-service-providers"],
 
+  // RADIUS D4. A reply profile is read as the EFFECTIVE one: clamped to the
+  // tenant's current Session-Timeout cap, and checked against its segment's
+  // envelope. So a cap write and a segment write both change what an open
+  // profile view should say, and the profile views are reached from both. A
+  // profile write changes only itself (the segment keeps its version).
+  "network-segments": ["network-segments", "network-profile"],
+  "network-policy": ["network-policy", "network-profile"],
+
   // MFA state is shown both on the user's own profile and on their admin page.
   mfaMethods: ["mfaMethods", "user-mfa", "currentUser"],
   "user-mfa": ["user-mfa", "mfaMethods", "user"],

@@ -40,6 +40,27 @@ struct ErrorBody {
     /// responses; omitted from the JSON body otherwise (SDK-Q02).
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_id: Option<String>,
+    /// A closed, machine-readable sub-code beside `error`, for the routes
+    /// that document one: today the network routes' `409`
+    /// (`sdks/CONTRACT.md` §36.4; `handlers::network::NetworkConflictReason`).
+    /// `message` stays for a human and is never the thing to branch on.
+    /// Omitted from the JSON body otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_code: Option<&'static str>,
+}
+
+impl AxiamApiError {
+    /// The response [`actix_web::ResponseError::error_response`] renders, with
+    /// `reason_code` set beside `error` when `Some`. The slug, the message and
+    /// the status are this type's, unchanged: a route that documents a
+    /// sub-code adds one member and changes nothing else.
+    #[must_use]
+    pub fn error_response_with_reason_code(
+        &self,
+        reason_code: Option<&'static str>,
+    ) -> HttpResponse {
+        self.render(reason_code)
+    }
 }
 
 /// A `422 Unprocessable Entity` in the crate's error shape (`{error, message}`).
@@ -55,6 +76,7 @@ pub fn unprocessable_entity(error: &str, message: String) -> HttpResponse {
         message,
         action: None,
         resource_id: None,
+        reason_code: None,
     })
 }
 
@@ -87,6 +109,13 @@ impl actix_web::ResponseError for AxiamApiError {
     }
 
     fn error_response(&self) -> HttpResponse {
+        self.render(None)
+    }
+}
+
+impl AxiamApiError {
+    fn render(&self, reason_code: Option<&'static str>) -> HttpResponse {
+        use actix_web::ResponseError;
         // Client-facing error code slug.
         let error_code = match &self.0 {
             AxiamError::NotFound { .. } => "not_found",
@@ -186,6 +215,7 @@ impl actix_web::ResponseError for AxiamApiError {
             message,
             action,
             resource_id,
+            reason_code,
         })
     }
 }
@@ -276,5 +306,28 @@ mod write_contention_tests {
         assert_eq!(status, 503);
         assert_eq!(retry_after, None);
         assert_eq!(body["error"], "service_unavailable");
+    }
+
+    /// `reason_code` is one member added beside `error` by a route that
+    /// documents one (§36.4); the slug, message and status are the type's own,
+    /// and every other response omits the member.
+    #[test]
+    fn a_reason_code_is_one_member_added_and_absent_otherwise() {
+        let err = AxiamApiError(AxiamError::Conflict {
+            reason: "the network segment changed since it was read".into(),
+        });
+        let response = err.error_response_with_reason_code(Some("stale_version"));
+        assert_eq!(response.status().as_u16(), 409);
+        let bytes = response.into_body().try_into_bytes().unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "conflict");
+        assert_eq!(body["reason_code"], "stale_version");
+        assert_eq!(
+            body["message"],
+            "the network segment changed since it was read"
+        );
+
+        let (_, _, plain) = render(AxiamError::Conflict { reason: "x".into() });
+        assert!(plain.get("reason_code").is_none(), "{plain}");
     }
 }

@@ -98,6 +98,12 @@ const DOMAINS = [
     tags: ["ssf", "ssf-receiver"],
   },
   {
+    label: "Network access",
+    blurb:
+      "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, what a device placed on a segment is given, and the tenant's cap on its Session-Timeout. `POST /api/v1/network/decide` is the placement decision FreeRADIUS asks for, over mTLS with a token bound to its own certificate; it is not SDK surface.",
+    tags: ["network"],
+  },
+  {
     label: "Audit & operations",
     blurb: "The append-only trail, and the endpoints a monitor reads.",
     tags: ["audit", "health"],

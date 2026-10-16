@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.1";
-export const API_OPERATION_COUNT = 278;
-export const API_PATH_COUNT = 191;
+export const API_OPERATION_COUNT = 291;
+export const API_PATH_COUNT = 197;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1516,6 +1516,78 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/ssf/v1/verify",
     "summary": ""
+   }
+  ]
+ },
+ {
+  "id": "api-network-access",
+  "label": "Network access",
+  "blurb": "Network segments and the RADIUS reply profile each owns: the reserved `/network` subtree of the resource tree, what a device placed on a segment is given, and the tenant's cap on its Session-Timeout. `POST /api/v1/network/decide` is the placement decision FreeRADIUS asks for, over mTLS with a token bound to its own certificate; it is not SDK surface.",
+  "operations": [
+   {
+    "method": "POST",
+    "path": "/api/v1/network/decide",
+    "summary": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS authentication (RADIUS D4)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/policy",
+    "summary": "The tenant's `Session-Timeout` cap."
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/policy",
+    "summary": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on `version`."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/profiles",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/network/profiles",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": "A **replacement** of the segment's profile, conditional on the profile's `version` and the segment's."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/network/profiles/{segment_id}",
+    "summary": "No profile means the segment is not a placement candidate, so the delete removes every device placed on it: the write gate asks `network:profiles_write` (H1) and the placing right, `network:grant` on the segment (and on `/network/quarantine/<site>` for a quarantine segment), and refuses a caller that may join the segment (H6)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/segments",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/network/segments",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": "A **replacement** of the envelope, conditional on `version`."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/network/segments/{id}",
+    "summary": "The segment, **its reply profile** and its resource node, in one transaction."
    }
   ]
  },

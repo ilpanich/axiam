@@ -2892,6 +2892,16 @@ every other grant (RFC 8628 §3.1 and §3.4, which apply RFC 6749 §3.2.1):
    describes, a certificate on the connection as [§21.3](#§213-authenticating-as-an-mtls-client-informative)
    describes. An SDK sends a credential **only** when its caller configured one: it never borrows
    a secret from another configuration and never invents one.
+
+   **The "same rules" reading (maintainer, 2026-10-16).** A confidential client sends its
+   credential at `device_authorize` and at the poll exactly as at its other token requests. A client
+   registered `client_secret_basic` sends its secret **in the form body** (`client_secret`) at both
+   device endpoints, as it does at `/token`; `private_key_jwt` sends the assertion; an mTLS client
+   presents its certificate. **No SDK sends `Authorization: Basic` to either endpoint, whatever the
+   client is registered for**: [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3 stands
+   for these two routes as for every other `/oauth2/*` one. The server accepts either form of a
+   secret at the device endpoints, as it does at `/token`; only the SDK's choice is fixed, and the
+   choice is the form body.
 3. **The poll names its client.** `device_poll` MUST send `client_id` (the client's own, in the
    form body), on every poll; a poll without one is `400 invalid_request`. The server reads the
    client **before** it looks at the device code.
@@ -2908,8 +2918,9 @@ confidential client that holds the grant and sends no credential is refused: a d
 to 1.1.0 finds out at its devices' next request.
 
 The §12.1 wire rules apply unchanged: form-encoded bodies, `tenant_id` as a **query**
-parameter and never a body field, `X-Tenant-ID` still emitted per §5 rule 2, no HTTP Basic
-(§12.1 rule 3, whose reason holds for these two endpoints as for every other `/oauth2/*` one).
+parameter and never a body field, `X-Tenant-ID` still emitted per §5 rule 2, no `Authorization: Basic`
+for any registration (rule 2 above; §12.1 rule 3, whose reason holds for these two endpoints as for
+every other `/oauth2/*` one).
 A slug-only client therefore cannot call either operation, exactly as for the five §12
 operations — same rule, same client-side error, same remedy.
 
@@ -3038,7 +3049,8 @@ returns a token set carrying the access token.
 
 **Contract 1.62, §14.1 and §14.2 rules 5 and 8**, against a mocked server: a client configured with
 a secret sends it (`client_secret`, in the body) at **both** `device_authorize` and every
-`device_poll`; a client configured with none sends neither a `client_secret` nor any other
+`device_poll`, and sends **no `Authorization` header** at either, whichever of `client_secret_post`
+and `client_secret_basic` the client is registered for (maintainer, 2026-10-16); a client configured with none sends neither a `client_secret` nor any other
 credential at either, and is not refused client-side; `device_poll` sends `client_id` on every
 poll; a `401` with `{"error":"invalid_client"}` from either operation raises `OAuthProtocolError`
 with that `error`, makes exactly one request (no retry), and does not enter the §9 refresh guard;
@@ -4064,10 +4076,13 @@ recorded here until one exists.
   no wire break.** Recorded in **§34.6**, marked *contract 1.62* inline where each rule lives.
   SDK work: the `network` namespace (§36, SHOULD in all eleven; twelve operations; **202 operations
   across 29 namespaces**, the decision route `POST /api/v1/network/decide` excluded by name, §27.0)
-  and its place in the manifest (§27.6.2, every SDK that ships §27.6); the device grant, where an SDK
+  and its place in the manifest (§27.6.2, every SDK that ships §27.6; a segment's `kind` in the wire
+  spelling `access` or `quarantine`, `filter_ids` compared as a set, a clamped profile judged on the
+  read, §34.6 items u to w); the device grant, where an SDK
   client configured with a credential sends it at **both** `device_authorize` and the poll and the
   poll names its `client_id` (§14.1, §14.2, §14.6 — **replacing** 1.60's "MUST NOT send
-  `client_secret`"); the change-taking form for a stream and the response's own string for
+  `client_secret`"; a client registered `client_secret_basic` sends the secret in the form body there
+  too, and no SDK sends `Authorization: Basic`, §34.6 item t); the change-taking form for a stream and the response's own string for
   `expected_updated_at` (§32.2, §32.8 test 7); the three meanings of `events_requested` at the
   `update_stream` call site (§32.2); an assigned `null` is "none" and the request `user_id` is an
   untyped string (§27.11 rule 5). **Source-breaking:** the request `user_id` loses its UUID type in
@@ -8082,7 +8097,7 @@ registry surface.
 
 ### §27.2 The surface is namespaced, not flat
 
-§1's operations sit directly on the client. This section's 162 **MUST NOT**. An SDK
+§1's operations sit directly on the client. This section's 162 (202 since contract 1.62) **MUST NOT**. An SDK
 exposes each namespace as a handle reached from the client, and the operations on that
 handle:
 
@@ -8097,7 +8112,7 @@ Three reasons this is normative rather than stylistic:
    every one needs a disambiguating prefix, and `listUsers`/`listRoles`/`listRolePermissions`
    is a naming scheme that has to be invented once per operation and remembered by every
    caller. Namespaced, `list` means `list` everywhere.
-2. **162 methods on one object is not an API.** It is a wall. Every SDK's client already
+2. **162 methods on one object (202 since contract 1.62) is not an API.** It is a wall. Every SDK's client already
    carries §1, §12, §14, §15, §20, §24, §25 and §26; adding the management surface flat
    would roughly quintuple it and bury the eight operations most callers actually want.
 3. **It keeps §1's vocabulary lock meaningful.** §1 forbids new login/auth/authz method
@@ -8146,7 +8161,7 @@ fragments.
 
 The §1.1 async-naming rule applies unchanged: a language whose §1 surface is
 `suspend`/`async`/`*Async` keeps that discipline here, and an SDK that ships both
-synchronous and asynchronous twins ships them for all 162 operations or for none.
+synchronous and asynchronous twins ships them for all 162 operations (202 since contract 1.62) or for none.
 
 ### §27.4 Semantics (normative, identical in all SDKs)
 
@@ -8165,7 +8180,7 @@ synchronous and asynchronous twins ships them for all 162 operations or for none
    work before the caller knows any UUID. An SDK MUST reject a non-UUID identifier
    client-side (§2 `NetworkError`, "SDK programming error"), with no wire call.
 
-3. **Implicit path context.** `{org_id}` and `{tenant_id}` appear in 34 of the 162 routes,
+3. **Implicit path context.** `{org_id}` and `{tenant_id}` appear in 34 of the 162 routes (56 of 202 since contract 1.62),
    and in almost every call they are the client's own. An SDK MUST default them from the
    client's configured `org_id`/`tenant_id`, and MUST accept an explicit argument that
    overrides the default (a platform-admin token legitimately administers a tenant other
@@ -8178,7 +8193,7 @@ synchronous and asynchronous twins ships them for all 162 operations or for none
    - The `X-Tenant-ID` header of §5 rule 2 is still sent on every request regardless, and
      is **not** a substitute for the path parameter.
 
-4. **Pagination.** Twenty-one operations take `offset`/`limit`/`search` and return the
+4. **Pagination.** Twenty-six operations take `offset`/`limit`/`search` and return the
    envelope `{ items, total, offset, limit }`. An SDK MUST:
    - return a typed `Page<T>` (or the language's equivalent) exposing all four fields —
      never a bare list, which throws away `total` and leaves the caller unable to tell a
@@ -8188,21 +8203,23 @@ synchronous and asynchronous twins ships them for all 162 operations or for none
    - **never silently truncate.** An SDK MUST NOT quietly apply a default `limit` and
      return the first page as though it were the whole set. Where a default is applied it
      is the server's, and `total` tells the caller the rest exists.
-   Nineteen other reads return a **bare array** and are not paginated
+   Twenty other reads return a **bare array** and are not paginated
    (`scopes.list`, `users.list_roles`, `roles.list_permissions`, …). An SDK MUST NOT
    invent pagination for them, and MUST NOT model them as `Page<T>` — the registry's
-   `paginated` flag says which is which.
+   `paginated` flag says which is which. (The rule counted twenty-one paginated and nineteen bare-array
+   operations when it was written; the registry holds **twenty-six** and **twenty** since contract
+   1.62, and is the count.)
 
-   **`search` (contract 1.31).** All twenty-one paginated operations additionally accept an
+   **`search` (contract 1.31).** All twenty-six paginated operations additionally accept an
    optional free-text `search` term, matched case-insensitively by the server against the
    identifying fields of whatever is being listed — a name or username, plus the record
    id, so an operator holding a UUID from a log line can paste it into the same box.
    Which fields exactly is the server's business and is not part of this contract; the
-   *shape* is, because twenty-one endpoints spelling it twenty-one ways is the divergence §27
+   *shape* is, because twenty-six endpoints spelling it twenty-six ways is the divergence §27
    exists to prevent.
 
    - It belongs on the **same page-request type** as `offset`/`limit`, not as a separate
-     positional argument on twenty-one generated methods. An SDK whose page request is a
+     positional argument on twenty-six generated methods. An SDK whose page request is a
      struct/record adds a third field; one whose `list` takes loose arguments adds a
      third optional argument in the same position everywhere.
    - **It is applied before `offset`/`limit`, and `total` counts matches, not rows.** An
@@ -8418,7 +8435,7 @@ applied to a case where the omission is total rather than field-by-field.
 
 ### §27.6 Declarative management — the manifest
 
-**Requirement level: SHOULD where the SDK ships §27.** The 162 imperative operations are
+**Requirement level: SHOULD where the SDK ships §27.** The 162 (202 since contract 1.62) imperative operations are
 the floor, not the ceiling. Almost nobody actually wants to call them one at a time:
 what an application does at start-up, in a migration, or in a test fixture is *assert a
 shape* — this tenant has these resources, with these scopes, these permissions, these
@@ -8475,7 +8492,7 @@ wrong the second time it runs. The declarative layer is one object and one call.
    plan whose actions are all `NoChange`. An SDK that cannot make that assertion pass has
    a drift-detection bug, and the test is worth more than any other in this section.
 
-7. **There is no transaction, and the SDK MUST NOT pretend otherwise.** These are 162 independent HTTP endpoints; nothing spans them. If action 12 of 30 fails, actions 1–11
+7. **There is no transaction, and the SDK MUST NOT pretend otherwise.** These are 162 (202 since contract 1.62) independent HTTP endpoints; nothing spans them. If action 12 of 30 fails, actions 1–11
    have happened and will not be undone. `apply` MUST therefore return the outcome of
    *every* action attempted, MUST stop at the first failure rather than continuing
    blindly, and MUST document that re-running after fixing the cause is the recovery path
@@ -8607,13 +8624,16 @@ section needs a human caller, and a service-account token meets `401` at the fir
 
 | Spec | Members | Natural key |
 |---|---|---|
-| `network.segments[]` | `key`; `site` (the wire `site_key`), `kind`, `name`; `vlan_id`; `rank` (for `zones`), `filter_ids`, `enabled` (each optional) | **site + kind + name**, where `kind` is spelled as the segment's path spells it, `zones` or `quarantine` (`/network/{zones\|quarantine}/<site>/<name>`); a `zones` segment is the one whose wire `kind` is `access` ([§36.2](#§362-shapes-normative)) |
+| `network.segments[]` | `key`; `site` (the wire `site_key`), `kind`, `name`; `vlan_id`; `rank` (for `access`), `filter_ids`, `enabled` (each optional) | **site + kind + name**, where `kind` is the **wire** spelling, `access` or `quarantine`: the value `create_segment` writes and every segment read returns ([§36.2](#§362-shapes-normative)). An SDK keeps no mapping between this and anything else, and has no `zones` spelling. (The path segment `zones` in `/network/zones/<site>/<name>` is a server-side detail, where an access segment sits in the resource tree; no SDK reads or writes it.) |
 | `network.profiles[]` | `segment` (the `key` of a segment spec of the same manifest); `session_timeout_secs`; `termination_action`, `idle_timeout_secs`, `filter_id`, `service_type` (each optional) | **its segment**: a profile has no name or id of its own and is addressed by the segment's id ([§36.1](#§361-canonical-operation-set)) |
 | `network.policy` | `session_timeout_max_secs` | **a singleton**: the tenant has exactly one, so it has no key; a manifest carries at most one |
 
 A manifest that names one natural key twice (two segments with one site, kind and name; two
 profiles for one segment; two policies) is refused **before any request**, with rule 2's
-client-side error: it cannot be reconciled with one server row. A profile whose `segment` names
+client-side error: it cannot be reconciled with one server row. **So is a segment that lists the
+same Filter-Id twice in its `filter_ids`** (maintainer, 2026-10-16): the list is compared as a set
+(item 3), and a set has no repeated member; the refusal is at `plan`, with zero wire calls, like a
+duplicate natural key. A profile whose `segment` names
 no segment spec of the manifest is a dangling key (rule 2) and is refused the same way: the
 manifest does not reach for a segment it does not declare. The segment `kind`, `site` and `name`
 are the key and so are never drift (§36.3 rule 4: they do not change); every other member is a
@@ -8633,14 +8653,38 @@ it did before 1.62.
 rule 4), the profile matched to its segment by `segment_id`. The tenant's policy always exists (the
 default, `version` 0, until the tenant first writes one), so it is never `Create`: it is `NoChange`
 or `Update`. A segment or profile is `Create` when the read finds none, `Update` when a stated
-member differs from the read, and `NoChange` otherwise; drift on a profile is judged on the members
-as the read returns them, which are the **effective** ones ([§36.2](#§362-shapes-normative)).
+member differs from the read, and `NoChange` otherwise. Drift is judged **on the read**, as the next
+paragraph says.
 
 | Action | Segment | Profile | Policy |
 |---|---|---|---|
 | `Create` | `create_segment` | `create_profile` | — |
 | `Update` | `replace_segment` | `replace_profile` | `replace_policy` |
 | `Delete` (pruning only) | `delete_segment` | `delete_profile` | — |
+
+**Judged on the read (maintainer, 2026-10-16).** Every stated member is compared with the value as
+the read returns it; for a profile that is the **effective** profile ([§36.2](#§362-shapes-normative)).
+No hidden value, and no stored one, is compared, and the SDK keeps none of its own. Two members need
+saying:
+
+- **`session_timeout_secs` is compared with the effective (clamped) value**
+  ([§36.3](#§363-server-rules-every-sdk-can-observe-normative) rule 6). A profile whose stored timeout
+  is above a lowered cap reads as the cap, with `session_timeout_clamped: true`. A manifest that
+  states the cap is therefore `NoChange` (the stored value stays as it is; `apply` neither restores
+  nor rewrites it), and a manifest that states a value **above the cap** differs from the read, so
+  `plan` shows an `Update`. `apply` then sends the `replace_profile`, and **the server refuses
+  it** because the value is above the cap: **`403` `authorization_denied`** (the write gate's H3, a
+  value rule answered as a refusal, §36.3 rules 1 and 5), with the message `session_timeout_secs is
+  above the tenant's cap of <cap>` and no `action` or `resource_id`, because no permission is
+  missing. That is the **action's failure**: the SDK reports the server's refusal as it is (`AuthzError`,
+  [§36.4](#§364-error-mapping)), `apply` stops (rule 7), and nothing is retried, adjusted or lowered
+  to the cap by the SDK. The author lowers the stated value, or states a higher `network.policy` in
+  the same manifest (the policy is written first, item 2).
+- **`filter_ids` is compared as a set.** The same names in another order are `NoChange`: a reorder
+  alone is never an `Update`. Names compare as exact strings. When the SDK does write a segment (a
+  `Create`, or an `Update` for another member) it sends `filter_ids` **in the order the manifest
+  states**; a manifest that does not state it carries the read's order (item 4). A list that repeats a
+  name is refused at `plan` (item 1).
 
 **4. The `replace_*` operations are version-conditional, full-body and never retried**
 (§27.4 rule 5, rule 8; [§36.3](#§363-server-rules-every-sdk-can-observe-normative) rule 2):
@@ -8650,7 +8694,9 @@ as the read returns them, which are the **effective** ones ([§36.2](#§362-shap
   rule 3, and a replacement would otherwise clear it); a member stated as `null` is "none" and is
   left **out** of the body, which is how a replacement clears an optional member. The `version` is
   the one `plan` read, sent exactly. A segment's `kind`, `site_key` and `name` are not in the
-  replacement body ([§36.2](#§362-shapes-normative)).
+  replacement body ([§36.2](#§362-shapes-normative)). A profile's carried `session_timeout_secs` is the
+  read's effective value, so an `Update` of a clamped profile that does not state its timeout stores
+  the clamped value from then on (§36.3 rule 6).
 - **A profile also carries `segment_version`**, the owning segment's version. When the same `apply`
   created or replaced that segment earlier, it is the `version` of **that write's response**, not
   the one `plan` read: the segment write moved it, and the stale one would be `409 stale_version`
@@ -8721,7 +8767,7 @@ second implementation of §27.6, and the two will disagree.
 
 ### §27.8 How an SDK builds this
 
-**Generated core, hand-written facade.** The 162 operations and their model types are
+**Generated core, hand-written facade.** The 162 operations (202 since contract 1.62) and their model types are
 **generated** from `management-registry.json`; the ergonomics are not.
 
 Generated, and regenerated whenever the registry changes:
@@ -8740,7 +8786,7 @@ Hand-written, once, per SDK:
 — and MUST NOT open its own connection, build its own client, or re-implement any of §3
 (CSRF), §4 (cookie jar), §5 (tenant/org headers), §6 (TLS), §9 (single-flight refresh),
 §16 (retry) or §19 (telemetry). Everything in this section inherits all of it by
-construction; an SDK whose management layer has its own HTTP client has 162 endpoints
+construction; an SDK whose management layer has its own HTTP client has 162 endpoints (202 since contract 1.62)
 outside its own refresh guard.
 
 Generated files MUST be committed (not produced at build time), MUST carry a
@@ -8860,6 +8906,19 @@ rule 6's idempotence test, which covers it:
   never deleted.
 - Two segments with one site, kind and name, and a profile whose `segment` names no segment spec,
   are each refused with zero wire calls.
+- A segment whose `kind` is stated as `access` is `NoChange` against a read that says `"access"`, and
+  its `create_segment` body carries `"kind": "access"` (assert the string); the SDK has no `zones`
+  value anywhere in a manifest.
+- A segment whose stated `filter_ids` are the read's names in another order is `NoChange`, and
+  `apply` makes no write for it; a segment `Update` caused by another member sends `filter_ids` in
+  the **order the manifest states** (assert the array order in the body); a `Create` does the same.
+- A segment whose `filter_ids` lists one name twice is refused with zero wire calls, at `plan` and at
+  `apply`, with rule 2's client-side error.
+- A profile read with `session_timeout_clamped: true` and `session_timeout_secs` equal to the cap:
+  a manifest stating that value is `NoChange`; a manifest stating a value above the cap is an `Update`
+  in `plan`, and `apply` of it sends exactly one `replace_profile`, receives `403`
+  `authorization_denied`, stops without a retry, later actions are not attempted, and the outcome
+  carries the server's message.
 
 ### §27.10 Per-SDK posture
 
@@ -13083,7 +13142,7 @@ an implementer finds it where the surface it touches is described.
   `409`). New required tests, §14.6.
 - **(n) `network` is a §27.6 manifest namespace (normative; every SDK that ships §27.6).**
   [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162): natural keys — a segment by site
-  + kind (`zones` or `quarantine`) + name, a profile by its segment, the policy a singleton;
+  + kind (`access` or `quarantine`, the wire spelling) + name, a profile by its segment, the policy a singleton;
   ordered policy, segments, profiles; `plan` and `apply` build the version-conditional `replace_*`
   bodies from the read, send the segment write's `version` as a profile's `segment_version`, never
   retry, and treat a `409` and its `reason_code` as the action's failure. New required tests in §27.9.
@@ -13108,7 +13167,42 @@ an implementer finds it where the surface it touches is described.
   `I_new ≤ 2·I_old`.
 - **(s) The counts.** Every "190 operations across 28 namespaces" in this document is the figure
   at the contract version that wrote it and now carries the registry's present numbers beside it:
-  **202 operations across 29 namespaces**.
+  **202 operations across 29 namespaces**. Two more were re-read from the registry on 2026-10-16:
+  [§27.4](#§274-semantics-normative-identical-in-all-sdks) rule 4 counted **twenty-one** paginated
+  operations and now says **twenty-six**, and counted nineteen bare-array reads and now says
+  **twenty** (the registry's `paginated` flag and response kind); and the "162" of the present-tense
+  sentences of §27.2, §27.4 rule 3 (where "34 of the 162 routes" is 56 of 202 by the same count),
+  §27.6 and §27.8 (the "generated core" paragraph and the refresh-guard sentence) carries **202
+  since contract 1.62** beside it. The 162
+  of the history (the change log, the §27 introduction, §27.1's account of the re-render, §27.9's "162
+  at contract 1.51" and S-9's "sixty-six of the 162") is the figure true at that revision and stays.
+- **(t) Device-grant client authentication: the "same rules" reading (maintainer, 2026-10-16;
+  normative; every SDK that ships §14).** [§14.1](#§141-canonical-operation-set-and-endpoint-map)
+  rule 2 and §14.6: a confidential client sends its credential at `device_authorize` and the poll
+  exactly as at its other token requests. A client registered `client_secret_basic` sends its secret
+  in the form body (`client_secret`) at both endpoints, as it does at `/token`; `private_key_jwt`
+  sends the assertion; mTLS presents the certificate. No SDK sends `Authorization: Basic` to either
+  endpoint ([§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3 stands). The server accepts
+  either form; only the SDK's choice is fixed. §14.6 gains the assertion that no `Authorization`
+  header is sent at either operation. Answers the question item (m) left open.
+- **(u) A clamped profile in a manifest is judged on the read (maintainer, 2026-10-16; normative;
+  every SDK that ships §27.6).** [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162)
+  item 3: `plan` compares the stated `session_timeout_secs`, and every other stated member, with the
+  value as the read returns it, the effective (clamped) one ([§36.3](#§363-server-rules-every-sdk-can-observe-normative)
+  rule 6). A stated value above the tenant cap differs from the read and `plan` shows an `Update`;
+  `apply`'s replace is refused by the server with `403` `authorization_denied` (the write gate's H3,
+  message `session_timeout_secs is above the tenant's cap of <cap>`), which is the action's failure:
+  reported as given, `apply` stops, no retry. No hidden or stored value is compared. A test is added
+  to §27.9.
+- **(v) `filter_ids` in a manifest is a set (maintainer, 2026-10-16; normative; every SDK that ships
+  §27.6).** §27.6.2 items 1 and 3: the comparison ignores order, so a reorder is `NoChange`; a
+  manifest that lists one Filter-Id twice in a segment is refused at `plan` with zero wire calls, like
+  a duplicate natural key; when the SDK writes it sends the stated order. Two tests are added to
+  §27.9.
+- **(w) A segment's `kind` in a manifest is the wire spelling (maintainer, 2026-10-16; normative;
+  every SDK that ships §27.6).** §27.6.2 item 1: `access` or `quarantine`, the value the API reads and
+  writes; the natural key is site + kind + name, and no SDK maps to or from `zones`, which is a
+  server-side path segment. Item (n) above is reworded to match; a test is added to §27.9.
 
 **What changes in `openapi.json` and the registry.** `openapi.json` gains the `network` paths and
 schemas (`NetworkSegmentResponse`, `NetworkReplyProfile`, `NetworkPolicyResponse`, the create and

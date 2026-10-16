@@ -64,8 +64,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.41.0",
  "diagramCount": 10,
  "total": 487,
- "open": 24,
- "mitigated": 453,
+ "open": 23,
+ "mitigated": 454,
  "notApplicable": 10,
  "areas": [
   {
@@ -135,7 +135,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 9,
    "title": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
    "total": 31,
-   "open": 7,
+   "open": 6,
    "notApplicable": 10
   }
  ],
@@ -173,7 +173,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Elevation of privilege",
    "total": 95,
-   "open": 6,
+   "open": 5,
    "notApplicable": 1
   }
  ],
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 204,
-   "open": 9,
+   "open": 8,
    "notApplicable": 3
   },
   {
@@ -383,16 +383,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
    "element": "RADIUS decision (tenant, authN, reply attributes)",
    "residualRisk": "**Amended 2026-10-15 (W6.6, RADIUS D4, #563; 1.1.0): the D4 column — still Open.** With the decision route (`POST /api/v1/network/decide`, T-468; `docs/pki/freeradius.md` section 5) a revoked certificate and a disabled service account are refused at the device's **next authentication**: the decision reads the certificate's row and runs `authenticate_der` on every request, uncached, and requires the account to be `Active`, so the CRL lag described below does not apply to it (FreeRADIUS's `check_crl` stays on, a second check with its own lag). Tests: `crates/axiam-api-rest/tests/network_decide_test.rs::revocation_and_a_disabled_account_refuse_at_the_next_request`; `crates/axiam-server/tests/radius_e2e.rs::a_decision_per_authentication_places_revokes_and_quarantines` (a device revoked in AXIAM is refused at once while FreeRADIUS still holds the old list). A quarantine (a deny of `network:join`) and any change to an assignment, a segment or a profile take effect at the next authentication too — after `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (5 s by default) on another replica when the optional decision cache is on without its broadcast. What remains is this entry's residual: a device that is **already connected** keeps its port until `Session-Timeout`, which its profile sets between 300 seconds and the tenant's cap (`network.session_timeout_max_secs`, 300 to 86 400, default 3 600; T-485), and then re-authenticates under `Termination-Action = RADIUS-Request` and meets the decision. No control ends a session already admitted: dynamic authorization (RFC 5176 CoA and Disconnect) is in neither AXIAM nor the recipe. The status stays Open (plan §12 Q9); the text below is the D3 profile's, unchanged for a deployment that does not run D4. **Corrected 2026-10-14 (R101W6-09, the W6 F4 review; model 2.41.0): Open for the operator-run recipe.** The entry was recorded Not applicable from model 2.36.0, and W6.2 (2026-10-13) kept it there while stating, below, the revocation lag the recipe carries. Not applicable is this model's status for “nothing is exposed”, which the recipe contradicts, so the status now follows the residual. The responsibility lands on whoever runs the recipe (`docs/pki/freeradius.md`, 1.0.1, #563), and its bound is stated: a revoked certificate stops being admitted at the first new EAP conversation after FreeRADIUS has read the new list, not at once, and a session the NAS has already admitted outlives it. AXIAM publishes a revocation at once (the CRL route's next response names the serial); the operator's fetch job brings it to the `ca_path` directory at most one fetch interval later; FreeRADIUS re-reads the lists only at the first new EAP conversation after `ca_path_reload_interval`, whose smallest accepted value is 300 s; and a device that is already connected keeps its port until `Session-Timeout`. The bound is the fetch interval plus 300 seconds plus the `Session-Timeout` — with the guide's figures roughly an hour and ten minutes in the worst case, a few minutes for a device that is not connected. Measured: `crates/axiam-server/tests/radius_e2e.rs::eap_tls_with_an_axiam_issued_device_certificate` revokes a device, sees AXIAM serve the new list, sees FreeRADIUS still admit the device because it holds the old one, and then sees it refused as revoked once the list is in `ca_path` (284 s after the revocation in the W6.2 run). Not covered by it: the session step — it connects no session and revokes it under it. No control ends a session already admitted: dynamic authorization (RFC 5176) is in neither AXIAM nor the recipe, and the recipe does not call AXIAM when a device authenticates (the real-time check, deferred item D4, is not built), so a disabled service account is seen only when its certificate is revoked. The operator's levers are the three numbers (a shorter fetch interval and `Session-Timeout`) and a shorter `validity_days` on devices; a fetch that stops is the other way this goes wrong, since a list past its `nextUpdate` refuses every device of the tenant (fail-closed, and an outage). The entry's own text for a native build already said it would stay Open until dynamic authorization ships. No test is claimed for the bound as a mitigation, and no status here rests on one. **Native front end (option A), unchanged and not built:** Not built (G-11 declined 2026-10-06; spike record R21). Required of any build: `Session-Timeout` capped per tenant and the bound stated in the product. Dynamic authorization is a separate, later item and inherits T-467's binding rule: AXIAM's own messages, carrying session and user identifiers, go to the registered NAS address only. If built as specified this entry stays **Open** — a residual bounded by the session timeout until dynamic authorization ships. **1.0.1 (W6.2, #563; 2026-10-13): stayed Not applicable, superseded above.** The recipe bounds this with the CRL fetch interval, FreeRADIUS's `ca_path_reload_interval` (300 s at the smallest) and `Session-Timeout`; the guide states the bound and the end-to-end shows a revoked device still admitted until the list is re-read. No control ends a session already admitted, so the residual stands until dynamic authorization exists."
-  },
-  {
-   "number": 482,
-   "title": "A service account that holds `network:grant` assigns itself `network:join`, a device placing itself",
-   "category": "Elevation of privilege",
-   "severity": "Medium",
-   "diagramId": 9,
-   "area": "RADIUS front end — native listener not built (G-11, declined 2026-10-06); FreeRADIUS recipe (1.0.1); decision route (1.1.0)",
-   "element": "Network management API and write gate",
-   "residualRisk": "**Open (entered 2026-10-15 by W6.6; W6.2's residual 4, for W6.7 to decide).** The gate applies H6 to profile and segment writes and to binding (`crates/axiam-api-rest/tests/network_gate_test.rs::a_service_account_cannot_bind_a_certificate_to_itself`; the gate's `h6_a_service_account_cannot_bind_a_certificate_to_itself`), not to an assignment whose subject is the writer. What bounds it today: the account must already hold `network:grant` at the node, which only a holder of `network:grant` there could delegate to it (§5.3, T-479), so the account was already trusted to confer that join on any other account; and the assignment is recorded by the route's request row (T-484). What would close it: H6 applied to assignment — refuse an assignment of a network-sensitive role whose subject is the writer, or the account the writer's certificate is bound to. No test is claimed."
   },
   {
    "number": 486,

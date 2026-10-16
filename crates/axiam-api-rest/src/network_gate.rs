@@ -92,6 +92,7 @@ pub async fn authorize_as<C: Connection + Clone>(
     let policy = SurrealNetworkPolicyRepository::new(state.db.clone());
     let store = RepositoryGateStore {
         roles: &state.role_repo,
+        groups: &state.group_repo,
         permissions: &state.permission_repo,
         resources: &state.resource_repo,
         segments: &segments,

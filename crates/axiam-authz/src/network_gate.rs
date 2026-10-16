@@ -11,7 +11,9 @@
 //! * a segment write (`network:segments_write` at the parent or the node);
 //! * a role assignment, unassignment, permission grant or revoke, role update
 //!   or delete that touches a **network-sensitive** role, against the §5.3
-//!   table and the three write-time rules of §4.2;
+//!   table and the three write-time rules of §4.2, and against H6 where the
+//!   write would widen the writer's **own** placement (a join it receives, a
+//!   deny it sheds; correction R110W6-01 of the note);
 //! * a certificate **bind** to a service account, against §5.3's binding rows
 //!   and H6 (correction R101W6-03 of the note);
 //! * a write of the tenant's network policy, the `Session-Timeout` cap that H3
@@ -72,8 +74,8 @@ use axiam_core::models::radius_reply::ReplyProfileInput;
 use axiam_core::models::resource::Resource;
 use axiam_core::models::role::{Role, RoleAssignment, RoleSubjectAssignment};
 use axiam_core::repository::{
-    CertificateRepository, NetworkPolicyRepository, NetworkSegmentRepository, PermissionRepository,
-    ReplyProfileRepository, ResourceRepository, RoleRepository,
+    CertificateRepository, GroupRepository, NetworkPolicyRepository, NetworkSegmentRepository,
+    PermissionRepository, ReplyProfileRepository, ResourceRepository, RoleRepository,
 };
 use uuid::Uuid;
 
@@ -193,6 +195,13 @@ pub trait NetworkGateStore: Send + Sync {
         tenant_id: Uuid,
         group_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+    /// The groups a subject (a user or a service account) is a member of: an
+    /// edge on one of them is an edge the subject inherits (H6, R110W6-01).
+    fn subject_group_ids(
+        &self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
     /// One permission. `NotFound` when it is not this tenant's.
     fn permission(
         &self,
@@ -228,9 +237,11 @@ pub trait NetworkGateStore: Send + Sync {
 }
 
 /// [`NetworkGateStore`] over `axiam-core`'s repository traits.
-pub struct RepositoryGateStore<'a, R, P, Res, Seg, Pro, Pol, Cert> {
+pub struct RepositoryGateStore<'a, R, P, Res, Seg, Pro, Pol, Cert, Grp> {
     /// Roles and assignments.
     pub roles: &'a R,
+    /// Groups and their members (H6 reads the writer's memberships).
+    pub groups: &'a Grp,
     /// Permissions and grants.
     pub permissions: &'a P,
     /// The resource tree.
@@ -253,10 +264,11 @@ fn not_found_is_none<T>(r: AxiamResult<T>) -> AxiamResult<Option<T>> {
     }
 }
 
-impl<R, P, Res, Seg, Pro, Pol, Cert> NetworkGateStore
-    for RepositoryGateStore<'_, R, P, Res, Seg, Pro, Pol, Cert>
+impl<R, P, Res, Seg, Pro, Pol, Cert, Grp> NetworkGateStore
+    for RepositoryGateStore<'_, R, P, Res, Seg, Pro, Pol, Cert, Grp>
 where
     R: RoleRepository,
+    Grp: GroupRepository,
     P: PermissionRepository,
     Res: ResourceRepository,
     Seg: NetworkSegmentRepository,
@@ -309,6 +321,17 @@ where
         self.roles
             .get_group_role_assignments(tenant_id, group_id)
             .await
+    }
+    async fn subject_group_ids(&self, tenant_id: Uuid, subject_id: Uuid) -> AxiamResult<Vec<Uuid>> {
+        // The id names a user or a service account, never both (v4 UUIDs), and
+        // `member_of` is untyped at its `in` end: read both, as the engine's
+        // own assignment read does.
+        let users = self.groups.get_user_groups(tenant_id, subject_id).await?;
+        let accounts = self
+            .groups
+            .get_service_account_groups(tenant_id, subject_id)
+            .await?;
+        Ok(users.into_iter().chain(accounts).map(|g| g.id).collect())
     }
     async fn permission(&self, tenant_id: Uuid, permission_id: Uuid) -> AxiamResult<Permission> {
         self.permissions.get_by_id(tenant_id, permission_id).await
@@ -996,6 +1019,48 @@ where
         }
     }
 
+    // -- H6 on the §5.3 writes (correction R110W6-01 of the note) -----------
+    //
+    // H6 is about self-configuration, not about how much the writer holds: a
+    // subject does not change its own placement, whatever it holds. The §5.3
+    // writes that could are the ones that *widen* the writer's own `network:`
+    // grants — a join allow it receives, a deny it sheds. Narrowing itself (a
+    // deny it takes on, an allow it gives up) stays allowed. The rule is
+    // subject-agnostic: a user writer is refused as a service account is, so
+    // D6 (users as devices) needs no revisit here.
+
+    /// Whether `id` is the writer itself.
+    fn is_writer(&self, id: Uuid) -> bool {
+        id == self.writer.subject_id
+    }
+
+    /// Whether an edge on `grantee` is one the writer holds: the grantee is the
+    /// writer, or a group the writer is a member of.
+    ///
+    /// A group never holds a network role (§4.2 rule 2), so the group arm
+    /// matters only for a state rule 2 forbids but cannot rule out (the T-481
+    /// interleaving, R110W6-04); it costs a read only for a group grantee.
+    async fn edge_reaches_writer(&self, grantee: Grantee) -> AxiamResult<bool> {
+        match grantee {
+            Grantee::User(id) | Grantee::ServiceAccount(id) => Ok(self.is_writer(id)),
+            Grantee::Group(group) => Ok(self
+                .store
+                .subject_group_ids(self.tenant(), self.writer.subject_id)
+                .await?
+                .contains(&group)),
+        }
+    }
+
+    /// Whether the writer holds `role_id` now, directly or through a group.
+    async fn writer_holds_role(&self, role_id: Uuid) -> AxiamResult<bool> {
+        Ok(self
+            .store
+            .subject_assignments(self.tenant(), self.writer.subject_id)
+            .await?
+            .iter()
+            .any(|a| a.role.id == role_id && a.reaches_tenant(self.tenant())))
+    }
+
     fn clearance(&self, target: NetworkWriteTarget) -> GateClearance {
         GateClearance::with_token(NetworkWriteClearance::issued_by_the_network_gate(
             self.tenant(),
@@ -1328,6 +1393,17 @@ where
                 "a role carrying a network: deny cannot be assigned with inherit: false",
             ))));
         }
+        // H6: a subject does not confer network:join on itself, whatever it
+        // holds. Taking on a deny narrows and stays allowed; a meta permission
+        // conferred is one §5.3 below already demands the writer hold at N.
+        if grants.join_allow && self.edge_reaches_writer(grantee).await? {
+            return Ok(Err(with_values(refuse(
+                RefusalStatus::Forbidden,
+                "H6",
+                audit,
+                "a subject cannot assign itself a role carrying network:join",
+            ))));
+        }
 
         // §5.3: joining (allow or deny) needs network:grant at N; every meta
         // permission conferred needs holding it at N.
@@ -1363,15 +1439,7 @@ where
         // network:grant where the deny was. Removing an allow only narrows.
         if grants.any_deny {
             let node = self.assignment_node(&role, resource_id);
-            if let Some(mut r) = self
-                .require_all(
-                    &[NETWORK_GRANT],
-                    node,
-                    "5.3:unassign",
-                    AUDIT_ROLE_UNASSIGN_REFUSED,
-                )
-                .await?
-            {
+            let with_values = |mut r: GateRefusal| {
                 let (kind, who) = grantee.describe();
                 r.before = vec![
                     ("role_id", role_id.to_string()),
@@ -1380,7 +1448,28 @@ where
                     ("node", node.to_string()),
                 ];
                 r.after = vec![("assignment", "removed".to_owned())];
-                return Ok(Err(r));
+                r
+            };
+            // H6: the quarantined credential is not what lifts the quarantine
+            // (§4.4), whatever it holds — nor through a group it is in.
+            if self.edge_reaches_writer(grantee).await? {
+                return Ok(Err(with_values(refuse(
+                    RefusalStatus::Forbidden,
+                    "H6",
+                    AUDIT_ROLE_UNASSIGN_REFUSED,
+                    "a subject cannot release its own network deny",
+                ))));
+            }
+            if let Some(r) = self
+                .require_all(
+                    &[NETWORK_GRANT],
+                    node,
+                    "5.3:unassign",
+                    AUDIT_ROLE_UNASSIGN_REFUSED,
+                )
+                .await?
+            {
+                return Ok(Err(with_values(r)));
             }
         }
         Ok(Ok(GateClearance::plain(true)))
@@ -1427,8 +1516,25 @@ where
         }
         // Deleting a role that carries a deny releases every assignment of it
         // at once: as an unassignment, at /network.
-        if grants.any_deny
-            && let Some(mut r) = self
+        if grants.any_deny {
+            let with_values = |mut r: GateRefusal| {
+                r.before = vec![
+                    ("role_id", role_id.to_string()),
+                    ("role", role.name.clone()),
+                ];
+                r.after = vec![("role", "deleted".to_owned())];
+                r
+            };
+            // H6: one of those assignments is the writer's own.
+            if self.writer_holds_role(role_id).await? {
+                return Ok(Err(with_values(refuse(
+                    RefusalStatus::Forbidden,
+                    "H6",
+                    AUDIT_ROLE_WRITE_REFUSED,
+                    "a subject cannot delete a role carrying a network deny that it holds",
+                ))));
+            }
+            if let Some(r) = self
                 .require_all(
                     &[NETWORK_GRANT],
                     self.root(),
@@ -1436,10 +1542,9 @@ where
                     AUDIT_ROLE_WRITE_REFUSED,
                 )
                 .await?
-        {
-            r.before = vec![("role_id", role_id.to_string()), ("role", role.name)];
-            r.after = vec![("role", "deleted".to_owned())];
-            return Ok(Err(r));
+            {
+                return Ok(Err(with_values(r)));
+            }
         }
         Ok(Ok(GateClearance::plain(true)))
     }
@@ -1539,6 +1644,19 @@ where
                 "a network: deny cannot be granted to a role assigned with inherit: false",
             );
         }
+        // H6: a join allow on a role the writer holds is a join the writer
+        // confers on itself, whatever it holds.
+        if effect == PermissionEffect::Allow
+            && action == NETWORK_JOIN
+            && self.writer_holds_role(role_id).await?
+        {
+            return Ok(Err(with_values(refuse(
+                RefusalStatus::Forbidden,
+                "H6",
+                audit,
+                "a subject cannot grant network:join to a role it holds",
+            ))));
+        }
 
         // It changes every existing assignment of the role at once.
         let mut needed = vec![NETWORK_GRANT];
@@ -1570,7 +1688,41 @@ where
         if !is_network_action(&permission.action) {
             return Ok(Ok(GateClearance::plain(false)));
         }
-        if let Some(mut r) = self
+        let current = self
+            .store
+            .role_grants(self.tenant(), role_id)
+            .await?
+            .into_iter()
+            .find(|g| g.permission.id == permission_id)
+            .map(|g| g.effect);
+        let with_values = |mut r: GateRefusal| {
+            r.before = vec![
+                ("role_id", role_id.to_string()),
+                ("permission", permission.action.clone()),
+                (
+                    "grant",
+                    match current {
+                        None => "none",
+                        Some(PermissionEffect::Allow) => "allow",
+                        Some(PermissionEffect::Deny) => "deny",
+                    }
+                    .to_owned(),
+                ),
+            ];
+            r.after = vec![("grant", "revoked".to_owned())];
+            r
+        };
+        // H6: revoking a network deny from a role the writer holds sheds the
+        // writer's own deny (a quarantine released by the quarantined).
+        if current == Some(PermissionEffect::Deny) && self.writer_holds_role(role_id).await? {
+            return Ok(Err(with_values(refuse(
+                RefusalStatus::Forbidden,
+                "H6",
+                AUDIT_ROLE_GRANT_REFUSED,
+                "a subject cannot revoke a network deny from a role it holds",
+            ))));
+        }
+        if let Some(r) = self
             .require_all(
                 &[NETWORK_GRANT],
                 self.root(),
@@ -1579,26 +1731,7 @@ where
             )
             .await?
         {
-            let current = self.store.role_grants(self.tenant(), role_id).await?;
-            r.before = vec![
-                ("role_id", role_id.to_string()),
-                ("permission", permission.action.clone()),
-                (
-                    "grant",
-                    current
-                        .iter()
-                        .find(|g| g.permission.id == permission_id)
-                        .map_or_else(
-                            || "none".to_owned(),
-                            |g| match g.effect {
-                                PermissionEffect::Allow => "allow".to_owned(),
-                                PermissionEffect::Deny => "deny".to_owned(),
-                            },
-                        ),
-                ),
-            ];
-            r.after = vec![("grant", "revoked".to_owned())];
-            return Ok(Err(r));
+            return Ok(Err(with_values(r)));
         }
         Ok(Ok(GateClearance::plain(true)))
     }

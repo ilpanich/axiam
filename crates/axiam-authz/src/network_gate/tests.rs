@@ -74,6 +74,8 @@ struct Store {
     profiles: HashMap<Uuid, ReplyProfile>,
     cap: u32,
     bindings: HashMap<Uuid, Uuid>,
+    /// subject → the groups it is a member of.
+    memberships: HashMap<Uuid, Vec<Uuid>>,
 }
 
 fn not_found(what: &str) -> AxiamError {
@@ -101,6 +103,9 @@ impl NetworkGateStore for Store {
     }
     async fn group_assignments(&self, _t: Uuid, id: Uuid) -> AxiamResult<Vec<RoleAssignment>> {
         Ok(self.assignments.get(&id).cloned().unwrap_or_default())
+    }
+    async fn subject_group_ids(&self, _t: Uuid, id: Uuid) -> AxiamResult<Vec<Uuid>> {
+        Ok(self.memberships.get(&id).cloned().unwrap_or_default())
     }
     async fn permission(&self, _t: Uuid, id: Uuid) -> AxiamResult<Permission> {
         self.permissions
@@ -1034,6 +1039,207 @@ async fn granting_a_network_permission_follows_rules_1_to_3_and_5_3() {
                 .await
         )
         .is_network_sensitive()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H6 on the §5.3 writes (correction R110W6-01): a subject does not change its
+// own placement, whatever it holds. Each refusal has its positive twin: the
+// same write on another grantee or holder clears.
+// ---------------------------------------------------------------------------
+
+/// Everything §5.3 asks of a writer at `n` and at `/network`.
+fn granter(w: &World, n: Uuid) -> Oracle {
+    Oracle::default()
+        .allow(w.writer, NETWORK_GRANT, n)
+        .allow(w.writer, NETWORK_GRANT, w.root())
+}
+
+#[tokio::test]
+async fn h6_a_subject_cannot_assign_itself_a_join() {
+    let mut w = World::new();
+    let join = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    let n = Uuid::new_v4();
+    let oracle = granter(&w, n);
+    let assign = |grantee| NetworkWrite::RoleAssign {
+        role_id: join,
+        grantee,
+        resource_id: Some(n),
+        inherit: true,
+    };
+
+    // A service account and (D6) a user writer alike.
+    for me in [Grantee::ServiceAccount(w.writer), Grantee::User(w.writer)] {
+        let r = refused(w.decide(&oracle, assign(me)).await, "H6");
+        assert_eq!(r.status, RefusalStatus::Forbidden);
+        assert_eq!(r.audit_action, AUDIT_ROLE_ASSIGN_REFUSED);
+        assert_eq!(r.missing, None, "H6 names no permission to obtain");
+        assert_eq!(r.after[2].1, w.writer.to_string());
+    }
+    // Positive twin: the same writer, the same role, another account.
+    passes(
+        w.decide(&oracle, assign(Grantee::ServiceAccount(Uuid::new_v4())))
+            .await,
+    );
+    // Taking on a deny narrows the writer and stays allowed.
+    let quarantine = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    passes(
+        w.decide(
+            &oracle,
+            NetworkWrite::RoleAssign {
+                role_id: quarantine,
+                grantee: Grantee::ServiceAccount(w.writer),
+                resource_id: Some(n),
+                inherit: true,
+            },
+        )
+        .await,
+    );
+}
+
+#[tokio::test]
+async fn h6_a_subject_cannot_release_its_own_deny() {
+    let mut w = World::new();
+    let quarantine = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    let zones = Uuid::new_v4();
+    let oracle = granter(&w, zones);
+    let unassign = |grantee| NetworkWrite::RoleUnassign {
+        role_id: quarantine,
+        grantee,
+        resource_id: Some(zones),
+    };
+
+    for me in [Grantee::ServiceAccount(w.writer), Grantee::User(w.writer)] {
+        let r = refused(w.decide(&oracle, unassign(me)).await, "H6");
+        assert_eq!(r.status, RefusalStatus::Forbidden);
+        assert_eq!(r.audit_action, AUDIT_ROLE_UNASSIGN_REFUSED);
+        assert_eq!(r.after, vec![("assignment", "removed".to_owned())]);
+    }
+    // Positive twin: the network administrator releases another device.
+    passes(
+        w.decide(&oracle, unassign(Grantee::ServiceAccount(Uuid::new_v4())))
+            .await,
+    );
+    // Giving up its own allow only narrows the writer.
+    let join = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    passes(
+        w.decide(
+            &Oracle::default(),
+            NetworkWrite::RoleUnassign {
+                role_id: join,
+                grantee: Grantee::ServiceAccount(w.writer),
+                resource_id: Some(zones),
+            },
+        )
+        .await,
+    );
+}
+
+/// A deny a group carries reaches its members, so unassigning it from a group
+/// the writer is in is a self-release. Rule 2 keeps network roles off groups;
+/// this closes the state rule 2 cannot rule out (the T-481 interleaving).
+/// Assigning a join to the writer's group is rule 2's, a `400`.
+#[tokio::test]
+async fn h6_a_subject_cannot_release_a_deny_through_its_own_group() {
+    let mut w = World::new();
+    let quarantine = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    let join = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    let zones = Uuid::new_v4();
+    let mine = Uuid::new_v4();
+    let theirs = Uuid::new_v4();
+    w.store.memberships.insert(w.writer, vec![mine]);
+    let oracle = granter(&w, zones);
+    let unassign = |group| NetworkWrite::RoleUnassign {
+        role_id: quarantine,
+        grantee: Grantee::Group(group),
+        resource_id: Some(zones),
+    };
+
+    let r = refused(w.decide(&oracle, unassign(mine)).await, "H6");
+    assert_eq!(r.audit_action, AUDIT_ROLE_UNASSIGN_REFUSED);
+    passes(w.decide(&oracle, unassign(theirs)).await);
+
+    let r = refused(
+        w.decide(
+            &oracle,
+            NetworkWrite::RoleAssign {
+                role_id: join,
+                grantee: Grantee::Group(mine),
+                resource_id: Some(zones),
+                inherit: true,
+            },
+        )
+        .await,
+        "4.2:rule-2",
+    );
+    assert_eq!(r.status, RefusalStatus::Invalid);
+}
+
+#[tokio::test]
+async fn h6_a_join_grant_to_a_role_the_writer_holds_is_refused() {
+    let mut w = World::new();
+    let join = w.permission(NETWORK_JOIN);
+    let held = w.role(false, &[]);
+    let other = w.role(false, &[]);
+    let n = Uuid::new_v4();
+    w.assign(w.writer, held, Some(n), true);
+    let oracle = granter(&w, n);
+    let grant = |role_id, effect| NetworkWrite::PermissionGrant {
+        role_id,
+        permission_id: join,
+        effect,
+        scope_ids: &[],
+    };
+
+    let r = refused(w.decide(&oracle, grant(held, ALLOW)).await, "H6");
+    assert_eq!(r.status, RefusalStatus::Forbidden);
+    assert_eq!(r.audit_action, AUDIT_ROLE_GRANT_REFUSED);
+    // Positive twins: a role the writer does not hold; a deny on its own role.
+    passes(w.decide(&oracle, grant(other, ALLOW)).await);
+    passes(w.decide(&oracle, grant(held, DENY)).await);
+}
+
+#[tokio::test]
+async fn h6_revoking_a_deny_from_a_role_the_writer_holds_is_refused() {
+    let mut w = World::new();
+    let held = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    let other = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    let allow = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    w.assign(w.writer, held, None, true);
+    w.assign(w.writer, allow, None, true);
+    let oracle = granter(&w, w.root());
+    let revoke = |w: &World, role_id: Uuid| NetworkWrite::PermissionRevoke {
+        role_id,
+        permission_id: w.store.grants[&role_id][0].permission.id,
+    };
+
+    let r = refused(w.decide(&oracle, revoke(&w, held)).await, "H6");
+    assert_eq!(r.audit_action, AUDIT_ROLE_GRANT_REFUSED);
+    assert_eq!(r.before[2], ("grant", "deny".to_owned()));
+    // Positive twins: the same deny on a role the writer does not hold; an
+    // allow revoked from a role it holds (that narrows).
+    passes(w.decide(&oracle, revoke(&w, other)).await);
+    passes(w.decide(&oracle, revoke(&w, allow)).await);
+}
+
+#[tokio::test]
+async fn h6_deleting_a_deny_role_the_writer_holds_is_refused() {
+    let mut w = World::new();
+    let held = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    let other = w.role(false, &[(NETWORK_JOIN, DENY)]);
+    w.assign(w.writer, held, Some(Uuid::new_v4()), true);
+    let oracle = granter(&w, w.root());
+
+    let r = refused(
+        w.decide(&oracle, NetworkWrite::RoleDelete { role_id: held })
+            .await,
+        "H6",
+    );
+    assert_eq!(r.status, RefusalStatus::Forbidden);
+    assert_eq!(r.audit_action, AUDIT_ROLE_WRITE_REFUSED);
+    passes(
+        w.decide(&oracle, NetworkWrite::RoleDelete { role_id: other })
+            .await,
     );
 }
 

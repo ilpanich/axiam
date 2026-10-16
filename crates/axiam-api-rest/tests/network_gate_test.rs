@@ -23,6 +23,7 @@ use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessRequest, SubjectScope};
 use axiam_core::models::audit::{AuditLogEntry, AuditOutcome};
 use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
+use axiam_core::models::group::CreateGroup;
 use axiam_core::models::network::{
     NETWORK_GRANT, NETWORK_JOIN, NetworkSegment, NetworkSegmentKind, NetworkWriteClearance,
     NetworkWriteTarget, NewNetworkSegment, branch_node_id, network_root_id, site_node_id,
@@ -34,9 +35,9 @@ use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    AuditLogFilter, AuditLogRepository, CertificateRepository, NetworkSegmentRepository,
-    OrganizationRepository, Pagination, PermissionRepository, RoleRepository,
-    ServiceAccountRepository, TenantRepository, UserRepository,
+    AuditLogFilter, AuditLogRepository, CertificateRepository, GroupRepository,
+    NetworkSegmentRepository, OrganizationRepository, Pagination, PermissionRepository,
+    RoleRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealCertificateRepository, SurrealGroupRepository,
@@ -661,6 +662,281 @@ async fn a_quarantine_is_imposed_and_released_only_with_network_grant_at_its_nod
     let (status, err) = call(&app, &w.user_token(netadmin), "DELETE", &release, None).await;
     assert_eq!(status, 204, "{err}");
     assert_eq!(w.joins(device, iot.id).await, "allowed");
+}
+
+/// H6 on the §5.3 writes (R110W6-01): a service account trusted to enrol
+/// devices — `admin` (so `roles:assign`, `permissions:grant`, …) and
+/// `network:grant` — does not place itself and does not lift its own
+/// quarantine, by any of the five doors. Each refusal is a `403` that writes
+/// nothing and leaves one audit row with rule `H6`; the same write on another
+/// account, or by another administrator, is `204`.
+#[actix_rt::test]
+async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
+    let w = World::new().await;
+    let iot = w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    let zones = branch_node_id(w.tenant, NetworkSegmentKind::Access);
+    let root = network_root_id(w.tenant);
+    let devices = w.role("devices", &[(NETWORK_JOIN, ALLOW)]).await;
+    let quarantined = w.role("network-quarantined", &[(NETWORK_JOIN, DENY)]).await;
+    let admin_role = w.role_named("admin").await;
+    let zones_granter = w.role("net-granter", &[(NETWORK_GRANT, ALLOW)]).await;
+    let agent = w
+        .service_account(&[(admin_role, None), (zones_granter, Some(zones))])
+        .await;
+    let netadmin = w
+        .user(&[
+            (admin_role, None),
+            (
+                w.role("zones-admin", &[(NETWORK_GRANT, ALLOW)]).await,
+                Some(zones),
+            ),
+        ])
+        .await;
+    let app = app!(w);
+    let agent_token = w.sa_token(agent);
+    let netadmin_token = w.user_token(netadmin);
+    let place = format!("/api/v1/roles/{devices}/service-accounts");
+
+    // 1. Self-assignment of a join: 403, nothing written, one H6 row.
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "POST",
+        &place,
+        Some(json!({ "service_account_id": agent, "resource_id": iot.id })),
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(w.joins(agent, iot.id).await, "no_grant", "nothing written");
+    let rows = w.audit("network_role.assign_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.actor_id, agent);
+    assert_eq!(row.metadata["rule"], "H6");
+    assert_eq!(row.metadata["after"]["service_account"], agent.to_string());
+    // Positive twin: the agent places another device (its job).
+    let other = w.service_account(&[]).await;
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "POST",
+        &place,
+        Some(json!({ "service_account_id": other, "resource_id": iot.id })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(w.joins(other, iot.id).await, "allowed");
+    // ... and another administrator places the agent.
+    let (status, err) = call(
+        &app,
+        &netadmin_token,
+        "POST",
+        &place,
+        Some(json!({ "service_account_id": agent, "resource_id": iot.id })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(w.joins(agent, iot.id).await, "allowed");
+
+    // 2. Quarantined by the network administrator, the agent cannot release
+    //    itself by unassigning the deny.
+    let (status, err) = call(
+        &app,
+        &netadmin_token,
+        "POST",
+        &format!("/api/v1/roles/{quarantined}/service-accounts"),
+        Some(json!({ "service_account_id": agent, "resource_id": zones })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(w.joins(agent, iot.id).await, "denied_by_rule");
+    let release = |who: Uuid| {
+        format!("/api/v1/roles/{quarantined}/service-accounts/{who}?resource_id={zones}")
+    };
+    let (status, err) = call(&app, &agent_token, "DELETE", &release(agent), None).await;
+    assert_eq!(status, 403, "{err}");
+    assert_eq!(
+        w.joins(agent, iot.id).await,
+        "denied_by_rule",
+        "still quarantined"
+    );
+    let rows = w.audit("network_role.unassign_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.actor_id, agent);
+    assert_eq!(row.metadata["rule"], "H6");
+
+    // 3. With network:grant at /network as well (what revoke, role delete and
+    //    grant ask), the other three doors stay shut.
+    let root_granter = w.role("root-granter", &[(NETWORK_GRANT, ALLOW)]).await;
+    w.roles()
+        .assign_to_service_account(
+            w.tenant,
+            agent,
+            root_granter,
+            AssignmentScope::from(Some(root)),
+        )
+        .await
+        .unwrap();
+    let join_perm = w.permission_id(NETWORK_JOIN).await;
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "DELETE",
+        &format!("/api/v1/roles/{quarantined}/permissions/{join_perm}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "revoke of its own deny: {err}");
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "DELETE",
+        &format!("/api/v1/roles/{quarantined}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "delete of its own deny role: {err}");
+    assert_eq!(
+        w.joins(agent, iot.id).await,
+        "denied_by_rule",
+        "still quarantined"
+    );
+    let fleet = w.role("fleet", &[]).await;
+    w.roles()
+        .assign_to_service_account(w.tenant, agent, fleet, AssignmentScope::from(Some(iot.id)))
+        .await
+        .unwrap();
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "POST",
+        &format!("/api/v1/roles/{fleet}/permissions"),
+        Some(json!({ "permission_id": join_perm, "effect": "allow" })),
+    )
+    .await;
+    assert_eq!(status, 403, "a join granted to a role it holds: {err}");
+    let grant_rows = w.audit("network_role.grant_refused").await;
+    assert_eq!(grant_rows.len(), 2, "{grant_rows:?}");
+    assert!(
+        grant_rows
+            .iter()
+            .all(|r| r.metadata["rule"] == "H6" && r.actor_id == agent)
+    );
+    let rows = w.audit("network_role.write_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.metadata["rule"], "H6");
+
+    // Positive twins of 3: the same writes on roles the agent does not hold.
+    let other_fleet = w.role("other-fleet", &[]).await;
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "POST",
+        &format!("/api/v1/roles/{other_fleet}/permissions"),
+        Some(json!({ "permission_id": join_perm, "effect": "allow" })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let other_quarantine = w.role("other-quarantine", &[(NETWORK_JOIN, DENY)]).await;
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "DELETE",
+        &format!("/api/v1/roles/{other_quarantine}/permissions/{join_perm}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let spare_quarantine = w.role("spare-quarantine", &[(NETWORK_JOIN, DENY)]).await;
+    let (status, err) = call(
+        &app,
+        &agent_token,
+        "DELETE",
+        &format!("/api/v1/roles/{spare_quarantine}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+
+    // 4. The network administrator releases the agent.
+    let (status, err) = call(&app, &netadmin_token, "DELETE", &release(agent), None).await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(w.joins(agent, iot.id).await, "allowed");
+}
+
+/// H6 through a group (R110W6-01): a deny a group carries reaches its
+/// members, so a member does not lift it by unassigning it from the group or
+/// by deleting the role — "holds" counts the group. Rule 2 keeps network roles
+/// off groups, so the edge is written here as one predating the rule would be.
+#[actix_rt::test]
+async fn a_member_cannot_release_a_deny_its_group_carries() {
+    let w = World::new().await;
+    let iot = w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    let zones = branch_node_id(w.tenant, NetworkSegmentKind::Access);
+    let root = network_root_id(w.tenant);
+    let quarantined = w.role("network-quarantined", &[(NETWORK_JOIN, DENY)]).await;
+    let admin_role = w.role_named("admin").await;
+    let root_granter = w.role("root-granter", &[(NETWORK_GRANT, ALLOW)]).await;
+    let groups = SurrealGroupRepository::new(w.db.clone());
+    let group = groups
+        .create(CreateGroup {
+            tenant_id: w.tenant,
+            name: "fleet".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    w.roles()
+        .assign_to_group(
+            w.tenant,
+            group.id,
+            quarantined,
+            AssignmentScope::from(Some(zones)),
+        )
+        .await
+        .unwrap();
+    let member = w
+        .user(&[
+            (admin_role, None),
+            (
+                w.role("devices", &[(NETWORK_JOIN, ALLOW)]).await,
+                Some(iot.id),
+            ),
+            (root_granter, Some(root)),
+        ])
+        .await;
+    groups.add_member(w.tenant, member, group.id).await.unwrap();
+    let outsider = w
+        .user(&[(admin_role, None), (root_granter, Some(root))])
+        .await;
+    let app = app!(w);
+    assert_eq!(w.joins(member, iot.id).await, "denied_by_rule");
+
+    let unassign = format!(
+        "/api/v1/roles/{quarantined}/groups/{}?resource_id={zones}",
+        group.id
+    );
+    let (status, err) = call(&app, &w.user_token(member), "DELETE", &unassign, None).await;
+    assert_eq!(status, 403, "{err}");
+    let rows = w.audit("network_role.unassign_refused").await;
+    assert_eq!(the_row(&rows).metadata["rule"], "H6");
+    let (status, err) = call(
+        &app,
+        &w.user_token(member),
+        "DELETE",
+        &format!("/api/v1/roles/{quarantined}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{err}");
+    let rows = w.audit("network_role.write_refused").await;
+    assert_eq!(the_row(&rows).metadata["rule"], "H6");
+    assert_eq!(w.joins(member, iot.id).await, "denied_by_rule");
+
+    // Positive twin: an administrator outside the group releases it.
+    let (status, err) = call(&app, &w.user_token(outsider), "DELETE", &unassign, None).await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(w.joins(member, iot.id).await, "allowed");
 }
 
 /// Deny-override holds for the writer: a `network:grant` deny beats an allow

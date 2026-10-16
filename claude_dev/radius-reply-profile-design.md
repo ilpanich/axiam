@@ -391,7 +391,9 @@ assigned to the device at `/network/zones` (inheritable). A baseline role
 deny-override buys (deny-override §2.1, "adding a deny rule can never widen
 access, and can never be undone by adding allows") is exactly the property a
 quarantine needs: no administrator who can grant `network:join` somewhere in
-`zones` can release a device by granting more.
+`zones` can release a device by granting more. Nor does the quarantined subject
+release itself, whatever it holds — by unassigning the deny, revoking it from the
+role or deleting the role (H6 on §5.3; correction of 2026-10-16, R110W6-01).
 
 When it takes effect: in the authorization engine, on the next decision after the
 assignment's cache invalidation (the existing hooks). On the wire, at the device's
@@ -487,6 +489,7 @@ only (§4.2), in addition to `roles:assign` / `roles:unassign`:
 | `roles:delete` of a role carrying a `network:` **deny** | as unassign, at `/network` |
 | **Bind** a certificate to a service account `A` (or re-bind it from another account), at `certificates:bind`, where `A` holds any `network:join` **allow** at a node `N`, directly or through a role | `W` holds `network:grant` at **every such `N`**. `A`'s `network:join` allows are read at write time with `check_access`'s own evaluation, deny-override in force, so an allow that a deny already beats is not one `W` must hold. Binding to an account with no `network:join` allow, or only a deny, asks nothing extra |
 | Any other path that issues a certificate already bound to an account (none exists today: `certificates:generate` and `sign-csr` bind nothing) | the same row, evaluated at issuance. Such a path is not built until it calls the §5.1 function |
+| **H6 (added 2026-10-16, R110W6-01):** any of the above that would **widen the writer's own** placement — assign a role carrying a `network:join` **allow** to `W`; unassign a role carrying a `network:` **deny** from `W`, or from a group `W` is a member of; delete such a role while `W` holds it; grant a `network:join` **allow** to a role `W` holds; revoke a `network:` **deny** from a role `W` holds ("holds" counts a group's edge) | **Refused (`403`, rule `H6`), whatever `W` holds**, for users and service accounts alike. Narrowing itself (taking on a deny, giving up an allow) stays allowed |
 
 **Correction of 2026-10-13 (R101W6-03, F4 review of W6).** This note first said
 that the assignment side is the whole of the leak ("joining is a role
@@ -514,6 +517,26 @@ for any future path that binds at issuance. The permission names
 (`certificates:generate`, `certificates:bind`, `network:grant`'s tenant-wide
 `Uuid::nil()` checks) match `crates/axiam-api-rest/src/permissions.rs:76ff`.
 `network:*` is not in the tree yet (nothing is built).
+
+**Correction of 2026-10-16 (R110W6-01, F4 review of W6, release 1.1.0).** H6 was
+applied to the profile write, the segment envelope write and the bind, and the
+first five rows of this table never compared the grantee, or the role's holders, with
+the writer. Those are the doors a machine reaches (`roles` and `permissions` are
+machine-to-machine route families): a service account holding `roles:assign` and
+`network:grant` at a node assigned itself `network:join` there, and, once
+quarantined, unassigned its own deny — the compromised credential lifting the
+quarantine §4.4 exists to impose. Revoking the deny from a quarantine role it holds,
+deleting that role, and granting `network:join` to a role it holds were the same gap.
+The delegation bound was satisfied in each case; H6 is the rule for exactly that
+case, and the H6 row above applies it to every §5.3 write. It is **subject-agnostic**
+(a user writer is refused too), so D6 needs no revisit of it. Group paths: assigning a
+join to a group, or granting `network:` to a role a group holds, is already rule 2's
+`400` (§4.2), so adding `W` to a group can confer no network grant; the row's group
+arm (a deny unassigned from `W`'s own group, a role `W` holds through a group) covers
+the state rule 2 forbids but cannot rule out — an edge predating the rule, or the
+T-481 interleaving. Tests: `network_gate_test::a_service_account_cannot_place_itself_or_release_its_own_quarantine`,
+`network_gate_test::a_member_cannot_release_a_deny_its_group_carries`, and the
+`h6_*` unit tests of `axiam-authz`'s `network_gate`.
 
 This is a **namespace-limited** delegation bound. AXIAM today has no general "you
 cannot assign more than you hold" rule, and this note does not propose one. That

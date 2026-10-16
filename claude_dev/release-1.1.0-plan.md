@@ -858,6 +858,52 @@ link the PKI README's rule (§13.5); the STRIDE text and `freeradius.md` still
 say all four Mitigated RADIUS entries are tested by the e2e.
 
 
+**W7, after the merge (2026-10-16).** Every commit is signed and pushed to
+`claude/release-1.1.0` unless the row says otherwise.
+
+| Item | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W7.1 | `5c012d741` | Sonnet | Contract 1.62 record §34.6 (a) … (s). <br>• Added: §27.6.2, the `network` manifest namespace. <br>• §14.1/§14.2 rewritten for option (a) and R110W3-11's stale text. <br>• Counts: the registry is unchanged at 202 operations / 29 namespaces; 11 `replace_*`, 18 sparse, 26 paginated. <br>*Plan vs tree:* <br>• **eleven** `replace_*` operations, not the "seven" of §13.6, because §27.4 rule 5 had been stale since 1.51; <br>• twelve network operations, not ten; <br>• the historical 190/28 counts kept, with "202/29 since 1.62" beside them. <br>The OpenAPI description of `RadiusServiceType` says the admin values are refused with `400`, but the code answers `403` (#700; for W8.2). It recorded ten questions. |
+| W7.1b | `d76c5a80b` | Sonnet | The maintainer's answers to four of those questions (2026-10-16): <br>• the device grant sends client secrets in the form body only, never `Authorization: Basic` (§12.1 rule 3 stands); <br>• a clamped profile is judged on the read; <br>• `filter_ids` are compared as a set; <br>• `kind` uses the wire spelling, `access` or `quarantine`. <br>Also: §27.4 rule 4 counts 26 paginated operations. An above-cap timeout is a `403 authorization_denied` (H3). |
+| W8.4a | `89e488e3e` | Sonnet | **Version 1.1.0, moved forward from W8.4** so the SDKs re-vendor the final spec once. Changed: the workspace and its pins, the console's version label, the k8s image tags, `Cargo.lock`, `openapi.json` (`info.version` only; digest `cf0fc71c…59a7`), the registry and `apiIndex.ts`. Left for W8.4: CHANGELOG, `version.ts`, the news post. |
+| SDK ports W7.2 … W7.12 | see below | Sonnet ×11 | Each SDK vendors `d76c5a80b` and is at 1.1.0, with `[1.0.1]` folded into `[1.1.0]`. Each adds: <br>• the twelve network operations (no method for the decide route); <br>• the `network` manifest namespace; <br>• the change-taking SSF form; <br>• device-grant credentials in the form body; <br>• its §8.2 extras. |
+| W7.13 | `3da7e0c9c` | Opus | `claude_dev/sdk-contract-1.62-conformance-review.md`: 0 High / 3 Medium / 6 Low / 8 Informational, and ten questions for the maintainer in §5. <br>• **Medium:** C162-01 (C) and C162-02 (C++), where caller-allocated structs grew with `SOVERSION` still 1; C162-03 (PHP), where unseen SSF event-type URIs were blanked. <br>• **Ruling:** the §21.9 DPoP rows were wrong, not the SDKs; no SDK generates proofs. |
+| W7.1c | `d25413506` | Sonnet | The maintainer's answers to the review's §5 (2026-10-16): <br>• Q10/C162-14 corrections: §21.9's seven rows; §27.2 rule 1 (19/19 of 29); §27.10 and §36.10. <br>• Q6: a §36 Conformance Statement sentence. <br>• Q5: pruning is a MAY; §27.10 records "no pruning" for all eleven. <br>• Q1: no session or adopted credential on any `/oauth2/*` request. The exception, written by the executor and accepted, is a credential the caller passes to that one call (RFC 7591/7592 registration tokens, §28.12). <br>• Q2: an unknown enum value on an unstated member is refused at `plan`, before any write; only an `Update` is refused. <br>• Q3: `termination_action`, `enabled` and `filter_ids` cannot be stated as none. <br>• Q8 and Q9 confirmed as written. <br>• Q4 (SCIM (g)) and Q7 (producer refusal) deferred to 1.63. |
+| W7.14 fix pass | see below | Sonnet ×11 | **Every SDK:** <br>• re-vendors `d25413506`; <br>• its README names §36 and says "manifest pruning: not offered in any namespace". <br>**Per finding:** <br>• **C162-01:** C goes to `SOVERSION 2`, with the `abi_soname` test. <br>• **C162-02:** C++ goes to `SOVERSION 2`, with the `abi_soname` test (shared builds only). <br>• **C162-03:** PHP emits `list<SsfEventType|string>`, with four round-trip tests. <br>• **C162-05 (maintainer: fix now):** TypeScript, Python, Java, C# and Kotlin withhold the session or adopted bearer on `/oauth2/*`. Rust, Go and Swift already did, and gain regression tests. |
+
+**The eleven SDK pull requests** (draft, branch `claude/contract-1.62`). The head is the fix-pass commit.
+
+| SDK | PR | Port head | Fix-pass head | CI on the fix head |
+|---|---|---|---|---|
+| Rust | ilpanich/axiam-rust-sdk#131 | `4c02dc1` (CodeQL fix after `bd362f6`) | `ba61dd4` | pending |
+| TypeScript | ilpanich/axiam-typescript-sdk#141 | `973427c` | `a9f7140` | green |
+| Python | ilpanich/axiam-python-sdk#98 | `71db0de` | `d5594cd` | green |
+| Go | ilpanich/axiam-go-sdk#98 | `5ebfb22` | `e3bf7b3` | green |
+| Java | ilpanich/axiam-java-sdk#114 | `dfcc1eb` | `3da7142` | green |
+| PHP | ilpanich/axiam-php-sdk#83 | `7a238fa` | `d363c66` | green |
+| Kotlin | ilpanich/axiam-kotlin-sdk#76 | `07855aa` | `7f0c68b` | pending |
+| C# | ilpanich/axiam-csharp-sdk#106 | `f70d039` | `1aab662` | green |
+| C | ilpanich/axiam-c-sdk#73 | `18be8e1` | `6a60bd0` | green |
+| C++ | ilpanich/axiam-cplusplus-sdk#75 | `d3670ed` | `5d9764b` | green |
+| Swift | ilpanich/axiam-swift-sdk#74 | `4d34370` | `66660bc` | pending |
+
+**Filed on `1.1.x`.**
+- **SDK repositories:** the review's Low and Informational findings, one issue per SDK.
+  - rust#132 (C162-07, -13), typescript#142 (-07, -08), python#99 (-07, -08), go#99 (-07), java#115 (-07, -10), php#84 (-04, -07), kotlin#77 (-07, -10), csharp#107 (-06, -15), c#74 (-06, -09), cplusplus#76 (-07, -16), swift#75 (-17).
+  - python#100: an adopted bearer overwrites an explicit PAT on `/uma2/*`.
+- **Platform:** ilpanich/axiam#710 covers the 1.63 contract items. Session cookies and `X-CSRF-Token` still reach `/oauth2/*` after a cookie login (Rust, Python and others); also the deferred Q4 and Q7.
+
+**Plan vs tree:**
+- §8's version rule: superseded by D-2 amended (all eleven SDKs at 1.1.0).
+- The platform version bump: moved from W8.4 into W7 (W8.4a).
+- W7.13: followed by a second contract commit (W7.1c) and a fix pass (W7.14) that the plan did not foresee. The review's questions needed answers that changed contract text, so the SDKs re-vendored once more, all eleven together.
+
+**Environment:**
+- Neither .NET nor Swift was preinstalled; the C# executors installed .NET 8 and 10 from apt.
+- Swift was never compiled locally. Its only builds are the PR's CI, which passed on the port head.
+- A Maven Central mirror init script under `~/.gradle/init.d/` (sandbox-only) was needed for Gradle.
+- Two stray log files at the filesystem root (`/scratchpad.log`, `/scratchpad_gen.log`) could not be deleted by the session's safety check; the maintainer removes them.
+
 ### 13.8 W8 — release readiness
 
 ---

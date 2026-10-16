@@ -906,6 +906,53 @@ say all four Mitigated RADIUS entries are tested by the e2e.
 
 ### 13.8 W8 — release readiness
 
+All W8 commits are signed and pushed to `claude/release-1.1.0`. The release pull request is
+**ilpanich/axiam#716** (non-draft, base `main`).
+
+| Item | Commit | Model | Result |
+|---|---|---|---|
+| W8.1 | — (a check; nothing committed) | Sonnet | Regression gate on `310203c98`, 3 h. <br>**Passed (exit 0):** <br>• `fmt`; workspace `clippy -D warnings` with SAML on and off. <br>• **7 250 Rust tests passed, 0 failed, 38 ignored** (1.0.1 also had 38 ignored), run crate by crate. `axiam-db`, `axiam-api-rest` and `axiam-server` ran one binary at a time: 78, 113 and 27 runs. <br>• The `client`-feature gRPC tests (34) and the conformance leg (14). <br>• **The RADIUS e2e, run locally: D3 and D4 passed** (425 s); `fetch-crl-test.sh` 64/64 under dash and under bash. <br>• Every `scripts/check-*` and its self-test, except the three below. <br>• Frontend lint, `tsc`, a11y and build; vitest 2 376 tests at 96.57 % coverage. Two `ScimTargetsPage` tests timed out under load on the first run and passed alone and on the rerun. <br>• Website lint, `tsc` and build; `npm audit` 0. <br>**Failed:** `cargo deny` and `cargo audit` on rustls 0.23.45 (RUSTSEC-2026-0346 … -0349), already on `main`; fixed in W8.1a. <br>**Expected failures:** `check-website-links` (the proxy returns 403), `check-sdk-artifact-drift` (until the SDK PRs merge), `check-sdk-amqps` (no SDK clone beside the checkout). <br>**Not run here:** the SurrealDB container (Docker Hub 429), the live AMQP broker, Playwright, Trivy, hadolint and llvm-cov. |
+| W8.1a | `f922935a0` | Sonnet | rustls 0.23.46 and yoke-derive 0.8.4, in three lockfiles: workspace, `examples/b3-mesh-delegation-grpc`, `tools/surreal-race-probe`. `cargo deny`, `cargo audit` (CI's ignores) and `clippy` pass; 81 runs of the rustls-touching test binaries pass. The Rust SDK already had 0.23.46. |
+| W8.2 | `f17af4c8f` | Opus | `claude_dev/security-review-release-1.1.0-2026-10-16.md`: **0 Critical / 0 High / 0 Medium**, 2 Low, 3 Informational, all filed on `1.1.x`: <br>• R110-01 #711: with no appending proxy, the per-address limiters key on a caller-written `X-Forwarded-For`. <br>• R110-02 #712: the #675 boot count re-runs its subquery per row. <br>• R110-03 #713, R110-04 #714, R110-05 #715. <br>Found sound: the W1×W4 purge merge, the limiter merges, v99/v100, the decide route against device tokens, the serial-keyed stash, W6's six late commits, the W7 contract text. All 97 commits are signed. |
+| W8.3 | `e8bf77fd1` | Opus | **Model 2.42.0**; the five copies agree. **487 threats: 454 Mitigated / 23 Open / 10 Not applicable** (Critical 43/2/0, High 201/9/6, Medium 204/8/3, Low 39/4/1). <br>• Corrected entries: T-444, T-472, T-462, T-212, T-486, T-481, T-483, T-484, T-478, plus the RADIUS diagram description. <br>• Guides: `freeradius.md` §4 and §5; the deployment guide's "Direct, no proxy" row; the design note's header. <br>• Website: the 202/29 counts. |
+| W8.4a | `89e488e3e` | Sonnet | Version 1.1.0; done in W7 (§13.7). |
+| W8.4 | `4890fa37e` | Sonnet | CHANGELOG: <br>• `[1.0.1]` folded into **`[1.1.0] - 2026-10-16`**, every entry kept. <br>• One entry per closed issue (43). #626, #629 and #647 are marked done or superseded; #675's entry says the issue stays open. <br>• An "Upgrading to 1.1.0" subsection lists the operator-first notes. Stale 1.0.1 text is corrected in place. <br>Website: an `axiam-1-1-0` post. <br>PR #716 is on #657's shape, with 43 `Closes` lines and the eleven SDK PRs listed. |
+
+**Corrections to §13.7.**
+- **The W5 merge (`a6c6340fa`) dropped most of W5's changes to `docs/pki/freeradius.md`,** not only the Ed25519 bullet. It resolved the one conflicting hunk by taking the whole file from the plan side. The lost text was:
+  - the `fetch-crl.sh` documentation;
+  - the `ca.pem` replacement rules;
+  - the NAS half of Blast-RADIUS;
+  - the tagged placement table;
+  - R110W5-01 … -03.
+
+  W8.3 found the loss and restored the text by a three-way merge in `e8bf77fd1`. The orchestrator verified that every line W5 added is present again, except the key re-encoding recipe, which was dropped on purpose as obsolete, and the "Last verified" date, which was updated. W5's threat-model text and W5's other files were never affected.
+- **The W5 merge commit names #644 for the re-encoding recipe; it is #647** (already recorded in §13.7).
+- **`89e488e3e` carries `Co-Authored-By: Claude Sonnet 5.5`** instead of the verbatim trailer line the executor rules give. It is pushed, so it is recorded here, not amended.
+
+**Left for the maintainer.**
+- `website/src/version.ts` `SECURITY_VERIFIED_RELEASE`/`_DATE` stay at 1.0.1 / 2026-10-14. W8.3 reconciled the Security section; it did not re-derive it from source. Moving the stamp would assert a verification nobody made; it is a one-line change once the maintainer judges it.
+- #700: is an administrative `Service-Type` refused with `400` or `403`? The code and contract say 403; the spec's description says 400. Open on `1.1.x`.
+- The two stray log files at the filesystem root of the build sandbox (`/scratchpad.log`, `/scratchpad_gen.log`). They are outside the repository; the session's safety check refused their removal.
+
+**Hand-off (nothing is tagged or merged by Claude).**
+1. Merge PR #716.
+2. Mark the eleven SDK PRs ready and merge them; their drift check compares with AXIAM `main`:
+   - ilpanich/axiam-rust-sdk#131 `cde52e0`
+   - axiam-typescript-sdk#141 `a9f7140`
+   - axiam-python-sdk#98 `d5594cd`
+   - axiam-go-sdk#98 `e3bf7b3`
+   - axiam-java-sdk#114 `3da7142`
+   - axiam-php-sdk#83 `d363c66`
+   - axiam-kotlin-sdk#76 `7f0c68b`
+   - axiam-csharp-sdk#106 `1aab662`
+   - axiam-c-sdk#73 `6a60bd0`
+   - axiam-cplusplus-sdk#75 `5d9764b`
+   - axiam-swift-sdk#74 `66660bc`
+3. Tag `v1.1.0` on the platform and on all eleven SDKs.
+
+The 43 issues close with the PR. 52 stay open on `1.1.x` (#664 … #715) and 2 on `1.0.x` (#513, #561).
+
 ---
 
 ## 14. Kickoff prompts

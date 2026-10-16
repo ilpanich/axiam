@@ -12904,11 +12904,17 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
    `filter_ids`; `service_type` `framed_user` or absent — the administrative values are not in the
    schema and are refused under option B; `dictionary` a version the server knows. A failure is `400` (or `403` for H3,
    rule 1).
-6. **Reads clamp; the stored value is kept.** Lowering the cap never rewrites a profile: every
-   read, the decision's included, renders `min(stored, cap)` and says so in
-   `session_timeout_clamped`, and raising the cap again restores the stored value. A replace sends
-   what it carries, so a read-modify-write of a clamped profile stores the clamped value; an SDK
-   that offers the composed form documents this beside it.
+6. **Reads clamp; the stored value is kept.** Lowering the cap never rewrites a profile. A read
+   of a reply profile — `get_profile`, `list_profiles`, the answer of a profile write, and the
+   decision — returns the **effective** `Session-Timeout`, `min(stored, cap)`, not the stored
+   value, and `session_timeout_clamped: true` says that it was lowered. A write of a
+   `session_timeout_secs` above the **current** cap is refused (`403`, H3; rule 1). So a
+   read-modify-write of a clamped profile **cannot restore the stored value**: it can send at most
+   the cap, and what it sends is what is stored — the clamped value, which from then on is the
+   stored one. Raising the cap **first**, with the profile left alone, restores the stored value at
+   read. There is no member that carries the stored value while it is clamped. An SDK that offers
+   the composed form (§27.4 rule 5) documents this beside it. (Amended 2026-10-16, R110W6-12; the
+   rule is unchanged, its consequence now stated.)
 7. **The cap** (`network.session_timeout_max_secs`). `get_policy` answers the default (3600,
    `version` 0) until the tenant writes one. `replace_policy` takes 300 to 86 400 (`400`
    otherwise). **Lowering is always allowed; raising is allowed and audited** as a raise; neither

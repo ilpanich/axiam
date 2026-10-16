@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:47ff33434bf70f39511141689b8e0f9e558b9333d5ee2bcfff4d3d900b88dd7c"
+    "x-axiam-spec-digest": "sha256:f948fbe2a02a5a982df2727e9969aab92d57c2ee2776ed4f573e505dfb3c3453"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4442,7 +4442,7 @@
         },
         "responses": {
           "200": {
-            "description": "The new policy. Lowering the cap is always allowed, even below an existing profile's `session_timeout_secs`: the stored value is untouched and every read clamps it to the cap (`session_timeout_clamped`), so raising the cap again restores it. Raising the cap is allowed and audited as `network_policy.raised`; lowering as `network_policy.lowered`, each with the cap before and after",
+            "description": "The new policy. Lowering the cap is always allowed, even below an existing profile's `session_timeout_secs`: the stored value is untouched and every read clamps it to the cap (`session_timeout_clamped`), so raising the cap again restores it — unless the profile was replaced meanwhile: a replace stores what it carries and is refused above the cap (H3), so one written back from a clamped read stores the clamped value. Raising the cap is allowed and audited as `network_policy.raised`; lowering as `network_policy.lowered`, each with the cap before and after",
             "content": {
               "application/json": {
                 "schema": {
@@ -4754,7 +4754,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The segment's effective reply profile",
+            "description": "The segment's effective reply profile: `session_timeout_secs` is the stored value lowered to the tenant's current cap, and `session_timeout_clamped` says when it was. A replace above the cap is refused (H3), so writing back a clamped read cannot restore the stored value; raising the cap first restores it at read",
             "content": {
               "application/json": {
                 "schema": {

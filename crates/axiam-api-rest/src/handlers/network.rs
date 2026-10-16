@@ -97,7 +97,10 @@
 //! Lowering the cap below an existing profile's `session_timeout_secs` is fine:
 //! the stored value is untouched, every read that produces a reply clamps it to
 //! the cap, and the profile says so (`session_timeout_clamped`). Raising the cap
-//! again restores the stored value.
+//! again restores the stored value — unless the profile was replaced while
+//! clamped: a replace stores what it carries, and the gate refuses one above
+//! the current cap (H3), so a read-modify-write of a clamped profile stores the
+//! clamped value and cannot restore the old one (§36.3 rule 6).
 
 use actix_web::error::{JsonPayloadError, QueryPayloadError};
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -1316,7 +1319,12 @@ pub async fn list_profiles<C: Connection + Clone>(
     tag = "network",
     params(("segment_id" = Uuid, Path, description = "ID of the segment that owns the profile")),
     responses(
-        (status = 200, description = "The segment's effective reply profile",
+        (status = 200, description = "The segment's effective reply profile: \
+                                      `session_timeout_secs` is the stored value lowered to the \
+                                      tenant's current cap, and `session_timeout_clamped` says \
+                                      when it was. A replace above the cap is refused (H3), so \
+                                      writing back a clamped read cannot restore the stored \
+                                      value; raising the cap first restores it at read",
          body = ReplyProfile),
         (status = 401, description = "Not authenticated, or a service-account token"),
         (status = 403, description = "The caller lacks `network:read` on the segment"),
@@ -1739,7 +1747,11 @@ pub async fn get_policy<C: Connection + Clone>(
                                       even below an existing profile's `session_timeout_secs`: \
                                       the stored value is untouched and every read clamps it \
                                       to the cap (`session_timeout_clamped`), so raising the \
-                                      cap again restores it. Raising the cap is allowed and \
+                                      cap again restores it — unless the profile was replaced \
+                                      meanwhile: a replace stores what it carries and is \
+                                      refused above the cap (H3), so one written back from a \
+                                      clamped read stores the clamped value. Raising the cap is \
+                                      allowed and \
                                       audited as `network_policy.raised`; lowering as \
                                       `network_policy.lowered`, each with the cap before and \
                                       after",

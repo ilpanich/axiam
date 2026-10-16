@@ -268,6 +268,7 @@ pub struct ReplaceNetworkSegmentRequest {
 
 /// The body of `POST /api/v1/network/profiles`.
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(as = CreateNetworkReplyProfileRequest)]
 #[serde(deny_unknown_fields)]
 pub struct CreateReplyProfileRequest {
     /// The segment the profile belongs to (at most one profile per segment).
@@ -282,6 +283,7 @@ pub struct CreateReplyProfileRequest {
 
 /// The body of `PUT /api/v1/network/profiles/{segment_id}`.
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(as = ReplaceNetworkReplyProfileRequest)]
 #[serde(deny_unknown_fields)]
 pub struct ReplaceReplyProfileRequest {
     /// The profile's `version` as the caller read it. A stale one is `409`.

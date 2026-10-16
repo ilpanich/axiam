@@ -12763,10 +12763,10 @@ not exist. A profile is **owned by its segment** and addressed by the segment's 
 | `network.get_segment` | `GET /api/v1/network/segments/{id}` | — | `200` `NetworkSegmentResponse` | — |
 | `network.replace_segment` | `PUT /api/v1/network/segments/{id}` | `ReplaceNetworkSegmentRequest` | `200` `NetworkSegmentResponse` | **`replace`** |
 | `network.delete_segment` | `DELETE /api/v1/network/segments/{id}?version=` | — | `204` | — |
-| `network.list_profiles` | `GET /api/v1/network/profiles` | — (`offset`, `limit`, `search`) | `200` page of `ReplyProfile` | — |
-| `network.create_profile` | `POST /api/v1/network/profiles` | `CreateReplyProfileRequest` | `201` `ReplyProfile` | — |
-| `network.get_profile` | `GET /api/v1/network/profiles/{segment_id}` | — | `200` `ReplyProfile` | — |
-| `network.replace_profile` | `PUT /api/v1/network/profiles/{segment_id}` | `ReplaceReplyProfileRequest` | `200` `ReplyProfile` | **`replace`** |
+| `network.list_profiles` | `GET /api/v1/network/profiles` | — (`offset`, `limit`, `search`) | `200` page of `NetworkReplyProfile` | — |
+| `network.create_profile` | `POST /api/v1/network/profiles` | `CreateNetworkReplyProfileRequest` | `201` `NetworkReplyProfile` | — |
+| `network.get_profile` | `GET /api/v1/network/profiles/{segment_id}` | — | `200` `NetworkReplyProfile` | — |
+| `network.replace_profile` | `PUT /api/v1/network/profiles/{segment_id}` | `ReplaceNetworkReplyProfileRequest` | `200` `NetworkReplyProfile` | **`replace`** |
 | `network.delete_profile` | `DELETE /api/v1/network/profiles/{segment_id}?version=` | — | `204` | — |
 | `network.get_policy` | `GET /api/v1/network/policy` | — | `200` `NetworkPolicyResponse` | — |
 | `network.replace_policy` | `PUT /api/v1/network/policy` | `ReplaceNetworkPolicyRequest` | `200` `NetworkPolicyResponse` | **`replace`** |
@@ -12775,7 +12775,9 @@ Both lists are §27.4 rule 4's paginated shape (`{ items, total, offset, limit }
 matched before paging: against a segment's name, site key and id, and against a profile's
 `filter_id` and segment id. `site` narrows the segment list to one site key. The three `replace`
 operations are **replacements** (§27.4 rule 5): every member is required and what is omitted is
-not preserved. The registry is the vocabulary (§27.0); the names above are rendered from it.
+not preserved. The PUT verbs therefore stay `replace_*` — full-body and version-conditional, like
+§27.4 rule 5's existing replace operations — and are not renamed `update_*`. The registry is the
+vocabulary (§27.0); the names above are rendered from it.
 
 ### §36.2 Shapes (normative)
 
@@ -12804,7 +12806,7 @@ SDK decodes a value it does not know and never re-sends one it decoded as unknow
 `vlan_id`, `filter_ids`, `enabled` (all required) and `rank` (as for create). It has no `kind`,
 `site_key` or `name`: a segment's kind and place in the tree do not change (§36.3 rule 4).
 
-**`ReplyProfile`** — what every profile read and write returns, as the **effective** profile:
+**`NetworkReplyProfile`** — what every profile read and write returns, as the **effective** profile:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -12812,20 +12814,20 @@ SDK decodes a value it does not know and never re-sends one it decoded as unknow
 | `dictionary` | string | `"axiam-radius-reply/1"`. |
 | `session_timeout_secs` | integer | The value a decision would render: the stored value, **lowered to the tenant's current cap** when it is above it (§36.3 rule 6). |
 | `session_timeout_clamped` | bool | Whether `session_timeout_secs` was lowered. |
-| `termination_action` | `"default"` \| `"radius_request"` | |
+| `termination_action` | `"default"` \| `"radius_request"` | `RadiusTerminationAction`. |
 | `idle_timeout_secs` | integer \| null | Never above `session_timeout_secs`. |
 | `filter_id` | string \| null | One of the segment's `filter_ids`. |
-| `service_type` | `"framed_user"` \| null | The schema also lists `administrative_user` and `nas_prompt_user`; the server refuses both (§36.3 rule 5). |
+| `service_type` | `"framed_user"` \| null | `RadiusServiceType`, whose only value under option B is `framed_user`. The schema lists no other value; a request that names `administrative_user` or `nas_prompt_user` is refused with a `400` (§36.3 rule 5). |
 | `version` | integer | The version the next `replace_profile` or `delete_profile` must name. |
 | `created_by`, `updated_by` | UUID | |
 | `created_at`, `updated_at` | RFC 3339 | |
 
-**`ReplyProfileInput`** — the profile as written: `dictionary` (default `"axiam-radius-reply/1"`),
+**`NetworkReplyProfileInput`** — the profile as written: `dictionary` (default `"axiam-radius-reply/1"`),
 `session_timeout_secs` (required), `termination_action` (default `"radius_request"`),
 `idle_timeout_secs`, `filter_id`, `service_type` (each optional). **There is no VLAN member**: the
-VLAN is the segment's. **`CreateReplyProfileRequest`**: `segment_id`, `segment_version` (the
+VLAN is the segment's. **`CreateNetworkReplyProfileRequest`**: `segment_id`, `segment_version` (the
 segment's `version` as the caller read it) and `profile`, all required.
-**`ReplaceReplyProfileRequest`**: `version` (the profile's), `segment_version` and `profile`, all
+**`ReplaceNetworkReplyProfileRequest`**: `version` (the profile's), `segment_version` and `profile`, all
 required.
 
 **`NetworkPolicyResponse`**: `tenant_id`, `session_timeout_max_secs` (the cap, 300–86 400; 3600
@@ -12881,8 +12883,8 @@ until the tenant first writes one), `version` (`0` until then), `updated_by` and
    `filter_ids`, each matching the pattern of §36.2; `rank` required for an access segment, absent
    for a quarantine one, unique per site; `session_timeout_secs` from 300 to the tenant cap (never
    `0`); `idle_timeout_secs` from 60 to `session_timeout_secs`; `filter_id` one of the segment's
-   `filter_ids`; `service_type` `framed_user` or absent — the administrative values are refused
-   under option B; `dictionary` a version the server knows. A failure is `400` (or `403` for H3,
+   `filter_ids`; `service_type` `framed_user` or absent — the administrative values are not in the
+   schema and are refused under option B; `dictionary` a version the server knows. A failure is `400` (or `403` for H3,
    rule 1).
 6. **Reads clamp; the stored value is kept.** Lowering the cap never rewrites a profile: every
    read, the decision's included, renders `min(stored, cap)` and says so in
@@ -12954,13 +12956,13 @@ Five per SDK that ships the namespace, against a mocked HTTP server:
    sends `version` — each exactly as given. A `409` to each is `ConflictError` after exactly one
    request.
 3. **Closed bodies.** The serialized `CreateNetworkSegmentRequest`, `ReplaceNetworkSegmentRequest`,
-   `CreateReplyProfileRequest` and `ReplaceNetworkPolicyRequest` carry exactly the keys §36.2 names
+   `CreateNetworkReplyProfileRequest` and `ReplaceNetworkPolicyRequest` carry exactly the keys §36.2 names
    for the members set (an unset `rank`, `idle_timeout_secs`, `filter_id` or `service_type` is
-   absent, not `null`); a `ReplyProfileInput` has no VLAN member; the replace types cannot be built
+   absent, not `null`); a `NetworkReplyProfileInput` has no VLAN member; the replace types cannot be built
    without their required members (or their builder refuses, in a language without the
    compile-time check).
 4. **Open decoding and pagination.** A `NetworkSegmentResponse` with an unknown `kind` and a
-   `ReplyProfile` with an unknown `termination_action` and `service_type` decode; a `ReplyProfile`
+   `NetworkReplyProfile` with an unknown `termination_action` and `service_type` decode; a `NetworkReplyProfile`
    with `session_timeout_clamped: true` decodes with both members; both lists return `Page<T>`
    with `total`, the auto-pager carrying `search` (and `site`) on every request.
 5. **Errors.** A `403` whose body carries `action: "network:grant"` and a `resource_id` is
@@ -12979,8 +12981,9 @@ UUID rule, and does not render a reply profile into RADIUS attributes: the serve
 bounds are the authority, and a client-side copy would drift from them. It does not cache a
 segment, a profile or the cap (§27.4 rule 10). It does not hide the two-version rule of a profile
 write behind a helper that re-reads and retries on `409`: a `409` means another administrator
-wrote, and the administrator decides. And `network` is **not** a manifest namespace: §27.6 does not
-name it.
+wrote, and the administrator decides. And `network` **is** a §27.6 manifest namespace in 1.62, with natural keys: a segment is
+identified by site + kind + name, a profile by its segment, and the policy is a singleton (§27.6's
+own text is the W7.1 record's).
 
 ### §36.10 Per-SDK posture
 

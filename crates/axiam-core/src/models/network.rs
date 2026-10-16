@@ -312,6 +312,7 @@ pub fn validate_segment_fields(
 /// `Session-Timeout` already clamped to the tenant's current cap (design note
 /// §3.4) and `Idle-Timeout` kept within it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = NetworkReplyProfile)]
 pub struct ReplyProfile {
     /// The owning segment, which is also this profile's id: one profile per
     /// segment, at most.

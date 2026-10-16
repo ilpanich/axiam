@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:9ab7b413a948749a7b74a74406f77b756193aba79039769117210abf083b1423"
+    "x-axiam-spec-digest": "sha256:16b96d68c61a8b59000a207b4857811fe8e2b0e1914bd38311335201ba77157c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4587,7 +4587,7 @@
                           "service_type": {
                             "oneOf": [
                               {
-                                "$ref": "#/components/schemas/ServiceType",
+                                "$ref": "#/components/schemas/RadiusServiceType",
                                 "description": "`Service-Type`."
                               },
                               {
@@ -4611,7 +4611,7 @@
                             "description": "The owning tenant."
                           },
                           "termination_action": {
-                            "$ref": "#/components/schemas/TerminationAction",
+                            "$ref": "#/components/schemas/RadiusTerminationAction",
                             "description": "`Termination-Action`."
                           },
                           "updated_at": {
@@ -4676,7 +4676,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateReplyProfileRequest"
+                "$ref": "#/components/schemas/CreateNetworkReplyProfileRequest"
               }
             }
           },
@@ -4688,7 +4688,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReplyProfile"
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
                 }
               }
             }
@@ -4744,7 +4744,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReplyProfile"
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
                 }
               }
             }
@@ -4788,7 +4788,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReplaceReplyProfileRequest"
+                "$ref": "#/components/schemas/ReplaceNetworkReplyProfileRequest"
               }
             }
           },
@@ -4800,7 +4800,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReplyProfile"
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
                 }
               }
             }
@@ -18293,6 +18293,33 @@
           }
         }
       },
+      "CreateNetworkReplyProfileRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/network/profiles`.",
+        "required": [
+          "segment_id",
+          "segment_version",
+          "profile"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/NetworkReplyProfileInput",
+            "description": "The profile: a typed record of the `axiam-radius-reply/1` dictionary.\nThe VLAN is never a field; it is the segment's."
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The segment the profile belongs to (at most one profile per segment)."
+          },
+          "segment_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The segment's `version` as the caller read it: the envelope the profile\nwas written against. A segment written since is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateNetworkSegmentRequest": {
         "type": "object",
         "description": "The body of `POST /api/v1/network/segments`.",
@@ -18760,33 +18787,6 @@
             "description": "The token's metadata."
           }
         }
-      },
-      "CreateReplyProfileRequest": {
-        "type": "object",
-        "description": "The body of `POST /api/v1/network/profiles`.",
-        "required": [
-          "segment_id",
-          "segment_version",
-          "profile"
-        ],
-        "properties": {
-          "profile": {
-            "$ref": "#/components/schemas/ReplyProfileInput",
-            "description": "The profile: a typed record of the `axiam-radius-reply/1` dictionary.\nThe VLAN is never a field; it is the segment's."
-          },
-          "segment_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The segment the profile belongs to (at most one profile per segment)."
-          },
-          "segment_version": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The segment's `version` as the caller read it: the envelope the profile\nwas written against. A segment written since is `409`.",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
       },
       "CreateResource": {
         "type": "object",
@@ -21240,7 +21240,7 @@
           "reply": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/RenderedReply",
+                "$ref": "#/components/schemas/RadiusRenderedReply",
                 "description": "The Access-Accept attributes of the segment the device is placed on:\nits tunnel triple (RFC 3580 §3.31) and its reply profile's fields, with\n`Session-Timeout` clamped to the tenant's cap. Only on an allow."
               },
               {
@@ -21293,6 +21293,157 @@
             "minimum": 0
           }
         }
+      },
+      "NetworkReplyProfile": {
+        "type": "object",
+        "description": "A segment's reply profile as read: **the effective one**, with the\n`Session-Timeout` already clamped to the tenant's current cap (design note\n§3.4) and `Idle-Timeout` kept within it.",
+        "required": [
+          "segment_id",
+          "tenant_id",
+          "dictionary",
+          "session_timeout_secs",
+          "session_timeout_clamped",
+          "termination_action",
+          "version",
+          "created_by",
+          "updated_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who created it."
+          },
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the profile was validated against."
+          },
+          "filter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Filter-Id`, one of the segment's declared names."
+          },
+          "idle_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`Idle-Timeout`, seconds, never above the effective `Session-Timeout`.",
+            "minimum": 0
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning segment, which is also this profile's id: one profile per\nsegment, at most."
+          },
+          "service_type": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RadiusServiceType",
+                "description": "`Service-Type`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_timeout_clamped": {
+            "type": "boolean",
+            "description": "Whether the stored value was above the cap and has been lowered."
+          },
+          "session_timeout_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`Session-Timeout`, seconds: the stored value lowered to the tenant's\ncurrent cap. This is the value a reply carries.",
+            "minimum": 0
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "termination_action": {
+            "$ref": "#/components/schemas/RadiusTerminationAction",
+            "description": "`Termination-Action`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last write time."
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who last wrote it."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the next replace or delete must name. Starts at 1.",
+            "minimum": 0
+          }
+        }
+      },
+      "NetworkReplyProfileInput": {
+        "type": "object",
+        "description": "What a writer supplies for a profile. Closed: an unknown key is a refusal\nnaming it, never ignored (design note §3.4).",
+        "required": [
+          "session_timeout_secs"
+        ],
+        "properties": {
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the profile is written against; defaults to\n[`REPLY_DICTIONARY_V1`]. An unknown version is refused."
+          },
+          "filter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Filter-Id`: one of the owning segment's declared `filter_ids`."
+          },
+          "idle_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`Idle-Timeout`, seconds: [`IDLE_TIMEOUT_FLOOR_SECS`] up to\n`session_timeout_secs`.",
+            "minimum": 0
+          },
+          "service_type": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RadiusServiceType",
+                "description": "`Service-Type`: `framed_user` or absent under option B."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_timeout_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`Session-Timeout`, seconds: [`SESSION_TIMEOUT_FLOOR_SECS`] up to the\ntenant cap. Never zero.",
+            "minimum": 0
+          },
+          "termination_action": {
+            "$ref": "#/components/schemas/RadiusTerminationAction",
+            "description": "`Termination-Action`; defaults to `RADIUS-Request`."
+          }
+        },
+        "additionalProperties": false
       },
       "NetworkSegmentKind": {
         "type": "string",
@@ -23410,6 +23561,91 @@
           }
         }
       },
+      "RadiusRenderedReply": {
+        "type": "object",
+        "description": "A rendered reply: the closed set of attributes of one dictionary version,\nproduced from typed fields only (design note §3.4: never rendered as text by\nconcatenation).",
+        "required": [
+          "dictionary",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RadiusReplyAttribute"
+            },
+            "description": "The attributes, in dictionary order: the segment's tunnel triple, then\nthe profile's fields that are set."
+          },
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the attributes belong to."
+          }
+        }
+      },
+      "RadiusReplyAttribute": {
+        "type": "object",
+        "description": "One attribute of a rendered Access-Accept.",
+        "required": [
+          "name",
+          "number",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …)."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The attribute number (RFC 2865 / RFC 2868).",
+            "minimum": 0
+          },
+          "tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The RFC 2868 tag octet that goes **on the wire**, when one does.\n\n`0` on `Tunnel-Type` and `Tunnel-Medium-Type`: an integer tunnel\nattribute always carries its tag octet (`0x00`), which FreeRADIUS emits\nfor these with or without `:0`. **Absent** on `Tunnel-Private-Group-Id`:\nthe VLAN string goes on the wire with no tag octet in front of it (RFC\n2868 §3.6 allows that, since the string's first octet is above `0x1F`),\nwhich is exactly what FreeRADIUS 3.2.8 emits for the attribute written\nuntagged or tagged `:0` (verified on the wire, W5.4). Absent, too, on\nevery untagged attribute.",
+            "minimum": 0
+          },
+          "value": {
+            "$ref": "#/components/schemas/RadiusReplyValue",
+            "description": "The value, typed as the dictionary types it."
+          }
+        }
+      },
+      "RadiusReplyValue": {
+        "oneOf": [
+          {
+            "type": "integer",
+            "format": "int32",
+            "description": "An `integer` attribute's value.",
+            "minimum": 0
+          },
+          {
+            "type": "string",
+            "description": "A `string` attribute's value."
+          }
+        ],
+        "description": "The value of one rendered attribute: an integer, or the one string kind the\ndictionary admits (a decimal VLAN or a `Filter-Id` identifier)."
+      },
+      "RadiusServiceType": {
+        "type": "string",
+        "description": "`Service-Type` (RFC 2865 §5.6). Option B accepts only `framed_user`; the administrative values are refused with a 400.",
+        "enum": [
+          "framed_user"
+        ]
+      },
+      "RadiusTerminationAction": {
+        "type": "string",
+        "description": "`Termination-Action` (RFC 2865 §5.29).",
+        "enum": [
+          "default",
+          "radius_request"
+        ]
+      },
       "ReactorEventDescriptor": {
         "type": "object",
         "description": "One hookable event, as the registry describes it.",
@@ -23969,27 +24205,6 @@
           }
         }
       },
-      "RenderedReply": {
-        "type": "object",
-        "description": "A rendered reply: the closed set of attributes of one dictionary version,\nproduced from typed fields only (design note §3.4: never rendered as text by\nconcatenation).",
-        "required": [
-          "dictionary",
-          "attributes"
-        ],
-        "properties": {
-          "attributes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ReplyAttribute"
-            },
-            "description": "The attributes, in dictionary order: the segment's tunnel triple, then\nthe profile's fields that are set."
-          },
-          "dictionary": {
-            "type": "string",
-            "description": "The dictionary version the attributes belong to."
-          }
-        }
-      },
       "ReplaceNetworkPolicyRequest": {
         "type": "object",
         "description": "The body of `PUT /api/v1/network/policy`: a **replacement** of the policy.",
@@ -24008,6 +24223,34 @@
             "type": "integer",
             "format": "int64",
             "description": "The policy's `version` as the caller read it (`0` for a tenant that has\nnever written one). A stale one is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplaceNetworkReplyProfileRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/network/profiles/{segment_id}`.",
+        "required": [
+          "version",
+          "segment_version",
+          "profile"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/NetworkReplyProfileInput",
+            "description": "The profile."
+          },
+          "segment_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The segment's `version` as the caller read it, as for\n[`CreateReplyProfileRequest::segment_version`].",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The profile's `version` as the caller read it. A stale one is `409`.",
             "minimum": 0
           }
         },
@@ -24057,234 +24300,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "ReplaceReplyProfileRequest": {
-        "type": "object",
-        "description": "The body of `PUT /api/v1/network/profiles/{segment_id}`.",
-        "required": [
-          "version",
-          "segment_version",
-          "profile"
-        ],
-        "properties": {
-          "profile": {
-            "$ref": "#/components/schemas/ReplyProfileInput",
-            "description": "The profile."
-          },
-          "segment_version": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The segment's `version` as the caller read it, as for\n[`CreateReplyProfileRequest::segment_version`].",
-            "minimum": 0
-          },
-          "version": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The profile's `version` as the caller read it. A stale one is `409`.",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "ReplyAttribute": {
-        "type": "object",
-        "description": "One attribute of a rendered Access-Accept.",
-        "required": [
-          "name",
-          "number",
-          "value"
-        ],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …)."
-          },
-          "number": {
-            "type": "integer",
-            "format": "int32",
-            "description": "The attribute number (RFC 2865 / RFC 2868).",
-            "minimum": 0
-          },
-          "tag": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "The RFC 2868 tag octet that goes **on the wire**, when one does.\n\n`0` on `Tunnel-Type` and `Tunnel-Medium-Type`: an integer tunnel\nattribute always carries its tag octet (`0x00`), which FreeRADIUS emits\nfor these with or without `:0`. **Absent** on `Tunnel-Private-Group-Id`:\nthe VLAN string goes on the wire with no tag octet in front of it (RFC\n2868 §3.6 allows that, since the string's first octet is above `0x1F`),\nwhich is exactly what FreeRADIUS 3.2.8 emits for the attribute written\nuntagged or tagged `:0` (verified on the wire, W5.4). Absent, too, on\nevery untagged attribute.",
-            "minimum": 0
-          },
-          "value": {
-            "$ref": "#/components/schemas/ReplyValue",
-            "description": "The value, typed as the dictionary types it."
-          }
-        }
-      },
-      "ReplyProfile": {
-        "type": "object",
-        "description": "A segment's reply profile as read: **the effective one**, with the\n`Session-Timeout` already clamped to the tenant's current cap (design note\n§3.4) and `Idle-Timeout` kept within it.",
-        "required": [
-          "segment_id",
-          "tenant_id",
-          "dictionary",
-          "session_timeout_secs",
-          "session_timeout_clamped",
-          "termination_action",
-          "version",
-          "created_by",
-          "updated_by",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Creation time."
-          },
-          "created_by": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The administrator who created it."
-          },
-          "dictionary": {
-            "type": "string",
-            "description": "The dictionary version the profile was validated against."
-          },
-          "filter_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`Filter-Id`, one of the segment's declared names."
-          },
-          "idle_timeout_secs": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "`Idle-Timeout`, seconds, never above the effective `Session-Timeout`.",
-            "minimum": 0
-          },
-          "segment_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The owning segment, which is also this profile's id: one profile per\nsegment, at most."
-          },
-          "service_type": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ServiceType",
-                "description": "`Service-Type`."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "session_timeout_clamped": {
-            "type": "boolean",
-            "description": "Whether the stored value was above the cap and has been lowered."
-          },
-          "session_timeout_secs": {
-            "type": "integer",
-            "format": "int32",
-            "description": "`Session-Timeout`, seconds: the stored value lowered to the tenant's\ncurrent cap. This is the value a reply carries.",
-            "minimum": 0
-          },
-          "tenant_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The owning tenant."
-          },
-          "termination_action": {
-            "$ref": "#/components/schemas/TerminationAction",
-            "description": "`Termination-Action`."
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Last write time."
-          },
-          "updated_by": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The administrator who last wrote it."
-          },
-          "version": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The version the next replace or delete must name. Starts at 1.",
-            "minimum": 0
-          }
-        }
-      },
-      "ReplyProfileInput": {
-        "type": "object",
-        "description": "What a writer supplies for a profile. Closed: an unknown key is a refusal\nnaming it, never ignored (design note §3.4).",
-        "required": [
-          "session_timeout_secs"
-        ],
-        "properties": {
-          "dictionary": {
-            "type": "string",
-            "description": "The dictionary version the profile is written against; defaults to\n[`REPLY_DICTIONARY_V1`]. An unknown version is refused."
-          },
-          "filter_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`Filter-Id`: one of the owning segment's declared `filter_ids`."
-          },
-          "idle_timeout_secs": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "`Idle-Timeout`, seconds: [`IDLE_TIMEOUT_FLOOR_SECS`] up to\n`session_timeout_secs`.",
-            "minimum": 0
-          },
-          "service_type": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ServiceType",
-                "description": "`Service-Type`: `framed_user` or absent under option B."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "session_timeout_secs": {
-            "type": "integer",
-            "format": "int32",
-            "description": "`Session-Timeout`, seconds: [`SESSION_TIMEOUT_FLOOR_SECS`] up to the\ntenant cap. Never zero.",
-            "minimum": 0
-          },
-          "termination_action": {
-            "$ref": "#/components/schemas/TerminationAction",
-            "description": "`Termination-Action`; defaults to `RADIUS-Request`."
-          }
-        },
-        "additionalProperties": false
-      },
-      "ReplyValue": {
-        "oneOf": [
-          {
-            "type": "integer",
-            "format": "int32",
-            "description": "An `integer` attribute's value.",
-            "minimum": 0
-          },
-          {
-            "type": "string",
-            "description": "A `string` attribute's value."
-          }
-        ],
-        "description": "The value of one rendered attribute: an integer, or the one string kind the\ndictionary admits (a decimal VLAN or a `Filter-Id` identifier)."
       },
       "RequestAuditHealth": {
         "type": "object",
@@ -25972,15 +25987,6 @@
             "format": "date-time"
           }
         }
-      },
-      "ServiceType": {
-        "type": "string",
-        "description": "`Service-Type` (RFC 2865 §5.6), the values the dictionary admits.",
-        "enum": [
-          "framed_user",
-          "administrative_user",
-          "nas_prompt_user"
-        ]
       },
       "SessionResponse": {
         "type": "object",
@@ -27791,14 +27797,6 @@
         "enum": [
           "Active",
           "Suspended"
-        ]
-      },
-      "TerminationAction": {
-        "type": "string",
-        "description": "`Termination-Action` (RFC 2865 §5.29).",
-        "enum": [
-          "default",
-          "radius_request"
         ]
       },
       "TokenExchangeRequest": {

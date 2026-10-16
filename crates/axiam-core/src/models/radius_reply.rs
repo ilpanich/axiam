@@ -179,6 +179,7 @@ pub fn dictionary(version: &str) -> Option<&'static [DictionaryEntry]> {
 
 /// `Termination-Action` (RFC 2865 §5.29).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = RadiusTerminationAction)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationAction {
     /// 0, `Default`: the NAS ends the session when `Session-Timeout` expires.
@@ -221,7 +222,14 @@ impl TerminationAction {
 }
 
 /// `Service-Type` (RFC 2865 §5.6), the values the dictionary admits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+///
+/// The type still parses the two admin-class spellings, so the write path can
+/// refuse them with its own 400 naming the value (and so option A can admit
+/// them additively), but the published schema (`RadiusServiceType`) lists only
+/// `framed_user`: a value the server refuses is not a value an SDK should be
+/// able to name. [`ToSchema`](utoipa::ToSchema) and
+/// [`PartialSchema`](utoipa::PartialSchema) are therefore written by hand below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceType {
     /// 2, `Framed-User`: the only value option B accepts.
@@ -231,6 +239,27 @@ pub enum ServiceType {
     AdministrativeUser,
     /// 7, `NAS-Prompt-User`: the admin class. Disabled for option B.
     NasPromptUser,
+}
+
+impl utoipa::PartialSchema for ServiceType {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::SchemaType::Type(
+                utoipa::openapi::schema::Type::String,
+            ))
+            .description(Some(
+                "`Service-Type` (RFC 2865 \u{a7}5.6). Option B accepts only `framed_user`; \
+                 the administrative values are refused with a 400.",
+            ))
+            .enum_values(Some(["framed_user"]))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for ServiceType {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("RadiusServiceType")
+    }
 }
 
 impl ServiceType {
@@ -309,6 +338,7 @@ fn default_dictionary() -> String {
 /// What a writer supplies for a profile. Closed: an unknown key is a refusal
 /// naming it, never ignored (design note §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = NetworkReplyProfileInput)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyProfileInput {
     /// The dictionary version the profile is written against; defaults to
@@ -403,6 +433,7 @@ pub const TUNNEL_MEDIUM_TYPE_802: u32 = 6;
 /// The value of one rendered attribute: an integer, or the one string kind the
 /// dictionary admits (a decimal VLAN or a `Filter-Id` identifier).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = RadiusReplyValue)]
 #[serde(untagged)]
 pub enum ReplyValue {
     /// An `integer` attribute's value.
@@ -413,6 +444,7 @@ pub enum ReplyValue {
 
 /// One attribute of a rendered Access-Accept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = RadiusReplyAttribute)]
 pub struct ReplyAttribute {
     /// The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …).
     pub name: String,
@@ -438,6 +470,7 @@ pub struct ReplyAttribute {
 /// produced from typed fields only (design note §3.4: never rendered as text by
 /// concatenation).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = RadiusRenderedReply)]
 pub struct RenderedReply {
     /// The dictionary version the attributes belong to.
     pub dictionary: String,
@@ -779,5 +812,22 @@ mod tests {
         }
         assert_eq!(ServiceType::FramedUser.value(), 2);
         assert_eq!(TerminationAction::RadiusRequest.value(), 1);
+    }
+
+    /// The published schema names the type `RadiusServiceType` and lists only
+    /// the one value option B accepts, while the type itself still parses the
+    /// admin-class spellings so the write path can refuse them by name.
+    #[test]
+    fn the_service_type_schema_lists_only_what_option_b_accepts() {
+        use utoipa::{PartialSchema, ToSchema};
+
+        assert_eq!(ServiceType::name(), "RadiusServiceType");
+        let schema = serde_json::to_value(ServiceType::schema()).expect("schema serializes");
+        assert_eq!(schema["enum"], serde_json::json!(["framed_user"]));
+        assert_eq!(
+            ServiceType::parse("administrative_user"),
+            Some(ServiceType::AdministrativeUser)
+        );
+        assert!(ServiceType::AdministrativeUser.is_admin_class());
     }
 }

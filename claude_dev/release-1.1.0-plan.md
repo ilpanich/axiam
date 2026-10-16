@@ -624,7 +624,7 @@ rules as its other token requests. W7.1 rewrites §14.1/§14.2 (with the stale
 unchanged. **R110W3-02 (#675), also answered:** beyond W8.4's upgrade note,
 1.1.0 adds a **boot-time warning** counting the confidential clients that hold
 the device grant (a small server change on the W3 branch, after W6.3; reviewed
-by W8.2); "an admin `PUT` may turn a device-only client public" stays on #675.
+by W8.2); "an admin `PUT` may turn a device-only client public" stays on #675. The warning landed as `6e7a0015d` on the W3 branch (Sonnet, 2026-10-15): `OAuth2ClientRepository::count_confidential_with_grant` returns the number of clients and tenants, both grant spellings counted, and one `warn!` at boot names the counts only — W3 head is therefore `6e7a0015d`.
 
 For **W7.1** (R110W3-11, stale contract text): §14 intro (`:2842-2846`, device
 tokens' `client_id` claim and `403`); §14.2 (the poll's `401 invalid_client`;
@@ -773,7 +773,90 @@ a segment that has a reply profile also needs `network:grant` at the segment,
 and H5's quarantine rule on a quarantine segment. One Opus executor on this
 branch before the merge.
 
+**Head `122b9ea92`** on `claude/release-1.1.0-w6` (from `3d011573e`), 2026-10-16. The wave has eighteen commits, all signed:
+- eleven task commits: W6.1 … W6.6, W6.3b, the renames, and W6.8's two;
+- the F4 review;
+- six in-wave fixes: R110W6-01 and -03, the coverage matrix, the `409` sub-code, rule 6, and the delete gate.
+
+The three numbers that changed during the wave:
+- **Schema:** v100 only. v99 is W1's; the runner applies every version above the highest recorded one, and the newest-version assertion says 100.
+- **Registry:** **202 operations / 29 namespaces** (from 190 / 28).
+- **Threat model:** **487 entries: 454 Mitigated / 23 Open / 10 Not applicable** (from 477: 443 / 19 / 15).
+
+**D-4, by the orchestrator:** none needed. The D4 e2e (`a_decision_per_authentication_places_revokes_and_quarantines`) ran on this machine with exit 0 (2 passed, 418 s), and the dispatch of `radius-e2e.yml` waits for the merged branch (W8.1).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W6.1 | `ef3f1ed0d` | Sonnet | The data model and v100. <br>• Tables `network_segment`, `reply_profile`, `network_policy`, in `TENANT_PURGE_ORDER`. <br>• A segment is a resource row plus a sidecar with the same id, written in one transaction. <br>• `/network`, branch and site nodes have deterministic v5 ids. <br>• The `axiam-radius-reply/1` dictionary is a compile-time table; `ReplyProfileInput` has `deny_unknown_fields`. <br>• Nine `network:*` permissions, all human-only. <br>• The cap `network.session_timeout_max_secs` (default 3600, range 300 … 86400) lives in its own `network_policy` row, not in `security_settings`, which is wire-visible. It is clamped at read. <br>*Tree:* the runner tolerates a version gap (an ordered static list, applying versions above the highest recorded), so v100 after v98 is sound on this branch. |
+| W6.2 | `e9766ce35` | Opus | `axiam-authz` `network_gate`. <br>• H1 … H6, rules 1 … 3, the §5.3 rows, reserved names and resources, the subject scope. <br>• The clearance token can be minted only by the gate. <br>• Gated: roles, permissions, certificate bind, the generic resource routes, UMA register/update/delete. <br>• The enumeration test (a source scan plus a token pin) fails if the bind gate is removed. <br>• Seeded roles: super-admin keeps `network:read` and five meta permissions, and never `join`/`admin`/`grant_admin`. Boot reconcile takes back W6.1's grant, and the seeded admin can no longer assign super-admin. <br>• H3 refusals are `403`. <br>*Residuals recorded for W6.7:* the gate and the write are not one transaction (T-481, Open); org-scope meta permissions (T-483, Open); no success gate row (T-484, Open); H6 not applied to role assignment (became R110W6-01). |
+| W6.3 | `d741349b3` | Sonnet | Segment and profile routes. <br>• Write order: body → gate → reactor veto (`network.pre_*_write`, fail-closed) → conditional write → audit (`*.write_refused` with the internal rule). <br>• `network_admin_per_min` (default 30), one bucket per write route. <br>• The registry goes from 190 to 200 operations and gains a 29th namespace. <br>*Tree:* the plan named no writer for the tenant cap. Asked, and answered by W6.3b. |
+| W6.4 | `fae9d87a5` | Opus | `POST /api/v1/network/decide`. <br>• Callers: cnf-bound service-account tokens only, via `permissions::CERTIFICATE_BOUND_MACHINE_ROUTES`; the network family otherwise stays human-only. <br>• Limits: `network_decide_per_min` 6000 keyed on `sub`, spent before any read, plus a ×10 per-address backstop. <br>• The route is excluded from the registry (§27.0). <br>• Tunnel-Type and Medium-Type carry tag 0; Tunnel-Private-Group-Id carries none. The design note's three "tag `0x00`" lines are corrected with a date (W5.4's finding). <br>• 12 tests, including timing medians within 1.5× and a mutation that drops the ratio to 0.59. <br>*Tree:* `DeviceAuthService` is in `axiam-pki` `mtls.rs`; there is no v101, because the existing audit indexes suffice. |
+| W6.3b | `f479c6530` | Sonnet | `GET`/`PUT /api/v1/network/policy`. <br>• The cap is gated and conditional on the version read. <br>• Audit actions: `raised`, `lowered`, `unchanged`, `write_refused`. <br>• Registry **202 / 29**. <br>*Tree:* `network:admin` (the first answer) is not grantable, so the route was writable by nobody. The maintainer corrected the writer to `network:segments_write` at the root. |
+| fix | `2b0f0cc1c` | Sonnet | The cap is written with `network:segments_write` at `/network`; the `NETWORK_POLICY_WRITE` alias is removed. |
+| W6.5 | `e4dca2686` | Sonnet | The `rlm_rest` recipe. <br>• `freeradius.md` gains §5 D4: mTLS must end at AXIAM (L4 pass-through is fine); the token comes from `POST /api/v1/auth/device`; the request body is closed; the attribute-mapping table; latency; the operator's residuals. <br>• `docker-compose.radius-d4.yml` overrides the base compose file and has no image line. `docker/radius/raddb/d4/` holds the D4 configuration. <br>• The e2e covers: placement, a cached token, an unbound certificate, revocation at the next authentication, quarantine, a wrong site key (`403`), AXIAM down, and 18 non-allow answers that are never copied into the Accept. <br>*Tree:* FreeRADIUS 3.2.8 exposes no client-certificate attribute in the outer post-auth, so the decision runs in `check-eap-tls` post-auth, with a `verify{client}` hook that stashes the SHA-256 by serial. FreeRADIUS has no JSON decoding, so the answer is parsed with one regex per attribute. |
+| W6.6 | `acda86038` | Opus | Contract §36: 36.1 … 36.10 are the SDK surface (human-only); 36.11, the decision, is not SDK work, and rule 6 fixes the answer's shape and member order. <br>Threat model: <br>• T-457, T-461, T-463, T-464 and T-468 go from Not applicable to Mitigated. <br>• T-462 stays Open and gains a D4 column. <br>• New T-478 … T-487. <br>• Diagram 9 is updated. <br>*Tree:* 12 operations, not 10. A `403` carries the permission and the node; the rule goes to the audit row only. |
+| renames | `70c8039cf` | Sonnet | Maintainer answers (2) and (3): <br>• nine components get network/radius names (`NetworkReplyProfile`, `RadiusServiceType`, `RadiusTerminationAction`, …); <br>• `RadiusServiceType` is a hand-written schema enum, `["framed_user"]`, and the Rust enum keeps the admin variants so that they answer `400`. <br>§36 gains `replace_*` and the manifest namespace. |
+| W6.8 | `e4f8c4740` | Sonnet | Console "Network access": the cap panel, segments by kind and site, the typed profile dialog, `403` with permission and node, `409` worded "reload". The decision route is not called. Coverage 96.57%. |
+| W6.8 | `326a8072d` | Sonnet | W3's touches: the `422 scope_exceeds_ceiling` message on the client forms, and the notice that a confidential client holding the device grant must authenticate at both device endpoints. <br>*Tree:* the console's grant list has no device-code entry, and a DCR/CIMD client opens read-only, so the `422` is unreachable from those rows today. |
+| W6.7 | `dacca3318` | Opus | `claude_dev/security-review-release-1.1.0-w6-2026-10-16.md`: **R110W6-01 Medium**; R110W6-02 … -08 and -13 Low; -09 … -12 Informational. |
+| fix | `21ab64fbc` | Opus | **R110W6-01**: H6 also refuses a §5.3 write that widens the writer's own placement — role assign and unassign (including group), role delete, permission grant and revoke. It reads `subject_group_ids`. T-482 → Mitigated; totals 487 / 454 / 23 / 10. |
+| fix | `22fcc5098` | Sonnet | **R110W6-13**: the frontend coverage matrix has rows for `network.rs` and `network_decide.rs`, so `docs-ci` is green. |
+| fix | `9dff2aa97` | Opus | **R110W6-03** (maintainer (c)): a `vlan_id`/`rank`/`enabled` change on a profiled segment needs `network:grant` at it (`H2:placement`), plus `H5:placement` on quarantine. The `freeze_profiled_placement` clearance narrows the write, and the transaction re-reads, so a race gets `409 stale_version`. The profile transaction writes the segment row (`profile_epoch`). T-478 corrected. |
+| fix | `f15f67434` | Sonnet | Maintainer (b): every network `409` carries `reason_code`: `stale_version`, `strands_profile`, `has_children`, `site_gone`, `duplicate_name`/`_vlan`/`_rank`, `profile_exists`, `other`. Documented in §36.3 rule 2, §36.4 and §36.8; the console words the stale case as "reload". |
+| fix | `b3a035413` | Sonnet | Maintainer (a): §36.3 rule 6 says a read is the effective (clamped) value, and that writing a clamped read back stores the cap, not the earlier timeout. There is no stored member. |
+| fix | `122b9ea92` | Opus | Maintainer, "gate delete too": deleting a profiled segment, or a segment's profile, needs `network:grant` at the segment (`H2:placement`), plus `H5:placement` on quarantine, then H6. The delete transaction re-reads the profile, so a race gets `409 stale_version`; the race test uses surrealkv. Design note §5.2/§4.2, §36.3 rules 1 and 2, the OpenAPI texts, T-478 and the console are updated. <br>*Tree:* neither delete asked H6 before this commit; it is added after the placing right. |
+
+**Filed on `1.1.x`:** ilpanich/axiam#700 (R110W6-02), #701 … #707 (R110W6-04 … -10), #708 (R110W6-14), #709 (R110W6-15).
+- #708 is the executor follow-up from `f15f674`: `reason_code` is derived by matching the repository's message text.
+- #709 is the follow-up from `122b9ea`: the console offers the profile editor without `network:grant`, and `PLACEMENT_RACED` is misnamed.
+- R110W6-11 is fixed at the W6 merge; R110W6-12 is W7.1's and W8.3's.
+
+Accepted as is: a profile delete by a writer without the grant answers `403` before `404`, as every other gated write does (permission before existence).
+
+**For W7.1:**
+- §34.6 item (l) counts the network operations from the registry (202 / 29);
+- the §27 rows, the §27.0 exclusion table (five → six), §27.4 rule 5 (seven `replace_*`), the §27.6 `network` namespace;
+- R110W6-12's contract part.
+
+**For W8.3:**
+- the design note's header ("nothing is built") and §3.1;
+- `freeradius.md`'s "Which threat-model entries" paragraph and `:866-868`;
+- `threat-modeling-and-security.md`, the model version and the website prose;
+- the 190 / 28 counts in `website/src` (`data.ts`, `reference.ts`, `integrate.ts`, `security.ts`);
+- `operate.ts:~1019`, D3-only text;
+- T-444, made stale by the W4 merge, below.
+
+**For W8.4:**
+- the `network:*` permissions and the two settings (`network_admin_per_min`, `network_decide_per_min`) as upgrade notes;
+- seeded permission descriptions reach existing tenants only through boot reconcile.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
+
+**The merge into `claude/release-1.1.0` (2026-10-16, by the orchestrator; W4 and
+W6 by an Opus merge executor each, since both needed code to reconcile).** Six
+signed merge commits, pushed:
+
+| Wave | Merge | Conflicts and how they were resolved |
+|---|---|---|
+| W1 | `764fe02d7` | none |
+| W2 | `8cb95aa9a` | T-102 (STRIDE and Threat Dragon): W1's #615/#616 and W2's #654 amendments both kept, W1's first (word-level three-way merge) |
+| W3 | `45243b94d` | `rate_limit.rs` imports (union); `cleanup.rs` and `cleanup_task.rs` keep W1's `certificate_retention` and W3's `rate_limit_bucket` sweeps; the tenant-purge entry keeps #622 then #637; `operate.ts` lists 23 sweeps (24 with the revocation feed); spec and registry deferred to the W6 merge |
+| W4 | `7292eaf56` | W1's orphan claim marker (#622) inside W4's two-phase purge (#655): `begin_orphan_purge` / `purge_orphan_rows` / `remove_purged_tenant`, the orphan unit under W4's `PurgeClaim` (released, not dropped, when given up, so the tombstone sweep finishes it); `ErasureUnit` carries #618's (b4). Also `tenant_purge_test.rs`: two W3 literals gain W1's `orphan: false` (the W3 merge did not compile there). Gate: fmt, clippy both feature sets, `tenant_purge_test` 11, `cleanup_task` 40, `axiam-db --lib tenant` 24, all 0 |
+| W5 | `a6c6340fa` | `freeradius.md`'s Ed25519 bullet: W1 (#651, keys returned as PKCS#8 v1), W5's re-encoding recipe dropped as obsolete. **Correction:** the merge body attributes the recipe to #644; it is **#647** (R101W6-08), which closes as superseded by #651 |
+| W6 | `09350bd2f` | migrations 98, 99, 100 (assertion 100); both limiter backstops; both sizing rows; `radius-e2e.yml` filters united plus W5's script step; both e2e tests; the T-462 row in W6's D3/D4 form with W5's amendment; spec, registry (202 / 29) and `threatModel.ts` regenerated. Fixes the merged tree needed: `unprocessable_entity()` sets `reason_code: None`; the D4 e2e calls W5's six-argument `refresh_crl` with a mirror; the v99 re-apply test deletes `version >= 99`; the enumeration test's exemption names W4's `cleanup.rs::prepare`. **R110W6-11** fixed (`freeradius.md`, `axiam-d4.sh`: serials are unique per issuer). Gate: workspace fmt and clippy `-D warnings` (SAML off; api-rest with SAML on), `axiam-db --lib` 302, the network, certificate, seeder and purge binaries, `axiam-authz --lib` 128, `axiam-api-rest --lib` 305 and the rate-limit binaries, the e2e compiled, every `scripts/check-*` 0 but `check-website-links` (proxy 403) and `check-sdk-artifact-drift` (until W7 re-vendors), console and website `tsc`/lint/vitest 0 |
+
+Threat model after the merge: 487 — 454 Mitigated / 23 Open / 10 Not
+applicable, version still 2.41.0 (W8.3 takes it to 2.42.0). **For W8.3, from
+the merges:** T-444 is stale after the W4 merge (an orphan purge now has a point
+of no return, the marker's removal, and one given up leaves the marker for the
+tombstone sweep); T-462 dropped "the recipe does not call AXIAM per
+authentication" (false with D4); the guide's D3 placement table writes the VLAN
+attributes untagged while §13.5 says W5.4 tagged them — check against the wire
+(W5.4's measurement) and make one statement; the guide's §4 must say a "lower
+than the installed" CRL refusal is expected once after an interval change and
+link the PKI README's rule (§13.5); the STRIDE text and `freeradius.md` still
+say all four Mitigated RADIUS entries are tested by the e2e.
+
 
 ### 13.8 W8 — release readiness
 

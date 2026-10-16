@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.61";
+export const CONTRACT_VERSION = "1.62";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -182,6 +182,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27.5": "#§275-sensitivet-applicability",
  "27.6": "#§276-declarative-management--the-manifest",
  "27.6.1": "#§2761-the-manifest-spec-where-151-makes-it-explicit",
+ "27.6.2": "#§2762-the-network-namespace-in-a-manifest-contract-162",
  "27.7": "#§277-per-language-declarative-form",
  "27.8": "#§278-how-an-sdk-builds-this",
  "27.9": "#§279-required-tests",
@@ -266,6 +267,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34.3": "#§343-divergences",
  "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned",
  "34.5": "#§345-contract-161--the-101-fields",
+ "34.6": "#§346-contract-162--the-110-release",
  "36.1": "#§361-canonical-operation-set",
  "36.2": "#§362-shapes-normative",
  "36.3": "#§363-server-rules-every-sdk-can-observe-normative",

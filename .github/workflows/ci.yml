@@ -529,9 +529,16 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Measured on a failing run: after `cargo test --workspace` the runner
+      # had 4.4G free of 145G and `target/` alone was 104G; the next feature
+      # set (`-p axiam-amqp`, below) then needed fresh dependency artifacts and
+      # died with "No space left on device" at 63 MB free. None of the toolchains
+      # removed here is used by this job; `|| true` keeps a path that a future
+      # runner image drops from failing the step.
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo rm -rf /usr/local/.ghcup /usr/share/swift /opt/az /opt/microsoft /opt/google /usr/local/julia* /usr/local/share/powershell /usr/local/share/chromium /usr/lib/jvm || true
           sudo docker image prune --all --force || true
           df -h
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f  # stable (2026-03-27)
@@ -592,6 +599,22 @@ jobs:
       # pass (the suite only began running once libxmlsec1 was installed, so
       # surfacing the whole picture at once is far cheaper than one-per-run).
       - run: cargo test --workspace --no-fail-fast
+      # The bulk of that 104G is, by construction, the linked test executables —
+      # one per integration-test target across the workspace, most of them
+      # carrying the SurrealDB tree. The step prints `target/debug/deps` before
+      # and after, so the log shows the saving. They have all just run, and nothing below reuses them:
+      # the steps after this one build their own, differently-featured, test
+      # targets. Deleting them frees the room those builds need. Libraries,
+      # build-script output and fingerprints stay, so no dependency is rebuilt
+      # (an executable that is missing is simply relinked if something does ask
+      # for it). Only extension-less executables are touched: `*.rlib`, `*.rmeta`,
+      # `*.d` and proc-macro `*.so` all carry a dot. No test step is dropped.
+      - name: Drop test executables that have already run
+        run: |
+          du -sh target/debug/deps
+          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          du -sh target/debug/deps
+          df -h /
       # The two steps below relink axiam-api-grpc under a different feature set
       # and are where the job ran out of disk. Report free space here so the
       # next capacity failure is diagnosable from the log directly, instead of

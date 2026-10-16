@@ -743,6 +743,20 @@ the OAuth2 client form shows the 422 `scope_exceeds_ceiling` message, and a
 confidential client holding the device grant is told it must authenticate at
 both device endpoints. Gate: vitest with the coverage threshold, `tsc`, lint.
 
+**W6.6's four contract questions (recorded per §10), answered by the
+maintainer on 2026-10-16:** (1) the network `PUT`s keep **`replace_*`**
+(full-body, version-conditional replacements, as §27.4 rule 5's existing four;
+the count becomes seven); (2) the generic OpenAPI components are **renamed**
+before W7 (`ReplyProfile` → `NetworkReplyProfile`, `ServiceType` →
+`RadiusServiceType`, `TerminationAction` → `RadiusTerminationAction`, and any
+other generic network schema name), spec and registry regenerated on this
+branch; (3) `administrative_user` and `nas_prompt_user` **leave the spec**
+(option B refuses them; option A may add them back additively; the server's
+refusal stays); (4) **`network` is a §27.6 manifest namespace in 1.62**
+(natural keys: a segment by site + kind + name, a profile by its segment, the
+policy as a singleton) — §27.6 text by W7.1, `plan`/`apply` in every SDK port
+that ships §27.6.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
 ### 13.8 W8 — release readiness

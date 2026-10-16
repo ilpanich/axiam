@@ -491,6 +491,62 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-1-0",
+    date: "2026-10-16",
+    dateShort: "Oct 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.1.0",
+    excerpt:
+      "AXIAM 1.1.0 adds the RADIUS decision route (D4) for 802.1X with AXIAM-issued device certificates, closes the forty-two Low and Informational findings of the 1.0.1 reviews, and carries SDK contract 1.62 in all eleven SDKs. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "1.0.1 was prepared and never tagged, so 1.1.0 carries it. Forty-three issues closed, the threat model at 2.42.0, contract 1.62 in all eleven SDKs. Some upgrades need an operator first. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.1.0 is" },
+      {
+        type: "p",
+        text: "1.1.0 is the first release after 1.0.0. The 1.0.1 patch was prepared but never tagged, so everything in it ships here. On top of it, 1.1.0 closes the forty-two Low and Informational findings the 1.0.1 reviews filed ([#615](https://github.com/ilpanich/axiam/issues/615) … [#656](https://github.com/ilpanich/axiam/issues/656)) and the last deliverable of the RADIUS tracker ([#563](https://github.com/ilpanich/axiam/issues/563)). Each of the six waves ended in a security review of its own diff and the whole branch in a last one; three Medium findings were found in the release's own diff and fixed in their wave, and the combined review found none.",
+      },
+      { type: "h", text: "RADIUS: the decision route" },
+      {
+        type: "p",
+        text: "AXIAM still speaks no RADIUS. With the `rlm_rest` recipe, FreeRADIUS asks AXIAM once per authentication where an 802.1X device belongs: network segments and typed reply profiles are managed in AXIAM, a certificate-bound service account asks `POST /api/v1/network/decide`, and every negative answer reads the same. It adds nine `network:*` permissions, two limiters, the console's *Network access* section and contract §36. The FreeRADIUS guide and the end-to-end test are in the repository.",
+      },
+      { type: "h", text: "The 1.0.1 findings" },
+      {
+        type: "p",
+        text: "The findings span the CRL and Vault paths, certificate serials and subjects, SAML and federation rate limiting, the device grant, tenant purge and erasure durability, the stop budget, the console and CI. The device grant now authenticates its client at both endpoints, the CRL number cannot go down, certificate serials are random and unique per issuer, and Ed25519 keys are returned in a form OpenSSL 3.0 reads. The [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) has one line per issue.",
+      },
+      { type: "h", text: "Contract 1.62 and the SDKs" },
+      {
+        type: "p",
+        text: "Contract 1.62 records the `network` operations and manifest namespace, the device grant's credential at both endpoints and a change-taking form of the SSF stream update. All eleven SDKs port it at version 1.1.0; the C and C++ SDKs move their shared-library ABI to version 2. Check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "The threat model" },
+      {
+        type: "p",
+        text: "Model 2.42.0 holds **487 threats: 454 mitigated, 23 open, 10 not applicable**. The ten new entries cover the network write gate and the decision route. Open at High or Critical are eleven, none a defect awaiting a fix in AXIAM's code. The reviews' Low and Informational findings are filed on the `1.1.x` milestone.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.1.0]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade; its first group lists what needs an operator. The schema moves from v94 to v100 at startup, additively. In particular: a confidential client that uses the device grant must now authenticate at both device endpoints; the administrator API refuses scopes above a self-registered client's ceiling; the first retention runs delete expired certificate rows; and the orderly stop is 38 seconds inside a 40-second grace period.",
+      },
+      { type: "h", text: "What is not in 1.1.0" },
+      {
+        type: "p",
+        text: "The OpenID Foundation submissions ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open: AXIAM is not certified, and every conformance figure on this site is a self-run. Benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) is not done; the Benchmarks page's numbers are run 5. The native RADIUS front end is not built.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.1.0 is a minor release of the first stable line: REST, gRPC, AMQP and the SDK contract are under semantic versioning. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "axiam-1-0-1",
     date: "2026-10-14",
     dateShort: "Oct 2026",
@@ -547,7 +603,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "Upgrading" },
       {
         type: "p",
-        text: "Read the `[1.0.1]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v94 to v98 at startup, additively. The behaviour changes it calls out: scopes an administrator added to a self-registered client outside `dcr_allowed_scopes` are no longer served; `AXIAM__PKI__CRL_BASE_URL` with credentials, and a Vault address or an IdP endpoint that redirects, are refused; a SAML signature may use only `enveloped-signature` and the canonicalisation family; the federation flow routes share the browser rate-limit bucket; the dead-letter file is `0600`; the Vault token needs `update` on `pki/revoke`; and the stop adds up to 37 seconds inside a 40-second grace period, which an orchestrator that sets its own must match.",
+        text: "1.0.1 was never tagged: its changes are in 1.1.0. Read the `[1.1.0]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v94 to v98 at startup, additively. The behaviour changes it calls out: scopes an administrator added to a self-registered client outside `dcr_allowed_scopes` are no longer served; `AXIAM__PKI__CRL_BASE_URL` with credentials, and a Vault address or an IdP endpoint that redirects, are refused; a SAML signature may use only `enveloped-signature` and the canonicalisation family; the federation flow routes share the browser rate-limit bucket; the dead-letter file is `0600`; the Vault token needs `update` on `pki/revoke`; and the stop adds up to 37 seconds inside a 40-second grace period, which an orchestrator that sets its own must match.",
       },
       { type: "h", text: "What is not in 1.0.1" },
       {

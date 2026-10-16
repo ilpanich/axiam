@@ -7,27 +7,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-10-14
+## [1.1.0] - 2026-10-16
 
-#### Upgrading to 1.0.1 — read before you upgrade
+1.1.0 follows 1.0.0 directly: **1.0.1 was prepared and never tagged**, so this
+section also carries everything that was to be 1.0.1 (those entries are kept as
+they were written, and corrected where 1.1.0 changed them), and the notes below
+take an installation from 1.0.0 straight to 1.1.0. 1.1.0 adds
+RADIUS D4 (#563), closes the forty-two Low and Informational findings the 1.0.1
+reviews filed (#615 … #656) and carries SDK contract 1.62; every closed issue has
+one entry below, ending in its number.
 
-- **The schema moves from v94 to v98.** Migrations v95 – v98 run at startup like
-  every earlier one. Each is additive and none backfills: v95 and v96 add the
+#### Upgrading to 1.1.0 — read before you upgrade
+
+**What needs an operator, first.**
+
+- **The schema moves from v94 to v100.** Migrations v95 – v100 run at startup
+  like every earlier one. Each is additive and none backfills: v95 and v96 add the
   Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
-  v97 adds `tenant.purge_claimed_at`, and v98 adds `certificate.user_id` and its
-  index. A row written before the upgrade reads as "none attempted, due now" or
-  "not bound", and the first sweep or the name convention covers it.
+  v97 adds `tenant.purge_claimed_at`, v98 adds `certificate.user_id` and its
+  index, **v99** adds `serial` to certificates and CA certificates with a unique
+  index per issuer (`(issuer_ca_id, serial)`, `(parent_ca_id, serial)`; a
+  certificate issued before the upgrade has no recorded serial, so it cannot
+  collide, and a root is not recorded; #653), and **v100** adds the three network
+  tables (`network_segment`, `reply_profile`, `network_policy`; #563). A row
+  written before the upgrade reads as "none attempted, due now" or "not bound",
+  and the first sweep or the name convention covers it.
+
+- **Confidential OAuth2 clients that use the device grant must now authenticate
+  (#635, #675).** Before 1.1.0 neither device endpoint authenticated a client.
+  Now `POST /oauth2/device_authorization` and the token poll authenticate the
+  client the way its registration says (a client secret, `private_key_jwt`, or an
+  mTLS certificate), and a public client sends nothing. A client registered
+  without `token_endpoint_auth_method` is confidential, and the 1.0.x quickstart
+  registered device clients that way: its devices send a `client_id` alone and
+  are answered `401 invalid_client` at both endpoints after the upgrade. The poll
+  also requires `client_id` now, and a poll that names another client's device
+  code is `invalid_grant`. Before upgrading, find these clients
+  (`GET /api/v1/oauth2-clients`, `grant_types` containing
+  `urn:ietf:params:oauth:grant-type:device_code`, `token_endpoint_auth_method`
+  not `none`). Either give the devices the credential — an SDK configured with
+  one sends it at both endpoints (contract 1.62 §14.1) — or register a public
+  client (`token_endpoint_auth_method: none`) for devices that keep no secret and
+  move them to its `client_id`; a client cannot be changed between public and
+  confidential (#675 stays open for an administrator `PUT` that would turn a
+  device-only client public). At boot the server logs **one warning** that counts
+  the confidential clients holding the device grant and the tenants that hold
+  them, never a name; the count runs under a 5 s deadline and on a very large
+  installation may read "timed out" (#712). A device token for a DPoP- or
+  mTLS-bound client is now bound too.
 
 - **Scopes an administrator added to a self-registered client are no longer
-  served (#613, #636).** The scope ceiling bounds a `managed_by: dcr` or `cimd`
-  client's scopes by the tenant's effective `dcr_allowed_scopes` wherever they
-  are read. 1.0.0 honoured scopes an administrator put on such a client through
+  served, and the administrator API now refuses to add them (#613, #636).** The
+  scope ceiling bounds a `managed_by: dcr` or `cimd` client's scopes by the
+  tenant's effective `dcr_allowed_scopes` wherever they are read. 1.0.0 honoured
+  scopes an administrator put on such a client through
   `PUT /api/v1/oauth2-clients/{id}` even when they were outside that list; after
   the upgrade they are withheld — `invalid_scope` at authorize, dropped from
-  refreshed and newly minted tokens — while the administrator API still accepts
-  them and `GET` still shows them. To keep serving one, add it to the tenant's
-  `dcr_allowed_scopes` (an empty list offers nothing, as at registration);
-  having the administrator API refuse such a write is #636.
+  refreshed and newly minted tokens — while `GET` still shows them. To keep
+  serving one, add it to the tenant's `dcr_allowed_scopes` (an empty list offers
+  nothing, as at registration). **New in 1.1.0:** that `PUT` answers
+  **`422 scope_exceeds_ceiling`**, naming the scopes, for a scope outside the
+  effective ceiling; a row already beyond a since-narrowed ceiling may keep what
+  it holds but gain nothing. An integration that writes such a row must add the
+  scope to `dcr_allowed_scopes` first.
+
+- **Network access (RADIUS D4) adds nine permissions and two limiters (#563).**
+  The permissions are `network:join`, `network:admin`, `network:read`,
+  `network:segments_write`, `network:profiles_write`, `network:grant`,
+  `network:grant_admin`, `network:decide` and `network:export`. They are
+  human-only in the management API, and the API refuses a `network:` grant to a
+  global role and any resource or permission of the reserved `/network` subtree
+  or `network:` namespace on the generic routes. The seeded `super-admin` role
+  receives `network:read`, `segments_write`, `profiles_write`, `grant`,
+  `decide` and `export`, never `join`, `admin` or `grant_admin`, so holding it
+  places no device anywhere; the seeded `admin` and `viewer` roles receive none,
+  and the seeded `admin` can no longer assign `super-admin`, because assigning it
+  confers the meta permissions the assigner must hold at `/network`. **An
+  existing tenant gets the nine permission rows, their descriptions and the
+  super-admin grants only through the boot reconcile**, not through a
+  migration. Two settings are new: `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN`
+  (default 30, one bucket per write route, never preset) and
+  `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` (6 000 in the machine presets, keyed
+  on the caller's `sub`, plus a per-address backstop of ten times that). The
+  tenant's `Session-Timeout` cap is `network.session_timeout_max_secs` (default
+  3 600, range 300 – 86 400), read and written at
+  `GET`/`PUT /api/v1/network/policy` under `network:segments_write` at the
+  `/network` root. The D4 recipe needs mutual TLS to end at AXIAM, and with no
+  appending proxy in front every per-address limiter keys on a caller-written
+  `X-Forwarded-For` (#686, #711): read `docs/deployment/README.md` "Direct, no
+  proxy" before you expose the listener.
+
+- **Ed25519 private keys are returned as PKCS#8 v1 (#651).** A new Ed25519 key
+  (a certificate issued by AXIAM, a generated CA) is returned in the RFC 8410
+  version-1 form, which OpenSSL 3.0 reads (`openssl pkey`) and the FreeRADIUS
+  recipe needs; the long PKCS#8 v2 form `ring` wrote is refused by OpenSSL 3.0.
+  Keys issued before 1.1.0 stay in the long form — AXIAM stores no private key
+  of a leaf, so reissue the certificate if its holder needs the new form.
+
+- **The first `certificate_retention` runs delete rows (#618).** The new sweep
+  deletes every certificate row that is eight days past its `notAfter` in a live
+  tenant, up to 10 000 rows per tick, and an erased account's certificate
+  `metadata` is cleared at erasure. An installation that has kept expired
+  certificate rows since 1.0.0 loses them at the first runs, over as many ticks
+  as it takes; export what you need first. The eight days are the grace the
+  revocation list needs (the tenant purge keeps a revoked row for the same
+  time). The legal basis recorded for the rows that are kept until then is
+  Art. 6(1)(f) and Art. 32 (the GDPR guide, T-187).
+
+- **Certificate subjects are checked (#649).** A common name, and every other
+  subject attribute, with a control character, a non-space whitespace or bidi,
+  zero-width or format character, a leading, trailing or doubled space, or more
+  than 64 characters (characters, not bytes) is now `400`, and so is a CSR with
+  two common names; so is a `vault_pki` intermediate whose default name would
+  exceed 64 characters. A tool that sends a long organisation-qualified name must
+  shorten it.
+
+- **AMQP: the actions `tenants.` and `gdpr.` are reserved (#637).** An AMQP
+  request whose action begins with either (ASCII case-insensitive) is sent to the
+  dead-letter queue after the signature checks and before the nonce. A tenant
+  purge now bounds the audit rows it deletes by the export receipt found in the
+  deleted tenant's own log, and `DELETE /api/v1/tenants/{id}` answers `409` for
+  a receipt that claims rows after itself.
+
+- **The orderly stop is 38 s, not 37 s (#628).** The stop adds up to
+  20 + 5 + 1 + 2 + 5 + 5 = **38 s** inside the 40 s grace period (the lease
+  release is a 1 s step of the budget, and a lost lease is not released), the
+  dead-component backstop is **39 s** (was 38 s in the 1.0.1 notes, 35 s in
+  1.0.0) and the stop after a lost lease stays 13 s. The grace period must
+  still be at least 40 s: the Compose files and the Kubernetes manifest in
+  this repository say so. A lost lease seen during a `SIGTERM` stop now exits
+  non-zero, as the deployment guide always said.
+
+- **Client SDKs.** All eleven SDKs are at **1.1.0** and implement contract 1.62
+  (the `network` operations and manifest namespace, the change-taking form of the
+  SSF stream update, the device-grant credential at both endpoints). Each SDK's
+  `[1.1.0]` change log lists its source-breaking changes; the **C and C++ SDKs
+  move their shared-library ABI to version 2** (`SOVERSION 2`) because
+  caller-allocated structs grew, so rebuild anything linked against 1.0.x.
+
+**Settings and answers that change.**
 
 - **Settings that now refuse to start, or refuse a request, where 1.0.0 accepted
   them.** `AXIAM__PKI__CRL_BASE_URL` carrying credentials (`user@host`) stops
@@ -48,27 +166,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Okta, Shibboleth and samael are unaffected.
 
 - **Rate limits and caps that integrators can meet.** The five federation flow
-  routes share `end_session_per_min` per address, one bucket each (#614), so a
-  backend that relays many people's sign-ins from one address should raise it. A
-  client may make three `bc-authorize` calls for one hint in ten minutes and
-  gets `429 slow_down` after that (#599): a test driver that runs more than
-  three CIBA flows for one user from one client in that window, FAPI-CIBA
-  conformance plans included, will be refused for ten to twenty minutes
-  (R101W3-06).
+  routes keep one bucket each (#614), and an authenticated caller's bucket is
+  keyed on the verified principal, `(tenant, sub)`, not on its address (#633): a
+  backend that relays many people's sign-ins from one address is no longer one
+  caller, and one token used from many addresses is one. Each route also keeps a
+  per-address backstop of ten times `end_session_per_min` (300 a minute at the
+  default; in-process, per replica). The authenticated ACS and OIDC callback have
+  buckets of their own, `federation_link_saml_acs` and
+  `federation_link_oidc_callback` (#632), so a counter that the public sign-in
+  routes shared is split in two. A client may make three `bc-authorize` calls for
+  one hint in ten minutes and gets `429 slow_down` after that (#599);
+  `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` sets the allowance (#639) and a
+  refused call is no longer counted, so a test driver that runs more flows than
+  the allowance for one user from one client — FAPI-CIBA conformance plans
+  included — raises it (the conformance harness sets 1 000) and is otherwise
+  refused for ten to twenty minutes (R101W3-06).
 
 - **Answers that change.** A tombstoned tenant's clients get `invalid_client`
   where the grants said `invalid_request` (#601); the device grant refuses a
   suspended or locked-out account with `invalid_grant` (#604); `DELETE
   /api/v1/users/{id}` revokes the account's `User` certificates (#533); a tenant
   purge deletes only the audit rows the export holds and keeps the rest for the
-  retention sweep (#602).
+  retention sweep (#602). In 1.1.0 a
+  service-account (`sa_`) `client_credentials` request for a tombstoned tenant is
+  `invalid_client` after its verify (#641), the device poll names its client
+  (#635), CIBA mints no ID token without the `openid` scope (#642), and a SAML
+  ACS that cannot take a crypto permit in time answers the `401` of a bad
+  signature while the IdP's SSO and SLO receivers answer `503` with
+  `Retry-After: 5` (#654).
 
 - **Operations.** The audit dead-letter file is created `0600`, an existing one
   is tightened to `0600` when next opened, and its lines are `{"occurred_at",
   "reason", "entry"}` (#594, #595); a reader running as another user loses
-  access. An orderly stop now adds up to 37 s inside the 40 s grace period and
-  the dead-component backstop moves from 35 s to 38 s, so the orchestrator's
-  grace period must be at least 40 s (#598). `GET /health/jobs` gains the job
+  access. The orderly stop and its backstop are in the first group above (#598,
+  #628). The cleanup task gains two sweeps, `certificate_retention` (#618) and
+  `rate_limit_bucket` (#638). `GET /health/jobs` gains the job
   `vault_revocation_failing` (#603) and the field
   `request_audit.outbound_abandoned_dropped` (R101W4-01). The CRL number is
   larger than any 1.0.0 number, so it keeps rising across the upgrade; its
@@ -98,20 +230,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercised. AXIAM still speaks no RADIUS. The authentik comparison's RADIUS row
   reads *recipe, not native*. `claude_dev/radius-reply-profile-design.md` is the
   design note for the reply profile and the network-segment pattern (D5; no
-  code). **What remains of #563 is D4**, the `rlm_rest` authorize endpoint: it
-  needs a contract section and the reply-profile bindings as code, and is
-  scheduled only if the recipe's CRL interval or attribute model proves
-  inadequate; the issue stays open for it. Threat model: T-449
-  (`Message-Authenticator` required), T-454 (the recipe vendors nothing), T-456
+  code). D4, the `rlm_rest` authorize endpoint, is the next entry. Threat
+  model: T-449 (`Message-Authenticator` required), T-454 (the recipe vendors nothing), T-456
   (EAP-TLS only, TLS 1.3 only) and T-459 (the tenant signing CA is the only
   anchor) move from Not applicable to Mitigated with that end-to-end as their
   test; **T-450 and T-462 move to Open** — the recipe exposes an adopter to the
   EAP-TLS keys travelling under MD5 obfuscation on plain UDP and to a revoked
   device being admitted until FreeRADIUS has read the list (R101W6-09); the
-  other fifteen RADIUS entries stay Not applicable and each says why. T-449
+  other fifteen RADIUS entries stay Not applicable for the recipe and each says
+  why (D4 moves five of them to Mitigated, next entry). T-449
   carries a dated correction (`Proxy-State` is returned unmodified, not refused,
   RFC 2865 §5.33), as do T-453 (RFC 5080 §2.2.2's duplicate key), T-459 (the
   shared organization root) and T-461 (the placement table's key).
+
+- **RADIUS D4: AXIAM decides the placement of each 802.1X authentication, and
+  holds the network segments and reply profiles that decision reads (#563).**
+  FreeRADIUS still terminates RADIUS and EAP-TLS. With the `rlm_rest` recipe
+  (`docs/pki/freeradius.md` §5, `docker/docker-compose.radius-d4.yml`) it asks
+  `POST /api/v1/network/decide`, once per authentication, which VLAN, filter and
+  `Session-Timeout` the device gets, or that it gets none; only a
+  certificate-bound service account may ask, and every negative answer reads the
+  same. A segment is a resource in the reserved
+  `/network/{zones|quarantine}/<site>/<segment>` subtree, so deny-override and
+  inheritance apply and a quarantine is a deny; its reply profile is typed, in
+  the closed `axiam-radius-reply/1` dictionary, and clamped to the tenant's cap.
+  New: twelve management operations (the registry is now **202 operations in 29
+  namespaces**, with a `network` manifest namespace), a write gate (H1 – H6 and
+  the §5.3 bounds on every route that could create or widen a placement), the
+  nine `network:*` permissions, the `network_admin_per_min` and
+  `network_decide_per_min` limiters, schema v100, contract §36, the console's
+  *Network access* section, and an end-to-end test (`eapol_test` through
+  placement, a cached token, an unbound certificate, revocation at the next
+  authentication, quarantine, a wrong site key, AXIAM down and 18 non-allow
+  answers). Threat model: T-478 … T-487 enter; T-457, T-461, T-463, T-464 and
+  T-468 move from Not applicable to Mitigated; T-462 stays Open. The native
+  RADIUS front end (option A) stays unbuilt.
+
+- **The CIBA hint cap's allowance is a setting, and a refused call is no longer
+  counted (#639).** `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (default 3, at
+  least 1, checked at boot) sets how many `bc-authorize` calls one client may
+  make for one hint in ten minutes. A refused call is taken back by a
+  conditional decrement, so a driver that retries is not held refused by its own
+  retries, and the bound — at most the allowance in any two consecutive windows,
+  across replicas — holds under concurrency; a late call overtaken by the next
+  window is refused, which closes a hole of 1.0.1. The conformance harness sets
+  1 000.
+
+- **A boot warning counts the confidential clients that hold the device grant
+  (#675 — the issue stays open on 1.1.x; this entry does not close it).** One
+  `warn!` at startup names the number of such clients and of tenants, never a
+  client or tenant name, and points at this change log and
+  `docs/api/device-flow.md`; it never fails or delays boot. What stays open is
+  letting an administrator `PUT` turn a device-only client public.
 
 ### Security
 
@@ -166,7 +336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. An expired certificate leaves a list only at an epoch boundary, as RFC
   5280 §3.3 expects, so the tenant purge keeps a revoked certificate row until
   eight days past its `notAfter`. The CRL number is monotone only under the
-  conditions #615 names. Threat model: T-472 and T-102 amended.
+  conditions #615 names (below). Threat model: T-472 and T-102 amended.
 
 - **A Vault revocation that Vault refuses for good no longer starves the sweep
   (#603, R1W1-05).** The sweep read the oldest hundred unforwarded revocations
@@ -234,8 +404,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status) by another account of the tenant, so erasing `Alice` no longer revokes
   `alice`'s certificate (R101W1-01); an older or ambiguous one is revoked by id.
   An erased account's revoked certificate rows keep the PEM, subject and
-  `metadata` for the tenant's lifetime (#618). Schema migration **v98**, no
-  backfill. Contract 1.61 §27.11 rule 5. Threat model: T-336 and T-187 amended.
+  `metadata` for the tenant's lifetime (as first shipped; #618, below, clears the
+  `metadata` at erasure and deletes the row eight days past `notAfter`). Schema
+  migration **v98**, no backfill. Contract 1.61 §27.11 rule 5. Threat model: T-336 and T-187 amended.
 
 - **SAML single logout is tested against a real service provider (#538,
   P23W4-09).** The Keycloak round trip (`saml_idp_keycloak_roundtrip_test`)
@@ -298,12 +469,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /api/v1/federation/oidc/authorize` and `POST /api/v1/federation/oidc/callback`.
   Each now carries the browser-endpoint preset (`end_session_per_min`, per IP,
   default 30) in a bucket of its own (`federation_saml_authn_request`,
-  `federation_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`,
-  `federation_oidc_callback`), so one route's exhaustion never spends another's
-  allowance; past its bucket a route answers `429`. No new setting. A backend
-  that relays many people's federated sign-ins to these routes from one address
-  shares one bucket per route and should raise `end_session_per_min`. Threat
-  model: T-474 carries a dated extension; totals unchanged.
+  `federation_link_saml_acs`, `federation_saml_metadata`,
+  `federation_oidc_authorize`, `federation_link_oidc_callback`), so one route's exhaustion never spends another's
+  allowance; past its bucket a route answers `429`. No new setting. (As first
+  shipped the buckets were keyed on the address, so a backend that relayed many
+  people's federated sign-ins from one address shared one bucket per route; since
+  #633 an authenticated caller is keyed on its principal, with a per-address
+  backstop, and the authenticated ACS and callback have buckets of their own,
+  #632 — see the Security and Fixed sections.) Threat model: T-474 carries a
+  dated extension; totals unchanged.
 - **Replacing or clearing a SAML configuration's assertion certificate is
   audited (#611).** `idp_signing_cert_pem` is the anchor of every federated
   sign-in, yet changing it wrote no specific audit row while the metadata
@@ -518,6 +692,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were published after 1.0.0 was cut, and `cargo audit` in the Security Scan job
   failed on them. A `Cargo.lock` change only; no source or behaviour changes.
 
+- **The CRL number can no longer go down (#615).** `thisUpdate` is clamped to
+  the refresh epoch's end less one second and the entries to `thisUpdate`, so a
+  datastore clock ahead of the epoch cannot raise a list's number and then lose
+  it. There is no high-water row, because one would end the byte-identical lists
+  of every replica (#608). The number stays monotone across a change of
+  `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` if and only if the new interval is at most
+  twice the old; the PKI guide and contract §35 state the rule. Threat model:
+  T-102 amended.
+
+- **The CRL route no longer queues unauthenticated callers without bound
+  (#616).** Each CA's re-sign is one spawned flight; callers that arrive during
+  it wait at most the permit wait (5 s) and share its outcome, a `503` too, and a
+  caller that hangs up no longer cancels the re-sign. Threat model: T-102.
+
+- **A failed key release no longer makes a tenant CA's Vault forward refused for
+  good (#617).** When Vault refuses a revoked CA's forward because the serial is
+  still an issuer in the mount, the sweep re-releases the CA's own issuer and
+  then forwards. T-470 names the single-mount dependency.
+
+- **An erased account's certificate rows no longer keep personal data (#618).**
+  The erasure clears the account's certificate `metadata` (keeping `user_id` as
+  the retry key), and the new `certificate_retention` sweep deletes a row eight
+  days past `notAfter` in live tenants — bounded per tick, stop-aware and safe
+  with two replicas. One definition of the revocation grace now feeds the tenant
+  purge's keep and the new grace. This replaces the 1.0.1 entry above that kept
+  the rows for the tenant's lifetime. Threat model: T-187 amended.
+
+- **A Vault refusal's text is sanitised before it reaches the audit log
+  (#619).** The reason is masked (the `b.` token prefix included) and cut at
+  both audit appends and both forward logs; the reason returned to the caller
+  stays whole, because the sweep's matcher reads it. Threat model: T-470.
+
+- **Four small races and edges close (#622).** (a) An orphan purge claims a
+  tombstoned marker row under the orphan's id and re-checks for rows under the
+  claim, and only the replica whose delete removes the marker records the purge;
+  (b) both certificate issuance routes re-read the account after the create and
+  revoke, answering `400` with nothing returned, when it is gone, and user
+  deletion revokes once more after its tombstone; (c) `DELETE` of an unknown
+  user revokes nothing; (d) the Vault failure record is conditional on the
+  claim's lease. Threat model: T-472 corrected, T-336 amended.
+
+- **Certificates on the same public key get different serials (#653).** Every
+  local signing site draws a 20-octet random serial (top bit clear); Vault's
+  `sign-verbatim` picks its own. Schema v99 records the serial and makes it
+  unique per issuer. A relying party that keys on `(issuer, serial)` — the
+  FreeRADIUS recipe's placement table does — no longer sees two certificates
+  collide.
+
+- **Certificate subjects refuse control characters and over-long names (#649).**
+  The common name refuses control, bidi, zero-width and other format characters,
+  stray spaces and more than 64 characters, never echoing the value; a CSR with
+  two common names is refused and every subject attribute passes the same rules
+  on the local and the Vault paths, before any Vault request. Threat model:
+  T-461 amended and corrected.
+
+- **SAML verifications no longer wait without bound on the crypto semaphore
+  (#654).** A `CryptoGate` bounds every SAML acquire by
+  `hash_acquire_timeout_secs`. A busy ACS answers the same `401` and body as a
+  bad signature, metadata fails as before, and the IdP's SSO and SLO receivers
+  answer `503` with `Retry-After: 5` and write no state; the IdP's own signing
+  (authenticated) stays unbounded. Threat model: T-477, T-102 and T-474 amended.
+
+- **The authenticated federation flow routes are limited by principal, not by
+  address (#633).** The five routes key both limiter layers on the verified
+  `(tenant, sub)` taken from the audit middleware's cached identity — no extra
+  verification — so a backend relaying many users from one address is not one
+  caller and one token used from many addresses is one. A sender-constrained
+  token is keyed on `(address, tenant, sub)`, a request with no identity on its
+  address. Each route keeps an outermost per-address backstop at ten times
+  `end_session_per_min` (300 a minute at the default; in-process, per replica).
+  Threat model: T-474 extended.
+
+- **The device grant authenticates its client (#635).** Both device endpoints
+  authenticate the client by its registered method, with the FAPI and `cnf`
+  checks of the other grants; an unknown client costs one verify against a fixed
+  hash; a foreign `client_id` is `invalid_grant` before the poll is recorded, so
+  no refusal spends or reveals a grant; the public-client poll bucket is keyed on
+  the route limiter's client address, not on the proxy (R110W3-01, which also
+  fixes public code and refresh requests behind a proxy). RFC 8628's "no client
+  authentication" holds for public clients only. See the upgrade note. Threat
+  model: T-289.
+
+- **The scope ceiling no longer withholds administrator-added scopes silently
+  (#636).** `PUT /api/v1/oauth2-clients/{id}` of a `dcr` or `cimd` row refuses,
+  with `422 scope_exceeds_ceiling`, a scope outside the effective
+  `dcr_allowed_scopes`. See the upgrade note.
+
+- **A forged export receipt can no longer set the purge bound (#637).** The
+  actions `tenants.` and `gdpr.` are refused from AMQP (to the dead-letter queue,
+  after the signature checks and before the nonce); a tenant purge deletes up to
+  `min(exported_through, receipt timestamp)` of the receipt found in the deleted
+  tenant's own log, and keeps the whole trail when there is none; deletion
+  refuses a receipt that claims rows after itself. Threat model: T-118 corrected,
+  T-472 amended.
+
+- **The CIBA hint cap's rows are swept (#638).** The cap reads the previous
+  window with a plain read, not an upsert, and the new `rate_limit_bucket` job
+  deletes rows older than twice the longest window in use (600 s) plus a 60 s
+  clock margin — bounded and safe with two replicas. Threat model: T-424 amended
+  (T-422's note with it).
+
+- **Residual paths after the tombstoned-tenant fix are closed (#641).** The
+  tenant tombstone transaction deletes the tenant's `device_grant` rows, and a
+  service-account (`sa_`) `client_credentials` request for a tombstoned tenant
+  answers `invalid_client` after its verify instead of a distinguishable
+  `invalid_request`. The other two paths of the issue were closed with #635. Threat model: T-472
+  amended.
+
+- **The IdP's self-checks parse with recovery off (#634).** Both
+  `saml_idp/sign.rs` self-checks use the receiver's parser options; a source-scan
+  test pins both calls.
+
+- **The FreeRADIUS CRL fetch refuses a forged or older list (#643).**
+  `docker/radius/fetch-crl.sh` installs only a `200` that parses, whose
+  `openssl crl -verify` prints exactly `verify OK` (OpenSSL exits 0 on "verify
+  failure"), and whose number is not lower than the installed one; it sends the
+  stored entity tag (one well-formed tag, bound to the installed file's SHA-256),
+  treats `304` as unchanged, holds a lock for the run, pins the scheme (`http://`
+  only with `FETCH_CRL_ALLOW_HTTP=1`) and never follows a redirect. The guide
+  links it; the end-to-end and a 64-check script harness run its refusals.
+  Threat model: T-462 amended (still Open).
+
+- **rustls moves from 0.23.45 to 0.23.46 (RUSTSEC-2026-0346 … -0349).** The
+  advisories (secrets in `Debug` output, an ECH rejection that exposes
+  outer-server data, Brotli certificate decompression of up to 1 GiB, a
+  ServerHello key-exchange downgrade) were published after 1.0.0; `cargo deny`
+  and `cargo audit` failed on them. The yanked `yoke-derive` 0.8.3 moves to
+  0.8.4. `Cargo.lock` only, and the lockfiles of `examples/b3-mesh-delegation-grpc`
+  and `tools/surreal-race-probe`; no source changes.
+
 ### Fixed
 
 - The console's tenant Settings page no longer writes the organization's
@@ -567,8 +871,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   told to stop before the drains, starts no further sweep, GDPR erasure or
   export, and is given 5 s after the audit drain (2 s after a lost lease) before
   the sweep it is in is cut, so a long sweep at `SIGTERM` no longer meets the
-  orchestrator's kill. The `SIGTERM` stop now adds up to 37 s inside the 40 s
-  grace period; the dead-component backstop moves from 35 s to 38 s. In the
+  orchestrator's kill. The `SIGTERM` stop now adds up to 38 s inside the 40 s
+  grace period (37 s as first written; #628 made the lease release a step of the
+  budget); the dead-component backstop moves from 35 s to 39 s. In the
   minimal profile, the stop after a lost lease fits its 15 s backstop: requests
   still in flight 5 s after the loss are cut (closed without a response) so the
   audit drain runs, where before a slow request held the drain until the
@@ -616,9 +921,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-item, two records sharing a line, did not hold: each record is one
   `write_all`, and a test now pins it.) Threat model: T-108 amended.
 
+- **The bootstrap Vault client is built, and tested, through the one builder
+  that never follows a redirect (#620).** `axiam_auth::secrets::bootstrap_client()`
+  shares its no-redirect builder with the private-CA client, and the redirect
+  test builds through it (checked by mutation). Threat model: T-476 corrected.
+
+- **Two rate-limit buckets no longer share a name with existing ones (#632).**
+  The authenticated SAML ACS and OIDC callback were registered under
+  `federation_saml_acs` and `federation_oidc_callback`, the names of the public
+  first-time-SSO routes, so each pair was one counter with two limits; they are
+  now `federation_link_saml_acs` and `federation_link_oidc_callback`. A
+  source-scan test (`rate_limit_bucket_names_test.rs`) fails on a repeated
+  bucket name; the two intentional exceptions (`directory_config`, `uma_rreg`)
+  are listed with their exact counts. This corrects the 1.0.1 entry above, which
+  claimed a bucket of its own for each route.
+
+- **The tenant audit export and its receipt use the datastore's clock (#640).**
+  `AuditLogRepository::datastore_now()` (required, with no `Utc::now()` default)
+  bounds the export, and the receipt is written after the last page, so the
+  bound and the audit timestamps are on one clock. Threat model: T-118.
+
+- **Text and hygiene after the 1.0.1 OAuth2 wave (#642).** The reason for voiding
+  a deleted client's device grants is corrected where it was written (the poll
+  authenticated no client; a CIMD client cannot hold either grant — the `#610
+  (d)` entry above, T-289), the client `DELETE` text lists device grants and
+  CIBA requests, CIBA mints no ID token without `openid`, and `boot.rs` is
+  re-indented; the OpenAPI document carries the wave's changes.
+
+- **Ed25519 private keys are returned as PKCS#8 v1, which OpenSSL 3.0 reads
+  (#651).** `ring` wrote the long version-2 form (an embedded public key) that
+  OpenSSL 3.0.13 refuses; the four `serialize_pem` sites now return the RFC 8410
+  version-1 form (`openssl pkey` exits 0). The FreeRADIUS guide's re-encoding
+  workaround is gone. See the upgrade note for keys issued earlier.
+
+- **The conformance workflow's `module_timeout` no longer reaches bash
+  arithmetic (#623).** `fapi-conformance.yml` validates `plan_name` and
+  `module_timeout` in a first step, before checkout, with the inputs passed
+  through `env:` and errors `%q`-escaped; `conf_require_uint` in `lib-env.sh`
+  refuses a non-numeric value before any arithmetic in `run-plan.sh` and
+  `run-some.sh`; `validate_inputs_test.sh` (281 checks) runs in CI. A dispatch
+  with `a[$(…)]` failed in the validation step with the value only escaped.
+
+- **A cut erasure keeps its audit row (#624).** A user's whole erasure runs as a
+  unit of its own (`cleanup::AuditedWork`) from the pipeline through the
+  `account_deletion` completion and `gdpr.user_pseudonymized`; the stop
+  waits for it inside the cleanup bound, and the unit gives itself up before its
+  point of no return (the anonymization), never crossing it once the stop has
+  been requested. A unit cut past that point is logged and listed in T-444.
+
+- **A cleanup cut no longer holds a tenant purge for an hour or loses its record
+  (#655).** The same design for a tombstoned tenant's purge (claim →
+  `tenants.purged`) and an orphan's: the stop is checked between tenants, the
+  purge stops before the removal of the tenant row, and a drop guard releases
+  the claim on every exit but success, so the next start purges at once. The
+  guide's list of what a cut cleanup can leave is restated. Threat model: T-444
+  and T-472 amended.
+
+- **The GDPR dead letter's structured event can no longer be skipped (#625).**
+  `axiam.audit.dlq` is emitted before the file append, and the file's failure has
+  an event of its own. The append is not spawned (a detached write would escape
+  the bounded stop join); the residual is in T-108.
+
+- **Turning a surface back on under an organization `false` says it stays off
+  (#627).** After a save that turned the SAML IdP or SSF switch on, the tenant
+  settings page says it stays off while the organization keeps it off — only
+  then, never on a failed read-back.
+
+- **The lease release is inside the stop budget, and the REST cut is tested
+  (#628).** The cleanup task is told to stop as soon as the REST listener
+  returns and at a lease loss itself, which closes the 0 – 7 s gap; the lease
+  release is a 1 s step of the budget (`ShutdownBudget::lease_release`), so the
+  orderly stop is 38 s and the backstop 39 s (see the upgrade note); and the
+  lost-lease cut of a request in flight is tested through the listener, with a
+  sign-in whose body is held.
+
+- **The unattended conformance baseline records where it came from, and the
+  gate refuses a plan it does not know (#630).** `gate.py` refuses a plan that
+  `baseline.json` does not name unless `--new-plan` says so (37 unit tests), and
+  `baseline-unattended.json` was re-recorded from `fapi-conformance` run
+  38779757053 — its plans are identical to the old lists, so only `source` gained
+  the dated provenance.
+
+- **A check that the FreeRADIUS recipe vendors nothing (#648).**
+  `scripts/check-radius-vendors-nothing.py` (with a self-test) runs in
+  Architecture Invariants; T-454 cites it beside `cargo-deny`'s licence list and
+  states what it does and does not catch.
+
+- **The `radius-e2e` path filter covers what the end-to-end depends on (#650).**
+  `crypto.rs`, `subject.rs`, `server.rs` and the check script join the filter.
+
+- **`Tunnel-Private-Group-Id` is written with its tag (#652).** The guide and
+  the end-to-end write the three VLAN attributes with `:0`; FreeRADIUS 3.2.8
+  encodes `Tunnel-Private-Group-Id:0` exactly as the untagged form, so the
+  end-to-end pins the Accept's octets and fails on any non-zero tag. The design
+  note's "tag `0x00`" lines are corrected, dated.
+
 ### Documentation
 
-- **SDK contract 1.61: the 1.0.1 fields.** `sdks/CONTRACT.md` records, in the new **§34.5** and
+- **SDK contract 1.61: the 1.0.1 fields (carried by contract 1.62, below).** `sdks/CONTRACT.md` records, in the new **§34.5** and
   marked inline where each rule lives, what 1.0.1 added to the surface an SDK sees. Additive,
   and the only SDK work: `Certificate.user_id` and the optional `user_id` on certificate issue
   and CSR signing, with the rule for which certificates deleting, erasing or linking an account
@@ -628,8 +1028,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (§33.3 rule 16, #599). Informative: the per-hint cap on `bc-authorize`, the SHA-1 escape hatch
   admitting SHA-1 only, the assertion-certificate audit names, a managed client's scopes under the
   tenant's current policy, the certificate revocation list's cache lifetime and replica-identical
-  bytes (under a fixed interval and agreeing clocks; the cases where the number falls are
-  #615), a CA's revocation under Vault custody, the device grant's account check, the removal of a
+  bytes (under a fixed interval and agreeing clocks; #615 narrows the cases where the number
+  falls to an interval change beyond twice the old one), a CA's revocation under Vault custody, the device grant's account check, the removal of a
   client or a tenant, and the `400` for an unsafe `backchannel_logout_uri`. No operation is added;
   `openapi.json` and `management-registry.json` are regenerated by the same release, and every
   SDK re-syncs.
@@ -639,35 +1039,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.40.0, where T-469 is Mitigated; the tree was checked again for 1.0.1 and
   nothing changed.
 
-- **Threat model 2.41.0: the 1.0.1 release in one model.** The model is **477
-  threats, 443 mitigated / 19 open / 15 not applicable** (2.40.0: 475, 437 / 17
-  / 21). T-476 (a Vault redirect carries `X-Vault-Token` off-host) and T-477 (a
-  received XML signature chooses what the verifier evaluates) enter Mitigated.
-  T-449, T-454, T-456 and T-459 move from Not applicable to Mitigated and T-450
-  and T-462 to Open for the FreeRADIUS recipe (see Added); the RADIUS entries
-  whose elements are the unbuilt native front end's now say so, and the
-  diagram's title says the native listener is not built. Open at High or
-  Critical are now eleven (T-450 joins the ten), none a defect awaiting a fix in
-  AXIAM's code. Entries amended with a dated correction in their own text: T-39,
-  T-55, T-67, T-69, T-102, T-108, T-112, T-118, T-163, T-187, T-275, T-289,
-  T-336, T-406, T-415, T-422, T-424, T-444 (three exceptions to "the next start
-  resumes it", not two), T-445, T-453, T-459, T-461, T-470, T-472, T-474 and
-  T-475. The five copies (`Axiam.json`, `threat-model-stride.md`,
-  `threat-modeling-and-security.md`, the website's generated model and its
-  Security page) are derived from the JSON once. The release's F4 reviews are
-  the `claude_dev/security-review-release-1.0.1-*.md` files, one per wave and
-  one for the combined branch (whose one Medium finding, R101-01, was fixed
-  before the release); their Low and Informational findings are #615 … #656.
+- **Text behind the code after the certificate and Vault fixes (#621).** (a) The
+  admin guide and the Operate page say a revoked certificate's row is kept
+  "eight days after it expires"; (b) `vault_revocation`'s real failure rule is
+  stated; (c) `crates/axiam-server/tests/crl_purge_margin.rs` pins
+  `REVOCATION_GRACE_SECS` at no less than the longest CRL `nextUpdate` plus a day
+  (it fails at seven days); (d) the Operate page lists every sweep.
 
-- **The eleven client SDKs** carry contract 1.61 in their `[1.0.1]` changelogs;
-  each lists what changed in it. The deployment guide, the Compose and
-  Kubernetes comments and the website's *Operate* page state the same stop
-  arithmetic as `boot.rs` (#598), and the guide's list of what a cut cleanup can
-  leave has three exceptions (R101-03, #655).
+- **#626 — already done in 1.0.1.** The 1.0.1 notes carry an entry each for
+  #590 and #594, written by 1.0.1's own release task; they are in this section
+  (#626).
 
-### Deferred to 1.0.x
+- **#629 — already done in 1.0.1.** The deployment guide, both Compose files, the
+  Kubernetes manifest and the Operate page list the five stop steps and the
+  lease-loss drain of 3 s; 1.1.0 changes the arithmetic itself (the upgrade note
+  on the 38 s stop), and the same places state the new sum (#629).
 
-What 1.0.1 does not contain, named so that nobody has to infer it. Each item is
+- **The FreeRADIUS guide states what the CRL reload re-reads (#644).**
+  `ca_path_reload_interval` re-reads the CA directory, not `ca_file`; replace
+  `ca.pem` atomically and never delete it without a restart, and an "Error
+  replacing X509 store" line means the old trust still holds.
+
+- **The revocation lag includes HTTP caching (#645).** Fetch the list direct or
+  with `no-cache`; the stated bound is the fetch interval plus
+  `ca_path_reload_interval` plus the session's `Session-Timeout`, plus any shared
+  cache's `max-age`. The design note's cell carries a dated correction.
+
+- **The guide covers RadSec's and the NAS's halves of Blast-RADIUS (#646).**
+  `require_message_authenticator = yes` on the RadSec client and the NAS's own
+  half are stated.
+
+- **#647 closes as superseded by #651.** The guide's Ed25519 re-encoding
+  snippet, which left the private seed on disk, is gone: keys are returned as
+  PKCS#8 v1, so there is nothing to re-encode (#647).
+
+- **API clients can no longer widen a stream narrowing by mistake (#631).**
+  Contract 1.62 requires every SDK to offer a change-taking form of the SSF
+  stream update, so a helper sends what it read and a caller states only the
+  change; the plain converter keeps a documented duty. The eleven SDKs port it,
+  and the OpenAPI text and §32 say the same.
+
+- **Contract §33.3 rule 16 states the CIBA list's per-address backstop (#656).**
+  §27.15 note 10, stale since 1.0.1, is corrected with it, and the route's
+  OpenAPI response description names the backstop.
+
+- **SDK contract 1.62.** `sdks/CONTRACT.md` records it in §34.6, items (a) – (ae):
+  the `network` management namespace (§36, twelve operations, whose full-body
+  `PUT`s are `replace_*` writes, §27.4 rule 5) and its manifest namespace
+  (§27.6.2); the device grant's credential at both endpoints (§14.1, §14.2),
+  with client secrets in the form body only; the change-taking SSF form; the
+  rule that `null` on a request member is dropped and the request `user_id` is
+  an untyped string; a converter over a typed `updated_at` keeps the server's
+  string; the three-meanings text at the `update_stream` call site;
+  `rate_limit_exceeded` replaced by the code's `slow_down` in §33.3 rule 13; no
+  session or adopted credential on any `/oauth2/*` request (§6.1 rule 11, §12.1
+  rule 3, §14.6); the reserved `tenants.` and `gdpr.` actions (§8, §8b); the
+  `reason_code` on a network `409`; pruning of a manifest is a MAY, and none of
+  the eleven SDKs prunes. The registry is 202 operations in 29 namespaces.
+
+- **Threat model 2.42.0: the 1.1.0 release in one model.** The model is **487
+  threats, 454 mitigated / 23 open / 10 not applicable** (2.40.0: 475, 437 / 17 /
+  21; 2.41.0, the never-tagged 1.0.1, 477, 443 / 19 / 15). T-476 (a Vault
+  redirect carries `X-Vault-Token` off-host) and T-477 (a received XML signature
+  chooses what the verifier evaluates) entered at 2.41.0, Mitigated; T-478 …
+  T-487, for the network write gate and the decision route, enter now, six of
+  them Mitigated and T-481, T-483, T-484 and T-486 Open. T-449, T-454, T-456 and
+  T-459 moved from Not applicable to Mitigated for the FreeRADIUS recipe and
+  T-450 and T-462 to Open; D4 moves T-457, T-461, T-463, T-464 and T-468 to
+  Mitigated and leaves T-462 Open. Open at High or Critical are eleven, none a
+  defect awaiting a fix in AXIAM's code. Entries amended or corrected with a
+  dated note in their own text include T-39, T-55, T-67, T-69, T-102, T-108,
+  T-112, T-118, T-163, T-187, T-212, T-275, T-289, T-336, T-406, T-415, T-422,
+  T-424, T-444, T-445, T-453, T-454, T-459, T-461, T-462, T-470, T-472, T-474,
+  T-475, T-476, T-477, T-478, T-481, T-483, T-484 and T-486. The five copies
+  (`Axiam.json`, `threat-model-stride.md`, `threat-modeling-and-security.md`, the
+  website's generated model and its Security page) and
+  `docs/compliance/FINDINGS.md` are brought to one statement. The release's F4
+  reviews are the `claude_dev/security-review-release-1.1.0-*.md` files, one per
+  wave W1 – W6 and one for the combined branch; they found three Medium findings
+  in the release's own diff (R110W1-01, R110W3-01, R110W6-01), all fixed in the
+  wave, and nothing Medium or higher in the combined review. Their Low and
+  Informational findings are #664 … #715 on the `1.1.x` milestone.
+
+- **The eleven client SDKs** carry contract 1.62 in their `[1.1.0]` change logs
+  (their unreleased `[1.0.1]` sections are folded into it); each lists what
+  changed in it. A conformance review of the eleven ports
+  (`claude_dev/sdk-contract-1.62-conformance-review.md`) found no High and three
+  Medium findings, all fixed in the SDK pull requests: the C and C++ shared
+  libraries grew public structs without a new `SOVERSION` (now 2), and PHP blanked
+  an unseen SSF event-type URI. Five SDKs now withhold the session or adopted
+  bearer on `/oauth2/*`. The deployment guide, the Compose and Kubernetes
+  comments and the Operate page state the stop arithmetic as `boot.rs` does, and
+  the guide's list of what a cut cleanup can leave is the one #655 left.
+
+### Deferred to 1.1.x
+
+What 1.1.0 does not contain, named so that nobody has to infer it. Each item is
 an open issue on `ilpanich/axiam`.
 
 - **Open past the tag, the maintainer's:** #513 — the OpenID Basic OP and FAPI
@@ -676,15 +1143,23 @@ an open issue on `ilpanich/axiam`.
 - **Benchmark currency:** #561 — run 6 against Keycloak 26.8.0, Zitadel v4.19.4
   and authentik 2026.8.3. Until it lands, the website's benchmark page states
   that its numbers are run 5.
-- **RADIUS, the `rlm_rest` authorize endpoint (D4 of #563):** not in 1.0.1; see
-  Added. The issue stays open for it.
-- **Filed from the release's reviews, all on `1.0.x`:** #615 … #622 (wave W1),
-  #623 … #631 (W4), #632 … #634 (W2), #635 … #642 (W3), #643 … #653 (W6) and
-  #654 … #656 (the combined review). Among them, #636 is the administrator-API
-  half of the scope-ceiling upgrade note above, #654 is the unbounded wait of
-  the SAML verifications on the crypto semaphore, #655 the cleanup cut that
-  holds a tenant purge for its lease, and #656 contract §33.3 rule 16's
-  per-address backstop.
+- **RADIUS option A, the native front end:** not built and declined (G-11); the
+  reopen condition is on record in the spike. D4 (#563) is in this release.
+- **#675, the administrator `PUT` that would turn a device-only client
+  public:** the boot warning and the upgrade note above ship; the issue stays
+  open for the `PUT`.
+- **Filed from the release's reviews, all on `1.1.x`:** #664 … #715 — #664 …
+  #669 (wave W1), #670 … #674 (W2), #675 … #686 (W3), #687 … #692 (W4), #693 …
+  #698 (W5), #699 (the quick-bench recipe), #700 … #709 (W6), #710 (the 1.63
+  contract items) and #711 … #715 (the combined review). Among them: #686 and
+  #711, the per-address limiters key on a caller-written `X-Forwarded-For`
+  without an appending proxy; #712, the boot warning's count of clients on a very
+  large installation; #714, an orphan purge cut before its claim exists; #700,
+  whether an administrative `Service-Type` is refused with `400` or `403`;
+  #701 … #703, the network write gate's residuals (T-481, T-483, T-484, kept
+  Open). The eleven SDK repositories carry their own follow-up issues for the
+  conformance review's Low and Informational findings (e.g.
+  `ilpanich/axiam-rust-sdk#132`, `ilpanich/axiam-python-sdk#99` and `#100`).
 
 ## [1.0.0] - 2026-10-10
 

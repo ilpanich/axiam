@@ -757,6 +757,22 @@ refusal stays); (4) **`network` is a §27.6 manifest namespace in 1.62**
 policy as a singleton) — §27.6 text by W7.1, `plan`/`apply` in every SDK port
 that ships §27.6.
 
+**W6.7's review (`dacca3318`) and the maintainer's answers, 2026-10-16.**
+R110W6-01 (Medium: H6 was not applied to the §5.3 writes that change the
+writer's own placement — a service account could assign itself join and
+release its own quarantine) is fixed in-wave (`21ab64fbc`, T-482 → Mitigated,
+totals 487 / 454 / 23 / 10); R110W6-13 (the frontend coverage matrix lacked the
+network handlers, `docs-ci` red) is fixed (`22fcc5098`). Asked of the
+maintainer and answered: (a) §36 rule 6 is **amended** to say the read is the
+effective (clamped) value and a write above the cap is refused — no stored
+member; (b) every network 409 body gains a **sub-code** member next to
+`error: "conflict"` (`stale_version` / `strands_profile` / `has_children`, exact
+names per the code), documented in §36, the console wording the stale case as
+"reload"; (c) **R110W6-03 is fixed in 1.1.0**: a `vlan`/`rank`/`enabled` change on
+a segment that has a reply profile also needs `network:grant` at the segment,
+and H5's quarantine rule on a quarantine segment. One Opus executor on this
+branch before the merge.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
 ### 13.8 W8 — release readiness

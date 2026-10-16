@@ -3140,7 +3140,7 @@ async fn legacy_sha256_client_secret_still_authenticates_and_is_upgraded() {
     );
     assert!(
         new_hash.starts_with(V2_PREFIX),
-        "the replacement must be in the current scheme: {new_hash}"
+        "the replacement must be in the current scheme"
     );
     assert_eq!(new_hash, &hash_client_secret(SECRET));
 }

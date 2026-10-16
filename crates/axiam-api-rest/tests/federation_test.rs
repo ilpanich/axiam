@@ -1042,8 +1042,7 @@ async fn oidc_secret_stored_encrypted_and_round_trips() {
     // The legacy plaintext column must be empty (secret was encrypted on write).
     assert!(
         row.client_secret.is_empty(),
-        "legacy plaintext client_secret must be empty after encrypted create; got: {:?}",
-        row.client_secret
+        "legacy plaintext client_secret must be empty after encrypted create"
     );
 
     // Ciphertext and nonce must be present.

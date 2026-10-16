@@ -316,9 +316,9 @@ async fn the_purge_clears_the_metadata_of_the_erased_accounts_certificates() {
         .unwrap();
     assert_eq!(revoked, 2, "the bound and the legacy row; one was revoked");
 
-    for cert in [&bound, &legacy, &earlier] {
+    for (i, cert) in [&bound, &legacy, &earlier].into_iter().enumerate() {
         let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
-        assert_eq!(read.metadata, serde_json::json!({}), "{}", cert.fingerprint);
+        assert_eq!(read.metadata, serde_json::json!({}), "certificate #{i}");
         assert_eq!(read.status, CertificateStatus::Revoked);
         assert_eq!(read.public_cert_pem, cert.public_cert_pem, "the PEM stays");
         assert_eq!(read.subject, cert.subject, "the subject stays");

@@ -1369,7 +1369,7 @@ async fn approving_lets_the_device_collect_its_tokens() {
     // End to end: the poll that was answering `authorization_pending` a moment
     // ago now returns tokens.
     let (status, tokens) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "post-approval poll returned {tokens:?}");
+    assert_eq!(status, 200, "the post-approval poll returns tokens");
     assert!(!tokens["access_token"].as_str().unwrap().is_empty());
 }
 

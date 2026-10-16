@@ -764,13 +764,13 @@ async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_
         Some(user)
     );
     let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
-    for cert in &page.items {
+    for (i, cert) in page.items.iter().enumerate() {
         let expected = if cert.id == bound.id {
             Some(user)
         } else {
             None
         };
-        assert_eq!(cert.user_id, expected, "{}", cert.fingerprint);
+        assert_eq!(cert.user_id, expected, "certificate #{i}");
     }
 
     // The sample's CN matches no name passed here: only the binding matches.

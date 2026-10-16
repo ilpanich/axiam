@@ -2607,14 +2607,17 @@ async fn the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes
     .await
     .expect("erasure pipeline");
 
-    for (cert, expected) in [
+    for (i, (cert, expected)) in [
         (&bound, CertificateStatus::Revoked),
         (&legacy, CertificateStatus::Revoked),
         (&someone_elses, CertificateStatus::Active),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         // Read back at all: the erasure kept the row.
         let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
-        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+        assert_eq!(read.status, expected, "certificate #{i}");
     }
     let on_the_list = certs
         .list_revoked_by_issuer(issuer, Utc::now())

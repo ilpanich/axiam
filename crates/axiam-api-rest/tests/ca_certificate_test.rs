@@ -621,8 +621,14 @@ async fn import_takes_custody_of_a_supplied_key() {
     assert_eq!(body["status"], "Active");
     assert_eq!(body["key_custody"], "database");
     // And the key itself never comes back out.
-    assert!(body.get("private_key_pem").is_none(), "{body}");
-    assert!(body.get("encrypted_private_key").is_none(), "{body}");
+    assert!(
+        body.get("private_key_pem").is_none(),
+        "no private key in the response"
+    );
+    assert!(
+        body.get("encrypted_private_key").is_none(),
+        "no stored key in the response"
+    );
 }
 
 #[actix_web::test]
@@ -760,8 +766,11 @@ async fn an_imported_ca_can_sign_a_leaf_certificate() {
     let resp = test::call_service(&app, req).await;
     let leaf_status = resp.status().as_u16();
     let leaf: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(leaf_status, 201, "{leaf}");
-    assert!(leaf["private_key_pem"].is_string(), "{leaf}");
+    assert_eq!(leaf_status, 201, "the leaf is issued");
+    assert!(
+        leaf["private_key_pem"].is_string(),
+        "the private key is returned once"
+    );
 }
 
 #[actix_web::test]

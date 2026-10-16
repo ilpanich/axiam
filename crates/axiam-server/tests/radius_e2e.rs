@@ -963,10 +963,7 @@ async fn issue_device(
     dir: &Path,
 ) -> Device {
     let (status, leaf) = try_issue_device(api, org, tenant, ca, subject).await;
-    assert_eq!(
-        status, 201,
-        "issue: the device certificate {subject:?}: {leaf}"
-    );
+    assert_eq!(status, 201, "issue: the device certificate {subject:?}");
     write_device(&leaf, subject, dir)
 }
 
@@ -2794,7 +2791,7 @@ async fn decision_per_authentication() {
     // `network:decide`, sent as a chain (leaf, then its signing CA) because the
     // listener's anchor is the organization CA above both.
     let (status, leaf) = try_issue(&api, &plant, 0, &line1, "freeradius-hq", "Service").await;
-    assert_eq!(status, 201, "issue: FreeRADIUS's certificate: {leaf}");
+    assert_eq!(status, 201, "issue: FreeRADIUS's certificate");
     let caller = write_device(&leaf, "freeradius-hq", &work);
     let caller_account: Uuid = bind(&api, &plant, 0, &caller)
         .await

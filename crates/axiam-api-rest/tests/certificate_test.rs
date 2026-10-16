@@ -1494,12 +1494,11 @@ async fn an_account_deleted_during_issuance_leaves_no_active_certificate() {
         .await
         .unwrap();
     assert_eq!(issued.total, 2, "both certificates were made");
-    for certificate in &issued.items {
+    for (i, certificate) in issued.items.iter().enumerate() {
         assert_eq!(
             certificate.status,
             CertificateStatus::Revoked,
-            "{}: revoked, not left active",
-            certificate.subject
+            "certificate #{i}: revoked, not left active"
         );
     }
     let listed = SurrealCertificateRepository::new(db)

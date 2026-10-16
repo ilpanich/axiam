@@ -83,6 +83,23 @@ describe("Sidebar", () => {
     expect(usersLink).not.toHaveAttribute("aria-disabled");
   });
 
+  it("shows Network access to a holder of network:read and disables it otherwise", () => {
+    useAuthStore.setState({ user: { ...limitedUser, permissions: ["network:read"] } });
+    const { unmount } = renderSidebar("/network");
+    const link = screen.getByRole("link", { name: /Network access/ });
+    expect(link).not.toHaveAttribute("aria-disabled");
+    expect(link).toHaveAttribute("href", "/network");
+    expect(link).toHaveAttribute("aria-current", "page");
+    unmount();
+
+    useAuthStore.setState({ user: limitedUser });
+    renderSidebar("/dashboard");
+    expect(screen.getByRole("link", { name: /Network access/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
   it("prevents navigation clicks on disabled items", async () => {
     useAuthStore.setState({ user: limitedUser });
     renderSidebar("/dashboard");

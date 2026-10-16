@@ -22,6 +22,12 @@ interface FormDialogProps {
    * Explicit id for the rendered error node. Defaults to `form-dialog-error`.
    */
   errorId?: string;
+  /**
+   * A dialog that only shows. Drops the submit button and renames Cancel to
+   * Close, so a principal who may read a record but not write it is not handed
+   * a button the server would refuse.
+   */
+  readOnly?: boolean;
 }
 
 export function FormDialog({
@@ -34,6 +40,7 @@ export function FormDialog({
   submitLabel = "Save",
   error,
   errorId = "form-dialog-error",
+  readOnly = false,
 }: FormDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -162,15 +169,17 @@ export function FormDialog({
               onClick={onClose}
               disabled={isLoading}
             >
-              Cancel
+              {readOnly ? "Close" : "Cancel"}
             </Button>
-            <Button type="submit" disabled={isLoading} className="min-w-[80px]">
-              {isLoading ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                submitLabel
-              )}
-            </Button>
+            {!readOnly && (
+              <Button type="submit" disabled={isLoading} className="min-w-[80px]">
+                {isLoading ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  submitLabel
+                )}
+              </Button>
+            )}
           </div>
         </form>
       </div>

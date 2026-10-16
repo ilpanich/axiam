@@ -138,6 +138,19 @@ describe("modal a11y", () => {
 // ─── FormDialog ────────────────────────────────────────────────────────────────
 
 describe("FormDialog", () => {
+  it("drops the submit button and says Close when read-only", () => {
+    const onClose = vi.fn();
+    render(
+      <FormDialog open readOnly onClose={onClose} onSubmit={() => {}} title="T" submitLabel="Save">
+        x
+      </FormDialog>
+    );
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("renders nothing when closed", () => {
     const { container } = render(
       <FormDialog open={false} onClose={() => {}} onSubmit={() => {}} title="T">

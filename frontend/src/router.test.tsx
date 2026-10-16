@@ -37,5 +37,7 @@ describe("router", () => {
     // (same class as dashboard/profile: authentication only).
     expect(childPaths).toContain("device");
     expect(childPaths).toContain("privacy");
+    // RADIUS D4: gated on network:read by its ProtectedRoute.
+    expect(childPaths).toContain("network");
   });
 });

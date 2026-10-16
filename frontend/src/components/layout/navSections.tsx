@@ -34,6 +34,7 @@ import {
   FileKey2,
   Share2,
   RadioTower,
+  Router,
 } from "lucide-react";
 
 interface NavItem {
@@ -299,6 +300,16 @@ export const navSections: NavSection[] = [
         label: "Reactors",
         icon: <Zap size={18} />,
         requiredPermission: "reactors:list",
+      },
+      {
+        // RADIUS D4: network segments, their reply profiles and the tenant's
+        // Session-Timeout cap. Acts on the caller's own tenant only, like the
+        // pages beside it. `network:read` is the family's read permission
+        // (checked at the /network root for the list).
+        to: "/network",
+        label: "Network access",
+        icon: <Router size={18} />,
+        requiredPermission: "network:read",
       },
     ],
   },

@@ -21,17 +21,24 @@ one entry below, ending in its number.
 
 **What needs an operator, first.**
 
-- **The schema moves from v94 to v100.** Migrations v95 – v100 run at startup
+- **The schema moves from v94 to v101.** Migrations v95 – v101 run at startup
   like every earlier one. Each is additive and none backfills: v95 and v96 add the
   Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
   v97 adds `tenant.purge_claimed_at`, v98 adds `certificate.user_id` and its
   index, **v99** adds `serial` to certificates and CA certificates with a unique
   index per issuer (`(issuer_ca_id, serial)`, `(parent_ca_id, serial)`; a
   certificate issued before the upgrade has no recorded serial, so it cannot
-  collide, and a root is not recorded; #653), and **v100** adds the three network
-  tables (`network_segment`, `reply_profile`, `network_policy`; #563). A row
-  written before the upgrade reads as "none attempted, due now" or "not bound",
-  and the first sweep or the name convention covers it.
+  collide, and a root is not recorded; #653), **v100** adds the three network
+  tables (`network_segment`, `reply_profile`, `network_policy`; #563), and
+  **v101** adds `role.grant_epoch` and `role.holder_epoch`, the two counters the
+  network gate's role writes claim (#701). A row written before the upgrade
+  reads as "none attempted, due now", "not bound" or epoch 0, and the first
+  sweep or the name convention covers it. **A `super-admin` role that a group
+  holds** (a release before 1.1.0 allowed that) does not receive the `network:`
+  meta permissions at the boot reconcile: a role carrying a `network:`
+  permission is never group-held, so the reconcile withholds them and logs a
+  warning naming the tenant and the permission. Unassign the role from the group
+  and restart to have them granted.
 
 - **Confidential OAuth2 clients that use the device grant must now authenticate
   (#635, #675).** Before 1.1.0 neither device endpoint authenticated a client.
@@ -265,6 +272,25 @@ one entry below, ending in its number.
   answers). Threat model: T-478 … T-487 enter; T-457, T-461, T-463, T-464 and
   T-468 move from Not applicable to Mitigated; T-462 stays Open. The native
   RADIUS front end (option A) stays unbuilt.
+
+- **The network gate's role writes act as one transaction with its reads
+  (#701, R110W6-04; the maintainer's review of #716).** The gate decides a
+  grant or revoke on a role, an assignment or unassignment (user, service
+  account, group), an `is_global` update and a role delete on reads it makes
+  before the write; two such writes to one role could each pass it on a state
+  the other was changing — a `network:join` grant racing the writer's
+  assignment of the role to itself (H6), a `network:` grant racing a group
+  assignment (§4.2 rule 2), `is_global: true` racing a `network:` grant
+  (rule 1), an `inherit: false` assignment racing a deny (rule 3), a revoke
+  deleting a deny its gate never saw. Each write now claims, inside its own
+  transaction, the role epochs the gate read first (schema v101) and writes the
+  role row, so overlapping writes conflict on it; the one that lost answers
+  **`409 conflict`** with `reason_code` `stale_version` and leaves a
+  `network_role.*_refused` audit row. A revoke deletes only the grant whose
+  effect its gate read. Two assignments of one role still both succeed. Race
+  tests on `surrealkv` hold both requests at a barrier after their gates cleared
+  them, one per interleaving. T-481 records it and stays Open for what the gate
+  reads about the writer's own rights and a binding's account.
 
 - **The CIBA hint cap's allowance is a setting, and a refused call is no longer
   counted (#639).** `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (default 3, at
@@ -1156,8 +1182,9 @@ an open issue on `ilpanich/axiam`.
   without an appending proxy; #712, the boot warning's count of clients on a very
   large installation; #714, an orphan purge cut before its claim exists; #700,
   whether an administrative `Service-Type` is refused with `400` or `403`;
-  #701 … #703, the network write gate's residuals (T-481, T-483, T-484, kept
-  Open). The eleven SDK repositories carry their own follow-up issues for the
+  #702 and #703, the network write gate's residuals (T-483, T-484, kept Open);
+  #701 (T-481) is fixed in this release for the role writes, and T-481 stays
+  Open for the writer's own rights and a binding's account. The eleven SDK repositories carry their own follow-up issues for the
   conformance review's Low and Informational findings (e.g.
   `ilpanich/axiam-rust-sdk#132`, `ilpanich/axiam-python-sdk#99` and `#100`).
 

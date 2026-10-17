@@ -730,6 +730,21 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send;
+
+    /// The role's two epochs (schema v101; R110W6-04), `None` when the role is
+    /// not the tenant's.
+    ///
+    /// The network gate reads them before anything else about the role and
+    /// hands them to the write as a [`crate::models::role::RoleClaim`].
+    /// Defaults to `None` — "this repository keeps no epochs, so no claim is
+    /// made" — for test doubles; the real repository overrides it.
+    fn get_role_epochs(
+        &self,
+        _tenant_id: Uuid,
+        _role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::role::RoleEpochs>>> + Send {
+        async { Ok(None) }
+    }
 }
 
 pub trait PermissionRepository: Send + Sync {

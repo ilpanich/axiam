@@ -9,6 +9,7 @@
 //! tenant. On startup, if the hash matches the stored value the UPSERT loop is
 //! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::network::{SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, is_network_action};
 use axiam_core::models::role::CreateRole;
 use axiam_core::permission_scope::is_organization_level_action;
@@ -792,13 +793,36 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                 }
             }
             if super_admin_may_hold(&perm.action) && !sa_have.contains(&perm.id) {
-                perm_repo
+                // §4.2 rule 2 binds the reconcile too (R110W6-04): the
+                // grant's own transaction refuses a `network:` permission to
+                // a super-admin a group holds — which a release before 1.1.0
+                // allowed — and a group assignment racing it. Withheld then,
+                // and said so, rather than failing the boot: the tenant keeps
+                // working, and its super-admin simply does not carry the
+                // network meta permissions until no group holds it (the next
+                // boot's reconcile grants them).
+                match perm_repo
                     .grant_to_role(tenant_id, super_admin_id, perm.id)
                     .await
-                    .map_err(|e| {
-                        DbError::Migration(format!("reconcile grant super-admin failed: {e}"))
-                    })?;
-                outcome.granted += 1;
+                {
+                    Ok(()) => outcome.granted += 1,
+                    Err(AxiamError::Conflict { reason }) => {
+                        tracing::warn!(
+                            %tenant_id,
+                            action = %perm.action,
+                            %reason,
+                            "network permission withheld from super-admin: a group holds the \
+                             role, and a role carrying a network: permission is never group-held \
+                             (design note §4.2 rule 2); unassign the role from the group to let \
+                             the next boot grant it"
+                        );
+                    }
+                    Err(e) => {
+                        return Err(DbError::Migration(format!(
+                            "reconcile grant super-admin failed: {e}"
+                        )));
+                    }
+                }
             }
             continue;
         }

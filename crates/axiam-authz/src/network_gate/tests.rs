@@ -22,7 +22,7 @@ use axiam_core::models::radius_reply::{
     REPLY_DICTIONARY_V1, ReplyProfileInput, ServiceType, TerminationAction,
 };
 use axiam_core::models::resource::Resource;
-use axiam_core::models::role::{Role, RoleAssignment, RoleSubjectAssignment};
+use axiam_core::models::role::{Role, RoleAssignment, RoleEpochs, RoleSubjectAssignment};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -130,6 +130,14 @@ impl NetworkGateStore for Store {
     }
     async fn bound_service_account(&self, cert: Uuid) -> AxiamResult<Option<Uuid>> {
         Ok(self.bindings.get(&cert).copied())
+    }
+    async fn role_epochs(&self, _t: Uuid, id: Uuid) -> AxiamResult<Option<RoleEpochs>> {
+        // Every known role is at epochs (7, 11), so a test can tell a claim
+        // carrying them from no claim.
+        Ok(self.roles.contains_key(&id).then_some(RoleEpochs {
+            grants: 7,
+            holders: 11,
+        }))
     }
 }
 
@@ -2067,5 +2075,128 @@ async fn a_segments_write_below_the_root_does_not_write_the_cap() {
     assert!(
         asked.iter().all(|(_, _, node)| *node == w.root()),
         "{asked:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R110W6-04: which cleared writes carry a claim on the role
+// ---------------------------------------------------------------------------
+
+/// Every role write the function decides on the role's grants, holders or
+/// scope is cleared with a claim on the epochs it read — including a write it
+/// cleared because the role carries **no** network grant, which is exactly the
+/// decision a racing grant would invalidate.
+#[tokio::test]
+async fn r110w6_04_every_decided_role_write_claims_the_epochs_it_read() {
+    let mut w = World::new();
+    let plain = w.role(false, &[("users:list", ALLOW)]);
+    let join = w.permission(NETWORK_JOIN);
+    let read = RoleEpochs {
+        grants: 7,
+        holders: 11,
+    };
+    let granter = Oracle::default().allow(w.writer, NETWORK_GRANT, w.root());
+    for write in [
+        NetworkWrite::RoleAssign {
+            role_id: plain,
+            grantee: Grantee::User(w.writer),
+            resource_id: None,
+            inherit: true,
+        },
+        NetworkWrite::RoleAssign {
+            role_id: plain,
+            grantee: Grantee::Group(Uuid::new_v4()),
+            resource_id: None,
+            inherit: true,
+        },
+        NetworkWrite::RoleUnassign {
+            role_id: plain,
+            grantee: Grantee::User(Uuid::new_v4()),
+            resource_id: None,
+        },
+        NetworkWrite::RoleUpdate {
+            role_id: plain,
+            is_global: Some(true),
+        },
+        NetworkWrite::RoleDelete { role_id: plain },
+        NetworkWrite::PermissionGrant {
+            role_id: plain,
+            permission_id: join,
+            effect: ALLOW,
+            scope_ids: &[],
+        },
+        NetworkWrite::PermissionRevoke {
+            role_id: plain,
+            permission_id: join,
+        },
+    ] {
+        let c = cleared(w.decide(&granter, write).await);
+        let claim = c
+            .role_claim()
+            .unwrap_or_else(|| panic!("{write:?} cleared without a claim"));
+        assert_eq!(claim.role_id, plain, "{write:?}");
+        assert_eq!(claim.epochs, read, "{write:?}");
+        let is_revoke = matches!(write, NetworkWrite::PermissionRevoke { .. });
+        // A revoke also carries the effect it read: no grant of join here.
+        assert_eq!(claim.revoked_effect, is_revoke.then_some(None), "{write:?}");
+    }
+}
+
+/// A write that depends on no state of a role claims nothing: a grant or
+/// revoke outside `network:` (two of them never collide), a role update that
+/// does not touch `is_global`, a role that is not the tenant's.
+#[tokio::test]
+async fn r110w6_04_a_write_that_reads_no_role_state_claims_nothing() {
+    let mut w = World::new();
+    let role = w.role(false, &[]);
+    let docs = w.permission("documents:read");
+    for write in [
+        NetworkWrite::PermissionGrant {
+            role_id: role,
+            permission_id: docs,
+            effect: ALLOW,
+            scope_ids: &[],
+        },
+        NetworkWrite::PermissionRevoke {
+            role_id: role,
+            permission_id: docs,
+        },
+        NetworkWrite::RoleUpdate {
+            role_id: role,
+            is_global: None,
+        },
+        NetworkWrite::RoleAssign {
+            role_id: Uuid::new_v4(),
+            grantee: Grantee::User(Uuid::new_v4()),
+            resource_id: None,
+            inherit: true,
+        },
+    ] {
+        let c = cleared(w.decide(&Oracle::default(), write).await);
+        assert_eq!(c.role_claim(), None, "{write:?}");
+    }
+}
+
+/// A revoke's claim names the effect the function read, so the delete can be
+/// conditional on it.
+#[tokio::test]
+async fn r110w6_04_a_revoke_claims_the_effect_it_read() {
+    let mut w = World::new();
+    let allowing = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    let join = w.store.grants[&allowing][0].permission.id;
+    let granter = Oracle::default().allow(w.writer, NETWORK_GRANT, w.root());
+    let c = cleared(
+        w.decide(
+            &granter,
+            NetworkWrite::PermissionRevoke {
+                role_id: allowing,
+                permission_id: join,
+            },
+        )
+        .await,
+    );
+    assert_eq!(
+        c.role_claim().map(|claim| claim.revoked_effect),
+        Some(Some(Some(ALLOW)))
     );
 }

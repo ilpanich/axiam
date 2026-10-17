@@ -51,6 +51,18 @@ const GUARDED_WRITES: &[&str] = &[
     ".grant_to_role_with_scopes(",
     ".grant_to_role_with_effect(",
     ".revoke_from_role(",
+    // The same writes with the gate's claim on the role (R110W6-04): what the
+    // handlers call. Named apart, since the scan matches whole call names.
+    ".assign_to_user_claimed(",
+    ".assign_to_service_account_claimed(",
+    ".assign_to_group_claimed(",
+    ".unassign_from_user_claimed(",
+    ".unassign_from_service_account_claimed(",
+    ".unassign_from_group_claimed(",
+    ".grant_to_role_claimed(",
+    ".revoke_from_role_claimed(",
+    "role_repo.update_claimed(",
+    "role_repo.delete_claimed(",
     // Certificate binding (§5.3 binding rows, H6).
     ".bind_to_service_account(",
     // Role update and delete (§4.2 rule 1, §5.3 row 6).

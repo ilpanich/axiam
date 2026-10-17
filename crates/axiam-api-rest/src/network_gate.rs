@@ -14,9 +14,11 @@
 //! [`authorize`] first (the T-429 lesson); segment and profile writes cannot
 //! even compile without the clearance [`authorize`] returns.
 
+use actix_web::HttpResponse;
 use axiam_authz::network_gate::{
-    GateClearance, GateRefusal, GateWriter, NetworkWrite, RefusalStatus, RepositoryGateStore,
-    authorize_network_write,
+    AUDIT_ROLE_ASSIGN_REFUSED, AUDIT_ROLE_GRANT_REFUSED, AUDIT_ROLE_UNASSIGN_REFUSED,
+    AUDIT_ROLE_WRITE_REFUSED, GateClearance, GateRefusal, GateWriter, Grantee, NetworkWrite,
+    RefusalStatus, RepositoryGateStore, authorize_network_write,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -29,6 +31,7 @@ use surrealdb::Connection;
 use crate::authz::AuthzChecker;
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedPrincipal;
+use crate::handlers::network::NetworkConflictReason;
 use crate::state::AppState;
 
 /// Who is writing, for the gate and for the audit row.
@@ -107,6 +110,155 @@ pub async fn authorize_as<C: Connection + Clone>(
             Err(into_error(refusal))
         }
     }
+}
+
+/// Answer a role write that the gate cleared and **its own transaction then
+/// refused** because what the gate read had changed by the time it ran
+/// (R110W6-04, #701).
+///
+/// The gate decides a role write — a grant or revoke, an assignment or
+/// unassignment, an `is_global` update, a delete — on the role's grants,
+/// holders and scope, read before the write. Two writes to one role can each
+/// pass it on a state the other is about to change (a `network:join` grant and
+/// the writer assigning itself the role; a grant and a group assignment; …).
+/// So the gate hands the write a claim on the role's epochs
+/// ([`GateClearance::role_claim`]), the `*_claimed` repository writes compare
+/// it inside their transaction, and a write that lost comes back as
+/// `AxiamError::Conflict` ("the role changed since it was read …"). That
+/// answers `409` with `reason_code` `stale_version` — the network routes'
+/// sub-code for "read again, decide again" (contract §36.3 rule 2): sent again,
+/// the request goes back through the gate, which decides on the role as it now
+/// is. It is audited as the gate audits its own refusals: one
+/// `network_role.*_refused` row, outcome denied, with the internal rule
+/// (`version:stale`, as the network routes record a stale write), the reason
+/// and the values.
+///
+/// Any other error is returned unchanged, unaudited, as it was before.
+///
+/// # Errors
+///
+/// `error` itself, when it is not that conflict or `write` is not a role
+/// write.
+pub async fn refused_after_clearance<C: Connection + Clone>(
+    principal: &AuthenticatedPrincipal,
+    state: &AppState<C>,
+    write: NetworkWrite<'_>,
+    error: AxiamError,
+) -> Result<HttpResponse, AxiamApiError> {
+    if NetworkConflictReason::of(&error) != Some(NetworkConflictReason::StaleVersion) {
+        return Err(AxiamApiError(error));
+    }
+    let grantee = |g: Grantee| match g {
+        Grantee::User(id) => ("user", id.to_string()),
+        Grantee::ServiceAccount(id) => ("service_account", id.to_string()),
+        Grantee::Group(id) => ("group", id.to_string()),
+    };
+    let node = |r: Option<uuid::Uuid>| r.map_or_else(|| "none".to_owned(), |r| r.to_string());
+    let (audit_action, before, after) = match write {
+        NetworkWrite::PermissionGrant {
+            role_id,
+            permission_id,
+            effect,
+            ..
+        } => (
+            AUDIT_ROLE_GRANT_REFUSED,
+            vec![("role_id", role_id.to_string())],
+            vec![
+                ("permission_id", permission_id.to_string()),
+                ("effect", effect.as_str().to_owned()),
+            ],
+        ),
+        NetworkWrite::PermissionRevoke {
+            role_id,
+            permission_id,
+        } => (
+            AUDIT_ROLE_GRANT_REFUSED,
+            vec![
+                ("role_id", role_id.to_string()),
+                ("permission_id", permission_id.to_string()),
+            ],
+            vec![("grant", "revoked".to_owned())],
+        ),
+        NetworkWrite::RoleAssign {
+            role_id,
+            grantee: g,
+            resource_id,
+            inherit,
+        } => {
+            let (kind, who) = grantee(g);
+            (
+                AUDIT_ROLE_ASSIGN_REFUSED,
+                vec![("role_id", role_id.to_string())],
+                vec![
+                    (kind, who),
+                    ("resource_id", node(resource_id)),
+                    ("inherit", inherit.to_string()),
+                ],
+            )
+        }
+        NetworkWrite::RoleUnassign {
+            role_id,
+            grantee: g,
+            resource_id,
+        } => {
+            let (kind, who) = grantee(g);
+            (
+                AUDIT_ROLE_UNASSIGN_REFUSED,
+                vec![
+                    ("role_id", role_id.to_string()),
+                    (kind, who),
+                    ("resource_id", node(resource_id)),
+                ],
+                vec![("assignment", "removed".to_owned())],
+            )
+        }
+        NetworkWrite::RoleUpdate { role_id, is_global } => (
+            AUDIT_ROLE_WRITE_REFUSED,
+            vec![("role_id", role_id.to_string())],
+            vec![(
+                "is_global",
+                is_global.map_or_else(|| "unchanged".to_owned(), |g| g.to_string()),
+            )],
+        ),
+        NetworkWrite::RoleDelete { role_id } => (
+            AUDIT_ROLE_WRITE_REFUSED,
+            vec![("role_id", role_id.to_string())],
+            vec![("role", "deleted".to_owned())],
+        ),
+        _ => return Err(AxiamApiError(error)),
+    };
+    let AxiamError::Conflict { reason } = &error else {
+        return Err(AxiamApiError(error));
+    };
+    let actor = GateActor::principal(principal);
+    let entry = CreateAuditLogEntry {
+        tenant_id: actor.writer.tenant_id,
+        actor_id: actor.writer.subject_id,
+        actor_type: actor.actor_type,
+        action: audit_action.to_owned(),
+        resource_id: None,
+        outcome: AuditOutcome::Denied,
+        ip_address: None,
+        metadata: Some(serde_json::json!({
+            "write": write_kind(&write),
+            "rule": "version:stale",
+            "reason": reason,
+            "status": 409,
+            "before": values(&before),
+            "after": values(&after),
+        })),
+    };
+    if let Err(audit_error) = state.audit_repo.append(entry).await {
+        tracing::error!(
+            target: "axiam::network_gate",
+            tenant_id = %principal.tenant_id,
+            action = audit_action,
+            error = %audit_error,
+            "a network write refusal could not be audited; the write stays refused"
+        );
+    }
+    Ok(AxiamApiError(error)
+        .error_response_with_reason_code(Some(NetworkConflictReason::StaleVersion.as_str())))
 }
 
 /// A short name for the write, for the audit row.

@@ -522,6 +522,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "network_segments_reply_profiles",
         sql: SCHEMA_V100,
     },
+    Migration {
+        version: 101,
+        name: "role_grant_holder_epochs",
+        sql: SCHEMA_V101,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4942,6 +4947,29 @@ DEFINE INDEX IF NOT EXISTS idx_network_policy_tenant ON TABLE network_policy
     COLUMNS tenant_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v101 — the role row's two epochs (#701, R110W6-04)
+// -----------------------------------------------------------------------
+//
+// The network gate decides a role write — a grant or revoke, an assignment or
+// unassignment, an `is_global` update, a delete — on reads it makes before the
+// write (`radius-reply-profile-design.md` §4.2, §5.3). Two writes to one role
+// could each pass it on a state the other was about to change: the engine
+// detects only two transactions writing one key, and those writes touched
+// disjoint edges. Every such write now moves an epoch on the role row and
+// compares, inside its own transaction, the epochs the gate read
+// (`repository/role.rs`): `grant_epoch` moves with a `network:` grant or revoke
+// and an `is_global` write, `holder_epoch` with every assignment and
+// unassignment. Like `network_segment.profile_epoch` (v100) the values mean
+// nothing beyond "changed".
+//
+// Additive: two optional fields, nothing backfilled (a role written before the
+// upgrade reads NONE, which every read and move treats as 0).
+const SCHEMA_V101: &str = "\
+DEFINE FIELD IF NOT EXISTS grant_epoch ON TABLE role TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5174,6 +5202,25 @@ mod tests {
                 "v100 must not contain {forbidden}: it is additive DDL only"
             );
         }
+    }
+
+    /// #701 (R110W6-04) — v101 is the role row's two epochs, optional fields
+    /// defined idempotently, and nothing else.
+    #[test]
+    fn v101_adds_only_the_role_epochs() {
+        let statements: Vec<&str> = SCHEMA_V101
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS grant_epoch ON TABLE role TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>"
+            ],
+            "v101 defines the two counters and nothing else"
+        );
     }
 
     /// The tables some migration gives `field`, minus the tables a migration
@@ -6657,8 +6704,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&100),
-            "v100 is the newest migration (#563, D4 — `network_segment`, `reply_profile` and \
+            Some(&101),
+            "v101 is the newest migration (#701, R110W6-04 — `role.grant_epoch` and \
+             `role.holder_epoch`, which every role write the network gate decides moves and \
+             compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \
              `network_policy`, the reserved-subtree segments, their typed reply profiles and the \
              tenant's `Session-Timeout` cap); v99 was #653 — `certificate.serial` and \
              `ca_certificate.serial`, each with a UNIQUE index under the issuer, so a serial is \

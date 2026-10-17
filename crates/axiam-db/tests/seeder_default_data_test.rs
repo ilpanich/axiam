@@ -757,3 +757,91 @@ async fn reconcile_takes_back_the_network_grants_the_seeded_roles_must_not_hold(
         ReconcileOutcome::default()
     );
 }
+
+/// R110W6-04: the boot reconcile is bound by §4.2 rule 2 too. A super-admin
+/// that a group holds (a release before 1.1.0 allowed it) is not given the
+/// `network:` meta permissions — the grant's own transaction refuses them —
+/// and the reconcile withholds them instead of failing the boot; everything
+/// else is reconciled as usual. Once no group holds the role, the next
+/// reconcile grants them.
+#[tokio::test]
+async fn reconcile_withholds_network_grants_from_a_group_held_super_admin() {
+    use axiam_core::models::group::CreateGroup;
+    use axiam_core::models::role::AssignmentScope;
+    use axiam_core::repository::{GroupRepository, RoleRepository};
+    use axiam_db::repository::{SurrealGroupRepository, SurrealRoleRepository};
+
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, REGISTRY).await.unwrap();
+    let roles = seed_default_roles(&db, tenant_id, REGISTRY).await.unwrap();
+    let group = SurrealGroupRepository::new(db.clone())
+        .create(CreateGroup {
+            tenant_id,
+            name: "operators".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    role_repo
+        .assign_to_group(
+            tenant_id,
+            group,
+            roles.super_admin_role_id,
+            AssignmentScope::from(None),
+        )
+        .await
+        .unwrap();
+    // An upgrade adds the reserved catalogue (here: one meta permission) and
+    // an ordinary one.
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    for action in ["network:read", "webhooks:create"] {
+        perm_repo
+            .create(CreatePermission {
+                tenant_id,
+                action: action.into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let outcome = reconcile_default_role_grants(&db, tenant_id)
+        .await
+        .expect("a group-held super-admin does not fail the reconcile");
+    // `webhooks:create` to super-admin and admin; `network:read` withheld.
+    assert_eq!(outcome.granted, 2, "{outcome:?}");
+    let held = |perms: Vec<axiam_core::models::permission::Permission>| {
+        perms.into_iter().map(|p| p.action).collect::<Vec<_>>()
+    };
+    let super_admin = held(
+        perm_repo
+            .get_role_permissions(tenant_id, roles.super_admin_role_id)
+            .await
+            .unwrap(),
+    );
+    assert!(super_admin.contains(&"webhooks:create".to_owned()));
+    assert!(
+        !super_admin.contains(&"network:read".to_owned()),
+        "{super_admin:?}"
+    );
+
+    // No group holds it any more: the next reconcile grants it.
+    role_repo
+        .unassign_from_group(tenant_id, group, roles.super_admin_role_id, None)
+        .await
+        .unwrap();
+    let outcome = reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+    assert_eq!(outcome.granted, 1, "{outcome:?}");
+    assert!(
+        held(
+            perm_repo
+                .get_role_permissions(tenant_id, roles.super_admin_role_id)
+                .await
+                .unwrap()
+        )
+        .contains(&"network:read".to_owned())
+    );
+}

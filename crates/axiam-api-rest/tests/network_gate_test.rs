@@ -20,7 +20,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{issue_access_token, issue_service_account_token};
 use axiam_authz::AuthorizationEngine;
-use axiam_authz::types::{AccessRequest, SubjectScope};
+use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::models::audit::{AuditLogEntry, AuditOutcome};
 use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
 use axiam_core::models::group::CreateGroup;
@@ -84,6 +84,11 @@ impl World {
         let db = Surreal::new::<Mem>(()).await.unwrap();
         db.use_ns("test").use_db("test").await.unwrap();
         axiam_db::run_migrations(&db).await.unwrap();
+        Self::on(db).await
+    }
+
+    /// The same world on a datastore the caller opened and migrated.
+    async fn on(db: Surreal<TestDb>) -> Self {
         let org = SurrealOrganizationRepository::new(db.clone())
             .create(CreateOrganization {
                 name: "Net Org".into(),
@@ -866,7 +871,9 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
 /// H6 through a group (R110W6-01): a deny a group carries reaches its
 /// members, so a member does not lift it by unassigning it from the group or
 /// by deleting the role — "holds" counts the group. Rule 2 keeps network roles
-/// off groups, so the edge is written here as one predating the rule would be.
+/// off groups — the API and, since R110W6-04, the repository's own transaction
+/// both refuse it — so the edge is written here in raw SurrealQL, as one
+/// predating the rule would have been.
 #[actix_rt::test]
 async fn a_member_cannot_release_a_deny_its_group_carries() {
     let w = World::new().await;
@@ -886,15 +893,15 @@ async fn a_member_cannot_release_a_deny_its_group_carries() {
         })
         .await
         .unwrap();
-    w.roles()
-        .assign_to_group(
-            w.tenant,
-            group.id,
-            quarantined,
-            AssignmentScope::from(Some(zones)),
-        )
-        .await
-        .unwrap();
+    w.db.query(format!(
+        "RELATE group:`{}` -> has_role -> role:`{quarantined}` SET resource_id = $node",
+        group.id
+    ))
+    .bind(("node", zones.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
     let member = w
         .user(&[
             (admin_role, None),
@@ -1186,4 +1193,640 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
     assert_eq!(status, 400, "{err}");
     let rule_rows = w.audit("network_role.grant_refused").await;
     assert!(rule_rows.iter().any(|r| r.metadata["rule"] == "4.2:rule-3"));
+}
+
+// ---------------------------------------------------------------------------
+// §4.2 rule 2 against a racing write (R110W6-04, #701)
+// ---------------------------------------------------------------------------
+
+/// The REST checker of a world, with one interleaving forced into it: when the
+/// gate asks its write-time question for `network:grant` — after it has read
+/// the role's group holders and found none — another request's group
+/// assignment of the role lands first, through the repository, as that
+/// request would write it (its own gate read no `network:` grant). Then the
+/// engine answers as usual.
+struct GroupAssignmentLandsMidGate {
+    engine: Arc<dyn AuthzChecker>,
+    db: Surreal<TestDb>,
+    tenant: Uuid,
+    role: Uuid,
+    group: Uuid,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl AuthzChecker for GroupAssignmentLandsMidGate {
+    fn check_access<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = axiam_core::error::AxiamResult<AccessDecision>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.engine.check_access(request)
+    }
+
+    fn check_access_uncached<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = axiam_core::error::AxiamResult<AccessDecision>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if request.action == NETWORK_GRANT
+                && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                SurrealRoleRepository::new(self.db.clone())
+                    .assign_to_group(
+                        self.tenant,
+                        self.group,
+                        self.role,
+                        AssignmentScope::from(None),
+                    )
+                    .await
+                    .expect("the racing group assignment lands: the role has no network grant yet");
+            }
+            self.engine.check_access_uncached(request).await
+        })
+    }
+}
+
+/// R110W6-04 end to end, in the order that loses: a `network:join` grant
+/// whose gate read "no group holds the role", and a group assignment of the
+/// role that lands before the grant's write. The grant's own transaction sees
+/// the group edge and refuses: `409 conflict` with `reason_code`
+/// `stale_version`, nothing written, one `network_role.grant_refused` row
+/// (`version:stale`, status 409). Sent again, it goes back through the gate,
+/// which now refuses it under rule 2 (`400`).
+#[actix_rt::test]
+async fn a_network_grant_that_loses_to_a_group_assignment_is_409_stale_version_and_audited() {
+    let w = World::new().await;
+    // The `/network` root the gate checks `network:grant` at.
+    w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    let role = w.role("fleet-devices", &[]).await;
+    let group = SurrealGroupRepository::new(w.db.clone())
+        .create(CreateGroup {
+            tenant_id: w.tenant,
+            name: "fleet".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let writer = w.user(&[(w.role_named("super-admin").await, None)]).await;
+    let checker: Arc<dyn AuthzChecker> = Arc::new(GroupAssignmentLandsMidGate {
+        engine: w.engine(),
+        db: w.db.clone(),
+        tenant: w.tenant,
+        role,
+        group,
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(w.auth.clone()))
+            .app_data(web::Data::new(checker))
+            .app_data(web::Data::new(AppState::for_test(
+                w.db.clone(),
+                w.auth.clone(),
+            )))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+    let grant = json!({ "permission_id": w.permission_id(NETWORK_JOIN).await, "effect": "allow" });
+    let uri = format!("/api/v1/roles/{role}/permissions");
+
+    let (status, body) = call(
+        &app,
+        &w.user_token(writer),
+        "POST",
+        &uri,
+        Some(grant.clone()),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "conflict", "{body}");
+    assert_eq!(body["reason_code"], "stale_version", "{body}");
+    let rows = w.audit("network_role.grant_refused").await;
+    let row = the_row(&rows);
+    assert_eq!(row.metadata["rule"], "version:stale");
+    assert_eq!(row.metadata["status"], 409);
+    assert_eq!(row.metadata["write"], "permission_grant");
+    assert_eq!(row.metadata["before"]["role_id"], role.to_string());
+
+    // The group assignment won; the grant wrote nothing.
+    let grants = SurrealPermissionRepository::new(w.db.clone())
+        .get_role_permission_grants(w.tenant, role)
+        .await
+        .unwrap();
+    assert!(grants.is_empty(), "{grants:?}");
+    assert_eq!(
+        w.roles().get_role_group_ids(w.tenant, role).await.unwrap(),
+        vec![group]
+    );
+
+    // Again: the gate now sees the group, and rule 2 answers.
+    let (status, body) = call(&app, &w.user_token(writer), "POST", &uri, Some(grant)).await;
+    assert_eq!(status, 400, "{body}");
+    let rows = w.audit("network_role.grant_refused").await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter().any(|r| r.metadata["rule"] == "4.2:rule-2"),
+        "{rows:?}"
+    );
+}
+
+// The races of R110W6-04 through the real gate, on the engine production runs
+// (`surrealkv`). Each round, two requests each run the network gate on a role
+// — both are **cleared**, which is the race: each reads the state from before
+// the other's write — then wait at a barrier until both have read, then write
+// at once, as the handlers do after their gate (the `*_claimed` repository
+// writes, with the gate's claim). One of the two must be refused with the
+// `409` ("the role changed since it was read"), and the invariant the gate
+// enforces must hold afterwards.
+
+/// One request of a race: what it asks the gate, and the write it then makes.
+#[derive(Clone, Copy, Debug)]
+enum Request {
+    Grant {
+        role: Uuid,
+        permission: Uuid,
+        effect: PermissionEffect,
+    },
+    Revoke {
+        role: Uuid,
+        permission: Uuid,
+    },
+    AssignUser {
+        role: Uuid,
+        user: Uuid,
+        node: Option<Uuid>,
+        inherit: bool,
+    },
+    AssignGroup {
+        role: Uuid,
+        group: Uuid,
+    },
+    MakeGlobal {
+        role: Uuid,
+    },
+}
+
+/// A migrated `surrealkv` world and its directory, held for the test's life.
+async fn serialising_world() -> (Arc<World>, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Surreal::new::<surrealdb::engine::local::SurrealKv>(
+        dir.path().join("race.db").to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let w = World::on(db).await;
+    // The `/network` root the gate checks `network:grant` at.
+    w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    (Arc::new(w), dir)
+}
+
+/// The gate as `network_gate::authorize` runs it, for `writer`.
+async fn gate(
+    w: &World,
+    writer: Uuid,
+    write: axiam_authz::network_gate::NetworkWrite<'_>,
+) -> axiam_authz::network_gate::GateVerdict {
+    use axiam_authz::network_gate::{GateWriter, RepositoryGateStore, authorize_network_write};
+    use axiam_db::repository::{SurrealNetworkPolicyRepository, SurrealReplyProfileRepository};
+    let engine = AuthorizationEngine::new(
+        SurrealRoleRepository::new(w.db.clone()),
+        SurrealPermissionRepository::new(w.db.clone()),
+        SurrealResourceRepository::new(w.db.clone()),
+        SurrealScopeRepository::new(w.db.clone()),
+        SurrealGroupRepository::new(w.db.clone()),
+    );
+    let store = RepositoryGateStore {
+        roles: &SurrealRoleRepository::new(w.db.clone()),
+        groups: &SurrealGroupRepository::new(w.db.clone()),
+        permissions: &SurrealPermissionRepository::new(w.db.clone()),
+        resources: &SurrealResourceRepository::new(w.db.clone()),
+        segments: &SurrealNetworkSegmentRepository::new(w.db.clone()),
+        profiles: &SurrealReplyProfileRepository::new(w.db.clone()),
+        policy: &SurrealNetworkPolicyRepository::new(w.db.clone()),
+        certificates: &SurrealCertificateRepository::new(w.db.clone()),
+    };
+    let writer = GateWriter {
+        tenant_id: w.tenant,
+        subject_id: writer,
+        subject_scope: SubjectScope::Tenant,
+    };
+    authorize_network_write(&engine, &store, writer, write)
+        .await
+        .expect("the gate's reads succeed")
+}
+
+/// Run `request` as `writer`: the gate (which must clear it), the barrier,
+/// then the handler's write with the gate's claim.
+async fn send(
+    w: Arc<World>,
+    writer: Uuid,
+    request: Request,
+    barrier: Arc<tokio::sync::Barrier>,
+) -> Result<(), axiam_core::error::AxiamError> {
+    use axiam_authz::network_gate::{Grantee, NetworkWrite};
+    let write = match request {
+        Request::Grant {
+            role,
+            permission,
+            effect,
+        } => NetworkWrite::PermissionGrant {
+            role_id: role,
+            permission_id: permission,
+            effect,
+            scope_ids: &[],
+        },
+        Request::Revoke { role, permission } => NetworkWrite::PermissionRevoke {
+            role_id: role,
+            permission_id: permission,
+        },
+        Request::AssignUser {
+            role,
+            user,
+            node,
+            inherit,
+        } => NetworkWrite::RoleAssign {
+            role_id: role,
+            grantee: Grantee::User(user),
+            resource_id: node,
+            inherit,
+        },
+        Request::AssignGroup { role, group } => NetworkWrite::RoleAssign {
+            role_id: role,
+            grantee: Grantee::Group(group),
+            resource_id: None,
+            inherit: true,
+        },
+        Request::MakeGlobal { role } => NetworkWrite::RoleUpdate {
+            role_id: role,
+            is_global: Some(true),
+        },
+    };
+    let claim = match gate(&w, writer, write).await {
+        Ok(cleared) => cleared.role_claim(),
+        Err(refusal) => panic!("{request:?}: the gate refused on its own read: {refusal:?}"),
+    };
+    barrier.wait().await;
+    let (roles, perms) = (w.roles(), SurrealPermissionRepository::new(w.db.clone()));
+    match request {
+        Request::Grant {
+            role,
+            permission,
+            effect,
+        } => {
+            perms
+                .grant_to_role_claimed(w.tenant, role, permission, vec![], effect, claim)
+                .await
+        }
+        Request::Revoke { role, permission } => {
+            perms
+                .revoke_from_role_claimed(w.tenant, role, permission, claim)
+                .await
+        }
+        Request::AssignUser {
+            role,
+            user,
+            node,
+            inherit,
+        } => {
+            let scope = AssignmentScope {
+                inherit,
+                ..AssignmentScope::from(node)
+            };
+            roles
+                .assign_to_user_claimed(w.tenant, user, role, scope, claim)
+                .await
+        }
+        Request::AssignGroup { role, group } => {
+            roles
+                .assign_to_group_claimed(w.tenant, group, role, AssignmentScope::from(None), claim)
+                .await
+        }
+        Request::MakeGlobal { role } => roles
+            .update_claimed(
+                w.tenant,
+                role,
+                axiam_core::models::role::UpdateRole {
+                    is_global: Some(true),
+                    ..Default::default()
+                },
+                claim,
+            )
+            .await
+            .map(drop),
+    }
+}
+
+/// What a role carries and who holds it, after a round.
+struct RoleState {
+    grants: Vec<(String, PermissionEffect)>,
+    users: Vec<(Uuid, bool)>,
+    grouped: bool,
+    is_global: bool,
+}
+
+impl RoleState {
+    async fn of(w: &World, role: Uuid) -> Self {
+        let grants = SurrealPermissionRepository::new(w.db.clone())
+            .get_role_permission_grants(w.tenant, role)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.permission.action, g.effect))
+            .collect();
+        let users = w
+            .roles()
+            .get_role_user_assignments(w.tenant, role)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.subject_id, a.inherit))
+            .collect();
+        let grouped = !w
+            .roles()
+            .get_role_group_ids(w.tenant, role)
+            .await
+            .unwrap()
+            .is_empty();
+        let is_global = w.roles().get_by_id(w.tenant, role).await.unwrap().is_global;
+        Self {
+            grants,
+            users,
+            grouped,
+            is_global,
+        }
+    }
+
+    fn network(&self) -> bool {
+        self.grants.iter().any(|(a, _)| a.starts_with("network:"))
+    }
+}
+
+/// Race `a` (as `writer_a`) against `b` (as `writer_b`) on a fresh role, for
+/// `ROUNDS` rounds; `setup` makes the role's starting state and the two
+/// requests, `holds` is the invariant. Returns how often each side won.
+const ROUNDS: usize = 8;
+
+async fn race<S, F, H>(w: &Arc<World>, writers: (Uuid, Uuid), setup: S, holds: H)
+where
+    S: Fn(Uuid) -> F,
+    F: std::future::Future<Output = (Uuid, Request, Request)>,
+    H: Fn(&RoleState) -> bool,
+{
+    let (mut a_won, mut b_won) = (0, 0);
+    for round in 0..ROUNDS {
+        let (role, a, b) = setup(
+            w.role(&format!("race-{}", Uuid::new_v4().simple()), &[])
+                .await,
+        )
+        .await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = tokio::spawn(send(Arc::clone(w), writers.0, a, Arc::clone(&barrier)));
+        let second = tokio::spawn(send(Arc::clone(w), writers.1, b, Arc::clone(&barrier)));
+        let (ra, rb) = (first.await.unwrap(), second.await.unwrap());
+        assert!(
+            ra.is_err() || rb.is_err(),
+            "round {round}: {a:?} and {b:?} both landed on what the gate read"
+        );
+        for refused in [&ra, &rb].into_iter().filter(|r| r.is_err()) {
+            assert!(
+                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
+                    if reason.contains("the role changed since it was read")),
+                "round {round}: the loser is the 409, got {refused:?}"
+            );
+        }
+        let state = RoleState::of(w, role).await;
+        assert!(
+            holds(&state),
+            "round {round}: invariant broken after {a:?} / {b:?}"
+        );
+        a_won += usize::from(ra.is_ok());
+        b_won += usize::from(rb.is_ok());
+    }
+    println!("first won {a_won}, second won {b_won} of {ROUNDS}");
+}
+
+/// A super-admin user: holds `network:grant` and the meta permissions at the
+/// `/network` root, and every route permission.
+async fn network_admin(w: &World) -> Uuid {
+    w.user(&[(w.role_named("super-admin").await, None)]).await
+}
+
+/// Rule 2: a `network:join` grant to a role racing the role's assignment to a
+/// group. Never a group-held network role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r110w6_04_rule_2_a_grant_racing_a_group_assignment_never_lands_both() {
+    let (w, _dir) = serialising_world().await;
+    let admin = network_admin(&w).await;
+    let join = w.permission_id(NETWORK_JOIN).await;
+    let ww = Arc::clone(&w);
+    race(
+        &w,
+        (admin, admin),
+        move |role| {
+            let w = Arc::clone(&ww);
+            async move {
+                let group = SurrealGroupRepository::new(w.db.clone())
+                    .create(CreateGroup {
+                        tenant_id: w.tenant,
+                        name: format!("g-{}", Uuid::new_v4().simple()),
+                        description: String::new(),
+                        metadata: None,
+                    })
+                    .await
+                    .unwrap()
+                    .id;
+                (
+                    role,
+                    Request::Grant {
+                        role,
+                        permission: join,
+                        effect: ALLOW,
+                    },
+                    Request::AssignGroup { role, group },
+                )
+            }
+        },
+        |s| !(s.network() && s.grouped),
+    )
+    .await;
+}
+
+/// Interleaving 1 (H6, T-482): a writer holding `network:grant` grants
+/// `network:join` to a role and, at once, assigns the role to itself. Each
+/// gate reads the other half as absent; never both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r110w6_04_h6_a_join_grant_racing_a_self_assignment_never_lands_both() {
+    let (w, _dir) = serialising_world().await;
+    let writer = network_admin(&w).await;
+    let join = w.permission_id(NETWORK_JOIN).await;
+    race(
+        &w,
+        (writer, writer),
+        move |role| async move {
+            (
+                role,
+                Request::Grant {
+                    role,
+                    permission: join,
+                    effect: ALLOW,
+                },
+                Request::AssignUser {
+                    role,
+                    user: writer,
+                    node: None,
+                    inherit: true,
+                },
+            )
+        },
+        move |s| {
+            let joins = s
+                .grants
+                .iter()
+                .any(|(a, e)| a == NETWORK_JOIN && *e == ALLOW);
+            !(joins && s.users.iter().any(|(u, _)| *u == writer))
+        },
+    )
+    .await;
+}
+
+/// Interleaving 2 (rule 1): a role made global racing a `network:` grant to
+/// it. Never a global role carrying a `network:` permission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r110w6_04_rule_1_a_global_update_racing_a_network_grant_never_lands_both() {
+    let (w, _dir) = serialising_world().await;
+    let admin = network_admin(&w).await;
+    let join = w.permission_id(NETWORK_JOIN).await;
+    race(
+        &w,
+        (admin, admin),
+        move |role| async move {
+            (
+                role,
+                Request::MakeGlobal { role },
+                Request::Grant {
+                    role,
+                    permission: join,
+                    effect: ALLOW,
+                },
+            )
+        },
+        |s| !(s.network() && s.is_global),
+    )
+    .await;
+}
+
+/// Interleaving 3 (rule 3): an assignment with `inherit: false` racing a
+/// `network:join` deny on the role. Never a network deny on a role held with
+/// `inherit: false` (a quarantine that reaches nothing below its node).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r110w6_04_rule_3_a_non_inheriting_assignment_racing_a_deny_never_lands_both() {
+    let (w, _dir) = serialising_world().await;
+    let admin = network_admin(&w).await;
+    let join = w.permission_id(NETWORK_JOIN).await;
+    let device = w.user(&[]).await;
+    let zones = branch_node_id(w.tenant, NetworkSegmentKind::Access);
+    race(
+        &w,
+        (admin, admin),
+        move |role| async move {
+            (
+                role,
+                Request::AssignUser {
+                    role,
+                    user: device,
+                    node: Some(zones),
+                    inherit: false,
+                },
+                Request::Grant {
+                    role,
+                    permission: join,
+                    effect: DENY,
+                },
+            )
+        },
+        |s| {
+            let denies = s
+                .grants
+                .iter()
+                .any(|(a, e)| a.starts_with("network:") && *e == DENY);
+            !(denies && s.users.iter().any(|(_, inherit)| !inherit))
+        },
+    )
+    .await;
+}
+
+/// Interleaving 4 (§5.3 row 5, H6): an administrator quarantines a role the
+/// writer holds (a `network:join` deny) while the writer revokes
+/// `network:join` from it, its gate having read no grant to revoke. The revoke
+/// never deletes a deny it did not read: if the deny was reported written, it
+/// is there afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
+    let (w, _dir) = serialising_world().await;
+    let admin = network_admin(&w).await;
+    let writer = network_admin(&w).await;
+    let join = w.permission_id(NETWORK_JOIN).await;
+    let ww = Arc::clone(&w);
+    let (mut quarantined, mut released) = (0, 0);
+    for round in 0..ROUNDS {
+        let role = w.role(&format!("q-{}", Uuid::new_v4().simple()), &[]).await;
+        ww.roles()
+            .assign_to_user(w.tenant, writer, role, AssignmentScope::from(None))
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let deny = Request::Grant {
+            role,
+            permission: join,
+            effect: DENY,
+        };
+        let revoke = Request::Revoke {
+            role,
+            permission: join,
+        };
+        let a = tokio::spawn(send(Arc::clone(&w), admin, deny, Arc::clone(&barrier)));
+        let b = tokio::spawn(send(Arc::clone(&w), writer, revoke, Arc::clone(&barrier)));
+        let (denied, revoked) = (a.await.unwrap(), b.await.unwrap());
+        assert!(
+            denied.is_err() || revoked.is_err(),
+            "round {round}: the deny and the revoke both landed on what their gates read"
+        );
+        for refused in [&denied, &revoked].into_iter().filter(|r| r.is_err()) {
+            assert!(
+                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
+                    if reason.contains("the role changed since it was read")),
+                "round {round}: {refused:?}"
+            );
+        }
+        let state = RoleState::of(&w, role).await;
+        let deny_there = state
+            .grants
+            .iter()
+            .any(|(a, e)| a == NETWORK_JOIN && *e == DENY);
+        if denied.is_ok() {
+            assert!(
+                deny_there,
+                "round {round}: the writer's revoke deleted the quarantine"
+            );
+            quarantined += 1;
+        } else {
+            released += 1;
+        }
+    }
+    println!("quarantine won {quarantined}, revoke won {released} of {ROUNDS}");
 }

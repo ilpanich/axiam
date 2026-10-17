@@ -78,7 +78,9 @@ use axiam_core::models::network::{
 use axiam_core::models::permission::{Permission, PermissionEffect, PermissionGrant};
 use axiam_core::models::radius_reply::ReplyProfileInput;
 use axiam_core::models::resource::Resource;
-use axiam_core::models::role::{Role, RoleAssignment, RoleSubjectAssignment};
+use axiam_core::models::role::{
+    Role, RoleAssignment, RoleClaim, RoleEpochs, RoleSubjectAssignment,
+};
 use axiam_core::repository::{
     CertificateRepository, GroupRepository, NetworkPolicyRepository, NetworkSegmentRepository,
     PermissionRepository, ReplyProfileRepository, ResourceRepository, RoleRepository,
@@ -240,6 +242,14 @@ pub trait NetworkGateStore: Send + Sync {
         &self,
         certificate_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<Uuid>>> + Send;
+    /// A role's two epochs (R110W6-04), `None` when it is not this tenant's or
+    /// the store keeps none. Read before anything else about the role, and
+    /// handed to the write as its [`RoleClaim`].
+    fn role_epochs(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<RoleEpochs>>> + Send;
 }
 
 /// [`NetworkGateStore`] over `axiam-core`'s repository traits.
@@ -362,6 +372,9 @@ where
         self.certificates
             .get_bound_service_account(certificate_id)
             .await
+    }
+    async fn role_epochs(&self, tenant_id: Uuid, role_id: Uuid) -> AxiamResult<Option<RoleEpochs>> {
+        self.roles.get_role_epochs(tenant_id, role_id).await
     }
 }
 
@@ -600,6 +613,8 @@ pub enum NetworkWrite<'a> {
 pub struct GateClearance {
     network_sensitive: bool,
     token: Option<NetworkWriteClearance>,
+    role_claim: Option<RoleClaim>,
+    revoked_effect: Option<Option<PermissionEffect>>,
 }
 
 impl GateClearance {
@@ -607,6 +622,8 @@ impl GateClearance {
         Self {
             network_sensitive,
             token: None,
+            role_claim: None,
+            revoked_effect: None,
         }
     }
 
@@ -614,17 +631,40 @@ impl GateClearance {
         Self {
             network_sensitive: true,
             token: Some(token),
+            role_claim: None,
+            revoked_effect: None,
         }
+    }
+
+    /// Record, for a revoke, the effect of the grant the decision read
+    /// (`None`: no grant).
+    fn revoking(mut self, read: Option<PermissionEffect>) -> Self {
+        self.revoked_effect = Some(read);
+        self
+    }
+
+    /// What the role write's transaction must still find (R110W6-04): the
+    /// role's epochs as the function read them before anything else about the
+    /// role, and for a revoke the effect it read. `None` for a write that
+    /// depends on no state of a role — a segment, profile, binding or
+    /// resource write; a grant or revoke outside `network:`; a role that is
+    /// not the tenant's; a role update that does not touch `is_global`.
+    ///
+    /// The role repositories' `*_claimed` writes take it; a write that lost a
+    /// race answers `409` ("the role changed since it was read").
+    #[must_use]
+    pub fn role_claim(&self) -> Option<RoleClaim> {
+        self.role_claim
     }
 
     /// Narrow the token (R110W6-03): see
     /// [`NetworkWriteClearance::freeze_profiled_placement`].
     fn freeze_profiled_placement(self) -> Self {
         Self {
-            network_sensitive: self.network_sensitive,
             token: self
                 .token
                 .map(NetworkWriteClearance::freeze_profiled_placement),
+            ..self
         }
     }
 
@@ -732,6 +772,55 @@ where
         store,
         writer,
     };
+    // R110W6-04: a role write is decided on the role's grants, holders and
+    // scope, read below; the write claims the epochs read here, first, so that
+    // anything that changed one of those since makes it `409` instead of
+    // landing on a state the decision never saw (the notes in
+    // `axiam-db`'s `repository/role.rs`).
+    let claimed_role = match write {
+        NetworkWrite::RoleAssign { role_id, .. }
+        | NetworkWrite::RoleUnassign { role_id, .. }
+        | NetworkWrite::RoleDelete { role_id }
+        | NetworkWrite::RoleUpdate {
+            role_id,
+            is_global: Some(_),
+        }
+        | NetworkWrite::PermissionGrant { role_id, .. }
+        | NetworkWrite::PermissionRevoke { role_id, .. } => Some(role_id),
+        _ => None,
+    };
+    let epochs = match claimed_role {
+        Some(role_id) => store.role_epochs(writer.tenant_id, role_id).await?,
+        None => None,
+    };
+    let verdict = decide(&gate, write).await?;
+    Ok(verdict.map(|mut clearance| {
+        // A grant or revoke outside `network:` depends on nothing of the role
+        // (the function cleared it on the permission alone), so it claims
+        // nothing and two of them never collide.
+        let grant_or_revoke = matches!(
+            write,
+            NetworkWrite::PermissionGrant { .. } | NetworkWrite::PermissionRevoke { .. }
+        );
+        if let (Some(role_id), Some(epochs)) = (claimed_role, epochs)
+            && (!grant_or_revoke || clearance.network_sensitive)
+        {
+            clearance.role_claim = Some(RoleClaim {
+                role_id,
+                epochs,
+                revoked_effect: clearance.revoked_effect,
+            });
+        }
+        clearance
+    }))
+}
+
+/// The dispatch of [`authorize_network_write`].
+async fn decide<A, S>(gate: &Gate<'_, A, S>, write: NetworkWrite<'_>) -> AxiamResult<GateVerdict>
+where
+    A: WriteTimeAccess + ?Sized,
+    S: NetworkGateStore + ?Sized,
+{
     match write {
         NetworkWrite::ProfileWrite { segment_id, input } => {
             gate.profile_write(segment_id, input).await
@@ -1878,7 +1967,9 @@ where
         {
             return Ok(Err(with_values(r)));
         }
-        Ok(Ok(GateClearance::plain(true)))
+        // The delete is conditional on the grant read here (R110W6-04): a deny
+        // written since would otherwise be deleted by a revoke H6 never saw.
+        Ok(Ok(GateClearance::plain(true).revoking(current)))
     }
 
     // -- the reserved namespace ----------------------------------------------

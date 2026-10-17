@@ -293,28 +293,29 @@ pub async fn grant_to_role<C: Connection + Clone>(
     // §5.3 / §4.2: a `network:` grant changes every assignment of the role at
     // once, so it takes `network:grant` at /network (and every meta permission
     // it confers), and never lands on a global or group-held role.
-    let _cleared = network_gate::authorize(
-        &principal,
-        authz.get_ref().as_ref(),
-        &state,
-        NetworkWrite::PermissionGrant {
-            role_id,
-            permission_id: req.permission_id,
-            effect: req.effect,
-            scope_ids: &req.scope_ids,
-        },
-    )
-    .await?;
-    state
+    let scope_ids = req.scope_ids.clone();
+    let write = NetworkWrite::PermissionGrant {
+        role_id,
+        permission_id: req.permission_id,
+        effect: req.effect,
+        scope_ids: &scope_ids,
+    };
+    let cleared =
+        network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
+    if let Err(error) = state
         .permission_repo
-        .grant_to_role_with_effect(
+        .grant_to_role_claimed(
             principal.tenant_id,
             role_id,
             req.permission_id,
             req.scope_ids,
             req.effect,
+            cleared.role_claim(),
         )
-        .await?;
+        .await
+    {
+        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
+    }
     // D7: an ALLOW grant widens access (safe direction) for every subject
     // holding the role (set unknown here) — flush the tenant so the new grant
     // is visible immediately.
@@ -492,20 +493,24 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     let p = path.into_inner();
     // §5.3: revoking a `network:` grant of either effect (a deny's revoke
     // releases a quarantine) takes `network:grant` at /network.
-    let _cleared = network_gate::authorize(
-        &principal,
-        authz.get_ref().as_ref(),
-        &state,
-        NetworkWrite::PermissionRevoke {
-            role_id: p.role_id,
-            permission_id: p.permission_id,
-        },
-    )
-    .await?;
-    state
+    let write = NetworkWrite::PermissionRevoke {
+        role_id: p.role_id,
+        permission_id: p.permission_id,
+    };
+    let cleared =
+        network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
+    if let Err(error) = state
         .permission_repo
-        .revoke_from_role(principal.tenant_id, p.role_id, p.permission_id)
-        .await?;
+        .revoke_from_role_claimed(
+            principal.tenant_id,
+            p.role_id,
+            p.permission_id,
+            cleared.role_claim(),
+        )
+        .await
+    {
+        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
+    }
     // D7 (REVOCATION — security critical): revoking a grant removes access for
     // every subject holding this role. The subject set isn't known here without
     // a query, so flush the whole tenant — this must never leave a stale allow.

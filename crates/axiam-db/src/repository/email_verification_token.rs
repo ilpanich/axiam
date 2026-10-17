@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, retry_hot_row, take_first_or_not_found};
+use crate::repository::mail_cap;
 
 #[derive(Debug, SurrealValue)]
 struct TokenRow {
@@ -258,6 +259,66 @@ impl<C: Connection> EmailVerificationTokenRepository
 
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
+    }
+
+    /// Item 7 of the 1.1.0 atomicity audit — the cap and the new token in one
+    /// transaction that claims the user row (`mail_cap`).
+    async fn create_within_daily_cap(
+        &self,
+        input: CreateEmailVerificationToken,
+        daily_cap: u64,
+    ) -> AxiamResult<Option<EmailVerificationToken>> {
+        let id = new_id();
+        let id_str = id.to_string();
+        let user_id_str = input.user_id.to_string();
+        let query = format!(
+            "BEGIN TRANSACTION; {claim}\
+             CREATE type::record('email_verification_token', $id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $user_id, \
+                 token_hash = $token_hash, \
+                 email = $email, \
+                 expires_at = $expires_at, \
+                 consumed_at = NONE; \
+             COMMIT TRANSACTION",
+            claim = mail_cap::claim("email_verification_token"),
+        );
+        // Result slots: BEGIN, the claim's, then the CREATE.
+        let create_slot = 1 + mail_cap::CLAIM_SLOTS;
+        let daily_cap = i64::try_from(daily_cap).unwrap_or(i64::MAX);
+        let day_start = mail_cap::day_start();
+
+        let rows = retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("id", id_str.clone()))
+                .bind(("tenant_id", input.tenant_id.to_string()))
+                .bind(("user_id", user_id_str.clone()))
+                .bind(("token_hash", input.token_hash.clone()))
+                .bind(("email", input.email.clone()))
+                .bind(("expires_at", input.expires_at))
+                .bind(("day_start", day_start))
+                .bind(("daily_cap", daily_cap))
+                .await
+                .map_err(DbError::from)?;
+            if mail_cap::outcome(
+                result.take_errors(),
+                "email_verification_token",
+                &user_id_str,
+            )? {
+                return Ok(None);
+            }
+            let rows: Vec<TokenRow> = result.take(create_slot).map_err(DbError::from)?;
+            Ok(Some(rows))
+        })
+        .await?;
+        let Some(rows) = rows else {
+            return Ok(None);
+        };
+        let row = take_first_or_not_found(rows, "email_verification_token", &id_str)?;
+        Ok(Some(row.into_token(id)?))
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {

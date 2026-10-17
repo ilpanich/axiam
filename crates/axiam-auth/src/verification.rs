@@ -171,17 +171,43 @@ where
             return Ok(None);
         }
 
-        // Rate limit: max resends per day.
+        // Rate limit: max resends per day. This count is the early refusal;
+        // the cap itself is counted again inside the mint below (item 7 of the
+        // 1.1.0 atomicity audit), because requests sent together each read a
+        // count under the cap here.
         let count = self.token_repo.count_today(tenant_id, user.id).await?;
         if count >= MAX_RESENDS_PER_DAY {
             return Err(AxiamError::RateLimited);
         }
 
-        let (raw_token, expires_at) = self
-            .initiate_verification(tenant_id, user.id, &user.email)
-            .await?;
+        let raw_token = token::generate_refresh_token();
+        let token_hash = token::hash_refresh_token(&raw_token);
+        let expires_at = Utc::now() + Duration::hours(TOKEN_EXPIRY_HOURS);
 
-        Ok(Some((raw_token, user.id, expires_at)))
+        // One transaction: the cap and the token, bound to the address on the
+        // account (the one it is mailed to). Concurrent resends for one account
+        // conflict on the user row, so at most the cap's remainder mint.
+        match self
+            .token_repo
+            .create_within_daily_cap(
+                CreateEmailVerificationToken {
+                    tenant_id,
+                    user_id: user.id,
+                    token_hash,
+                    email: user.email.clone(),
+                    expires_at,
+                },
+                MAX_RESENDS_PER_DAY,
+            )
+            .await
+        {
+            Ok(Some(_)) => Ok(Some((raw_token, user.id, expires_at))),
+            Ok(None) => Err(AxiamError::RateLimited),
+            // The account went between the lookup and the mint: answered as an
+            // unknown address is, so the race reveals nothing either.
+            Err(AxiamError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Check if a user has any federation links (social/external

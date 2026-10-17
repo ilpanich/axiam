@@ -537,6 +537,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_client_quota_epoch",
         sql: SCHEMA_V103,
     },
+    Migration {
+        version: 104,
+        name: "user_mail_epoch",
+        sql: SCHEMA_V104,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5038,6 +5043,29 @@ const SCHEMA_V103: &str = "\
 DEFINE FIELD IF NOT EXISTS client_quota_epoch ON TABLE tenant TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v104 — a mail token's daily cap is one transaction
+// (the 1.1.0 atomicity audit, item 7)
+// -----------------------------------------------------------------------
+//
+// **`user.mail_epoch`** — moves with every capped mail-token mint: a password
+// reset link and a resent verification link. The daily cap was a count made
+// before the mint, in a statement of its own, so parallel requests each read
+// a count under the cap and all minted — the cap was exceeded, and more than
+// one reset link was live. The mint now re-counts inside its own transaction,
+// refuses at the cap, and writes this field on the user row
+// (`repository/mail_cap.rs`): the shared write is what makes two overlapping
+// mints conflict, and the loser is retried on a fresh snapshot, where its
+// count sees the winner's token. Like `tenant.client_quota_epoch` (v103) the
+// value means nothing beyond "changed". Classified in
+// `axiam_core::personal_data::USER_COLUMNS`.
+//
+// Additive: one optional field, nothing backfilled (a user written before the
+// upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V104: &str = "\
+DEFINE FIELD IF NOT EXISTS mail_epoch ON TABLE user TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5305,6 +5333,22 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// Item 7 of the 1.1.0 atomicity audit — v104 is the user row's mail
+    /// epoch, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v104_adds_only_the_mail_epoch() {
+        let statements: Vec<&str> = SCHEMA_V104
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS mail_epoch ON TABLE user TYPE option<int>"],
+            "v104 defines the counter and nothing else"
+        );
     }
 
     /// Item 6 of the 1.1.0 atomicity audit — v103 is the tenant row's client
@@ -6823,10 +6867,13 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&103),
-            "v103 is the newest migration (the 1.1.0 atomicity audit's item 6 — \
-             `tenant.client_quota_epoch`, which every create of a `dcr` or `cimd` client \
-             writes so that the quota count and the create act as one transaction); v102 was \
+            Some(&104),
+            "v104 is the newest migration (the 1.1.0 atomicity audit's item 7 — \
+             `user.mail_epoch`, which every capped password-reset or verification mint writes \
+             so that the daily cap and the mint act as one transaction); v103 was the 1.1.0 \
+             atomicity audit's item 6 — `tenant.client_quota_epoch`, which every create of a \
+             `dcr` or `cimd` client writes so that the quota count and the create act as one \
+             transaction; v102 was \
              the 1.1.0 atomicity audit's single-use items — \
              `email_verification_token.email`, the address a verification token vouches for, \
              the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`; \

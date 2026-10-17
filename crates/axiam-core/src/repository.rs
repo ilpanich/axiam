@@ -5065,6 +5065,22 @@ pub trait EmailVerificationTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// Store a new verification token unless the user already has
+    /// `daily_cap` minted today, counted **inside** the store's transaction
+    /// (item 7 of the 1.1.0 atomicity audit).
+    ///
+    /// `None` at the cap, having written nothing. Implementations MUST make
+    /// two overlapping mints for one user conflict — a count alone does not,
+    /// under snapshot isolation — so that N requests sent together cannot each
+    /// count under the cap and all mint. `NotFound` when the user is not the
+    /// tenant's. A caller's own [`Self::count_today`], made earlier, is an
+    /// early refusal and nothing more.
+    fn create_within_daily_cap(
+        &self,
+        input: CreateEmailVerificationToken,
+        daily_cap: u64,
+    ) -> impl Future<Output = AxiamResult<Option<EmailVerificationToken>>> + Send;
+
     /// Delete expired and consumed tokens (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
@@ -5112,6 +5128,24 @@ pub trait PasswordResetTokenRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Invalidate the user's unconsumed tokens and store a new one, as one
+    /// transaction, unless the user already has `daily_cap` tokens minted
+    /// today — counted **inside** that transaction (item 7 of the 1.1.0
+    /// atomicity audit).
+    ///
+    /// `None` at the cap, having written nothing. Implementations MUST make
+    /// two overlapping replacements for one user conflict — a count alone
+    /// does not, under snapshot isolation — so that N requests sent together
+    /// can neither each count under the cap and all mint, nor leave more than
+    /// one link live. `NotFound` when the user is not the tenant's. A caller's
+    /// own [`Self::count_today`], made earlier, is an early refusal and nothing
+    /// more.
+    fn replace_within_daily_cap(
+        &self,
+        input: CreatePasswordResetToken,
+        daily_cap: u64,
+    ) -> impl Future<Output = AxiamResult<Option<PasswordResetToken>>> + Send;
 }
 
 // -------------------------------------------------------------------

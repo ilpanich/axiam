@@ -19,6 +19,7 @@ mod federation_config;
 mod federation_link;
 mod federation_login_state;
 mod group;
+mod mail_cap;
 mod mds;
 mod minimal_profile_lease;
 mod network;

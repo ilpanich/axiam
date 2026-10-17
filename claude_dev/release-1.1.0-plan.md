@@ -978,6 +978,125 @@ The 43 issues close with the PR, and #701 with them since its fix landed on the 
 
 Final CI state on `67bc4c464`: every check is green except Security Scan, including Test, cargo-llvm-cov, E2E, CodeQL Analyze (rust) and the runtime smoke.
 
+### 13.9 Atomicity remediation and close-out
+
+This section closes the release record. It covers the work on `claude/release-1.1.0` after the first §13.8 addendum (`47197dcf0`), up to `74ca43f90`. The §13.8 addendum already has one row per fix, with root cause and tests. This section records why the work was done, what was decided, and what is left. All commits listed here are signed and pushed.
+
+**Trigger.**
+- On 2026-10-17 the maintainer posted a P2 review comment on #716 ("Make network-role checks and assignments atomic"), from a private review of `f1b4468f6`. It was R110W6-04 (#701, Low in the W6 F4 review): the network gate's check runs before its write, not inside it.
+- The maintainer asked: **"is RADIUS the only one?"** To answer, the orchestrator ran a read-only atomicity audit of the whole tree at `f1b4468f6`.
+
+**What the audit found.**
+- **The guarantee.** SurrealDB 3.3.4 gives snapshot isolation with write-write conflict detection only, on every engine:
+  - A plain read is not validated at commit. So **write skew passes**: two transactions that read the same state and write different rows both commit.
+  - surrealkv validates only `SELECT … FOR UPDATE` reads on record ids, and AXIAM never uses them.
+  - RocksDB is assumed to behave the same. This was not verified.
+  - Outside `BEGIN … COMMIT`, each statement is its own transaction. So a guard statement placed before a write is not atomic with it.
+- **The findings:**
+
+| Group | Findings | Count |
+|---|---|---|
+| Network-gate races | The gate decides a role write on reads it makes before the write (R110W6-04, #701). The fix names five interleavings: rule 2, H6, rule 1, rule 3, and a revoke that deletes a deny its gate never saw. | 4 |
+| Other races | 5 lockout reset · 6 DCR/CIMD quota · 7 mailed-token daily caps · 8 resource-hierarchy cycle · 9 OAuth2 client patch · 10 enabled directory vs `opaque_mode = required` · 11 deletion cancel vs purge sweep | 7 |
+| Single-use gaps (not races) | A (Medium): an email-verification token is not bound to an address · B (Low): a WebAuthn assertion can be replayed, and its signature counter is never stored | 2 |
+
+**Decision.** **"Everything in #716"**, by the maintainer, 2026-10-17. Every finding is fixed on this branch before the tag. None is deferred to `1.1.x`.
+
+**The fix.** Every fix uses the house pattern, which is already in the tree (`9dff2aa97`, `122b9ea92`, `claim_parent` for #308, `expected_updated_at` in `scim_target.rs`):
+- **A claimed row.** Both conflicting writers write one common row: an epoch or version on the role, tenant, user or request row. Each write compares that value, inside its own transaction, with the value it read before deciding. If the value has moved, the write `THROW`s.
+- **An in-transaction re-check.** The rule is checked again inside the same transaction.
+- **The effect.** Two overlapping writes now conflict on the claimed row. The loser is retried on a fresh snapshot, fails the compare, and gets a `409` or the existing refusal.
+
+Every race test runs on `surrealkv` and holds both sides at a barrier after their reads, 8 rounds a run, and passed **20 of 20 runs**. Where the last column says yes, the test was also run with the claim or guard removed and failed.
+
+| Batch | Commits | What | Schema | Fails with the claim removed |
+|---|---|---|---|---|
+| #701 | `6ef82125f` (docs `97e6e9c7b`) | The gate reads `role.grant_epoch` and `role.holder_epoch` first. The `*_claimed` writes compare and move them. Rule 2 is re-checked inside the transaction. A lost race gets `409 stale_version` and a `network_role.*_refused` audit row. | v101 | yes, 4 of 5 tests (rule 2 is also re-checked inside the transaction) |
+| A, 5, B | `5e3fc1cb0`, `8e7946d7a`, `c7f0984da` (docs `87a84cf41`) | **A:** the token is bound to the address it was mailed to, and redeemed in one conditional transaction; an email change deletes unconsumed verification and reset links. <br>**5:** the success path clears the failure counter only `WHERE` no lock is in force. <br>**B:** the state token's `jti` is spent in the replay store, and `sign_count` is compared in the write. | v102 | not recorded |
+| 6, 7 | `625fa3d6a`, `56d3a523a` (docs `d1377607f`) | Count, `THROW` at the ceiling, and create, all in one transaction that writes `tenant.client_quota_epoch` (6) or `user.mail_epoch` (7). | v103, v104 | yes |
+| 8 – 11 | `fdd54bd67`, `994a78b8e`, `7d0bf96f6`, `a2942fa2d` (docs `e8722b668`) | **8:** `tenant.hierarchy_epoch`, with the ancestor walk inside the re-parent's transaction. <br>**9:** `updated_at = $read` in the patch's `WHERE`, else `409`. <br>**10:** `tenant.opaque_directory_epoch`, else `409`. <br>**11:** `account_deletion.purge_claimed_at` is the sweep's claim, and the cancel is conditional (`409` once the erasure has started). | v105, v106, v107 (none for 9) | yes |
+| Follow-ups | `42b940339`, `393b1e369` | Item 7 leftovers: one token per verification mail, and the expiry sweep keeps the tokens minted today. Item 8's review: resource edge writes bind their record ids instead of formatting them into the query. | — | n/a |
+
+The schema moves from **v94 to v107**. Migrations v101 – v107 are additive and backfill nothing.
+
+**The stack-overflow fix, `5895af23b`.**
+- **What failed.** CI's "OpenLDAP + Samba AD" job aborted `openldap_sync_deactivates_a_vanished_user` with a stack overflow, from `97e6e9c7b` on.
+- **Why.** The #701 epoch move, `UPDATE role SET grant_epoch = (grant_epoch ?? 0) + 1`, evaluated its `+` inside the embedded engine's per-document write path. That path ran inline under `seed_default_roles` → `grant_to_role`, and used about 1.5 MB of the 2 MiB thread stack.
+- **The fix.** The next epoch value is computed in a `LET`, from the epochs the same transaction already read, and the `UPDATE` assigns the parameter. The values written and the conflict behaviour are unchanged. `directory_e2e`'s scenario macro also boxes each scenario future, for stack margin.
+
+**Maintainer decisions (2026-10-17).**
+
+| Decision | Commit | What it means |
+|---|---|---|
+| Ignore the three `zip` 8.6.0 advisories (RUSTSEC-2026-0367, -0368, -0369), with a rationale | `f1b4468f6` | The ignores are in `deny.toml` and in CI's `cargo audit` input. <br>• `zip` is only a build dependency of `utoipa-swagger-ui` 10.0.1, which has no newer release. <br>• Its build script never calls `extract()`. <br>• Nothing of it ships in the binary. <br>The ignores are removed when `utoipa-swagger-ui` moves to `zip` ≥ 9 (#719). This replaces the "Security Scan, not fixed in the PR" paragraph of §13.8. |
+| The OPAQUE `required` coverage count stays a point-in-time check | — (documented in `7d0bf96f6`'s CHANGELOG entry) | See below. |
+| The generic role routes' `409 stale_version` stays undocumented in the contract | — | See below. Left as the maintainer's call. |
+
+**The OPAQUE coverage count.** When `opaque_mode` is switched to `required`, `count_active_users_without_credential` counts the tenant's `Active` users that have no OPAQUE record, and refuses the switch if there are any. Nothing re-checks this later. An account that becomes `Active` after the switch without a record is let through. Two examples:
+- a `PendingVerification` account created under `disabled` or `optional` that verifies its address after the switch;
+- a `Locked` or `Inactive` account that is re-enabled after the switch.
+
+This is what the code does with such an account:
+- `POST /auth/login` answers **`403 opaque_required`**. Under `required` it does this for the whole tenant, before any credential is read.
+- `POST /auth/opaque/login/start` answers `200` with the decoy exchange, as it does for an unknown name. The finish answers **`401` invalid credentials**, the same answer as a wrong password. Neither the user nor an administrator is told why.
+- **The way back is a password reset.** Under `required`, the reset confirmation must carry an OPAQUE registration record (`validate_enrollment` refuses a request without one), so completing the reset enrols the account.
+- Accounts created under `required` are not affected, because creation without a record is refused. Directory accounts are not affected either, because an enabled directory and `required` cannot both be in force (item 10).
+
+**The generic role routes' `409 stale_version`.** Since `6ef82125f`, the ten role and permission handlers call the `*_claimed` writes. So a grant, revoke, assignment, unassignment, `is_global` update or role delete that loses a race on the same role answers `409 conflict` with `reason_code: stale_version`. This happens on the generic `/api/v1/roles…` routes, not only on the network routes. Contract §36 does not describe these routes, and `sdks/openapi.json` was not changed for it. Whether 1.63 documents it is the maintainer's call. In the same change, a role rename to a name the tenant already has became `409` (it was a `500`).
+
+**CI fixes after the first addendum.**
+
+| Commit | What failed | Fix |
+|---|---|---|
+| `5367a5ba9` | `cargo audit`: RUSTSEC-2026-0373 in `ammonia` 4.2.3 (CSS `url()` matched case-sensitively), reached only through `surrealdb-runtime` | `ammonia` 4.2.4; a `Cargo.lock` change only, with no ignore |
+| `867fdcfcc` | "Build (SAML off)" with `-Dwarnings`, at `7ab0488b0`: an unused trait import in `handlers/gdpr.rs` after item 11 | The import is removed |
+| `74ca43f90` | CodeQL: 19 alerts on test code (`rust/hard-coded-cryptographic-value`, `rust/cleartext-logging`) | Test passwords and keys come from `axiam_test_support` or are random per process. Assertion messages carry a label, not the value. No assertion condition changed. |
+| `5895af23b` | The OpenLDAP + Samba AD stack overflow | Described above |
+| `2ee7b8669`, `ae5f159d5`, `7ab0488b0` | The spec drift check, after items 9, 10 and 11 added `409`s (and, for 11, `403` and `404`) | `sdks/openapi.json` regenerated three times: response descriptions only, no request or schema change |
+
+**The spec and the SDKs.**
+- **The spec.** The final digest is **`sha256:7c3a5091…c8a1`**, from `7ab0488b0`. It does not change through `74ca43f90`. `sdks/CONTRACT.md`, `sdks/management-registry.json` and `proto/` have not changed since `e8722b668`.
+- **The SDKs.** Each SDK re-vendored AXIAM `e8722b668`. These are the final heads of `claude/contract-1.62`. All eleven PRs are still drafts. On 2026-10-17 every check run on each head was success or skipped.
+
+| SDK | PR | Head |
+|---|---|---|
+| Rust | ilpanich/axiam-rust-sdk#131 | `aa66990` |
+| TypeScript | ilpanich/axiam-typescript-sdk#141 | `35eaa46` |
+| Python | ilpanich/axiam-python-sdk#98 | `f4e9340` |
+| Go | ilpanich/axiam-go-sdk#98 | `d72a11f` |
+| Java | ilpanich/axiam-java-sdk#114 | `d62b225` |
+| PHP | ilpanich/axiam-php-sdk#83 | `60dfa19` |
+| Kotlin | ilpanich/axiam-kotlin-sdk#76 | `54fefb1` |
+| C# | ilpanich/axiam-csharp-sdk#106 | `f798cec` |
+| C | ilpanich/axiam-c-sdk#73 | `51084ec` |
+| C++ | ilpanich/axiam-cplusplus-sdk#75 | `faecdbf` |
+| Swift | ilpanich/axiam-swift-sdk#74 | `43f4296` |
+
+**Corrections to §13.8:**
+- **Merge order.** The hand-off says the SDK drift check compares with AXIAM `main`. It does not. Each SDK's drift check compares its vendored files with its own generated output. So the SDK PRs do not wait on `main`, and they can merge before or after #716. Merging #716 first is still recommended, so that `main` carries what the SDKs vendor.
+- **The SDK heads.** The hand-off's heads, including the Rust `cde52e0`, are superseded by the table above.
+
+**Issues filed during close-out (milestone `1.1.x`).**
+- **#717:** `vault_ca_key_store_test` failure messages print the string they assert holds no secret. This is the follow-up to `057a9c5a2`.
+- **#718:** the shared rate-limit counter's cold-entry seed leaves a 30/min admin family as few as 3 writes late in a minute. This is the follow-up to `67bc4c464`.
+- **#719:** drop the `zip` audit ignores once `utoipa-swagger-ui` moves to `zip` ≥ 9.
+
+**Issue counts.**
+- **44 issues close with #716:** the 43 on its `Closes` lines, and #701.
+- **`1.1.x` has 55 open issues today.** After the merge, 54 stay open: #664 … #715 except #701, plus #717 – #719.
+- **`1.0.x`:** 2 stay open (#513, #561).
+
+**Still open for the maintainer.**
+- **Pin the SurrealDB image.** `surrealdb/surrealdb:v3` is a floating tag in `docker/docker-compose.{prod,minimal,dev,e2e}.yml`, `k8s/surrealdb/statefulset.yml`, `ci.yml` and `coverage.yml`. The audit's guarantee was read from 3.3.4, and every fix above relies on write-write conflict detection. Pin a digest, or a 3.3.x tag, and re-check the guarantee when it moves.
+- **T-481's residuals.** T-481 stays Open. The gate still reads the writer's own rights and a certificate binding's account without a claim.
+- **#718:** whether to change the cold-entry seed for production admins.
+- **#700:** is an administrative `Service-Type` refused with `400` or `403`?
+- The items in §13.8's "Left for the maintainer" still stand: the `SECURITY_VERIFIED_*` stamp and the two stray log files.
+
+**CI on the final head.** CI on `74ca43f90`, and on the commit that adds this section, was pending at the time of writing. The orchestrator records the result on the PR.
+
+**Process note.** During the CodeQL cleanup (`74ca43f90`), the executor once ran a command with the sandbox disabled when it was not needed. This had no effect on the repository or on any pushed commit. It is recorded here for transparency.
+
 ---
 
 ## 14. Kickoff prompts

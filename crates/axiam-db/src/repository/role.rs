@@ -264,10 +264,52 @@ pub(crate) fn claim_binds(claim: Option<&RoleClaim>) -> (bool, i64, i64) {
     })
 }
 
-/// The statement that moves `epoch` (`grant_epoch` or `holder_epoch`) on the
-/// role row.
-pub(crate) fn bump_statement(role_id: &str, epoch: &str) -> String {
-    format!("UPDATE role:`{role_id}` SET {epoch} = ({epoch} ?? 0) + 1 WHERE tenant_id = $tid; ")
+/// One of the role row's two epochs.
+#[derive(Clone, Copy)]
+pub(crate) enum Epoch {
+    /// `grant_epoch`: `network:` grants and revokes, `is_global` writes.
+    Grants,
+    /// `holder_epoch`: assignments and unassignments.
+    Holders,
+}
+
+impl Epoch {
+    /// The role row's field.
+    pub(crate) fn field(self) -> &'static str {
+        match self {
+            Self::Grants => "grant_epoch",
+            Self::Holders => "holder_epoch",
+        }
+    }
+
+    /// The statement that leaves the epoch's next value in `$next_epoch`,
+    /// read from the `$epochs` pair [`claim_statements`] read earlier in the
+    /// same transaction (and block): the same snapshot an in-place
+    /// `x = (x ?? 0) + 1` would read. A role that is not the tenant's reads no
+    /// pair, and its UPDATE matches nothing.
+    pub(crate) fn next_statement(self) -> &'static str {
+        match self {
+            Self::Grants => "LET $next_epoch = ($epochs[0][0] ?? 0) + 1; ",
+            Self::Holders => "LET $next_epoch = ($epochs[0][1] ?? 0) + 1; ",
+        }
+    }
+}
+
+/// The statements that move `epoch` on the role row. Must follow
+/// [`claim_statements`] in the same block, whose `$epochs` they read.
+///
+/// The arithmetic is a `LET` of its own, so the `UPDATE` only assigns a
+/// parameter: the embedded engine evaluates an expression in a `SET` inside
+/// its per-document write pipeline, nested several frames below the statement
+/// that runs it, and in a debug build that nesting alone took the seeder's
+/// grant past a 2 MiB thread stack (`directory_e2e`, PR #716). The values
+/// written are the same.
+pub(crate) fn bump_statement(role_id: &str, epoch: Epoch) -> String {
+    format!(
+        "{next}UPDATE role:`{role_id}` SET {field} = $next_epoch WHERE tenant_id = $tid; ",
+        next = epoch.next_statement(),
+        field = epoch.field(),
+    )
 }
 
 /// A transaction's statement errors, read for the refusals every role write
@@ -386,21 +428,25 @@ impl<C: Connection> SurrealRoleRepository<C> {
         }
         let claim_check = if input.is_global.is_some() {
             sets.push("is_global = $is_global");
-            sets.push("grant_epoch = (grant_epoch ?? 0) + 1");
-            claim_statements(
+            // The next value is a `LET` of its own (`Epoch::next_statement`),
+            // for the reason `bump_statement` gives.
+            sets.push("grant_epoch = $next_epoch");
+            let mut statements = claim_statements(
                 &id_str,
                 Claims {
                     grants: true,
                     holders: false,
                 },
-            )
+            );
+            statements.push_str(Epoch::Grants.next_statement());
+            statements
         } else {
             String::new()
         };
         sets.push("updated_at = time::now()");
-        // Result slots: BEGIN, then the claim's LET and IF when present, then
-        // the UPDATE.
-        let update_slot = if claim_check.is_empty() { 1 } else { 3 };
+        // Result slots: BEGIN, then — when `is_global` is written — the
+        // claim's LET and IF and the next epoch's LET, then the UPDATE.
+        let update_slot = if claim_check.is_empty() { 1 } else { 4 };
 
         let query = format!(
             "BEGIN TRANSACTION; \
@@ -860,7 +906,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                 holders: false,
             },
         );
-        let bump = bump_statement(&role_id_str, "holder_epoch");
+        let bump = bump_statement(&role_id_str, Epoch::Holders);
 
         // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
@@ -947,7 +993,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                 holders: false,
             },
         );
-        let bump = bump_statement(&role_id_str, "holder_epoch");
+        let bump = bump_statement(&role_id_str, Epoch::Holders);
 
         // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
         let query = format!(

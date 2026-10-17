@@ -20,7 +20,7 @@ use crate::helpers::{
     take_first_or_not_found,
 };
 use crate::repository::role::{
-    Claims, NETWORK_ACTION_REGEX, NETWORK_GRANT_TO_GROUP_HELD_ROLE, ROLE_EPOCH_STALE,
+    Claims, Epoch, NETWORK_ACTION_REGEX, NETWORK_GRANT_TO_GROUP_HELD_ROLE, ROLE_EPOCH_STALE,
     bump_statement, claim_binds, claim_statements, role_tx_outcome,
 };
 
@@ -353,7 +353,7 @@ impl<C: Connection> SurrealPermissionRepository<C> {
                 holders: true,
             },
         );
-        let bump = bump_statement(&role_id_str, "grant_epoch");
+        let bump = bump_statement(&role_id_str, Epoch::Grants);
 
         // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
         let query = format!(
@@ -427,7 +427,7 @@ fn network_grant_statements(role_id: &str) -> String {
             holders: true,
         },
     );
-    let bump = bump_statement(role_id, "grant_epoch");
+    let bump = bump_statement(role_id, Epoch::Grants);
     format!(
         "IF string::matches($pe[0], {NETWORK_ACTION_REGEX}) {{ \
              {claim_check}\

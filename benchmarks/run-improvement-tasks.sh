@@ -575,7 +575,7 @@ task_g1_dbdirect() {
   # Same query shape the authz hot path uses, issued straight at SurrealDB from an
   # ephemeral container on the bench network — no AXIAM server involved.
   local net; net=$(docker inspect "$C_DB" -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || echo "")
-  local img; img=$(docker inspect "$C_DB" -f '{{.Config.Image}}' 2>/dev/null || echo "surrealdb/surrealdb:v3")
+  local img; img=$(docker inspect "$C_DB" -f '{{.Config.Image}}' 2>/dev/null || echo "surrealdb/surrealdb:v3.3.4")
   # Credential resolution, most-authoritative-last so an operator override still
   # wins: this shell's environment, then docker/.secrets/env, then the running
   # containers (see container_env — bench-up's bootstrapped defaults exist

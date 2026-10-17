@@ -57,6 +57,16 @@ one entry below, ending in its number.
   warning naming the tenant and the permission. Unassign the role from the group
   and restart to have them granted.
 
+- **The shipped manifests pin SurrealDB 3.3.4.** The Compose files
+  (`docker/docker-compose.{prod,minimal,dev,e2e}.yml`), the Kubernetes
+  StatefulSet (`k8s/surrealdb/statefulset.yml`), the Raspberry Pi overlay and CI
+  now run `surrealdb/surrealdb:v3.3.4` where they ran the floating `v3` tag (the
+  Pi overlay ran `v3.2`). An operator who overrides the image should stay on
+  3.3.x: the 1.1.0 race fixes (#701 and the atomicity audit's items 5 – 11)
+  rely on its write-write conflict detection, which lets only one of two
+  overlapping writes to a claimed row commit. `docs/deployment/README.md`
+  "Storage engine" says so.
+
 - **Confidential OAuth2 clients that use the device grant must now authenticate
   (#635, #675).** Before 1.1.0 neither device endpoint authenticated a client.
   Now `POST /oauth2/device_authorization` and the token poll authenticate the

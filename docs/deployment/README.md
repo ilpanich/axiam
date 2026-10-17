@@ -203,6 +203,14 @@ The shipped deployments already satisfy this — `docker-compose.dev.yml`,
 `surrealkv:/data/surreal.db`. If you author your own manifest, carry that
 argument over.
 
+**The version is pinned too.** From 1.1.0 the shipped Compose files, the
+Kubernetes StatefulSet and CI run `surrealdb/surrealdb:v3.3.4`, not the floating
+`v3` tag. 1.1.0's race fixes go further than the three redemptions above: every
+write that is decided on an earlier read also writes one row that a conflicting
+write must write too, and relies on SurrealDB 3.3.4's write-write conflict
+detection to let only one of them commit. If you override the image, stay on
+3.3.x, and re-run the race tests before you move to another line.
+
 **The server cannot verify this for you.** SurrealDB exposes no datastore
 identity over the wire: neither `/version`, nor `INFO FOR ROOT` (including its
 `system`, `nodes` and `config` sections), nor any `session::*` function names
@@ -2267,7 +2275,9 @@ How it was measured, so the number can be reproduced and not over-read:
   server *image* has not been taken.
 * **Versions.** SurrealDB 3.2.5 (`surrealdb/surrealdb:v3`, digest
   `sha256:eb6dddd6…`), RabbitMQ `4-management-alpine` (digest `sha256:3ef7f7e8…`),
-  on a 4-vCPU Linux 6.18 host.
+  on a 4-vCPU Linux 6.18 host. The measurement predates 1.1.0, whose manifests
+  pin `v3.3.4` (see the storage-engine section above); it has not been repeated
+  on 3.3.4.
 * **What the RSS figure includes.** File-backed pages count (the server's own
   binary, ~32 MiB of its 121 MiB; SurrealDB's mapped datastore, ~62 MiB of its
   87 MiB), which a container's cgroup accounting largely does not — which is why

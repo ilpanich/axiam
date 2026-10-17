@@ -571,9 +571,9 @@ about *durability* is touched (see below).
 defaults to `synchronous_commit = on`: a transaction's WAL record is written
 and fsynced to disk before the client's `COMMIT` returns — durable-by-default.
 AXIAM's bench target (`targets/axiam/docker-compose.yml`) runs
-`surrealdb/surrealdb:v3` with the **SurrealKV** storage engine
-(`surrealkv:/data/axiam.db`), no `SURREAL_SYNC_DATA` override — i.e. whatever
-the `v3` image defaults to. SurrealKV itself exposes two per-transaction
+`surrealdb/surrealdb:v3.3.4` (the floating `:v3` tag before 1.1.0) with the
+**SurrealKV** storage engine (`surrealkv:/data/axiam.db`), no
+`SURREAL_SYNC_DATA` override — i.e. whatever that 3.x image defaults to. SurrealKV itself exposes two per-transaction
 durability levels: **Eventual** (data written to the OS page cache, fsync
 deferred — SurrealKV's own stated default and "best performance" mode) and
 **Immediate** (fsync before `commit()` returns — the slower, durable mode).
@@ -581,7 +581,7 @@ Publicly, SurrealDB has stated that **2.x did not enable disk sync by
 default**, and that **3.x does** (`SURREAL_SYNC_DATA` on by default), in
 direct response to community criticism that its earlier benchmark numbers
 were measured with every engine's writes sitting in the page cache rather
-than actually flushed to disk. Since the AXIAM bench compose pins `:v3` and
+than actually flushed to disk. Since the AXIAM bench compose runs a 3.x image and
 sets no override, it should inherit that "sync on" default — but this
 framework has **not independently verified live fsync behavior against a
 running container** (no `strace`/`fsync`-call instrumentation has been run;

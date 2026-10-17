@@ -21,7 +21,7 @@ one entry below, ending in its number.
 
 **What needs an operator, first.**
 
-- **The schema moves from v94 to v104.** Migrations v95 – v104 run at startup
+- **The schema moves from v94 to v107.** Migrations v95 – v107 run at startup
   like every earlier one. Each is additive and none backfills: v95 and v96 add the
   Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
   v97 adds `tenant.purge_claimed_at`, v98 adds `certificate.user_id` and its
@@ -37,9 +37,14 @@ one entry below, ending in its number.
   single-use items, under Security below), and **v103** and **v104** add
   `tenant.client_quota_epoch` and `user.mail_epoch`, the counters that make the
   self-registered client quota and the mailed-token daily caps one transaction
-  with their counts (the atomicity audit's items 6 and 7). A row written before the upgrade
-  reads as "none attempted, due now", "not bound", epoch 0 or signature counter
-  0, and the first sweep or the name convention covers it. **Email-verification
+  with their counts (the atomicity audit's items 6 and 7), and **v105**,
+  **v106** and **v107** add `tenant.hierarchy_epoch`,
+  `tenant.opaque_directory_epoch` and `account_deletion.purge_claimed_at`, which
+  make a resource re-parent's cycle check, the directory/`opaque_mode = required`
+  exclusion and a deletion cancel against the purge sweep one transaction with
+  their writes (items 8, 10 and 11). A row written before the upgrade
+  reads as "none attempted, due now", "not bound", epoch 0, signature counter
+  0 or "not claimed", and the first sweep or the name convention covers it. **Email-verification
   links mailed before the upgrade no longer verify anything:** they name no
   address, and a link now verifies only the address it was sent to. They live
   24 hours; a user holding one asks for another (`POST
@@ -415,6 +420,110 @@ one entry below, ending in its number.
   through the real services held at a barrier after their counts: exactly the
   cap's worth mint, one reset link is live; 8 rounds a run, 20 of 20 runs).
   Threat model: T-41 corrected, T-29 extended.
+
+- **A resource re-parent can no longer close a cycle in the hierarchy (the
+  1.1.0 atomicity audit, item 8; Low).** The cycle check walked the new
+  parent's ancestors before the write, in statements of its own, and the
+  re-parent's transaction claimed only the new parent (#308). Two re-parents
+  that each closed half of a loop — X under Y and Z under W, with Z above Y and
+  X above W — each walked a hierarchy without the other's edge and both
+  committed; every authorization check beneath the cycle then failed closed on a
+  depth overflow. The walk now runs inside the re-parent's transaction, which
+  writes `tenant.hierarchy_epoch` (schema v105), so overlapping re-parents in one
+  tenant conflict and the loser re-walks on a fresh snapshot and gets the
+  existing `400` "cycle detected in resource hierarchy". A create cannot close a
+  cycle (a new resource has no descendants), and the reserved `/network`
+  subtree's writes only create nodes; neither claims anything. The re-parent,
+  create and delete statements also bind their record ids instead of formatting
+  them into the query. Test: `hierarchy_cycle_race_test` (on `surrealkv`, two
+  movers held at a barrier after their reads: exactly one lands and every node's
+  ancestor walk succeeds; 8 rounds a run, 20 of 20 runs). Threat model: T-86
+  extended.
+
+- **An administrator's OAuth2 client patch is written only over the row it was
+  validated against (the 1.1.0 atomicity audit, item 9; Low).** `PUT
+  /api/v1/oauth2-clients/{id}` checked each rule — the public/confidential
+  line, the redirect URIs an added `authorization_code` needs, CIBA and FAPI on
+  the merged row, the self-registered scope ceiling — against a read of its
+  own, and wrote only the patch's fields; two patches each validated against the
+  row before the other could both land and leave a merged row neither had
+  validated. The handler now reads once, checks every rule against that read,
+  and writes only if the row still carries the read's `updated_at`; a row
+  written since answers **`409 conflict`** ("the OAuth2 client changed since it
+  was read; read it again and retry") and nothing is written. The precondition
+  is the server's own read: no request member or `If-Match` header, so the SDKs'
+  request shapes are unchanged; the route documents the new `409`. Test:
+  `client_patch_race_test` (on `surrealkv`, a patch adding `authorization_code`
+  and one clearing the redirect URIs, held at a barrier after their reads:
+  exactly one lands; 8 rounds a run, 20 of 20 runs). Threat model: T-258
+  extended.
+
+- **An enabled directory and `opaque_mode = required` can no longer both be
+  saved at once (the 1.1.0 atomicity audit, item 10; Low).** Each refused the
+  other on a read made before its write — the directory save read the effective
+  settings, the settings write read the directory — and the two writes touch
+  different rows, so an enable and a `required` sent together both landed and
+  every directory account was locked out of sign-in. Both writes now claim
+  `tenant.opaque_directory_epoch` (schema v106): read before the read the rule
+  decides on, compared and moved inside the write's own transaction (an
+  organization baseline claims every live tenant, and is refused when a tenant
+  appeared since its read). A write that lost answers **`409 conflict`** ("the
+  tenant's directory or its opaque_mode changed since this request read them;
+  reload and retry") on `PUT`/`PATCH /api/v1/directory`, `PUT /api/v1/settings`,
+  `PUT /api/v1/tenants/{id}/settings` and `PUT
+  /api/v1/organizations/{id}/settings`, whose `409` descriptions now say so. The
+  admin console's Directory page, Settings page, tenant override panel and
+  organization settings form word that `409` as the Network page words its
+  `stale_version`: "Changed by someone else — reload and try again." Not
+  changed: the OPAQUE coverage count is a point-in-time check of `Active`
+  accounts; an account created during the switch is `PendingVerification` and
+  outside it whatever the order. Test: `opaque_directory_race_test` (on
+  `surrealkv`, an enable and a tenant `required` held at a barrier after their
+  reads: exactly one lands, never an enabled directory under `required`; 8
+  rounds a run, 20 of 20 runs).
+
+- **A deletion cancel and the purge sweep never both win (the 1.1.0 atomicity
+  audit, item 11; Low).** The cancel link read the request ("pending, inside
+  the window") and then marked it cancelled and re-enabled the account in two
+  unconditional writes; the sweep selected due accounts and erased them with
+  unconditional writes. A cancel at the deadline could land after the sweep had
+  selected the account: the subject was told "cancelled" while the account was
+  erased — or was left re-enabled after the sweep had revoked its sessions,
+  passkeys, groups, roles and certificates. The sweep now claims the request
+  before its first destructive step (`account_deletion.purge_claimed_at`, schema
+  v107, in a transaction that re-checks the account is still due at the sweep's
+  own `now`) and skips an account whose deletion was cancelled; the cancel is one
+  transaction that re-checks the request is pending, unclaimed and inside its
+  window before it re-enables the account. A cancel that lost answers **`409
+  conflict`** ("the account's erasure has already started"); a used token and an
+  ended window keep their `403`, and the route now documents `403`, `404` and
+  `409`. `mark_cancelled` and `mark_completed` are conditional on the request
+  still being pending. Tests: `deletion_cancel_race_test` (on `surrealkv`, a
+  cancel and the sweep's claim held at a barrier after their reads: exactly one
+  wins, either way round; 8 rounds a run, 20 of 20 runs), `gdpr_handlers_test`
+  (a cancel after the claim is `409`, the account stays due).
+
+- **One token per verification mail, and the expiry sweep no longer gives an
+  account its daily mail cap back (follow-ups to the 1.1.0 atomicity audit's item
+  7; Low).** A resend's mail did not carry the token its capped mint made: the
+  handler minted a second, uncapped token for the mail, so every resend left two
+  live tokens. It now sends the capped token. And `delete_expired` deleted every
+  consumed or expired reset and verification token, which lowered the count the
+  daily caps read: three reset links used, one cleanup pass, three more. Tokens
+  minted since UTC midnight are now kept until the day is over (a hash that no
+  longer redeems anything; the account's erasure still deletes it). Tests:
+  `email_verification_test`, `mail_token_sweep_test`. Threat model: T-41 and
+  T-29 extended.
+
+- **`ammonia` moves from 4.2.3 to 4.2.4 (RUSTSEC-2026-0373).** Published
+  2026-10-16: CSS `url()` was matched case-sensitively. As before it arrives only
+  through `surrealdb-runtime`, and AXIAM calls none of it. A `Cargo.lock` change
+  only.
+
+- **`sdks/openapi.json` documents the new `409`s.** The OAuth2 client patch
+  (item 9), the directory and settings writes (item 10) and the deletion cancel
+  (item 11, with its `403` and `404`) — response descriptions only; no request
+  or schema changes. The eleven SDK repositories re-vendor the file.
 
 - **The CRL distribution point written into a certificate is the URL that was
   validated (#609, R1W1-11).** `CrlDistribution` checked the parsed URL but

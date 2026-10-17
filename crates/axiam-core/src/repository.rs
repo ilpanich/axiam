@@ -22,7 +22,9 @@ use crate::models::{
     directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
-    email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
+    email_verification::{
+        CreateEmailVerificationToken, EmailVerificationRedemption, EmailVerificationToken,
+    },
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
@@ -257,12 +259,46 @@ pub trait UserRepository: Send + Sync {
         tenant_id: Uuid,
         email: &str,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+    /// Apply `input` to one user.
+    ///
+    /// A write that changes the stored `email` also deletes, **in the same
+    /// transaction**, the user's unconsumed email-verification and
+    /// password-reset tokens: both were mailed to the old address, and neither
+    /// may outlive it (the atomicity audit's item A). Every writer inherits
+    /// this — self-service, an administrator, SCIM — because it is decided
+    /// here, against the stored value, and not by the caller.
     fn update(
         &self,
         tenant_id: Uuid,
         id: Uuid,
         input: UpdateUser,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+
+    /// Redeem an email-verification token by its hash, in **one transaction**:
+    /// consume the token, then mark the account's address verified (and a
+    /// `PendingVerification` account `Active`) only while the account's
+    /// `email` is still the address the token was minted for and is not yet
+    /// verified.
+    ///
+    /// The binding is the point: a token mailed to one address must never
+    /// verify another the account has moved to since. `NotFound` when the
+    /// token is unknown, expired, already consumed, or carries no address (a
+    /// token minted before schema v102).
+    ///
+    /// The default implementation refuses, so a test double that never redeems
+    /// a token needs nothing new.
+    fn redeem_email_verification(
+        &self,
+        _tenant_id: Uuid,
+        _token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationRedemption>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not redeem email verification tokens".into(),
+            ))
+        }
+    }
+
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 

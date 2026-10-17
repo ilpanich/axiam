@@ -7,6 +7,7 @@
 use axiam_auth::password;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
+use axiam_core::models::email_verification::EmailVerificationRedemption;
 use axiam_core::models::user::{
     Address, CollisionAttribute, CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser,
     User, UserStatus,
@@ -193,6 +194,54 @@ struct TotpStepCasRow {
 struct CollisionRow {
     record_id: String,
     by_username: bool,
+}
+
+/// The text of a transaction's failed statements, for `classify_write_error`.
+///
+/// Every slot is read, not `check()`'s first: the statement that failed (a
+/// UNIQUE violation, a malformed statement) reports its own error while every
+/// other slot reports "not executed due to a cancelled (or failed)
+/// transaction" and the COMMIT "aborted due to a prior error". Those sibling reports are dropped when a real
+/// one is present, so a constraint is not retried as if it were contention; a
+/// commit-time conflict, which every slot reports alike, is kept and retried.
+fn tx_error_text(errors: std::collections::HashMap<usize, surrealdb::Error>) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let all: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
+    let own: Vec<&str> = all
+        .iter()
+        .map(String::as_str)
+        .filter(|m| {
+            !m.contains("was not executed due to a")
+                && !m.contains("transaction was aborted due to a prior error")
+        })
+        .collect();
+    Some(if own.is_empty() {
+        all.join("; ")
+    } else {
+        own.join("; ")
+    })
+}
+
+/// The outcome row of [`UserRepository::redeem_email_verification`]'s
+/// transaction.
+#[derive(Debug, SurrealValue)]
+struct RedemptionRow {
+    /// A live token matched, and is now consumed.
+    found: bool,
+    user_id: String,
+    /// The token names an address (minted at v102 or later).
+    bound: bool,
+    /// The address was verified by this redemption.
+    verified: bool,
+    /// The account was `PendingVerification` and is now `Active`.
+    was_pending: bool,
+    /// The account's address is the one the token names.
+    same_address: bool,
+    /// The account's address is verified (read after this transaction's own
+    /// write, so meaningful only when `verified` is false).
+    already_verified: bool,
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -710,11 +759,40 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             }
             sets.push("updated_at = time::now()");
 
-            let query = format!(
+            // Item A of the 1.1.0 atomicity audit: a write that changes the
+            // stored address deletes the user's unconsumed verification and
+            // reset tokens in the same transaction. Both were mailed to the old
+            // address; a verification token left behind verified the new one
+            // (the token was not bound to its address before v102), and a
+            // reset link left behind kept the old mailbox able to take the
+            // account over. The comparison is against the value this
+            // transaction read, not one the caller read earlier, so every
+            // writer — self-service, an administrator, SCIM — inherits it.
+            let update = format!(
                 "UPDATE type::record('user', $id) SET {} \
              WHERE tenant_id = $tenant_id",
                 sets.join(", ")
             );
+            let (query, update_slot) = if input.email.is_some() {
+                (
+                    format!(
+                        "BEGIN TRANSACTION; \
+                         LET $previous_email = (SELECT VALUE email FROM type::record('user', $id) \
+                             WHERE tenant_id = $tenant_id)[0]; \
+                         {update}; \
+                         IF $previous_email != NONE AND $previous_email != $email {{ \
+                             DELETE email_verification_token WHERE tenant_id = $tenant_id \
+                                 AND user_id = $id AND consumed_at IS NONE; \
+                             DELETE password_reset_token WHERE tenant_id = $tenant_id \
+                                 AND user_id = $id AND consumed_at IS NONE; \
+                         }}; \
+                         COMMIT TRANSACTION"
+                    ),
+                    2,
+                )
+            } else {
+                (update, 0)
+            };
 
             let db = self.db.current();
             let mut builder = db
@@ -776,18 +854,25 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 builder = builder.bind(("address", row));
             }
 
-            let result = builder.await.map_err(DbError::from)?;
-            let mut result = result
-                .check()
-                .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+            let mut result = builder.await.map_err(DbError::from)?;
+            // Every slot is read, not `check()`'s first: in the transaction a
+            // UNIQUE violation on the address fires on the UPDATE's slot while
+            // the others report "not executed due to a failed transaction",
+            // which alone would read as a retryable conflict.
+            if let Some(text) = tx_error_text(result.take_errors()) {
+                // Kept a `DbError` inside the retried closure: its text carries
+                // the engine's conflict marker, which `retry_on_write_conflict`
+                // reads; `AxiamError::WriteContention` would not.
+                return Err(classify_write_error(text, "user"));
+            }
 
-            let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+            let rows: Vec<UserRow> = result.take(update_slot).map_err(DbError::from)?;
             let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
                 entity: "user".into(),
                 id: id_str,
             })?;
 
-            Ok::<_, axiam_core::error::AxiamError>(row.into_user(id)?)
+            row.into_user(id)
         })
         .await?;
         if touches_provisioned_field {
@@ -1189,6 +1274,99 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
 
         let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
         Ok(!rows.is_empty())
+    }
+
+    async fn redeem_email_verification(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<EmailVerificationRedemption> {
+        // One transaction (item A of the 1.1.0 atomicity audit). The token is
+        // consumed and the address verified together, and the verification
+        // matches only while the account's `email` is the address the token
+        // was minted for and is still unverified — compared inside the write,
+        // not on a read made before it. The UPDATE writes the user row, as an
+        // address change does, so a redemption and an email change that
+        // overlap conflict on that key: the loser is retried on a fresh
+        // snapshot (`retry_on_write_conflict`), where either the token is gone
+        // (the change deleted it) or the address it names is verified and the
+        // change then clears the verification (SEC-050).
+        //
+        // A token consumed here that verifies nothing — another address, an
+        // address already verified, a token minted before v102 — stays
+        // consumed: it can never verify anything later either.
+        const REDEEM: &str = "BEGIN TRANSACTION; \
+             LET $consumed = (UPDATE email_verification_token SET consumed_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND token_hash = $token_hash \
+                   AND consumed_at IS NONE AND expires_at > time::now() \
+                 RETURN AFTER); \
+             LET $redeemed = $consumed[0]; \
+             LET $verified = IF $redeemed.email != NONE { \
+                 (UPDATE type::record('user', $redeemed.user_id) SET \
+                     email_verified_at = time::now(), \
+                     status = IF status = 'PendingVerification' THEN 'Active' ELSE status END, \
+                     updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id AND email = $redeemed.email \
+                    AND email_verified_at IS NONE \
+                  RETURN BEFORE) \
+             } ELSE { [] }; \
+             LET $account = IF $redeemed != NONE { \
+                 (SELECT email, email_verified_at FROM type::record('user', $redeemed.user_id) \
+                  WHERE tenant_id = $tenant_id) \
+             } ELSE { [] }; \
+             RETURN { \
+                 found: $redeemed != NONE, \
+                 user_id: $redeemed.user_id ?? '', \
+                 bound: ($redeemed.email ?? NONE) != NONE, \
+                 verified: array::len($verified) > 0, \
+                 was_pending: ($verified[0].status ?? '') = 'PendingVerification', \
+                 same_address: $redeemed != NONE AND ($account[0].email ?? NONE) = $redeemed.email, \
+                 already_verified: ($account[0].email_verified_at ?? NONE) != NONE \
+             }; \
+             COMMIT TRANSACTION";
+        // Result slots: BEGIN (0), the four LETs (1-4), the RETURN (5).
+        const OUTCOME_SLOT: usize = 5;
+
+        let tenant_id_str = tenant_id.to_string();
+        let row = crate::helpers::retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(REDEEM)
+                .bind(("tenant_id", tenant_id_str.clone()))
+                .bind(("token_hash", token_hash.to_owned()))
+                .await
+                .map_err(DbError::from)?;
+            if let Some(text) = tx_error_text(result.take_errors()) {
+                return Err(classify_write_error(text, "email_verification_token"));
+            }
+            let row: Option<RedemptionRow> = result.take(OUTCOME_SLOT).map_err(DbError::from)?;
+            Ok::<_, DbError>(row)
+        })
+        .await?;
+
+        let not_found = || DbError::NotFound {
+            entity: "email_verification_token".into(),
+            id: format!("token_hash={token_hash}"),
+        };
+        let row = row.filter(|r| r.found).ok_or_else(not_found)?;
+        if !row.bound {
+            // Minted before v102: it names no address, so it vouches for none.
+            return Err(not_found().into());
+        }
+        if row.verified {
+            let user_id = parse_uuid(&row.user_id, "user_id")?;
+            if row.was_pending {
+                // The status moved (`PendingVerification` → `Active`), which a
+                // downstream directory is told about, as `update` does.
+                self.notify_user_changed(tenant_id, user_id).await;
+            }
+            return Ok(EmailVerificationRedemption::Verified { user_id });
+        }
+        if row.same_address && row.already_verified {
+            return Ok(EmailVerificationRedemption::AlreadyVerified);
+        }
+        Ok(EmailVerificationRedemption::AddressMismatch)
     }
 
     async fn list(

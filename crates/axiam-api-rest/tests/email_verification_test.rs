@@ -188,6 +188,7 @@ async fn verify_email_success_then_replay_is_rejected() {
             tenant_id: f.tenant_id,
             user_id: f.pending_user_id,
             token_hash,
+            email: "pending-user@example.com".into(),
             expires_at: Utc::now() + Duration::hours(24),
         })
         .await
@@ -250,6 +251,7 @@ async fn verify_email_already_verified_user_returns_400() {
             tenant_id: f.tenant_id,
             user_id: f.pending_user_id,
             token_hash,
+            email: "pending-user@example.com".into(),
             expires_at: Utc::now() + Duration::hours(24),
         })
         .await

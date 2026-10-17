@@ -527,6 +527,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "role_grant_holder_epochs",
         sql: SCHEMA_V101,
     },
+    Migration {
+        version: 102,
+        name: "single_use_bindings",
+        sql: SCHEMA_V102,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4970,6 +4975,23 @@ DEFINE FIELD IF NOT EXISTS grant_epoch ON TABLE role TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v102 — single-use credentials bound to what they vouch for
+// (the 1.1.0 atomicity audit, items A and B)
+// -----------------------------------------------------------------------
+//
+// **`email_verification_token.email`** — the address the token was minted
+// for and mailed to. Redeeming a token verifies the account only while the
+// account's `email` is still that address and is unverified, in the same
+// transaction that consumes the token (`repository/user.rs`,
+// `redeem_email_verification`). Without it a token minted for one address
+// verified whatever address the account had moved to since. Optional and not
+// backfilled: a token minted before the upgrade carries none, and no longer
+// verifies anything (the CHANGELOG's upgrade notes say so; tokens live 24 h).
+const SCHEMA_V102: &str = "\
+DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5202,6 +5224,25 @@ mod tests {
                 "v100 must not contain {forbidden}: it is additive DDL only"
             );
         }
+    }
+
+    /// The atomicity audit's single-use items — v102 binds an email
+    /// verification token to its address, and nothing else.
+    #[test]
+    fn v102_adds_only_the_single_use_bindings() {
+        let statements: Vec<&str> = SCHEMA_V102
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token \
+                 TYPE option<string>"
+            ],
+            "v102 defines the bindings and nothing else"
+        );
     }
 
     /// #701 (R110W6-04) — v101 is the role row's two epochs, optional fields
@@ -6704,8 +6745,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&101),
-            "v101 is the newest migration (#701, R110W6-04 — `role.grant_epoch` and \
+            Some(&102),
+            "v102 is the newest migration (the 1.1.0 atomicity audit's single-use items — \
+             `email_verification_token.email`, the address a verification token vouches for); \
+             v101 was #701 (R110W6-04 — `role.grant_epoch` and \
              `role.holder_epoch`, which every role write the network gate decides moves and \
              compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \
              `network_policy`, the reserved-subtree segments, their typed reply profiles and the \

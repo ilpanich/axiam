@@ -20,6 +20,7 @@ struct TokenRow {
     tenant_id: String,
     user_id: String,
     token_hash: String,
+    email: Option<String>,
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -31,6 +32,7 @@ struct TokenRowWithId {
     tenant_id: String,
     user_id: String,
     token_hash: String,
+    email: Option<String>,
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -47,6 +49,7 @@ impl TokenRow {
             tenant_id,
             user_id,
             token_hash: self.token_hash,
+            email: self.email,
             expires_at: self.expires_at,
             consumed_at: self.consumed_at,
             created_at: self.created_at,
@@ -67,6 +70,7 @@ impl TokenRowWithId {
             tenant_id,
             user_id,
             token_hash: self.token_hash,
+            email: self.email,
             expires_at: self.expires_at,
             consumed_at: self.consumed_at,
             created_at: self.created_at,
@@ -112,6 +116,7 @@ impl<C: Connection> EmailVerificationTokenRepository
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  token_hash = $token_hash, \
+                 email = $email, \
                  expires_at = $expires_at, \
                  consumed_at = NONE",
             )
@@ -119,6 +124,7 @@ impl<C: Connection> EmailVerificationTokenRepository
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("user_id", input.user_id.to_string()))
             .bind(("token_hash", input.token_hash))
+            .bind(("email", input.email))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;

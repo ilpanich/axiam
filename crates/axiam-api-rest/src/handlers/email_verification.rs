@@ -67,7 +67,9 @@ pub(crate) async fn enqueue_verification_email<C: Connection + Clone>(
     let (raw_token, expires_at) = match state
         .mail
         .email_verification_service
-        .initiate_verification(tenant_id, user_id)
+        // Bound to `email`, the address this mail goes to: the token verifies
+        // the account only while that is still its address.
+        .initiate_verification(tenant_id, user_id, email)
         .await
     {
         Ok(pair) => pair,

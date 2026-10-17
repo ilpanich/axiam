@@ -696,3 +696,160 @@ async fn deleting_an_unknown_user_revokes_nothing() {
         .unwrap();
     assert!(rows.items.is_empty(), "and no revocation recorded");
 }
+
+/// Item A of the 1.1.0 atomicity audit, end to end through the routes.
+///
+/// The attack: the account holds an unredeemed verification link for the
+/// address it has (A), changes its address by self-service to one it does not
+/// own (B), and redeems the link. Before v102 the token named no address, so
+/// it verified B and activated the account. Now the change spends both links
+/// mailed to A — the verification link and a reset link — in the write that
+/// moves the address, and the token is bound to A besides.
+#[actix_rt::test]
+async fn a_self_email_change_spends_the_old_address_verification_and_reset_links() {
+    use axiam_auth::token::{generate_refresh_token, hash_refresh_token};
+    use axiam_core::models::email_verification::CreateEmailVerificationToken;
+    use axiam_core::models::password_reset::CreatePasswordResetToken;
+    use axiam_core::models::user::UserStatus;
+    use axiam_core::repository::{EmailVerificationTokenRepository, PasswordResetTokenRepository};
+    use axiam_db::repository::{
+        SurrealEmailVerificationTokenRepository, SurrealPasswordResetTokenRepository,
+    };
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let users = SurrealUserRepository::new(db.clone());
+    let before = users.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(before.status, UserStatus::PendingVerification);
+
+    // Both links mailed to A.
+    let verify_raw = generate_refresh_token();
+    SurrealEmailVerificationTokenRepository::new(db.clone())
+        .create(CreateEmailVerificationToken {
+            tenant_id,
+            user_id,
+            token_hash: hash_refresh_token(&verify_raw),
+            email: before.email.clone(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        })
+        .await
+        .unwrap();
+    let reset_raw = generate_refresh_token();
+    SurrealPasswordResetTokenRepository::new(db.clone())
+        .create(CreatePasswordResetToken {
+            tenant_id,
+            user_id,
+            token_hash: hash_refresh_token(&reset_raw),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    // The self-service change to B.
+    let req = test::TestRequest::put()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri(&format!("/api/v1/users/{user_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "email": "victim@b.example" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    // Both rows went with the old address, in the same write.
+    assert!(
+        SurrealEmailVerificationTokenRepository::new(db.clone())
+            .get_by_token_hash(tenant_id, &hash_refresh_token(&verify_raw))
+            .await
+            .is_err(),
+        "the verification link for A is gone"
+    );
+    assert!(
+        SurrealPasswordResetTokenRepository::new(db.clone())
+            .get_by_token_hash(tenant_id, &hash_refresh_token(&reset_raw))
+            .await
+            .is_err(),
+        "the reset link mailed to A is gone"
+    );
+
+    // Redeeming A's link verifies nothing.
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri("/api/v1/auth/verify-email")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "tenant_id": tenant_id, "token": verify_raw }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+
+    // And A's reset link resets nothing.
+    let req = test::TestRequest::post()
+        .insert_header(("X-Forwarded-For", "127.0.0.1"))
+        .uri("/api/v1/auth/reset/confirm")
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "token": reset_raw,
+            "new_password": "AnotherStr0ngPassword77",
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+
+    let after = users.get_by_id(tenant_id, user_id).await.unwrap();
+    assert_eq!(after.email, "victim@b.example");
+    assert!(after.email_verified_at.is_none(), "B is not verified");
+    assert_eq!(after.status, UserStatus::PendingVerification);
+    assert_eq!(
+        after.password_hash, before.password_hash,
+        "the password is unchanged"
+    );
+}
+
+/// An update that leaves the address as it is spends no link: the deletion
+/// is decided against the stored value, not by the request naming `email`.
+#[actix_rt::test]
+async fn an_update_naming_the_same_address_keeps_the_links() {
+    use axiam_auth::token::{generate_refresh_token, hash_refresh_token};
+    use axiam_core::models::email_verification::CreateEmailVerificationToken;
+    use axiam_core::models::user::UpdateUser;
+    use axiam_core::repository::EmailVerificationTokenRepository;
+    use axiam_db::repository::SurrealEmailVerificationTokenRepository;
+
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let users = SurrealUserRepository::new(db.clone());
+    let tokens = SurrealEmailVerificationTokenRepository::new(db.clone());
+    let raw = generate_refresh_token();
+    tokens
+        .create(CreateEmailVerificationToken {
+            tenant_id,
+            user_id,
+            token_hash: hash_refresh_token(&raw),
+            email: "admin@example.com".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        })
+        .await
+        .unwrap();
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                email: Some("admin@example.com".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokens
+            .get_by_token_hash(tenant_id, &hash_refresh_token(&raw))
+            .await
+            .is_ok()
+    );
+}

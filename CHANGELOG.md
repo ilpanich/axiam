@@ -21,7 +21,7 @@ one entry below, ending in its number.
 
 **What needs an operator, first.**
 
-- **The schema moves from v94 to v101.** Migrations v95 – v101 run at startup
+- **The schema moves from v94 to v102.** Migrations v95 – v102 run at startup
   like every earlier one. Each is additive and none backfills: v95 and v96 add the
   Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
   v97 adds `tenant.purge_claimed_at`, v98 adds `certificate.user_id` and its
@@ -31,9 +31,18 @@ one entry below, ending in its number.
   collide, and a root is not recorded; #653), **v100** adds the three network
   tables (`network_segment`, `reply_profile`, `network_policy`; #563), and
   **v101** adds `role.grant_epoch` and `role.holder_epoch`, the two counters the
-  network gate's role writes claim (#701). A row written before the upgrade
-  reads as "none attempted, due now", "not bound" or epoch 0, and the first
-  sweep or the name convention covers it. **A `super-admin` role that a group
+  network gate's role writes claim (#701), and **v102** adds
+  `email_verification_token.email`, `webauthn_credential.sign_count` and the
+  `webauthn_assertion` kind of the replay store (the atomicity audit's
+  single-use items, under Security below). A row written before the upgrade
+  reads as "none attempted, due now", "not bound", epoch 0 or signature counter
+  0, and the first sweep or the name convention covers it. **Email-verification
+  links mailed before the upgrade no longer verify anything:** they name no
+  address, and a link now verifies only the address it was sent to. They live
+  24 hours; a user holding one asks for another (`POST
+  /api/v1/auth/resend-verification`, or the profile page's button), which is
+  bound. A WebAuthn sign-in ceremony started before the upgrade (five minutes at
+  most) is refused at its finish and is simply started again. **A `super-admin` role that a group
   holds** (a release before 1.1.0 allowed that) does not receive the `network:`
   meta permissions at the boot reconcile: a role carrying a `network:`
   permission is never group-held, so the reconcile withholds them and logs a
@@ -310,6 +319,64 @@ one entry below, ending in its number.
   letting an administrator `PUT` turn a device-only client public.
 
 ### Security
+
+- **An email-verification link verifies only the address it was mailed to, and
+  an address change spends the old address's links (the 1.1.0 atomicity audit,
+  item A; Medium).** A verification token named an account, not an address: a
+  user could ask for a link to the address the account had, change the address
+  by self-service to one they do not own, and redeem the link — the new address
+  became verified, the account `Active`, and ID tokens carried
+  `email_verified: true` for it (an SAML IdP could issue it as an email
+  `NameID`, T-313). The token now stores the address it is mailed to (schema
+  v102), and redeeming it is one transaction that consumes it and marks the
+  address verified only `WHERE email = <the token's address> AND
+  email_verified_at IS NONE`, so a token for another address verifies nothing.
+  Every write that changes a user's `email` — self-service, an administrator,
+  SCIM — deletes the user's unconsumed verification **and password-reset**
+  tokens in the same transaction, so a reset link mailed to the old address no
+  longer outlives it either. A link minted before the upgrade names no address
+  and is refused (upgrade notes above). Tests: `user_test`'s route-level attack
+  (mint for A, change to B, redeem: `400`, B unverified, A's reset link `400`
+  too), `email_verification_binding_test` (on `surrealkv`, a redemption racing
+  the address change with both held at a barrier after their reads, 8 rounds a
+  run, 20 of 20 runs). Threat model: T-40 and T-29 extended.
+
+- **A WebAuthn assertion signs in once, and the signature counter is enforced
+  (the 1.1.0 atomicity audit, item B; Low).** The authentication ceremony's
+  challenge travels in a stateless state token that nothing recorded as used,
+  so a captured (state token, assertion) pair signed in again for the token's
+  five minutes, and two copies sent together each opened a session. The token
+  now carries a `jti`, recorded in the replay store DPoP proofs and client
+  assertions use (`oauth2_proof_replay`, kind `webauthn_assertion`, UNIQUE
+  index, swept by the same job) when an assertion against it verifies; a
+  second finish with the token is `401`. The authenticator's signature counter
+  is now stored with the credential (schema v102) and an assertion is accepted
+  only if its counter is greater, or both are zero (W3C WebAuthn §7.2 step 21),
+  compared inside the write; the credential's stored passkey is updated from
+  the result (`webauthn-rs`'s `update_credential`). Both the second-factor and
+  the usernameless ceremonies. Tests: `webauthn_single_use_test` drives the
+  real ceremony with a software P-256 authenticator on `surrealkv`: a replay is
+  refused, a parallel double-submit opens exactly one session (8 rounds a run,
+  20 of 20 runs), a non-increasing counter is refused. Threat model: T-32
+  extended.
+
+- **A sign-in's counter reset no longer undoes a lock committed after the
+  sign-in read the account (the 1.1.0 atomicity audit, item 5; Low).** The
+  login read the account, checked the lock, verified the password and only then
+  reset the failed-login counter. Guesses sent together at threshold − 1 all
+  passed the check; a wrong one locked the account, and a correct one landing
+  after it cleared the lock and got a session — up to one extra guess per
+  concurrent request each lockout cycle. The reset is now conditional on the
+  lock inside the write (`UPDATE … WHERE locked_until IS NONE OR locked_until
+  <= time::now()`); when it matches nothing the sign-in is refused as a wrong
+  password is, and no session, challenge or token is issued. Every path that
+  proves a credential shares it (password, OPAQUE, directory bind, JIT
+  provisioning); gRPC `ValidateCredentials`, which resets no counter, asks the
+  same question after its verify before it answers `valid`. Test:
+  `lockout_race_test` (on `surrealkv`; four guesses held at a barrier after
+  their reads, the correct one admitted after every wrong one committed: no
+  session, the lock stands; 8 rounds a run, 20 of 20 runs). Threat model: T-36
+  corrected.
 
 - **The CRL distribution point written into a certificate is the URL that was
   validated (#609, R1W1-11).** `CrlDistribution` checked the parsed URL but

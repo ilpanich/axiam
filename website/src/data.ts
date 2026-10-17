@@ -532,7 +532,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "Upgrading" },
       {
         type: "p",
-        text: "Read the `[1.1.0]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade; its first group lists what needs an operator. The schema moves from v94 to v101 at startup, additively. In particular: a confidential client that uses the device grant must now authenticate at both device endpoints; the administrator API refuses scopes above a self-registered client's ceiling; the first retention runs delete expired certificate rows; and the orderly stop is 38 seconds inside a 40-second grace period.",
+        text: "Read the `[1.1.0]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade; its first group lists what needs an operator. The schema moves from v94 to v102 at startup, additively; an email-verification link mailed before the upgrade no longer verifies, and a fresh one is a resend away. In particular: a confidential client that uses the device grant must now authenticate at both device endpoints; the administrator API refuses scopes above a self-registered client's ceiling; the first retention runs delete expired certificate rows; and the orderly stop is 38 seconds inside a 40-second grace period.",
       },
       { type: "h", text: "What is not in 1.1.0" },
       {

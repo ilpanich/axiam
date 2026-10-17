@@ -1131,7 +1131,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Password-reset links are bearer credentials; a compromised mailbox or provider grants account takeover.",
-       "mitigation": "Reset tokens are CSPRNG-generated (never UUIDv7 — see the design-document note on id generation), single-use and expire quickly; consuming a reset invalidates existing sessions."
+       "mitigation": "Reset tokens are CSPRNG-generated (never UUIDv7 — see the design-document note on id generation), single-use and expire quickly; consuming a reset invalidates existing sessions. Extended 2026-10-17 (1.1.0 atomicity audit, item A): every write that changes a user's email deletes the user's unconsumed reset and verification tokens in the same transaction, so a reset link no longer outlives the address it was mailed to."
       }
      ],
      "open": 0,
@@ -1237,7 +1237,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Mitigated",
        "description": "If the intermediate MFA challenge token is accepted as a full session, or can be exchanged more than once, the second factor is bypassed.",
-       "mitigation": "The challenge token is a distinct, short-lived credential that only authorises the MFA verification call and carries no API authority. Corrected 2026-09-13: what is consumed is the TOTP step, not the token — verify_mfa records totp_last_used_step under a compare-and-swap and refuses a code from a step already spent, so a captured challenge token cannot be replayed with the same code, and re-presenting it requires the authenticator. Known residual R-E: the setup token (purpose mfa_setup) is stateless in the same way and has no second factor behind it, so within its 300-second window a captured token lets a second party enrol a factor and complete the login. Low: the window is short, the token travels only under TLS in a 403 body to the caller who authenticated, and it is inert once the legitimate completion has run. The single-use hardening (M-5) was assessed and not taken — there is no consumption store to reuse and it needs a new repository on a service already generic over four — and remains a follow-up."
+       "mitigation": "The challenge token is a distinct, short-lived credential that only authorises the MFA verification call and carries no API authority. Corrected 2026-09-13: what is consumed is the TOTP step, not the token — verify_mfa records totp_last_used_step under a compare-and-swap and refuses a code from a step already spent, so a captured challenge token cannot be replayed with the same code, and re-presenting it requires the authenticator. Known residual R-E: the setup token (purpose mfa_setup) is stateless in the same way and has no second factor behind it, so within its 300-second window a captured token lets a second party enrol a factor and complete the login. Low: the window is short, the token travels only under TLS in a 403 body to the caller who authenticated, and it is inert once the legitimate completion has run. The single-use hardening (M-5) was assessed and not taken — there is no consumption store to reuse and it needs a new repository on a service already generic over four — and remains a follow-up. Extended 2026-10-17 (1.1.0 atomicity audit, item B), the WebAuthn half: each ceremony state token carries a jti that is spent in oauth2_proof_replay (kind webauthn_assertion, UNIQUE index, same sweep) when an assertion against it verifies, so one (token, assertion) pair signs in once and a parallel double-submit opens one session; the signature counter is stored (webauthn_credential.sign_count) and must increase, or both be zero, compared inside the write. Test: webauthn_single_use_test on surrealkv with a software authenticator, 20 of 20 runs."
       },
       {
        "number": 33,
@@ -1347,7 +1347,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Read-then-write increments lose updates under parallel attempts, letting an attacker exceed the configured threshold.",
-       "mitigation": "SEC-032: the increment is a single atomic SurrealQL UPDATE, removing the TOCTOU window."
+       "mitigation": "SEC-032: the increment is a single atomic SurrealQL UPDATE, removing the TOCTOU window. Corrected 2026-10-17 (1.1.0 atomicity audit, item 5): \"removing the TOCTOU window\" overclaimed — the increment was atomic, but the success path reset the counter on a read made before the password was verified, so a correct guess sent together with wrong ones at threshold − 1 could land after the lock, clear it and get a session. The reset is now conditional on the lock inside the write (admit_unless_locked: UPDATE … WHERE locked_until IS NONE OR locked_until <= time::now()); no match is InvalidCredentials and nothing is issued, on every credential path (password, OPAQUE, directory, JIT; gRPC ValidateCredentials re-asks after its verify). Relies on SurrealDB 3.3.4 write-write conflict detection on the user row. Test: lockout_race_test on surrealkv, 20 of 20 runs."
       },
       {
        "number": 178,
@@ -1444,7 +1444,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "A predictable or low-entropy reset token is brute-forceable within its validity window.",
-       "mitigation": "Reset, verification, export-download and deletion-cancel tokens are CSPRNG-generated. The design document explicitly forbids UUIDv7 for secrets because its 48-bit timestamp prefix leaves same-millisecond values sharing a long common prefix."
+       "mitigation": "Reset, verification, export-download and deletion-cancel tokens are CSPRNG-generated. The design document explicitly forbids UUIDv7 for secrets because its 48-bit timestamp prefix leaves same-millisecond values sharing a long common prefix. Extended 2026-10-17 (1.1.0 atomicity audit, item A): a verification token is bound to the address it is mailed to (email_verification_token.email, schema v102) and redeemed in one transaction that verifies only WHERE email = the token's address AND email_verified_at IS NONE, so a link for one address never verifies another the account moved to; every email change deletes the user's unconsumed verification and reset tokens in the same transaction; pre-v102 tokens are refused. Tests: user_test (route-level attack), email_verification_binding_test (surrealkv race, 20 of 20 runs)."
       },
       {
        "number": 41,

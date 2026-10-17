@@ -339,6 +339,81 @@ async fn resend_verification_pending_user_enqueues_mail() {
     assert_eq!(sent[0].user_id, f.pending_user_id);
 }
 
+/// A resent mail carries the token the capped mint made — one token per mail.
+/// The handler used to discard that token and mint a second, uncapped one for
+/// the mail, so every resend left two live tokens and the daily cap counted
+/// half of them.
+#[actix_rt::test]
+async fn each_resent_mail_carries_the_one_capped_token_it_minted() {
+    let f = setup().await;
+    let auth = test_auth_config();
+
+    let recorder = RecordingPublisher::default();
+    let sent_handle = recorder.sent.clone();
+    let mut state = AppState::for_test(f.db.clone(), auth.clone());
+    state.mail.mail_outbound_publisher = Arc::new(recorder);
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(state))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let resend = || {
+        with_csrf(test::TestRequest::post())
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/resend-verification")
+            .set_json(json!({
+                "tenant_id": f.tenant_id,
+                "email": "pending-user@example.com",
+            }))
+            .to_request()
+    };
+    // The cap is two a day: two resends mail, the third does not.
+    for _ in 0..3 {
+        let resp = test::call_service(&app, resend()).await;
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    let mailed: Vec<String> = sent_handle
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| m.template_context["token"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(mailed.len(), 2, "the cap holds: two mails");
+
+    let tokens: Vec<String> =
+        f.db.query("SELECT VALUE token_hash FROM email_verification_token WHERE user_id = $u")
+            .bind(("u", f.pending_user_id.to_string()))
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+    assert_eq!(tokens.len(), 2, "one stored token per mail, no more");
+    for raw in &mailed {
+        assert!(
+            tokens.contains(&hash_refresh_token(raw)),
+            "the mailed token is the one the capped mint stored"
+        );
+    }
+
+    // And the mailed token verifies.
+    let verify = with_csrf(test::TestRequest::post())
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/verify-email")
+        .set_json(json!({ "tenant_id": f.tenant_id, "token": mailed[1] }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, verify).await.status().as_u16(),
+        200
+    );
+}
+
 #[actix_rt::test]
 async fn resend_verification_already_active_user_sends_without_enqueue() {
     let f = setup().await;

@@ -243,15 +243,23 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {
+        // A token minted since UTC midnight is kept, dead or alive, until the
+        // day is over: the daily cap counts the account's tokens minted today
+        // (`count_today`, and the capped mint's own count in `mail_cap`), so
+        // deleting a consumed or expired one lowered the count and handed the
+        // account its cap again within the same day. What is kept is a hash
+        // that no longer redeems anything, for at most a day — and the account's
+        // own erasure still deletes it.
         let result = self
             .db
             .current()
             .query(
                 "DELETE FROM password_reset_token \
-                 WHERE expires_at < time::now() \
-                    OR consumed_at IS NOT NONE \
+                 WHERE (expires_at < time::now() OR consumed_at IS NOT NONE) \
+                    AND created_at < $day_start \
                  RETURN BEFORE",
             )
+            .bind(("day_start", crate::repository::mail_cap::day_start()))
             .await
             .map_err(DbError::from)?;
 

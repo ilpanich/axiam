@@ -5081,7 +5081,8 @@ pub trait EmailVerificationTokenRepository: Send + Sync {
         daily_cap: u64,
     ) -> impl Future<Output = AxiamResult<Option<EmailVerificationToken>>> + Send;
 
-    /// Delete expired and consumed tokens (garbage collection).
+    /// Delete expired and consumed tokens (garbage collection) — except those
+    /// minted since UTC midnight, which the daily cap still counts.
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
@@ -5118,7 +5119,8 @@ pub trait PasswordResetTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete expired and consumed tokens (garbage collection).
+    /// Delete expired and consumed tokens (garbage collection) — except those
+    /// minted since UTC midnight, which the daily cap still counts.
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Invalidate unconsumed tokens for a user (mark as consumed so

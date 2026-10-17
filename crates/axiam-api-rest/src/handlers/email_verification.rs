@@ -83,7 +83,24 @@ pub(crate) async fn enqueue_verification_email<C: Connection + Clone>(
             return;
         }
     };
+    send_verification_email(state, tenant_id, user_id, email, &raw_token, expires_at).await;
+}
 
+/// Enqueue the activation email for a token already minted — the one
+/// [`enqueue_verification_email`] mints for a new account, or the one a resend
+/// minted under its daily cap. Exactly one token per mail: a resend used to
+/// discard its capped token and mint a second, uncapped one here, so every
+/// resend left two live tokens and the cap counted only half of them.
+///
+/// Best-effort, as [`enqueue_verification_email`] is, and for the same reasons.
+pub(crate) async fn send_verification_email<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    email: &str,
+    raw_token: &str,
+    expires_at: chrono::DateTime<Utc>,
+) {
     let org_id = match state.tenant_repo.get_by_id(tenant_id).await {
         Ok(tenant) => tenant.organization_id,
         Err(e) => {
@@ -186,13 +203,20 @@ pub async fn resend_verification<C: Connection + Clone>(
         .resend_verification(req.tenant_id, &req.email)
         .await
     {
-        Ok(Some((_raw_token, user_id, _expires_at))) => {
-            // The token minted above is discarded and a fresh one minted inside
-            // the shared helper. That costs one extra row and buys the guarantee
-            // that a resent activation email is byte-for-byte the one account
-            // creation sends — same URL shape, same context keys, same template.
-            // Two hand-rolled copies of this block is how they drift.
-            enqueue_verification_email(&state, req.tenant_id, user_id, &req.email).await;
+        Ok(Some((raw_token, user_id, expires_at))) => {
+            // The mail carries the token the capped mint above made — one
+            // token per mail — through the same helper account creation sends
+            // with, so a resent activation email is byte-for-byte the first one:
+            // same URL shape, same context keys, same template.
+            send_verification_email(
+                &state,
+                req.tenant_id,
+                user_id,
+                &req.email,
+                &raw_token,
+                expires_at,
+            )
+            .await;
         }
         Ok(None) => {
             // User not found or already verified — silently ignore (D-15).
@@ -278,8 +302,16 @@ pub async fn resend_own_verification<C: Connection + Clone>(
         .resend_verification(user.principal_tenant_id, &me.email)
         .await
     {
-        Ok(Some((_raw_token, user_id, _expires_at))) => {
-            enqueue_verification_email(&state, user.principal_tenant_id, user_id, &me.email).await;
+        Ok(Some((raw_token, user_id, expires_at))) => {
+            send_verification_email(
+                &state,
+                user.principal_tenant_id,
+                user_id,
+                &me.email,
+                &raw_token,
+                expires_at,
+            )
+            .await;
             Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
         }
         // The service returns `None` for "nothing to do", which here can only

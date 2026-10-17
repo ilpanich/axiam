@@ -476,50 +476,54 @@ async fn h3_a_filter_id_outside_the_envelope_or_above_the_cap_is_refused() {
     );
 }
 
+/// R110W6-02 (#700): under option B the administrative class is disabled, so a
+/// profile naming it is a `400` (`3.3:admin-class`) for every writer — one
+/// holding nothing, a full profile writer, and one holding H4's
+/// `network:grant_admin` and `network:admin` too. Before #700 the gate asked
+/// for H4's permissions first and answered a `403` naming
+/// `network:grant_admin`, which nobody can be granted.
 #[tokio::test]
-async fn h4_the_admin_class_needs_grant_admin_and_admin() {
+async fn r110w6_02_an_administrative_service_type_is_400_for_every_writer() {
     let mut w = World::new();
     let seg = w.segment(NetworkSegmentKind::Access);
-    let mut admin = profile_input();
-    admin.service_type = Some(ServiceType::AdministrativeUser);
+    let full = profile_writer(&w, &seg)
+        .allow(w.writer, NETWORK_GRANT_ADMIN, seg.id)
+        .allow(w.writer, NETWORK_ADMIN, seg.id);
+    let writers = [Oracle::default(), profile_writer(&w, &seg), full];
 
-    let r = refused(
+    for service_type in [ServiceType::AdministrativeUser, ServiceType::NasPromptUser] {
+        let mut admin = profile_input();
+        admin.service_type = Some(service_type);
+        for writer in &writers {
+            let r = refused(
+                w.decide(
+                    writer,
+                    NetworkWrite::ProfileWrite {
+                        segment_id: seg.id,
+                        input: &admin,
+                    },
+                )
+                .await,
+                "3.3:admin-class",
+            );
+            assert_eq!(r.status, RefusalStatus::Invalid);
+            assert!(r.missing.is_none(), "a 400 names no permission");
+            assert_eq!(r.audit_action, AUDIT_PROFILE_WRITE_REFUSED);
+            assert!(
+                r.after
+                    .iter()
+                    .any(|(k, v)| *k == "service_type" && v == service_type.as_str())
+            );
+        }
+    }
+
+    // `framed_user` is still cleared for a profile writer.
+    passes(
         w.decide(
             &profile_writer(&w, &seg),
             NetworkWrite::ProfileWrite {
                 segment_id: seg.id,
-                input: &admin,
-            },
-        )
-        .await,
-        "H4",
-    );
-    assert_eq!(r.missing.unwrap().action, NETWORK_GRANT_ADMIN);
-
-    // Holding grant_admin alone is not holding the class itself.
-    let half = profile_writer(&w, &seg).allow(w.writer, NETWORK_GRANT_ADMIN, seg.id);
-    let r = refused(
-        w.decide(
-            &half,
-            NetworkWrite::ProfileWrite {
-                segment_id: seg.id,
-                input: &admin,
-            },
-        )
-        .await,
-        "H4",
-    );
-    assert_eq!(r.missing.unwrap().action, NETWORK_ADMIN);
-
-    // Positive (option A's case; the repository still refuses the class
-    // under option B).
-    let both = half.allow(w.writer, NETWORK_ADMIN, seg.id);
-    passes(
-        w.decide(
-            &both,
-            NetworkWrite::ProfileWrite {
-                segment_id: seg.id,
-                input: &admin,
+                input: &profile_input(),
             },
         )
         .await,

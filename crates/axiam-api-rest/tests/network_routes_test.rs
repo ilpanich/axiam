@@ -1027,6 +1027,94 @@ async fn a_profile_is_a_closed_record() {
     assert_eq!(row.metadata["status"], 400);
 }
 
+/// R110W6-02 (#700): under option B the administrative class is disabled, so
+/// a profile naming `administrative_user` or `nas_prompt_user` is a `400`
+/// (`validation_error`, as the published `RadiusServiceType` says) on create
+/// and on replace — not a `403` naming `network:grant_admin`, a permission
+/// nobody can be granted. Each refusal leaves one `reply_profile.write_refused`
+/// row with the rule `3.3:admin-class`, and writes nothing; `framed_user` is
+/// still `201`.
+#[actix_rt::test]
+async fn an_administrative_service_type_is_400_and_audited() {
+    let w = World::new().await;
+    let admin = w.netadmin(w.tenant).await;
+    let app = app!(w);
+    let segment = make_segment(&app, &admin, "corp", 10, &["corp-acl"]).await;
+    let id = segment["id"].as_str().unwrap().to_owned();
+    let admin_values = ["administrative_user", "nas_prompt_user"];
+
+    for value in admin_values {
+        let mut body = profile_body(&segment, 1800, Some("corp-acl"));
+        body["profile"]["service_type"] = json!(value);
+        let (status, err) = call(&app, &admin, "POST", PROFILES, Some(body)).await;
+        assert_eq!(status, 400, "{value}: {err}");
+        assert_eq!(err["error"], "validation_error", "{err}");
+        assert!(
+            err.get("action").is_none(),
+            "a 400 names no permission: {err}"
+        );
+    }
+    let (status, none) = call(&app, &admin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(status, 404, "neither create wrote a profile: {none}");
+
+    let mut body = profile_body(&segment, 1800, Some("corp-acl"));
+    body["profile"]["service_type"] = json!("framed_user");
+    let (status, created) = call(&app, &admin, "POST", PROFILES, Some(body)).await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["service_type"], "framed_user");
+
+    for value in admin_values {
+        let (status, err) = call(
+            &app,
+            &admin,
+            "PUT",
+            &format!("{PROFILES}/{id}"),
+            Some(json!({
+                "version": created["version"],
+                "segment_version": segment["version"],
+                "profile": {
+                    "session_timeout_secs": 1800,
+                    "filter_id": "corp-acl",
+                    "service_type": value,
+                },
+            })),
+        )
+        .await;
+        assert_eq!(status, 400, "{value}: {err}");
+        assert_eq!(err["error"], "validation_error", "{err}");
+    }
+    let (status, got) = call(&app, &admin, "GET", &format!("{PROFILES}/{id}"), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(got, created, "neither replace wrote anything");
+
+    let rows = w.audit("reply_profile.write_refused").await;
+    assert_eq!(rows.len(), 4, "one row per refusal: {rows:?}");
+    let mut seen: Vec<String> = Vec::new();
+    for row in &rows {
+        assert_eq!(row.outcome, AuditOutcome::Denied);
+        assert_eq!(row.metadata["write"], "profile_write");
+        assert_eq!(row.metadata["rule"], "3.3:admin-class");
+        assert_eq!(row.metadata["status"], 400);
+        assert!(row.metadata.get("missing_permission").is_none());
+        seen.push(
+            row.metadata["after"]["service_type"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "administrative_user",
+            "administrative_user",
+            "nas_prompt_user",
+            "nas_prompt_user"
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Conditional writes
 // ---------------------------------------------------------------------------

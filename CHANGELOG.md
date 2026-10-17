@@ -1266,6 +1266,17 @@ one entry below, ending in its number.
   end-to-end pins the Accept's octets and fails on any non-zero tag. The design
   note's "tag `0x00`" lines are corrected, dated.
 
+- **An administrative `Service-Type` is refused with `400`, matching the
+  OpenAPI document (#700, R110W6-02).** A reply-profile create or replace naming
+  `administrative_user` or `nas_prompt_user` was answered `403
+  authorization_denied` naming `network:grant_admin`, a permission nobody can be
+  granted while the administrative class is disabled. The write gate now
+  refuses it before any permission check, with `400 validation_error` and one
+  `reply_profile.write_refused` row (rule `3.3:admin-class`), which is what the
+  published `RadiusServiceType` says. `sdks/openapi.json` and the contract are
+  unchanged: §36.3 rule 5 already tells an SDK to depend on neither status.
+  T-478 carries a dated correction.
+
 ### Documentation
 
 - **SDK contract 1.61: the 1.0.1 fields (carried by contract 1.62, below).** `sdks/CONTRACT.md` records, in the new **§34.5** and
@@ -1404,11 +1415,11 @@ an open issue on `ilpanich/axiam`.
   contract items) and #711 … #715 (the combined review). Among them: #686 and
   #711, the per-address limiters key on a caller-written `X-Forwarded-For`
   without an appending proxy; #712, the boot warning's count of clients on a very
-  large installation; #714, an orphan purge cut before its claim exists; #700,
-  whether an administrative `Service-Type` is refused with `400` or `403`;
+  large installation; #714, an orphan purge cut before its claim exists;
   #702 and #703, the network write gate's residuals (T-483, T-484, kept Open);
   #701 (T-481) is fixed in this release for the role writes, and T-481 stays
-  Open for the writer's own rights and a binding's account. The eleven SDK repositories carry their own follow-up issues for the
+  Open for the writer's own rights and a binding's account. #700 is fixed in
+  this release too: an administrative `Service-Type` is a `400`. The eleven SDK repositories carry their own follow-up issues for the
   conformance review's Low and Informational findings (e.g.
   `ilpanich/axiam-rust-sdk#132`, `ilpanich/axiam-python-sdk#99` and `#100`).
 

@@ -7,7 +7,8 @@
 //! create or change **who may be placed on a network segment, and what being
 //! placed there gives**:
 //!
-//! * a reply-profile write, against H1–H6 of §5.2;
+//! * a reply-profile write, against H1–H6 of §5.2, after refusing an
+//!   administrative `Service-Type` outright (§3.3; a `400`, #700);
 //! * a segment write (`network:segments_write` at the parent or the node; a
 //!   replace that changes `vlan_id`, `rank` or `enabled` of a segment that has
 //!   a profile, or a delete of such a segment, also needs `network:grant`
@@ -711,7 +712,8 @@ pub struct GateRefusal {
     /// The internal reason, for the audit row: `H1` … `H6`, `H3:envelope:…`,
     /// `H2:placement`, `H5:placement` (a segment replace that re-places the
     /// devices of a profiled segment, R110W6-03; a delete of a profiled segment
-    /// or of a profile, 2026-10-16),
+    /// or of a profile, 2026-10-16), `3.3:admin-class` (a profile naming an
+    /// administrative `Service-Type`, a `400`; #700),
     /// `4.1:reserved-subtree`, `4.2:rule-1` … `4.2:rule-3`,
     /// `4.2:reserved-namespace`, `4.2:not-grantable`, `4.2:scoped-grant`,
     /// `5.3:assign`, `5.3:unassign`, `5.3:permission`, `5.3:role-delete`,
@@ -1221,6 +1223,20 @@ where
         };
         let audit = AUDIT_PROFILE_WRITE_REFUSED;
 
+        // Design note §3.3: under option B the administrative class is
+        // disabled, so a profile that names it is legal for nobody — a `400`,
+        // decided before any permission is read. Asking for H4's permissions
+        // first answered a `403` naming `network:grant_admin`, which no
+        // grant can confer (R110W6-02, #700).
+        if input.service_type.is_some_and(|s| s.is_admin_class()) {
+            return Ok(Err(with_values(refuse(
+                RefusalStatus::Invalid,
+                "3.3:admin-class",
+                audit,
+                "the administrative Service-Type values are disabled",
+            ))));
+        }
+
         // H1: the profile's own permission. H2: writing it is a grant.
         for (rule, action) in [("H1", NETWORK_PROFILES_WRITE), ("H2", NETWORK_GRANT)] {
             if let Some(r) = self.require_all(&[action], seg.id, rule, audit).await? {
@@ -1252,8 +1268,9 @@ where
         }
 
         // H4: conferring administrative login needs holding it, and the right
-        // to confer it. Vacuous under option B, where the repository refuses
-        // the class anyway; checked so that option A inherits the rule.
+        // to confer it. Unreachable under option B, where the class is refused
+        // above (and by the repository); kept so that option A, which lifts
+        // that refusal, inherits the rule.
         if input.service_type.is_some_and(|s| s.is_admin_class())
             && let Some(r) = self
                 .require_all(&[NETWORK_GRANT_ADMIN, NETWORK_ADMIN], seg.id, "H4", audit)

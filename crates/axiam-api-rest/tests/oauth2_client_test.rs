@@ -717,9 +717,11 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
                 managed_by: ManagedBy::Cimd,
                 ciba: Default::default(),
             },
+            20,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("under the ceiling");
     assert_eq!(rematerialised.client_id, doomed_client);
     let (status, body) = poll_device!(app, tenant_id, doomed_client, doomed_code);
     assert_eq!(

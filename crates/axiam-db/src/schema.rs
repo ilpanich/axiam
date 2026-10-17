@@ -532,6 +532,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "single_use_bindings",
         sql: SCHEMA_V102,
     },
+    Migration {
+        version: 103,
+        name: "tenant_client_quota_epoch",
+        sql: SCHEMA_V103,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5011,6 +5016,28 @@ DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
 DEFINE FIELD IF NOT EXISTS sign_count ON TABLE webauthn_credential TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v103 — the externally registered client quota is one transaction
+// (the 1.1.0 atomicity audit, item 6)
+// -----------------------------------------------------------------------
+//
+// **`tenant.client_quota_epoch`** — moves with every create of a `dcr` or
+// `cimd` client row. `dcr_max_clients` was checked by a count before the
+// create, in a statement of its own, so N registrations sent together each
+// counted `max - 1` and all created. The create now re-counts inside its own
+// transaction, refuses at the ceiling, and writes this field on the tenant row
+// (`repository/oauth2_client.rs`, `CLIENT_QUOTA_REACHED`): SurrealDB 3.3.4
+// detects only write-write conflicts, so it is the shared write, not the
+// count, that makes two overlapping creates conflict — the loser is retried on
+// a fresh snapshot, where its count sees the winner's row. Like
+// `role.grant_epoch` (v101) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V103: &str = "\
+DEFINE FIELD IF NOT EXISTS client_quota_epoch ON TABLE tenant TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5278,6 +5305,22 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// Item 6 of the 1.1.0 atomicity audit — v103 is the tenant row's client
+    /// quota epoch, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v103_adds_only_the_client_quota_epoch() {
+        let statements: Vec<&str> = SCHEMA_V103
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS client_quota_epoch ON TABLE tenant TYPE option<int>"],
+            "v103 defines the counter and nothing else"
+        );
     }
 
     /// #701 (R110W6-04) — v101 is the role row's two epochs, optional fields
@@ -6780,10 +6823,13 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&102),
-            "v102 is the newest migration (the 1.1.0 atomicity audit's single-use items — \
+            Some(&103),
+            "v103 is the newest migration (the 1.1.0 atomicity audit's item 6 — \
+             `tenant.client_quota_epoch`, which every create of a `dcr` or `cimd` client \
+             writes so that the quota count and the create act as one transaction); v102 was \
+             the 1.1.0 atomicity audit's single-use items — \
              `email_verification_token.email`, the address a verification token vouches for, \
-             the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`); \
+             the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`; \
              v101 was #701 (R110W6-04 — `role.grant_epoch` and \
              `role.holder_epoch`, which every role write the network gate decides moves and \
              compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \

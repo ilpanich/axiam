@@ -2261,9 +2261,11 @@ async fn rfc7592_clients_without_a_management_token_are_refused() {
         .upsert_cimd_client(
             "https://publisher.example.com/client.json",
             row(ManagedBy::Cimd),
+            20,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("under the ceiling");
 
     // Whatever is presented — a fresh token-shaped value, or a real token
     // belonging to some other client — the answer is the same.

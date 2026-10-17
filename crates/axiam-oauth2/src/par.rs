@@ -469,10 +469,10 @@ mod tests {
                 &self,
                 _: axiam_core::models::oauth2_client::CreateOAuth2Client,
                 _: &str,
-            ) -> axiam_core::error::AxiamResult<(
-                axiam_core::models::oauth2_client::OAuth2Client,
-                String,
-            )> {
+                _: u32,
+            ) -> axiam_core::error::AxiamResult<
+                Option<(axiam_core::models::oauth2_client::OAuth2Client, String)>,
+            > {
                 unimplemented!("RFC 7592 is not exercised by this double")
             }
             async fn get_by_registration_access_token(
@@ -514,7 +514,8 @@ mod tests {
                 &self,
                 _: &str,
                 _: CreateOAuth2Client,
-            ) -> AxiamResult<OAuth2Client> {
+                _: u32,
+            ) -> AxiamResult<Option<OAuth2Client>> {
                 unreachable!("peek must not touch the client registration")
             }
             async fn get_by_id(&self, _: Uuid, _: Uuid) -> AxiamResult<OAuth2Client> {

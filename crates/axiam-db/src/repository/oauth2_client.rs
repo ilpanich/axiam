@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, is_transaction_conflict, paginate, search_bind, search_filter,
-    take_first_or_not_found,
+    CountRow, classify_write_error, is_transaction_conflict, paginate, retry_hot_row, search_bind,
+    search_filter, take_first_or_not_found,
 };
 
 /// Generate a random client ID with the `oa_` prefix (32 hex chars).
@@ -428,47 +428,9 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
     }
 }
 
-impl<C: Connection> SurrealOAuth2ClientRepository<C> {
-    /// [`OAuth2ClientRepository::create`], optionally with the digest of an
-    /// RFC 7592 management token written in the same statement (T23.4.1).
-    ///
-    /// One `CREATE` for both, so a `dcr` client never exists without the token
-    /// its registrant was given. `None` writes `NONE`, which is what every
-    /// client that is not self-registered carries.
-    async fn create_row(
-        &self,
-        input: CreateOAuth2Client,
-        registration_access_token_hash: Option<String>,
-    ) -> AxiamResult<(OAuth2Client, String)> {
-        let id = new_id();
-        let id_str = id.to_string();
-        let tenant_id_str = input.tenant_id.to_string();
-
-        let client_id = generate_client_id();
-        // T21.2 — a public client is created with no secret at all.
-        //
-        // Not "a secret nobody tells the operator about": none. Minting one
-        // unconditionally is what SEC-093 found had given every `tls_client_auth`
-        // client a live password-equivalent credential its registration said it
-        // did not use, and a public client is the sharper case — its whole
-        // registration is the statement that it cannot keep one. An empty
-        // `client_secret_hash` is therefore the truth about the row rather than
-        // a placeholder, and the token endpoint never consults it: the public
-        // arm of `authenticate_client_credential` returns before any hash is
-        // read, so no comparison against the empty string can ever be reached.
-        let (raw_secret, secret_hash) = if input.token_endpoint_auth_method.is_public() {
-            (String::new(), String::new())
-        } else {
-            let raw = generate_client_secret();
-            let hash = client_secret::global()?.hash(&raw);
-            (raw, hash)
-        };
-
-        let result = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('oauth2_client', $id) SET \
+/// The `CREATE` of a client row, shared by [`OAuth2ClientRepository::create`]
+/// and the quota-claimed creates.
+const CREATE_CLIENT: &str = "CREATE type::record('oauth2_client', $id) SET \
                  tenant_id = $tenant_id, \
                  client_id = $client_id, \
                  client_secret_hash = $secret_hash, \
@@ -498,12 +460,199 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                  backchannel_token_delivery_mode = $ciba_mode, \
                  backchannel_client_notification_endpoint = $ciba_endpoint, \
                  backchannel_authentication_request_signing_alg = $ciba_signing_alg, \
-                 last_authorized_at = NONE",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str))
-            .bind(("client_id", client_id))
-            .bind(("secret_hash", secret_hash))
+                 last_authorized_at = NONE";
+
+/// `THROW`n by a quota-claimed create when the tenant already holds
+/// `$max_clients` rows of the provenance being created (item 6 of the 1.1.0
+/// atomicity audit).
+const CLIENT_QUOTA_REACHED: &str = "axiam:client_quota_reached";
+
+/// `THROW`n by a quota-claimed create whose tenant row does not exist: there
+/// is no row to claim, so nothing is created.
+const CLIENT_QUOTA_NO_TENANT: &str = "axiam:client_quota_no_tenant";
+
+/// The statements that make a create of a `dcr` or `cimd` row one transaction
+/// with its quota (item 6 of the 1.1.0 atomicity audit). They read
+/// `$tenant_id`, `$managed_by` and `$max_clients`, and fill
+/// [`CLIENT_QUOTA_CLAIM_SLOTS`] result slots.
+///
+/// The count is made **inside** the create's transaction, and refused at the
+/// ceiling. That alone would not do: SurrealDB 3.3.4 is snapshot-isolated
+/// with write-write conflict detection only, so N transactions that each
+/// counted `max - 1` and each created a different row would all commit. So
+/// every claimed create also writes one shared key, `tenant.client_quota_epoch`
+/// (schema v103): two overlapping creates for one tenant conflict on it, the
+/// loser is retried on a fresh snapshot ([`retry_hot_row`]: a burst of
+/// registrations for one tenant is a hot row by design, one winner per
+/// round), and its count then sees the winner's row. A refusal writes
+/// nothing, so it conflicts with nothing. The epoch's next value is a `LET` of
+/// its own and the `UPDATE` only assigns it, for the stack-depth reason
+/// `role::bump_statement` gives.
+fn client_quota_claim() -> String {
+    format!(
+        "LET $quota_epoch = (SELECT VALUE client_quota_epoch ?? 0 \
+             FROM type::record('tenant', $tenant_id)); \
+         IF array::len($quota_epoch) = 0 {{ THROW '{CLIENT_QUOTA_NO_TENANT}'; }}; \
+         LET $held = (SELECT count() AS total FROM oauth2_client \
+             WHERE tenant_id = $tenant_id AND managed_by = $managed_by GROUP ALL); \
+         IF ($held[0].total ?? 0) >= $max_clients {{ THROW '{CLIENT_QUOTA_REACHED}'; }}; \
+         LET $next_quota_epoch = $quota_epoch[0] + 1; \
+         UPDATE type::record('tenant', $tenant_id) \
+             SET client_quota_epoch = $next_quota_epoch; "
+    )
+}
+
+/// How many result slots [`client_quota_claim`] fills.
+const CLIENT_QUOTA_CLAIM_SLOTS: usize = 6;
+
+/// A quota-claimed create's statement errors, read. `Ok(true)`: the tenant
+/// was at its ceiling. `Ok(false)`: nothing failed. `Err`: what is left,
+/// classified — an engine conflict is retried by the caller's
+/// [`retry_hot_row`], a duplicate is `AlreadyExists`.
+///
+/// Every slot is read: a `THROW` fires on its own statement while the rest
+/// report "not executed due to a failed transaction", which is also a
+/// write-conflict marker — so the refusals are matched first.
+fn client_quota_outcome(
+    errors: std::collections::HashMap<usize, surrealdb::Error>,
+    tenant_id: &str,
+) -> Result<bool, DbError> {
+    if errors.is_empty() {
+        return Ok(false);
+    }
+    let combined = errors
+        .into_values()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if combined.contains(CLIENT_QUOTA_REACHED) {
+        return Ok(true);
+    }
+    if combined.contains(CLIENT_QUOTA_NO_TENANT) {
+        return Err(DbError::NotFound {
+            entity: "tenant".into(),
+            id: tenant_id.to_owned(),
+        });
+    }
+    Err(classify_write_error(combined, "oauth2_client"))
+}
+
+impl<C: Connection> SurrealOAuth2ClientRepository<C> {
+    /// [`OAuth2ClientRepository::create`], optionally with the digest of an
+    /// RFC 7592 management token written in the same statement (T23.4.1).
+    ///
+    /// One `CREATE` for both, so a `dcr` client never exists without the token
+    /// its registrant was given. `None` writes `NONE`, which is what every
+    /// client that is not self-registered carries.
+    ///
+    /// With `max_clients`, the create is one transaction with the tenant's
+    /// quota for the input's `managed_by` ([`client_quota_claim`]) and answers
+    /// `None` at the ceiling, having written nothing. Without, it is the bare
+    /// `CREATE` and never answers `None`.
+    async fn create_row(
+        &self,
+        input: CreateOAuth2Client,
+        registration_access_token_hash: Option<&str>,
+        max_clients: Option<u32>,
+    ) -> AxiamResult<Option<(OAuth2Client, String)>> {
+        let id = new_id();
+        let id_str = id.to_string();
+
+        let client_id = generate_client_id();
+        // T21.2 — a public client is created with no secret at all.
+        //
+        // Not "a secret nobody tells the operator about": none. Minting one
+        // unconditionally is what SEC-093 found had given every `tls_client_auth`
+        // client a live password-equivalent credential its registration said it
+        // did not use, and a public client is the sharper case — its whole
+        // registration is the statement that it cannot keep one. An empty
+        // `client_secret_hash` is therefore the truth about the row rather than
+        // a placeholder, and the token endpoint never consults it: the public
+        // arm of `authenticate_client_credential` returns before any hash is
+        // read, so no comparison against the empty string can ever be reached.
+        let (raw_secret, secret_hash) = if input.token_endpoint_auth_method.is_public() {
+            (String::new(), String::new())
+        } else {
+            let raw = generate_client_secret();
+            let hash = client_secret::global()?.hash(&raw);
+            (raw, hash)
+        };
+
+        let Some(max_clients) = max_clients else {
+            let mut result = self
+                .send_create(
+                    CREATE_CLIENT,
+                    &input,
+                    &id_str,
+                    &client_id,
+                    &secret_hash,
+                    registration_access_token_hash,
+                    0,
+                )
+                .await?
+                .check()
+                .map_err(|e| DbError::Migration(e.to_string()))?;
+            let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
+            let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
+            return Ok(Some((row.try_into_client(id)?, raw_secret)));
+        };
+
+        let query = format!(
+            "BEGIN TRANSACTION; {claim}{CREATE_CLIENT}; COMMIT TRANSACTION",
+            claim = client_quota_claim()
+        );
+        // Result slots: BEGIN, the claim's, then the CREATE.
+        let create_slot = 1 + CLIENT_QUOTA_CLAIM_SLOTS;
+        let tenant_id_str = input.tenant_id.to_string();
+        let max_clients = i64::from(max_clients);
+        let outcome = retry_hot_row(|| async {
+            let mut result = self
+                .send_create(
+                    &query,
+                    &input,
+                    &id_str,
+                    &client_id,
+                    &secret_hash,
+                    registration_access_token_hash,
+                    max_clients,
+                )
+                .await?;
+            if client_quota_outcome(result.take_errors(), &tenant_id_str)? {
+                return Ok(None);
+            }
+            let rows: Vec<OAuth2ClientRow> = result.take(create_slot).map_err(DbError::from)?;
+            Ok::<_, DbError>(Some(rows))
+        })
+        .await
+        .map_err(AxiamError::from)?;
+        let Some(rows) = outcome else {
+            return Ok(None);
+        };
+        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
+        Ok(Some((row.try_into_client(id)?, raw_secret)))
+    }
+
+    /// Send `query` — [`CREATE_CLIENT`], alone or inside a quota claim — with
+    /// every parameter either reads.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_create(
+        &self,
+        query: &str,
+        input: &CreateOAuth2Client,
+        id_str: &str,
+        client_id: &str,
+        secret_hash: &str,
+        registration_access_token_hash: Option<&str>,
+        max_clients: i64,
+    ) -> Result<surrealdb::IndexedResults, DbError> {
+        let input = input.clone();
+        self.db
+            .current()
+            .query(query)
+            .bind(("id", id_str.to_owned()))
+            .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
+            .bind(("secret_hash", secret_hash.to_owned()))
             .bind(("name", input.name))
             .bind(("redirect_uris", input.redirect_uris))
             .bind(("grant_types", input.grant_types))
@@ -550,8 +699,9 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
             .bind(("managed_by", input.managed_by.as_str().to_owned()))
             .bind((
                 "registration_access_token_hash",
-                registration_access_token_hash,
+                registration_access_token_hash.map(str::to_owned),
             ))
+            .bind(("max_clients", max_clients))
             .bind((
                 "ciba_mode",
                 input
@@ -571,24 +721,15 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                 normalise_optional(input.ciba.backchannel_client_notification_endpoint),
             ))
             .await
-            .map_err(DbError::from)?;
-
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
-
-        let client = row.try_into_client(id)?;
-
-        Ok((client, raw_secret))
+            .map_err(DbError::from)
     }
 }
 
 impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
     async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
-        self.create_row(input, None).await
+        self.create_row(input, None, None)
+            .await?
+            .ok_or_else(|| AxiamError::Internal("an unclaimed create answered no row".into()))
     }
 
     /// T21.5 — create or refresh a CIMD shadow row. See the trait's
@@ -617,7 +758,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         &self,
         client_id: &str,
         input: CreateOAuth2Client,
-    ) -> AxiamResult<OAuth2Client> {
+        max_clients: u32,
+    ) -> AxiamResult<Option<OAuth2Client>> {
         let tenant_id = input.tenant_id;
         let tenant_id_str = tenant_id.to_string();
         let client_id_owned = client_id.to_string();
@@ -658,7 +800,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
 
         let refreshed: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
         if let Some(row) = refreshed.into_iter().next() {
-            return row.try_into_client().map_err(Into::into);
+            return row.try_into_client().map(Some).map_err(Into::into);
         }
 
         // Nothing was refreshed: either there is no row at all, or there is
@@ -678,13 +820,16 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             Err(e) => return Err(e),
         }
 
+        // A first appearance (T21.8 / MCP-04, and item 6 of the 1.1.0
+        // atomicity audit): counted against `max_clients` inside the create's
+        // own transaction, which claims the tenant row (`client_quota_claim`),
+        // so first appearances sent together cannot each count `max - 1`.
         let id = new_id();
         let id_str = id.to_string();
-        let result = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('oauth2_client', $id) SET \
+        let query = format!(
+            "BEGIN TRANSACTION; {claim}{create}; COMMIT TRANSACTION",
+            claim = client_quota_claim(),
+            create = "CREATE type::record('oauth2_client', $id) SET \
                  tenant_id = $tenant_id, \
                  client_id = $client_id, \
                  client_secret_hash = '', \
@@ -711,39 +856,68 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  allowed_resources = $allowed_resources, \
                  managed_by = $managed_by, \
                  last_authorized_at = NONE",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str))
-            .bind(("client_id", client_id_owned.clone()))
-            .bind(("name", input.name))
-            .bind(("redirect_uris", input.redirect_uris))
-            .bind(("grant_types", input.grant_types))
-            .bind(("scopes", input.scopes))
-            .bind(("profile", input.profile.as_str()))
-            .bind((
-                "token_endpoint_auth_method",
-                input.token_endpoint_auth_method.as_str(),
-            ))
-            .bind(("jwks", normalise_optional(input.jwks)))
-            .bind(("jwks_uri", normalise_optional(input.jwks_uri)))
-            .bind(("authn_request_params", input.authn_request_params.as_str()))
-            .bind(("allowed_resources", input.allowed_resources))
-            .bind(("managed_by", input.managed_by.as_str().to_owned()))
-            .await
-            .map_err(DbError::from);
+        );
+        // Result slots: BEGIN, the claim's, then the CREATE.
+        let create_slot = 1 + CLIENT_QUOTA_CLAIM_SLOTS;
+        let max_clients = i64::from(max_clients);
+        let result = retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("id", id_str.clone()))
+                .bind(("tenant_id", tenant_id_str.clone()))
+                .bind(("client_id", client_id_owned.clone()))
+                .bind(("name", input.name.clone()))
+                .bind(("redirect_uris", input.redirect_uris.clone()))
+                .bind(("grant_types", input.grant_types.clone()))
+                .bind(("scopes", input.scopes.clone()))
+                .bind(("profile", input.profile.as_str()))
+                .bind((
+                    "token_endpoint_auth_method",
+                    input.token_endpoint_auth_method.as_str(),
+                ))
+                .bind(("jwks", normalise_optional(input.jwks.clone())))
+                .bind(("jwks_uri", normalise_optional(input.jwks_uri.clone())))
+                .bind(("authn_request_params", input.authn_request_params.as_str()))
+                .bind(("allowed_resources", input.allowed_resources.clone()))
+                .bind(("managed_by", input.managed_by.as_str().to_owned()))
+                .bind(("max_clients", max_clients))
+                .await
+                .map_err(DbError::from)?;
+            if client_quota_outcome(result.take_errors(), &tenant_id_str)? {
+                return Ok(None);
+            }
+            let rows: Vec<OAuth2ClientRow> = result.take(create_slot).map_err(DbError::from)?;
+            Ok::<_, DbError>(Some(rows))
+        })
+        .await;
 
         match result {
-            Ok(mut result) => {
-                let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
+            Ok(Some(rows)) => {
                 let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
-                Ok(row.try_into_client(id)?)
+                Ok(Some(row.try_into_client(id)?))
             }
-            // The unique index refused the write: a concurrent first
-            // authorization for the same document won. The row it created is
-            // the row this call was about to create, so it is read back rather
-            // than reported — the outcome the caller asked for has happened.
+            // At the ceiling — or the unique index refused the write: a
+            // concurrent first authorization for the same document won. In
+            // both cases a row the winner created is the row this call was
+            // about to create, so it is read back rather than reported; with
+            // no such row the ceiling stands.
+            Ok(None) => match self.get_by_client_id(tenant_id, &client_id_owned).await {
+                Ok(existing) if existing.managed_by == ManagedBy::Cimd => Ok(Some(existing)),
+                Ok(existing) => Err(AxiamError::Conflict {
+                    reason: format!(
+                        "client_id {client_id_owned} already names a {} client in this tenant; \
+                         a client ID metadata document cannot replace a registration AXIAM's \
+                         operator created",
+                        existing.managed_by,
+                    ),
+                }),
+                Err(AxiamError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e),
+            },
             Err(e) => match self.get_by_client_id(tenant_id, &client_id_owned).await {
-                Ok(existing) if existing.managed_by == ManagedBy::Cimd => Ok(existing),
+                Ok(existing) if existing.managed_by == ManagedBy::Cimd => Ok(Some(existing)),
                 _ => Err(e.into()),
             },
         }
@@ -1236,7 +1410,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         &self,
         input: CreateOAuth2Client,
         registration_access_token_hash: &str,
-    ) -> AxiamResult<(OAuth2Client, String)> {
+        max_clients: u32,
+    ) -> AxiamResult<Option<(OAuth2Client, String)>> {
         if input.managed_by != ManagedBy::Dcr {
             return Err(AxiamError::Validation {
                 message: "only a dynamically registered client is issued an RFC 7592 \
@@ -1249,8 +1424,14 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                 message: "a registration access token digest must not be empty".into(),
             });
         }
-        self.create_row(input, Some(registration_access_token_hash.to_owned()))
-            .await
+        // Item 6 of the 1.1.0 atomicity audit: the `dcr_max_clients` count is
+        // made inside the create's transaction, which claims the tenant row.
+        self.create_row(
+            input,
+            Some(registration_access_token_hash),
+            Some(max_clients),
+        )
+        .await
     }
 
     /// T23.4.1 — the management token's lookup. The `(tenant_id, client_id)`
@@ -1559,20 +1740,55 @@ mod tests {
         }
     }
 
+    /// The ceiling the RFC 7592 tests register under: far above what they
+    /// create.
+    const MAX: u32 = 20;
+
+    /// An org and a tenant row: a quota-claimed create claims the tenant row,
+    /// and refuses a tenant that has none.
+    async fn tenant_in(db: &Surreal<surrealdb::engine::local::Db>, slug: &str) -> Uuid {
+        use crate::repository::{SurrealOrganizationRepository, SurrealTenantRepository};
+        use axiam_core::models::organization::CreateOrganization;
+        use axiam_core::models::tenant::{CreateTenant, TenantKind};
+        use axiam_core::repository::{OrganizationRepository, TenantRepository};
+        let org = SurrealOrganizationRepository::new(db.clone())
+            .create(CreateOrganization {
+                name: format!("Org {slug}"),
+                slug: format!("org-{slug}"),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        SurrealTenantRepository::new(db.clone())
+            .create(CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: format!("Tenant {slug}"),
+                slug: format!("tenant-{slug}"),
+                metadata: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
     /// The digest names one row, in one tenant, under one `client_id`; and
     /// only a `dcr` row can carry one.
     #[tokio::test]
     async fn a_management_token_names_exactly_its_own_row() {
-        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
-        let tenant = Uuid::new_v4();
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "t").await;
+        let repo = SurrealOAuth2ClientRepository::new(db);
         let (client, _) = repo
-            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h1")
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h1", MAX)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("under the ceiling");
         let (other, _) = repo
-            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h2")
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h2", MAX)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("under the ceiling");
 
         let found = repo
             .get_by_registration_access_token(tenant, &client.client_id, "h1")
@@ -1600,9 +1816,13 @@ mod tests {
 
         for provenance in [ManagedBy::Admin, ManagedBy::Cimd] {
             assert!(
-                repo.create_with_registration_access_token(public_client(tenant, provenance), "h3")
-                    .await
-                    .is_err(),
+                repo.create_with_registration_access_token(
+                    public_client(tenant, provenance),
+                    "h3",
+                    MAX
+                )
+                .await
+                .is_err(),
                 "{provenance:?} is never issued a management token"
             );
         }
@@ -1612,8 +1832,9 @@ mod tests {
     /// — not even a digest of the empty string.
     #[tokio::test]
     async fn a_client_created_without_a_token_matches_no_digest() {
-        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
-        let tenant = Uuid::new_v4();
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "t").await;
+        let repo = SurrealOAuth2ClientRepository::new(db);
         let (client, _) = repo
             .create(public_client(tenant, ManagedBy::Dcr))
             .await
@@ -1634,12 +1855,18 @@ mod tests {
     /// columns a registration cannot set are untouched.
     #[tokio::test]
     async fn replacement_rotates_the_token_and_touches_nothing_else() {
-        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
-        let tenant = Uuid::new_v4();
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "t").await;
+        let repo = SurrealOAuth2ClientRepository::new(db);
         let (client, _) = repo
-            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "old")
+            .create_with_registration_access_token(
+                public_client(tenant, ManagedBy::Dcr),
+                "old",
+                MAX,
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("under the ceiling");
 
         let replaced = repo
             .replace_dcr_registration(
@@ -1694,12 +1921,18 @@ mod tests {
     /// Deletion is conditional on the digest, and a second one finds nothing.
     #[tokio::test]
     async fn deletion_needs_the_current_token_and_happens_once() {
-        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
-        let tenant = Uuid::new_v4();
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "t").await;
+        let repo = SurrealOAuth2ClientRepository::new(db);
         let (client, _) = repo
-            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "tok")
+            .create_with_registration_access_token(
+                public_client(tenant, ManagedBy::Dcr),
+                "tok",
+                MAX,
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("under the ceiling");
         assert!(
             repo.delete_by_registration_access_token(tenant, &client.client_id, "wrong")
                 .await
@@ -1725,5 +1958,150 @@ mod tests {
             0,
             "the deleted row no longer counts against dcr_max_clients"
         );
+    }
+
+    // --- Item 6 of the 1.1.0 atomicity audit: the quota in the transaction ---
+
+    /// The claim's slot count is what the creates index the `CREATE` after it
+    /// by; a statement added without moving it would read the wrong slot.
+    #[test]
+    fn the_quota_claim_fills_the_slots_it_declares() {
+        let claim = client_quota_claim();
+        let statements: usize = ["LET $", "IF ", "UPDATE "]
+            .iter()
+            .map(|keyword| claim.matches(keyword).count())
+            .sum();
+        assert_eq!(statements, CLIENT_QUOTA_CLAIM_SLOTS);
+    }
+
+    async fn quota_epoch(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> Option<i64> {
+        let epochs: Vec<Option<i64>> = db
+            .query("SELECT VALUE client_quota_epoch FROM type::record('tenant', $id)")
+            .bind(("id", tenant.to_string()))
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        epochs.into_iter().next().flatten()
+    }
+
+    /// The `dcr` ceiling is counted inside the create: at the ceiling nothing
+    /// is written and the answer is `None`; every create that lands moves the
+    /// tenant row's epoch; another tenant's rows and other provenances do not
+    /// count.
+    #[tokio::test]
+    async fn a_dcr_create_counts_its_ceiling_in_its_own_transaction() {
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "a").await;
+        let other = tenant_in(&db, "b").await;
+        let repo = SurrealOAuth2ClientRepository::new(db.clone());
+        // Rows that are not this tenant's `dcr` rows.
+        repo.create(public_client(tenant, ManagedBy::Admin))
+            .await
+            .unwrap();
+        repo.create_with_registration_access_token(public_client(other, ManagedBy::Dcr), "o", 2)
+            .await
+            .unwrap()
+            .expect("another tenant's ceiling");
+
+        for n in 0..2 {
+            repo.create_with_registration_access_token(
+                public_client(tenant, ManagedBy::Dcr),
+                &format!("h{n}"),
+                2,
+            )
+            .await
+            .unwrap()
+            .expect("under the ceiling");
+        }
+        assert!(
+            repo.create_with_registration_access_token(
+                public_client(tenant, ManagedBy::Dcr),
+                "h-over",
+                2
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "at the ceiling nothing is created"
+        );
+        assert_eq!(
+            repo.count_by_managed_by(tenant, ManagedBy::Dcr)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            quota_epoch(&db, tenant).await,
+            Some(2),
+            "one move per create"
+        );
+        assert_eq!(quota_epoch(&db, other).await, Some(1));
+    }
+
+    /// A tenant with no row has nothing to claim: the create is refused and
+    /// writes nothing.
+    #[tokio::test]
+    async fn a_dcr_create_for_a_tenant_with_no_row_writes_nothing() {
+        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
+        let tenant = Uuid::new_v4();
+        assert!(matches!(
+            repo.create_with_registration_access_token(
+                public_client(tenant, ManagedBy::Dcr),
+                "h",
+                MAX
+            )
+            .await,
+            Err(AxiamError::NotFound { .. })
+        ));
+        assert_eq!(
+            repo.count_by_managed_by(tenant, ManagedBy::Dcr)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// A first CIMD appearance counts against the ceiling in its transaction;
+    /// a refresh never counts.
+    #[tokio::test]
+    async fn a_first_cimd_appearance_counts_its_ceiling_and_a_refresh_does_not() {
+        let db = setup_db().await;
+        let tenant = tenant_in(&db, "c").await;
+        let repo = SurrealOAuth2ClientRepository::new(db.clone());
+        let doc = |url: &str| {
+            let mut input = public_client(tenant, ManagedBy::Cimd);
+            input.name = url.to_owned();
+            input
+        };
+        let a = "https://app.example/a.json";
+        let b = "https://app.example/b.json";
+        assert!(
+            repo.upsert_cimd_client(a, doc(a), 1)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repo.upsert_cimd_client(b, doc(b), 1)
+                .await
+                .unwrap()
+                .is_none(),
+            "a second document at a ceiling of one is not materialised"
+        );
+        assert!(
+            repo.upsert_cimd_client(a, doc(a), 1)
+                .await
+                .unwrap()
+                .is_some(),
+            "a refresh of the first never counts"
+        );
+        assert_eq!(
+            repo.count_by_managed_by(tenant, ManagedBy::Cimd)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(quota_epoch(&db, tenant).await, Some(1));
     }
 }

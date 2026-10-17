@@ -1159,9 +1159,10 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
     };
     let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
     let before = client_repo
-        .upsert_cimd_client(client_id, document())
+        .upsert_cimd_client(client_id, document(), 20)
         .await
-        .expect("materialised");
+        .expect("materialised")
+        .expect("under the ceiling");
 
     // What the client was granted while it was in use.
     let refresh_repo = axiam_db::SurrealRefreshTokenRepository::new(db.clone());
@@ -1233,9 +1234,10 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
 
     // The client presents its document again.
     let after = client_repo
-        .upsert_cimd_client(client_id, document())
+        .upsert_cimd_client(client_id, document(), 20)
         .await
-        .expect("re-materialised");
+        .expect("re-materialised")
+        .expect("under the ceiling");
     assert_ne!(after.id, before.id, "a new row under the same client_id");
 
     assert!(

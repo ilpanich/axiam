@@ -1730,13 +1730,22 @@ pub trait OAuth2ClientRepository: Send + Sync {
     ///   client whose registration is a public document.
     /// * `created_at` survives a refresh; `updated_at` moves.
     ///
+    /// * **A first appearance counts against `max_clients`** — the tenant's
+    ///   `dcr_max_clients`, counted over its `cimd` rows — **inside the
+    ///   create's own transaction** (item 6 of the 1.1.0 atomicity audit). A
+    ///   caller's count made before the fetch is an early refusal, not the
+    ///   ceiling: N first appearances sent together each read `max - 1`
+    ///   there. A refresh never counts.
+    ///
     /// Returns the row as stored, so the caller acts on what was written
-    /// rather than on what it asked for.
+    /// rather than on what it asked for; `None` when no row existed and the
+    /// tenant already held `max_clients` of them, and nothing was written.
     fn upsert_cimd_client(
         &self,
         client_id: &str,
         input: CreateOAuth2Client,
-    ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+        max_clients: u32,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2Client>>> + Send;
 
     /// Stamp `last_authorized_at` (T21.4).
     ///
@@ -1773,11 +1782,21 @@ pub trait OAuth2ClientRepository: Send + Sync {
     /// caller was told about and could never manage. Implementations MUST
     /// refuse an input whose `managed_by` is not `dcr` — no other provenance
     /// is issued a management token.
+    ///
+    /// **`max_clients` is the ceiling, enforced in the create's transaction**
+    /// (`dcr_max_clients`; item 6 of the 1.1.0 atomicity audit): the tenant's
+    /// `dcr` rows are counted there, and at the ceiling nothing is written and
+    /// the answer is `None`. Implementations MUST make two overlapping creates
+    /// for one tenant conflict — a count alone does not, under snapshot
+    /// isolation — so that N registrations sent together cannot each count
+    /// `max - 1` and all land. The caller's own count, made earlier, is an
+    /// early refusal and nothing more.
     fn create_with_registration_access_token(
         &self,
         input: CreateOAuth2Client,
         registration_access_token_hash: &str,
-    ) -> impl Future<Output = AxiamResult<(OAuth2Client, String)>> + Send;
+        max_clients: u32,
+    ) -> impl Future<Output = AxiamResult<Option<(OAuth2Client, String)>>> + Send;
 
     /// The `dcr` client this management token belongs to, or `None`.
     ///

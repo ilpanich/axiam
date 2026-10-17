@@ -232,14 +232,26 @@ accepted at `/oauth2/authorize`, and only one of them started this flow.
 ## Rate limiting
 
 A token request carrying no client credential is counted in its own bucket,
-keyed on **`client_id` and the transport peer address together**, with the
+keyed on **`client_id` and the client's address together**, with the
 `token_per_min` allowance (`AXIAM__RATE_LIMIT__TOKEN_PER_MIN`, default 120 —
-see the [deployment guide](../deployment/README.md)). It sits in front of the
-endpoint's own rate limit rather than replacing it.
+see the [deployment guide](../deployment/README.md)). It sits behind the
+endpoint's own rate limit rather than replacing it. The device-code grant's
+polls are counted in it too: a public device client presents no credential.
+
+The address is the one the endpoint's own rate limit keys on: the rightmost
+`X-Forwarded-For` entry your proxies did not add, under
+`AXIAM__RATE_LIMIT__TRUSTED_HOPS` (the number of proxies in front of the
+server minus one — see [Deriving `TRUSTED_HOPS`](../deployment/README.md#deriving-trusted_hops)),
+and the connection's peer address when there is no such entry. Before 1.1.0 it
+was always the peer address, which behind a reverse proxy is the proxy: every
+user of one public client then shared one allowance, and one address could
+spend it and have every other user's code exchange and refresh — and, once
+device polls were counted, every device's poll — answered `429 slow_down`. A `TRUSTED_HOPS` set one too high brings that back,
+for this bucket as for every other.
 
 Neither half of that key works alone here. `client_id` on its own is a bucket
-an unauthenticated caller mints by rotating a value they choose; the peer
-address on its own puts every desktop client behind one NAT gateway — an
+an unauthenticated caller mints by rotating a value they choose; the address
+on its own puts every desktop client behind one NAT gateway — an
 office, a household — into a single allowance. Deployments that front many
 confidential clients from one egress IP should additionally set
 `AXIAM__RATE_LIMIT__KEY=ip_client_id`, which applies the same reasoning to the

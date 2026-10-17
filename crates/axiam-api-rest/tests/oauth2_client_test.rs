@@ -518,17 +518,18 @@ async fn approved_device_grant(
     device_code
 }
 
-/// Poll the token endpoint with a device code: `(status, body)`.
+/// Poll the token endpoint with a device code, as the public client
+/// `client_id` (RFC 8628 §3.4): `(status, body)`.
 macro_rules! poll_device {
-    ($app:expr, $tenant_id:expr, $device_code:expr) => {{
+    ($app:expr, $tenant_id:expr, $client_id:expr, $device_code:expr) => {{
         let req = test::TestRequest::post()
             .peer_addr("127.0.0.1:12345".parse().unwrap())
             .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
             .insert_header(("content-type", "application/x-www-form-urlencoded"))
             .set_payload(format!(
                 "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code\
-                 &device_code={}",
-                $device_code
+                 &device_code={}&client_id={}",
+                $device_code, $client_id
             ))
             .to_request();
         let resp = test::call_service(&$app, req).await;
@@ -540,10 +541,12 @@ macro_rules! poll_device {
 
 /// **#610 (d).** Deleting a client voids its device grants and CIBA requests.
 ///
-/// The device poll authenticates nothing but the device code, so an approved
-/// grant outlives its client — and, for a `managed_by: cimd` client whose
-/// `client_id` names its metadata document, redeems again once the next request
-/// re-materialises the row. The pending CIBA request would meanwhile stay
+/// Before #635 the device poll authenticated nothing but the device code, so
+/// an approved grant outlived its client — and, for a `managed_by: cimd`
+/// client whose `client_id` names its metadata document, redeemed again once
+/// the next request re-materialised the row. The poll now reads the client
+/// (gone: `invalid_client`), and the deletion still voids the grant, which is
+/// what refuses it once the `client_id` names a row again. The pending CIBA request would meanwhile stay
 /// listed for its user naming a client that is gone.
 ///
 /// A grant of another client in the same tenant is the control: it still
@@ -589,7 +592,10 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
                 "name": name,
                 "redirect_uris": [],
                 "grant_types": [DEVICE_GRANT],
-                "scopes": ["openid"]
+                "scopes": ["openid"],
+                // Public, as a television is: it polls with its `client_id`
+                // alone (#635).
+                "token_endpoint_auth_method": "none"
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -670,13 +676,13 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
         "a deleted client's device grant is deleted"
     );
 
-    // Even before anything is re-materialised the poll authenticates no client,
-    // so the grant is what refuses it.
+    // Before anything is re-materialised the client is gone, which the poll
+    // now reads (#635): `invalid_client`, nothing minted.
     let before_refresh = refresh_token_count(&db).await;
-    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    let (status, body) = poll_device!(app, tenant_id, doomed_client, doomed_code);
     assert_eq!(
         (status, body["error"].as_str()),
-        (400, Some("invalid_grant")),
+        (401, Some("invalid_client")),
         "{body}"
     );
 
@@ -711,11 +717,13 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
                 managed_by: ManagedBy::Cimd,
                 ciba: Default::default(),
             },
+            20,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("under the ceiling");
     assert_eq!(rematerialised.client_id, doomed_client);
-    let (status, body) = poll_device!(app, tenant_id, doomed_code);
+    let (status, body) = poll_device!(app, tenant_id, doomed_client, doomed_code);
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
@@ -729,7 +737,7 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
     );
 
     // The control: another client's approved grant is untouched.
-    let (status, body) = poll_device!(app, tenant_id, surviving_code);
+    let (status, body) = poll_device!(app, tenant_id, surviving_client, surviving_code);
     assert_eq!(status, 200, "{body}");
     assert!(body["access_token"].as_str().is_some_and(|t| !t.is_empty()));
 }
@@ -1872,4 +1880,293 @@ async fn an_update_that_does_not_touch_the_backchannel_logout_uri_leaves_a_legac
         Some("http://169.254.169.254/latest"),
         "no backfill: the stored row is not rewritten"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #636 (R101W3-02) — the admin API refuses what the scope ceiling would withhold
+// ---------------------------------------------------------------------------
+
+/// Seed a client row with the given provenance and scopes, straight through the
+/// repository: the admin API can only ever create an `admin` row, and `dcr` /
+/// `cimd` rows come from `/oauth2/register` and the CIMD fetch.
+async fn seed_managed_client(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    managed_by: axiam_core::models::oauth2_client::ManagedBy,
+    scopes: &[&str],
+) -> String {
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client,
+    };
+    use axiam_core::repository::OAuth2ClientRepository;
+    let (row, _) = axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .create(CreateOAuth2Client {
+            tenant_id,
+            name: format!("{managed_by} client"),
+            redirect_uris: vec!["https://app.example.com/callback".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: ClientAuthMethod::None,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by,
+            ciba: Default::default(),
+        })
+        .await
+        .unwrap();
+    row.id.to_string()
+}
+
+/// Set the organization baseline `dcr_allowed_scopes`, bypassing the handler's
+/// validation (this is setup, not the thing under test).
+async fn set_ceiling(db: &Surreal<TestDb>, org_id: Uuid, scopes: &[&str]) {
+    use axiam_core::models::settings::{SetOrgSettings, system_defaults};
+    use axiam_core::repository::SettingsRepository;
+    axiam_db::repository::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org_id,
+            SetOrgSettings {
+                dcr_allowed_scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+                ..system_defaults()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+macro_rules! put_client {
+    ($app:expr, $token:expr, $id:expr, $body:expr) => {{
+        let req = test::TestRequest::put()
+            .uri(&format!("/api/v1/oauth2-clients/{}", $id))
+            .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json($body)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+async fn stored_scopes(db: &Surreal<TestDb>, tenant_id: Uuid, id: &str) -> Vec<String> {
+    use axiam_core::repository::OAuth2ClientRepository;
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_id(tenant_id, id.parse().unwrap())
+        .await
+        .unwrap()
+        .scopes
+}
+
+/// The oracle: an outside scope on a `dcr` row and on a `cimd` row is `422`,
+/// names the scope, and writes nothing — while the same body on an `admin` row
+/// is accepted (an administrator's client is not bounded by the list).
+#[actix_rt::test]
+async fn admin_put_of_a_scope_outside_the_ceiling_is_422_on_dcr_and_cimd_rows_only() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    let (db, org_id, tenant_id) = setup_db().await;
+    set_ceiling(&db, org_id, &["openid", "profile"]).await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+        let id = seed_managed_client(&db, tenant_id, managed_by, &["openid"]).await;
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "scopes": ["openid", "email"] })
+        );
+        assert_eq!(status, 422, "{managed_by}: {body}");
+        assert_eq!(body["error"], "scope_exceeds_ceiling", "{body}");
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.contains("email") && !message.contains("openid,"),
+            "the refusal names the offending scope and only it: {body}"
+        );
+        assert_eq!(
+            stored_scopes(&db, tenant_id, &id).await,
+            vec!["openid".to_owned()],
+            "{managed_by}: a refusal leaves the row unchanged"
+        );
+
+        // Inside the ceiling is still an ordinary edit.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "scopes": ["openid", "profile"] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+    }
+
+    // The control: the same body on an administrator's own client.
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "scopes": ["openid", "email"] })
+    );
+    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(
+        stored_scopes(&db, tenant_id, &id).await,
+        vec!["openid".to_owned(), "email".to_owned()]
+    );
+}
+
+/// The ceiling is the tenant's **effective** list: a tenant override narrows the
+/// organization baseline, and the admin API reads the same value the grant-time
+/// ceiling does. An empty effective list (the default) offers nothing.
+#[actix_rt::test]
+async fn the_admin_refusal_reads_the_effective_list_including_a_tenant_override() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::models::settings::SetTenantOverride;
+    use axiam_core::repository::SettingsRepository;
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Dcr, &[]).await;
+
+    // Default: no list, so a self-registered client is offered nothing.
+    let (status, body) = put_client!(app, token, id, serde_json::json!({ "scopes": ["openid"] }));
+    assert_eq!(status, 422, "an empty list offers nothing: {body}");
+
+    set_ceiling(&db, org_id, &["openid", "profile"]).await;
+    axiam_db::repository::SurrealSettingsRepository::new(db.clone())
+        .set_tenant_override(
+            tenant_id,
+            SetTenantOverride {
+                dcr_allowed_scopes: Some(vec!["openid".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = put_client!(app, token, id, serde_json::json!({ "scopes": ["openid"] }));
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "scopes": ["openid", "profile"] })
+    );
+    assert_eq!(
+        status, 422,
+        "the tenant override narrowed the baseline: {body}"
+    );
+}
+
+/// A row that already exceeds a ceiling which has since narrowed is not
+/// stranded. The grant-time ceiling withholds the excess and the row keeps
+/// serving the rest, so: an edit that does not send `scopes` is accepted, a PUT
+/// that re-sends the held scopes (a form posting the record back) is accepted,
+/// and dropping the excess is accepted — only a scope the row does not hold
+/// and the tenant does not offer is refused.
+#[actix_rt::test]
+async fn a_row_beyond_a_narrowed_ceiling_stays_editable_but_cannot_gain_scopes() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    let (db, org_id, tenant_id) = setup_db().await;
+    set_ceiling(&db, org_id, &["openid"]).await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    // Registered when the list offered `profile` too.
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Dcr, &["openid", "profile"]).await;
+
+    let (status, body) = put_client!(app, token, id, serde_json::json!({ "name": "renamed" }));
+    assert_eq!(status, 200, "an unrelated edit must not be refused: {body}");
+
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "name": "again", "scopes": ["openid", "profile"] })
+    );
+    assert_eq!(
+        status, 200,
+        "re-sending what the row holds adds nothing: {body}"
+    );
+
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "scopes": ["openid", "profile", "email"] })
+    );
+    assert_eq!(status, 422, "a new outside scope is refused: {body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.contains("email") && !message.contains("profile"),
+        "only the scope that is new is named: {body}"
+    );
+    assert_eq!(
+        stored_scopes(&db, tenant_id, &id).await,
+        vec!["openid".to_owned(), "profile".to_owned()]
+    );
+
+    let (status, body) = put_client!(app, token, id, serde_json::json!({ "scopes": ["openid"] }));
+    assert_eq!(
+        status, 200,
+        "narrowing to the ceiling is always allowed: {body}"
+    );
+}
+
+/// The admin `create` cannot produce a `dcr` / `cimd` row at all — it asserts
+/// `managed_by: admin` itself and the request has no such member — so there is
+/// no create path to bound. Pin that: a body claiming `managed_by: dcr` yields
+/// an `admin` row, which is why an outside scope is accepted on it.
+#[actix_rt::test]
+async fn admin_create_cannot_claim_dcr_provenance() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    use axiam_core::repository::OAuth2ClientRepository;
+    let (db, org_id, tenant_id) = setup_db().await;
+    set_ceiling(&db, org_id, &["openid"]).await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Claims DCR",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid", "email"],
+            "managed_by": "dcr"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let row = axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_id(tenant_id, body["id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(row.managed_by, ManagedBy::Admin);
 }

@@ -2,7 +2,9 @@
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use axiam_core::error::AxiamResult;
+use crate::helpers::{TxFail, retry_on_write_conflict};
+use crate::repository::opaque_directory::{self, OpaqueDirectoryClaim};
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, CimdPolicy, DEFAULT_DCR_MAX_CLIENTS, DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
@@ -769,6 +771,43 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         settings: &SecuritySettings,
         overrides_json: Option<String>,
     ) -> Result<SecuritySettings, DbError> {
+        self.upsert_once(settings, overrides_json, None)
+            .await
+            .map_err(|fail| match fail {
+                TxFail::Db(e) => e,
+                // Only a claimed write refuses; an unclaimed one has nothing
+                // to compare.
+                TxFail::Refused(e) => DbError::Migration(e.to_string()),
+            })
+    }
+
+    /// [`Self::upsert`] behind the opaque/directory claims (item 10 of the
+    /// 1.1.0 atomicity audit; `repository/opaque_directory.rs`), retried on an
+    /// engine conflict — after which the compare fails and the answer is
+    /// `Conflict`.
+    async fn upsert_claimed(
+        &self,
+        settings: &SecuritySettings,
+        overrides_json: Option<String>,
+        claims: &[OpaqueDirectoryClaim],
+        org_id: Option<Uuid>,
+    ) -> AxiamResult<SecuritySettings> {
+        retry_on_write_conflict(|| {
+            self.upsert_once(settings, overrides_json.clone(), Some((claims, org_id)))
+        })
+        .await
+        .map_err(AxiamError::from)
+    }
+
+    /// One attempt at an upsert, opened by the claims when there are any
+    /// (`org_id` set: also refuse a live tenant of that organization the
+    /// claims do not name).
+    async fn upsert_once(
+        &self,
+        settings: &SecuritySettings,
+        overrides_json: Option<String>,
+        claimed: Option<(&[OpaqueDirectoryClaim], Option<Uuid>)>,
+    ) -> Result<SecuritySettings, TxFail> {
         // Use a deterministic record ID derived from (scope, scope_id) so
         // that concurrent requests for the same key converge on the same
         // row.  UPDATE on a deterministic ID is a single-statement upsert
@@ -785,16 +824,36 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         // exist, updates it otherwise. Timestamps are handled inline:
         // `created_at` is only set on initial creation via
         // `time::now()` default, and `updated_at` is always refreshed.
-        let query = format!(
+        let upsert = format!(
             "UPSERT type::record('security_settings', $id) SET \
              {SETTINGS_FIELDS}, \
              created_at = created_at OR time::now(), \
              updated_at = time::now()",
         );
+        // Claimed: BEGIN=0, the claim's slots, UPSERT, COMMIT. Unclaimed: the
+        // UPSERT alone, slot 0.
+        let (query, row_slot) = match claimed {
+            Some((_, org_id)) => {
+                let org_scoped = org_id.is_some();
+                (
+                    format!(
+                        "BEGIN TRANSACTION; {claim}{upsert}; COMMIT TRANSACTION",
+                        claim = opaque_directory::claim_statement(org_scoped),
+                    ),
+                    1 + opaque_directory::claim_slots(org_scoped),
+                )
+            }
+            None => (upsert, 0),
+        };
 
         let bindings = self.bind_settings(settings, overrides_json);
         let db = self.db.current();
         let mut builder = db.query(&query).bind(("id", id_str.clone()));
+        if let Some((claims, org_id)) = claimed {
+            builder = builder
+                .bind(("opaque_claims", opaque_directory::bind_claims(claims)))
+                .bind(("org_id", org_id.map(|o| o.to_string())));
+        }
         for (name, value) in bindings {
             builder = match value {
                 BindValue::Str(v) => builder.bind((name, v)),
@@ -807,12 +866,16 @@ impl<C: Connection> SurrealSettingsRepository<C> {
             };
         }
 
-        let result = builder.await.map_err(DbError::from)?;
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let mut result = builder.await.map_err(DbError::from)?;
+        if claimed.is_some() {
+            opaque_directory::outcome(result.take_errors(), "security_settings")?;
+        } else {
+            result = result
+                .check()
+                .map_err(|e| DbError::Migration(e.to_string()))?;
+        }
 
-        let rows: Vec<SettingsRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<SettingsRow> = result.take(row_slot).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "security_settings".into(),
             id: id_str,
@@ -1114,5 +1177,106 @@ impl<C: Connection> SettingsRepository for SurrealSettingsRepository<C> {
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
             ..org
         })
+    }
+}
+
+// -----------------------------------------------------------------------
+// Claimed writes — an enabled directory and `required` never coexist
+// (item 10 of the 1.1.0 atomicity audit; `repository/opaque_directory.rs`)
+// -----------------------------------------------------------------------
+
+impl<C: Connection> SurrealSettingsRepository<C> {
+    /// The claim a write that would make `tenant_id`'s effective `opaque_mode`
+    /// `required` — or a directory save that would leave the tenant's
+    /// directory enabled — reads first, before the read its rule decides on.
+    /// `NotFound` when the tenant does not exist.
+    pub async fn opaque_directory_claim(
+        &self,
+        tenant_id: Uuid,
+    ) -> AxiamResult<OpaqueDirectoryClaim> {
+        let mut result = self
+            .db
+            .current()
+            .query(opaque_directory::READ_ONE)
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<opaque_directory::ClaimRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "tenant".into(),
+            id: tenant_id.to_string(),
+        })?;
+        Ok(row.into_claim()?)
+    }
+
+    /// The claims an organization baseline of `required` reads first: one per
+    /// live tenant of the organization.
+    pub async fn opaque_directory_claims(
+        &self,
+        org_id: Uuid,
+    ) -> AxiamResult<Vec<OpaqueDirectoryClaim>> {
+        let mut result = self
+            .db
+            .current()
+            .query(opaque_directory::READ_ORG)
+            .bind(("org_id", org_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<opaque_directory::ClaimRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(opaque_directory::ClaimRow::into_claim)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// [`SettingsRepository::set_org_settings`] under the organization's
+    /// claims ([`Self::opaque_directory_claims`]): `Conflict` when any tenant's
+    /// epoch moved since the read, or the organization holds a live tenant the
+    /// claims do not name.
+    pub async fn set_org_settings_claimed(
+        &self,
+        org_id: Uuid,
+        input: SetOrgSettings,
+        claims: &[OpaqueDirectoryClaim],
+    ) -> AxiamResult<SecuritySettings> {
+        let settings = settings_from_org_input(Uuid::nil(), org_id, &input);
+        self.upsert_claimed(&settings, None, claims, Some(org_id))
+            .await
+    }
+
+    /// [`SettingsRepository::store_effective_tenant_settings`] under the
+    /// tenant's claim: `Conflict` when its epoch moved since the read.
+    pub async fn store_effective_tenant_settings_claimed(
+        &self,
+        tenant_id: Uuid,
+        settings: SecuritySettings,
+        claim: OpaqueDirectoryClaim,
+    ) -> AxiamResult<SecuritySettings> {
+        let org_id = self.lookup_org_id(tenant_id).await?;
+        let org = self.get_org_settings(org_id).await?;
+        let sparse_overrides = diff_against_org(&org, &settings);
+        let overrides_json = serde_json::to_string(&sparse_overrides)
+            .map_err(|e| DbError::Migration(format!("failed to serialize overrides: {e}")))?;
+        let merged = effective_settings(&org, &sparse_overrides, tenant_id, settings.id);
+        self.upsert_claimed(&merged, Some(overrides_json), &[claim], None)
+            .await
+    }
+
+    /// [`SettingsRepository::set_tenant_override`] under the tenant's claim:
+    /// `Conflict` when its epoch moved since the read.
+    pub async fn set_tenant_override_claimed(
+        &self,
+        tenant_id: Uuid,
+        input: SetTenantOverride,
+        claim: OpaqueDirectoryClaim,
+    ) -> AxiamResult<TenantSettingsOverride> {
+        let org_id = self.lookup_org_id(tenant_id).await?;
+        let org = self.get_org_settings(org_id).await?;
+        let overrides_json = serde_json::to_string(&input)
+            .map_err(|e| DbError::Migration(format!("failed to serialize overrides: {e}")))?;
+        let merged = effective_settings(&org, &input, tenant_id, Uuid::nil());
+        self.upsert_claimed(&merged, Some(overrides_json), &[claim], None)
+            .await?;
+        Ok(diff_against_org(&org, &merged))
     }
 }

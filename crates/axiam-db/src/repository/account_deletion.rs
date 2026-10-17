@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`AccountDeletionRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{AccountDeletion, AccountDeletionStatus, CreateAccountDeletion};
 use axiam_core::provisioning::ProvisioningSink;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{classify_write_error, parse_uuid};
+use crate::helpers::{TxFail, classify_write_error, parse_uuid, retry_on_write_conflict};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -260,6 +260,207 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cancel vs. purge (item 11 of the 1.1.0 atomicity audit)
+// ---------------------------------------------------------------------------
+//
+// A cancel and the purge sweep decided on reads made before their writes, and
+// every write was unconditional: a cancel that read "pending, inside the grace
+// window" just before the deadline could land after the sweep had selected the
+// account, and the caller was told "cancelled" while the sweep erased the
+// account — or, worse, after the sweep had already revoked its credentials,
+// group memberships, roles and certificates, which a cancel does not restore.
+//
+// Now the sweep **claims** a request before its first destructive step
+// (`claim_for_purge`: `purge_claimed_at`, schema v107, written in a transaction
+// that re-checks the account is still due), and a cancel is one transaction
+// that re-checks the request is pending, unclaimed and inside its window, and
+// then clears the account's pending flag (`cancel_pending`). Both write the
+// `account_deletion` row, so the engine serialises them: a claim committed
+// first makes the cancel answer [`CancelOutcome::Erasing`]; a cancel committed
+// first makes the claim find the account no longer due, and the sweep skips
+// it. The loser of an overlap is retried on a fresh snapshot, where its
+// re-check sees the winner.
+
+const DELETION_GONE: &str = "axiam:account_deletion_gone";
+const DELETION_CANCELLED: &str = "axiam:account_deletion_cancelled";
+const DELETION_ERASING: &str = "axiam:account_deletion_erasing";
+const DELETION_EXPIRED: &str = "axiam:account_deletion_expired";
+const PURGE_NOT_DUE: &str = "axiam:account_purge_not_due";
+
+/// What a cancel that is no longer possible answers through
+/// [`AccountDeletionRepository::mark_cancelled`].
+const NOT_CANCELLABLE: &str = "the deletion request is no longer pending: it was cancelled already, or its erasure has \
+     started";
+
+/// What [`SurrealAccountDeletionRepository::cancel_pending`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The request is cancelled and the account active again.
+    Cancelled,
+    /// The request was cancelled before; nothing changed.
+    AlreadyCancelled,
+    /// The grace window has ended; nothing changed.
+    Expired,
+    /// The purge sweep has claimed the request (or completed it): the erasure
+    /// has started, and nothing changed.
+    Erasing,
+}
+
+impl<C: Connection> SurrealAccountDeletionRepository<C> {
+    /// Cancel the pending deletion request `id`, and re-enable its account, as
+    /// one transaction — or say why not.
+    ///
+    /// The request must still be `pending`, unclaimed by the purge sweep
+    /// (`purge_claimed_at = NONE`) and inside its grace window when the
+    /// transaction runs, and the account must still be deletion-pending; the
+    /// checks and both writes are one transaction. `NotFound` when there is no
+    /// such request in the tenant.
+    pub async fn cancel_pending(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<CancelOutcome> {
+        let outcome = retry_on_write_conflict(|| self.cancel_tx(tenant_id, id))
+            .await
+            .map_err(AxiamError::from)?;
+        if let (CancelOutcome::Cancelled, Some(sink), Some(user_id)) =
+            (outcome.0, &self.provisioning_sink, outcome.1)
+        {
+            // The account is `Active` again: a provisioned field changed.
+            sink.user_changed(tenant_id, user_id).await;
+        }
+        Ok(outcome.0)
+    }
+
+    async fn cancel_tx(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> Result<(CancelOutcome, Option<Uuid>), TxFail> {
+        // Slots: BEGIN=0, LET $row=1, four IF/THROW=2..=5, UPDATE deletion=6,
+        // LET $user=7, IF/THROW=8, $user=9, COMMIT=10.
+        let query = format!(
+            "BEGIN TRANSACTION; \
+             LET $row = (SELECT status, purge_claimed_at, scheduled_purge_at, user_id \
+                 FROM type::record('account_deletion', $id) WHERE tenant_id = $tenant_id); \
+             IF array::len($row) = 0 {{ THROW '{DELETION_GONE}'; }}; \
+             IF $row[0].status = 'cancelled' {{ THROW '{DELETION_CANCELLED}'; }}; \
+             IF $row[0].status != 'pending' OR $row[0].purge_claimed_at != NONE \
+                 {{ THROW '{DELETION_ERASING}'; }}; \
+             IF $row[0].scheduled_purge_at <= time::now() {{ THROW '{DELETION_EXPIRED}'; }}; \
+             UPDATE type::record('account_deletion', $id) SET status = 'cancelled'; \
+             LET $user = (UPDATE type::record('user', $row[0].user_id) SET \
+                 deletion_pending = false, scheduled_purge_at = NONE, status = 'Active', \
+                 updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND deletion_pending = true \
+                 RETURN VALUE meta::id(id)); \
+             IF array::len($user) = 0 {{ THROW '{DELETION_ERASING}'; }}; \
+             $user; \
+             COMMIT TRANSACTION"
+        );
+        let mut result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await?;
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if combined.contains(DELETION_GONE) {
+                return Err(TxFail::Refused(AxiamError::NotFound {
+                    entity: "account_deletion".into(),
+                    id: id.to_string(),
+                }));
+            }
+            // The refusals are matched before anything else: the statements
+            // after a THROW report "not executed due to a failed transaction",
+            // which is also a write-conflict marker.
+            let refused = if combined.contains(DELETION_CANCELLED) {
+                CancelOutcome::AlreadyCancelled
+            } else if combined.contains(DELETION_ERASING) {
+                CancelOutcome::Erasing
+            } else if combined.contains(DELETION_EXPIRED) {
+                CancelOutcome::Expired
+            } else {
+                return Err(TxFail::Db(classify_write_error(
+                    combined,
+                    "account_deletion",
+                )));
+            };
+            return Ok((refused, None));
+        }
+        let users: Vec<String> = result.take(9).map_err(DbError::from)?;
+        let user_id = users.first().map(|u| parse_uuid(u, "user")).transpose()?;
+        Ok((CancelOutcome::Cancelled, user_id))
+    }
+
+    /// Claim `user_id`'s erasure for the purge sweep, before its first
+    /// destructive step: `true` when the account is still deletion-pending and
+    /// due at `now` (the sweep's own `now`, the one it selected the account
+    /// with), and its pending request — if it has one — is marked
+    /// `purge_claimed_at`; `false` when it is no longer due (its deletion was
+    /// cancelled since the sweep's read), and the sweep skips it.
+    ///
+    /// Idempotent: a claimed request keeps its first claim time, so a purge
+    /// that stopped before its point of no return is claimed again by the next
+    /// sweep. Once claimed, a request can no longer be cancelled.
+    pub async fn claim_for_purge(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        retry_on_write_conflict(|| self.claim_tx(tenant_id, user_id, now))
+            .await
+            .map_err(AxiamError::from)
+    }
+
+    async fn claim_tx(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, TxFail> {
+        let query = format!(
+            "BEGIN TRANSACTION; \
+             LET $due = (SELECT VALUE meta::id(id) FROM type::record('user', $user_id) \
+                 WHERE tenant_id = $tenant_id AND deletion_pending = true \
+                 AND scheduled_purge_at <= $now); \
+             IF array::len($due) = 0 {{ THROW '{PURGE_NOT_DUE}'; }}; \
+             UPDATE account_deletion SET purge_claimed_at = purge_claimed_at ?? $now \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending'; \
+             COMMIT TRANSACTION"
+        );
+        let mut result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("now", now))
+            .await?;
+        let errors = result.take_errors();
+        if errors.is_empty() {
+            return Ok(true);
+        }
+        let combined = errors
+            .into_values()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        if combined.contains(PURGE_NOT_DUE) {
+            return Ok(false);
+        }
+        Err(TxFail::Db(classify_write_error(
+            combined,
+            "account_deletion",
+        )))
+    }
+}
+
 impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionRepository<C> {
     async fn create(&self, input: CreateAccountDeletion) -> AxiamResult<AccountDeletion> {
         let id = new_id();
@@ -330,12 +531,15 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
     }
 
     async fn mark_cancelled(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(
                 "UPDATE type::record('account_deletion', $id) SET \
                  status = 'cancelled' \
-                 WHERE tenant_id = $tenant_id",
+                 WHERE tenant_id = $tenant_id AND status = 'pending' \
+                 AND purge_claimed_at = NONE \
+                 RETURN VALUE meta::id(id)",
             )
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
@@ -343,6 +547,15 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
             .map_err(DbError::from)?
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
+        // Item 11 of the 1.1.0 atomicity audit: only a request still pending,
+        // and not yet claimed by the purge sweep, is cancelled. Anything else
+        // is not, and says so.
+        let cancelled: Vec<String> = result.take(0).map_err(DbError::from)?;
+        if cancelled.is_empty() {
+            return Err(AxiamError::Conflict {
+                reason: NOT_CANCELLABLE.into(),
+            });
+        }
         Ok(())
     }
 
@@ -352,7 +565,7 @@ impl<C: Connection> AccountDeletionRepository for SurrealAccountDeletionReposito
             .query(
                 "UPDATE type::record('account_deletion', $id) SET \
                  status = 'completed' \
-                 WHERE tenant_id = $tenant_id",
+                 WHERE tenant_id = $tenant_id AND status = 'pending'",
             )
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))

@@ -13,13 +13,15 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, retry_hot_row, take_first_or_not_found};
+use crate::repository::mail_cap;
 
 #[derive(Debug, SurrealValue)]
 struct TokenRow {
     tenant_id: String,
     user_id: String,
     token_hash: String,
+    email: Option<String>,
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -31,6 +33,7 @@ struct TokenRowWithId {
     tenant_id: String,
     user_id: String,
     token_hash: String,
+    email: Option<String>,
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -47,6 +50,7 @@ impl TokenRow {
             tenant_id,
             user_id,
             token_hash: self.token_hash,
+            email: self.email,
             expires_at: self.expires_at,
             consumed_at: self.consumed_at,
             created_at: self.created_at,
@@ -67,6 +71,7 @@ impl TokenRowWithId {
             tenant_id,
             user_id,
             token_hash: self.token_hash,
+            email: self.email,
             expires_at: self.expires_at,
             consumed_at: self.consumed_at,
             created_at: self.created_at,
@@ -112,6 +117,7 @@ impl<C: Connection> EmailVerificationTokenRepository
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  token_hash = $token_hash, \
+                 email = $email, \
                  expires_at = $expires_at, \
                  consumed_at = NONE",
             )
@@ -119,6 +125,7 @@ impl<C: Connection> EmailVerificationTokenRepository
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("user_id", input.user_id.to_string()))
             .bind(("token_hash", input.token_hash))
+            .bind(("email", input.email))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -254,16 +261,84 @@ impl<C: Connection> EmailVerificationTokenRepository
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
     }
 
+    /// Item 7 of the 1.1.0 atomicity audit — the cap and the new token in one
+    /// transaction that claims the user row (`mail_cap`).
+    async fn create_within_daily_cap(
+        &self,
+        input: CreateEmailVerificationToken,
+        daily_cap: u64,
+    ) -> AxiamResult<Option<EmailVerificationToken>> {
+        let id = new_id();
+        let id_str = id.to_string();
+        let user_id_str = input.user_id.to_string();
+        let query = format!(
+            "BEGIN TRANSACTION; {claim}\
+             CREATE type::record('email_verification_token', $id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $user_id, \
+                 token_hash = $token_hash, \
+                 email = $email, \
+                 expires_at = $expires_at, \
+                 consumed_at = NONE; \
+             COMMIT TRANSACTION",
+            claim = mail_cap::claim("email_verification_token"),
+        );
+        // Result slots: BEGIN, the claim's, then the CREATE.
+        let create_slot = 1 + mail_cap::CLAIM_SLOTS;
+        let daily_cap = i64::try_from(daily_cap).unwrap_or(i64::MAX);
+        let day_start = mail_cap::day_start();
+
+        let rows = retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("id", id_str.clone()))
+                .bind(("tenant_id", input.tenant_id.to_string()))
+                .bind(("user_id", user_id_str.clone()))
+                .bind(("token_hash", input.token_hash.clone()))
+                .bind(("email", input.email.clone()))
+                .bind(("expires_at", input.expires_at))
+                .bind(("day_start", day_start))
+                .bind(("daily_cap", daily_cap))
+                .await
+                .map_err(DbError::from)?;
+            if mail_cap::outcome(
+                result.take_errors(),
+                "email_verification_token",
+                &user_id_str,
+            )? {
+                return Ok(None);
+            }
+            let rows: Vec<TokenRow> = result.take(create_slot).map_err(DbError::from)?;
+            Ok(Some(rows))
+        })
+        .await?;
+        let Some(rows) = rows else {
+            return Ok(None);
+        };
+        let row = take_first_or_not_found(rows, "email_verification_token", &id_str)?;
+        Ok(Some(row.into_token(id)?))
+    }
+
     async fn delete_expired(&self) -> AxiamResult<u64> {
+        // A token minted since UTC midnight is kept, dead or alive, until the
+        // day is over: the daily cap counts the account's tokens minted today
+        // (`count_today`, and the capped mint's own count in `mail_cap`), so
+        // deleting a consumed or expired one lowered the count and handed the
+        // account its cap again within the same day. What is kept is a hash
+        // that no longer redeems anything, for at most a day — and the account's
+        // own erasure still deletes it.
         let result = self
             .db
             .current()
             .query(
                 "DELETE FROM email_verification_token \
-                 WHERE expires_at < time::now() \
-                    OR consumed_at IS NOT NONE \
+                 WHERE (expires_at < time::now() OR consumed_at IS NOT NONE) \
+                    AND created_at < $day_start \
                  RETURN BEFORE",
             )
+            .bind(("day_start", crate::repository::mail_cap::day_start()))
             .await
             .map_err(DbError::from)?;
 

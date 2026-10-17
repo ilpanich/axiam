@@ -18,6 +18,7 @@
 import { Badge } from "@/components/ui/badge";
 import { BooleanDisplay } from "./policyFields";
 import type { SurfaceKey, SurfaceLayer } from "@/services/settings";
+import { SURFACE_LABELS } from "./policyText";
 
 export interface SurfaceValue {
   saml_idp_enabled: boolean;
@@ -45,12 +46,12 @@ const SURFACES: {
 }[] = [
   {
     key: "saml_idp_enabled",
-    label: "SAML 2.0 identity provider",
+    label: SURFACE_LABELS.saml_idp_enabled,
     help: "AXIAM signs people in to other applications over SAML. Off, the IdP endpoints answer 404 and no assertion is issued; the registered service providers and the signing credential are kept.",
   },
   {
     key: "ssf_enabled",
-    label: "Shared Signals Framework transmitter",
+    label: SURFACE_LABELS.ssf_enabled,
     help: "AXIAM sends security events about this tenant's users (session revoked, credential change, account state) to the receivers registered as SSF streams. Off, nothing is signed or transmitted; the streams are kept.",
   },
 ];

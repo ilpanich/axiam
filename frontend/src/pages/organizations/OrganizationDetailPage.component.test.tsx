@@ -826,6 +826,22 @@ describe("OrganizationDetailPage — settings tab", () => {
     ).toBeInTheDocument();
   });
 
+  it("words a 409 that lost to a directory enable as changed elsewhere — reload", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settings });
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 409",
+      response: { status: 409, data: { error: "conflict", message: "the tenant's directory or its opaque_mode changed since this request read them; reload and retry" } },
+    });
+    await goToSettings();
+    const mode = await screen.findByLabelText("Mode");
+    await userEvent.selectOptions(mode, "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText("Changed by someone else — reload and try again.")
+    ).toBeInTheDocument();
+  });
+
   it("toggles a checkbox to mark the form dirty", async () => {
     routeGet({ [URLS.org]: org, [URLS.settings]: settings });
     await goToSettings();

@@ -734,7 +734,22 @@ async fn write_config<C: Connection + Clone>(
         }));
     }
 
-    // 5. A directory and `opaque_mode = required` never coexist.
+    // 5. A directory and `opaque_mode = required` never coexist. A save that
+    //    leaves the directory enabled first reads the tenant's opaque/directory
+    //    claim, then the settings its refusal decides on, and the write below
+    //    compares the claim inside its own transaction (item 10 of the 1.1.0
+    //    atomicity audit): a settings write that made the mode `required` after
+    //    the read below is a `409`, not an enabled directory under `required`.
+    let claim = if input.enabled {
+        Some(
+            state
+                .settings_repo
+                .opaque_directory_claim(tenant_id)
+                .await?,
+        )
+    } else {
+        None
+    };
     refuse_under_opaque_required(state, user, tenant_id, input.enabled).await?;
 
     // The live-account count rides the audit row of a disable (§30.3 rule 5).
@@ -751,7 +766,11 @@ async fn write_config<C: Connection + Clone>(
 
     // 6. The write.
     let (config, created) = if stored.is_some() {
-        match repo.update(input).await {
+        let written = match claim {
+            Some(claim) => repo.update_claimed(input, claim).await,
+            None => repo.update(input).await,
+        };
+        match written {
             Ok(config) => (config, false),
             // The repository compares against the stored row in the same
             // statement as the write, so a connection that moved between the
@@ -774,7 +793,11 @@ async fn write_config<C: Connection + Clone>(
             Err(other) => return Err(other.into()),
         }
     } else {
-        (repo.create(input).await?, true)
+        let written = match claim {
+            Some(claim) => repo.create_claimed(input, claim).await,
+            None => repo.create(input).await,
+        };
+        (written?, true)
     };
 
     let mut metadata = serde_json::json!({
@@ -883,7 +906,7 @@ pub async fn get_directory<C: Connection + Clone>(
         (status = 400, description = "Validation or address-guard refusal, or the connection \
                                       moved without the bind secret"),
         (status = 403, description = "Another tenant's configuration"),
-        (status = 409, description = "An enabled directory under opaque_mode `required`"),
+        (status = 409, description = "An enabled directory under opaque_mode `required`; or the tenant's opaque_mode or directory changed after this request read them, so nothing was written — reload and retry"),
         (status = 503, description = "The deployment has no directory encryption key"),
     ),
     security(("bearer" = []))
@@ -926,7 +949,7 @@ pub async fn set_directory<C: Connection + Clone>(
                                       moved without the bind secret"),
         (status = 403, description = "Another tenant's configuration"),
         (status = 404, description = "The tenant has no directory configuration"),
-        (status = 409, description = "An enabled directory under opaque_mode `required`"),
+        (status = 409, description = "An enabled directory under opaque_mode `required`; or the tenant's opaque_mode or directory changed after this request read them, so nothing was written — reload and retry"),
         (status = 503, description = "The deployment has no directory encryption key"),
     ),
     security(("bearer" = []))

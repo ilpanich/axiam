@@ -47,6 +47,9 @@ const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitl
 /// are equal (no session lookup). Safe (GET) requests ignore it.
 const CSRF_TOKEN: &str = "test-csrf-token";
 
+/// A legacy Vault batch token (`b.` prefix) as a refusal might echo it.
+const BATCH_TOKEN: &str = "b.AAAAAQJ0aGlzX2lzX25vdF9hX3JlYWxfdG9rZW4"; // gitleaks:allow
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let pem_header = "-----BEGIN PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
@@ -315,6 +318,129 @@ async fn generate_certificate_signed_by_ca() {
     assert_eq!(body["issuer_ca_id"], ca_id);
 }
 
+/// #649 — a subject that would write a line of its own into a log, a RADIUS
+/// table or an ACL is a `400` on every way a name reaches a certificate, and
+/// nothing is issued: no leaf, and no second CA beside the two the test made.
+#[actix_rt::test]
+async fn a_subject_with_a_control_character_is_a_400_and_issues_nothing() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
+
+    let long = "a".repeat(65);
+    let bad_subjects = [
+        "device\n001",
+        "device-001\n",
+        "dev\tice",
+        "dev\u{0}ice",
+        "CN=dev\r\nice",
+        "press\u{202E}07",
+        "press\u{200B}07",
+        long.as_str(),
+    ];
+
+    for subject in bad_subjects {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/certificates")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(serde_json::json!({
+                "issuer_ca_id": ca_id,
+                "subject": subject,
+                "cert_type": "Device",
+                "key_algorithm": "Ed25519",
+                "validity_days": 90
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400, "{subject:?} must be a 400");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains('\n') && !message.contains('\u{202E}'),
+            "the refusal must not echo the subject back: {message:?}"
+        );
+    }
+
+    // The same value through the other doors: a root CA, a tenant signing CA
+    // and a caller's CSR.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/organizations/{org_id}/ca-certificates"))
+        .insert_header(("Authorization", format!("Bearer {ca_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "subject": "Root\nCA", "key_algorithm": "Ed25519", "validity_days": 365
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"
+        ))
+        .insert_header(("Authorization", format!("Bearer {ca_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "parent_ca_id": org_ca_id, "subject": long,
+            "key_algorithm": "Ed25519", "validity_days": 364
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+
+    for cn in ["dev\nice", long.as_str()] {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/certificates/sign-csr")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr(cn),
+                "cert_type": "Device", "validity_days": 30
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400, "a CSR named {cn:?}");
+    }
+
+    // Nothing was issued by any of them.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["total"], 0, "no certificate may have been stored");
+
+    // And the same request with a clean name is issued, so the 400s above are
+    // the subject's and not the fixture's.
+    let req = test::TestRequest::post()
+        .uri("/api/v1/certificates")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({
+            "issuer_ca_id": ca_id, "subject": "a".repeat(64), "cert_type": "Device",
+            "key_algorithm": "Ed25519", "validity_days": 90
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 201);
+}
+
 #[actix_rt::test]
 async fn list_certificates_returns_paginated() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -480,7 +606,10 @@ async fn a_revocation_vault_refuses_still_stands_and_is_audited() {
     Mock::given(method("POST"))
         .and(path("/v1/pki_int/revoke"))
         .respond_with(
-            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": ["sealed"] })),
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": [
+                // R101W1-06: a refusal that echoes a token and an essay.
+                format!("sealed; token {BATCH_TOKEN} {}", "overlong ".repeat(100)),
+            ] })),
         )
         .expect(u64::from(axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS))
         .mount(&vault)
@@ -611,11 +740,25 @@ async fn a_revocation_vault_refuses_still_stands_and_is_audited() {
     assert_eq!(rows.len(), 1, "the refusal is audited once: {rows:?}");
     assert_eq!(rows[0]["resource_id"], leaf.id.to_string());
     assert_eq!(rows[0]["outcome"], "Failure");
+    // R101W1-06: the append-only row keeps the sanitised reason, not Vault's text.
+    let reason = rows[0]["metadata"]["reason"].as_str().unwrap_or_default();
     assert!(
-        rows[0]["metadata"]["reason"]
-            .as_str()
-            .is_some_and(|r| r.contains("sealed")),
+        reason.contains("sealed"),
         "the audit row says why: {rows:?}"
+    );
+    assert!(
+        !reason.contains(BATCH_TOKEN) && reason.contains("[redacted]"),
+        "the token is masked: {reason}"
+    );
+    assert_eq!(
+        reason.chars().count(),
+        axiam_pki::vault_forward::MAX_REASON_CHARS,
+        "the reason is bounded: {reason}"
+    );
+    assert_eq!(
+        reason,
+        axiam_pki::vault_forward::sanitise_reason(reason),
+        "it is exactly the sanitised form"
     );
 }
 
@@ -1275,4 +1418,92 @@ async fn a_user_binding_that_does_not_hold_is_a_400() {
         .await
         .unwrap();
     assert_eq!(issued.total, 0, "a refused request issues nothing");
+}
+
+/// R101W1-09 (b): an administrator's deletion that lands between the binding
+/// check and the certificate's row leaves no active certificate behind. The
+/// race is made deterministic with a datastore event, the fault-injection seam
+/// these tests already use: the account is marked deleted inside the very
+/// transaction that stores the certificate, which is the last moment a
+/// deletion could land and still precede the row. Both issuance paths then
+/// read the account back, revoke what they made, and answer the binding's own
+/// `400` — without the certificate, and without the private key `generate`
+/// made for it. Before the fix both answered `201` and the rows stayed
+/// `Active`, bound to a deleted account.
+#[actix_rt::test]
+async fn an_account_deleted_during_issuance_leaves_no_active_certificate() {
+    use axiam_core::models::certificate::CertificateStatus;
+    use axiam_core::repository::{CertificateRepository as _, Pagination};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin = create_admin_user(&db, tenant_id).await;
+    let alice = tenant_user(&db, tenant_id, "alice").await;
+    let bob = tenant_user(&db, tenant_id, "bob").await;
+    let token = mint_token(&auth, admin, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db.clone(), auth);
+    let org_ca_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, org_ca_id);
+
+    // The deletion, landing as the bound certificate's row is written.
+    db.query(
+        "DEFINE EVENT deleted_during_issuance ON TABLE certificate \
+         WHEN $event = 'CREATE' AND $after.user_id != NONE \
+         THEN (UPDATE type::record('user', $after.user_id) SET status = 'Deleted')",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let cases = [
+        (
+            "generate",
+            "/api/v1/certificates",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "subject": "alice-laptop", "cert_type": "User",
+                "key_algorithm": "Ed25519", "validity_days": 30, "user_id": alice,
+            }),
+        ),
+        (
+            "sign-csr",
+            "/api/v1/certificates/sign-csr",
+            serde_json::json!({
+                "issuer_ca_id": ca_id, "csr_pem": plain_csr("bob-token"),
+                "cert_type": "User", "validity_days": 30, "user_id": bob,
+            }),
+        ),
+    ];
+    for (label, uri, payload) in cases {
+        let (status, body) = post_json(&app, uri, &token, payload).await;
+        assert_eq!(status, 400, "{label}: the binding's refusal");
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("does not name a user of this tenant"),
+            "{label}: {message:?}"
+        );
+        assert!(
+            body.get("private_key_pem").is_none() && body.get("id").is_none(),
+            "{label}: nothing of the issuance is returned"
+        );
+    }
+
+    let issued = SurrealCertificateRepository::new(db.clone())
+        .list(tenant_id, Pagination::default())
+        .await
+        .unwrap();
+    assert_eq!(issued.total, 2, "both certificates were made");
+    for (i, certificate) in issued.items.iter().enumerate() {
+        assert_eq!(
+            certificate.status,
+            CertificateStatus::Revoked,
+            "certificate #{i}: revoked, not left active"
+        );
+    }
+    let listed = SurrealCertificateRepository::new(db)
+        .list_revoked_by_issuer(ca_id.parse().unwrap(), chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2, "both dated, on the issuer's list");
 }

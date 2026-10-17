@@ -20,7 +20,8 @@
 # did not implement it.
 #
 # Exports: conf_load (source both files), conf_write_local (upsert keys into
-# the local file).
+# the local file), conf_require_uint (refuse a non-numeric value before it
+# reaches bash arithmetic).
 
 # shellcheck shell=bash
 
@@ -112,4 +113,36 @@ for pair in rest:
 open(path, "w").write(src)
 PY
   chmod 600 "$target"
+}
+
+# conf_require_uint NAME VALUE
+#
+# Returns 0 when VALUE is one to five decimal digits; otherwise prints a refusal
+# naming NAME to stderr and returns 2. The caller exits on that status.
+#
+# Why this exists (R101W4-02). A value that reaches `$(( ... ))` is parsed as an
+# arithmetic EXPRESSION, and an array subscript inside one is expanded first:
+# `a[$(cmd)]` runs `cmd`. The workflow's `module_timeout` dispatch input arrived
+# here by way of CONFORMANCE_MODULE_TIMEOUT, so anyone who may dispatch the
+# workflow could execute commands on the runner. Pinning the value to digits
+# before any arithmetic closes the class.
+#
+# The check is a REGEX, never arithmetic: `[[ "$x" -eq 0 ]]` evaluates `$x` as an
+# expression too, so "validating" with it would run the very command it is meant
+# to refuse. `[[ =~ ]]` does no expansion of the value. The pattern sits in a
+# variable so bash treats it as a regex, and a POSIX ERE `$` matches only at the
+# end of the whole string, so `5<newline>anything` does not match.
+#
+# The value is quoted with `%q` in the message: control characters are escaped
+# and it stays on one line, so the refusal cannot forge a workflow command
+# (`::error::` at the start of a line) or hide text in the log. The value is
+# only ever PRINTED; nothing here evaluates it.
+conf_require_uint() {
+  local name="$1" value="$2"
+  local re='^[0-9]{1,5}$'
+  if ! [[ "$value" =~ $re ]]; then
+    printf '%s must be a whole number of seconds, 1 to 5 digits. Got: %q\n' \
+      "$name" "$value" >&2
+    return 2
+  fi
 }

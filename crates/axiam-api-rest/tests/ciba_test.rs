@@ -1112,6 +1112,44 @@ async fn the_cap_is_per_client_and_per_hint() {
     );
 }
 
+/// The hint cap's rows in the shared rate-limit table.
+async fn hint_cap_rows(f: &Fixture) -> i64 {
+    let mut count =
+        f.db.query(
+            "SELECT count() AS n FROM rate_limit_bucket \
+             WHERE string::starts_with(meta::id(id), 'ciba_hint_cap:') GROUP ALL",
+        )
+        .await
+        .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    n.unwrap_or(0)
+}
+
+/// #638: a hint's first call creates exactly one row, the current window's;
+/// the previous window's count is read, not written (it used to be an upsert
+/// of zero, which created a second row for a window nobody had counted in).
+/// Further calls in the window add no row, a second hint adds one, and the
+/// refused fourth call adds none.
+#[actix_web::test]
+async fn a_new_hint_creates_one_rate_limit_row() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    assert_eq!(hint_cap_rows(&f).await, 0);
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    assert_eq!(hint_cap_rows(&f).await, 1, "one row for a new hint");
+    for _ in 0..2 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 429);
+    assert_eq!(
+        hint_cap_rows(&f).await,
+        1,
+        "the window's one row, refused call too"
+    );
+    assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=bob").0, 200);
+    assert_eq!(hint_cap_rows(&f).await, 2, "one row per hint");
+}
+
 /// A replica's state: its own `AppState` (and so its own CIBA service and
 /// counter store) over the fixture's datastore, or the fixture's own. Built
 /// here, outside the test's future, which an `AppState` would overflow.
@@ -1160,6 +1198,54 @@ async fn the_cap_is_shared_by_replicas_over_one_store() {
         statuses.push(Box::pin(bc_authorize_on(state.clone(), &f, hint)).await);
     }
     assert_eq!(statuses, [200, 200, 200, 429, 429]);
+}
+
+/// #639: the allowance is the deployment's (`RateLimitConfig::
+/// bc_authorize_per_hint`, which the composition root hands the cap). With it
+/// at four, a fourth request for one hint is admitted and a fifth refused, and
+/// the refused fifth adds nothing to the count: the stored count is the four
+/// admitted ones.
+#[actix_web::test]
+async fn the_per_hint_allowance_is_the_deployments() {
+    let mut f = setup().await;
+    let allowance = RateLimitConfig {
+        bc_authorize_per_hint: 4,
+        ..permissive()
+    };
+    f.state.oauth2.ciba_service = axiam_oauth2::ciba::CibaService::new(
+        axiam_db::SurrealCibaRequestRepository::new(f.db.clone(), None),
+        SurrealUserRepository::new(f.db.clone()),
+        f.auth.jwt_public_key_pem.clone(),
+        axiam_oauth2::ciba::CibaHintCap::derived_from(
+            Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(
+                f.db.clone(),
+            )),
+            f.auth.jwt_private_key_pem.as_bytes(),
+        )
+        .with_per_hint(allowance.bc_authorize_per_hint_checked()),
+    );
+    let app = app!(f, allowance);
+    for _ in 0..4 {
+        assert_eq!(bc_authorize!(app, f, &f.ciba, "&login_hint=alice").0, 200);
+    }
+    for _ in 0..3 {
+        let (status, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+        assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
+    }
+    assert_eq!(stored_requests(&f).await, 4);
+    let mut counted =
+        f.db.query(
+            "SELECT VALUE count FROM rate_limit_bucket \
+             WHERE string::starts_with(meta::id(id), 'ciba_hint_cap:')",
+        )
+        .await
+        .unwrap();
+    let counted: Vec<i64> = counted.take(0).unwrap();
+    assert_eq!(
+        counted.iter().sum::<i64>(),
+        4,
+        "the refused calls took their count back: {counted:?}"
+    );
 }
 
 /// The CIBA grant at the token endpoint is counted by the token endpoint's
@@ -1541,6 +1627,75 @@ async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
             .unwrap();
     let n: Option<i64> = count.take("n").unwrap();
     assert_eq!(n.unwrap_or(0), 0);
+}
+
+/// #642 (c) — the scope ceiling can remove `openid` from an external client's
+/// grant while the request waits for the user; the redemption then mints the
+/// access token and no ID token, and the `scope` it reports omits `openid`.
+/// (The same client with `openid` still allowed gets its ID token, so the test
+/// does not pass because the client simply never receives one.)
+#[actix_web::test]
+async fn no_id_token_when_the_scope_ceiling_removed_openid() {
+    use axiam_core::models::settings::{DynamicRegistrationMode, SetOrgSettings, system_defaults};
+    use axiam_core::repository::SettingsRepository;
+
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let settings = axiam_db::repository::SurrealSettingsRepository::new(f.db.clone());
+    let allow = |scopes: &[&str]| SetOrgSettings {
+        dynamic_registration: DynamicRegistrationMode::Anonymous,
+        dcr_allowed_scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+        ..system_defaults()
+    };
+    settings
+        .set_org_settings(f.org_id, allow(&["openid", "profile"]))
+        .await
+        .unwrap();
+
+    // A self-registered (`dcr`) client holding the CIBA grant: the ceiling
+    // applies to it and not to an administrator's.
+    let mut input = create_input(f.tenant_id, "dcr-ciba", &[CIBA_GRANT_TYPE], poll_mode());
+    input.managed_by = ManagedBy::Dcr;
+    let (row, secret) = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    let dcr = CibaClient {
+        client_id: row.client_id,
+        secret,
+    };
+
+    // With `openid` still allowed the ID token is minted.
+    let (status, body) = bc_authorize!(app, f, &dcr, "&login_hint=alice");
+    assert_eq!(status, 200, "{body}");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    age_poll(&f, &id).await;
+    let (status, json) = token!(app, f, &dcr, &id);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["scope"], "openid profile");
+    assert!(json["id_token"].is_string(), "openid survives: {json}");
+
+    // A request made while `openid` was allowed, approved, and then the tenant
+    // withdraws `openid` before the client redeems it.
+    let (status, body) = bc_authorize!(app, f, &dcr, "&login_hint=alice");
+    assert_eq!(status, 200, "{body}");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    settings
+        .set_org_settings(f.org_id, allow(&["profile"]))
+        .await
+        .unwrap();
+    age_poll(&f, &id).await;
+    let (status, json) = token!(app, f, &dcr, &id);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["scope"], "profile", "openid is gone: {json}");
+    assert!(
+        json.get("id_token").is_none_or(Value::is_null),
+        "no ID token without openid: {json}"
+    );
+    assert!(json["access_token"].is_string());
+    assert_eq!(stored(&f, &id).await.status, CibaRequestStatus::Redeemed);
 }
 
 // ---------------------------------------------------------------------------

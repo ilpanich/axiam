@@ -189,6 +189,160 @@ fn gdpr_audit_dlq_on_db_failure() {
 }
 
 // ---------------------------------------------------------------------------
+// The event does not wait for the file (R101W4-04, #625)
+// ---------------------------------------------------------------------------
+
+/// A subscriber that captures into the returned buffer for as long as the guard
+/// lives. The tests below run on a current-thread runtime, so the events the
+/// future under test emits are this thread's.
+fn capture_events() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+    let log_buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(log_buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    (log_buf, tracing::subscriber::set_default(subscriber))
+}
+
+fn captured(log_buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    String::from_utf8(log_buf.lock().unwrap().clone()).expect("utf8 log output")
+}
+
+fn failed_pseudonymization(tenant_id: Uuid) -> CreateAuditLogEntry {
+    CreateAuditLogEntry {
+        tenant_id,
+        actor_id: Uuid::new_v4(),
+        actor_type: ActorType::System,
+        action: "gdpr.user_pseudonymized".into(),
+        resource_id: None,
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: Some(json!({ "pseudonym": "DELETED_USER_cancel0123456789" })),
+    }
+}
+
+/// A future dropped while the file is being written still logs the event.
+///
+/// The seam is a named pipe: opening it for writing blocks in the kernel until a
+/// reader opens it, so the dead-letter write sits inside the blocking task for as
+/// long as the test likes, and the future awaiting it is cut there by a timeout —
+/// what the cleanup task's bounded join, the lease-loss cut or a dropped handler
+/// does. Before #625 the event followed the file write and was skipped.
+#[cfg(unix)]
+#[actix_web::test]
+async fn a_dead_letter_cut_during_the_file_write_still_logs_the_event() {
+    let _env = ENV_LOCK.lock().await;
+    let fifo = dead_letter_file("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    // SAFETY: every test in this binary that reads or writes the variable holds
+    // `ENV_LOCK` for the whole of its use.
+    unsafe {
+        std::env::set_var(GDPR_AUDIT_DLQ_FILE_ENV, &fifo);
+    }
+
+    let tenant_id = Uuid::new_v4();
+    let entry = failed_pseudonymization(tenant_id);
+    let actor_id = entry.actor_id;
+    let (log_buf, _subscriber) = capture_events();
+
+    let cut = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        write_audit_with_dead_letter(&FailingAuditSink, entry),
+    )
+    .await;
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(GDPR_AUDIT_DLQ_FILE_ENV);
+    }
+    assert!(
+        cut.is_err(),
+        "the future was still awaiting the file when it was dropped (the open \
+         of a pipe with no reader blocks)"
+    );
+
+    // The blocking task is stuck in `open`; a reader releases it so the runtime
+    // can shut down, and the writer's end of the pipe closes when it is done.
+    let mut drained = Vec::new();
+    std::io::Read::read_to_end(&mut std::fs::File::open(&fifo).unwrap(), &mut drained).unwrap();
+    let _ = std::fs::remove_file(&fifo);
+
+    let log_output = captured(&log_buf);
+    let dlq_line = log_output
+        .lines()
+        .find(|l| l.contains("axiam.audit.dlq"))
+        .unwrap_or_else(|| {
+            panic!("the structured event is logged although the future was dropped: {log_output}")
+        });
+    // The fields operators' queries match on.
+    for field in [
+        format!("tenant_id={tenant_id}"),
+        format!("actor_id={actor_id}"),
+        "action=gdpr.user_pseudonymized".to_string(),
+        "resource_id=None".to_string(),
+        "db_error=".to_string(),
+        "gdpr_audit_dlq".to_string(),
+    ] {
+        assert!(
+            dlq_line.contains(&field),
+            "event missing `{field}`: {dlq_line}"
+        );
+    }
+}
+
+/// A file the write cannot open logs its own failure, beside the event, which
+/// comes first; the failure's line carries the path and the I/O error and
+/// nothing of the record.
+#[actix_web::test]
+async fn a_failed_file_write_logs_both_events_and_the_event_comes_first() {
+    let _env = ENV_LOCK.lock().await;
+    let missing_dir = dead_letter_file("no-such-dir");
+    let path = missing_dir.join("dlq.jsonl");
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var(GDPR_AUDIT_DLQ_FILE_ENV, &path);
+    }
+
+    let tenant_id = Uuid::new_v4();
+    let (log_buf, _subscriber) = capture_events();
+    write_audit_with_dead_letter(&FailingAuditSink, failed_pseudonymization(tenant_id)).await;
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(GDPR_AUDIT_DLQ_FILE_ENV);
+    }
+
+    let log_output = captured(&log_buf);
+    let event = log_output
+        .find("axiam.audit.dlq")
+        .unwrap_or_else(|| panic!("the structured event is logged: {log_output}"));
+    let failure_at = log_output
+        .find("gdpr: failed to append audit dead-letter file")
+        .unwrap_or_else(|| panic!("the file's failure is logged on its own: {log_output}"));
+    assert!(
+        event < failure_at,
+        "the event precedes the file write and so its failure: {log_output}"
+    );
+    let failure_line = log_output
+        .lines()
+        .find(|l| l.contains("failed to append audit dead-letter file"))
+        .unwrap();
+    assert!(
+        !failure_line.contains("axiam.audit.dlq")
+            && !failure_line.contains(&tenant_id.to_string())
+            && !failure_line.contains("DELETED_USER_cancel"),
+        "the failure's own event carries the path and the error, none of the record: {failure_line}"
+    );
+    assert!(
+        failure_line.contains(&path.display().to_string()),
+        "the failure names the path: {failure_line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The request records (P23W5-A8)
 // ---------------------------------------------------------------------------
 

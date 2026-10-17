@@ -785,8 +785,10 @@ mod tests {
             &self,
             _: axiam_core::models::oauth2_client::CreateOAuth2Client,
             _: &str,
-        ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
-        {
+            _: u32,
+        ) -> axiam_core::error::AxiamResult<
+            Option<(axiam_core::models::oauth2_client::OAuth2Client, String)>,
+        > {
             unimplemented!("RFC 7592 is not exercised by this double")
         }
         async fn get_by_registration_access_token(
@@ -825,7 +827,8 @@ mod tests {
             &self,
             _client_id: &str,
             _input: CreateOAuth2Client,
-        ) -> AxiamResult<OAuth2Client> {
+            _: u32,
+        ) -> AxiamResult<Option<OAuth2Client>> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -873,6 +876,13 @@ mod tests {
             unimplemented!()
         }
 
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
+            unimplemented!()
+        }
+
         async fn list_all_by_managed_by(
             &self,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
@@ -905,8 +915,10 @@ mod tests {
             &self,
             _: axiam_core::models::oauth2_client::CreateOAuth2Client,
             _: &str,
-        ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
-        {
+            _: u32,
+        ) -> axiam_core::error::AxiamResult<
+            Option<(axiam_core::models::oauth2_client::OAuth2Client, String)>,
+        > {
             unimplemented!("RFC 7592 is not exercised by this double")
         }
         async fn get_by_registration_access_token(
@@ -945,7 +957,8 @@ mod tests {
             &self,
             _client_id: &str,
             _input: CreateOAuth2Client,
-        ) -> AxiamResult<OAuth2Client> {
+            _: u32,
+        ) -> AxiamResult<Option<OAuth2Client>> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -990,6 +1003,13 @@ mod tests {
             _tid: Uuid,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
         ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
             unimplemented!()
         }
 
@@ -1089,8 +1109,10 @@ mod tests {
             &self,
             _: axiam_core::models::oauth2_client::CreateOAuth2Client,
             _: &str,
-        ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
-        {
+            _: u32,
+        ) -> axiam_core::error::AxiamResult<
+            Option<(axiam_core::models::oauth2_client::OAuth2Client, String)>,
+        > {
             unimplemented!("RFC 7592 is not exercised by this double")
         }
         async fn get_by_registration_access_token(
@@ -1129,7 +1151,8 @@ mod tests {
             &self,
             _client_id: &str,
             _input: CreateOAuth2Client,
-        ) -> AxiamResult<OAuth2Client> {
+            _: u32,
+        ) -> AxiamResult<Option<OAuth2Client>> {
             unimplemented!()
         }
         async fn get_by_id(&self, _tid: Uuid, _id: Uuid) -> AxiamResult<OAuth2Client> {
@@ -1177,6 +1200,13 @@ mod tests {
             _tid: Uuid,
             _managed_by: axiam_core::models::oauth2_client::ManagedBy,
         ) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+
+        async fn count_confidential_with_grant(
+            &self,
+            _grant_types: &[&str],
+        ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
             unimplemented!()
         }
 

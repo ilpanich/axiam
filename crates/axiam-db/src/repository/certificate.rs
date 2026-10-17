@@ -15,9 +15,10 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, paginate, retry_hot_row, search_bind, search_filter,
-    take_first_or_not_found,
+    CountRow, classify_write_error, paginate, retry_hot_row, retry_on_write_conflict, search_bind,
+    search_filter, take_first_or_not_found,
 };
+use crate::repository::tenant_purge::PAST_REVOCATION_GRACE;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -127,6 +128,41 @@ const UNFORWARDED_WHERE: &str = "status = 'Revoked' \
        AND issuer_ca_id IN (SELECT VALUE meta::id(id) FROM ca_certificate \
                             WHERE key_custody = 'vault_pki' \
                               AND status = 'Active')";
+
+/// `$taken` and `$unambiguous` for [`BELONGS_TO_ACCOUNT`]: the collision rule of
+/// `SurrealUserRepository::identity_collision` — both columns, folded, every
+/// status, the account itself left out — computed in the same query as the
+/// write that uses it, so no caller can skip it (R101W1-01). Binds `$tenant_id`,
+/// `$user_id`, `$names`.
+const ACCOUNT_NAMES_PREFIX: &str = "LET $taken = array::flatten( \
+         SELECT VALUE [string::lowercase(username), string::lowercase(email)] \
+         FROM user \
+         WHERE tenant_id = $tenant_id \
+           AND meta::id(id) != $user_id \
+           AND (string::lowercase(username) IN $names \
+                OR string::lowercase(email) IN $names)); \
+     LET $unambiguous = array::complement($names, $taken);";
+
+/// The condition under which a `User` certificate belongs to the account being
+/// revoked or erased (#533, R101W1-01): the binding, and for a row without one
+/// the convention — `metadata.user_id`, or a common name equal to an
+/// unambiguous name of the account on a row created since the account was.
+/// One definition for the revocation and the metadata scrub, so the second can
+/// never reach a row the first would not. Binds `$user_id`, `$user_created_at`.
+const BELONGS_TO_ACCOUNT: &str = "(user_id = $user_id \
+         OR (user_id = NONE \
+             AND (metadata.user_id = $user_id \
+                  OR (created_at >= $user_created_at \
+                      AND string::lowercase(subject) IN $unambiguous))))";
+
+/// An account's username and email, trimmed and folded, without the empty ones.
+fn folded_names(username: &str, email: &str) -> Vec<String> {
+    [username, email]
+        .into_iter()
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
 
 #[derive(Debug, SurrealValue)]
 struct RevokedCertificateRow {
@@ -346,12 +382,20 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
                  not_after = $not_after, \
                  status = $status, \
                  metadata = $metadata, \
-                 user_id = $user_id",
+                 user_id = $user_id, \
+                 serial = $serial",
             )
             .bind(("id", id_str))
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("issuer_ca_id", input.issuer_ca_id.to_string()))
             .bind(("subject", input.subject))
+            // #653: the serial the certificate carries, recorded so the unique
+            // index on `(issuer_ca_id, serial)` refuses a repeat under one
+            // issuer. `None` for text that is not a parseable certificate.
+            .bind((
+                "serial",
+                axiam_pki::certificate_serial_hex(&input.public_cert_pem),
+            ))
             .bind(("public_cert_pem", input.public_cert_pem))
             .bind(("fingerprint", input.fingerprint))
             .bind(("cert_type", cert_type_str(&input.cert_type)))
@@ -630,32 +674,46 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         &self,
         tenant_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
+        // R101W1-09 (d): conditional on the lease the caller's claim wrote, as
+        // the claim is on the value it read. A replica whose attempt outlived
+        // its lease finds another replica's lease (or a forwarded row) and
+        // writes nothing; a write conflict with that replica's claim is
+        // retried and then finds the new lease.
         let error: String = error.chars().take(MAX_FORWARD_ERROR_CHARS).collect();
-        let result = self
-            .db
-            .current()
-            .query(
-                "UPDATE type::record('certificate', $id) SET \
-                   vault_forward_attempts = $attempts, \
-                   vault_forward_last_error = $error, \
-                   vault_next_attempt_at = $next \
-                 WHERE tenant_id = $tenant_id AND vault_revoked_at = NONE",
-            )
-            .bind(("id", id.to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("attempts", i64::from(attempts)))
-            .bind(("error", error))
-            .bind(("next", next_attempt_at))
-            .await
-            .map_err(DbError::from)?;
-        result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        Ok(())
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "UPDATE type::record('certificate', $id) SET \
+                       vault_forward_attempts = $attempts, \
+                       vault_forward_last_error = $error, \
+                       vault_next_attempt_at = $next \
+                     WHERE tenant_id = $tenant_id \
+                       AND vault_revoked_at = NONE \
+                       AND vault_next_attempt_at = $lease \
+                     RETURN VALUE meta::id(id)",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("lease", claimed_until))
+                .bind(("attempts", i64::from(attempts)))
+                .bind(("error", error.clone()))
+                .bind(("next", next_attempt_at))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "certificate"))?;
+            let written: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!written.is_empty())
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn count_vault_forwards_failing(&self, min_attempts: u32) -> AxiamResult<u64> {
@@ -754,34 +812,19 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         // query as the revocation, so no caller can skip it. The binding and
         // the `metadata.user_id` match (a random id nobody can be named
         // after) are not bounded.
-        let names: Vec<String> = [username, email]
-            .into_iter()
-            .map(|name| name.trim().to_lowercase())
-            .filter(|name| !name.is_empty())
-            .collect();
+        let names = folded_names(username, email);
         let result = self
             .db
             .current()
-            .query(
-                "LET $taken = array::flatten( \
-                     SELECT VALUE [string::lowercase(username), string::lowercase(email)] \
-                     FROM user \
-                     WHERE tenant_id = $tenant_id \
-                       AND meta::id(id) != $user_id \
-                       AND (string::lowercase(username) IN $names \
-                            OR string::lowercase(email) IN $names)); \
-                 LET $unambiguous = array::complement($names, $taken); \
+            .query(format!(
+                "{ACCOUNT_NAMES_PREFIX} \
                  SELECT meta::id(id) AS record_id FROM \
                  (UPDATE certificate SET status = 'Revoked', revoked_at = time::now() \
                   WHERE tenant_id = $tenant_id \
                     AND cert_type = 'User' \
                     AND status = 'Active' \
-                    AND (user_id = $user_id \
-                         OR (user_id = NONE \
-                             AND (metadata.user_id = $user_id \
-                                  OR (created_at >= $user_created_at \
-                                      AND string::lowercase(subject) IN $unambiguous)))))",
-            )
+                    AND {BELONGS_TO_ACCOUNT})"
+            ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .bind(("names", names))
@@ -794,6 +837,89 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         // LET, LET, SELECT.
         let rows: Vec<RevokedCertificateRow> = result.take(2).map_err(DbError::from)?;
         Ok(rows.len() as u64)
+    }
+
+    async fn clear_user_certificates_metadata(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+        user_created_at: DateTime<Utc>,
+    ) -> AxiamResult<u64> {
+        // The rows `revoke_user_certificates` matches, in any status; the
+        // free-form `metadata` is the one column of a kept row that carries
+        // what the issuer's operator typed about the holder, and the list does
+        // not need it (the tenant purge clears it the same way). `user_id`,
+        // the PEM and `subject` stay: see the trait.
+        let names = folded_names(username, email);
+        let result = self
+            .db
+            .current()
+            .query(format!(
+                "{ACCOUNT_NAMES_PREFIX} \
+                 SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE certificate SET metadata = {{}} \
+                  WHERE tenant_id = $tenant_id \
+                    AND cert_type = 'User' \
+                    AND metadata != {{}} \
+                    AND {BELONGS_TO_ACCOUNT})"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("names", names))
+            .bind(("user_created_at", user_created_at))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        // LET, LET, SELECT.
+        let rows: Vec<RevokedCertificateRow> = result.take(2).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
+
+    async fn delete_past_retention(&self, limit: u32) -> AxiamResult<u64> {
+        // The batch is chosen first and deleted by id, so `LIMIT` bounds the
+        // write; the edge goes before the row it hangs from. Counted from what
+        // `DELETE … RETURN BEFORE` returns, i.e. what this call removed: a
+        // replica that lost the race for a row deletes nothing and counts
+        // nothing. Live tenants only (a tenant row without `deleted_at`).
+        //
+        // The live tenants are read once into `$live`: written inline as
+        // `tenant_id IN (SELECT …)` the subquery is evaluated again for every
+        // candidate row (36 s for 3 000 rows and 301 tenants, R110W1-01).
+        //
+        // Two replicas choosing overlapping batches conflict on the rows they
+        // both delete, and the datastore aborts one transaction having
+        // committed nothing; replaying it re-chooses its batch from what is
+        // left, so a conflict is retried here rather than failing the sweep.
+        let removed = retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(format!(
+                    "LET $live = (SELECT VALUE meta::id(id) FROM tenant \
+                                  WHERE deleted_at = NONE); \
+                     LET $doomed = (SELECT VALUE id FROM certificate \
+                         WHERE {PAST_REVOCATION_GRACE} \
+                           AND tenant_id IN $live \
+                         LIMIT $limit); \
+                     DELETE cert_bound_to WHERE in IN $doomed; \
+                     LET $removed = (DELETE $doomed RETURN BEFORE); \
+                     SELECT meta::id(id) AS record_id FROM $removed"
+                ))
+                .bind(("limit", limit))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| DbError::Migration(e.to_string()))?;
+            // LET, LET, DELETE, LET, SELECT.
+            let rows: Vec<RevokedCertificateRow> = result.take(4).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows.len() as u64)
+        })
+        .await?;
+        Ok(removed)
     }
 
     async fn list(

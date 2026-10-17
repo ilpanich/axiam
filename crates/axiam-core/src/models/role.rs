@@ -379,3 +379,44 @@ mod tests {
         assert!(!assignment(Some(vec![])).reaches_tenant(a));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The role row's two epochs (R110W6-04, #701; schema v101)
+// ---------------------------------------------------------------------------
+
+/// The two counters on a role row that the network gate reads and the role
+/// writes claim, so that the gate's reads and the write behave as one
+/// transaction.
+///
+/// `grants` moves with every change of what the role confers in the
+/// `network:` namespace — a `network:` grant or revoke, and a change of
+/// `is_global` — and `holders` with every assignment or unassignment of the
+/// role, to any subject. A role row written before schema v101 reads `0` for
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RoleEpochs {
+    /// Bumped by a `network:` grant or revoke, and by an `is_global` write.
+    pub grants: u64,
+    /// Bumped by every assignment or unassignment of the role.
+    pub holders: u64,
+}
+
+/// What the network gate read about a role before it cleared a write to it:
+/// the write's transaction refuses (`409`, "the role changed since it was
+/// read") unless the epochs its decision depended on are still these.
+///
+/// Which epoch a write claims is the repository's to apply, by the kind of
+/// write: an assignment or unassignment depends on the role's grants, so it
+/// claims `grants` (two assignments of one role do not invalidate each
+/// other); a grant, revoke or delete also depends on who holds the role, so it
+/// claims both; an `is_global` update claims `grants`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleClaim {
+    /// The role the epochs are of.
+    pub role_id: Uuid,
+    /// The epochs as the gate read them, before any other read of the role.
+    pub epochs: RoleEpochs,
+    /// For a revoke: the effect of the grant the gate read, `Some(None)` when
+    /// it read none. The delete is conditional on it.
+    pub revoked_effect: Option<Option<crate::models::permission::PermissionEffect>>,
+}

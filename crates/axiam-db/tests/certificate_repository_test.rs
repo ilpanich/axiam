@@ -390,6 +390,38 @@ async fn revoked_vault_leaves(
     (repo, ids)
 }
 
+/// One refused attempt on `id`, as the sweep makes it (#603, R101W1-09 (d)):
+/// claimed on the date the due list read, then the failure recorded on the
+/// claim's lease.
+async fn refuse(
+    repo: &SurrealCertificateRepository<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    id: Uuid,
+    attempts: u32,
+    next: chrono::DateTime<Utc>,
+    error: &str,
+) {
+    let seen = repo
+        .list_due_vault_forwards(Utc::now() + Duration::days(1), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.certificate.id == id)
+        .expect("an unforwarded row")
+        .next_attempt_at;
+    let lease = Utc::now() + Duration::minutes(2);
+    assert!(
+        repo.claim_vault_forward(tenant_id, id, seen, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.record_vault_forward_failure(tenant_id, id, lease, attempts, next, error)
+            .await
+            .unwrap()
+    );
+}
+
 /// A row never attempted carries none of the v95 fields and is due at once with
 /// no attempts (D-6: no backfill); a refused row leaves the due list until its
 /// backoff runs out and comes back with what was recorded.
@@ -410,16 +442,16 @@ async fn a_refused_revocation_leaves_the_due_list_until_its_backoff_runs_out() {
             .all(|c| c.attempts == 0 && c.next_attempt_at.is_none() && c.last_error.is_none())
     );
 
-    // The oldest is refused: its next attempt is an hour away.
-    repo.record_vault_forward_failure(
+    // The oldest is claimed and refused: its next attempt is an hour away.
+    refuse(
+        &repo,
         tenant_id,
         ids[0],
         1,
         now + Duration::hours(1),
         "vault pki: answered 403 Forbidden: permission denied",
     )
-    .await
-    .unwrap();
+    .await;
     let due = repo.list_due_vault_forwards(now, 10).await.unwrap();
     assert_eq!(
         due.iter().map(|c| c.certificate.id).collect::<Vec<_>>(),
@@ -476,9 +508,11 @@ async fn of_concurrent_claims_of_one_row_exactly_one_wins() {
         assert_eq!(won, 1, "round {round}: exactly one claim wins");
 
         // Release the lease for the next round, as a failure would.
-        repo.record_vault_forward_failure(tenant_id, id, round + 1, Utc::now(), "again")
-            .await
-            .unwrap();
+        assert!(
+            repo.record_vault_forward_failure(tenant_id, id, lease, round + 1, Utc::now(), "again")
+                .await
+                .unwrap()
+        );
         // The row now holds a date; the stale read (`NONE`) no longer matches.
         assert!(
             !repo
@@ -531,9 +565,12 @@ async fn of_concurrent_claims_of_one_row_exactly_one_wins() {
             .await
             .unwrap()
     );
-    repo.record_vault_forward_failure(tenant_id, id, 9, Utc::now(), "late")
-        .await
-        .unwrap();
+    assert!(
+        !repo
+            .record_vault_forward_failure(tenant_id, id, next, 9, Utc::now(), "late")
+            .await
+            .unwrap()
+    );
     assert_eq!(repo.count_vault_forwards_failing(1).await.unwrap(), 0);
 }
 
@@ -543,17 +580,98 @@ async fn the_claim_and_the_failure_stay_inside_the_tenant() {
     let (db, org, tenant_id) = setup().await;
     let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 1).await;
     let other = Uuid::new_v4();
+    let lease = Utc::now() + Duration::minutes(2);
     assert!(
         !repo
-            .claim_vault_forward(other, ids[0], None, Utc::now() + Duration::minutes(2))
+            .claim_vault_forward(other, ids[0], None, lease)
             .await
             .unwrap()
     );
-    repo.record_vault_forward_failure(other, ids[0], 5, Utc::now(), "not yours")
+    // Even on the lease this tenant's claim wrote, another tenant's failure
+    // writes nothing.
+    assert!(
+        repo.claim_vault_forward(tenant_id, ids[0], None, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .record_vault_forward_failure(other, ids[0], lease, 5, Utc::now(), "not yours")
+            .await
+            .unwrap()
+    );
+    let due = repo
+        .list_due_vault_forwards(Utc::now() + Duration::hours(1), 10)
         .await
         .unwrap();
-    let due = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
     assert_eq!(due[0].attempts, 0);
+}
+
+/// R101W1-09 (d): a refusal is recorded only on the lease its claim wrote. A
+/// replica whose attempt outlived its lease — the row since claimed by another
+/// replica — writes nothing: not the count, not the reason, and not the date
+/// that now holds the other replica's lease.
+#[tokio::test]
+async fn a_failure_recorded_on_a_lapsed_claim_writes_nothing() {
+    let (db, org, tenant_id) = setup().await;
+    let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 1).await;
+    let id = ids[0];
+
+    // Replica A claims with a lease that has already run out.
+    let lapsed = Utc::now() - Duration::seconds(1);
+    assert!(
+        repo.claim_vault_forward(tenant_id, id, None, lapsed)
+            .await
+            .unwrap()
+    );
+    // Replica B reads the row due again and claims it over A's lease.
+    let due = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(due[0].next_attempt_at, Some(lapsed));
+    let current = Utc::now() + Duration::minutes(2);
+    assert!(
+        repo.claim_vault_forward(tenant_id, id, Some(lapsed), current)
+            .await
+            .unwrap()
+    );
+
+    // A's late refusal writes nothing: B's lease and the count stand.
+    assert!(
+        !repo
+            .record_vault_forward_failure(tenant_id, id, lapsed, 7, Utc::now(), "late")
+            .await
+            .unwrap()
+    );
+    let row = repo
+        .list_due_vault_forwards(Utc::now() + Duration::hours(1), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            row[0].attempts,
+            row[0].next_attempt_at,
+            row[0].last_error.as_deref()
+        ),
+        (0, Some(current), None)
+    );
+    assert!(
+        repo.list_due_vault_forwards(Utc::now(), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "B's lease still holds the row back"
+    );
+
+    // B's refusal, on its own lease, is recorded.
+    assert!(
+        repo.record_vault_forward_failure(tenant_id, id, current, 1, Utc::now(), "refused")
+            .await
+            .unwrap()
+    );
+    let row = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(
+        (row[0].attempts, row[0].last_error.as_deref()),
+        (1, Some("refused"))
+    );
 }
 
 /// The reason a row keeps is bounded whatever the caller sent, and the count of
@@ -564,15 +682,9 @@ async fn the_stored_reason_is_bounded_and_failing_rows_are_counted() {
     let (repo, ids) = revoked_vault_leaves(&db, org, tenant_id, 3).await;
     let soon = Utc::now() + Duration::hours(1);
 
-    repo.record_vault_forward_failure(tenant_id, ids[0], 12, soon, &"x".repeat(5_000))
-        .await
-        .unwrap();
-    repo.record_vault_forward_failure(tenant_id, ids[1], 11, soon, "fewer")
-        .await
-        .unwrap();
-    repo.record_vault_forward_failure(tenant_id, ids[2], 30, soon, "many")
-        .await
-        .unwrap();
+    refuse(&repo, tenant_id, ids[0], 12, soon, &"x".repeat(5_000)).await;
+    refuse(&repo, tenant_id, ids[1], 11, soon, "fewer").await;
+    refuse(&repo, tenant_id, ids[2], 30, soon, "many").await;
 
     assert_eq!(repo.count_vault_forwards_failing(12).await.unwrap(), 2);
     assert_eq!(repo.count_vault_forwards_failing(11).await.unwrap(), 3);
@@ -652,13 +764,13 @@ async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_
         Some(user)
     );
     let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
-    for cert in &page.items {
+    for (i, cert) in page.items.iter().enumerate() {
         let expected = if cert.id == bound.id {
             Some(user)
         } else {
             None
         };
-        assert_eq!(cert.user_id, expected, "{}", cert.fingerprint);
+        assert_eq!(cert.user_id, expected, "certificate #{i}");
     }
 
     // The sample's CN matches no name passed here: only the binding matches.
@@ -684,4 +796,306 @@ async fn the_user_binding_reads_back_and_a_users_revocation_is_due_to_the_vault_
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert!(listed[0].revoked_at.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// #653 — serials are stored and unique under their issuer (migration v99)
+// ---------------------------------------------------------------------------
+
+/// A real self-signed certificate carrying exactly `serial`, as PEM.
+fn pem_with_serial(serial: &[u8], cn: &str) -> String {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, cn);
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(serial));
+    params.self_signed(&key).unwrap().pem()
+}
+
+fn sample_ca(
+    org: Uuid,
+    parent: Option<Uuid>,
+    pem: String,
+    fingerprint: &str,
+) -> StoreCaCertificate {
+    StoreCaCertificate {
+        id: Uuid::new_v4(),
+        organization_id: org,
+        tenant_id: None,
+        parent_ca_id: parent,
+        subject: "CN=CA".into(),
+        public_cert_pem: pem,
+        chain_pem: None,
+        fingerprint: fingerprint.into(),
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - Duration::minutes(1),
+        not_after: Utc::now() + Duration::days(3650),
+        encrypted_private_key: None,
+        key_custody: CaKeyCustody::VaultPki,
+        key_locator: Some("{}".into()),
+    }
+}
+
+/// Rows whose certificate cannot be read carry `serial = NONE`, and NONE does
+/// not collide in the unique index: this is what lets the index build over
+/// rows written before the fix (none of them has a serial column), including
+/// pairs that already share a serial inside their PEM.
+#[tokio::test]
+async fn rows_without_a_recorded_serial_do_not_collide() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealCertificateRepository::new(db);
+    let issuer = Uuid::new_v4();
+    for i in 0..3 {
+        repo.create(sample_cert(tenant_id, issuer, &format!("fp-none-{i}")))
+            .await
+            .unwrap();
+    }
+}
+
+/// The same serial under one issuer is refused; under another issuer it is a
+/// different certificate and is accepted.
+#[tokio::test]
+async fn one_issuer_cannot_issue_a_serial_twice() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealCertificateRepository::new(db);
+    let issuer = Uuid::new_v4();
+    let other_issuer = Uuid::new_v4();
+    let serial = [0x11u8; 20];
+
+    let first = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "first"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-1")
+    };
+    repo.create(first).await.unwrap();
+
+    let twin = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "second"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-2")
+    };
+    assert!(
+        repo.create(twin).await.is_err(),
+        "the same serial under the same issuer must be refused"
+    );
+
+    let elsewhere = StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "third"),
+        ..sample_cert(tenant_id, other_issuer, "fp-serial-3")
+    };
+    repo.create(elsewhere).await.unwrap();
+
+    let distinct = StoreCertificate {
+        public_cert_pem: pem_with_serial(&[0x22u8; 20], "fourth"),
+        ..sample_cert(tenant_id, issuer, "fp-serial-4")
+    };
+    repo.create(distinct).await.unwrap();
+}
+
+/// A CA is keyed on its parent: two intermediates under one parent may not
+/// share a serial; roots (no parent) never collide, whatever their serial.
+#[tokio::test]
+async fn ca_serials_are_unique_under_a_parent_and_free_among_roots() {
+    let (db, org, _tenant) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let serial = [0x33u8; 20];
+
+    let root_a = repo
+        .create(sample_ca(
+            org,
+            None,
+            pem_with_serial(&serial, "a"),
+            "fp-root-a",
+        ))
+        .await
+        .unwrap();
+    repo.create(sample_ca(
+        org,
+        None,
+        pem_with_serial(&serial, "b"),
+        "fp-root-b",
+    ))
+    .await
+    .expect("two roots may share a serial: it is their issuers' choice");
+
+    repo.create(sample_ca(
+        org,
+        Some(root_a.id),
+        pem_with_serial(&serial, "c"),
+        "fp-int-c",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        repo.create(sample_ca(
+            org,
+            Some(root_a.id),
+            pem_with_serial(&serial, "d"),
+            "fp-int-d",
+        ))
+        .await
+        .is_err(),
+        "two intermediates under one parent must not share a serial"
+    );
+}
+
+/// The upgrade path: an existing database holds certificates issued under one
+/// serial (the pre-fix same-key twins) and has no `serial` column. Migration v99
+/// must apply over them — `NONE` is not a collision — and afterwards enforce
+/// the index on what is written next. v99 is un-applied by hand (its DDL
+/// removed, its `_migration` record and every later one deleted, because the
+/// runner applies only what lies above the highest recorded version) so the
+/// real runner re-applies it, and the later migrations again, idempotently.
+#[tokio::test]
+async fn v99_applies_over_rows_that_already_share_a_serial() {
+    let (db, _org, tenant_id) = setup().await;
+    let issuer = Uuid::new_v4();
+
+    db.query(
+        "REMOVE INDEX idx_certificate_issuer_serial ON TABLE certificate; \
+         REMOVE INDEX idx_ca_certificate_parent_serial ON TABLE ca_certificate; \
+         REMOVE FIELD serial ON TABLE certificate; \
+         REMOVE FIELD serial ON TABLE ca_certificate; \
+         DELETE _migration WHERE version >= 99;",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    // Two certificates, one serial, one issuer: what a CSR signed twice made.
+    let serial = [0x44u8; 20];
+    for (i, cn) in ["twin-a", "twin-b"].into_iter().enumerate() {
+        db.query(
+            "CREATE type::record('certificate', $id) SET \
+             tenant_id = $tenant_id, issuer_ca_id = $issuer, subject = $cn, \
+             public_cert_pem = $pem, fingerprint = $fp, cert_type = 'Device', \
+             key_algorithm = 'Ed25519', not_before = time::now(), \
+             not_after = time::now() + 30d, status = 'Active'",
+        )
+        .bind(("id", Uuid::new_v4().to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("issuer", issuer.to_string()))
+        .bind(("cn", cn))
+        .bind(("pem", pem_with_serial(&serial, cn)))
+        .bind(("fp", format!("fp-twin-{i}")))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    }
+
+    axiam_db::run_migrations(&db)
+        .await
+        .expect("v99 must apply over rows that share a serial");
+
+    let repo = SurrealCertificateRepository::new(db);
+    repo.create(StoreCertificate {
+        public_cert_pem: pem_with_serial(&serial, "after-a"),
+        ..sample_cert(tenant_id, issuer, "fp-after-a")
+    })
+    .await
+    .expect("the old twins have no recorded serial, so the next one is the first");
+    assert!(
+        repo.create(StoreCertificate {
+            public_cert_pem: pem_with_serial(&serial, "after-b"),
+            ..sample_cert(tenant_id, issuer, "fp-after-b")
+        })
+        .await
+        .is_err(),
+        "from here on a repeat is refused"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R110W1-01: the retention batch reads the tenant table once
+// ---------------------------------------------------------------------------
+
+/// `delete_past_retention` used to write the live-tenant set as an inline
+/// `tenant_id IN (SELECT … FROM tenant …)`, which the datastore evaluates again
+/// for every candidate row: 3 000 candidate rows and 301 tenants took 36 s for
+/// one call. Here 2 000 rows past the grace sit in a tombstoned tenant (so every
+/// one is a candidate and none is deletable) beside 200 live tenants; the call
+/// must come back with nothing removed in seconds, and a past-grace row of a
+/// live tenant among them must still go.
+#[tokio::test]
+async fn the_retention_batch_reads_the_tenant_table_once() {
+    let (db, org, live_tenant) = setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    for n in 0..200 {
+        tenants
+            .create(CreateTenant {
+                organization_id: org,
+                kind: TenantKind::Standard,
+                name: format!("Extra {n}"),
+                slug: format!("extra-{n}"),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+    }
+    let dying = tenants
+        .create(CreateTenant {
+            organization_id: org,
+            kind: TenantKind::Standard,
+            name: "Dying".into(),
+            slug: "dying".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    tenants.delete(dying).await.unwrap();
+
+    db.query(
+        "FOR $n IN 0..2000 { \
+             CREATE certificate SET \
+                 tenant_id = $tenant_id, issuer_ca_id = $issuer, subject = 'CN=old', \
+                 public_cert_pem = 'not-a-parsed-certificate', \
+                 fingerprint = string::concat('fp-old-', <string> $n), \
+                 cert_type = 'Device', key_algorithm = 'Ed25519', \
+                 not_before = time::now() - 400d, not_after = time::now() - 30d, \
+                 status = 'Active'; \
+         }",
+    )
+    .bind(("tenant_id", dying.to_string()))
+    .bind(("issuer", Uuid::new_v4().to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let repo = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    let past_grace = repo
+        .create(StoreCertificate {
+            not_before: Utc::now() - Duration::days(400),
+            not_after: Utc::now() - Duration::days(30),
+            ..sample_cert(live_tenant, issuer, "fp-live-past-grace")
+        })
+        .await
+        .unwrap();
+    let fresh = repo
+        .create(sample_cert(live_tenant, issuer, "fp-live-valid"))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let removed = repo.delete_past_retention(500).await.unwrap();
+    let took = started.elapsed();
+    assert_eq!(
+        removed, 1,
+        "only the live tenant's past-grace row is deletable; the tombstoned \
+         tenant's rows are the tenant purge's"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "one batch took {took:?}: the tenant table is being read per candidate row"
+    );
+    assert!(repo.get_by_id(live_tenant, past_grace.id).await.is_err());
+    assert!(repo.get_by_id(live_tenant, fresh.id).await.is_ok());
+    assert_eq!(
+        repo.delete_past_retention(500).await.unwrap(),
+        0,
+        "a second batch finds nothing deletable"
+    );
 }

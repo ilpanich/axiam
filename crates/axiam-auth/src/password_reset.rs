@@ -189,33 +189,44 @@ where
             return Ok(None);
         }
 
-        // Rate limit: max resets per day.
+        // Rate limit: max resets per day. This count is the early refusal; the
+        // cap itself is counted again inside the mint below (item 7 of the
+        // 1.1.0 atomicity audit), because requests sent together each read a
+        // count under the cap here.
         let count = self.token_repo.count_today(tenant_id, user.id).await?;
         if count >= MAX_RESETS_PER_DAY {
             return Err(AxiamError::RateLimited);
         }
 
-        // Invalidate any prior unconsumed tokens for this user so
-        // intercepted older emails cannot be used after a newer
-        // reset request.
-        self.token_repo
-            .delete_unconsumed_for_user(tenant_id, user.id)
-            .await?;
-
         let raw_token = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_token);
         let expires_at = Utc::now() + Duration::hours(expiry_hours as i64);
 
-        self.token_repo
-            .create(CreatePasswordResetToken {
-                tenant_id,
-                user_id: user.id,
-                token_hash,
-                expires_at,
-            })
-            .await?;
-
-        Ok(Some((raw_token, user.id, expires_at)))
+        // One transaction: the cap, the invalidation of every prior unconsumed
+        // token for this user (so intercepted older emails cannot be used after
+        // a newer reset request), and the new token. Concurrent requests for
+        // one account conflict on the user row, so at most the cap's remainder
+        // mint and exactly one link is left live.
+        match self
+            .token_repo
+            .replace_within_daily_cap(
+                CreatePasswordResetToken {
+                    tenant_id,
+                    user_id: user.id,
+                    token_hash,
+                    expires_at,
+                },
+                MAX_RESETS_PER_DAY,
+            )
+            .await
+        {
+            Ok(Some(_)) => Ok(Some((raw_token, user.id, expires_at))),
+            Ok(None) => Err(AxiamError::RateLimited),
+            // The account went between the lookup and the mint: answered as an
+            // unknown address is, so the race reveals nothing either.
+            Err(AxiamError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Confirm a password reset using the raw token and a new password.
@@ -964,6 +975,13 @@ mod tests {
             unimplemented!()
         }
         async fn delete_unconsumed_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
+            unimplemented!()
+        }
+        async fn replace_within_daily_cap(
+            &self,
+            _i: CreatePasswordResetToken,
+            _c: u64,
+        ) -> AxiamResult<Option<axiam_core::models::password_reset::PasswordResetToken>> {
             unimplemented!()
         }
     }

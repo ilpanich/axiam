@@ -206,13 +206,27 @@ pub async fn materialise_if_cimd<C: Connection + Clone>(
     // it. It also decides whether anything is audited — a client materialising
     // for the first time is an event an operator wants to see, and a refresh
     // every five minutes for as long as the client is in use is not.
+    //
+    // The count in step 3 is the early refusal, before the fetch. The ceiling
+    // is the count the upsert makes again inside the create's own transaction
+    // (item 6 of the 1.1.0 atomicity audit): first appearances sent together
+    // each read `max - 1` in step 3, and at most the ceiling of them land.
     match state
         .oauth2_client_repo
-        .upsert_cimd_client(client_id, validated.create)
+        .upsert_cimd_client(client_id, validated.create, settings.oidc.dcr_max_clients)
         .await
     {
-        Ok(_) if existing.is_some() => {}
-        Ok(_) => audit_materialisation(state, http_req, tenant_id, client_id).await,
+        Ok(None) => {
+            tracing::debug!(
+                %tenant_id,
+                client_id,
+                "a tenant reached its client ID metadata document ceiling while this document \
+                 was fetched; not materialised"
+            );
+            audit_quota_refusal(state, http_req, tenant_id).await;
+        }
+        Ok(Some(_)) if existing.is_some() => {}
+        Ok(Some(_)) => audit_materialisation(state, http_req, tenant_id, client_id).await,
         Err(e) => {
             tracing::error!(
                 %tenant_id,

@@ -416,7 +416,9 @@ pub async fn get_org_settings<C: Connection + Clone>(
                         no per-tenant issuers (D-55)"),
         (status = 409,
          description = "opaque_mode `required` would coexist with an enabled \
-                        directory (LDAP / Active Directory)"),
+                        directory (LDAP / Active Directory); or a tenant's \
+                        directory or opaque_mode changed after this request \
+                        read them, so nothing was written — reload and retry"),
     ),
     security(("bearer" = []))
 )]
@@ -470,12 +472,21 @@ pub async fn set_org_settings<C: Connection + Clone>(
     // was. `required` at the organization makes every tenant `required` — the
     // tighten-only rule means no tenant can hold itself below the baseline — so
     // every tenant is in scope, the organization's own reserved scope included.
-    if opaque_mode == OpaqueMode::Required {
+    //
+    // Item 10 of the 1.1.0 atomicity audit: the claims are read before the
+    // directory reads they guard, and the write compares them inside its own
+    // transaction, so a directory enabled after the reads below is a `409`
+    // rather than an enabled directory under `required`.
+    let opaque_claims = if opaque_mode == OpaqueMode::Required {
+        let claims = state.settings_repo.opaque_directory_claims(org_id).await?;
         // The directory exclusion first (G-3): it is the more specific refusal,
         // and no amount of OPAQUE enrolment would make it go away.
         refuse_required_over_enabled_directory(&state, &tenants).await?;
         refuse_incomplete_opaque_coverage(&state, &tenants).await?;
-    }
+        Some(claims)
+    } else {
+        None
+    };
 
     // D-55: turning SSF on while the deployment's tenants would share one
     // issuer is refused, before anything is written.
@@ -486,7 +497,15 @@ pub async fn set_org_settings<C: Connection + Clone>(
         .is_ok_and(|current| current.oidc.ssf_enabled);
     refuse_ssf_while_issuer_shared(&state, input.ssf_enabled && !ssf_was_on).await?;
 
-    let settings = state.settings_repo.set_org_settings(org_id, input).await?;
+    let settings = match opaque_claims {
+        Some(claims) => {
+            state
+                .settings_repo
+                .set_org_settings_claimed(org_id, input, &claims)
+                .await?
+        }
+        None => state.settings_repo.set_org_settings(org_id, input).await?,
+    };
 
     // Switching OPAQUE on at the organization switches it on for every tenant
     // that has not tightened past it, so every one of them needs key material.
@@ -553,7 +572,9 @@ pub async fn get_tenant_settings<C: Connection + Clone>(
                                       (D-55)"),
         (status = 409,
          description = "opaque_mode `required` would coexist with an enabled \
-                        directory (LDAP / Active Directory)"),
+                        directory (LDAP / Active Directory); or a tenant's \
+                        directory or opaque_mode changed after this request \
+                        read them, so nothing was written — reload and retry"),
     ),
     security(("bearer" = []))
 )]
@@ -599,16 +620,35 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
         refuse_ssf_while_issuer_shared(&state, !was_on).await?;
     }
 
-    // G-3: an effective `required` and an enabled directory never coexist.
-    if merged.opaque.opaque_mode == OpaqueMode::Required {
+    // G-3: an effective `required` and an enabled directory never coexist. The
+    // claim is read before the directory read and compared by the write (item
+    // 10 of the 1.1.0 atomicity audit).
+    let opaque_claim = if merged.opaque.opaque_mode == OpaqueMode::Required {
+        let claim = state
+            .settings_repo
+            .opaque_directory_claim(user.tenant_id)
+            .await?;
         let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
         refuse_required_over_enabled_directory(&state, std::slice::from_ref(&tenant)).await?;
-    }
+        Some(claim)
+    } else {
+        None
+    };
 
-    let result = state
-        .settings_repo
-        .store_effective_tenant_settings(user.tenant_id, merged)
-        .await?;
+    let result = match opaque_claim {
+        Some(claim) => {
+            state
+                .settings_repo
+                .store_effective_tenant_settings_claimed(user.tenant_id, merged, claim)
+                .await?
+        }
+        None => {
+            state
+                .settings_repo
+                .store_effective_tenant_settings(user.tenant_id, merged)
+                .await?
+        }
+    };
 
     if result.opaque.opaque_mode != OpaqueMode::Disabled {
         provision_opaque_setup(&state, user.tenant_id, result.opaque.opaque_suite).await;
@@ -693,7 +733,9 @@ pub async fn get_tenant_override<C: Connection + Clone>(
                                       no OPAQUE keys"),
         (status = 409,
          description = "opaque_mode `required` would coexist with an enabled \
-                        directory (LDAP / Active Directory)"),
+                        directory (LDAP / Active Directory); or a tenant's \
+                        directory or opaque_mode changed after this request \
+                        read them, so nothing was written — reload and retry"),
     ),
     security(("bearer" = []))
 )]
@@ -749,11 +791,20 @@ pub async fn set_tenant_override<C: Connection + Clone>(
         refuse_ssf_while_issuer_shared(&state, !was_on).await?;
     }
     // G-3: an effective `required` and an enabled directory never coexist,
-    // whichever layer made it `required`.
-    if would_be.opaque.opaque_mode == OpaqueMode::Required {
+    // whichever layer made it `required`. The claim is read before the
+    // directory read and compared by the write (item 10 of the 1.1.0 atomicity
+    // audit).
+    let opaque_claim = if would_be.opaque.opaque_mode == OpaqueMode::Required {
+        let claim = state
+            .settings_repo
+            .opaque_directory_claim(tenant_id)
+            .await?;
         let tenant = state.tenant_repo.get_by_id(tenant_id).await?;
         refuse_required_over_enabled_directory(&state, std::slice::from_ref(&tenant)).await?;
-    }
+        Some(claim)
+    } else {
+        None
+    };
     if would_be.opaque.opaque_mode == OpaqueMode::Required
         && overrides.opaque_mode == Some(OpaqueMode::Required)
     {
@@ -761,10 +812,20 @@ pub async fn set_tenant_override<C: Connection + Clone>(
         refuse_incomplete_opaque_coverage(&state, std::slice::from_ref(&tenant)).await?;
     }
 
-    let stored = state
-        .settings_repo
-        .set_tenant_override(tenant_id, overrides)
-        .await?;
+    let stored = match opaque_claim {
+        Some(claim) => {
+            state
+                .settings_repo
+                .set_tenant_override_claimed(tenant_id, overrides, claim)
+                .await?
+        }
+        None => {
+            state
+                .settings_repo
+                .set_tenant_override(tenant_id, overrides)
+                .await?
+        }
+    };
 
     let merged = effective_settings(&org, &stored, tenant_id, Uuid::nil());
     if merged.opaque.opaque_mode != OpaqueMode::Disabled {

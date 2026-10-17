@@ -261,3 +261,35 @@ export function getApiErrorStatus(err: unknown): number | undefined {
   const status = asErrorLike(err)?.response?.status;
   return typeof status === "number" ? status : undefined;
 }
+
+/**
+ * What every admin page says when a write lost to someone else's — the
+ * wording the Network page introduced (W6.8).
+ */
+export const STALE_WRITE_ADVICE = "Changed by someone else — reload and try again.";
+
+/**
+ * {@link STALE_WRITE_ADVICE} when `err` is a `409` that says another request
+ * wrote first, `undefined` for anything else (the caller then words the error
+ * as it always has).
+ *
+ * The network routes say so with `reason_code: "stale_version"` (CONTRACT
+ * §36.4). The settings and directory routes carry no `reason_code`: they
+ * answer `409 conflict` both for "an enabled directory and `opaque_mode =
+ * required` cannot coexist" — the server's sentence, which names the remedy and
+ * is shown as is — and for "the tenant's directory or its opaque_mode changed
+ * since this request read them" (the 1.1.0 atomicity audit, item 10), which is
+ * told apart by that fixed phrase. The phrase is the server's own constant,
+ * shipped in the same release as this console.
+ */
+export function staleWriteMessage(err: unknown): string | undefined {
+  if (getApiErrorStatus(err) !== 409) return undefined;
+  const data = asErrorLike(err)?.response?.data as
+    | { reason_code?: unknown; message?: unknown }
+    | undefined;
+  if (data?.reason_code === "stale_version") return STALE_WRITE_ADVICE;
+  if (typeof data?.message === "string" && data.message.includes("changed since")) {
+    return STALE_WRITE_ADVICE;
+  }
+  return undefined;
+}

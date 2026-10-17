@@ -50,4 +50,6 @@ axiam-test-support = { workspace = true }
 # actually ship.
 surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
 tempfile = "3"
+# #653: certificates with a chosen serial for the unique-index tests.
+rcgen = { workspace = true }
 tokio-test = { workspace = true }

@@ -457,21 +457,645 @@ carries it.
 
 *(the `main` commit each W1 … W6 branch is cut from, and the date)*
 
+**`3d011573e`** (`main` after the dependabot merge #662, which follows the plan
+commits `e82e451` and `0233203`), 2026-10-14. All six wave branches
+(`claude/release-1.1.0-w1` … `-w6`) and the plan branch `claude/release-1.1.0`
+were pushed from it before the first executor started.
+
+Orchestrator's environment, measured at the start: 4 cores, 15 GB RAM, about
+30 GB of free disk, no `protoc`, no libxml2 headers, docker daemon stopped.
+`protobuf-compiler`, `libxml2-dev` and `libxmlsec1-dev` were installed and
+`dockerd` started. Because one Rust build fills most of the machine, the waves
+run **one Rust executor at a time** (with `cargo clean` between items) rather
+than six branches at once; non-Rust items (issue comments, console, text) may
+overlap. SAGE is not connected in this session either.
+
+**D-2 measured before any wave:** `git ls-remote --tags` shows **no `v1.0.1`**
+on `ilpanich/axiam` (latest `v1.0.0-beta18`) and **no 1.61 tag** on any of the
+eleven SDK repositories (latest `v1.0.0-beta17` each). W1 … W6 do not depend on
+the tags; W7 does not start until they exist (D-2), and the maintainer was
+asked for them at the start of W1.
+
+**D-2 amended by the maintainer, 2026-10-14 (during W1).** 1.0.1 is **not
+tagged**: the platform and the SDKs move straight to **1.1.0**. W7 therefore
+does not wait for tags. Consequences, also decided by the maintainer:
+- **Every SDK's contract-1.62 PR carries 1.1.0** (§8's version rule is
+  superseded): Rust, Java, Kotlin and PHP fold 1.62 into their unreleased
+  `[1.1.0]`; the other seven fold their unreleased `[1.0.1]` into `[1.1.0]`.
+  The hand-off tags after merge are `v1.1.0` everywhere (§14 W8 superseded).
+- **The never-tagged `[1.0.1]` sections are merged into `[1.1.0]`** and the
+  `[1.0.1]` heading removed — in the platform `CHANGELOG.md` (W8.4) and in each
+  SDK's change log (W7.2 … W7.12). The source-breaking notes of the four SDKs
+  stay, under `[1.1.0]`.
+- W7.1 (j)'s amended change-log line reads "released as 1.1.0" for all eleven.
+
 ### 13.1 W1 — what landed, and where the tree overruled the plan
+
+**Head `dd3d3f10`** on `claude/release-1.1.0-w1` (from `3d011573e`), 2026-10-14:
+eleven task commits, the F4 review and three in-wave fixes, all signed. One
+executor per item at the row's model; the §10 gate before each commit (every
+command exit 0 as reported by the tool); `cargo clean` between items (4.7 –
+27.8 GiB each). From W1.5 on executors build with `CARGO_INCREMENTAL=0` and
+line-tables-only debug info (local settings, no tracked file) because W1.4's
+server tests filled 27.8 GiB. The clone was shallow, so
+`check-remediation-evidence.py` failed on cited commits; the orchestrator ran
+`git fetch --unshallow` before W1.3 and it passes since (37 verified).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W1.1 #615 | `b97741b4` | Opus | `thisUpdate` clamped to `epoch.end − 1 s`, entries to `thisUpdate`; no high-water number (it would end #608's byte identity across replicas). The operator rule was derived, not assumed: an interval change stays monotonic at `nextUpdate` iff `I_new ≤ 2·I_old` (module doc, PKI guide, T-102). *Tree:* `list_identity` at `crl.rs:~767`, not `:709`. |
+| W1.2 #616 | `da02b290` | Opus | Each CA's re-sign is one spawned flight behind a `watch` marker in `CaSlot`; joiners wait at most `permit_wait` and share its outcome (a `503` too); a hang-up no longer cancels the re-sign; `AxiamError: Clone`. *Tree:* the "shared flight precedent" was a mutex sharing a success only; the semaphore is at `boot.rs:705`. |
+| W1.3 #617 | `e9a3ecca` | Sonnet | The sweep re-releases a revoked CA's own issuer when Vault refuses its forward as still an issuer (two triggers: the recorded error, or the refusal itself), then forwards; T-470 names the single-mount dependency and the not-adopted `issuer/<child>/revoke`. *Tree:* the sweep is `CertService::forward_pending_ca_revocations` in `axiam-pki/src/cert.rs`, not `cleanup.rs`; `revoke_within` unchanged. |
+| W1.4 #618 | `4bd98bf4` | Sonnet | Step (b4) clears the account's certificate `metadata` (shared "belongs to the account" SQL with the revocation; `user_id` kept as the retry key); new job `certificate_retention` deletes rows eight days past `notAfter` in live tenants (bounded, stop-aware, two-replica safe); one `revocation_grace` definition feeds `KEPT_REVOCATION` and the new grace; T-187 and the GDPR doc: Art. 6(1)(f) / Art. 32, Art. 17(3)(b) withdrawn. *Tree:* (b4) at `cleanup.rs:~1975`; no migration. |
+| W1.5 #619 | `29943ab7` | Sonnet | `sanitise_reason` at both audit appends and both forward logs; `b.` prefix masked; T-470 corrected. The returned reason stays whole (W1.3's matcher reads it). |
+| W1.6 #620 | `843f2e81` | Sonnet | `axiam_auth::secrets::bootstrap_client()` on one no-redirect builder shared with the private-CA client; the redirect test builds through it (mutation-checked); T-476 corrected. *Tree:* the old builder had no timeout or TLS settings to carry. |
+| W1.7 #621 | `4f3cf47b` | Sonnet | (a) "eight days after it expires" in the admin guide and `operate.ts`; (b) `vault_revocation`'s real failure rule; (c) `crates/axiam-server/tests/crl_purge_margin.rs` pins `REVOCATION_GRACE_SECS ≥ MAX_CRL_NEXT_UPDATE_SECS + 1 d` (fails at seven days); (d) `operate.ts` lists all 22 sweeps. *Tree:* `tenant_purge.rs` is in `axiam-db/src/repository/`; "Seventeen" was already stale (five jobs missing before W1.4). |
+| W1.8 #622 | `a8324435` | Opus | (a) an orphan purge claims a tombstoned marker row under the orphan's id **and** re-checks for rows under the claim — each alone fails an interleaving; only the replica whose `DELETE … RETURN BEFORE` removes the marker records; (b) both issuance routes re-read the account after the create and revoke + `400` (nothing returned) when it is gone, and user deletion revokes once more after its tombstone; (c) `DELETE` of an unknown user revokes nothing; (d) the Vault failure record is conditional on the claim's lease (leaf and CA; core trait signature). T-472 corrected, T-336 amended. |
+| W1.9 #653 | `09c76d56` | Sonnet | 20-octet CSPRNG serials (top bit clear) at every local signing site; Vault's `sign-verbatim` picks its own. **v99 taken**: no serial column existed, so v99 adds `serial` and UNIQUE `(issuer_ca_id, serial)` / `(parent_ca_id, serial)`; old rows `NONE` (no collision, safe upgrade), roots not recorded; scope test and newest version 99. *Tree:* no index existed (the plan allowed both); oracle in pki `crl_test.rs`. |
+| W1.10 #651 | `c51a8677` | Sonnet | Ed25519 keys returned (and stored) as RFC 8410 v1; OpenSSL 3.0.13 `pkey` reads v1 (exit 0), refuses ring's v2 (exit 1); the FreeRADIUS re-encoding workaround is gone (W5.2 reads this); spec regenerated (descriptions incl. the CRL `503` sentence of W1.2), registry digest refreshed. *Tree:* `to_pkcs8_pem` is the RSA hand-off; the fix is at the four `serialize_pem` sites. |
+| W1.11 #649 | `28dc3eb6` | Sonnet | The common name refuses control, non-space whitespace, bidi/zero-width/format characters, stray spaces and > 64 characters (characters, not bytes), never echoing the value; T-461 amended. *Tree:* the CSR path (`inspect_csr`) was unchecked and the Vault intermediate default could exceed 64 — both now refused. |
+| W1.12 | `76821676` | Opus | `claude_dev/security-review-release-1.1.0-w1-2026-10-14.md`: R110W1-01 **Medium**, R110W1-02 Low, R110W1-03 … -06 Informational. |
+| fix | `b24e34a1` | Sonnet | **R110W1-01** (Medium): the retention batch reads the live tenants once (`LET $live`); 2 000 + 201-tenant test (old statement 29 s). |
+| fix | `154e0d5e` | Sonnet | **R110W1-02** (Low, fixed in-wave because the wave closes #649): a CSR with two CNs is refused and every subject attribute passes the value rules, local and Vault paths, before any Vault request; T-461 corrected. Value rules rather than refusing O/OU/C: local paths drop them today and client tooling sends them. Spec regenerated (one description). |
+| fix | `dd3d3f10` | Sonnet | **R110W1-03**: registry `spec_digest` refreshed (`gen-management-registry.py --check` exit 0; 190 operations, 28 namespaces). |
+
+Filed on the next patch milestone (named in each body: `1.1.x` does not exist
+yet and the session cannot create milestones): ilpanich/axiam#664 (R110W1-04),
+#665 (R110W1-05), #666 (R110W1-06 (a)–(c); its (d) is W8.4's), and three
+executor follow-ups the review confirmed: #667 (Vault clients without a
+request timeout), #668 (an issuance between the Art. 17 purge's (b4) and its
+anonymization survives), #669 (a unique-serial violation answers `500`). The
+review rejected four others (request-path issuer-release retry; the 256-character
+cut of the stored reason; T-102 citing Art. 17(3)(b); an epoch-premise test —
+`epochs_are_half_the_interval_and_aligned_for_every_replica` exists).
+
+For later waves: **W7.1** — `CONTRACT.md` §35 still names "a datastore clock
+ahead" among the ways the CRL number falls; after W1.1 only the interval change
+and replica-clock straddle remain, and §35 should carry the `I_new ≤ 2·I_old`
+rule (an informative-section text change, not a §12 question). **W8.3** —
+`website/src/threatModel.ts` and `threat-modeling-and-security.md` copies of
+T-102, T-187, T-470, T-476 lag. **W8.4** — upgrade notes: the first
+`certificate_retention` runs delete every row eight days past `notAfter` (up to
+10 000 per tick); keys issued before 1.1.0 stay in the long PKCS#8 form;
+subjects with control characters, two spaces or > 64 characters are now `400`;
+v99 and random serials. `check-sdk-artifact-drift.py` exits 1 until the SDKs
+re-vendor (W7), as expected.
 
 ### 13.2 W2
 
+**Head `3652db6d6`** on `claude/release-1.1.0-w2` (from `3d011573e`), 2026-10-15:
+four task commits, one fix of W2.1, the F4 review and one in-wave fix, all
+signed; the SAML-off `cargo check` before every commit. **Gap found and closed
+in this wave:** the executors' gate ran without CI's `RUSTFLAGS=-Dwarnings`
+(`ci.yml:14`), so W2.1 left an unused binding that only warns locally and
+fails CI's "Build (SAML off)" job; from W2.4 on every executor builds with
+`RUSTFLAGS=-Dwarnings`. W1 was gated without it; W8.1 runs with it (and the
+plan-branch merge checks it first).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W2.1 #654 | `cad058673` | Sonnet | `CryptoGate` (`axiam-federation/src/saml_gate.rs`) bounds every SAML acquire by `hash_acquire_timeout_secs`; `with_crypto_semaphore` replaced by `with_crypto_gate` so no composition can pass an unbounded semaphore. Busy ACS → the same `401` and body as a bad signature; metadata → its failure; IdP SSO/SLO receiver → `503` + `Retry-After: 5`, no state written. The IdP's own signing (authenticated) left unbounded. *Tree:* T-477, not named by the plan, was the entry stating the unbounded wait (amended with T-102, T-474). |
+| W2.2 #632 | `b1ddc8947` | Sonnet | `federation_link_oidc_callback`, `federation_link_saml_acs`; `rate_limit_bucket_names_test.rs` (source scan of `crates/*/src`, allow-list with exact counts). *Tree:* `login` is registered once (its second spelling is a doc example), so two intentional shared names (`directory_config` ×3, `uma_rreg` ×2), not the three the 1.0.1 combined review §6 names. |
+| W2.3 #633 | `ff8ca52a0` | Opus | **D-3: the principal `(tenant, sub)` alone** — `(address, sub)` leaves one token from many addresses unbounded. A `cnf` token is keyed `(address, tenant, sub)` (its proof is checked after the limiter). The key comes from the audit middleware's cached verified identity, so no extra verification; no identity → address. `RateLimitKeyMode::Principal` cannot be set from `AXIAM__RATE_LIMIT__KEY`. *Tree:* `authz.rs:215-245` checks only that a credential is present, so the limiter runs before verification and the reused verification is the audit middleware's (`axiam-audit/src/middleware.rs:612-664`, wired `boot.rs:3069`). |
+| fix | `fea3b64d6` | Sonnet | W2.1's `hash_acquire_timeout_secs` binding gated `#[cfg(feature = "saml")]`; SAML-off `check` and `--tests` exit 0 under `-Dwarnings`. |
+| W2.4 #634 | `c7ec9a1c2` | Sonnet | Both `saml_idp/sign.rs` self-checks parse with `receiver_parser_options()`; a source-scan test pins both calls (a refused self-check reads the same either way, so the call is what is pinned). |
+| W2.5 | `3d2489dc8` | Opus | `claude_dev/security-review-release-1.1.0-w2-2026-10-15.md`: nothing Medium or higher; R110W2-01, -02 Low; -03 … -06 Informational. |
+| fix | `3652db6d6` | Sonnet | **R110W2-01** (Low, fixed in-wave because the wave closes #633 on it): the five authenticated federation flow routes keep an outermost per-address backstop at `end_session_per_min × 10` (`FEDERATION_FLOW_BACKSTOP_FACTOR`, the CIBA list's pattern, in-process per replica); four tests, mutation-checked; T-474 and the two deployment rows. |
+
+Filed on the next patch milestone (`1.1.x`, named in each body):
+ilpanich/axiam#670 (R110W2-02, Low — `DPoP`-scheme requests not attributed by
+the audit middleware), #671 (R110W2-03 — ten authenticated waiters on the
+crypto semaphore still unbounded; the Redirect-binding query check stays
+ungated by decision), #672 (R110W2-04 — the bucket-name scan's blind spots),
+#673 (R110W2-05 — in-process governors never swept), #674 (R110W2-06 — text
+and the unpinned audit-before-limiter order; its (h), the website copy, is
+W8.3's). For **W8.4**: the CHANGELOG's #614 entry (`~301-302`) names the old
+buckets; for **W6**: its new `network_*` buckets must pass
+`rate_limit_bucket_names_test.rs` after the merge.
+
 ### 13.3 W3
+
+**Head `b40b33a67`** on `claude/release-1.1.0-w3` (from `3d011573e`), 2026-10-15:
+eight task commits, the F4 review and one in-wave fix, all signed; every gate
+command exit 0 under `RUSTFLAGS=-Dwarnings`. `sdks/openapi.json` was held until
+W3.8 and regenerated once (the review's own rebuild is byte-identical).
+**Re-model:** W3.5 ran at Opus, not Sonnet (§1.1): "refused calls no longer
+counted" made the admission a check-then-increment under concurrency.
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W3.1 #635 | `3fcac1532` | Opus | `token_device.rs`: the device grant authenticates its client at both endpoints through the other grants' path (registered method, live tenant, FAPI `enforce_client_authentication` / `enforce_token_request`, grant check, `cnf` at the poll); an unknown client costs one HMAC verify against a fixed hash no secret produces; a foreign `client_id` is `invalid_grant` before `record_poll`; no refusal spends or reveals a grant; device tokens are bound (`cnf`, `token_type: DPoP`) for DPoP/mTLS clients. *Tree:* W3.7(a) folded in; W3.7(b) answers **`invalid_client`** (client authentication reads the tenant), not the plan's `invalid_grant`; `boot.rs` / `state/mod.rs` changed (service generics). |
+| W3.2 #636 | `1d9b8664b` | Sonnet | Admin `PUT` of a `dcr`/`cimd` row refuses (422 `scope_exceeds_ceiling`, naming the scopes) a scope outside the effective `dcr_allowed_scopes`; a row beyond a since-narrowed ceiling may keep what it holds but gain nothing. *Tree:* `AxiamError::Validation` is 400 and there is no `Unprocessable`, so a REST-crate `unprocessable_entity` helper; `POST` can only create `admin` rows and there is no `PATCH`, so only update refuses. |
+| W3.3 #637 | `fe6878687` | Opus | `RESERVED_ACTION_NAMESPACES` (`tenants.`, `gdpr.`, ASCII-case-insensitive) refused from AMQP (to the DLQ, after the signature checks, before the nonce); the purge bound is `min(exported_through, receipt timestamp)` of the receipt found in the deleted tenant's own log (none → keep the whole trail); deletion refuses (409) a receipt claiming rows after itself. *Tree:* the namespaces live in `axiam-core` (amqp may not depend on db). |
+| W3.4 #638 | `f07713169` | Sonnet | The hint cap reads the previous window with `peek_count` (was an upsert); new job `rate_limit_bucket` deletes rows older than 2 × the longest window in use (600 s, derived from the three writers) **+ 60 s clock margin**, bounded, two-replica safe. *Tree:* the margin is the executor's addition (lenient-only); no `updated_at` index (no migration owned). |
+| W3.5 #639 | `8492128e7` | **Opus** (re-modelled) | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` (default 3, `≥ 1`, checked at boot because the CIBA service is built before `validate()`); refused calls are taken back by a conditional decrement; an "overtaken" rule closes a 1.0.1 late-call hole; the bound — at most the allowance in any two consecutive windows, across replicas — holds exactly, errors strict-side only. Conformance harness sets 1000. |
+| W3.6 #640 | `3ae58f5d4` | Sonnet | `AuditLogRepository::datastore_now()` (required, no `Utc::now()` default) bounds the export; the receipt is written after the last page. *Tree:* no server-time helper existed (eleven doubles in six crates gained it); `audit.rs:355` unchanged. |
+| W3.7 #641 | `afa4dce4f` | Sonnet | The tombstone transaction deletes `device_grant`; the `sa_` `client_credentials` path answers a tombstoned tenant `invalid_client` after its verify (it answered a distinguishable `invalid_request`). (a)/(b) were W3.1's. |
+| W3.8 #642 | `ee2a3bacc` | Sonnet | (a) R101W3-01 named as the reason (module doc, the `[1.0.1]` #610(d) entry corrected in place, T-289); (b) the client `DELETE` text; (c) CIBA mints no ID token without `openid`; (d) `boot.rs` re-indented; (f), (g) left, reasons in the commit; spec regenerated (W3.1's fields and 401, W3.2's 422, (b), #656's per-address backstop text, the tenant `DELETE`'s 409); registry digest-only (190 / 28). **(e) not obtained:** 1.0.1's W3.2 quick bench (`just bench-quick` Cell 1, `claude_dev/quick-bench-runbook-2026-08-16.md`) needs `just`, k6 (`dl.k6.io` denied by the proxy) and an AXIAM server image (`ghcr.io/ilpanich/axiam/server:1.0.1` not found; a local fat-LTO release build exceeds this machine's disk), and is a before/after pair (`7be5e8094~1` vs HEAD). Left for the maintainer's bench box. **Obtained 2026-10-15 on the maintainer's box** (i7-8750H, 6 c / 12 t, 30 GiB, governor `powersave`; three local `build=1` images; report kept as [`quick-bench-w32-2026-10-15.md`](quick-bench-w32-2026-10-15.md)): `bench-quick` Cell 1, A = `7f5330cf4` vs B = `7be5e8094` — unbound 2149.2 → 2188.8 req/s (+1.8 %), p50 4.50 → 4.28 ms (−4.9 %); certificate-bound 1993.8 → 2183.6 req/s (+9.5 %), p50 5.06 → 4.32 ms (−14.7 %); p95/p99 +2.5 … +10 % (a separate ~45–53 ms stall mode, not a per-request cost); 0 errors (B: 262 356 calls). In-run noise floor 7–15 % (A's two sub-arms on one binary); **verdict: within noise, no regression above ~10 % single-window variance.** Informative arm C (W3 head `b40b33a67`) within ~1 % of B. Single unrepeated 45 s windows — indicative, not a matrix result. The run found a recipe bug: `bench-quick` on p3-mtls fails at k6 init unless `BENCH_CERTS_DIR` is absolute (filed). |
+| W3.9 | `f70976a26` | Opus | `claude_dev/security-review-release-1.1.0-w3-2026-10-15.md`: R110W3-01 **Medium**, -02 Low, -03 … -12 Informational. |
+| fix | `b40b33a67` | Opus | **R110W3-01** (Medium): the public-client token bucket keyed on the transport peer, so behind the proxy one address could hold every public client's device polls at `429 slow_down`; it now keys on the route limiter's client address (`select_rate_limit_ip`, one reader of `TRUSTED_HOPS`), audit rows keep the peer; also fixes public code and refresh requests (exposed since T21.2, which had no flood test — one added). |
+
+Filed on `1.1.x` (named in each body): ilpanich/axiam#675 (R110W3-02, Low —
+existing confidential device clients are refused after the upgrade), #676 …
+#684 (R110W3-03 … -10, -12), #685 (the public-client bucket now never refuses
+first), #686 (Low, pre-existing T-212: without a proxy the limiters key on a
+caller-written `X-Forwarded-For`). R110W3-11 (contract text the wave made
+stale) is W7.1's, below.
+
+**Contract question for the maintainer (§10: recorded, not answered; also for
+the conformance review's §5).** `sdks/CONTRACT.md` §14.1 (`:2859-2861`):
+"`device_authorize` is **unauthenticated** … SDKs MUST NOT send
+`client_secret` on it". Since W3.1 a confidential device client must
+authenticate at both device endpoints (public clients send nothing and are
+refused if they do), so an SDK following §14.1 cannot run the device grant for
+a confidential client. Options from the review: (a) §14.1 keeps
+"unauthenticated" for public clients and SDKs send a confidential client's
+credential at both endpoints; (b) the server returns to §14.1 at the start
+endpoint (reverses part of W3.1; not recommended); (c) device clients must be
+public at registration. **Asked of the maintainer on 2026-10-15; W7 does not
+start without the answer.**
+
+**Answered by the maintainer, 2026-10-15: option (a).** §14.1 keeps
+"unauthenticated" for a public client; an SDK client configured with a
+credential (client secret — post or Basic —, `private_key_jwt`, or an mTLS
+certificate) sends it at **both** `device_authorize` and the poll, by the same
+rules as its other token requests. W7.1 rewrites §14.1/§14.2 (with the stale
+§14 text listed below) and every SDK port implements it. The server is
+unchanged. **R110W3-02 (#675), also answered:** beyond W8.4's upgrade note,
+1.1.0 adds a **boot-time warning** counting the confidential clients that hold
+the device grant (a small server change on the W3 branch, after W6.3; reviewed
+by W8.2); "an admin `PUT` may turn a device-only client public" stays on #675. The warning landed as `6e7a0015d` on the W3 branch (Sonnet, 2026-10-15): `OAuth2ClientRepository::count_confidential_with_grant` returns the number of clients and tenants, both grant spellings counted, and one `warn!` at boot names the counts only — W3 head is therefore `6e7a0015d`.
+
+For **W7.1** (R110W3-11, stale contract text): §14 intro (`:2842-2846`, device
+tokens' `client_id` claim and `403`); §14.2 (the poll's `401 invalid_client`;
+DPoP proof per poll and `token_type: DPoP`); §27 rule 2 (`:9068`, a deleted
+client's poll is `invalid_client`); §33.3 rule 13 (the hint-cap setting,
+refused calls not counted, SDK suites raise it); §8/§8b (the reserved
+`tenants.` / `gdpr.` actions); the admin `PUT`'s 422 `scope_exceeds_ceiling`;
+`tenants.delete`'s second 409. For **W8.4**: upgrade notes for W3.1 (confidential
+device clients must send their credential at both endpoints, the poll requires
+`client_id`; review §2.2 text), W3.2's 422, W3.5's setting.
 
 ### 13.4 W4
 
+**W4.1 (#626, #629) — done 2026-10-14, no code.** Comments:
+ilpanich/axiam#626 (issuecomment-6171974235) and ilpanich/axiam#629
+(issuecomment-6171975861), verified on `main` @ `3d011573e`. Tree vs plan:
+#626's two entries start one line earlier than §0.1 says (`CHANGELOG.md:586`
+and `:602`, added by `52d4219`); #629's text was taken by `fe7b9d2` (1.0.1's
+threat-model reconciliation commit, not a separate W7.3 commit), the prod
+compose file and the k8s manifest name only `ORDERLY_STOP`, and `operate.ts:122`
+names neither constant but links the guide's "Stopping, and the grace period" —
+the five steps, 37 s and the 3 s lease-loss drain are in all four.
+
+**Head `6faa925cd`** on `claude/release-1.1.0-w4` (from `3d011573e`), 2026-10-15:
+six task commits and the F4 review, all signed; every Rust gate under
+`RUSTFLAGS=-Dwarnings`. No in-wave fix (nothing Medium or higher).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W4.2 #655, #624 | `fff66606b` | Opus | `cleanup::AuditedWork`: a tenant purge (claim → `tenants.purged`), an orphan purge and a user's whole purge (→ `account_deletion` completion and `gdpr.user_pseudonymized`) each run as a spawned unit; `join_cleanup` waits for the cleanup task and then the running unit against one deadline (`budget.cleanup`) and aborts at it. The stop is checked between tenants; a unit gives up before its point of no return (the anonymization; the tenant row's removal) and never crosses it once stopping. `PurgeClaim` drop guard releases the claim on every exit but success. `purge_tombstoned` split in two (`axiam-db`). *Tree:* the guide, T-444 and `join_cleanup`'s doc already listed the tenant purge (1.0.1 W7.3), so the lists were restated; the unit is waited for inside the cleanup bound, not the slack (kept for W4.4); the erasure unit is the whole user purge (the SSF `with_cause` task-local does not cross a spawn). |
+| W4.3 #625 | `dad34dbe9` | Sonnet | `axiam.audit.dlq` is emitted before the file append; the file's failure has its own event. Not spawned (a detached write would escape the bounded stop join); residual recorded in T-108. |
+| W4.4 #628 | `e0670df5e` | Opus | The cleanup task is told to stop when the REST listener returns (SIGTERM) and at the loss itself (lease-loss stop callback), closing W4.2's 0–7 s gap; the lease release is a budget step (`ShutdownBudget::lease_release`: 1 s orderly, 0 on loss) via `release_lease_within`; a loss seen during a SIGTERM stop now skips the release and exits non-zero (the guide said so; the code returned Ok). **The arithmetic changed:** `ORDERLY_STOP` = 20 + 5 + **1** + 2 + 5 + 5 = **38 s**, `FATAL_STOP_BACKSTOP` **39 s**, grace 40 s, `LEASE_LOSS_STOP` 13 s — guide, both compose files, k8s and `operate.ts` updated. *Tree:* the 1 s could not fit the 1 s backstop margin (37 + 1 = 38), so it became a step; the existing cut test is a lib test (`profile.rs:518`); there is no sleeping route, so the new case holds a sign-in's body. |
+| W4.5 #623 | `1ab46dd50` | Sonnet | `fapi-conformance.yml` validates `plan_name` / `module_timeout` in a first step before checkout (inputs via `env:`, `%q` errors, validated values via `$GITHUB_ENV`); `conf_require_uint` in `lib-env.sh` refuses non-numeric values before any arithmetic in `run-plan.sh` / `run-some.sh` (and `CONFORMANCE_SUITE_WAIT`); `conformance/scripts/tests/validate_inputs_test.sh` (281 checks), wired into CI next to the gate's unittest. |
+| W4.6 #630 | `3b0a540a7` | Sonnet | `gate.py` refuses a plan `baseline.json` does not name unless `--new-plan` (repeatable; refused for a baselined plan or one not also `--plan`); 37 unit tests. *Tree:* the gate's rules live in `claude_dev/fapi-conformance-runbook.md` ("The CI gate"); `docs/conformance/README.md` points to it. **Second half not done:** re-recording `baseline-unattended.json` needs a full `fapi-conformance` dispatch, i.e. running the conformance suites, which the orchestrator does not do — **for the maintainer (D-4):** dispatch on `claude/release-1.1.0-w4` with `axiam_image` empty, `plan_name` default, `module_timeout=30`; then `python3 -I conformance/scripts/gate.py --results <artifact>/conformance/.run/results --record-unattended` and compare `.plans` only with `baseline-unattended.json` (expected empty; then only `source` gains a provenance note naming the run, keeping `38317560409`). **Done 2026-10-15** (`6faa925cd`): at the maintainer's go-ahead the orchestrator dispatched run 38779757053 (on `1d6498165`, `module_timeout=30`, AXIAM from source; every step success; gate green, 95 tolerated = 94 WAITING + 1 SKIPPED); the blob store refused the artifact (403), the maintainer uploaded it (zip sha256 `43057373…5808c60`); `--record-unattended` over it exit 0 and its `plans` are identical to the baseline (diff exit 0, 27 / 27 / 40), so the lists are now a recording; only `source` gained the dated provenance. |
+| W4.7 #627 | `5445dadc0` | Sonnet | After a save that turned a surface on, the settings page says it stays off while the organization keeps it off (only then; not on a failed read-back). *Tree:* no i18n or toast exists — the page's own alert block; the save handler is at `~:386`. Coverage 96.55 % ≥ 96.1. |
+| W4.8 | `1d6498165` | Opus | `claude_dev/security-review-release-1.1.0-w4-2026-10-15.md`: R110W4-01 … -07, all Informational. |
+
+**D-4 dispatch by the orchestrator** — the bad-input run of W4.5, run
+38737745432 on `3b0a540a7` with `module_timeout = a[$(echo INJECTED >&2)]`:
+"Validate dispatch inputs" failed (exit 1) before checkout; the log carries the
+value only `%q`-escaped, never a bare `INJECTED`. The `always()` steps then ran
+on the empty workspace (noise; R110W4-05).
+
+Filed on `1.1.x`: ilpanich/axiam#687 (R110W4-01), #688 (-02), #689 (-03), #690
+(-04), #691 (-05), #692 (-07); R110W4-06 (T-472 still says #655 is not fixed) is
+**W8.3's**. The review rejected one follow-up: a lease release that commits
+after its 1 s bound cannot remove a successor's lease (`DELETE … WHERE holder =
+$holder`, a per-process UUID). For **W8.4**: the stop is 38 s (was 37) and the
+backstop 39 s (was 38); the grace is unchanged.
+
 ### 13.5 W5
+
+**Head `285b48b1a`** on `claude/release-1.1.0-w5` (from `3d011573e`), 2026-10-15:
+four task commits, the F4 review and four in-wave fixes, all signed. **The
+RADIUS e2e runs on this machine:** `eapol_test` 2.10 from apt
+(`eapoltest`), the pinned FreeRADIUS 3.2.8 image pulled (one Docker Hub 429,
+then fine). Baseline before any change: `AXIAM_E2E_RADIUS=1 cargo test -p
+axiam-server --no-default-features --test radius_e2e` exit 0 (328 s, 285 s
+revocation lag); exit 0 again after W5.1 and W5.4. **D-4, by the orchestrator:**
+`radius-e2e.yml` dispatched on the branch — run 38761953931 on `63fc3d7d2`
+(the workflow's first-ever run) **success**; run 38768034553 on `285b48b1a`
+(compiles and runs the fixes' uncompiled e2e edit and the new script harness)
+**success**.
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W5.1 #643 | `384d2c772` | Sonnet | `docker/radius/fetch-crl.sh`: installs only a 200 that parses, whose `openssl crl -verify` output is exactly `verify OK` (openssl exits 0 on "verify failure"), whose CRL number is not lower than the installed one; sends the stored ETag, treats 304 as unchanged; `mktemp` + `mv`. The guide links it (no second copy); the e2e runs it on the host against a loopback mirror (forged, lower-numbered, 304 cases; each check's removal turns the e2e red). T-462 amended (Open). *Tree:* the snippet sat at `freeradius.md:389-418`, `refresh_crl` at `~:933`; T-450 (MD5 obfuscation) untouched. |
+| W5.2 #644–#647 | `8a91f9c38` | Sonnet | Guide: what the reload re-reads, `ca.pem` replaced atomically and never deleted without a restart, "Error replacing X509 store" means the old trust holds (#644); fetch direct or `no-cache`, the bound "+ any shared cache's `max-age`", the note's §6.3 cell with a dated correction (#645); `require_message_authenticator = yes` on the RadSec client and the NAS's half of Blast-RADIUS (#646); the re-encoding under `umask 077` through a pipe, octal `printf` (the `\x30` form only worked under bash) (#647 — W1.10 removes the workaround; the merge takes W1). *Tree:* the shipped `clients.conf` already had the option. |
+| W5.3 #648, #650 | `d215a644b` | Sonnet | `scripts/check-radius-vendors-nothing.py` (`--self-test`, 18 cases) in Architecture Invariants; T-454 cites it and `cargo-deny`'s licence list; `radius-e2e.yml`'s filter gains `crypto.rs`, `subject.rs`, `server.rs` and the script. *Tree:* the licence list is `deny.toml:~118-136`, run by the `security-scan` job. |
+| W5.4 #652 | `63fc3d7d2` | Sonnet | `:0` tags on the three VLAN attributes in the guide and the e2e's generated table; the e2e pins the Accept's octets. ***Tree overruled the plan:*** FreeRADIUS 3.2.8 encodes `Tunnel-Private-Group-Id:0 = "20"` exactly as untagged (`3230`; RFC 2868 §3.6 allows it); only a non-zero tag adds an octet; the integers always carry `0x00`. So "fail on the untagged form" is impossible; the assertion fails on any non-zero tag (`:1` → red). `docker/radius/raddb/` holds no placement entries (generated per run). The design note's "tag `0x00`" (`radius-reply-profile-design.md:83,178,722`) is wrong for FreeRADIUS — **W6's to correct**, since D4 renders the reply. |
+| W5.5 | `90924ed4c` | Opus | `claude_dev/security-review-release-1.1.0-w5-2026-10-15.md` (no cargo; the e2e evidence above): nothing Medium or higher; R110W5-01 … -04 Low, -05 … -10 Informational; a trial merge with W1. |
+| fix | `507899207` | Sonnet | **R110W5-01**: one well-formed entity-tag only (never `*`), bound to the installed file's SHA-256; a 304 counts only with the tag sent, else one unconditional fetch. |
+| fix | `f0fe8b064` | Sonnet | **R110W5-02**: a lock for the whole run (`flock`, present in the pinned image; `mkdir` fallback with stale-lock breaking); a run that finds it held exits 0 untouched. |
+| fix | `b84d0bcb2` | Sonnet | **R110W5-03**: `curl -q`, scheme pinned, `--max-redirs 0`, `--globoff`, `--url`; `http://` only with `FETCH_CRL_ALLOW_HTTP=1`; the e2e gains the refused-HTTP case. `docker/radius/tests/fetch-crl-test.sh` + `crl-stub.py` (64 checks, dash and bash, each fix's checks red on the previous script) run in `radius-e2e.yml`. |
+| fix | `285b48b1a` | Sonnet | **R110W5-04**: T-454's correction states exactly what the check does and does not catch (status Mitigated on the narrower claim). |
+
+The four Low findings were fixed in-wave because they are in the script and the
+check this wave ships for #643 and #648. Filed on `1.1.x`: ilpanich/axiam#693
+(R110W5-05 — the guide's RadSec block fails `-XC` and its
+`require_message_authenticator` is inert on a RadSec client), #694 … #698
+(R110W5-06 … -10). **For the merge:** the only conflict is the Ed25519 bullet of
+`freeradius.md` — take W1 (W1.10's removal settles #647); after the merge the
+guide's §4 must say a "lower than the installed" refusal is expected once after
+an interval change (W1.1) and link the PKI README's rule. **For W8.3:** the
+STRIDE text and `freeradius.md:618` still say all four Mitigated RADIUS entries
+are tested by the e2e (true of T-449, T-456, T-459 only).
 
 ### 13.6 W6
 
+**Maintainer decision, 2026-10-15 (asked by the orchestrator after W6.3):** the
+per-tenant cap `network.session_timeout_max_secs` (stored by W6.1, enforced by
+the gate's H3 and at read; the note names no writer) **is exposed under
+`network:admin`**: `GET`/`PUT /api/v1/network/policy`, writable by
+`network:admin` at the `/network` root (lowering always allowed, raising
+audited), conditional on the row's version. Two more management operations
+(the registry reaches **202 / 29**), an executor after W6.4 on this branch,
+and §36 text in W6.6.
+
+**Corrected by the maintainer, 2026-10-15 (after W6.3b, `f479c6530`):** the
+first question named `network:admin`, which the note defines as administrative
+login to a segment's NAS devices and which is **not grantable** under option B,
+so the route as built was writable by nobody. The cap write is guarded by
+**`network:segments_write` at the `/network` root** instead: the cap is the
+`Session-Timeout` envelope every profile is clamped to, and envelopes are
+`segments_write`'s (H3 keeps envelope writers apart from profile writers).
+
+**Maintainer decision, 2026-10-15: the admin console is in 1.1.0.** The plan had
+no console work for D4 (nor did the design note), and `frontend/src` has no
+network page. A new item **W6.8** (Sonnet, M–L) lands on this branch after
+W6.6 and before the F4 review (W6.7), so the review reads it: a "Network
+access" section — the segment tree (`/network/{zones|quarantine}/<site>/<segment>`),
+the reply-profile editor (the typed dictionary; `Session-Timeout` shown
+clamped), the tenant cap (`GET`/`PUT /network/policy`), gate refusals (403 with
+the rule) and 409s surfaced — plus two console touches for W3's API changes:
+the OAuth2 client form shows the 422 `scope_exceeds_ceiling` message, and a
+confidential client holding the device grant is told it must authenticate at
+both device endpoints. Gate: vitest with the coverage threshold, `tsc`, lint.
+
+**W6.6's four contract questions (recorded per §10), answered by the
+maintainer on 2026-10-16:** (1) the network `PUT`s keep **`replace_*`**
+(full-body, version-conditional replacements, as §27.4 rule 5's existing four;
+the count becomes seven); (2) the generic OpenAPI components are **renamed**
+before W7 (`ReplyProfile` → `NetworkReplyProfile`, `ServiceType` →
+`RadiusServiceType`, `TerminationAction` → `RadiusTerminationAction`, and any
+other generic network schema name), spec and registry regenerated on this
+branch; (3) `administrative_user` and `nas_prompt_user` **leave the spec**
+(option B refuses them; option A may add them back additively; the server's
+refusal stays); (4) **`network` is a §27.6 manifest namespace in 1.62**
+(natural keys: a segment by site + kind + name, a profile by its segment, the
+policy as a singleton) — §27.6 text by W7.1, `plan`/`apply` in every SDK port
+that ships §27.6.
+
+**W6.7's review (`dacca3318`) and the maintainer's answers, 2026-10-16.**
+R110W6-01 (Medium: H6 was not applied to the §5.3 writes that change the
+writer's own placement — a service account could assign itself join and
+release its own quarantine) is fixed in-wave (`21ab64fbc`, T-482 → Mitigated,
+totals 487 / 454 / 23 / 10); R110W6-13 (the frontend coverage matrix lacked the
+network handlers, `docs-ci` red) is fixed (`22fcc5098`). Asked of the
+maintainer and answered: (a) §36 rule 6 is **amended** to say the read is the
+effective (clamped) value and a write above the cap is refused — no stored
+member; (b) every network 409 body gains a **sub-code** member next to
+`error: "conflict"` (`stale_version` / `strands_profile` / `has_children`, exact
+names per the code), documented in §36, the console wording the stale case as
+"reload"; (c) **R110W6-03 is fixed in 1.1.0**: a `vlan`/`rank`/`enabled` change on
+a segment that has a reply profile also needs `network:grant` at the segment,
+and H5's quarantine rule on a quarantine segment. One Opus executor on this
+branch before the merge.
+
+**Head `122b9ea92`** on `claude/release-1.1.0-w6` (from `3d011573e`), 2026-10-16. The wave has eighteen commits, all signed:
+- eleven task commits: W6.1 … W6.6, W6.3b, the renames, and W6.8's two;
+- the F4 review;
+- six in-wave fixes: R110W6-01 and -03, the coverage matrix, the `409` sub-code, rule 6, and the delete gate.
+
+The three numbers that changed during the wave:
+- **Schema:** v100 only. v99 is W1's; the runner applies every version above the highest recorded one, and the newest-version assertion says 100.
+- **Registry:** **202 operations / 29 namespaces** (from 190 / 28).
+- **Threat model:** **487 entries: 454 Mitigated / 23 Open / 10 Not applicable** (from 477: 443 / 19 / 15).
+
+**D-4, by the orchestrator:** none needed. The D4 e2e (`a_decision_per_authentication_places_revokes_and_quarantines`) ran on this machine with exit 0 (2 passed, 418 s), and the dispatch of `radius-e2e.yml` waits for the merged branch (W8.1).
+
+| Task | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W6.1 | `ef3f1ed0d` | Sonnet | The data model and v100. <br>• Tables `network_segment`, `reply_profile`, `network_policy`, in `TENANT_PURGE_ORDER`. <br>• A segment is a resource row plus a sidecar with the same id, written in one transaction. <br>• `/network`, branch and site nodes have deterministic v5 ids. <br>• The `axiam-radius-reply/1` dictionary is a compile-time table; `ReplyProfileInput` has `deny_unknown_fields`. <br>• Nine `network:*` permissions, all human-only. <br>• The cap `network.session_timeout_max_secs` (default 3600, range 300 … 86400) lives in its own `network_policy` row, not in `security_settings`, which is wire-visible. It is clamped at read. <br>*Tree:* the runner tolerates a version gap (an ordered static list, applying versions above the highest recorded), so v100 after v98 is sound on this branch. |
+| W6.2 | `e9766ce35` | Opus | `axiam-authz` `network_gate`. <br>• H1 … H6, rules 1 … 3, the §5.3 rows, reserved names and resources, the subject scope. <br>• The clearance token can be minted only by the gate. <br>• Gated: roles, permissions, certificate bind, the generic resource routes, UMA register/update/delete. <br>• The enumeration test (a source scan plus a token pin) fails if the bind gate is removed. <br>• Seeded roles: super-admin keeps `network:read` and five meta permissions, and never `join`/`admin`/`grant_admin`. Boot reconcile takes back W6.1's grant, and the seeded admin can no longer assign super-admin. <br>• H3 refusals are `403`. <br>*Residuals recorded for W6.7:* the gate and the write are not one transaction (T-481, Open); org-scope meta permissions (T-483, Open); no success gate row (T-484, Open); H6 not applied to role assignment (became R110W6-01). |
+| W6.3 | `d741349b3` | Sonnet | Segment and profile routes. <br>• Write order: body → gate → reactor veto (`network.pre_*_write`, fail-closed) → conditional write → audit (`*.write_refused` with the internal rule). <br>• `network_admin_per_min` (default 30), one bucket per write route. <br>• The registry goes from 190 to 200 operations and gains a 29th namespace. <br>*Tree:* the plan named no writer for the tenant cap. Asked, and answered by W6.3b. |
+| W6.4 | `fae9d87a5` | Opus | `POST /api/v1/network/decide`. <br>• Callers: cnf-bound service-account tokens only, via `permissions::CERTIFICATE_BOUND_MACHINE_ROUTES`; the network family otherwise stays human-only. <br>• Limits: `network_decide_per_min` 6000 keyed on `sub`, spent before any read, plus a ×10 per-address backstop. <br>• The route is excluded from the registry (§27.0). <br>• Tunnel-Type and Medium-Type carry tag 0; Tunnel-Private-Group-Id carries none. The design note's three "tag `0x00`" lines are corrected with a date (W5.4's finding). <br>• 12 tests, including timing medians within 1.5× and a mutation that drops the ratio to 0.59. <br>*Tree:* `DeviceAuthService` is in `axiam-pki` `mtls.rs`; there is no v101, because the existing audit indexes suffice. |
+| W6.3b | `f479c6530` | Sonnet | `GET`/`PUT /api/v1/network/policy`. <br>• The cap is gated and conditional on the version read. <br>• Audit actions: `raised`, `lowered`, `unchanged`, `write_refused`. <br>• Registry **202 / 29**. <br>*Tree:* `network:admin` (the first answer) is not grantable, so the route was writable by nobody. The maintainer corrected the writer to `network:segments_write` at the root. |
+| fix | `2b0f0cc1c` | Sonnet | The cap is written with `network:segments_write` at `/network`; the `NETWORK_POLICY_WRITE` alias is removed. |
+| W6.5 | `e4dca2686` | Sonnet | The `rlm_rest` recipe. <br>• `freeradius.md` gains §5 D4: mTLS must end at AXIAM (L4 pass-through is fine); the token comes from `POST /api/v1/auth/device`; the request body is closed; the attribute-mapping table; latency; the operator's residuals. <br>• `docker-compose.radius-d4.yml` overrides the base compose file and has no image line. `docker/radius/raddb/d4/` holds the D4 configuration. <br>• The e2e covers: placement, a cached token, an unbound certificate, revocation at the next authentication, quarantine, a wrong site key (`403`), AXIAM down, and 18 non-allow answers that are never copied into the Accept. <br>*Tree:* FreeRADIUS 3.2.8 exposes no client-certificate attribute in the outer post-auth, so the decision runs in `check-eap-tls` post-auth, with a `verify{client}` hook that stashes the SHA-256 by serial. FreeRADIUS has no JSON decoding, so the answer is parsed with one regex per attribute. |
+| W6.6 | `acda86038` | Opus | Contract §36: 36.1 … 36.10 are the SDK surface (human-only); 36.11, the decision, is not SDK work, and rule 6 fixes the answer's shape and member order. <br>Threat model: <br>• T-457, T-461, T-463, T-464 and T-468 go from Not applicable to Mitigated. <br>• T-462 stays Open and gains a D4 column. <br>• New T-478 … T-487. <br>• Diagram 9 is updated. <br>*Tree:* 12 operations, not 10. A `403` carries the permission and the node; the rule goes to the audit row only. |
+| renames | `70c8039cf` | Sonnet | Maintainer answers (2) and (3): <br>• nine components get network/radius names (`NetworkReplyProfile`, `RadiusServiceType`, `RadiusTerminationAction`, …); <br>• `RadiusServiceType` is a hand-written schema enum, `["framed_user"]`, and the Rust enum keeps the admin variants so that they answer `400`. <br>§36 gains `replace_*` and the manifest namespace. |
+| W6.8 | `e4f8c4740` | Sonnet | Console "Network access": the cap panel, segments by kind and site, the typed profile dialog, `403` with permission and node, `409` worded "reload". The decision route is not called. Coverage 96.57%. |
+| W6.8 | `326a8072d` | Sonnet | W3's touches: the `422 scope_exceeds_ceiling` message on the client forms, and the notice that a confidential client holding the device grant must authenticate at both device endpoints. <br>*Tree:* the console's grant list has no device-code entry, and a DCR/CIMD client opens read-only, so the `422` is unreachable from those rows today. |
+| W6.7 | `dacca3318` | Opus | `claude_dev/security-review-release-1.1.0-w6-2026-10-16.md`: **R110W6-01 Medium**; R110W6-02 … -08 and -13 Low; -09 … -12 Informational. |
+| fix | `21ab64fbc` | Opus | **R110W6-01**: H6 also refuses a §5.3 write that widens the writer's own placement — role assign and unassign (including group), role delete, permission grant and revoke. It reads `subject_group_ids`. T-482 → Mitigated; totals 487 / 454 / 23 / 10. |
+| fix | `22fcc5098` | Sonnet | **R110W6-13**: the frontend coverage matrix has rows for `network.rs` and `network_decide.rs`, so `docs-ci` is green. |
+| fix | `9dff2aa97` | Opus | **R110W6-03** (maintainer (c)): a `vlan_id`/`rank`/`enabled` change on a profiled segment needs `network:grant` at it (`H2:placement`), plus `H5:placement` on quarantine. The `freeze_profiled_placement` clearance narrows the write, and the transaction re-reads, so a race gets `409 stale_version`. The profile transaction writes the segment row (`profile_epoch`). T-478 corrected. |
+| fix | `f15f67434` | Sonnet | Maintainer (b): every network `409` carries `reason_code`: `stale_version`, `strands_profile`, `has_children`, `site_gone`, `duplicate_name`/`_vlan`/`_rank`, `profile_exists`, `other`. Documented in §36.3 rule 2, §36.4 and §36.8; the console words the stale case as "reload". |
+| fix | `b3a035413` | Sonnet | Maintainer (a): §36.3 rule 6 says a read is the effective (clamped) value, and that writing a clamped read back stores the cap, not the earlier timeout. There is no stored member. |
+| fix | `122b9ea92` | Opus | Maintainer, "gate delete too": deleting a profiled segment, or a segment's profile, needs `network:grant` at the segment (`H2:placement`), plus `H5:placement` on quarantine, then H6. The delete transaction re-reads the profile, so a race gets `409 stale_version`; the race test uses surrealkv. Design note §5.2/§4.2, §36.3 rules 1 and 2, the OpenAPI texts, T-478 and the console are updated. <br>*Tree:* neither delete asked H6 before this commit; it is added after the placing right. |
+
+**Filed on `1.1.x`:** ilpanich/axiam#700 (R110W6-02), #701 … #707 (R110W6-04 … -10), #708 (R110W6-14), #709 (R110W6-15).
+- #708 is the executor follow-up from `f15f674`: `reason_code` is derived by matching the repository's message text.
+- #709 is the follow-up from `122b9ea`: the console offers the profile editor without `network:grant`, and `PLACEMENT_RACED` is misnamed.
+- R110W6-11 is fixed at the W6 merge; R110W6-12 is W7.1's and W8.3's.
+
+Accepted as is: a profile delete by a writer without the grant answers `403` before `404`, as every other gated write does (permission before existence).
+
+**For W7.1:**
+- §34.6 item (l) counts the network operations from the registry (202 / 29);
+- the §27 rows, the §27.0 exclusion table (five → six), §27.4 rule 5 (seven `replace_*`), the §27.6 `network` namespace;
+- R110W6-12's contract part.
+
+**For W8.3:**
+- the design note's header ("nothing is built") and §3.1;
+- `freeradius.md`'s "Which threat-model entries" paragraph and `:866-868`;
+- `threat-modeling-and-security.md`, the model version and the website prose;
+- the 190 / 28 counts in `website/src` (`data.ts`, `reference.ts`, `integrate.ts`, `security.ts`);
+- `operate.ts:~1019`, D3-only text;
+- T-444, made stale by the W4 merge, below.
+
+**For W8.4:**
+- the `network:*` permissions and the two settings (`network_admin_per_min`, `network_decide_per_min`) as upgrade notes;
+- seeded permission descriptions reach existing tenants only through boot reconcile.
+
 ### 13.7 W7 — the contract, the eleven SDKs and the conformance review
 
+**The merge into `claude/release-1.1.0` (2026-10-16, by the orchestrator; W4 and
+W6 by an Opus merge executor each, since both needed code to reconcile).** Six
+signed merge commits, pushed:
+
+| Wave | Merge | Conflicts and how they were resolved |
+|---|---|---|
+| W1 | `764fe02d7` | none |
+| W2 | `8cb95aa9a` | T-102 (STRIDE and Threat Dragon): W1's #615/#616 and W2's #654 amendments both kept, W1's first (word-level three-way merge) |
+| W3 | `45243b94d` | `rate_limit.rs` imports (union); `cleanup.rs` and `cleanup_task.rs` keep W1's `certificate_retention` and W3's `rate_limit_bucket` sweeps; the tenant-purge entry keeps #622 then #637; `operate.ts` lists 23 sweeps (24 with the revocation feed); spec and registry deferred to the W6 merge |
+| W4 | `7292eaf56` | W1's orphan claim marker (#622) inside W4's two-phase purge (#655): `begin_orphan_purge` / `purge_orphan_rows` / `remove_purged_tenant`, the orphan unit under W4's `PurgeClaim` (released, not dropped, when given up, so the tombstone sweep finishes it); `ErasureUnit` carries #618's (b4). Also `tenant_purge_test.rs`: two W3 literals gain W1's `orphan: false` (the W3 merge did not compile there). Gate: fmt, clippy both feature sets, `tenant_purge_test` 11, `cleanup_task` 40, `axiam-db --lib tenant` 24, all 0 |
+| W5 | `a6c6340fa` | `freeradius.md`'s Ed25519 bullet: W1 (#651, keys returned as PKCS#8 v1), W5's re-encoding recipe dropped as obsolete. **Correction:** the merge body attributes the recipe to #644; it is **#647** (R101W6-08), which closes as superseded by #651 |
+| W6 | `09350bd2f` | migrations 98, 99, 100 (assertion 100); both limiter backstops; both sizing rows; `radius-e2e.yml` filters united plus W5's script step; both e2e tests; the T-462 row in W6's D3/D4 form with W5's amendment; spec, registry (202 / 29) and `threatModel.ts` regenerated. Fixes the merged tree needed: `unprocessable_entity()` sets `reason_code: None`; the D4 e2e calls W5's six-argument `refresh_crl` with a mirror; the v99 re-apply test deletes `version >= 99`; the enumeration test's exemption names W4's `cleanup.rs::prepare`. **R110W6-11** fixed (`freeradius.md`, `axiam-d4.sh`: serials are unique per issuer). Gate: workspace fmt and clippy `-D warnings` (SAML off; api-rest with SAML on), `axiam-db --lib` 302, the network, certificate, seeder and purge binaries, `axiam-authz --lib` 128, `axiam-api-rest --lib` 305 and the rate-limit binaries, the e2e compiled, every `scripts/check-*` 0 but `check-website-links` (proxy 403) and `check-sdk-artifact-drift` (until W7 re-vendors), console and website `tsc`/lint/vitest 0 |
+
+Threat model after the merge: 487 — 454 Mitigated / 23 Open / 10 Not
+applicable, version still 2.41.0 (W8.3 takes it to 2.42.0). **For W8.3, from
+the merges:** T-444 is stale after the W4 merge (an orphan purge now has a point
+of no return, the marker's removal, and one given up leaves the marker for the
+tombstone sweep); T-462 dropped "the recipe does not call AXIAM per
+authentication" (false with D4); the guide's D3 placement table writes the VLAN
+attributes untagged while §13.5 says W5.4 tagged them — check against the wire
+(W5.4's measurement) and make one statement; the guide's §4 must say a "lower
+than the installed" CRL refusal is expected once after an interval change and
+link the PKI README's rule (§13.5); the STRIDE text and `freeradius.md` still
+say all four Mitigated RADIUS entries are tested by the e2e.
+
+
+**W7, after the merge (2026-10-16).** Every commit is signed and pushed to
+`claude/release-1.1.0` unless the row says otherwise.
+
+| Item | Commit | Model | What landed; where the tree overruled the plan |
+|---|---|---|---|
+| W7.1 | `5c012d741` | Sonnet | Contract 1.62 record §34.6 (a) … (s). <br>• Added: §27.6.2, the `network` manifest namespace. <br>• §14.1/§14.2 rewritten for option (a) and R110W3-11's stale text. <br>• Counts: the registry is unchanged at 202 operations / 29 namespaces; 11 `replace_*`, 18 sparse, 26 paginated. <br>*Plan vs tree:* <br>• **eleven** `replace_*` operations, not the "seven" of §13.6, because §27.4 rule 5 had been stale since 1.51; <br>• twelve network operations, not ten; <br>• the historical 190/28 counts kept, with "202/29 since 1.62" beside them. <br>The OpenAPI description of `RadiusServiceType` says the admin values are refused with `400`, but the code answers `403` (#700; for W8.2). It recorded ten questions. |
+| W7.1b | `d76c5a80b` | Sonnet | The maintainer's answers to four of those questions (2026-10-16): <br>• the device grant sends client secrets in the form body only, never `Authorization: Basic` (§12.1 rule 3 stands); <br>• a clamped profile is judged on the read; <br>• `filter_ids` are compared as a set; <br>• `kind` uses the wire spelling, `access` or `quarantine`. <br>Also: §27.4 rule 4 counts 26 paginated operations. An above-cap timeout is a `403 authorization_denied` (H3). |
+| W8.4a | `89e488e3e` | Sonnet | **Version 1.1.0, moved forward from W8.4** so the SDKs re-vendor the final spec once. Changed: the workspace and its pins, the console's version label, the k8s image tags, `Cargo.lock`, `openapi.json` (`info.version` only; digest `cf0fc71c…59a7`), the registry and `apiIndex.ts`. Left for W8.4: CHANGELOG, `version.ts`, the news post. |
+| SDK ports W7.2 … W7.12 | see below | Sonnet ×11 | Each SDK vendors `d76c5a80b` and is at 1.1.0, with `[1.0.1]` folded into `[1.1.0]`. Each adds: <br>• the twelve network operations (no method for the decide route); <br>• the `network` manifest namespace; <br>• the change-taking SSF form; <br>• device-grant credentials in the form body; <br>• its §8.2 extras. |
+| W7.13 | `3da7e0c9c` | Opus | `claude_dev/sdk-contract-1.62-conformance-review.md`: 0 High / 3 Medium / 6 Low / 8 Informational, and ten questions for the maintainer in §5. <br>• **Medium:** C162-01 (C) and C162-02 (C++), where caller-allocated structs grew with `SOVERSION` still 1; C162-03 (PHP), where unseen SSF event-type URIs were blanked. <br>• **Ruling:** the §21.9 DPoP rows were wrong, not the SDKs; no SDK generates proofs. |
+| W7.1c | `d25413506` | Sonnet | The maintainer's answers to the review's §5 (2026-10-16): <br>• Q10/C162-14 corrections: §21.9's seven rows; §27.2 rule 1 (19/19 of 29); §27.10 and §36.10. <br>• Q6: a §36 Conformance Statement sentence. <br>• Q5: pruning is a MAY; §27.10 records "no pruning" for all eleven. <br>• Q1: no session or adopted credential on any `/oauth2/*` request. The exception, written by the executor and accepted, is a credential the caller passes to that one call (RFC 7591/7592 registration tokens, §28.12). <br>• Q2: an unknown enum value on an unstated member is refused at `plan`, before any write; only an `Update` is refused. <br>• Q3: `termination_action`, `enabled` and `filter_ids` cannot be stated as none. <br>• Q8 and Q9 confirmed as written. <br>• Q4 (SCIM (g)) and Q7 (producer refusal) deferred to 1.63. |
+| W7.14 fix pass | see below | Sonnet ×11 | **Every SDK:** <br>• re-vendors `d25413506`; <br>• its README names §36 and says "manifest pruning: not offered in any namespace". <br>**Per finding:** <br>• **C162-01:** C goes to `SOVERSION 2`, with the `abi_soname` test. <br>• **C162-02:** C++ goes to `SOVERSION 2`, with the `abi_soname` test (shared builds only). <br>• **C162-03:** PHP emits `list<SsfEventType|string>`, with four round-trip tests. <br>• **C162-05 (maintainer: fix now):** TypeScript, Python, Java, C# and Kotlin withhold the session or adopted bearer on `/oauth2/*`. Rust, Go and Swift already did, and gain regression tests. |
+
+**The eleven SDK pull requests** (draft, branch `claude/contract-1.62`). The head is the fix-pass commit.
+
+| SDK | PR | Port head | Fix-pass head | CI on the fix head |
+|---|---|---|---|---|
+| Rust | ilpanich/axiam-rust-sdk#131 | `4c02dc1` (CodeQL fix after `bd362f6`) | `ba61dd4` | pending |
+| TypeScript | ilpanich/axiam-typescript-sdk#141 | `973427c` | `a9f7140` | green |
+| Python | ilpanich/axiam-python-sdk#98 | `71db0de` | `d5594cd` | green |
+| Go | ilpanich/axiam-go-sdk#98 | `5ebfb22` | `e3bf7b3` | green |
+| Java | ilpanich/axiam-java-sdk#114 | `dfcc1eb` | `3da7142` | green |
+| PHP | ilpanich/axiam-php-sdk#83 | `7a238fa` | `d363c66` | green |
+| Kotlin | ilpanich/axiam-kotlin-sdk#76 | `07855aa` | `7f0c68b` | pending |
+| C# | ilpanich/axiam-csharp-sdk#106 | `f70d039` | `1aab662` | green |
+| C | ilpanich/axiam-c-sdk#73 | `18be8e1` | `6a60bd0` | green |
+| C++ | ilpanich/axiam-cplusplus-sdk#75 | `d3670ed` | `5d9764b` | green |
+| Swift | ilpanich/axiam-swift-sdk#74 | `4d34370` | `66660bc` | pending |
+
+**Filed on `1.1.x`.**
+- **SDK repositories:** the review's Low and Informational findings, one issue per SDK.
+  - rust#132 (C162-07, -13), typescript#142 (-07, -08), python#99 (-07, -08), go#99 (-07), java#115 (-07, -10), php#84 (-04, -07), kotlin#77 (-07, -10), csharp#107 (-06, -15), c#74 (-06, -09), cplusplus#76 (-07, -16), swift#75 (-17).
+  - python#100: an adopted bearer overwrites an explicit PAT on `/uma2/*`.
+- **Platform:** ilpanich/axiam#710 covers the 1.63 contract items. Session cookies and `X-CSRF-Token` still reach `/oauth2/*` after a cookie login (Rust, Python and others); also the deferred Q4 and Q7.
+
+**Plan vs tree:**
+- §8's version rule: superseded by D-2 amended (all eleven SDKs at 1.1.0).
+- The platform version bump: moved from W8.4 into W7 (W8.4a).
+- W7.13: followed by a second contract commit (W7.1c) and a fix pass (W7.14) that the plan did not foresee. The review's questions needed answers that changed contract text, so the SDKs re-vendored once more, all eleven together.
+
+**Environment:**
+- Neither .NET nor Swift was preinstalled; the C# executors installed .NET 8 and 10 from apt.
+- Swift was never compiled locally. Its only builds are the PR's CI, which passed on the port head.
+- A Maven Central mirror init script under `~/.gradle/init.d/` (sandbox-only) was needed for Gradle.
+- Two stray log files at the filesystem root (`/scratchpad.log`, `/scratchpad_gen.log`) could not be deleted by the session's safety check; the maintainer removes them.
+
 ### 13.8 W8 — release readiness
+
+All W8 commits are signed and pushed to `claude/release-1.1.0`. The release pull request is
+**ilpanich/axiam#716** (non-draft, base `main`).
+
+| Item | Commit | Model | Result |
+|---|---|---|---|
+| W8.1 | — (a check; nothing committed) | Sonnet | Regression gate on `310203c98`, 3 h. <br>**Passed (exit 0):** <br>• `fmt`; workspace `clippy -D warnings` with SAML on and off. <br>• **7 250 Rust tests passed, 0 failed, 38 ignored** (1.0.1 also had 38 ignored), run crate by crate. `axiam-db`, `axiam-api-rest` and `axiam-server` ran one binary at a time: 78, 113 and 27 runs. <br>• The `client`-feature gRPC tests (34) and the conformance leg (14). <br>• **The RADIUS e2e, run locally: D3 and D4 passed** (425 s); `fetch-crl-test.sh` 64/64 under dash and under bash. <br>• Every `scripts/check-*` and its self-test, except the three below. <br>• Frontend lint, `tsc`, a11y and build; vitest 2 376 tests at 96.57 % coverage. Two `ScimTargetsPage` tests timed out under load on the first run and passed alone and on the rerun. <br>• Website lint, `tsc` and build; `npm audit` 0. <br>**Failed:** `cargo deny` and `cargo audit` on rustls 0.23.45 (RUSTSEC-2026-0346 … -0349), already on `main`; fixed in W8.1a. <br>**Expected failures:** `check-website-links` (the proxy returns 403), `check-sdk-artifact-drift` (until the SDK PRs merge), `check-sdk-amqps` (no SDK clone beside the checkout). <br>**Not run here:** the SurrealDB container (Docker Hub 429), the live AMQP broker, Playwright, Trivy, hadolint and llvm-cov. |
+| W8.1a | `f922935a0` | Sonnet | rustls 0.23.46 and yoke-derive 0.8.4, in three lockfiles: workspace, `examples/b3-mesh-delegation-grpc`, `tools/surreal-race-probe`. `cargo deny`, `cargo audit` (CI's ignores) and `clippy` pass; 81 runs of the rustls-touching test binaries pass. The Rust SDK already had 0.23.46. |
+| W8.2 | `f17af4c8f` | Opus | `claude_dev/security-review-release-1.1.0-2026-10-16.md`: **0 Critical / 0 High / 0 Medium**, 2 Low, 3 Informational, all filed on `1.1.x`: <br>• R110-01 #711: with no appending proxy, the per-address limiters key on a caller-written `X-Forwarded-For`. <br>• R110-02 #712: the #675 boot count re-runs its subquery per row. <br>• R110-03 #713, R110-04 #714, R110-05 #715. <br>Found sound: the W1×W4 purge merge, the limiter merges, v99/v100, the decide route against device tokens, the serial-keyed stash, W6's six late commits, the W7 contract text. All 97 commits are signed. |
+| W8.3 | `e8bf77fd1` | Opus | **Model 2.42.0**; the five copies agree. **487 threats: 454 Mitigated / 23 Open / 10 Not applicable** (Critical 43/2/0, High 201/9/6, Medium 204/8/3, Low 39/4/1). <br>• Corrected entries: T-444, T-472, T-462, T-212, T-486, T-481, T-483, T-484, T-478, plus the RADIUS diagram description. <br>• Guides: `freeradius.md` §4 and §5; the deployment guide's "Direct, no proxy" row; the design note's header. <br>• Website: the 202/29 counts. |
+| W8.4a | `89e488e3e` | Sonnet | Version 1.1.0; done in W7 (§13.7). |
+| W8.4 | `4890fa37e` | Sonnet | CHANGELOG: <br>• `[1.0.1]` folded into **`[1.1.0] - 2026-10-16`**, every entry kept. <br>• One entry per closed issue (43). #626, #629 and #647 are marked done or superseded; #675's entry says the issue stays open. <br>• An "Upgrading to 1.1.0" subsection lists the operator-first notes. Stale 1.0.1 text is corrected in place. <br>Website: an `axiam-1-1-0` post. <br>PR #716 is on #657's shape, with 43 `Closes` lines and the eleven SDK PRs listed. |
+
+**Corrections to §13.7.**
+- **The W5 merge (`a6c6340fa`) dropped most of W5's changes to `docs/pki/freeradius.md`,** not only the Ed25519 bullet. It resolved the one conflicting hunk by taking the whole file from the plan side. The lost text was:
+  - the `fetch-crl.sh` documentation;
+  - the `ca.pem` replacement rules;
+  - the NAS half of Blast-RADIUS;
+  - the tagged placement table;
+  - R110W5-01 … -03.
+
+  W8.3 found the loss and restored the text by a three-way merge in `e8bf77fd1`. The orchestrator verified that every line W5 added is present again, except the key re-encoding recipe, which was dropped on purpose as obsolete, and the "Last verified" date, which was updated. W5's threat-model text and W5's other files were never affected.
+- **The W5 merge commit names #644 for the re-encoding recipe; it is #647** (already recorded in §13.7).
+- **`89e488e3e` carries `Co-Authored-By: Claude Sonnet 5.5`** instead of the verbatim trailer line the executor rules give. It is pushed, so it is recorded here, not amended.
+
+**Left for the maintainer.**
+- `website/src/version.ts` `SECURITY_VERIFIED_RELEASE`/`_DATE` stay at 1.0.1 / 2026-10-14. W8.3 reconciled the Security section; it did not re-derive it from source. Moving the stamp would assert a verification nobody made; it is a one-line change once the maintainer judges it.
+- #700: is an administrative `Service-Type` refused with `400` or `403`? The code and contract say 403; the spec's description says 400. Open on `1.1.x`.
+- The two stray log files at the filesystem root of the build sandbox (`/scratchpad.log`, `/scratchpad_gen.log`). They are outside the repository; the session's safety check refused their removal.
+
+**Hand-off (nothing is tagged or merged by Claude).**
+1. Merge PR #716.
+2. Mark the eleven SDK PRs ready and merge them; their drift check compares with AXIAM `main`:
+   - ilpanich/axiam-rust-sdk#131 `cde52e0`
+   - axiam-typescript-sdk#141 `a9f7140`
+   - axiam-python-sdk#98 `d5594cd`
+   - axiam-go-sdk#98 `e3bf7b3`
+   - axiam-java-sdk#114 `3da7142`
+   - axiam-php-sdk#83 `d363c66`
+   - axiam-kotlin-sdk#76 `7f0c68b`
+   - axiam-csharp-sdk#106 `1aab662`
+   - axiam-c-sdk#73 `6a60bd0`
+   - axiam-cplusplus-sdk#75 `5d9764b`
+   - axiam-swift-sdk#74 `66660bc`
+3. Tag `v1.1.0` on the platform and on all eleven SDKs.
+
+The 43 issues close with the PR, and #701 with them since its fix landed on the PR (§13.8 addendum): 44. 51 stay open on `1.1.x` (#664 … #715 but #701) and 2 on `1.0.x` (#513, #561).
+
+**§13.8 addendum — CI and review on PR #716.** Five commits fixed what CI found on the release pull request, one fixed the maintainer's review finding R110W6-04 (#701), and three fixed the atomicity audit's lockout race (item 5) and its two single-use gaps (items A and B), which the maintainer decided to fix before the tag. Two more fixed the audit's DCR/CIMD quota race (item 6) and its mailed-token cap race (item 7), under the same decision, and four more its remaining races (items 8 – 11), with one more for two leftovers of item 7. All are signed and pushed to `claude/release-1.1.0`; the three `sdks/openapi.json` regenerations those fixes needed (`2ee7b8669`, `ae5f159d5`, `7ab0488b0`) are listed in the CHANGELOG, not here.
+
+| Commit | What failed | Root cause | Fix |
+|---|---|---|---|
+| `39493eff8` | Clippy on Rust 1.99: `result_large_err`. | `GateRefusal` was 152 bytes; the lint's threshold is 128. | `GateRefusal::missing` is boxed. The type is now 120 bytes. |
+| `e9e7cb93a` | E2E nav-reach matrix, `nav-reach.spec.ts:197`. | The `/network` route that W6.8 added was missing from `NAV_DESTINATIONS`. | One row in `frontend/e2e/helpers/matrix.ts`. |
+| `057a9c5a2` | CodeQL `rust/cleartext-logging` (high), at `certificate_test.rs:1502`. | Assertion messages formatted certificate subjects, fingerprints, key-bearing bodies, client secrets and token responses. | The messages in 10 test files no longer format them. The assertions are unchanged. <br>*Follow-up:* #717 (`vault_ca_key_store_test.rs`, which is outside the release's change list). |
+| `4ec6aca7b` | "No space left on device" in the Test job and the cargo-llvm-cov job. | After `cargo test --workspace`, `target/` was 104 GB on a 145 GB runner. | • More preinstalled toolchains are freed. <br>• `ci.yml` drops test executables that have already run. <br>• `coverage.yml` cleans the profraw files and instrumented binaries after the Coveralls upload. <br>Measured afterwards: 117 GB free. |
+| `67bc4c464` | `network_routes_test` got 429 instead of 409 or 200. It failed 3 runs in 30 locally, whenever a run crossed a minute boundary. | The shared rate-limit counter seeds a cold entry: for a key first seen mid-minute, up to 90 % of a limit of 20 or more. | The contract tests turn the shared counter off. The limiter test keeps both layers. <br>*Follow-up:* #718. The same seed affects production admins of every 30/min family; whether to change it is a maintainer decision. |
+| `6ef82125f` | Maintainer's review (P2), R110W6-04 / #701, widened by the orchestrator's atomicity audit of `f1b4468f6`. | The network gate decides a role write on reads it makes before the write. SurrealDB 3.3.4 detects only write-write conflicts, so two writes to one role that touch disjoint edges both commit. That allows five races: rule 2 (a grant racing a group assignment), H6 (a self-assignment racing a `network:join` grant), rule 1 (`is_global`), rule 3 (`inherit: false` racing a deny), and a revoke that deletes a deny its gate never saw. | • Schema v101 adds `role.grant_epoch` and `role.holder_epoch`. <br>• The gate reads both epochs before anything else about the role and returns them in `GateClearance::role_claim`. <br>• The `*_claimed` writes compare the claim inside their transaction and write the role row. A lost race gets `409 stale_version` and a `network_role.*_refused` audit row. <br>• A revoke is also conditional on the effect its gate read. <br>• Rule 2 is re-checked inside the transaction, and the boot reconcile withholds a network grant to a group-held super-admin. <br>• Five race tests on `surrealkv` use a barrier after the gate. With the claim disabled, four of them fail. They passed 20 of 20 runs. <br>• T-481 is corrected and stays Open, for the writer's own rights and a binding's account. The OpenAPI document is unchanged. |
+| `5e3fc1cb0` | Atomicity audit item A (Medium): an email-verification link verified whatever address the account had moved to since it was minted. | The token named an account, not an address, and `verify_email` consumed it, read the user and wrote `email_verified_at` in three steps. An address change revoked no link, so a reset link mailed to the old address also survived it. | • Schema v102 adds `email_verification_token.email`; the token is bound to the address it is mailed to. <br>• `redeem_email_verification` consumes the token and verifies the address in one transaction, `WHERE email = <the token's address> AND email_verified_at IS NONE`. <br>• Every email change deletes the user's unconsumed verification and reset tokens in the same transaction. <br>• Tokens minted before the upgrade are refused (CHANGELOG upgrade note). <br>• Tests: the route-level attack in `user_test`, and a `surrealkv` race of a redemption against the change, 20 of 20 runs. |
+| `8e7946d7a` | Atomicity audit item 5 (Low): concurrent guesses at threshold − 1 let a correct one clear a lock committed after its read and get a session. | `login` checked the lock on its read, before the verify, and the success path reset the counter and the lock unconditionally. T-36 claimed the TOCTOU window was removed, but only the increment was atomic. | • `admit_unless_locked` resets the counter only `WHERE locked_until IS NONE OR locked_until <= time::now()`. When nothing matches, the sign-in fails as `InvalidCredentials` and nothing is issued. <br>• It covers password, OPAQUE, directory and JIT sign-ins. gRPC `ValidateCredentials` asks again after its verify. <br>• Test: `lockout_race_test` on `surrealkv`, 20 of 20 runs. |
+| `c7f0984da` | Atomicity audit item B (Low): a WebAuthn assertion could be replayed within the state token's 300 s, and a parallel double-submit opened two sessions. The signature counter was never stored. | The challenge travels in a stateless token, and nothing recorded the token as used. | • The state token carries a `jti`. It is spent in `oauth2_proof_replay` (kind `webauthn_assertion`, schema v102) when an assertion verifies. <br>• `webauthn_credential.sign_count` is stored and must increase, or both counters be zero, compared in the write. <br>• Test: `webauthn_single_use_test` with a software authenticator on `surrealkv`: a replay is refused, and a double-submit opens one session. 20 of 20 runs. |
+| `625fa3d6a` | Atomicity audit item 6 (Low): registrations sent together exceeded `dcr_max_clients`, and so did first CIMD appearances of different documents. | The handler counted the tenant's rows and created in a later statement (CIMD: counted before the fetch, upserted after it). Every racer counted `max - 1`; T-272 had accepted the overshoot as a residual. | • Schema v103 adds `tenant.client_quota_epoch`. <br>• The DCR create and the CIMD first appearance are one transaction: re-count, `THROW` at the ceiling (the same `403` / audited refusal, nothing written), write the epoch on the tenant row, create. Overlapping creates conflict there and the loser re-counts. The earlier counts stay as early refusals. <br>• Test: `client_quota_race_test` on `surrealkv`, six creates at `max - 1` held after their counts: exactly one lands. 20 of 20 runs. |
+| `56d3a523a` | Atomicity audit item 7 (Low): parallel password-reset and verification-resend requests exceeded the daily caps, and a reset burst left several live links. | `count_today` was read before the mint; the invalidation of older reset links and the new token were separate statements. | • Schema v104 adds `user.mail_epoch`. <br>• `replace_within_daily_cap` (reset: re-count, invalidate, create) and `create_within_daily_cap` (verification) are one transaction that writes the epoch on the user row and `THROW`s at the cap. Responses are unchanged (the same `200` on the public endpoints). <br>• Test: `mail_cap_race_test` on `surrealkv`, six requests through the real services held after their counts: exactly the cap's worth mint, one reset link live. 20 of 20 runs. |
+| `fdd54bd67` | Atomicity audit item 8 (Low): two re-parents that each closed half of a loop both committed and made a cycle in the resource hierarchy. | The cycle check walked the new parent's ancestors before the write; the transaction claimed only the new parent. | • Schema v105 adds `tenant.hierarchy_epoch`. <br>• A re-parent onto a new parent writes the epoch and walks the ancestors inside its own transaction; the loser of an overlap is retried and refused as a cycle (the existing `400`). Creates, `/network` writes and detaches cannot close a cycle and claim nothing. <br>• Test: `hierarchy_cycle_race_test` on `surrealkv`. 20 of 20 runs; fails with the tenant-row write removed. |
+| `994a78b8e` | Atomicity audit item 9 (Low): two administrator patches of one OAuth2 client, each validated against the row before the other, both landed. | Every rule re-read the row; the write set only the patch's fields; the merged result of both was never validated. | • One read; every rule checked against it; `update_if_unchanged` writes with `updated_at = $read` in the `WHERE`, else `409`. Server-side precondition: no request member, no SDK change. <br>• Test: `client_patch_race_test` on `surrealkv`. 20 of 20 runs; fails with the guard removed. |
+| `7d0bf96f6` | Atomicity audit item 10 (Low): enabling a directory and making `opaque_mode` `required` both landed, locking every directory account out. | Each side refused the other on a read made before its write, and the writes touch different rows. | • Schema v106 adds `tenant.opaque_directory_epoch`, read before the rule's read and compared and moved by the write (organization baseline: every live tenant, and refused if a tenant appeared). `409` "changed since read"; the admin console words it as the Network page does. <br>• Not fixed, needs a decision: the coverage count vs. a user create (a create is `PendingVerification`, the count reads `Active` only). <br>• Test: `opaque_directory_race_test` on `surrealkv`. 20 of 20 runs; fails with the compare removed. |
+| `a2942fa2d` | Atomicity audit item 11 (Low): a deletion cancel at the deadline was answered "cancelled" while the purge sweep erased (or stripped) the account. | Cancel and sweep decided on earlier reads; `mark_cancelled`, `clear_deletion_pending`, `anonymize_user` and `mark_completed` were unconditional. | • Schema v107 adds `account_deletion.purge_claimed_at`, the sweep's claim before its first destructive step. The cancel is one conditional transaction; `409` once the erasure has started. `mark_cancelled`/`mark_completed` are conditional. <br>• Test: `deletion_cancel_race_test` on `surrealkv`. 20 of 20 runs; fails with the claim check removed. |
+| `42b940339` | Item 7 leftovers (Low): each resend left two live verification tokens, and the expiry sweep gave an account its daily cap back. | The resend's mail minted its own uncapped token; `delete_expired` deleted the day's dead tokens the caps count. | • The mail carries the capped mint's token. The sweep keeps tokens minted since UTC midnight. <br>• Tests: `email_verification_test`, `mail_token_sweep_test`. |
+
+**Security Scan, not fixed in the PR.** Three RustSec advisories on `zip` 8.6.0 (RUSTSEC-2026-0367 high, -0368, -0369 critical) were published on 2026-10-16 at 19:44 UTC. `zip` is a `[build-dependencies]` entry of `utoipa-swagger-ui` 10.0.1 (the latest release, `zip = "8.6"`), so there is no upgrade path, and `main` is red on the same three. The build script does not call `extract()`, and none of it ships in the binary. The decision, to ignore the advisories with a rationale or to fork or vendor `utoipa-swagger-ui`, is the maintainer's. It was posted on the PR on 2026-10-17 and is open at the time of writing.
+
+Final CI state on `67bc4c464`: every check is green except Security Scan, including Test, cargo-llvm-cov, E2E, CodeQL Analyze (rust) and the runtime smoke.
+
+### 13.9 Atomicity remediation and close-out
+
+This section closes the release record. It covers the work on `claude/release-1.1.0` after the first §13.8 addendum (`47197dcf0`), up to `74ca43f90`. The §13.8 addendum already has one row per fix, with root cause and tests. This section records why the work was done, what was decided, and what is left. All commits listed here are signed and pushed.
+
+**Trigger.**
+- On 2026-10-17 the maintainer posted a P2 review comment on #716 ("Make network-role checks and assignments atomic"), from a private review of `f1b4468f6`. It was R110W6-04 (#701, Low in the W6 F4 review): the network gate's check runs before its write, not inside it.
+- The maintainer asked: **"is RADIUS the only one?"** To answer, the orchestrator ran a read-only atomicity audit of the whole tree at `f1b4468f6`.
+
+**What the audit found.**
+- **The guarantee.** SurrealDB 3.3.4 gives snapshot isolation with write-write conflict detection only, on every engine:
+  - A plain read is not validated at commit. So **write skew passes**: two transactions that read the same state and write different rows both commit.
+  - surrealkv validates only `SELECT … FOR UPDATE` reads on record ids, and AXIAM never uses them.
+  - RocksDB is assumed to behave the same. This was not verified.
+  - Outside `BEGIN … COMMIT`, each statement is its own transaction. So a guard statement placed before a write is not atomic with it.
+- **The findings:**
+
+| Group | Findings | Count |
+|---|---|---|
+| Network-gate races | The gate decides a role write on reads it makes before the write (R110W6-04, #701). The fix names five interleavings: rule 2, H6, rule 1, rule 3, and a revoke that deletes a deny its gate never saw. | 4 |
+| Other races | 5 lockout reset · 6 DCR/CIMD quota · 7 mailed-token daily caps · 8 resource-hierarchy cycle · 9 OAuth2 client patch · 10 enabled directory vs `opaque_mode = required` · 11 deletion cancel vs purge sweep | 7 |
+| Single-use gaps (not races) | A (Medium): an email-verification token is not bound to an address · B (Low): a WebAuthn assertion can be replayed, and its signature counter is never stored | 2 |
+
+**Decision.** **"Everything in #716"**, by the maintainer, 2026-10-17. Every finding is fixed on this branch before the tag. None is deferred to `1.1.x`.
+
+**The fix.** Every fix uses the house pattern, which is already in the tree (`9dff2aa97`, `122b9ea92`, `claim_parent` for #308, `expected_updated_at` in `scim_target.rs`):
+- **A claimed row.** Both conflicting writers write one common row: an epoch or version on the role, tenant, user or request row. Each write compares that value, inside its own transaction, with the value it read before deciding. If the value has moved, the write `THROW`s.
+- **An in-transaction re-check.** The rule is checked again inside the same transaction.
+- **The effect.** Two overlapping writes now conflict on the claimed row. The loser is retried on a fresh snapshot, fails the compare, and gets a `409` or the existing refusal.
+
+Every race test runs on `surrealkv` and holds both sides at a barrier after their reads, 8 rounds a run, and passed **20 of 20 runs**. Where the last column says yes, the test was also run with the claim or guard removed and failed.
+
+| Batch | Commits | What | Schema | Fails with the claim removed |
+|---|---|---|---|---|
+| #701 | `6ef82125f` (docs `97e6e9c7b`) | The gate reads `role.grant_epoch` and `role.holder_epoch` first. The `*_claimed` writes compare and move them. Rule 2 is re-checked inside the transaction. A lost race gets `409 stale_version` and a `network_role.*_refused` audit row. | v101 | yes, 4 of 5 tests (rule 2 is also re-checked inside the transaction) |
+| A, 5, B | `5e3fc1cb0`, `8e7946d7a`, `c7f0984da` (docs `87a84cf41`) | **A:** the token is bound to the address it was mailed to, and redeemed in one conditional transaction; an email change deletes unconsumed verification and reset links. <br>**5:** the success path clears the failure counter only `WHERE` no lock is in force. <br>**B:** the state token's `jti` is spent in the replay store, and `sign_count` is compared in the write. | v102 | not recorded |
+| 6, 7 | `625fa3d6a`, `56d3a523a` (docs `d1377607f`) | Count, `THROW` at the ceiling, and create, all in one transaction that writes `tenant.client_quota_epoch` (6) or `user.mail_epoch` (7). | v103, v104 | yes |
+| 8 – 11 | `fdd54bd67`, `994a78b8e`, `7d0bf96f6`, `a2942fa2d` (docs `e8722b668`) | **8:** `tenant.hierarchy_epoch`, with the ancestor walk inside the re-parent's transaction. <br>**9:** `updated_at = $read` in the patch's `WHERE`, else `409`. <br>**10:** `tenant.opaque_directory_epoch`, else `409`. <br>**11:** `account_deletion.purge_claimed_at` is the sweep's claim, and the cancel is conditional (`409` once the erasure has started). | v105, v106, v107 (none for 9) | yes |
+| Follow-ups | `42b940339`, `393b1e369` | Item 7 leftovers: one token per verification mail, and the expiry sweep keeps the tokens minted today. Item 8's review: resource edge writes bind their record ids instead of formatting them into the query. | — | n/a |
+
+The schema moves from **v94 to v107**. Migrations v101 – v107 are additive and backfill nothing.
+
+**The stack-overflow fix, `5895af23b`.**
+- **What failed.** CI's "OpenLDAP + Samba AD" job aborted `openldap_sync_deactivates_a_vanished_user` with a stack overflow, from `97e6e9c7b` on.
+- **Why.** The #701 epoch move, `UPDATE role SET grant_epoch = (grant_epoch ?? 0) + 1`, evaluated its `+` inside the embedded engine's per-document write path. That path ran inline under `seed_default_roles` → `grant_to_role`, and used about 1.5 MB of the 2 MiB thread stack.
+- **The fix.** The next epoch value is computed in a `LET`, from the epochs the same transaction already read, and the `UPDATE` assigns the parameter. The values written and the conflict behaviour are unchanged. `directory_e2e`'s scenario macro also boxes each scenario future, for stack margin.
+
+**Maintainer decisions (2026-10-17).**
+
+| Decision | Commit | What it means |
+|---|---|---|
+| Ignore the three `zip` 8.6.0 advisories (RUSTSEC-2026-0367, -0368, -0369), with a rationale | `f1b4468f6` | The ignores are in `deny.toml` and in CI's `cargo audit` input. <br>• `zip` is only a build dependency of `utoipa-swagger-ui` 10.0.1, which has no newer release. <br>• Its build script never calls `extract()`. <br>• Nothing of it ships in the binary. <br>The ignores are removed when `utoipa-swagger-ui` moves to `zip` ≥ 9 (#719). This replaces the "Security Scan, not fixed in the PR" paragraph of §13.8. |
+| The OPAQUE `required` coverage count stays a point-in-time check | — (documented in `7d0bf96f6`'s CHANGELOG entry) | See below. |
+| The generic role routes' `409 stale_version` stays undocumented in the contract | — | See below. Left as the maintainer's call. |
+
+**The OPAQUE coverage count.** When `opaque_mode` is switched to `required`, `count_active_users_without_credential` counts the tenant's `Active` users that have no OPAQUE record, and refuses the switch if there are any. Nothing re-checks this later. An account that becomes `Active` after the switch without a record is let through. Two examples:
+- a `PendingVerification` account created under `disabled` or `optional` that verifies its address after the switch;
+- a `Locked` or `Inactive` account that is re-enabled after the switch.
+
+This is what the code does with such an account:
+- `POST /auth/login` answers **`403 opaque_required`**. Under `required` it does this for the whole tenant, before any credential is read.
+- `POST /auth/opaque/login/start` answers `200` with the decoy exchange, as it does for an unknown name. The finish answers **`401` invalid credentials**, the same answer as a wrong password. Neither the user nor an administrator is told why.
+- **The way back is a password reset.** Under `required`, the reset confirmation must carry an OPAQUE registration record (`validate_enrollment` refuses a request without one), so completing the reset enrols the account.
+- Accounts created under `required` are not affected, because creation without a record is refused. Directory accounts are not affected either, because an enabled directory and `required` cannot both be in force (item 10).
+
+**The generic role routes' `409 stale_version`.** Since `6ef82125f`, the ten role and permission handlers call the `*_claimed` writes. So a grant, revoke, assignment, unassignment, `is_global` update or role delete that loses a race on the same role answers `409 conflict` with `reason_code: stale_version`. This happens on the generic `/api/v1/roles…` routes, not only on the network routes. Contract §36 does not describe these routes, and `sdks/openapi.json` was not changed for it. Whether 1.63 documents it is the maintainer's call. In the same change, a role rename to a name the tenant already has became `409` (it was a `500`).
+
+**CI fixes after the first addendum.**
+
+| Commit | What failed | Fix |
+|---|---|---|
+| `5367a5ba9` | `cargo audit`: RUSTSEC-2026-0373 in `ammonia` 4.2.3 (CSS `url()` matched case-sensitively), reached only through `surrealdb-runtime` | `ammonia` 4.2.4; a `Cargo.lock` change only, with no ignore |
+| `867fdcfcc` | "Build (SAML off)" with `-Dwarnings`, at `7ab0488b0`: an unused trait import in `handlers/gdpr.rs` after item 11 | The import is removed |
+| `74ca43f90` | CodeQL: 19 alerts on test code (`rust/hard-coded-cryptographic-value`, `rust/cleartext-logging`) | Test passwords and keys come from `axiam_test_support` or are random per process. Assertion messages carry a label, not the value. No assertion condition changed. |
+| `5895af23b` | The OpenLDAP + Samba AD stack overflow | Described above |
+| `2ee7b8669`, `ae5f159d5`, `7ab0488b0` | The spec drift check, after items 9, 10 and 11 added `409`s (and, for 11, `403` and `404`) | `sdks/openapi.json` regenerated three times: response descriptions only, no request or schema change |
+
+**The spec and the SDKs.**
+- **The spec.** The final digest is **`sha256:7c3a5091…c8a1`**, from `7ab0488b0`. It does not change through `74ca43f90`. `sdks/CONTRACT.md`, `sdks/management-registry.json` and `proto/` have not changed since `e8722b668`.
+- **The SDKs.** Each SDK re-vendored AXIAM `e8722b668`. These are the final heads of `claude/contract-1.62`. All eleven PRs are still drafts. On 2026-10-17 every check run on each head was success or skipped.
+
+| SDK | PR | Head |
+|---|---|---|
+| Rust | ilpanich/axiam-rust-sdk#131 | `aa66990` |
+| TypeScript | ilpanich/axiam-typescript-sdk#141 | `35eaa46` |
+| Python | ilpanich/axiam-python-sdk#98 | `f4e9340` |
+| Go | ilpanich/axiam-go-sdk#98 | `d72a11f` |
+| Java | ilpanich/axiam-java-sdk#114 | `d62b225` |
+| PHP | ilpanich/axiam-php-sdk#83 | `60dfa19` |
+| Kotlin | ilpanich/axiam-kotlin-sdk#76 | `54fefb1` |
+| C# | ilpanich/axiam-csharp-sdk#106 | `f798cec` |
+| C | ilpanich/axiam-c-sdk#73 | `51084ec` |
+| C++ | ilpanich/axiam-cplusplus-sdk#75 | `faecdbf` |
+| Swift | ilpanich/axiam-swift-sdk#74 | `43f4296` |
+
+**Corrections to §13.8:**
+- **Merge order.** The hand-off says the SDK drift check compares with AXIAM `main`. It does not. Each SDK's drift check compares its vendored files with its own generated output. So the SDK PRs do not wait on `main`, and they can merge before or after #716. Merging #716 first is still recommended, so that `main` carries what the SDKs vendor.
+- **The SDK heads.** The hand-off's heads, including the Rust `cde52e0`, are superseded by the table above.
+
+**Issues filed during close-out (milestone `1.1.x`).**
+- **#717:** `vault_ca_key_store_test` failure messages print the string they assert holds no secret. This is the follow-up to `057a9c5a2`.
+- **#718:** the shared rate-limit counter's cold-entry seed leaves a 30/min admin family as few as 3 writes late in a minute. This is the follow-up to `67bc4c464`.
+- **#719:** drop the `zip` audit ignores once `utoipa-swagger-ui` moves to `zip` ≥ 9.
+
+**Issue counts.**
+- **44 issues close with #716:** the 43 on its `Closes` lines, and #701.
+- **`1.1.x` has 55 open issues today.** After the merge, 54 stay open: #664 … #715 except #701, plus #717 – #719.
+- **`1.0.x`:** 2 stay open (#513, #561).
+
+**Still open for the maintainer.**
+- **Pin the SurrealDB image.** `surrealdb/surrealdb:v3` is a floating tag in `docker/docker-compose.{prod,minimal,dev,e2e}.yml`, `k8s/surrealdb/statefulset.yml`, `ci.yml` and `coverage.yml`. The audit's guarantee was read from 3.3.4, and every fix above relies on write-write conflict detection. Pin a digest, or a 3.3.x tag, and re-check the guarantee when it moves.
+- **T-481's residuals.** T-481 stays Open. The gate still reads the writer's own rights and a certificate binding's account without a claim.
+- **#718:** whether to change the cold-entry seed for production admins.
+- **#700:** is an administrative `Service-Type` refused with `400` or `403`?
+- The items in §13.8's "Left for the maintainer" still stand: the `SECURITY_VERIFIED_*` stamp and the two stray log files.
+
+**CI on the final head.** CI on `74ca43f90`, and on the commit that adds this section, was pending at the time of writing. The orchestrator records the result on the PR.
+
+**Process note.** During the CodeQL cleanup (`74ca43f90`), the executor once ran a command with the sandbox disabled when it was not needed. This had no effect on the repository or on any pushed commit. It is recorded here for transparency.
 
 ---
 

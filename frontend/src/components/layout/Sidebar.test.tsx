@@ -51,7 +51,7 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Users/ })).toBeInTheDocument();
     expect(screen.getByText("AXIAM")).toBeInTheDocument();
-    expect(screen.getByText("AXIAM v1.0.1")).toBeInTheDocument();
+    expect(screen.getByText("AXIAM v1.1.0")).toBeInTheDocument();
   });
 
   it("marks the current route's link as active with aria-current", () => {
@@ -81,6 +81,23 @@ describe("Sidebar", () => {
 
     const usersLink = screen.getByRole("link", { name: /Users/ });
     expect(usersLink).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("shows Network access to a holder of network:read and disables it otherwise", () => {
+    useAuthStore.setState({ user: { ...limitedUser, permissions: ["network:read"] } });
+    const { unmount } = renderSidebar("/network");
+    const link = screen.getByRole("link", { name: /Network access/ });
+    expect(link).not.toHaveAttribute("aria-disabled");
+    expect(link).toHaveAttribute("href", "/network");
+    expect(link).toHaveAttribute("aria-current", "page");
+    unmount();
+
+    useAuthStore.setState({ user: limitedUser });
+    renderSidebar("/dashboard");
+    expect(screen.getByRole("link", { name: /Network access/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 
   it("prevents navigation clicks on disabled items", async () => {

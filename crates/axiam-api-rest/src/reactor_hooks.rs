@@ -1,8 +1,9 @@
-//! The three REST-side reactor hooks (X1 / R2.2).
+//! The five REST-side reactor hooks (X1 / R2.2, and RADIUS D4's two).
 //!
 //! `login.post_auth` lives in `axiam-auth` and `token.pre_issue` in
 //! `axiam-oauth2`, because those are the crates that own the operation. The
-//! other three — `user.pre_create`, `user.pre_update` and `grant.pre_assign` —
+//! other five — `user.pre_create`, `user.pre_update`, `grant.pre_assign` and the
+//! network pair `network.pre_profile_write` / `network.pre_segment_write` —
 //! have no service layer between the handler and the repository, so the handler
 //! *is* the operation and this module is where they run.
 //!
@@ -208,6 +209,65 @@ pub async fn grant_pre_assign(
         // answer nobody can apply.
         ReactorOutcome::Mutate { .. } => Err(impossible("roles:assign", "mutate")),
         ReactorOutcome::RequireMfa => Err(impossible("roles:assign", "require_mfa")),
+    }
+}
+
+/// Run `network.pre_profile_write` — the four-eyes hook on a RADIUS reply
+/// profile (create, replace, delete). Veto only.
+///
+/// Called by the network handlers **after** the write gate has cleared the
+/// write and **before** the repository write: the approver is asked about a
+/// write the writer may make, never about one the gate refuses (a refusal is
+/// audited on its own), and a rule that ran after the profile existed would be
+/// reviewing a placement devices already have.
+pub async fn network_pre_profile_write(
+    gate: &SharedReactorGate,
+    tenant_id: Uuid,
+    payload: serde_json::Value,
+) -> Result<(), AxiamApiError> {
+    veto_only(
+        gate,
+        tenant_id,
+        reactor_events::NETWORK_PRE_PROFILE_WRITE,
+        "network:profiles_write",
+        payload,
+    )
+    .await
+}
+
+/// Run `network.pre_segment_write` — the four-eyes hook on a network segment
+/// (create, replace, delete). Veto only; called as
+/// [`network_pre_profile_write`] is.
+pub async fn network_pre_segment_write(
+    gate: &SharedReactorGate,
+    tenant_id: Uuid,
+    payload: serde_json::Value,
+) -> Result<(), AxiamApiError> {
+    veto_only(
+        gate,
+        tenant_id,
+        reactor_events::NETWORK_PRE_SEGMENT_WRITE,
+        "network:segments_write",
+        payload,
+    )
+    .await
+}
+
+/// The shared body of a veto-only site: `Allow` proceeds, `Deny` refuses with
+/// the reactor's reason, and an answer the event's registry entry says cannot
+/// occur (`mutable: false`, no step-up) refuses rather than being discarded.
+async fn veto_only(
+    gate: &SharedReactorGate,
+    tenant_id: Uuid,
+    event: &'static str,
+    action: &str,
+    payload: serde_json::Value,
+) -> Result<(), AxiamApiError> {
+    match gate.intercept(tenant_id, event, payload).await {
+        ReactorOutcome::Allow => Ok(()),
+        ReactorOutcome::Deny { reason } => Err(veto(action, reason)),
+        ReactorOutcome::Mutate { .. } => Err(impossible(action, "mutate")),
+        ReactorOutcome::RequireMfa => Err(impossible(action, "require_mfa")),
     }
 }
 
@@ -443,5 +503,44 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    /// Both network hooks are veto-only and fail the same way the grant hook
+    /// does: an allow permits, a deny refuses with the reactor's reason, and an
+    /// answer they cannot honour refuses.
+    #[tokio::test]
+    async fn the_network_hooks_veto_and_refuse_what_they_cannot_honour() {
+        let tenant = Uuid::new_v4();
+        for profile_hook in [true, false] {
+            let hook = |gate: SharedReactorGate, tenant: Uuid, payload: serde_json::Value| async move {
+                if profile_hook {
+                    network_pre_profile_write(&gate, tenant, payload).await
+                } else {
+                    network_pre_segment_write(&gate, tenant, payload).await
+                }
+            };
+            hook(noop_reactor_gate(), tenant, serde_json::json!({}))
+                .await
+                .expect("the no-op gate allows");
+
+            let denied = hook(
+                gate(ReactorOutcome::Deny {
+                    reason: "second approver missing".into(),
+                }),
+                tenant,
+                serde_json::json!({}),
+            )
+            .await
+            .expect_err("a veto refuses");
+            assert!(denied.0.to_string().contains("second approver missing"));
+
+            for impossible in [patch(&[("vlan_id", "99")]), ReactorOutcome::RequireMfa] {
+                assert!(
+                    hook(gate(impossible), tenant, serde_json::json!({}))
+                        .await
+                        .is_err()
+                );
+            }
+        }
     }
 }

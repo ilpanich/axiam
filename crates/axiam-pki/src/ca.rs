@@ -34,7 +34,7 @@ use crate::cert::{
     serial_hex,
 };
 use crate::crl::CrlDistribution;
-use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::crypto::{compute_fingerprint, generate_keypair, private_key_pem};
 use crate::subject::subject_common_name;
 
 pub use crate::config::PkiConfig;
@@ -172,12 +172,14 @@ impl<R: CaCertificateRepository> CaService<R> {
         let (private_key_pem, public_cert_pem, fingerprint) =
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
                 let key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&key_pair)?;
 
                 let mut params = CertificateParams::new(Vec::<String>::new())
                     .map_err(|e| AxiamError::Certificate(e.to_string()))?;
                 params.distinguished_name.push(DnType::CommonName, &subject);
                 params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+                // #653: rcgen's default is a hash of the public key.
+                params.serial_number = Some(crate::serial::random_serial());
                 params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
                     .expect("valid timestamp");
                 params.not_after = time::OffsetDateTime::from_unix_timestamp(not_after_ts)
@@ -246,15 +248,38 @@ impl<R: CaCertificateRepository> CaService<R> {
         input: CreateCaCertificate,
     ) -> AxiamResult<GeneratedCaCertificate> {
         let store = self.custodians.default_store()?;
-        let intermediate = (!input.issue_from_root).then(|| IntermediateSpec {
-            subject: input
-                .intermediate_subject
-                .clone()
-                .unwrap_or_else(|| format!("{} Intermediate Authority", input.subject)),
-            validity_days: input
-                .intermediate_validity_days
-                .unwrap_or(input.validity_days),
-        });
+        let intermediate = if input.issue_from_root {
+            None
+        } else {
+            let subject = match &input.intermediate_subject {
+                // Already through `subject_common_name` in `generate`.
+                Some(given) => given.clone(),
+                None => {
+                    // #649 — the one name AXIAM composes itself. The root's
+                    // subject passed the 64-character bound; the root's subject
+                    // plus this suffix might not, and would otherwise reach the
+                    // custodian (and the row) as an over-long common name.
+                    let derived = format!("{} Intermediate Authority", input.subject);
+                    if derived.chars().count() > crate::subject::MAX_COMMON_NAME_CHARS {
+                        return Err(AxiamError::Validation {
+                            message: format!(
+                                "the default intermediate subject (the subject plus \" \
+                                 Intermediate Authority\") would exceed {} characters; give \
+                                 intermediate_subject",
+                                crate::subject::MAX_COMMON_NAME_CHARS
+                            ),
+                        });
+                    }
+                    derived
+                }
+            };
+            Some(IntermediateSpec {
+                subject,
+                validity_days: input
+                    .intermediate_validity_days
+                    .unwrap_or(input.validity_days),
+            })
+        };
 
         let generated = store
             .generate_ca(&CaGenerationRequest {
@@ -493,7 +518,7 @@ impl<R: CaCertificateRepository> CaService<R> {
                     })?;
 
                 let key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&key_pair)?;
 
                 let mut params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
                 params.use_authority_key_identifier_extension = true;
@@ -942,6 +967,12 @@ impl<R: CaCertificateRepository> CaService<R> {
     /// deleted, its serial is a stored certificate like a leaf's, and the
     /// parent's mount accepts it; where the mounts differ (the usual two-tier
     /// organization CA) the order changes nothing.
+    ///
+    /// A release that failed here (logged and swallowed) or never ran (the
+    /// process died after the revocation) leaves that issuer in the parent's
+    /// mount, and Vault then refuses every forward. The sweep recognises the
+    /// refusal and runs the release again before it forwards
+    /// ([`forward_ca_revocation_releasing`], R101W1-04).
     pub async fn revoke(
         &self,
         organization_id: Uuid,
@@ -1111,7 +1142,7 @@ pub(crate) async fn forward_ca_revocation<R: CaCertificateRepository>(
             ca_id = %revoked.id,
             organization_id = %revoked.organization_id,
             parent_ca_id = ?revoked.parent_ca_id,
-            reason = %reason,
+            reason = %crate::vault_forward::sanitise_reason(&reason),
             "CA revoked in AXIAM but not yet on its parent's revocation list in Vault, which \
              therefore does not name it; the cleanup job retries"
         );
@@ -1168,6 +1199,105 @@ pub(crate) async fn forward_ca_revocation<R: CaCertificateRepository>(
     CustodianRevocation::Forwarded
 }
 
+/// The refusal Vault's PKI engine answers `revoke` with for a serial that is
+/// still an issuer of the mount it is revoked in: "adding issuer (id: …) to its
+/// own CRL is not allowed" (issuers are revoked through `issuer/<ref>/revoke`).
+/// Matched case-insensitively and without the issuer's id, which is the part
+/// that varies.
+const ISSUER_ON_ITS_OWN_CRL: &str = "to its own crl is not allowed";
+
+/// Whether `reason`, the text of a failed forward, is Vault saying the revoked
+/// CA is still an issuer in the mount it is being revoked in (R101W1-04).
+///
+/// That is the single-mount layout — a parent that signs from the mount that
+/// also holds its subordinates' issuers — and it means the release
+/// [`CaService::revoke`] makes after the revocation did not happen: the delete
+/// failed (logged and swallowed there) or the process died between the two.
+pub(crate) fn is_issuer_on_its_own_crl_refusal(reason: &str) -> bool {
+    reason.to_ascii_lowercase().contains(ISSUER_ON_ITS_OWN_CRL)
+}
+
+/// Run the custodian's release of a revoked subordinate CA again — the
+/// issuer(s) and key its own locator names, and nothing else — and say whether
+/// the custodian accepted it (R101W1-04).
+///
+/// For the sweep, when Vault refused a forward because the CA is still an issuer
+/// in the parent's mount ([`is_issuer_on_its_own_crl_refusal`]). Idempotent: the
+/// Vault store treats an issuer or key that is already gone as released, so a
+/// release that had in fact succeeded costs two `404`s and no error. Never
+/// releases a CA that is not revoked, nor one whose key is not in Vault's PKI
+/// engine (an `external` CA's key is not Vault's to delete), and gives up at
+/// `deadline`. A failure is logged and answered `false`; the forward then
+/// stays pending as it was.
+pub(crate) async fn release_revoked_ca<R: CaCertificateRepository>(
+    custodians: &CaKeyCustodians,
+    revoked: &CaCertificate,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if revoked.status != CertificateStatus::Revoked || revoked.key_custody != CaKeyCustody::VaultPki
+    {
+        return false;
+    }
+    let store = match custodians.store_for(revoked.key_custody) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(ca_id = %revoked.id, error = %e, "the revoked CA's key custodian is not available");
+            return false;
+        }
+    };
+    let key_ref = CaService::<R>::key_ref(revoked);
+    match tokio::time::timeout_at(deadline, store.delete(&key_ref)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                ca_id = %revoked.id,
+                error = %e,
+                "a revoked CA's issuer could not be removed from Vault again"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(ca_id = %revoked.id, "Vault did not answer the removal of a revoked CA's issuer in time");
+            false
+        }
+    }
+}
+
+/// [`forward_ca_revocation`] for the cleanup job's sweep, which also finishes
+/// the release a revocation left undone (R101W1-04).
+///
+/// Where the parent signs from the mount that holds its subordinates' issuers,
+/// Vault refuses to revoke a serial that is still an issuer there, so a CA whose
+/// release failed is refused at every forward. `last_error` is the sanitised
+/// reason the row recorded at its previous failed attempt. When it names that
+/// refusal the release is run again before the forward; when it does not (the
+/// request that revoked the CA records nothing on the row, and the reason is cut
+/// to 256 characters), a forward that is refused that way is followed by the
+/// release and one more forward, inside the same claim and `deadline`. Once
+/// per attempt either way: the row's claim, backoff and failure count are the
+/// caller's and unchanged.
+pub(crate) async fn forward_ca_revocation_releasing<R: CaCertificateRepository>(
+    repo: &R,
+    custodians: &CaKeyCustodians,
+    revoked: &CaCertificate,
+    last_error: Option<&str>,
+    attempts: u32,
+    deadline: tokio::time::Instant,
+) -> CustodianRevocation {
+    let refused_before = last_error.is_some_and(is_issuer_on_its_own_crl_refusal);
+    if refused_before {
+        release_revoked_ca::<R>(custodians, revoked, deadline).await;
+    }
+    let outcome = forward_ca_revocation(repo, custodians, revoked, attempts, deadline).await;
+    if !refused_before
+        && matches!(&outcome, CustodianRevocation::Pending { reason } if is_issuer_on_its_own_crl_refusal(reason))
+        && release_revoked_ca::<R>(custodians, revoked, deadline).await
+    {
+        return forward_ca_revocation(repo, custodians, revoked, attempts, deadline).await;
+    }
+    outcome
+}
+
 // ---------------------------------------------------------------------------
 // Import helpers
 // ---------------------------------------------------------------------------
@@ -1215,6 +1345,9 @@ fn intermediate_params(
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    // #653: rcgen's default is a hash of the public key, so two intermediates on
+    // one key would share a serial.
+    params.serial_number = Some(crate::serial::random_serial());
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)
         .map_err(|e| AxiamError::Certificate(format!("invalid notBefore: {e}")))?;
@@ -1350,9 +1483,19 @@ pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
             .into(),
     })?;
 
-    let common_name = csr
-        .certification_request_info
-        .subject
+    let subject = &csr.certification_request_info.subject;
+    // R110W1-02 — the name is single-valued. A `vault_pki` CA sends this very
+    // CSR to `sign-verbatim`, which copies the whole subject, and a relying
+    // party that reads the *last* common name (Go's `crypto/x509` overwrites
+    // `Subject.CommonName` with each in turn) would authenticate the holder
+    // under a name the row, which records the first, does not show.
+    if subject.iter_common_name().nth(1).is_some() {
+        return Err(AxiamError::Validation {
+            message: "the certificate signing request's subject has more than one common name"
+                .into(),
+        });
+    }
+    let common_name = subject
         .iter_common_name()
         .next()
         .and_then(|cn| cn.as_str().ok())
@@ -1361,6 +1504,36 @@ pub(crate) fn inspect_csr(pem: &str) -> AxiamResult<CsrFacts> {
         .ok_or_else(|| AxiamError::Validation {
             message: "the certificate signing request has no common name in its subject".into(),
         })?;
+    // #649 — the other way a name reaches a certificate. The name is the CSR's
+    // and is not rewritten (a remote signer signs these very bytes), so it is
+    // refused, not repaired, by the rules a request's `subject` meets.
+    crate::subject::check_common_name_value(
+        &common_name,
+        "the certificate signing request's common name",
+    )?;
+    // R110W1-02 — and so is every other attribute of the subject. The local
+    // signing paths keep nothing of the subject but the common name (the DN is
+    // rebuilt from it), so an `O=`/`OU=` is dropped there; but `sign-verbatim`
+    // writes them into the certificate as given, so a newline or a bidi
+    // override in an `OU` would reach an issued subject exactly as #649 closed
+    // for the CN. Refused on every custodian, so the same CSR is not accepted
+    // on one and refused on another, by the same value rules and not by a
+    // narrower list: an ordinary `openssl req -subj /C=…/O=…/CN=…` request,
+    // which is signed today, keeps being signed. A value that is not a string
+    // type cannot be checked and is refused (fail closed).
+    for attr in subject.iter().flat_map(|rdn| rdn.iter()) {
+        if attr.attr_type() == &x509_parser::oid_registry::OID_X509_COMMON_NAME {
+            continue;
+        }
+        let what = format!(
+            "the certificate signing request's subject attribute {}",
+            attr.attr_type().to_id_string()
+        );
+        let value = attr.as_str().map_err(|_| AxiamError::Validation {
+            message: format!("{what} is not a text string"),
+        })?;
+        crate::subject::check_common_name_value(value, &what)?;
+    }
 
     let spki = &csr.certification_request_info.subject_pki;
     let (key_algorithm, rsa_modulus_bits) = match spki.algorithm.algorithm.to_id_string().as_str() {

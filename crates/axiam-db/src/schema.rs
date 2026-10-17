@@ -512,6 +512,51 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_user_binding",
         sql: SCHEMA_V98,
     },
+    Migration {
+        version: 99,
+        name: "certificate_serial_index",
+        sql: SCHEMA_V99,
+    },
+    Migration {
+        version: 100,
+        name: "network_segments_reply_profiles",
+        sql: SCHEMA_V100,
+    },
+    Migration {
+        version: 101,
+        name: "role_grant_holder_epochs",
+        sql: SCHEMA_V101,
+    },
+    Migration {
+        version: 102,
+        name: "single_use_bindings",
+        sql: SCHEMA_V102,
+    },
+    Migration {
+        version: 103,
+        name: "tenant_client_quota_epoch",
+        sql: SCHEMA_V103,
+    },
+    Migration {
+        version: 104,
+        name: "user_mail_epoch",
+        sql: SCHEMA_V104,
+    },
+    Migration {
+        version: 105,
+        name: "tenant_hierarchy_epoch",
+        sql: SCHEMA_V105,
+    },
+    Migration {
+        version: 106,
+        name: "tenant_opaque_directory_epoch",
+        sql: SCHEMA_V106,
+    },
+    Migration {
+        version: 107,
+        name: "account_deletion_purge_claim",
+        sql: SCHEMA_V107,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4799,6 +4844,312 @@ DEFINE INDEX IF NOT EXISTS idx_certificate_tenant_user ON TABLE certificate \
     FIELDS tenant_id, user_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v99 — a certificate's serial is stored, and unique under its issuer (#653)
+// -----------------------------------------------------------------------
+//
+// No column held a serial: it lived only inside `public_cert_pem`, so nothing
+// could refuse two certificates one CA issued under the same serial. Until
+// #653 that was easy to cause — rcgen derived the serial from the public key,
+// so a CSR signed twice produced two certificates with one serial (RFC 5280
+// §4.1.2.2 forbids it, and a CRL entry revokes both). Issuance now draws 20
+// CSPRNG octets, and the repositories record the serial of the certificate
+// they are given (lower-case hex of its big-endian magnitude, the bytes a CRL
+// entry carries) so this index refuses a repeat under one issuer.
+//
+// Additive: one optional column per table, and a UNIQUE index per table, no row
+// rewritten and no backfill. Every row that exists reads `serial = NONE`, and
+// SurrealDB does not index a row whose indexed field is NONE as a value that can
+// collide, so rows written before the fix — including the pairs that already
+// share a serial — cannot make the index fail to build, and the upgrade
+// cannot be broken by them (`certificate_repository_test.rs` pins both facts).
+// `ca_certificate` is keyed on `parent_ca_id`: a root CA has no parent in
+// AXIAM, is self-signed or imported, and an imported root's serial is its
+// foreign issuer's choice (many roots are serial 1), so a root's serial is
+// left unrecorded and a root can never collide.
+const SCHEMA_V99: &str = "\
+DEFINE FIELD IF NOT EXISTS serial ON TABLE certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_certificate_issuer_serial ON TABLE certificate \
+    FIELDS issuer_ca_id, serial UNIQUE;
+DEFINE FIELD IF NOT EXISTS serial ON TABLE ca_certificate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE ca_certificate \
+    FIELDS parent_ca_id, serial UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v100 — network segments, reply profiles and the session cap (#563, D4)
+// -----------------------------------------------------------------------
+//
+// `claude_dev/radius-reply-profile-design.md` §3.5 and §4. Three new
+// tenant-scoped tables and nothing else; no existing table is touched.
+//
+// **`network_segment`** is the sidecar of a `resource` row in the reserved
+// `/network` subtree (§4.1). Its record id is the resource's id, repeated in
+// the unique `resource_id`. It holds what the tree cannot: `kind`
+// (`access` or `quarantine`), the `vlan_id` (1 to 4094) and the `filter_ids`
+// envelope its profile chooses from (§3.2), the placement `rank`, `enabled`,
+// the `version` every write is conditional on, and `profile_epoch`, a counter
+// the profile writer bumps so that a concurrent segment write conflicts with it
+// (the key two transactions must both write for the engine to see a race; its
+// value is never read). `name` is the leaf of the path, kept here so the unique
+// index can refuse two segments of one name under one branch of a site. Unique
+// per `(tenant, site_key)`: the VLAN, and the rank (an access segment's; a
+// quarantine segment has none); and per `(tenant, site_key, kind)`: the name.
+//
+// **`reply_profile`** is at most one per segment (record id = the segment's id,
+// repeated in the unique `segment_id`): the typed fields of the
+// `axiam-radius-reply/1` dictionary (§3.2), the dictionary version they were
+// validated against, and a `version`. The floor of 300 seconds on
+// `session_timeout_secs` is the dictionary's (RFC 3580 §3.17); the tenant's cap
+// is applied at read.
+//
+// **`network_policy`** is one row per tenant that has set one: the cap on
+// `Session-Timeout` (`network.session_timeout_max_secs`, §3.4, 300 to 86400).
+// A tenant without a row has the default of 3600.
+//
+// Additive: new tables only, nothing backfilled.
+const SCHEMA_V100: &str = "\
+DEFINE TABLE IF NOT EXISTS network_segment SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE network_segment TYPE string;
+DEFINE FIELD IF NOT EXISTS resource_id ON TABLE network_segment TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE network_segment TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 63;
+DEFINE FIELD IF NOT EXISTS site_key ON TABLE network_segment TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 63;
+DEFINE FIELD IF NOT EXISTS kind ON TABLE network_segment TYPE string
+    ASSERT $value IN ['access', 'quarantine'];
+DEFINE FIELD IF NOT EXISTS vlan_id ON TABLE network_segment TYPE int
+    ASSERT $value >= 1 AND $value <= 4094;
+DEFINE FIELD IF NOT EXISTS filter_ids ON TABLE network_segment TYPE array<string>
+    DEFAULT [] ASSERT array::len($value) <= 32;
+DEFINE FIELD IF NOT EXISTS filter_ids.* ON TABLE network_segment TYPE string;
+DEFINE FIELD IF NOT EXISTS rank ON TABLE network_segment TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE network_segment TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS version ON TABLE network_segment TYPE int;
+DEFINE FIELD IF NOT EXISTS profile_epoch ON TABLE network_segment TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS created_by ON TABLE network_segment TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_by ON TABLE network_segment TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE network_segment TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE network_segment TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_network_segment_resource ON TABLE network_segment
+    COLUMNS resource_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_network_segment_site_name ON TABLE network_segment
+    COLUMNS tenant_id, site_key, kind, name UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_network_segment_site_vlan ON TABLE network_segment
+    COLUMNS tenant_id, site_key, vlan_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_network_segment_site_rank ON TABLE network_segment
+    COLUMNS tenant_id, site_key, rank UNIQUE;
+DEFINE TABLE IF NOT EXISTS reply_profile SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE reply_profile TYPE string;
+DEFINE FIELD IF NOT EXISTS segment_id ON TABLE reply_profile TYPE string;
+DEFINE FIELD IF NOT EXISTS dictionary ON TABLE reply_profile TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 64;
+DEFINE FIELD IF NOT EXISTS session_timeout_secs ON TABLE reply_profile TYPE int
+    ASSERT $value >= 300 AND $value <= 86400;
+DEFINE FIELD IF NOT EXISTS termination_action ON TABLE reply_profile TYPE string
+    ASSERT $value IN ['default', 'radius_request'];
+DEFINE FIELD IF NOT EXISTS idle_timeout_secs ON TABLE reply_profile TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS filter_id ON TABLE reply_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS service_type ON TABLE reply_profile TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['framed_user', 'administrative_user', 'nas_prompt_user'];
+DEFINE FIELD IF NOT EXISTS version ON TABLE reply_profile TYPE int;
+DEFINE FIELD IF NOT EXISTS created_by ON TABLE reply_profile TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_by ON TABLE reply_profile TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE reply_profile TYPE datetime
+    DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE reply_profile TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_reply_profile_segment ON TABLE reply_profile
+    COLUMNS segment_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_reply_profile_tenant ON TABLE reply_profile
+    COLUMNS tenant_id;
+DEFINE TABLE IF NOT EXISTS network_policy SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE network_policy TYPE string;
+DEFINE FIELD IF NOT EXISTS session_timeout_max_secs ON TABLE network_policy TYPE int
+    ASSERT $value >= 300 AND $value <= 86400;
+DEFINE FIELD IF NOT EXISTS version ON TABLE network_policy TYPE int;
+DEFINE FIELD IF NOT EXISTS updated_by ON TABLE network_policy TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE network_policy TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_network_policy_tenant ON TABLE network_policy
+    COLUMNS tenant_id UNIQUE;
+";
+
+// -----------------------------------------------------------------------
+// Schema v101 — the role row's two epochs (#701, R110W6-04)
+// -----------------------------------------------------------------------
+//
+// The network gate decides a role write — a grant or revoke, an assignment or
+// unassignment, an `is_global` update, a delete — on reads it makes before the
+// write (`radius-reply-profile-design.md` §4.2, §5.3). Two writes to one role
+// could each pass it on a state the other was about to change: the engine
+// detects only two transactions writing one key, and those writes touched
+// disjoint edges. Every such write now moves an epoch on the role row and
+// compares, inside its own transaction, the epochs the gate read
+// (`repository/role.rs`): `grant_epoch` moves with a `network:` grant or revoke
+// and an `is_global` write, `holder_epoch` with every assignment and
+// unassignment. Like `network_segment.profile_epoch` (v100) the values mean
+// nothing beyond "changed".
+//
+// Additive: two optional fields, nothing backfilled (a role written before the
+// upgrade reads NONE, which every read and move treats as 0).
+const SCHEMA_V101: &str = "\
+DEFINE FIELD IF NOT EXISTS grant_epoch ON TABLE role TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v102 — single-use credentials bound to what they vouch for
+// (the 1.1.0 atomicity audit, items A and B)
+// -----------------------------------------------------------------------
+//
+// **`email_verification_token.email`** — the address the token was minted
+// for and mailed to. Redeeming a token verifies the account only while the
+// account's `email` is still that address and is unverified, in the same
+// transaction that consumes the token (`repository/user.rs`,
+// `redeem_email_verification`). Without it a token minted for one address
+// verified whatever address the account had moved to since. Optional and not
+// backfilled: a token minted before the upgrade carries none, and no longer
+// verifies anything (the CHANGELOG's upgrade notes say so; tokens live 24 h).
+//
+// **`oauth2_proof_replay.kind`** is re-defined to admit `webauthn_assertion`:
+// a WebAuthn authentication ceremony's state token is spent when an assertion
+// against it verifies, by recording its `jti` in the same table and under the
+// same UNIQUE `(tenant_id, kind, scope, jti)` index as a DPoP proof's — first
+// sighting by `CREATE`, replay by index violation, no read in the path, swept
+// by the same job. The re-definition only widens the ASSERT (v81's list plus
+// one value); every stored row satisfies it.
+//
+// **`webauthn_credential.sign_count`** — the authenticator's signature counter
+// as of the last accepted assertion (W3C WebAuthn §7.2 step 21). An assertion
+// is accepted only if its counter is greater, or both are zero, compared
+// inside the write that stores it (`repository/webauthn_credential.rs`,
+// `advance_sign_count`). Optional and not backfilled: a credential stored
+// before the upgrade reads as 0.
+const SCHEMA_V102: &str = "\
+DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token TYPE option<string>;
+DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
+    ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object',
+                      'webauthn_assertion'];
+DEFINE FIELD IF NOT EXISTS sign_count ON TABLE webauthn_credential TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v103 — the externally registered client quota is one transaction
+// (the 1.1.0 atomicity audit, item 6)
+// -----------------------------------------------------------------------
+//
+// **`tenant.client_quota_epoch`** — moves with every create of a `dcr` or
+// `cimd` client row. `dcr_max_clients` was checked by a count before the
+// create, in a statement of its own, so N registrations sent together each
+// counted `max - 1` and all created. The create now re-counts inside its own
+// transaction, refuses at the ceiling, and writes this field on the tenant row
+// (`repository/oauth2_client.rs`, `CLIENT_QUOTA_REACHED`): SurrealDB 3.3.4
+// detects only write-write conflicts, so it is the shared write, not the
+// count, that makes two overlapping creates conflict — the loser is retried on
+// a fresh snapshot, where its count sees the winner's row. Like
+// `role.grant_epoch` (v101) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V103: &str = "\
+DEFINE FIELD IF NOT EXISTS client_quota_epoch ON TABLE tenant TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v104 — a mail token's daily cap is one transaction
+// (the 1.1.0 atomicity audit, item 7)
+// -----------------------------------------------------------------------
+//
+// **`user.mail_epoch`** — moves with every capped mail-token mint: a password
+// reset link and a resent verification link. The daily cap was a count made
+// before the mint, in a statement of its own, so parallel requests each read
+// a count under the cap and all minted — the cap was exceeded, and more than
+// one reset link was live. The mint now re-counts inside its own transaction,
+// refuses at the cap, and writes this field on the user row
+// (`repository/mail_cap.rs`): the shared write is what makes two overlapping
+// mints conflict, and the loser is retried on a fresh snapshot, where its
+// count sees the winner's token. Like `tenant.client_quota_epoch` (v103) the
+// value means nothing beyond "changed". Classified in
+// `axiam_core::personal_data::USER_COLUMNS`.
+//
+// Additive: one optional field, nothing backfilled (a user written before the
+// upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V104: &str = "\
+DEFINE FIELD IF NOT EXISTS mail_epoch ON TABLE user TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v105 — a re-parent's cycle check is one transaction
+// (the 1.1.0 atomicity audit, item 8)
+// -----------------------------------------------------------------------
+//
+// **`tenant.hierarchy_epoch`** — moves with every re-parent of a resource onto
+// a new parent. The cycle check walked the new parent's ancestors before the
+// write, in statements of its own, and the write claimed only the new parent,
+// so two re-parents that each closed half of a loop (X→Y and Z→W, with Z above
+// Y and X above W) both committed and made a cycle. The walk now runs inside
+// the re-parent's transaction, which writes this field on the tenant row
+// (`repository/resource.rs`, `claim_hierarchy`): the shared write is what makes
+// two overlapping re-parents in one tenant conflict, and the loser is retried
+// on a fresh snapshot, where its walk sees the winner's edge. Like
+// `tenant.client_quota_epoch` (v103) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V105: &str = "\
+DEFINE FIELD IF NOT EXISTS hierarchy_epoch ON TABLE tenant TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v106 — an enabled directory and `opaque_mode = required` never
+// coexist, under concurrency too (the 1.1.0 atomicity audit, item 10)
+// -----------------------------------------------------------------------
+//
+// **`tenant.opaque_directory_epoch`** — compared and moved by a directory
+// save whose result is enabled and by a settings write whose result is an
+// effective `required` (for an organization baseline, on every tenant of the
+// organization). Each side refused the other on a read made before its write,
+// and the two writes touch different rows, so an enable and a `required` sent
+// together both landed and locked every directory account out. The handler now
+// reads this field before the read its rule decides on, and the write's own
+// transaction compares and moves it (`repository/opaque_directory.rs`): a
+// write whose epoch moved since its read is refused (`409`), and two
+// overlapping ones conflict on the tenant row. Like `tenant.hierarchy_epoch`
+// (v105) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the claim treats as 0).
+const SCHEMA_V106: &str = "\
+DEFINE FIELD IF NOT EXISTS opaque_directory_epoch ON TABLE tenant TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v107 — a deletion cancel and the purge sweep never both win
+// (the 1.1.0 atomicity audit, item 11)
+// -----------------------------------------------------------------------
+//
+// **`account_deletion.purge_claimed_at`** — when the purge sweep claimed the
+// request, before the first destructive step of the erasure. A cancel and the
+// sweep decided on reads made before their writes, and every write was
+// unconditional, so a cancel just before the deadline could land after the
+// sweep had selected the account: the caller was told "cancelled" while the
+// account was erased (or stripped of its credentials, groups, roles and
+// certificates). The sweep's claim re-checks that the account is still due and
+// writes this field; a cancel is one transaction that refuses a claimed (or
+// completed, or cancelled, or expired) request before it clears the account's
+// pending flag (`repository/account_deletion.rs`). Both write the request row,
+// so the engine serialises them. Operational state about the request, not
+// about the person: it holds a time and nothing else.
+//
+// Additive: one optional field, nothing backfilled (a request written before
+// the upgrade reads NONE — unclaimed).
+const SCHEMA_V107: &str = "\
+DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4955,6 +5306,221 @@ mod tests {
                 "v98 must not contain {forbidden}: it is additive DDL only"
             );
         }
+    }
+
+    /// #653 — v99 records each certificate's serial and makes it unique under
+    /// its issuer, and rewrites no row (no backfill: pairs that already share a
+    /// serial keep `serial = NONE` and cannot fail the index build).
+    #[test]
+    fn v99_adds_only_the_certificate_serial_and_its_unique_indexes() {
+        let statements: Vec<&str> = SCHEMA_V99
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS serial ON TABLE certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_certificate_issuer_serial ON TABLE certificate \
+                 FIELDS issuer_ca_id, serial UNIQUE",
+                "DEFINE FIELD IF NOT EXISTS serial ON TABLE ca_certificate TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE \
+                 ca_certificate FIELDS parent_ca_id, serial UNIQUE",
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V99.contains(forbidden),
+                "v99 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #563 (D4), W6.1 — v100 defines the three network tables, their fields
+    /// and their indexes, every one idempotently, touches no existing table,
+    /// and rewrites no row.
+    #[test]
+    fn v100_adds_only_the_network_tables() {
+        let statements: Vec<&str> = SCHEMA_V100
+            .split(';')
+            .map(str::trim)
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert!(!statements.is_empty());
+        for statement in &statements {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v100 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.split_whitespace().any(|word| [
+                    "network_segment",
+                    "reply_profile",
+                    "network_policy"
+                ]
+                .contains(&word)),
+                "v100 defined something outside its three tables: {statement}"
+            );
+        }
+        for table in ["network_segment", "reply_profile", "network_policy"] {
+            assert!(
+                SCHEMA_V100.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table} must be a new SCHEMAFULL table"
+            );
+        }
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "CREATE",
+            "INSERT",
+        ] {
+            assert!(
+                !SCHEMA_V100.contains(forbidden),
+                "v100 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// The atomicity audit's single-use items — v102 binds an email
+    /// verification token to its address, admits the WebAuthn assertion kind
+    /// to the replay store (widening, never narrowing, v81's list), and stores
+    /// a credential's signature counter; nothing else.
+    #[test]
+    fn v102_adds_only_the_single_use_bindings() {
+        let statements: Vec<String> = SCHEMA_V102
+            .split(';')
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token \
+                 TYPE option<string>",
+                "DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string \
+                 ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object', \
+                 'webauthn_assertion']",
+                "DEFINE FIELD IF NOT EXISTS sign_count ON TABLE webauthn_credential \
+                 TYPE option<int>",
+            ],
+            "v102 defines the bindings and nothing else"
+        );
+        // Every kind a row may carry, the new one included.
+        for kind in [
+            axiam_core::repository::ProofKind::ClientAssertion,
+            axiam_core::repository::ProofKind::DpopProof,
+            axiam_core::repository::ProofKind::CibaRequestObject,
+            axiam_core::repository::ProofKind::WebauthnAssertion,
+        ] {
+            assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
+        }
+    }
+
+    /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
+    /// purge claim, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v107_adds_only_the_purge_claim() {
+        let statements: Vec<&str> = SCHEMA_V107
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion \
+                 TYPE option<datetime>"
+            ],
+            "v107 defines the claim and nothing else"
+        );
+    }
+
+    /// Item 10 of the 1.1.0 atomicity audit — v106 is the tenant row's
+    /// opaque/directory epoch, an optional field defined idempotently, and
+    /// nothing else.
+    #[test]
+    fn v106_adds_only_the_opaque_directory_epoch() {
+        let statements: Vec<&str> = SCHEMA_V106
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS opaque_directory_epoch ON TABLE tenant TYPE option<int>"],
+            "v106 defines the counter and nothing else"
+        );
+    }
+
+    /// Item 8 of the 1.1.0 atomicity audit — v105 is the tenant row's
+    /// hierarchy epoch, an optional field defined idempotently, and nothing
+    /// else.
+    #[test]
+    fn v105_adds_only_the_hierarchy_epoch() {
+        let statements: Vec<&str> = SCHEMA_V105
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS hierarchy_epoch ON TABLE tenant TYPE option<int>"],
+            "v105 defines the counter and nothing else"
+        );
+    }
+
+    /// Item 7 of the 1.1.0 atomicity audit — v104 is the user row's mail
+    /// epoch, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v104_adds_only_the_mail_epoch() {
+        let statements: Vec<&str> = SCHEMA_V104
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS mail_epoch ON TABLE user TYPE option<int>"],
+            "v104 defines the counter and nothing else"
+        );
+    }
+
+    /// Item 6 of the 1.1.0 atomicity audit — v103 is the tenant row's client
+    /// quota epoch, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v103_adds_only_the_client_quota_epoch() {
+        let statements: Vec<&str> = SCHEMA_V103
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS client_quota_epoch ON TABLE tenant TYPE option<int>"],
+            "v103 defines the counter and nothing else"
+        );
+    }
+
+    /// #701 (R110W6-04) — v101 is the role row's two epochs, optional fields
+    /// defined idempotently, and nothing else.
+    #[test]
+    fn v101_adds_only_the_role_epochs() {
+        let statements: Vec<&str> = SCHEMA_V101
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS grant_epoch ON TABLE role TYPE option<int>",
+                "DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>"
+            ],
+            "v101 defines the two counters and nothing else"
+        );
     }
 
     /// The tables some migration gives `field`, minus the tables a migration
@@ -6438,8 +7004,33 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&98),
-            "v98 is the newest migration (#533 — `certificate.user_id` and its index, the \
+            Some(&107),
+            "v107 is the newest migration (the 1.1.0 atomicity audit's item 11 — \
+             `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
+             destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \
+             never both win); v106 was the 1.1.0 atomicity audit's item 10 — \
+             `tenant.opaque_directory_epoch`, which a directory save that leaves the directory \
+             enabled and a settings write that makes opaque_mode `required` both compare and \
+             move, so that each side's refusal and the other's write act as one transaction); \
+             v105 was the 1.1.0 atomicity audit's item 8 — \
+             `tenant.hierarchy_epoch`, which every re-parent of a resource onto a new parent \
+             writes so that the cycle check and the move act as one transaction); v104 was the \
+             1.1.0 atomicity audit's item 7 — \
+             `user.mail_epoch`, which every capped password-reset or verification mint writes \
+             so that the daily cap and the mint act as one transaction); v103 was the 1.1.0 \
+             atomicity audit's item 6 — `tenant.client_quota_epoch`, which every create of a \
+             `dcr` or `cimd` client writes so that the quota count and the create act as one \
+             transaction; v102 was \
+             the 1.1.0 atomicity audit's single-use items — \
+             `email_verification_token.email`, the address a verification token vouches for, \
+             the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`; \
+             v101 was #701 (R110W6-04 — `role.grant_epoch` and \
+             `role.holder_epoch`, which every role write the network gate decides moves and \
+             compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \
+             `network_policy`, the reserved-subtree segments, their typed reply profiles and the \
+             tenant's `Session-Timeout` cap); v99 was #653 — `certificate.serial` and \
+             `ca_certificate.serial`, each with a UNIQUE index under the issuer, so a serial is \
+             never issued twice by one CA; v98 was #533 — `certificate.user_id` and its index, the \
              account a `User` certificate was issued for, so revoking a user's certificates \
              matches the binding rather than a name; v97 was #610 — `tenant.purge_claimed_at`, \
              the claim one replica writes before it purges a tombstoned tenant, so two replicas \

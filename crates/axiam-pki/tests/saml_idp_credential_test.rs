@@ -582,7 +582,16 @@ async fn issuance_refuses_a_ca_it_may_not_use() {
             tenant_id: Some(expired_tenant),
             parent_ca_id: Some(root.id),
             subject: "Expired Tenant CA".into(),
-            public_cert_pem: ca.public_cert_pem.clone(),
+            // Its own certificate: #653 made a serial unique under one parent,
+            // so a row can no longer repeat another child's certificate text.
+            public_cert_pem: {
+                let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+                let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+                params
+                    .distinguished_name
+                    .push(rcgen::DnType::CommonName, "Expired Tenant CA");
+                params.self_signed(&pair).unwrap().pem()
+            },
             chain_pem: None,
             fingerprint: format!("expired-{}", Uuid::new_v4().simple()),
             key_algorithm: KeyAlgorithm::Ed25519,

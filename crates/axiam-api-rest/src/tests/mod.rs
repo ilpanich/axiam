@@ -2,6 +2,7 @@
 //! test modules under `src/tests/` (as opposed to the inline `#[cfg(test)]`
 //! blocks in individual source files).
 
+pub mod audit_export_clock_test;
 pub mod authz_check_test;
 pub mod route_openapi_parity_test;
 pub mod user_invalidation_test;

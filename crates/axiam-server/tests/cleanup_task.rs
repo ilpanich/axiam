@@ -194,6 +194,9 @@ async fn cleanup_does_not_propagate_db_errors_as_panics() {
 struct FailingAuditRepo;
 
 impl AuditLogRepository for FailingAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         unimplemented!("not exercised by erasure_pipeline_fatal_on_pseudonymize_failure")
     }
@@ -1156,9 +1159,10 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
     };
     let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
     let before = client_repo
-        .upsert_cimd_client(client_id, document())
+        .upsert_cimd_client(client_id, document(), 20)
         .await
-        .expect("materialised");
+        .expect("materialised")
+        .expect("under the ceiling");
 
     // What the client was granted while it was in use.
     let refresh_repo = axiam_db::SurrealRefreshTokenRepository::new(db.clone());
@@ -1230,9 +1234,10 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
 
     // The client presents its document again.
     let after = client_repo
-        .upsert_cimd_client(client_id, document())
+        .upsert_cimd_client(client_id, document(), 20)
         .await
-        .expect("re-materialised");
+        .expect("re-materialised")
+        .expect("under the ceiling");
     assert_ne!(after.id, before.id, "a new row under the same client_id");
 
     assert!(
@@ -2060,7 +2065,13 @@ use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository};
-use axiam_server::cleanup::sweep_tenant_purge;
+use axiam_server::cleanup::{AuditedWork, sweep_tenant_purge};
+use std::sync::Arc;
+
+/// Units that never stop: no stop is ever requested (the sender is gone).
+fn never_stopping() -> AuditedWork {
+    AuditedWork::new(watch::channel(false).1)
+}
 
 /// A tenant of a fresh organization with one user in it.
 async fn tenant_with_a_user(
@@ -2145,8 +2156,9 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
         .await
         .unwrap()
         .id;
-    let tenants = SurrealTenantRepository::new(db.clone());
-    let audit = SurrealAuditLogRepository::new(db.clone());
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let work = never_stopping();
     let tombstoned = tenant_with_a_user(&db, org, "tombstoned").await;
     let orphan = tenant_with_a_user(&db, org, "orphan").await;
     let live = tenant_with_a_user(&db, org, "live").await;
@@ -2170,12 +2182,18 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
         }
     };
     // The tombstoned tenant's trail: one row the export holds, then the
-    // export, then one row it does not hold.
+    // export, then one row it does not hold — its receipt, which the deletion
+    // record names and whose timestamp caps the bound (R101W3-03, #637).
     entry(tombstoned, "users.updated", None).await;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let exported_through = Utc::now();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let late = entry(tombstoned, "users.created", None).await;
+    let late = entry(
+        tombstoned,
+        axiam_api_rest::handlers::tenants::AUDIT_EXPORT_ACTION,
+        Some(serde_json::json!({ "exported_through": exported_through })),
+    )
+    .await;
     tenants.delete(tombstoned).await.unwrap();
     audit
         .append(CreateAuditLogEntry {
@@ -2186,7 +2204,10 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
             resource_id: Some(tombstoned),
             outcome: AuditOutcome::Success,
             ip_address: None,
-            metadata: Some(serde_json::json!({ "audit_exported_through": exported_through })),
+            metadata: Some(serde_json::json!({
+                "audit_export_receipt_id": late.id,
+                "audit_exported_through": exported_through,
+            })),
         })
         .await
         .unwrap();
@@ -2199,7 +2220,9 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
 
     // A tick that does not look for orphans purges the tombstoned tenant only.
     assert_eq!(
-        sweep_tenant_purge(&tenants, &audit, false).await.unwrap(),
+        sweep_tenant_purge(&tenants, &audit, false, &work)
+            .await
+            .unwrap(),
         1
     );
     assert_eq!(users_in(&db, tombstoned).await, 0);
@@ -2207,10 +2230,20 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
     assert_eq!(users_in(&db, orphan).await, 1);
 
     // The tick that looks finds the orphan.
-    assert_eq!(sweep_tenant_purge(&tenants, &audit, true).await.unwrap(), 1);
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, true, &work)
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(users_in(&db, orphan).await, 0);
     // Nothing is left to do, and the live tenant was never touched.
-    assert_eq!(sweep_tenant_purge(&tenants, &audit, true).await.unwrap(), 0);
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, true, &work)
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(users_in(&db, live).await, 1);
     assert!(tenants.get_by_id(live).await.is_ok());
 
@@ -2274,13 +2307,14 @@ async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
         .id;
     // Two replicas: each its own repositories over the one datastore.
     let (tenants_a, audit_a) = (
-        SurrealTenantRepository::new(db.clone()),
-        SurrealAuditLogRepository::new(db.clone()),
+        Arc::new(SurrealTenantRepository::new(db.clone())),
+        Arc::new(SurrealAuditLogRepository::new(db.clone())),
     );
     let (tenants_b, audit_b) = (
-        SurrealTenantRepository::new(db.clone()),
-        SurrealAuditLogRepository::new(db.clone()),
+        Arc::new(SurrealTenantRepository::new(db.clone())),
+        Arc::new(SurrealAuditLogRepository::new(db.clone())),
     );
+    let (work, work_b) = (never_stopping(), never_stopping());
     let records_of = |records: &[AuditLogEntry], id: Uuid| {
         records.iter().filter(|e| e.resource_id == Some(id)).count()
     };
@@ -2288,8 +2322,8 @@ async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
     let doomed = tenant_with_a_user(&db, org, "doomed").await;
     tenants_a.delete(doomed).await.unwrap();
     let (a, b) = tokio::join!(
-        sweep_tenant_purge(&tenants_a, &audit_a, false),
-        sweep_tenant_purge(&tenants_b, &audit_b, false)
+        sweep_tenant_purge(&tenants_a, &audit_a, false, &work),
+        sweep_tenant_purge(&tenants_b, &audit_b, false, &work_b)
     );
     let (a, b) = (a.expect("replica A's sweep"), b.expect("replica B's sweep"));
     assert_eq!(a + b, 1, "one replica purged the tenant");
@@ -2313,7 +2347,7 @@ async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
             .unwrap()
     );
     assert_eq!(
-        sweep_tenant_purge(&tenants_a, &audit_a, false)
+        sweep_tenant_purge(&tenants_a, &audit_a, false, &work)
             .await
             .unwrap(),
         0
@@ -2331,13 +2365,148 @@ async fn two_replicas_sweeping_at_once_purge_a_tenant_once_and_neither_fails() {
         .check()
         .unwrap();
     assert_eq!(
-        sweep_tenant_purge(&tenants_a, &audit_a, false)
+        sweep_tenant_purge(&tenants_a, &audit_a, false, &work)
             .await
             .unwrap(),
         1
     );
     assert_eq!(users_in(&db, held).await, 0);
     assert_eq!(records_of(&purged_records(&db).await, held), 1);
+}
+
+/// R101W1-09 (a): every replica also scans for orphaned tenant ids. Two
+/// replicas' sweeps over one store, both looking for orphans at once, purge an
+/// orphaned id once between them: one `tenants.purged {orphan: true}` record,
+/// and both sweeps `Ok`. A replica whose scan predates the other's finished
+/// purge finds nothing left and records nothing. And a claim left by a replica
+/// that died mid-purge holds the id for the lease, then the tombstoned-tenant
+/// sweep takes it over and records it — once, and as the orphan it is.
+#[tokio::test]
+async fn two_replicas_whose_orphan_scans_coincide_record_its_purge_once() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "orphan-race".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let (tenants_a, audit_a) = (
+        Arc::new(SurrealTenantRepository::new(db.clone())),
+        Arc::new(SurrealAuditLogRepository::new(db.clone())),
+    );
+    let (tenants_b, audit_b) = (
+        Arc::new(SurrealTenantRepository::new(db.clone())),
+        Arc::new(SurrealAuditLogRepository::new(db.clone())),
+    );
+    let (work, work_b) = (never_stopping(), never_stopping());
+    let records_of = |records: &[AuditLogEntry], id: Uuid| {
+        records
+            .iter()
+            .filter(|e| e.resource_id == Some(id))
+            .map(|e| e.metadata.clone())
+            .collect::<Vec<_>>()
+    };
+    // What a deletion made before the tombstone left behind.
+    let orphaned = |slug: &'static str| {
+        let db = db.clone();
+        async move {
+            let id = tenant_with_a_user(&db, org, slug).await;
+            db.query("DELETE type::record('tenant', $id)")
+                .bind(("id", id.to_string()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            id
+        }
+    };
+
+    // Both replicas' scans find the orphan at once: one purge, one record.
+    let orphan = orphaned("orphan").await;
+    let (a, b) = tokio::join!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true, &work),
+        sweep_tenant_purge(&tenants_b, &audit_b, true, &work_b)
+    );
+    let (a, b) = (a.expect("replica A's sweep"), b.expect("replica B's sweep"));
+    assert_eq!(a + b, 1, "one replica purged the orphan");
+    assert_eq!(users_in(&db, orphan).await, 0);
+    let records = records_of(&purged_records(&db).await, orphan);
+    assert_eq!(records.len(), 1, "one tenants.purged record");
+    assert_eq!(records[0]["orphan"], true);
+    assert!(
+        tenants_a.list_tombstoned().await.unwrap().is_empty(),
+        "the claim marker went with the purge"
+    );
+    assert!(tenants_a.orphaned_tenant_ids().await.unwrap().is_empty());
+
+    // Replica B scanned before A purged: by the time B gets to the id there is
+    // nothing left, and B records nothing.
+    let stale = orphaned("stale").await;
+    let scanned = tenants_b.orphaned_tenant_ids().await.unwrap();
+    assert_eq!(scanned, vec![stale]);
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true, &work)
+            .await
+            .unwrap(),
+        1
+    );
+    for id in scanned {
+        assert!(
+            tenants_b.purge_orphan(id).await.unwrap().is_none(),
+            "a stale scan purges and records nothing"
+        );
+    }
+    assert_eq!(records_of(&purged_records(&db).await, stale).len(), 1);
+    assert!(
+        tenants_a.list_tombstoned().await.unwrap().is_empty(),
+        "the stale claim's marker is dropped"
+    );
+
+    // B claims an orphan and dies before purging it. During the lease the id
+    // is neither an orphan to A's scan nor a tombstone A may claim.
+    let held = orphaned("held").await;
+    assert!(
+        tenants_b
+            .claim_orphan_purge(held, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, true, &work)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(users_in(&db, held).await, 1);
+    // Once the lease has run out (the claim is dated back past it), A's
+    // tombstoned-tenant pass takes the marker over and purges the id as an
+    // orphan: its audit trail kept, and recorded once.
+    let lease = chrono::TimeDelta::from_std(axiam_server::cleanup::TENANT_PURGE_LEASE).unwrap();
+    db.query("UPDATE type::record('tenant', $id) SET purge_claimed_at = $at")
+        .bind(("id", held.to_string()))
+        .bind(("at", Utc::now() - lease - chrono::TimeDelta::minutes(1)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        sweep_tenant_purge(&tenants_a, &audit_a, false, &work)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(users_in(&db, held).await, 0);
+    let records = records_of(&purged_records(&db).await, held);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["orphan"], true);
+    assert_eq!(
+        records[0]["audit_exported_through"],
+        serde_json::Value::Null
+    );
+    assert!(tenants_a.list_tombstoned().await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -2440,14 +2609,17 @@ async fn the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes
     .await
     .expect("erasure pipeline");
 
-    for (cert, expected) in [
+    for (i, (cert, expected)) in [
         (&bound, CertificateStatus::Revoked),
         (&legacy, CertificateStatus::Revoked),
         (&someone_elses, CertificateStatus::Active),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         // Read back at all: the erasure kept the row.
         let read = certs.get_by_id(tenant_id, cert.id).await.unwrap();
-        assert_eq!(read.status, expected, "{}", cert.fingerprint);
+        assert_eq!(read.status, expected, "certificate #{i}");
     }
     let on_the_list = certs
         .list_revoked_by_issuer(issuer, Utc::now())
@@ -2555,5 +2727,827 @@ async fn erasing_an_account_leaves_an_older_namesakes_certificate_alone() {
         certs.get_by_id(tenant_id, alices.id).await.unwrap().status,
         CertificateStatus::Active,
         "alice's certificate is not Alice's"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R101W1-05 (#618) — the certificate retention sweep
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::certificate::{
+    CertificateType as RetentionType, KeyAlgorithm as RetentionAlgorithm,
+    StoreCertificate as RetentionLeaf,
+};
+use axiam_core::repository::CertificateRepository as _;
+use axiam_db::SurrealCertificateRepository;
+use axiam_server::cleanup::{CERTIFICATE_RETENTION_BATCH, sweep_certificate_retention};
+
+/// A `User` certificate of `tenant` under `issuer`, whose `notAfter` is `days`
+/// days ago (negative: ahead), revoked or not.
+async fn leaf_expired_days_ago(
+    certs: &SurrealCertificateRepository<surrealdb::engine::local::Db>,
+    tenant: Uuid,
+    issuer: Uuid,
+    fingerprint: &str,
+    days: i64,
+    revoked: bool,
+) -> Uuid {
+    let cert = certs
+        .create(RetentionLeaf {
+            tenant_id: tenant,
+            issuer_ca_id: issuer,
+            subject: format!("holder-{fingerprint}"),
+            public_cert_pem: "not-a-parsed-certificate".into(),
+            fingerprint: fingerprint.into(),
+            cert_type: RetentionType::User,
+            key_algorithm: RetentionAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::days(days + 365),
+            not_after: Utc::now() - chrono::Duration::days(days),
+            metadata: serde_json::json!({ "note": "a person" }),
+            user_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .unwrap();
+    if revoked {
+        certs.revoke(tenant, cert.id).await.unwrap();
+    }
+    cert.id
+}
+
+/// The sweep deletes a certificate row more than eight days past `notAfter` —
+/// revoked, or expired without ever being revoked — and its binding edge, and
+/// leaves one seven days past, one still valid, and one of a tenant that is
+/// being deleted (the tenant purge's). The issuer's revocation list is the
+/// same before and after: it stopped naming the deleted row at seven days at
+/// the latest. It touches no audit row, and a second run finds nothing.
+#[tokio::test]
+async fn the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_change() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "cert-retention".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let live = tenant_with_a_user(&db, org, "cert-live").await;
+    let dying = tenant_with_a_user(&db, org, "cert-dying").await;
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+
+    let nine = leaf_expired_days_ago(&certs, live, issuer, "fp-nine", 9, true).await;
+    let nine_unrevoked = leaf_expired_days_ago(&certs, live, issuer, "fp-nine-u", 9, false).await;
+    let seven = leaf_expired_days_ago(&certs, live, issuer, "fp-seven", 7, true).await;
+    let ahead = leaf_expired_days_ago(&certs, live, issuer, "fp-ahead", -30, true).await;
+    let dying_nine = leaf_expired_days_ago(&certs, dying, issuer, "fp-dying", 9, true).await;
+    tenants.delete(dying).await.unwrap();
+
+    // The nine-day row is bound to a service account; its edge must go too.
+    db.query(format!(
+        "RELATE certificate:`{nine}`->cert_bound_to->service_account:`{}`",
+        Uuid::new_v4()
+    ))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let edges = |db: &Surreal<surrealdb::engine::local::Db>| {
+        let db = db.clone();
+        async move {
+            #[derive(SurrealValue)]
+            struct C {
+                total: i64,
+            }
+            let mut r = db
+                .query("SELECT count() AS total FROM cert_bound_to GROUP ALL")
+                .await
+                .unwrap();
+            let rows: Vec<C> = r.take(0).unwrap();
+            rows.first().map_or(0, |c| c.total)
+        }
+    };
+    assert_eq!(edges(&db).await, 1);
+
+    // The widest window a list can keep an expired entry for (seven days), and
+    // a minute more: the seven-day row is on it, the nine-day one never is.
+    let widest = Utc::now() - chrono::Duration::days(7) - chrono::Duration::minutes(1);
+    let list = || async {
+        let mut fingerprints: Vec<String> = certs
+            .list_revoked_by_issuer(issuer, widest)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.fingerprint)
+            .collect();
+        fingerprints.sort();
+        fingerprints
+    };
+    let before = list().await;
+    assert_eq!(
+        before,
+        vec!["fp-ahead", "fp-seven"],
+        "the nine-day rows are not on the list: it dropped them already"
+    );
+    let audit_before = SurrealAuditLogRepository::new(db.clone())
+        .list_system(AuditLogFilter::default(), Pagination::default())
+        .await
+        .unwrap()
+        .total;
+
+    let (_stop, shutdown) = watch::channel(false);
+    let removed = sweep_certificate_retention(&certs, &shutdown)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2, "the revoked and the unrevoked nine-day rows");
+
+    for (i, gone) in [nine, nine_unrevoked].into_iter().enumerate() {
+        assert!(
+            certs.get_by_id(live, gone).await.is_err(),
+            "swept row #{i} is gone"
+        );
+    }
+    for (i, kept) in [(live, seven), (live, ahead), (dying, dying_nine)]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            certs.get_by_id(kept.0, kept.1).await.is_ok(),
+            "kept row #{i} survives"
+        );
+    }
+    assert_eq!(edges(&db).await, 0, "the binding went with its row");
+    assert_eq!(list().await, before, "the list is unchanged");
+    assert_eq!(
+        SurrealAuditLogRepository::new(db.clone())
+            .list_system(AuditLogFilter::default(), Pagination::default())
+            .await
+            .unwrap()
+            .total,
+        audit_before,
+        "no audit row is touched"
+    );
+    assert_eq!(
+        sweep_certificate_retention(&certs, &shutdown)
+            .await
+            .unwrap(),
+        0,
+        "a second run finds nothing"
+    );
+}
+
+/// Bounded: a batch removes at most its limit, the sweep takes batches until
+/// one comes back short, and two replicas sweeping at once between them remove
+/// each row exactly once, neither failing.
+#[tokio::test]
+async fn the_certificate_sweep_is_bounded_and_two_replicas_remove_each_row_once() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "cert-retention-2".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenant = tenant_with_a_user(&db, org, "cert-batches").await;
+    let certs = SurrealCertificateRepository::new(db.clone());
+    let issuer = Uuid::new_v4();
+    for n in 0..7 {
+        leaf_expired_days_ago(
+            &certs,
+            tenant,
+            issuer,
+            &format!("fp-{n}"),
+            10 + n,
+            n % 2 == 0,
+        )
+        .await;
+    }
+
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 3);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 3);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 1);
+    assert_eq!(certs.delete_past_retention(3).await.unwrap(), 0);
+
+    for n in 0..40 {
+        leaf_expired_days_ago(&certs, tenant, issuer, &format!("fq-{n}"), 10, true).await;
+    }
+    let (_stop, shutdown) = watch::channel(false);
+    let a = SurrealCertificateRepository::new(db.clone());
+    let b = SurrealCertificateRepository::new(db.clone());
+    let (ra, rb) = tokio::join!(
+        sweep_certificate_retention(&a, &shutdown),
+        sweep_certificate_retention(&b, &shutdown)
+    );
+    assert_eq!(ra.unwrap() + rb.unwrap(), 40);
+    assert!(u32::try_from(40).unwrap() < CERTIFICATE_RETENTION_BATCH);
+
+    // A stop request ends the sweep before its first batch.
+    leaf_expired_days_ago(&certs, tenant, issuer, "fp-stop", 10, true).await;
+    let (stop, stopped) = watch::channel(false);
+    stop.send(true).unwrap();
+    assert_eq!(
+        sweep_certificate_retention(&certs, &stopped).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        sweep_certificate_retention(&certs, &shutdown)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// rate_limit_bucket sweep (#638)
+// ---------------------------------------------------------------------------
+
+mod rate_limit_bucket {
+    use super::*;
+    use axiam_db::SurrealRateLimitBucketRepository;
+    use axiam_server::cleanup::{
+        RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS, RATE_LIMIT_BUCKET_RETENTION,
+        RATE_LIMIT_BUCKET_SWEEP_BATCH, sweep_rate_limit_buckets,
+    };
+
+    /// Set a bucket's `updated_at` to `age` before `now`.
+    async fn age(db: &Surreal<surrealdb::engine::local::Db>, key: &str, age: Duration) {
+        let at = Utc::now() - chrono::Duration::from_std(age).unwrap();
+        db.query("UPDATE type::record('rate_limit_bucket', $key) SET updated_at = $at")
+            .bind(("key", key.to_owned()))
+            .bind(("at", at))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    async fn keys(db: &Surreal<surrealdb::engine::local::Db>) -> Vec<String> {
+        let mut r = db
+            .query("SELECT VALUE meta::id(id) FROM rate_limit_bucket ORDER BY id")
+            .await
+            .unwrap();
+        r.take(0).unwrap()
+    }
+
+    /// The longest window is the hint cap's, and the retention is twice it
+    /// plus the margin: longer than two of every window a writer counts in.
+    #[test]
+    fn the_retention_is_derived_from_the_windows_in_use() {
+        assert_eq!(
+            RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS,
+            axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS
+        );
+        for window in [
+            axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS,
+            axiam_db::rate_limit_counter::DEFAULT_WINDOW_SECS,
+            axiam_api_grpc::middleware::rate_limit::WINDOW_SECS as u64,
+        ] {
+            assert!(window <= RATE_LIMIT_BUCKET_LONGEST_WINDOW_SECS);
+            assert!(RATE_LIMIT_BUCKET_RETENTION.as_secs() > 2 * window);
+        }
+        assert_eq!(RATE_LIMIT_BUCKET_RETENTION, Duration::from_secs(21 * 60));
+    }
+
+    /// The sweep removes the rows nobody can read and keeps every row a
+    /// limiter still can: the hint cap's previous window (the oldest row it
+    /// reads, up to two windows old), a counter's bucket, a fresh one.
+    #[tokio::test]
+    async fn the_sweep_removes_stale_rows_and_keeps_current_ones() {
+        let db = setup_db().await;
+        let repo = SurrealRateLimitBucketRepository::new(db.clone());
+        let w = Utc::now();
+        let hint_window = Duration::from_secs(axiam_oauth2::ciba::HINT_CAP_WINDOW_SECS);
+        let retention = RATE_LIMIT_BUCKET_RETENTION;
+        let second = Duration::from_secs(1);
+        for k in [
+            "ciba_hint_cap:t:dead:0",
+            "login:203.0.113.1",
+            "ciba_hint_cap:t:previous:1",
+            "ciba_hint_cap:t:edge:0",
+            "authz_check:203.0.113.2",
+            "ciba_hint_cap:t:current:0",
+        ] {
+            repo.increment_by(k, w, 1).await.unwrap();
+        }
+        age(&db, "ciba_hint_cap:t:dead:0", retention + second).await;
+        age(&db, "login:203.0.113.1", retention + hint_window).await;
+        // Written in the window before this one: read as `previous` right now.
+        age(&db, "ciba_hint_cap:t:previous:1", hint_window).await;
+        // Two windows old: no longer read, but inside the margin.
+        age(&db, "ciba_hint_cap:t:edge:0", 2 * hint_window + second).await;
+        age(&db, "authz_check:203.0.113.2", retention - 5 * second).await;
+
+        assert_eq!(
+            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            keys(&db).await,
+            [
+                "authz_check:203.0.113.2",
+                "ciba_hint_cap:t:current:0",
+                "ciba_hint_cap:t:edge:0",
+                "ciba_hint_cap:t:previous:1",
+            ]
+        );
+        assert_eq!(
+            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
+            0
+        );
+        // A kept bucket still counts where it was.
+        assert_eq!(
+            repo.peek_count("ciba_hint_cap:t:current:0", w)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    /// More stale rows than a batch are all removed, by two replicas sweeping
+    /// at once: neither fails, every row goes exactly once and the fresh one
+    /// stays.
+    #[tokio::test]
+    async fn two_replicas_sweeping_at_once_remove_each_row_once() {
+        let db = setup_db().await;
+        let repo = SurrealRateLimitBucketRepository::new(db.clone());
+        let stale = 2 * RATE_LIMIT_BUCKET_SWEEP_BATCH as usize + 37;
+        db.query(
+            "FOR $i IN 0..$n { CREATE type::record('rate_limit_bucket', string::concat('old:', $i)) \
+             SET count = 1, window_start = d'2000-01-01T00:00:00Z', \
+                 updated_at = d'2000-01-01T00:00:00Z'; }",
+        )
+        .bind(("n", stale as i64))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        repo.increment_by("fresh", Utc::now(), 1).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            sweep_rate_limit_buckets(&repo, Utc::now()),
+            sweep_rate_limit_buckets(&repo, Utc::now())
+        );
+        // A sweeper that loses a contended commit leaves the rows to the
+        // winner or to the next pass; no row is removed twice, none is missed.
+        let rest = sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap();
+        assert_eq!(a.unwrap() + b.unwrap() + rest, stale as u64);
+        assert_eq!(keys(&db).await, ["fresh"]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #655, #624 — a stop does not cut a tenant purge or an erasure from its record
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::gdpr::CreateAccountDeletion;
+use axiam_core::repository::AccountDeletionRepository;
+use axiam_db::SurrealAccountDeletionRepository;
+use axiam_server::cleanup::{
+    ErasureSubject, TENANT_PURGE_LEASE, UnitStep, UnitStepForTests, erase_and_record,
+};
+use tokio::sync::Notify;
+
+/// A unit step that, at `at`, says so on `entered` and then holds until `go`
+/// is notified — forever, when it never is.
+fn hold_at(at: UnitStep, entered: watch::Sender<bool>, go: Arc<Notify>) -> UnitStepForTests {
+    Arc::new(move |step| {
+        let (entered, go) = (entered.clone(), Arc::clone(&go));
+        Box::pin(async move {
+            if step == at {
+                entered.send_replace(true);
+                go.notified().await;
+            }
+        })
+    })
+}
+
+/// What the composition root's `join_cleanup` does once the cleanup task has
+/// been told to stop: wait for the task until the bound, abort it past that,
+/// then wait for the unit it left in flight until the same deadline.
+async fn join_like_the_teardown(
+    mut task: tokio::task::JoinHandle<()>,
+    work: &AuditedWork,
+    bound: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    work.join(deadline).await
+}
+
+async fn wait_until_entered(entered: &mut watch::Receiver<bool>) {
+    tokio::time::timeout(Duration::from_secs(10), entered.wait_for(|on| *on))
+        .await
+        .expect("the unit reaches its step")
+        .expect("the step's sender lives as long as the unit");
+}
+
+async fn purge_records_of(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> usize {
+    purged_records(db)
+        .await
+        .iter()
+        .filter(|e| e.resource_id == Some(tenant))
+        .count()
+}
+
+async fn new_org(db: &Surreal<surrealdb::engine::local::Db>, slug: &str) -> Uuid {
+    SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: slug.into(),
+            slug: slug.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+/// #655: a stop that finds a tick inside a tenant purge — the tenant's rows
+/// removed, its tenant row not yet — no longer holds the tenant for the claim's
+/// one-hour lease. While the purge runs its claim keeps every other replica off
+/// the tenant; at the stop the purge gives itself up before its point of no
+/// return and releases the claim, so the next start purges the tenant at once
+/// and records it exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_purge_held_across_a_stop_is_purged_at_once_by_the_next_start_and_recorded_once() {
+    let db = setup_db().await;
+    let org = new_org(&db, "purge-at-stop").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let doomed = tenant_with_a_user(&db, org, "held-at-stop").await;
+    tenants.delete(doomed).await.unwrap();
+
+    // The first start: its tick holds inside the purge, which is never let go.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::TenantRowsPurged(doomed),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = {
+        let (tenants, audit, work) = (Arc::clone(&tenants), Arc::clone(&audit), work.clone());
+        tokio::spawn(async move {
+            sweep_tenant_purge(&tenants, &audit, false, &work)
+                .await
+                .expect("a stop is not a failure of the sweep");
+        })
+    };
+    wait_until_entered(&mut entered).await;
+    assert_eq!(users_in(&db, doomed).await, 0, "the purge is under way");
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE).unwrap();
+    assert!(
+        !tenants
+            .claim_purge(doomed, Utc::now(), lease)
+            .await
+            .unwrap(),
+        "while the purge runs, its claim keeps another replica off the tenant"
+    );
+
+    // The stop.
+    stop_tx.send_replace(true);
+    assert!(
+        join_like_the_teardown(tick, &work, Duration::from_secs(5)).await,
+        "nothing was left to cut: the purge gave itself up at the stop"
+    );
+    assert!(
+        tenants.list_tombstoned().await.unwrap().contains(&doomed),
+        "the tenant row is still there, tombstoned, for the next start"
+    );
+    assert_eq!(purge_records_of(&db, doomed).await, 0);
+
+    // The next start purges it at once, without waiting out the lease.
+    let next_start = never_stopping();
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, false, &next_start)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(purge_records_of(&db, doomed).await, 1);
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, false, &next_start)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        purge_records_of(&db, doomed).await,
+        1,
+        "tenants.purged exists exactly once"
+    );
+}
+
+/// #655: the claim is released from a drop guard on any exit but a finished
+/// purge — here a purge that panics, and one aborted where it is (the
+/// teardown's cut at its bound) — so neither holds the tenant for the lease:
+/// the next sweep purges it, and records it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_purge_that_panics_or_is_cut_releases_its_claim() {
+    let db = setup_db().await;
+    let org = new_org(&db, "purge-guard").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    // The guard's release is spawned when the unit is dropped: give it a
+    // moment, without ever waiting anything like the lease.
+    let purged_soon = |tenant: Uuid| {
+        let (tenants, audit) = (Arc::clone(&tenants), Arc::clone(&audit));
+        async move {
+            for _ in 0..50 {
+                if sweep_tenant_purge(&tenants, &audit, false, &never_stopping())
+                    .await
+                    .unwrap()
+                    == 1
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("tenant {tenant} is still held by the claim of a purge that did not finish");
+        }
+    };
+
+    // A purge that panics: the sweep fails, the claim is released.
+    let panicked = tenant_with_a_user(&db, org, "panicked").await;
+    tenants.delete(panicked).await.unwrap();
+    let panicking: UnitStepForTests = Arc::new(|step| {
+        Box::pin(async move {
+            if matches!(step, UnitStep::TenantRowsPurged(_)) {
+                panic!("a tenant purge that panics");
+            }
+        })
+    });
+    let work = never_stopping().with_step_for_tests(Some(panicking));
+    assert!(
+        sweep_tenant_purge(&tenants, &audit, false, &work)
+            .await
+            .is_err(),
+        "a purge without an outcome fails the sweep"
+    );
+    purged_soon(panicked).await;
+    assert_eq!(purge_records_of(&db, panicked).await, 1);
+
+    // A purge aborted where it is, as the teardown's join does at its bound.
+    let cut = tenant_with_a_user(&db, org, "cut").await;
+    tenants.delete(cut).await.unwrap();
+    let (_running, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::TenantRowsPurged(cut),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = {
+        let (tenants, audit, work) = (Arc::clone(&tenants), Arc::clone(&audit), work.clone());
+        tokio::spawn(async move { sweep_tenant_purge(&tenants, &audit, false, &work).await })
+    };
+    wait_until_entered(&mut entered).await;
+    assert!(
+        !work.join(tokio::time::Instant::now()).await,
+        "the purge was cut"
+    );
+    assert!(
+        tick.await.unwrap().is_err(),
+        "a cut purge has no outcome, and the sweep says so"
+    );
+    purged_soon(cut).await;
+    assert_eq!(purge_records_of(&db, cut).await, 1);
+}
+
+/// An account due for erasure, with its pending `account_deletion` row.
+async fn erasure_due_with_its_request(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    name: &str,
+) -> User {
+    let user = user_due_for_erasure(db, tenant_id, name).await;
+    SurrealAccountDeletionRepository::new(db.clone())
+        .create(CreateAccountDeletion {
+            tenant_id,
+            user_id: user.id,
+            cancel_token_hash: format!("{:064x}", 7),
+            scheduled_purge_at: Utc::now() - chrono::Duration::seconds(1),
+        })
+        .await
+        .expect("the deletion request");
+    user
+}
+
+async fn pseudonymized_rows(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+) -> Vec<AuditLogEntry> {
+    SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some("gdpr.user_pseudonymized".into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+/// The cleanup task's tick running one erasure as its unit, held at
+/// [`UnitStep::ErasureAnonymized`] until `go`.
+fn erasure_tick(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    user: &User,
+    work: &AuditedWork,
+) -> tokio::task::JoinHandle<()> {
+    let (audit, proofs, users, deletions) = (
+        SurrealAuditLogRepository::new(db.clone()),
+        SurrealErasureProofRepository::new(db.clone()),
+        SurrealUserRepository::new(db.clone()),
+        SurrealAccountDeletionRepository::new(db.clone()),
+    );
+    let (tenant_id, user_id, work) = (user.tenant_id, user.id, work.clone());
+    tokio::spawn(async move {
+        let unit_work = work.clone();
+        let _ = work
+            .run(async move {
+                erase_and_record(
+                    &audit,
+                    &proofs,
+                    &users,
+                    &deletions,
+                    None,
+                    ErasureSubject {
+                        tenant_id,
+                        user_id,
+                        pseudonym: "DELETED_USER_held0000000001",
+                        email_hash: "hashed_held_email",
+                        certificates_revoked: 0,
+                    },
+                    &unit_work,
+                )
+                .await
+            })
+            .await;
+    })
+}
+
+/// #624: a stop that finds an erasure between the anonymization — its point of
+/// no return, after which no sweep selects the account again — and its audit
+/// row no longer loses the row: the erasure runs as a task of its own, which
+/// the cut of the cleanup task does not reach, and the teardown waits for it
+/// within its bound. The `account_deletion` row is completed too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_held_between_the_anonymization_and_its_audit_row_across_a_stop_keeps_the_row() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "held_erasure").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let go = Arc::new(Notify::new());
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::ErasureAnonymized(user.id),
+        entered_tx,
+        Arc::clone(&go),
+    )));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    let users = SurrealUserRepository::new(db.clone());
+    assert_eq!(
+        users.get_by_id(tenant_id, user.id).await.unwrap().email,
+        "hashed_held_email",
+        "the account is anonymized"
+    );
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    // The stop, and the cut of the cleanup task itself — the abort the
+    // teardown's bound used to cut the erasure with.
+    stop_tx.send_replace(true);
+    tick.abort();
+    let _ = tick.await;
+
+    // The erasure's last statements run inside the teardown's bound.
+    go.notify_one();
+    assert!(
+        work.join(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await,
+        "the erasure finished within the bound"
+    );
+    let rows = pseudonymized_rows(&db, tenant_id).await;
+    assert_eq!(rows.len(), 1, "gdpr.user_pseudonymized is written, once");
+    assert_eq!(rows[0].actor_id, user.id);
+    assert_eq!(rows[0].metadata["pseudonym"], "DELETED_USER_held0000000001");
+    assert!(
+        SurrealAccountDeletionRepository::new(db.clone())
+            .find_pending_by_user_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the account_deletion row is completed"
+    );
+}
+
+/// The other side of the bound (#624, and the lease's): an erasure still held
+/// when the teardown's deadline passes is aborted there, so the instance writes
+/// nothing after its stop's budget — not even the audit row it was about to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_still_running_at_the_deadline_is_cut_and_writes_nothing_after_it() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "cut_erasure").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let go = Arc::new(Notify::new());
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::ErasureAnonymized(user.id),
+        entered_tx,
+        Arc::clone(&go),
+    )));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+
+    stop_tx.send_replace(true);
+    assert!(
+        !join_like_the_teardown(tick, &work, Duration::from_millis(300)).await,
+        "the erasure outlasted the bound and was cut"
+    );
+    // Let it go after the cut: nothing is left to run it.
+    go.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        pseudonymized_rows(&db, tenant_id).await.is_empty(),
+        "nothing is written after the bound"
+    );
+}
+
+/// #624, the other half of the design: an erasure never crosses its point of
+/// no return once the process is stopping. Asked to run then, it stops after
+/// the (idempotent) audit scrub and before the anonymization: the account is
+/// untouched and still due, and nothing — proof, completion, audit row — is
+/// written, so the next start erases it whole.
+#[tokio::test]
+async fn an_erasure_does_not_start_its_anonymization_once_the_process_is_stopping() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "stopping_erasure").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    stop_tx.send_replace(true);
+    let work = AuditedWork::new(stop_rx);
+    let (audit, proofs, users, deletions) = (
+        SurrealAuditLogRepository::new(db.clone()),
+        SurrealErasureProofRepository::new(db.clone()),
+        SurrealUserRepository::new(db.clone()),
+        SurrealAccountDeletionRepository::new(db.clone()),
+    );
+
+    let erased = erase_and_record(
+        &audit,
+        &proofs,
+        &users,
+        &deletions,
+        None,
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: "DELETED_USER_stop000000001",
+            email_hash: "hashed_stopping_email",
+            certificates_revoked: 0,
+        },
+        &work,
+    )
+    .await
+    .expect("giving up is not a failure");
+
+    assert!(!erased, "the erasure gave itself up");
+    let after = users.get_by_id(tenant_id, user.id).await.unwrap();
+    assert_eq!(after.email, "stopping_erasure@example.com");
+    assert!(
+        users
+            .find_due_for_purge(Utc::now())
+            .await
+            .unwrap()
+            .iter()
+            .any(|due| due.id == user.id),
+        "the account is still due"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+    assert!(
+        deletions
+            .find_pending_by_user_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the deletion request is still pending"
     );
 }

@@ -5,7 +5,7 @@ use axiam_core::id::new_id;
 use axiam_core::models::webauthn_credential::{
     CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
 };
-use axiam_core::repository::WebauthnCredentialRepository;
+use axiam_core::repository::{ProofKind, ProofReplayRepository, WebauthnCredentialRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, classify_write_error, take_first_or_not_found};
+use crate::repository::oauth2_proof_replay::SurrealProofReplayRepository;
 
 #[derive(Debug, SurrealValue)]
 struct WebauthnCredentialRow {
@@ -54,6 +55,13 @@ struct WebauthnCredentialRowWithId {
     attestation_format: Option<String>,
     attested: bool,
     authenticator_name: Option<String>,
+}
+
+/// The row [`WebauthnCredentialRepository::advance_sign_count`] wrote, if any.
+#[derive(Debug, SurrealValue)]
+struct AdvancedRow {
+    #[allow(dead_code)]
+    record_id: String,
 }
 
 fn parse_credential_type(s: &str) -> Result<WebauthnCredentialType, DbError> {
@@ -277,6 +285,70 @@ impl<C: Connection> WebauthnCredentialRepository for SurrealWebauthnCredentialRe
             .map_err(DbError::from)?;
 
         Ok(())
+    }
+
+    async fn consume_assertion(
+        &self,
+        tenant_id: Uuid,
+        ceremony: &str,
+        jti: &str,
+        expires_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        // The replay store DPoP proofs and client assertions use: one CREATE
+        // against the UNIQUE `(tenant_id, kind, scope, jti)` index, whose
+        // violation is the "already seen" answer, swept by
+        // `cleanup_expired_proofs` once `expires_at` passes.
+        SurrealProofReplayRepository::new(self.db.clone())
+            .insert_proof_jti(
+                tenant_id,
+                ProofKind::WebauthnAssertion,
+                ceremony,
+                jti,
+                expires_at,
+            )
+            .await
+    }
+
+    async fn advance_sign_count(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        counter: u32,
+        passkey_json: String,
+    ) -> AxiamResult<bool> {
+        // The compare is in the WHERE, so it is made against the row this
+        // write replaces: two assertions reporting one counter both write the
+        // row, conflict on it, and the loser — retried on a fresh snapshot —
+        // finds the counter already there. A credential stored before v102
+        // has no `sign_count` and reads as 0, as an authenticator's first
+        // counter is compared against.
+        const ADVANCE: &str = "SELECT meta::id(id) AS record_id FROM \
+             (UPDATE type::record('webauthn_credential', $id) SET \
+                 sign_count = $counter, \
+                 passkey_json = $passkey_json, \
+                 last_used_at = time::now() \
+              WHERE tenant_id = $tenant_id \
+                AND (($counter = 0 AND (sign_count ?? 0) = 0) OR $counter > (sign_count ?? 0)))";
+        let (id, tenant) = (id.to_string(), tenant_id.to_string());
+        let rows = crate::helpers::retry_on_write_conflict(|| async {
+            let result = self
+                .db
+                .current()
+                .query(ADVANCE)
+                .bind(("id", id.clone()))
+                .bind(("tenant_id", tenant.clone()))
+                .bind(("counter", i64::from(counter)))
+                .bind(("passkey_json", passkey_json.clone()))
+                .await
+                .map_err(DbError::from)?;
+            let mut result = result
+                .check()
+                .map_err(|e| classify_write_error(e.to_string(), "webauthn_credential"))?;
+            let rows: Vec<AdvancedRow> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows)
+        })
+        .await?;
+        Ok(!rows.is_empty())
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {

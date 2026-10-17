@@ -251,6 +251,33 @@ impl std::fmt::Debug for VaultConfig {
     }
 }
 
+/// The builder every Vault-bound client in the secret provider starts from.
+///
+/// It carries the Vault token, so it never follows a redirect: reqwest strips
+/// only the standard credential headers on a cross-host hop, and
+/// `X-Vault-Token` is not one of them (T-476). One definition, so the
+/// bootstrap client and the private-CA client cannot drift apart.
+fn vault_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
+/// The short-lived HTTP client the composition root hands to
+/// [`SecretProviderKind::build`] before the shared client exists.
+///
+/// It never follows a redirect (T-476, #620): a `3xx` from Vault arrives as an
+/// ordinary response, which [`VaultSecretProvider::fetch`] turns into an error
+/// naming the host that answered. It trusts the built-in roots only; a Vault
+/// behind a private CA is handled by `build`, which makes a second client.
+///
+/// # Errors
+///
+/// [`AxiamError::Internal`] if the TLS backend cannot be initialised.
+pub fn bootstrap_client() -> AxiamResult<reqwest::Client> {
+    vault_client_builder().build().map_err(|e| {
+        AxiamError::Internal(format!("failed to build the bootstrap HTTP client: {e}"))
+    })
+}
+
 impl VaultSecretProvider {
     /// Read every key in `names` from Vault, once.
     ///
@@ -477,8 +504,7 @@ impl SecretProviderKind {
                                 path.display()
                             )));
                         }
-                        let mut builder =
-                            reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+                        let mut builder = vault_client_builder();
                         for anchor in anchors {
                             builder = builder.add_root_certificate(anchor);
                         }

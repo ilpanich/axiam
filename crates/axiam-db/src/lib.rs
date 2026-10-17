@@ -39,8 +39,8 @@ pub use handle::DbHandle;
 pub use helpers::{CountRow, parse_uuid, take_first_or_not_found};
 pub use pool::{DbCheckout, DbPool};
 pub use rate_limit_counter::{
-    SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreIncrementFuture,
-    WindowMode,
+    SharedRateLimitConfig, SharedRateLimitCounter, SharedRateLimitStore, StoreDecrementFuture,
+    StoreIncrementFuture, StorePeekFuture, WindowMode,
 };
 pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, ReadReplicaConfig};
 pub use repository::{
@@ -53,7 +53,8 @@ pub use repository::{
     SurrealEmailTemplateRepository, SurrealEmailVerificationTokenRepository,
     SurrealErasureProofRepository, SurrealExportJobRepository, SurrealFederationConfigRepository,
     SurrealFederationLinkRepository, SurrealFederationLoginStateRepository, SurrealGroupRepository,
-    SurrealMdsRepository, SurrealMinimalProfileLeaseRepository, SurrealNotificationRuleRepository,
+    SurrealMdsRepository, SurrealMinimalProfileLeaseRepository, SurrealNetworkPolicyRepository,
+    SurrealNetworkSegmentRepository, SurrealNotificationRuleRepository,
     SurrealNotificationWindowRepository, SurrealOAuth2ClientRepository,
     SurrealOAuth2RegistrationTokenRepository, SurrealOpaqueCredentialRepository,
     SurrealOpaqueServerSetupRepository, SurrealOrganizationRepository,
@@ -61,8 +62,8 @@ pub use repository::{
     SurrealPendingSamlRequestRepository, SurrealPermissionRepository, SurrealPgpKeyRepository,
     SurrealProofReplayRepository, SurrealPushedAuthRequestRepository,
     SurrealRateLimitBucketRepository, SurrealReactorRepository, SurrealRefreshTokenRepository,
-    SurrealResourceRepository, SurrealRevokedSessionRepository, SurrealRoleRepository,
-    SurrealSamlIdpCredentialRepository, SurrealSamlLogoutRunRepository,
+    SurrealReplyProfileRepository, SurrealResourceRepository, SurrealRevokedSessionRepository,
+    SurrealRoleRepository, SurrealSamlIdpCredentialRepository, SurrealSamlLogoutRunRepository,
     SurrealSamlServiceProviderRepository, SurrealSamlSpSessionRepository,
     SurrealScimTargetLinkRepository, SurrealScimTargetRepository, SurrealScimTargetStateRepository,
     SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,

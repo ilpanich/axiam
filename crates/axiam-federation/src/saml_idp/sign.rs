@@ -17,6 +17,7 @@ use samael::crypto::{CertificateDer, CryptoProvider, ReduceMode, XmlSec};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use super::request::receiver_parser_options;
 use super::{SamlIdpError, SamlIdpSigningKey, xml};
 
 /// XML-DSig namespace.
@@ -178,9 +179,10 @@ pub(super) fn verify_output(
         SamlIdpError::SigningFailed
     };
 
-    let parser = libxml::parser::Parser::default();
-    let doc = parser
-        .parse_string(response.as_bytes())
+    // R101W2-06 (#634): the parse an SP does — no recovery — so a serializer
+    // bug is refused here instead of being repaired into a tree no SP sees.
+    let doc = libxml::parser::Parser::default()
+        .parse_string_with_options(response.as_bytes(), receiver_parser_options())
         .map_err(|_| fail("unparseable output"))?;
     let root = doc.get_root_element().ok_or_else(|| fail("no root"))?;
     if !is_element(&root, super::NS_PROTOCOL, "Response")
@@ -273,8 +275,9 @@ pub(super) fn verify_root_signed(
         tracing::error!(reason, "SAML IdP: a logout message failed its own check");
         SamlIdpError::SigningFailed
     };
+    // R101W2-06 (#634): no recovery, as `verify_output` and every receiver.
     let doc = libxml::parser::Parser::default()
-        .parse_string(document.as_bytes())
+        .parse_string_with_options(document.as_bytes(), receiver_parser_options())
         .map_err(|_| fail("unparseable output"))?;
     let root = doc.get_root_element().ok_or_else(|| fail("no root"))?;
     if !is_element(&root, super::NS_PROTOCOL, root_name)

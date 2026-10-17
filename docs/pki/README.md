@@ -37,6 +37,45 @@ certificate in that organization chains to.
 > refused with `400`: the certificate has one CN, and silently discarding the
 > components you asked for would be worse than saying so. The stored `subject`
 > is the normalised value, so the row and the certificate always agree.
+>
+> **The name must be printable and short (1.1.0, #649).** A common name ends up
+> in log lines, FreeRADIUS `files` entries, ACLs and terminals, so AXIAM refuses
+> with `400` a `subject` that:
+>
+> - is longer than **64 characters** — characters (Unicode scalar values), not
+>   bytes, which is how RFC 5280 states `ub-common-name` (`SIZE (1..64)`): 64
+>   two-byte letters are accepted, 65 characters are not;
+> - holds a **control character** (`char::is_control`: a newline, a tab, NUL,
+>   DEL, the C1 range) or any **whitespace other than a single space** between
+>   words — a trailing newline is refused, not trimmed away;
+> - holds an **invisible or reordering format character**: the bidirectional
+>   controls (U+202A–U+202E, U+2066–U+2069, U+200E/U+200F, U+061C), the
+>   zero-width characters (U+200B–U+200D, U+2060, U+FEFF), the line and
+>   paragraph separators (U+2028/U+2029) and the soft hyphen — a name that
+>   *reads* `press-07` while being something else defeats the operator who reads
+>   it; or
+> - starts or ends with a space, or has **two spaces in a row**.
+>
+> The refusal says which rule applied and does not repeat the value. The same
+> rules apply to the common name of a CSR you submit to `sign-csr`, which AXIAM
+> refuses rather than rewrites — and, since the 1.1.0 review (R110W1-02), to the
+> value of **every other attribute** of the CSR's subject (`O`, `OU`, `C` and
+> the rest), and a subject with **more than one** common name is refused. A
+> `vault_pki` CA signs the CSR's subject as given, so what AXIAM would not let
+> through in a name it must not let through in an `OU` either; a CA whose key
+> AXIAM holds keeps only the common name, so the other attributes are checked
+> and then dropped. A `vault_pki` root with no `intermediate_subject`
+> takes `<subject> Intermediate Authority`; if that would pass 64 characters the
+> request is refused and asks for `intermediate_subject`.
+>
+> **Recommended for a `Device` or `Service` name that another system reads:**
+> match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` — letters, digits, `.`, `_` and
+> `-`, starting with a letter or digit, at most 64 characters (the
+> [FreeRADIUS recipe](freeradius.md#the-key-is-the-serial) tells its table
+> writer to refuse anything else). AXIAM does not enforce this narrower
+> pattern: `ACME Corp Root CA`, `jdoe@example.com` and non-Latin names are
+> legitimate common names. Certificates issued before 1.1.0 keep the names they
+> have; the rules apply to a request, not retroactively.
 
 ```
 POST /api/v1/organizations/{org_id}/ca-certificates
@@ -53,6 +92,28 @@ only this once. Store it in your secrets manager immediately (or, in a
 Kubernetes deployment, seed it into `AXIAM__AUTH__PKI_ENCRYPTION_KEY`-protected
 storage per your operational process) — AXIAM itself never persists the
 plaintext key.
+
+### The form of a returned private key
+
+Every private key AXIAM generates and returns — a CA's here, a leaf's under
+[Issue a leaf certificate](#issue-a-leaf-certificate) — is an unencrypted
+PKCS#8 `-----BEGIN PRIVATE KEY-----` block.
+
+- **Ed25519** is returned in RFC 8410 **version 1** form: the PKCS#8
+  `PrivateKeyInfo` with `version` INTEGER 0 holding the 32-byte seed and
+  nothing else (48 bytes of DER). The longer form, RFC 5958's `OneAsymmetricKey`
+  **v2** (`version` INTEGER 1, the seed plus a `[1] publicKey` attribute, 83
+  bytes), is what the cryptographic library underneath AXIAM serialises by
+  default, and OpenSSL 3.0 — Ubuntu 24.04's `wpa_supplicant` and `eapol_test`,
+  and many device images — refuses it (`DECODER routines::unsupported`). The
+  seed fixes the public key, so the shorter form loses nothing, and the
+  readers that take the long form (OpenSSL 3.2+ among them) take this one too. There is no request option to choose: `openssl pkey -in key.pem -noout`
+  succeeds on what you receive.
+- **RSA-4096** is the ordinary PKCS#8 `RSAPrivateKey`, unchanged.
+
+A key issued before 1.1.0 is in the longer form; a stored CA key keeps working
+in either, and a device that cannot read an older key is re-issued rather than
+converted (the key is returned once and is not retained to convert).
 
 ## Import a CA you already have (BYOK)
 
@@ -512,6 +573,23 @@ CSR (`external` custody) is forwarded the same way; one signed in AXIAM before
 its parent's key moved into Vault is not, since Vault never recorded it, and
 AXIAM's own list for the parent names it either way.
 
+**One mount for parent and children.** The order above is a dependency, not a
+courtesy, wherever a parent signs from the mount that also holds its
+subordinates' issuers (an organization CA whose key locator records no root):
+while the revoked CA's issuer is still in that mount, Vault refuses the
+forward with `adding issuer (id: …) to its own CRL is not allowed`. The issuer
+is deleted after AXIAM's revocation is written, and a delete that failed (it is
+logged and does not undo the revocation) or a process that died in between
+would leave the CA refused at every forward. The `vault_revocation` sweep
+therefore recognises that refusal and deletes the CA's own issuer and key again
+before it forwards — before the forward when the row has already recorded the
+refusal, else right after the refused forward and with one more forward in the
+same attempt. Deleting what is already gone is not an error, and only the
+revoked CA's own issuer and key are ever deleted. With a root and an
+intermediate mount (the usual layout) the refusal does not arise. Vault's
+`POST <mount>/issuer/<child>/revoke`, which would put the issuer on its
+signer's list without deleting it, is not used: it needs Vault 1.11 or later.
+
 Everything that applies to a leaf applies here: AXIAM's revocation stands
 whatever Vault answers, the request tries twice within ten seconds (a tenant
 deletion once per CA, within one ten-second budget for all of them), a refusal
@@ -581,6 +659,33 @@ when the issuing CA is under `vault_pki` custody, `chain_pem` holding the chain
 the signer returned. A tenant may cap `validity_days` via its
 `max_certificate_validity_days` metadata setting; requests exceeding that cap
 are rejected.
+
+### Serial numbers (1.1.0)
+
+Every certificate AXIAM signs itself — a generated leaf, a CSR-signed leaf, a
+root CA, an intermediate CA — carries a fresh serial of 20 random octets from
+the operating system's CSPRNG, top bit clear (positive, and within the 20 octets
+RFC 5280 §4.1.2.2 allows). A certificate Vault's PKI engine signs carries the
+random serial Vault chose. The serial is therefore never a function of the key:
+the same CSR signed twice yields two certificates with two serials, and
+revoking one leaves the other off the CRL.
+
+**Correction (2026-10-14, #653).** Before 1.1.0 AXIAM left the serial to
+`rcgen`, which wrote the first 20 bytes of SHA-256 over the subject public key.
+Two certificates one CA issued on one key (a CSR signed twice, a re-issue on a
+retained key) carried the same serial, contrary to RFC 5280 §4.1.2.2, and a CRL
+entry for one revoked both. Certificates issued before the upgrade keep the
+serial they were issued with; a pair that already shares one stays a pair, and
+revoking one still lists both until both are revoked or expired. Re-issue the
+pair on fresh serials if that matters to you.
+
+The database records each certificate's serial (lower-case hex of the serial's
+big-endian magnitude, the bytes a CRL entry carries) and refuses a second
+certificate under the same issuing CA with the same serial (schema v99, unique
+on `(issuer_ca_id, serial)`; a CA is keyed on `(parent_ca_id, serial)`, and a root
+CA, whose serial is its own issuer's choice, is not recorded). Rows written
+before v99 have no recorded serial and are not indexed, so the upgrade cannot
+fail on a pair that already shares one.
 
 ### A user certificate names its account (`user_id`, 1.0.1)
 
@@ -1232,13 +1337,58 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   half the `nextUpdate` interval long and aligned to the Unix epoch, so every
   replica cuts at the same instants. `thisUpdate` is the start of the epoch the
   list was signed in, or the newest revocation on the list if that is later
-  (never before the CA's own `notBefore`); the CRL number is that `thisUpdate`
-  in seconds, shifted left 24 bits, plus the number of entries. Both are
-  functions of the revocations and the epoch alone, and both CA key types sign
-  deterministically, so every replica signs the same state in the same epoch
-  to the same bytes, CRL number and `ETag`: a relying party behind a load
-  balancer revalidates to `304` wherever its request lands. The number grows
-  with every change of the list, an entry leaving included (RFC 5280 §5.2.3).
+  (never before the CA's own `notBefore`, and never past the epoch's last
+  second); the CRL number is that `thisUpdate` in seconds, shifted left 24
+  bits, plus the number of entries. Both are functions of the revocations and
+  the epoch alone, and both CA key types sign deterministically, so every
+  replica signs the same state in the same epoch to the same bytes, CRL number
+  and `ETag`: a relying party behind a load balancer revalidates to `304`
+  wherever its request lands.
+- **When the CRL number only grows.** RFC 5280 §5.2.3 asks for a number that
+  increases with every list, and some relying parties discard a list whose
+  number is lower than the one they hold. AXIAM's number grows with every
+  change of the list, an entry leaving included, on two conditions:
+  - **the interval is unchanged** — see *Changing the interval* below;
+  - **the replicas' clocks agree within half a refresh epoch** (a quarter of the
+    interval; keep them NTP-synchronised, which is far tighter). For as long as
+    two replicas disagree about which side of an epoch boundary they are on, a
+    relying party alternating between them can be handed the previous epoch's
+    list again — never an older one, and never when it fetches again at its
+    list's `nextUpdate`.
+
+  The datastore's clock is not a condition. It writes the revocation date, and
+  a date ahead of the signing replica's clock could otherwise lie past the end
+  of the epoch; `thisUpdate` is never later than the epoch's last second and
+  no entry states a date later than `thisUpdate`, so the next epoch's list
+  always has a greater number (#615). What remains is that `thisUpdate` can be
+  ahead of the replica's clock, and of a strict relying party's, by as much as
+  the datastore's clock leads — never past the epoch's end — and a strict
+  relying party refuses the list as "not yet valid" for that long. Keep the
+  datastore's clock synchronised with the replicas'.
+- **Changing the interval** (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`). Epochs are
+  cut from it, so a new value cuts new epochs, and the number can step back
+  once: raising the interval moves the current epoch's start back, and
+  lowering it ends an expired entry's stay sooner while `thisUpdate` may stay
+  put. Nothing a relying party trusted is withdrawn by the step — a lower
+  number never lacks a revocation the higher one carried, only entries that
+  expired. A relying party that keeps its list until `nextUpdate`, refuses a
+  lower number, and fetches again at `nextUpdate` is offered a greater number
+  then, as long as the new value is at most twice every value its list may
+  have been signed under. So:
+  - **lowering** the interval is safe, in one step;
+  - **raising** it goes at most to twice the current value at a time, with one
+    old interval between two raises (one day to seven: two days, then four
+    after a day, then seven after two more);
+  - **during a rolling restart**, while some replicas run the old value and
+    some the new, keep the two within a factor of two of each other (the
+    steps above do), or finish the restart within the new interval.
+
+  Raised in one larger step, the number stays below the last one served for
+  up to half the new interval, and a relying party of that kind can find its
+  list past `nextUpdate` with nothing newer it accepts until then. OpenSSL's
+  own CRL check does not compare numbers; a fetch job that refuses a lower
+  one, as the [FreeRADIUS recipe](freeradius.md) advises, is a relying party
+  of this kind.
 - **Entries**: every certificate the CA signed and revoked that has not yet
   expired, or expired during the current or the previous refresh epoch — so an
   entry appears on a list issued after its expiry, as RFC 5280 §3.3 requires,
@@ -1272,6 +1422,12 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   holds up only its own CA's changed list. Whether a list changed is decided
   from each revoked certificate's fingerprint and revocation date; the
   certificates are read only when the list is signed.
+  One re-sign per CA runs at a time and its outcome is shared: a request that
+  finds one in flight waits for it at most the same five seconds, then
+  answers `503`, and is handed the re-sign's own `503` when it fails — so
+  callers queued on a saturated gate all answer within about five seconds,
+  not five seconds each in turn. A re-sign is not abandoned when the caller
+  that started it hangs up; its list is served to the next request.
 
 **The distribution point.** Every certificate AXIAM signs in-process from
 1.0.0 on — leaves issued by `POST /api/v1/certificates` and by

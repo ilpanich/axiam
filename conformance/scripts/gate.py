@@ -27,7 +27,9 @@ The regressions are:
   baseline (it completed unattended before, or it is new and nobody has said
   it needs a browser);
 * a plan the baseline names that the run left no result file for, or a plan
-  that evaluated nothing (no module `PASSED`).
+  that evaluated nothing (no module `PASSED`);
+* a plan that is not in `baseline.json` at all, unless `--new-plan NAME` says it
+  is new (see below).
 
 `WAITING` is tolerated only for a module the unattended baseline lists for that
 plan, and only then; `SKIPPED` (not applicable to the variant) is tolerated, and
@@ -38,12 +40,22 @@ it tolerated, and the report step still renders them.
 The gate fails closed on its inputs: an unreadable or malformed baseline of
 either kind, an unreadable result file, or a plan the unattended baseline does
 not name (every `WAITING` in it is then a regression) all end red, never
-silently tolerant. The one deliberate exception predates this file: a plan the
-main baseline does not name is checked for outright failures only.
+silently tolerant. A plan the main baseline does not name is refused: with
+nothing to compare against, the gate would check outright failures only (not
+even `WAITING`), so a typo in `--plan`, or a plan added to the workflow and
+never baselined, would read as green (R101W4-10, #630). `--new-plan NAME`
+(repeatable) is the explicit statement that a plan is new: it is then checked
+for outright failures only, and the summary says so. The flag is as narrow as
+it can be: every `--new-plan` must also be named by `--plan` (so it has to have
+a result file), and a `--new-plan` for a plan `baseline.json` already names is
+refused, so a flag left in a workflow after the plan was baselined cannot
+quietly downgrade its checks. The cure for a new plan is to record it
+(`--write-baseline`, `--record-unattended`), after which the flag goes away.
 
 Stdlib only, like `report.py`.
 
     gate.py --results conformance/.run/results --plan fapi2-security-profile-final-mtls ...  # the CI gate
+    gate.py --results DIR --plan NEWPLAN --new-plan NEWPLAN  # a plan no baseline names yet (failures only)
     gate.py --results DIR --write-baseline > baseline.json  # record a new baseline (browser-driven run)
     gate.py --results DIR --record-unattended > baseline-unattended.json  # record the parked set (unattended run)
 """
@@ -136,26 +148,46 @@ def check_plan(name: str, run: dict, baseline: dict | None,
 
 
 def gate(results_dir: pathlib.Path, baseline: dict, unattended: dict,
-         only: list[str] | None = None) -> int:
+         only: list[str] | None = None, new_plans: list[str] | None = None) -> int:
     """Gate the plans in `only` (default: every plan the baseline names).
 
     `unattended` is the parsed unattended baseline (see `read_unattended`); it is
     required, not optional, so a caller that forgets it cannot get the old
     tolerate-every-WAITING behaviour by accident.
+
+    `new_plans` names plans that `baseline.json` does not (yet) know. A plan the
+    gate meets that is neither in `baseline.json` nor in `new_plans` is a
+    regression, and a `new_plans` entry the baseline already names, or that
+    `only` does not name, is one too (see the module doc).
     """
     runs = load_results(results_dir) if results_dir.is_dir() else {}
     plans = baseline.get("plans", {})
     parked_by_plan = unattended.get("plans", {})
+    new_plans = sorted(set(new_plans or []))
     required = sorted(only or plans)
     if only:
         runs = {n: r for n, r in runs.items() if n in only}
     regressions: list[str] = []
     notes: list[str] = []
 
+    for name in new_plans:
+        if name in plans:
+            regressions.append(f"{name}: --new-plan, but baseline.json already names this plan "
+                               "(drop the flag; it would only weaken the checks)")
+        elif name not in (only or []):
+            regressions.append(f"{name}: --new-plan, but the plan is not among the --plan arguments")
+
     for name in required:
         if name not in runs:
             regressions.append(f"{name}: no result file under {results_dir}")
+            if name not in plans and name not in new_plans:
+                regressions.append(f"{name}: the plan is not in baseline.json and --new-plan "
+                                   f"{name} was not given")
     for name, run in sorted(runs.items()):
+        if name not in plans and name not in new_plans:
+            regressions.append(f"{name}: the plan is not in baseline.json and --new-plan {name} "
+                               "was not given (a typo, or a new plan nobody has recorded?)")
+            continue
         # A plan the main baseline names must say which modules park; one that
         # the unattended baseline omits has none, so any WAITING in it is red.
         parked = set(parked_by_plan.get(name, {}).get("waiting", [])) if name in plans else None
@@ -163,7 +195,9 @@ def gate(results_dir: pathlib.Path, baseline: dict, unattended: dict,
         regressions += r
         notes += n
         if name not in plans:
-            notes.append(f"{name}: no baseline for this plan; only outright failures are checked")
+            notes.append(f"{name}: NEW PLAN (--new-plan), no baseline; only outright failures are "
+                         "checked, not WAITING. Record it with --write-baseline and "
+                         "--record-unattended, then drop the flag")
 
     if not runs and not required:
         regressions.append(f"no *.results.json under {results_dir} — the run wrote no result")
@@ -242,6 +276,11 @@ def main() -> int:
                     help="gate only this plan (the results file's stem); repeatable. "
                          "Each one named must have a result file. Default: every "
                          "plan the baseline names")
+    ap.add_argument("--new-plan", action="append", default=[], metavar="NAME",
+                    help="say that this --plan is new, i.e. absent from the baseline: it is "
+                         "then checked for outright failures only and reported as new. Without "
+                         "it a --plan absent from the baseline is a regression. Repeatable; "
+                         "each must also be a --plan, and must not be in the baseline")
     ap.add_argument("--write-baseline", action="store_true",
                     help="print a baseline built from --results instead of gating "
                          "(record it from a browser-driven run)")
@@ -281,7 +320,7 @@ def main() -> int:
         print(f"[gate] cannot read the unattended baseline {args.baseline_unattended}: {e}",
               file=sys.stderr)
         return 1
-    return gate(results_dir, baseline, unattended, args.plan)
+    return gate(results_dir, baseline, unattended, args.plan, args.new_plan)
 
 
 if __name__ == "__main__":

@@ -103,6 +103,55 @@ jobs:
     timeout-minutes: 150
 
     steps:
+      # FIRST, before the checkout or anything that could use a dispatch input.
+      #
+      # `plan_name` and `module_timeout` are free text for anyone who may
+      # dispatch this workflow. `module_timeout` ends up inside bash arithmetic
+      # in conformance/scripts/run-plan.sh, where `a[$(cmd)]` runs `cmd`
+      # (R101W4-02, the sibling of the `axiam_image` injection closed in #592);
+      # `plan_name` ends up in a URL query and a JSON file. So both are checked
+      # against a closed pattern here, and a value that fails stops the job
+      # before it has cost a minute of runner time.
+      #
+      # The inputs reach this step through `env:`, never as `${{ inputs.x }}`
+      # interpolated into the script: an expression inside `run:` is pasted
+      # into the script text BEFORE bash parses it, so a quote and a semicolon
+      # in the input become commands. As an environment variable the value is
+      # data, and `[[ =~ ]]` does no expansion of it.
+      #
+      # Later steps read the VALIDATED values from $GITHUB_ENV, not the raw
+      # inputs. Both patterns exclude a newline (a POSIX ERE `$` matches only at
+      # the end of the whole string), which is what makes the append to
+      # $GITHUB_ENV safe; see the "Select the AXIAM image" step for the same
+      # reasoning. `axiam_image` is validated in that step, which also owns the
+      # claim the report makes about it.
+      - name: Validate dispatch inputs
+        env:
+          INPUT_PLAN_NAME: ${{ inputs.plan_name }}
+          INPUT_MODULE_TIMEOUT: ${{ inputs.module_timeout }}
+        run: |
+          set -euo pipefail
+          plan_re='^[a-z0-9-]{1,128}$'
+          timeout_re='^[0-9]{1,5}$'
+          bad=0
+          if ! [[ "${INPUT_PLAN_NAME}" =~ ${plan_re} ]]; then
+            # %q escapes control characters and keeps it on one line, so the
+            # refusal cannot forge a workflow command.
+            printf '::error::plan_name must match %s (lower-case letters, digits and hyphens, 1 to 128 characters). Got: %q\n' "${plan_re}" "${INPUT_PLAN_NAME}"
+            bad=1
+          fi
+          if ! [[ "${INPUT_MODULE_TIMEOUT}" =~ ${timeout_re} ]]; then
+            printf '::error::module_timeout must match %s (whole seconds, 1 to 5 digits). Got: %q\n' "${timeout_re}" "${INPUT_MODULE_TIMEOUT}"
+            bad=1
+          fi
+          if [ "${bad}" -ne 0 ]; then
+            exit 1
+          fi
+          {
+            echo "CONFORMANCE_PLAN_NAME=${INPUT_PLAN_NAME}"
+            echo "CONFORMANCE_MODULE_TIMEOUT=${INPUT_MODULE_TIMEOUT}"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -335,9 +384,10 @@ jobs:
       - name: Run the three test plans
         id: run
         continue-on-error: true
-        env:
-          CONFORMANCE_PLAN_NAME: ${{ inputs.plan_name }}
-          CONFORMANCE_MODULE_TIMEOUT: ${{ inputs.module_timeout }}
+        # CONFORMANCE_PLAN_NAME and CONFORMANCE_MODULE_TIMEOUT come from
+        # $GITHUB_ENV, written by "Validate dispatch inputs" after it checked
+        # them; this step deliberately does not read the raw inputs (R101W4-02).
+        #
         # `continue-on-error` so the REPORT step below always runs. A red plan
         # whose artifacts were never uploaded is a run nobody can act on, and
         # the job's overall verdict is restored by the final gate step.

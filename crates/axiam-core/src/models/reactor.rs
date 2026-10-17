@@ -207,6 +207,29 @@ pub const EVENT_REGISTRY: &[ReactorEventSpec] = &[
         default_failure_policy: FailurePolicy::FailClosed,
         description: "Veto a role or permission assignment (four-eyes workflows). Veto-only.",
     },
+    ReactorEventSpec {
+        name: "network.pre_profile_write",
+        interceptable: true,
+        mutable: false,
+        mutable_fields: &[],
+        // A reply profile decides what VLAN-bound session a device gets and
+        // for how long; writing one is a grant (design note §5.2). Four-eyes
+        // rules on network policy live here, so an unreachable approver is
+        // not an approval.
+        default_failure_policy: FailurePolicy::FailClosed,
+        description: "Veto a RADIUS reply-profile create, replace or delete (four-eyes on network policy). Veto-only.",
+    },
+    ReactorEventSpec {
+        name: "network.pre_segment_write",
+        interceptable: true,
+        mutable: false,
+        mutable_fields: &[],
+        // As above: a segment's envelope (kind, VLAN, filter ids, rank,
+        // enabled) is what every profile and every placement is checked
+        // against.
+        default_failure_policy: FailurePolicy::FailClosed,
+        description: "Veto a network segment create, replace or delete (four-eyes on network policy). Veto-only.",
+    },
 ];
 
 /// Look an event up by wire name.
@@ -377,7 +400,7 @@ pub fn noop_reactor_gate() -> SharedReactorGate {
     std::sync::Arc::new(NoopReactorGate)
 }
 
-/// The five v1 interceptor event names, as the `&'static str`s the gate takes.
+/// The interceptor event names, as the `&'static str`s the gate takes.
 ///
 /// Call sites use these rather than string literals so a typo is a compile
 /// error rather than an event that silently dispatches to nothing (which is
@@ -394,6 +417,10 @@ pub mod events {
     pub const USER_PRE_UPDATE: &str = "user.pre_update";
     /// Before a role is assigned to a user or a group. Veto only.
     pub const GRANT_PRE_ASSIGN: &str = "grant.pre_assign";
+    /// Before a RADIUS reply profile is created, replaced or deleted. Veto only.
+    pub const NETWORK_PRE_PROFILE_WRITE: &str = "network.pre_profile_write";
+    /// Before a network segment is created, replaced or deleted. Veto only.
+    pub const NETWORK_PRE_SEGMENT_WRITE: &str = "network.pre_segment_write";
 }
 
 // ---------------------------------------------------------------------------
@@ -643,7 +670,12 @@ mod tests {
 
     #[test]
     fn a_veto_only_event_admits_no_patch_at_all() {
-        for name in ["login.post_auth", "grant.pre_assign"] {
+        for name in [
+            "login.post_auth",
+            "grant.pre_assign",
+            "network.pre_profile_write",
+            "network.pre_segment_write",
+        ] {
             let spec = event_spec(name).unwrap();
             for field in ["anything", "ext.x", "reason", ""] {
                 assert!(
@@ -792,7 +824,7 @@ mod tests {
         assert_eq!(FailurePolicy::from_wire("fail_sometimes"), None);
     }
 
-    /// The constants the five call sites pass must be registry names. A
+    /// The constants the call sites pass must be registry names. A
     /// constant that drifted out of the registry would make its hook dispatch
     /// to nothing — a security control that silently stopped running.
     #[test]
@@ -803,6 +835,8 @@ mod tests {
             events::USER_PRE_CREATE,
             events::USER_PRE_UPDATE,
             events::GRANT_PRE_ASSIGN,
+            events::NETWORK_PRE_PROFILE_WRITE,
+            events::NETWORK_PRE_SEGMENT_WRITE,
         ] {
             assert!(
                 event_spec(name).is_some(),
@@ -811,7 +845,7 @@ mod tests {
         }
         assert_eq!(
             EVENT_REGISTRY.len(),
-            5,
+            7,
             "a sixth event needs a call-site constant and a wired hook, or it \
              is a registration nothing will ever fire"
         );

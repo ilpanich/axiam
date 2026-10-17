@@ -10,7 +10,16 @@
  * without the JSX around it.
  */
 
-import type { DynamicRegistrationMode } from "@/services/settings";
+import type {
+  DynamicRegistrationMode,
+  SurfaceKey,
+} from "@/services/settings";
+
+/** The label each disable-only switch is shown under, and named by in messages. */
+export const SURFACE_LABELS: Record<SurfaceKey, string> = {
+  saml_idp_enabled: "SAML 2.0 identity provider",
+  ssf_enabled: "Shared Signals Framework transmitter",
+};
 
 /** `"a\nb\n  \nc"` → `["a", "b", "c"]` — one entry per non-blank line. */
 export function parseLines(raw: string): string[] {

@@ -446,7 +446,7 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
 
     async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
         // Every status, expired or not: an approved grant is the one that
-        // matters (it redeems against a re-materialised client), but a
+        // matters (it must not outlive its client, R101W3-01), but a
         // pending one could still be approved and a redeemed row is of no
         // further use. Tenant AND client id, as `client_id` is unique only
         // within its tenant.

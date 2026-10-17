@@ -129,6 +129,52 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("reactors:create", "Register a reactor"),
     ("reactors:update", "Update a reactor registration"),
     ("reactors:delete", "Delete a reactor registration"),
+    // Network segments and RADIUS reply profiles (RADIUS D4,
+    // `claude_dev/radius-reply-profile-design.md` §4.2).
+    //
+    // The whole `network:` namespace is reserved: `permissions:create` must
+    // refuse an action that starts with it, so a tenant cannot mint a look-alike
+    // (W6.2). A role carrying any of these is *network-sensitive* and is bound
+    // by the write-time rules of §4.2 and §5.3. `network:admin` and
+    // `network:grant_admin` are defined and not grantable under option B (the
+    // administrative `Service-Type` class is disabled, §3.3); they exist so that
+    // option A inherits the rule instead of inventing one.
+    (
+        "network:join",
+        "Be placed on a network segment (held by a device's service account; cascades from the site and branch)",
+    ),
+    (
+        "network:admin",
+        "Administrative login to a segment's network devices (defined, not grantable under option B)",
+    ),
+    (
+        "network:read",
+        "Read network segments and their reply profiles",
+    ),
+    (
+        "network:segments_write",
+        "Create, change and delete network segments: the tree and each segment's envelope (kind, VLAN, filter ids, rank, enabled), and, at the /network root, the tenant's Session-Timeout cap",
+    ),
+    (
+        "network:profiles_write",
+        "Create, replace and delete the reply profile of a network segment",
+    ),
+    (
+        "network:grant",
+        "Confer network:join on a node: write a reply profile, or assign or unassign a role that carries a network permission",
+    ),
+    (
+        "network:grant_admin",
+        "Confer the administrative class on a network segment (option A only)",
+    ),
+    (
+        "network:decide",
+        "Ask for RADIUS placement decisions for a site (held by the RADIUS server's service account)",
+    ),
+    (
+        "network:export",
+        "Read the rendered RADIUS placement export for a site",
+    ),
     // Webhooks
     ("webhooks:list", "List webhooks"),
     ("webhooks:get", "Retrieve a single webhook"),
@@ -400,7 +446,33 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "webauthn_policy",
     "scim",
     "scim_tokens",
+    // RADIUS D4 (W6.1): a segment's profile decides what VLAN and ACL a device
+    // gets, and writing one is a grant (design note §5.2). A network
+    // administrator is a human's role. The one machine caller, FreeRADIUS's
+    // `network:decide` on the decision route, is placed by W6.4 as a named
+    // exception (`CERTIFICATE_BOUND_MACHINE_ROUTES`), not by admitting the
+    // family: a service account still cannot reach a management route.
+    "network",
 ];
+
+/// Routes of a **human-only** family whose one caller is a machine, admitted by
+/// name, each with the condition it adds — an exception to
+/// [`HUMAN_ONLY_FAMILIES`], never a widening of a family.
+///
+/// Today one: `POST /api/v1/network/decide` (RADIUS D4, W6.4; design note §6.3,
+/// T-468). Its caller is a FreeRADIUS server's service account, so a person's
+/// token is refused (`401`); and because it is an authenticated oracle on
+/// "is this certificate good here", a service account is admitted only with a
+/// token **bound to its own certificate** (`cnf.x5t#S256`), presented over mTLS
+/// with that certificate, which still resolves to the same account: a plain
+/// bearer token of the same account is `401`. Admitting the whole `network`
+/// family instead would hand every service account the management routes'
+/// audience, which is the decision D-5 keeps human.
+///
+/// Each entry is `(method, path, permission)`; the route is in
+/// [`ROUTE_PERMISSION_MAP`] too, and `m2m_management_test` holds the two in step.
+pub const CERTIFICATE_BOUND_MACHINE_ROUTES: &[(&str, &str, &str)] =
+    &[("POST", "/api/v1/network/decide", "network:decide")];
 
 // ---------------------------------------------------------------------------
 // Public-path allowlist (D-04)
@@ -1309,6 +1381,49 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/scim-targets/{id}/reconcile",
         "scim_targets:write",
     ),
+    // Network segments and RADIUS reply profiles (RADIUS D4, W6.3). The route
+    // permission is the one the write gate asks for first (design note §5.2,
+    // §4.2); a profile write also needs `network:grant` on the segment (H2).
+    ("GET", "/api/v1/network/segments", "network:read"),
+    ("POST", "/api/v1/network/segments", "network:segments_write"),
+    ("GET", "/api/v1/network/segments/{id}", "network:read"),
+    (
+        "PUT",
+        "/api/v1/network/segments/{id}",
+        "network:segments_write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/network/segments/{id}",
+        "network:segments_write",
+    ),
+    ("GET", "/api/v1/network/profiles", "network:read"),
+    ("POST", "/api/v1/network/profiles", "network:profiles_write"),
+    (
+        "GET",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:profiles_write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/network/profiles/{segment_id}",
+        "network:profiles_write",
+    ),
+    // The tenant's `Session-Timeout` cap (plan 13.6, W6.3b): read at the
+    // `/network` root; written with `network:segments_write` there (the cap is
+    // the envelope every profile is clamped to), which the write gate asks for
+    // itself (`NetworkWrite::PolicyWrite`).
+    ("GET", "/api/v1/network/policy", "network:read"),
+    ("PUT", "/api/v1/network/policy", "network:segments_write"),
+    // The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
+    // node the decision reads, inside the handler. Its caller is a machine, by
+    // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.
+    ("POST", "/api/v1/network/decide", "network:decide"),
     // WebAuthn Attestation Policy (X3 wave 3)
     (
         "GET",

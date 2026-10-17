@@ -52,10 +52,14 @@ use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::HttpMessage;
-use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
-use actix_web::http::header::{ContentType, RETRY_AFTER};
-use std::net::IpAddr;
+use actix_web::http::header::{ContentType, HeaderMap, RETRY_AFTER};
+use actix_web::{HttpRequest, HttpResponse};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+
+use axiam_auth::token::CachedUserIdentity;
+use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
 
@@ -94,41 +98,101 @@ impl XForwardedForKeyExtractor {
     }
 }
 
+/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, or `0` when it is unset or unparseable.
+///
+/// The one reading of the variable every REST limiter keyed on the client's
+/// address uses: the route governors (`server.rs`), the shared counter
+/// (`middleware::rate_limit_shared`) and the token endpoint's public-client
+/// bucket ([`rate_limit_client_ip`]). Read per call, as the shared counter has
+/// always read it, so they cannot disagree about which address a request is.
+pub fn configured_trusted_hops() -> usize {
+    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The address a per-address rate limit keys a request on (SEC-048, T-212).
+///
+/// The **rightmost untrusted** `X-Forwarded-For` hop — `hops[len - 1 -
+/// trusted_hops]` — when the header has more hops than `trusted_hops` and
+/// that entry parses as an address; otherwise `peer`, the transport peer.
+/// Behind `trusted_hops + 1` appending proxies a client cannot choose the
+/// result by writing the header: the entries it writes sit to the LEFT of the
+/// ones the proxies append, and the index counts from the right; and a header
+/// too short to reach past the trusted hops is ignored entirely rather than
+/// indexed from the left (SECHRD-03). A server exposed with no proxy at all
+/// reads whatever the caller wrote — the deployment guide's T-212 caveat,
+/// shared by every limiter that calls this.
+///
+/// The second value is `Some(hops seen)` when the header was discarded
+/// because `trusted_hops >= hops` — the R-4 misconfiguration signal, which
+/// only [`XForwardedForKeyExtractor`] records, once per request.
+fn select_rate_limit_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_hops: usize,
+) -> (Option<IpAddr>, Option<usize>) {
+    let mut discarded_hops = None;
+    if let Some(forwarded_for) = headers.get("X-Forwarded-For")
+        && let Ok(val) = forwarded_for.to_str()
+    {
+        let hops: Vec<&str> = val.split(',').map(str::trim).collect();
+        // Select the rightmost-untrusted hop.
+        // hops = [client, proxy1, ..., trusted_proxy]
+        // trusted_hops=1 → index = len - 1 - 1 = len - 2
+        if trusted_hops < hops.len() {
+            let idx = hops.len() - 1 - trusted_hops;
+            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
+                return (Some(ip), None);
+            }
+        } else {
+            // Fewer hops than trusted_hops requires: the header cannot be
+            // trusted at all (an attacker could otherwise rotate it to get a
+            // fresh bucket per request via the old `hops[0]` fallback —
+            // SECHRD-03). Fall through to the peer instead of indexing into it.
+            discarded_hops = Some(hops.len());
+        }
+    }
+    (peer.map(|addr| addr.ip()), discarded_hops)
+}
+
+/// The address the route limiters key `req` on, under the
+/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS` in force — for a limit a handler applies
+/// itself.
+///
+/// R110W3-01: the token endpoint's public-client bucket keyed on the transport
+/// peer, which behind the shipped reverse proxy is the proxy, so every caller
+/// of one public client shared one allowance that any single address could
+/// fill. This is the same selection [`XForwardedForKeyExtractor`] makes for
+/// the route's governor and shared counter on the same request (one function,
+/// [`select_rate_limit_ip`]), so a handler's bucket can be no easier to mint
+/// and no coarser than the route's. It records no R-4 discard: the route's
+/// extractor has already counted this request.
+///
+/// A rate-limit key, never an audit value: an audit row keeps
+/// [`super::client_info::peer_ip`] (SEC-087).
+pub fn rate_limit_client_ip(req: &HttpRequest) -> Option<IpAddr> {
+    select_rate_limit_ip(req.headers(), req.peer_addr(), configured_trusted_hops()).0
+}
+
 impl KeyExtractor for XForwardedForKeyExtractor {
     type Key = IpAddr;
     type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
 
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        if let Some(forwarded_for) = req.headers().get("X-Forwarded-For")
-            && let Ok(val) = forwarded_for.to_str()
-        {
-            let hops: Vec<&str> = val.split(',').map(str::trim).collect();
-            // Select the rightmost-untrusted hop.
-            // hops = [client, proxy1, ..., trusted_proxy]
-            // trusted_hops=1 → index = len - 1 - 1 = len - 2
-            if self.trusted_hops < hops.len() {
-                let idx = hops.len() - 1 - self.trusted_hops;
-                if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                    return Ok(ip);
-                }
-            }
-            // Fewer hops than trusted_hops requires: the header cannot be
-            // trusted at all (an attacker could otherwise rotate it to get a
-            // fresh bucket per request via the old `hops[0]` fallback — SECHRD-03).
-            // Fall through to peer_addr() below instead of indexing into XFF.
-            //
-            // R-4: no longer silently. Under a `trusted_hops` one too high this
-            // fires on every request and every client shares one bucket keyed on
-            // the proxy — the failure T-212 describes, which went unnoticed
-            // precisely because nothing said so. One WARN per process plus a
-            // counter; see `super::xff_metrics`.
-            if self.trusted_hops >= hops.len() {
-                super::xff_metrics::record_discarded_xff(hops.len(), self.trusted_hops);
-            }
+        let (ip, discarded_hops) =
+            select_rate_limit_ip(req.headers(), req.peer_addr(), self.trusted_hops);
+        // R-4: a header with fewer hops than `trusted_hops` requires is no
+        // longer discarded silently. Under a `trusted_hops` one too high this
+        // fires on every request and every client shares one bucket keyed on
+        // the proxy — the failure T-212 describes, which went unnoticed
+        // precisely because nothing said so. One WARN per process plus a
+        // counter; see `super::xff_metrics`.
+        if let Some(hops_seen) = discarded_hops {
+            super::xff_metrics::record_discarded_xff(hops_seen, self.trusted_hops);
         }
-        req.peer_addr()
-            .map(|addr| addr.ip())
-            .ok_or_else(|| SimpleKeyExtractionError::new("no peer address"))
+        ip.ok_or_else(|| SimpleKeyExtractionError::new("no peer address"))
     }
 
     /// Returns a JSON 429 response with Retry-After header per D-03.
@@ -223,6 +287,94 @@ pub fn extract_client_id(body: &[u8], authorization: Option<&str>) -> Option<Str
     extract_form_client_id(body).or_else(|| authorization.and_then(extract_basic_client_id))
 }
 
+// ---------------------------------------------------------------------------
+// #633 — principal keying (the authenticated federation flow routes only)
+// ---------------------------------------------------------------------------
+
+/// The principal a [`RateLimitKeyMode::Principal`] bucket is keyed on: the
+/// `(tenant, sub)` of an access token whose signature, expiry and issuer were
+/// **verified** for this request.
+///
+/// Built only by [`verified_principal`], from the
+/// [`CachedUserIdentity`] that `axiam_audit::middleware::AuditMiddleware`
+/// leaves on every request whose token verifies. That middleware wraps the
+/// whole application (`axiam-server`'s `boot.rs`), so it has run before any
+/// limiter here, and reusing its result is what keeps the principal key free:
+/// no limiter verifies a signature, so a refused credential still costs the
+/// verifications it cost before (§10, "one verify per refusal").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitPrincipal {
+    /// The tenant the token was issued in (its `tenant_id` claim).
+    pub tenant_id: Uuid,
+    /// The token's subject (its `sub` claim).
+    pub subject: Uuid,
+    /// Whether the token is sender-constrained (`cnf`, RFC 8705 / RFC 9449).
+    /// Its proof of possession is checked by the extractor, after the limiter,
+    /// so here the token alone does not yet show its holder is the principal.
+    pub sender_constrained: bool,
+}
+
+/// The verified principal of this request, or `None` when no token verified.
+///
+/// **Reads, never verifies.** `None` covers "no token", "a token that did not
+/// verify" (forged, expired, another issuer's) and "no audit middleware in this
+/// composition" alike, and every one of them keys on the address — the
+/// pre-authentication fallback, which is what every route keyed on before
+/// #633. A caller cannot reach this with a claim it wrote itself: request
+/// extensions are written by server code only, and the one writer of this
+/// extension inserts it after `validate_access_token` succeeded.
+pub fn verified_principal(req: &ServiceRequest) -> Option<RateLimitPrincipal> {
+    let extensions = req.extensions();
+    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
+    Some(RateLimitPrincipal {
+        tenant_id: cached.tenant_id,
+        subject: cached.user_id,
+        sender_constrained: cached.claims.0.cnf.is_some(),
+    })
+}
+
+/// The identity part of a bucket key — `{endpoint}:{this}` in the shared
+/// counter, the whole key in the in-memory governor — for every key mode.
+///
+/// One function for both layers, so the shared counter
+/// ([`crate::middleware::rate_limit_shared::RateLimitShared`]) and the
+/// in-process governor ([`ClientAwareKeyExtractor`]) can never disagree about
+/// which bucket a request belongs to: with `AXIAM__RATE_LIMIT__SHARED` on or
+/// off, a route keys the same way.
+///
+/// `None` only when the key needs the address and there is none; the caller
+/// then fails open (shared layer) or refuses the key (governor), as before.
+pub fn bucket_key_part(
+    key_mode: RateLimitKeyMode,
+    ip: Option<IpAddr>,
+    client_id: Option<&str>,
+    principal: Option<&RateLimitPrincipal>,
+) -> Option<String> {
+    match (key_mode, client_id, principal) {
+        // #633. A verified bearer token: the principal alone, from whichever
+        // address it comes — one token used from many addresses is one
+        // bucket, and one address relaying many users is many.
+        (RateLimitKeyMode::Principal, _, Some(p)) if !p.sender_constrained => {
+            Some(format!("principal:{}:{}", p.tenant_id, p.subject))
+        }
+        // A sender-constrained token, whose possession is not yet proved: the
+        // address and the principal together, so a copy replayed from
+        // elsewhere spends a bucket of its own and never its principal's.
+        (RateLimitKeyMode::Principal, _, Some(p)) => {
+            ip.map(|ip| format!("{ip}:principal:{}:{}", p.tenant_id, p.subject))
+        }
+        // No verified token (pre-authentication fallback), `ip` mode, or no
+        // client_id available (fail-safe fallback): the address alone.
+        (RateLimitKeyMode::Principal, _, None)
+        | (RateLimitKeyMode::Ip, _, _)
+        | (RateLimitKeyMode::ClientId | RateLimitKeyMode::IpClientId, None, _) => {
+            ip.map(|ip| ip.to_string())
+        }
+        (RateLimitKeyMode::ClientId, Some(cid), _) => Some(format!("client:{cid}")),
+        (RateLimitKeyMode::IpClientId, Some(cid), _) => ip.map(|ip| format!("{ip}:client:{cid}")),
+    }
+}
+
 /// D8 key extractor for the token/introspect/revoke endpoints: honors
 /// `AXIAM__RATE_LIMIT__KEY` (`ip` | `client_id` | `ip_client_id`) to key the
 /// in-memory `Governor` bucket on the OAuth2 `client_id`, the `(ip,
@@ -232,6 +384,10 @@ pub fn extract_client_id(body: &[u8], authorization: Option<&str>) -> Option<Str
 /// client identity** — see [`crate::config::rate_limit::RateLimitKeyMode`]
 /// for why login is structurally excluded (it authenticates a user, not an
 /// OAuth2 client; there is no `client_id` to key on at that point).
+///
+/// The same extractor in [`RateLimitKeyMode::Principal`] keys the five
+/// authenticated federation flow routes on their verified principal (#633);
+/// see [`verified_principal`]. It never reads a body in that mode.
 #[derive(Debug, Clone)]
 pub struct ClientAwareKeyExtractor {
     /// Always computed alongside the client_id — used verbatim in `Ip`
@@ -260,14 +416,20 @@ impl KeyExtractor for ClientAwareKeyExtractor {
             .extensions()
             .get::<RateLimitClientId>()
             .and_then(|c| c.0.clone());
+        let principal = match self.key_mode {
+            RateLimitKeyMode::Principal => verified_principal(req),
+            _ => None,
+        };
 
-        Ok(match (self.key_mode, client_id) {
-            // `ip` mode, or no client_id available (fail-safe fallback):
-            // identical to the pre-D8 IP-only key.
-            (RateLimitKeyMode::Ip, _) | (_, None) => ip.to_string(),
-            (RateLimitKeyMode::ClientId, Some(cid)) => format!("client:{cid}"),
-            (RateLimitKeyMode::IpClientId, Some(cid)) => format!("{ip}:client:{cid}"),
-        })
+        // With an address in hand every mode yields a key; `ok_or` is for the
+        // type, not a reachable branch.
+        bucket_key_part(
+            self.key_mode,
+            Some(ip),
+            client_id.as_deref(),
+            principal.as_ref(),
+        )
+        .ok_or_else(|| SimpleKeyExtractionError::new("no bucket key"))
     }
 
     /// Same 429 contract as [`XForwardedForKeyExtractor`] — clients must
@@ -524,6 +686,99 @@ mod client_aware_tests {
         assert!(resp.headers().contains_key(RETRY_AFTER));
     }
 
+    fn principal(tenant: u128, subject: u128, sender_constrained: bool) -> RateLimitPrincipal {
+        RateLimitPrincipal {
+            tenant_id: Uuid::from_u128(tenant),
+            subject: Uuid::from_u128(subject),
+            sender_constrained,
+        }
+    }
+
+    /// #633: a verified bearer principal is one bucket from any address, and
+    /// two principals behind one address are two buckets.
+    #[test]
+    fn principal_mode_keys_on_the_principal_alone() {
+        let ip_a: IpAddr = "203.0.113.9".parse().unwrap();
+        let ip_b: IpAddr = "203.0.113.10".parse().unwrap();
+        let alice = principal(1, 10, false);
+        let bob = principal(1, 11, false);
+        let key = |ip, p| bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(p));
+
+        assert_eq!(
+            key(ip_a, &alice),
+            key(ip_b, &alice),
+            "one token, two addresses"
+        );
+        assert_ne!(key(ip_a, &alice), key(ip_a, &bob), "one address, two users");
+        assert!(!key(ip_a, &alice).unwrap().contains("203.0.113.9"));
+        assert_ne!(
+            key(ip_a, &principal(1, 10, false)),
+            key(ip_a, &principal(2, 10, false)),
+            "the tenant is part of the key"
+        );
+    }
+
+    /// #633: without a verified token the key is the address — byte for byte
+    /// the key `build_governor` gives — and a sender-constrained token keys on
+    /// the address and the principal together.
+    #[test]
+    fn principal_mode_falls_back_to_the_address_and_pairs_a_bound_token_with_it() {
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, None).as_deref(),
+            Some("203.0.113.9")
+        );
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, None, None, None),
+            None
+        );
+
+        let bound = principal(1, 10, true);
+        let unbound = principal(1, 10, false);
+        let other_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let bound_here = bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(&bound));
+        let bound_there = bucket_key_part(
+            RateLimitKeyMode::Principal,
+            Some(other_ip),
+            None,
+            Some(&bound),
+        );
+        let unbound_here =
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), None, Some(&unbound));
+        assert_ne!(
+            bound_here, bound_there,
+            "a bound token's key carries the address"
+        );
+        assert_ne!(
+            bound_here, unbound_here,
+            "and is never the bearer principal's key"
+        );
+        assert_ne!(bound_here.as_deref(), Some("203.0.113.9"));
+    }
+
+    /// The principal mode ignores a client_id, and the other modes ignore a
+    /// principal: each key is what it was before #633.
+    #[test]
+    fn the_modes_do_not_read_each_others_identity() {
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let p = principal(1, 10, false);
+        assert_eq!(
+            bucket_key_part(RateLimitKeyMode::Principal, Some(ip), Some("c"), None).as_deref(),
+            Some("203.0.113.9")
+        );
+        for (mode, expected) in [
+            (RateLimitKeyMode::Ip, "203.0.113.9"),
+            (RateLimitKeyMode::ClientId, "client:c"),
+            (RateLimitKeyMode::IpClientId, "203.0.113.9:client:c"),
+        ] {
+            assert_eq!(
+                bucket_key_part(mode, Some(ip), Some("c"), Some(&p)).as_deref(),
+                Some(expected),
+                "{mode:?}"
+            );
+        }
+    }
+
     #[test]
     fn extract_form_client_id_parses_and_rejects_empty() {
         assert_eq!(
@@ -535,5 +790,94 @@ mod client_aware_tests {
         assert_eq!(extract_form_client_id(b"client_id=&grant_type=x"), None);
         assert_eq!(extract_form_client_id(b"grant_type=x"), None);
         assert_eq!(extract_form_client_id(b""), None);
+    }
+}
+
+/// R110W3-01: the one selection the route limiters and the token endpoint's
+/// public-client bucket share.
+#[cfg(test)]
+mod address_selection_tests {
+    use super::*;
+    use actix_web::test::TestRequest;
+
+    /// The reverse proxy: the transport peer of every request below.
+    const PROXY: &str = "10.0.0.2:443";
+    const A: &str = "198.51.100.9";
+    const B: &str = "203.0.113.7";
+
+    fn headers(xff: Option<&str>) -> HeaderMap {
+        let mut req = TestRequest::get();
+        if let Some(value) = xff {
+            req = req.insert_header(("X-Forwarded-For", value));
+        }
+        req.to_http_request().headers().clone()
+    }
+
+    fn select(xff: Option<&str>, trusted_hops: usize) -> (Option<IpAddr>, Option<usize>) {
+        select_rate_limit_ip(&headers(xff), Some(PROXY.parse().unwrap()), trusted_hops)
+    }
+
+    fn ip(s: &str) -> Option<IpAddr> {
+        Some(s.parse().unwrap())
+    }
+
+    fn proxy() -> Option<IpAddr> {
+        Some(PROXY.parse::<SocketAddr>().unwrap().ip())
+    }
+
+    #[test]
+    fn behind_one_proxy_the_key_is_the_address_the_proxy_appended() {
+        assert_eq!(select(Some(A), 0), (ip(A), None));
+        // An untrusted entry the client wrote itself sits to the LEFT of the
+        // one the proxy appends, so it does not change the key: a caller at A
+        // cannot charge its requests to B's bucket.
+        assert_eq!(select(Some(&format!("{B}, {A}")), 0), (ip(A), None));
+        assert_eq!(select(Some(&format!("{B},{B}, {A}")), 0), (ip(A), None));
+    }
+
+    #[test]
+    fn trusted_hops_at_or_above_the_hop_count_falls_back_to_the_peer() {
+        // The T-212 off-by-one (`1` behind one proxy): the header cannot be
+        // trusted, so the key is the peer, and the discard is reported for
+        // R-4's signal.
+        assert_eq!(select(Some(A), 1), (proxy(), Some(1)));
+        assert_eq!(select(Some(&format!("{B}, {A}")), 2), (proxy(), Some(2)));
+        assert_eq!(select(Some(&format!("{B}, {A}")), 5), (proxy(), Some(2)));
+        // One hop more than trusted reaches the client again.
+        assert_eq!(select(Some(&format!("{B}, {A}")), 1), (ip(B), None));
+    }
+
+    #[test]
+    fn no_header_or_an_unparseable_entry_falls_back_to_the_peer() {
+        assert_eq!(select(None, 0), (proxy(), None));
+        assert_eq!(select(Some("not-an-address"), 0), (proxy(), None));
+        assert_eq!(
+            select_rate_limit_ip(&headers(Some(A)), None, 1),
+            (None, Some(1)),
+            "no peer and nothing trusted is no key"
+        );
+    }
+
+    #[test]
+    fn the_handlers_address_is_the_route_extractors_key() {
+        // `rate_limit_client_ip` reads the configured hops (`0` unless the
+        // environment says otherwise); the governor on the same route reads
+        // the same value. Whatever it is, the two agree on every shape.
+        let hops = configured_trusted_hops();
+        let extractor = XForwardedForKeyExtractor::with_trusted_hops(hops);
+        for xff in [None, Some(A), Some("x"), Some("203.0.113.7, 198.51.100.9")] {
+            let build = || {
+                let mut req = TestRequest::post().peer_addr(PROXY.parse().unwrap());
+                if let Some(value) = xff {
+                    req = req.insert_header(("X-Forwarded-For", value));
+                }
+                req
+            };
+            assert_eq!(
+                rate_limit_client_ip(&build().to_http_request()),
+                extractor.extract(&build().to_srv_request()).ok(),
+                "xff: {xff:?}"
+            );
+        }
     }
 }

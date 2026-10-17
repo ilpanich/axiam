@@ -47,6 +47,9 @@ const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitl
 /// are equal (no session lookup). Safe (GET) requests ignore it.
 const CSRF_TOKEN: &str = "test-csrf-token";
 
+/// A legacy Vault batch token (`b.` prefix) as a refusal might echo it.
+const BATCH_TOKEN: &str = "b.AAAAAQJ0aGlzX2lzX25vdF9hX3JlYWxfdG9rZW4"; // gitleaks:allow
+
 fn test_keypair() -> (String, String) {
     // Test-only non-secret Ed25519 key pair used solely for JWT signing in unit tests.
     let private_key = [
@@ -618,8 +621,14 @@ async fn import_takes_custody_of_a_supplied_key() {
     assert_eq!(body["status"], "Active");
     assert_eq!(body["key_custody"], "database");
     // And the key itself never comes back out.
-    assert!(body.get("private_key_pem").is_none(), "{body}");
-    assert!(body.get("encrypted_private_key").is_none(), "{body}");
+    assert!(
+        body.get("private_key_pem").is_none(),
+        "no private key in the response"
+    );
+    assert!(
+        body.get("encrypted_private_key").is_none(),
+        "no stored key in the response"
+    );
 }
 
 #[actix_web::test]
@@ -757,8 +766,11 @@ async fn an_imported_ca_can_sign_a_leaf_certificate() {
     let resp = test::call_service(&app, req).await;
     let leaf_status = resp.status().as_u16();
     let leaf: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(leaf_status, 201, "{leaf}");
-    assert!(leaf["private_key_pem"].is_string(), "{leaf}");
+    assert_eq!(leaf_status, 201, "the leaf is issued");
+    assert!(
+        leaf["private_key_pem"].is_string(),
+        "the private key is returned once"
+    );
 }
 
 #[actix_web::test]
@@ -851,7 +863,10 @@ async fn a_ca_revocation_vault_refuses_still_stands_and_is_audited() {
     Mock::given(method("POST"))
         .and(path("/v1/pki/revoke"))
         .respond_with(
-            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": ["sealed"] })),
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": [
+                // R101W1-06: a refusal that echoes a token and an essay.
+                format!("sealed; token {BATCH_TOKEN} {}", "overlong ".repeat(100)),
+            ] })),
         )
         .expect(u64::from(axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS))
         .mount(&vault)
@@ -992,11 +1007,25 @@ async fn a_ca_revocation_vault_refuses_still_stands_and_is_audited() {
     assert_eq!(rows[0]["resource_id"], tenant_ca.id.to_string());
     assert_eq!(rows[0]["tenant_id"], tenant_id.to_string());
     assert_eq!(rows[0]["outcome"], "Failure");
+    // R101W1-06: the append-only row keeps the sanitised reason, not Vault's text.
+    let reason = rows[0]["metadata"]["reason"].as_str().unwrap_or_default();
     assert!(
-        rows[0]["metadata"]["reason"]
-            .as_str()
-            .is_some_and(|r| r.contains("sealed")),
+        reason.contains("sealed"),
         "the audit row says why: {rows:?}"
+    );
+    assert!(
+        !reason.contains(BATCH_TOKEN) && reason.contains("[redacted]"),
+        "the token is masked: {reason}"
+    );
+    assert_eq!(
+        reason.chars().count(),
+        axiam_pki::vault_forward::MAX_REASON_CHARS,
+        "the reason is bounded: {reason}"
+    );
+    assert_eq!(
+        reason,
+        axiam_pki::vault_forward::sanitise_reason(reason),
+        "it is exactly the sanitised form"
     );
     vault.verify().await;
 }

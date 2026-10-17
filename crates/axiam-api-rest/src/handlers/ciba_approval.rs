@@ -288,7 +288,10 @@ pub struct CibaPendingList {
         (status = 401, description = "Not authenticated"),
         (status = 403, description = "The token is not a console sign-in's: no session row behind it, \
                                       or AXIAM minted it for an OAuth2 client"),
-        (status = 429, description = "The signed-in user's `ciba_approval_per_min` allowance of this route is spent"),
+        (status = 429, description = "The signed-in user's `ciba_approval_per_min` allowance of this route is spent, \
+                                      or the calling address has spent the route's per-address backstop, ten times \
+                                      that allowance (it answers requests whose token does not authenticate, \
+                                      which never reach the per-user count)"),
     ),
     security(("session" = [])),
 )]

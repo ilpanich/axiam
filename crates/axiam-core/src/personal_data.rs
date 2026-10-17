@@ -283,6 +283,17 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                account then stops being a directory account, which its terminal \
                status already makes moot.",
     },
+    UserColumn {
+        name: "mail_epoch",
+        erasure: None,
+        export: None,
+        note: "Item 7 of the 1.1.0 atomicity audit: a counter every capped \
+               mail-token mint (password reset, resent verification) writes, \
+               so that two mints for one account conflict and the daily cap \
+               is counted inside the mint's transaction. Its value means \
+               nothing beyond \"changed\" and says nothing about the subject; \
+               neither path clears it and the export does not carry it.",
+    },
 ];
 
 /// The `SET` clause fragment both erasure statements share, derived from

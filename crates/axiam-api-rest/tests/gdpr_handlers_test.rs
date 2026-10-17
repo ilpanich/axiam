@@ -721,6 +721,51 @@ async fn cancel_expired_grace_window_is_forbidden() {
     assert_eq!(resp.status().as_u16(), 403);
 }
 
+/// Item 11 of the 1.1.0 atomicity audit: once the purge sweep has claimed the
+/// request, a cancel is `409` and changes nothing — the subject is never told
+/// "cancelled" for an account the sweep goes on to erase.
+#[actix_web::test]
+async fn cancel_after_the_purge_claimed_the_request_is_conflict_and_changes_nothing() {
+    let f = setup().await;
+    let deletion_repo = SurrealAccountDeletionRepository::new(f.db.clone());
+    let raw_token = "claimed-by-the-sweep";
+    deletion_repo
+        .create_with_pending_flag(
+            f.tenant_id,
+            f.user_id,
+            Utc::now() + Duration::days(30),
+            sha256_hex(raw_token),
+        )
+        .await
+        .unwrap();
+    // The sweep, on a replica whose `now` is past the deadline.
+    assert!(
+        deletion_repo
+            .claim_for_purge(f.tenant_id, f.user_id, Utc::now() + Duration::days(31))
+            .await
+            .unwrap()
+    );
+
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/api/v1/auth/account/delete/cancel?token={raw_token}"
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 409);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], json!("conflict"));
+
+    let user = SurrealUserRepository::new(f.db.clone())
+        .get_by_id(f.tenant_id, f.user_id)
+        .await
+        .unwrap();
+    assert!(user.deletion_pending, "the account is still due");
+}
+
 // ---------------------------------------------------------------------------
 // The erasure grace window is a setting, not a constant
 // ---------------------------------------------------------------------------

@@ -62,6 +62,9 @@ impl RecordingRepo {
 }
 
 impl AuditLogRepository for RecordingRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
@@ -844,6 +847,9 @@ async fn drain_of_a_dead_worker_reports_failure_at_once() {
 struct PanicRepo;
 
 impl AuditLogRepository for PanicRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, _input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         panic!("worker append boom");
     }

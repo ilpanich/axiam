@@ -241,6 +241,29 @@ describe("SettingsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("words a 409 that lost to a directory enable as changed elsewhere — reload", async () => {
+    apiMock.get.mockResolvedValue(res(settings));
+    apiMock.put.mockRejectedValue({
+      message: "Request failed with status code 409",
+      response: {
+        status: 409,
+        data: {
+          error: "conflict",
+          message:
+            "the tenant's directory or its opaque_mode changed since this request read them; reload and retry",
+        },
+      },
+    });
+    renderWithProviders(<SettingsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Edit Settings/ }));
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "required");
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText("Changed by someone else — reload and try again."),
+    ).toBeInTheDocument();
+  });
+
   it("shows a success message and returns to view mode after a successful save", async () => {
     apiMock.get.mockResolvedValue(res(settings));
     apiMock.put.mockResolvedValue(res(settings));

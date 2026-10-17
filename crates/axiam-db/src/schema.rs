@@ -547,6 +547,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_hierarchy_epoch",
         sql: SCHEMA_V105,
     },
+    Migration {
+        version: 106,
+        name: "tenant_opaque_directory_epoch",
+        sql: SCHEMA_V106,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5093,6 +5098,29 @@ const SCHEMA_V105: &str = "\
 DEFINE FIELD IF NOT EXISTS hierarchy_epoch ON TABLE tenant TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v106 — an enabled directory and `opaque_mode = required` never
+// coexist, under concurrency too (the 1.1.0 atomicity audit, item 10)
+// -----------------------------------------------------------------------
+//
+// **`tenant.opaque_directory_epoch`** — compared and moved by a directory
+// save whose result is enabled and by a settings write whose result is an
+// effective `required` (for an organization baseline, on every tenant of the
+// organization). Each side refused the other on a read made before its write,
+// and the two writes touch different rows, so an enable and a `required` sent
+// together both landed and locked every directory account out. The handler now
+// reads this field before the read its rule decides on, and the write's own
+// transaction compares and moves it (`repository/opaque_directory.rs`): a
+// write whose epoch moved since its read is refused (`409`), and two
+// overlapping ones conflict on the tenant row. Like `tenant.hierarchy_epoch`
+// (v105) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the claim treats as 0).
+const SCHEMA_V106: &str = "\
+DEFINE FIELD IF NOT EXISTS opaque_directory_epoch ON TABLE tenant TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5360,6 +5388,23 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// Item 10 of the 1.1.0 atomicity audit — v106 is the tenant row's
+    /// opaque/directory epoch, an optional field defined idempotently, and
+    /// nothing else.
+    #[test]
+    fn v106_adds_only_the_opaque_directory_epoch() {
+        let statements: Vec<&str> = SCHEMA_V106
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS opaque_directory_epoch ON TABLE tenant TYPE option<int>"],
+            "v106 defines the counter and nothing else"
+        );
     }
 
     /// Item 8 of the 1.1.0 atomicity audit — v105 is the tenant row's
@@ -6911,8 +6956,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&105),
-            "v105 is the newest migration (the 1.1.0 atomicity audit's item 8 — \
+            Some(&106),
+            "v106 is the newest migration (the 1.1.0 atomicity audit's item 10 — \
+             `tenant.opaque_directory_epoch`, which a directory save that leaves the directory \
+             enabled and a settings write that makes opaque_mode `required` both compare and \
+             move, so that each side's refusal and the other's write act as one transaction); \
+             v105 was the 1.1.0 atomicity audit's item 8 — \
              `tenant.hierarchy_epoch`, which every re-parent of a resource onto a new parent \
              writes so that the cycle check and the move act as one transaction); v104 was the \
              1.1.0 atomicity audit's item 7 — \

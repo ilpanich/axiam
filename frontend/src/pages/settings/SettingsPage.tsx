@@ -50,7 +50,7 @@ import {
   OpaquePolicyFields,
   OpaquePolicySummary,
 } from "@/components/OpaquePolicyFields";
-import { getApiErrorMessage } from "@/lib/apiError";
+import { getApiErrorMessage, staleWriteMessage } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -433,14 +433,18 @@ export function SettingsPage() {
     onError: (err: unknown) => {
       // The 400 from `validate_tenant_override` lists exactly which field was
       // below the org baseline; that text is the whole value of the response.
+      // A `409` that lost to another request's write (the tenant's directory
+      // was enabled since this page read it) is worded as every lost write is.
       setFeedback({
         type: "error",
-        message: getApiErrorMessage(
-          err,
-          err instanceof Error
-            ? err.message
-            : "Failed to save settings. Please try again."
-        ),
+        message:
+          staleWriteMessage(err) ??
+          getApiErrorMessage(
+            err,
+            err instanceof Error
+              ? err.message
+              : "Failed to save settings. Please try again."
+          ),
       });
     },
   });

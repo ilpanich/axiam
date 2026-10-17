@@ -1,4 +1,4 @@
-import { getApiErrorMessage } from "@/lib/apiError";
+import { getApiErrorMessage, staleWriteMessage } from "@/lib/apiError";
 
 /** The longest server sentence shown in place. */
 const MAX_LENGTH = 500;
@@ -16,6 +16,11 @@ const MAX_LENGTH = 500;
  * not applied to them. Anything else (a `503`, a gateway's page, a network
  * failure) goes through {@link getApiErrorMessage} as everywhere.
  *
+ * A `409` that says another request changed the tenant's directory or its
+ * `opaque_mode` after this one read them (the 1.1.0 atomicity audit, item 10)
+ * is not an instruction to change anything: it is worded as every lost write
+ * is, "Changed by someone else — reload and try again" ({@link staleWriteMessage}).
+ *
  * As a second line of defence for the one value that matters here, an
  * occurrence of the secret the operator just typed is blanked out of whatever is
  * returned.
@@ -25,6 +30,8 @@ export function directoryErrorMessage(
   typedSecret: string,
   fallback = "The directory request failed.",
 ): string {
+  const stale = staleWriteMessage(err);
+  if (stale) return stale;
   const data = (
     err as { response?: { data?: { error?: unknown; message?: unknown } } }
   )?.response?.data;

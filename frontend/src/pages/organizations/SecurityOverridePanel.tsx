@@ -28,7 +28,7 @@ import { readOpaquePolicy, type OpaquePolicy } from "@/services/opaquePolicy";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { usePermissions } from "@/hooks/usePermissions";
-import { getApiErrorMessage } from "@/lib/apiError";
+import { getApiErrorMessage, staleWriteMessage } from "@/lib/apiError";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -440,7 +440,10 @@ export function TenantSecurityOverridePanel({
       setSuccess(true);
     },
     onError: (err: unknown) =>
-      setError(getApiErrorMessage(err, "Failed to save security overrides.")),
+      setError(
+        staleWriteMessage(err) ??
+          getApiErrorMessage(err, "Failed to save security overrides."),
+      ),
   });
 
   const clearMutation = useMutation({

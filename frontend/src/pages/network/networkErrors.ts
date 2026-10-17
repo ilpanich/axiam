@@ -1,4 +1,4 @@
-import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import { STALE_WRITE_ADVICE, getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 
 /** The longest server sentence shown in place. */
 const MAX_LENGTH = 500;
@@ -18,7 +18,7 @@ interface DeniedBody {
 
 /** The one `409` that is someone else's write (§36.3 rule 2). */
 const STALE_VERSION = "stale_version";
-const STALE_ADVICE = "Changed by someone else — reload and try again.";
+const STALE_ADVICE = STALE_WRITE_ADVICE;
 
 function bodyOf(err: unknown): DeniedBody | undefined {
   const data = (err as { response?: { data?: DeniedBody } })?.response?.data;

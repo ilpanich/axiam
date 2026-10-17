@@ -316,6 +316,24 @@ describe("DirectoryPage — editing", () => {
     expect(await screen.findByText(conflict)).toBeInTheDocument();
   });
 
+  it("words a 409 that lost to a settings write as changed elsewhere — reload", async () => {
+    mockGets({ stored: config({ enabled: false }) });
+    apiMock.patch.mockImplementation(() =>
+      rejection(
+        409,
+        "conflict",
+        "the tenant's directory or its opaque_mode changed since this request read them; reload and retry",
+      ),
+    );
+    renderWithProviders(<DirectoryPage />);
+    await openEdit();
+    await userEvent.click(screen.getByLabelText("Enabled"));
+    await userEvent.click(screen.getByRole("button", { name: /Save changes/ }));
+    expect(
+      await screen.findByText("Changed by someone else — reload and try again."),
+    ).toBeInTheDocument();
+  });
+
   it("replaces with PUT carrying every member and no secret when the connection is unchanged", async () => {
     mockGets();
     apiMock.put.mockResolvedValue(res(config()));

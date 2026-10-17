@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  STALE_WRITE_ADVICE,
   getApiErrorCode,
   getApiErrorMessage,
   getApiErrorStatus,
   redactSecrets,
+  staleWriteMessage,
 } from "./apiError";
 
 // Minimal rejected-request shape. `isAxiosError` is set here only because a
@@ -323,5 +325,47 @@ describe("getApiErrorMessage redaction", () => {
     expect(
       getApiErrorMessage(new Error("failed with Bearer abcdef0123456789"))
     ).not.toContain("abcdef0123456789");
+  });
+});
+
+describe("staleWriteMessage", () => {
+  const rejected = (status: number, data: Record<string, unknown>) => ({
+    message: `Request failed with status code ${status}`,
+    response: { status, data },
+  });
+
+  it("words a network 409 stale_version as a lost write", () => {
+    expect(
+      staleWriteMessage(rejected(409, { error: "conflict", reason_code: "stale_version", message: "x" })),
+    ).toBe(STALE_WRITE_ADVICE);
+  });
+
+  it("words the settings and directory routes' changed-since-read 409 as a lost write", () => {
+    expect(
+      staleWriteMessage(
+        rejected(409, {
+          error: "conflict",
+          message:
+            "the tenant's directory or its opaque_mode changed since this request read them; reload and retry",
+        }),
+      ),
+    ).toBe("Changed by someone else — reload and try again.");
+  });
+
+  it("leaves a 409 that names a remedy to the caller", () => {
+    expect(
+      staleWriteMessage(
+        rejected(409, {
+          error: "conflict",
+          message: "an enabled directory cannot coexist with opaque_mode `required`",
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("is undefined for any other status, and for no response at all", () => {
+    expect(staleWriteMessage(rejected(400, { message: "changed since" }))).toBeUndefined();
+    expect(staleWriteMessage(new Error("changed since"))).toBeUndefined();
+    expect(staleWriteMessage(null)).toBeUndefined();
   });
 });

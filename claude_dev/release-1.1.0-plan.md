@@ -953,6 +953,20 @@ All W8 commits are signed and pushed to `claude/release-1.1.0`. The release pull
 
 The 43 issues close with the PR. 52 stay open on `1.1.x` (#664 … #715) and 2 on `1.0.x` (#513, #561).
 
+**§13.8 addendum — CI on PR #716.** Five commits fixed what CI found on the release pull request. All are signed and pushed to `claude/release-1.1.0`.
+
+| Commit | What failed | Root cause | Fix |
+|---|---|---|---|
+| `39493eff8` | Clippy on Rust 1.99: `result_large_err`. | `GateRefusal` was 152 bytes; the lint's threshold is 128. | `GateRefusal::missing` is boxed. The type is now 120 bytes. |
+| `e9e7cb93a` | E2E nav-reach matrix, `nav-reach.spec.ts:197`. | The `/network` route that W6.8 added was missing from `NAV_DESTINATIONS`. | One row in `frontend/e2e/helpers/matrix.ts`. |
+| `057a9c5a2` | CodeQL `rust/cleartext-logging` (high), at `certificate_test.rs:1502`. | Assertion messages formatted certificate subjects, fingerprints, key-bearing bodies, client secrets and token responses. | The messages in 10 test files no longer format them. The assertions are unchanged. <br>*Follow-up:* #717 (`vault_ca_key_store_test.rs`, which is outside the release's change list). |
+| `4ec6aca7b` | "No space left on device" in the Test job and the cargo-llvm-cov job. | After `cargo test --workspace`, `target/` was 104 GB on a 145 GB runner. | • More preinstalled toolchains are freed. <br>• `ci.yml` drops test executables that have already run. <br>• `coverage.yml` cleans the profraw files and instrumented binaries after the Coveralls upload. <br>Measured afterwards: 117 GB free. |
+| `67bc4c464` | `network_routes_test` got 429 instead of 409 or 200. It failed 3 runs in 30 locally, whenever a run crossed a minute boundary. | The shared rate-limit counter seeds a cold entry: for a key first seen mid-minute, up to 90 % of a limit of 20 or more. | The contract tests turn the shared counter off. The limiter test keeps both layers. <br>*Follow-up:* #718. The same seed affects production admins of every 30/min family; whether to change it is a maintainer decision. |
+
+**Security Scan, not fixed in the PR.** Three RustSec advisories on `zip` 8.6.0 (RUSTSEC-2026-0367 high, -0368, -0369 critical) were published on 2026-10-16 at 19:44 UTC. `zip` is a `[build-dependencies]` entry of `utoipa-swagger-ui` 10.0.1 (the latest release, `zip = "8.6"`), so there is no upgrade path, and `main` is red on the same three. The build script does not call `extract()`, and none of it ships in the binary. The decision, to ignore the advisories with a rationale or to fork or vendor `utoipa-swagger-ui`, is the maintainer's. It was posted on the PR on 2026-10-17 and is open at the time of writing.
+
+Final CI state on `67bc4c464`: every check is green except Security Scan, including Test, cargo-llvm-cov, E2E, CodeQL Analyze (rust) and the runtime smoke.
+
 ---
 
 ## 14. Kickoff prompts

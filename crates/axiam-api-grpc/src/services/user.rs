@@ -296,6 +296,21 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         drop(_permit);
 
         if valid {
+            // Item 5 of the 1.1.0 atomicity audit: the lock was checked on the
+            // read above, before the verify. Guesses sent together at
+            // threshold − 1 all pass that check and a wrong one may lock the
+            // account meanwhile; a correct one answering `valid` after the lock
+            // committed was one more guess than the policy allows. Asked again
+            // now, after the verify — this RPC resets no counter, so there is
+            // no lock for it to undo, only an answer to withhold.
+            let admitted = self
+                .user_repo
+                .admit_unless_locked(claims_tenant_id, user.id, false)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if !admitted {
+                return Ok(invalid);
+            }
             Ok(Response::new(ValidateCredentialsResponse {
                 valid: true,
                 user_id: user.id.to_string(),

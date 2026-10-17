@@ -353,6 +353,55 @@ pub trait UserRepository: Send + Sync {
         max_lockout_secs: i64,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Admit a sign-in whose credential has just verified — **unless** the
+    /// account is serving a lockout at this moment — and, when
+    /// `clear_failures`, reset the failed-login counter in the same write.
+    ///
+    /// Returns `Ok(true)` when the sign-in may proceed, `Ok(false)` when a
+    /// lockout is in force now (the caller refuses the sign-in exactly as a
+    /// wrong password is refused, and issues nothing).
+    ///
+    /// Item 5 of the 1.1.0 atomicity audit. A login reads the account, checks
+    /// the lock, verifies the password, and only then resets the counter. K
+    /// guesses sent together at threshold − 1 all pass the check; a wrong one
+    /// locks the account, and a correct one landing after that used to reset
+    /// the counter *and the lock* — up to K guesses per lockout cycle. The
+    /// reset is therefore conditional on the lock, inside the write
+    /// (`WHERE locked_until IS NONE OR locked_until <= time::now()`): a lock
+    /// committed first makes it match nothing, and one committed concurrently
+    /// conflicts with it on the user row, so the loser is retried and sees it.
+    ///
+    /// The default implementation reads and then writes — not atomic, which is
+    /// acceptable only for test doubles; the SurrealDB repository overrides it
+    /// with the one conditional statement.
+    fn admit_unless_locked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        clear_failures: bool,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async move {
+            let user = self.get_by_id(tenant_id, user_id).await?;
+            if user.locked_until.is_some_and(|until| until > Utc::now()) {
+                return Ok(false);
+            }
+            if clear_failures {
+                self.update(
+                    tenant_id,
+                    user_id,
+                    UpdateUser {
+                        failed_login_attempts: Some(0),
+                        last_failed_login_at: Some(None),
+                        locked_until: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(true)
+        }
+    }
+
     /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
     ///
     /// Implementations MUST scrub every PII column (email, username,

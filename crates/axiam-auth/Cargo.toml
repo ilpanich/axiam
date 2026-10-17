@@ -51,7 +51,11 @@ axiam-test-support = { workspace = true }
 axiam-db = { workspace = true }
 rcgen = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
-surrealdb = { workspace = true, features = ["kv-mem"] }
+# `kv-surrealkv` for the race tests (`lockout_race_test`), which run on the
+# engine production runs, as `axiam-db/tests/common` explains; already in
+# Cargo.lock through axiam-db's own dev-dependencies, as is `tempfile`.
+surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
+tempfile = "3"
 tokio-test = { workspace = true }
 getrandom = "0.4.3"
 wiremock = "0.6.5"

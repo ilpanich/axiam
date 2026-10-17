@@ -653,9 +653,24 @@ impl<
         user_agent: Option<String>,
         mfa_policy: Option<MfaPolicy>,
     ) -> AxiamResult<LoginResult> {
-        // 4. Reset failed login counter on success.
-        if user.failed_login_attempts > 0 {
-            self.reset_failed_logins(tenant_id, user.id).await?;
+        // 4. Admit the sign-in unless a lockout is in force *now*, resetting
+        //    the failed-login counter in the same conditional write (item 5 of
+        //    the 1.1.0 atomicity audit). The lock was checked when the account
+        //    was read, before the credential was verified; guesses sent
+        //    together at threshold − 1 all pass that check, and a wrong one
+        //    may lock the account while this one verifies. The reset used to
+        //    clear that lock and issue a session. Now a lock committed first
+        //    stands, and the sign-in is refused as a wrong password is — the
+        //    same answer `login` gives a locked account (no oracle) — with no
+        //    session, challenge or token issued. Every path that proves a
+        //    credential lands here: password, OPAQUE, directory bind, JIT.
+        let clear_failures = user.failed_login_attempts > 0 || user.locked_until.is_some();
+        if !self
+            .user_repo
+            .admit_unless_locked(tenant_id, user.id, clear_failures)
+            .await?
+        {
+            return Err(AuthError::InvalidCredentials.into());
         }
 
         // 5. Check account status.
@@ -1898,22 +1913,6 @@ impl<
             }
         };
         crate::lockout::record_failed_login(&self.user_repo, policy, tenant_id, user).await
-    }
-
-    async fn reset_failed_logins(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
-        self.user_repo
-            .update(
-                tenant_id,
-                user_id,
-                UpdateUser {
-                    failed_login_attempts: Some(0),
-                    last_failed_login_at: Some(None),
-                    locked_until: Some(None),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        Ok(())
     }
 }
 

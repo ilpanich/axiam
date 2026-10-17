@@ -1276,6 +1276,52 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(!rows.is_empty())
     }
 
+    async fn admit_unless_locked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        clear_failures: bool,
+    ) -> AxiamResult<bool> {
+        // Item 5 of the 1.1.0 atomicity audit: the lock is compared inside the
+        // write. With `clear_failures` the reset is an UPDATE of the user row,
+        // which is the row `increment_failed_logins` writes the lock to — so
+        // a lock committed first makes this match nothing, and one committed
+        // concurrently conflicts with it on that key: the loser is retried
+        // (`retry_on_write_conflict`) on a fresh snapshot, where it sees the
+        // lock. Without a counter to clear, nothing needs undoing and a read
+        // made after the credential verified answers.
+        const RESET: &str = "SELECT meta::id(id) AS record_id FROM \
+             (UPDATE type::record('user', $id) SET \
+                 failed_login_attempts = 0, \
+                 last_failed_login_at = NONE, \
+                 locked_until = NONE, \
+                 updated_at = time::now() \
+              WHERE tenant_id = $tenant_id \
+                AND (locked_until IS NONE OR locked_until <= time::now()))";
+        const CHECK: &str = "SELECT meta::id(id) AS record_id FROM type::record('user', $id) \
+             WHERE tenant_id = $tenant_id \
+               AND (locked_until IS NONE OR locked_until <= time::now())";
+        let query = if clear_failures { RESET } else { CHECK };
+        let (id, tenant) = (user_id.to_string(), tenant_id.to_string());
+        let rows = crate::helpers::retry_on_write_conflict(|| async {
+            let result = self
+                .db
+                .current()
+                .query(query)
+                .bind(("id", id.clone()))
+                .bind(("tenant_id", tenant.clone()))
+                .await
+                .map_err(DbError::from)?;
+            let mut result = result
+                .check()
+                .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+            let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows)
+        })
+        .await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn redeem_email_verification(
         &self,
         tenant_id: Uuid,

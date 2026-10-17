@@ -295,7 +295,7 @@ async fn a_correct_guess_landing_after_the_lock_gets_no_session_and_the_lock_sta
             after
                 .locked_until
                 .is_some_and(|until| until > chrono::Utc::now()),
-            "round {round}: the lock stands ({after:?})"
+            "round {round}: the lock stands"
         );
         assert!(
             after.failed_login_attempts >= THRESHOLD,

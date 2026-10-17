@@ -314,10 +314,10 @@ const DENY: PermissionEffect = PermissionEffect::Deny;
 fn refused(v: GateVerdict, rule: &str) -> GateRefusal {
     match v {
         Err(r) => {
-            assert_eq!(r.rule, rule, "{r:?}");
+            assert_eq!(r.rule, rule, "the refusal names the expected rule");
             r
         }
-        Ok(c) => panic!("expected a refusal under {rule}, got {c:?}"),
+        Ok(_) => panic!("expected a refusal under {rule}, got a clearance"),
     }
 }
 

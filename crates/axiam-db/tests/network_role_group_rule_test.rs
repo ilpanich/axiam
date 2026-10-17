@@ -260,7 +260,7 @@ async fn writes_outside_the_rule_are_unchanged() {
             tenant_id: w.tenant,
             username: format!("u{}", Uuid::new_v4().simple()),
             email: format!("{}@example.com", Uuid::new_v4().simple()),
-            password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

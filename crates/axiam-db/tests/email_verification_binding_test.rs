@@ -62,7 +62,7 @@ async fn account(db: &Surreal<Db>, n: usize) -> (Uuid, Uuid) {
             tenant_id: tenant.id,
             username: format!("owner-{n}"),
             email: OLD.into(),
-            password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -171,7 +171,7 @@ async fn an_address_change_deletes_the_accounts_unconsumed_links_only() {
             tenant_id,
             username: "bystander".into(),
             email: "bystander@a.example".into(),
-            password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

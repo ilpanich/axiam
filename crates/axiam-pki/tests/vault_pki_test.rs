@@ -2268,7 +2268,7 @@ async fn the_sweep_releases_a_revoked_ca_vault_refuses_as_still_an_issuer_and_th
     let outcome = f.cas.revoke(f.org, f.tenant_ca).await.unwrap();
     assert!(
         matches!(&outcome, CustodianRevocation::Pending { reason } if reason.contains("to its own CRL is not allowed")),
-        "Vault's refusal is the pending reason: {outcome:?}"
+        "Vault's refusal is the pending reason"
     );
     assert!(!vault.released.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(pending_ca_forwards(&f).await, [f.tenant_ca]);

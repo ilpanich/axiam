@@ -2863,11 +2863,20 @@ async fn the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_
         .unwrap();
     assert_eq!(removed, 2, "the revoked and the unrevoked nine-day rows");
 
-    for gone in [nine, nine_unrevoked] {
-        assert!(certs.get_by_id(live, gone).await.is_err(), "{gone} is gone");
+    for (i, gone) in [nine, nine_unrevoked].into_iter().enumerate() {
+        assert!(
+            certs.get_by_id(live, gone).await.is_err(),
+            "swept row #{i} is gone"
+        );
     }
-    for kept in [(live, seven), (live, ahead), (dying, dying_nine)] {
-        assert!(certs.get_by_id(kept.0, kept.1).await.is_ok(), "{kept:?}");
+    for (i, kept) in [(live, seven), (live, ahead), (dying, dying_nine)]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            certs.get_by_id(kept.0, kept.1).await.is_ok(),
+            "kept row #{i} survives"
+        );
     }
     assert_eq!(edges(&db).await, 0, "the binding went with its row");
     assert_eq!(list().await, before, "the list is unchanged");

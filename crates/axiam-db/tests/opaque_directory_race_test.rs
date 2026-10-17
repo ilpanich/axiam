@@ -206,7 +206,7 @@ async fn a_claim_read_before_the_other_side_wrote_is_conflict() {
         .await;
     assert!(
         matches!(&stale, Err(e) if is_changed_since_read(e)),
-        "{stale:?}"
+        "a stale claim is refused as changed-since-read"
     );
     assert!(dirs.get_by_tenant(tenant_id).await.unwrap().is_none());
 

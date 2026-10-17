@@ -1232,13 +1232,12 @@ async fn a_profile_and_an_envelope_change_racing_never_leave_a_stranded_profile(
             let used = stored.filter_id.expect("the profile names an ACL");
             assert!(
                 envelope.contains(&used),
-                "round {round}: profile uses {used:?}, envelope is {envelope:?} \
-                 (update {updated:?}, create {created:?})"
+                "round {round}: the profile's ACL is outside the segment's envelope"
             );
         }
         assert!(
             updated.is_ok() || created.is_ok(),
-            "round {round}: at least one writer wins: {updated:?} / {created:?}"
+            "round {round}: at least one writer wins"
         );
     }
 }

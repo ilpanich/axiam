@@ -1319,9 +1319,7 @@ async fn a_revocation_dated_past_the_epoch_cannot_lower_the_number_across_the_bo
     );
     assert!(
         after.crl_number > before.crl_number,
-        "the number grows across the boundary: {} then {}",
-        before.crl_number,
-        after.crl_number
+        "the number grows across the boundary"
     );
 }
 

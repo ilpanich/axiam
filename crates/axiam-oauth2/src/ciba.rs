@@ -2193,9 +2193,24 @@ mod tests {
         }
     }
 
+    /// The "deployment secret" every replica in a test shares: random per
+    /// process, stable within one, so no key-shaped literal sits in the source.
+    fn deployment_secret() -> &'static [u8] {
+        static SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        SECRET.get_or_init(|| {
+            let mut secret = [0u8; 32];
+            secret[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+            secret[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+            secret
+        })
+    }
+
     fn cap() -> (CibaHintCap, std::sync::Arc<MemStore>) {
         let store = std::sync::Arc::new(MemStore::default());
-        (CibaHintCap::derived_from(store.clone(), b"secret"), store)
+        (
+            CibaHintCap::derived_from(store.clone(), deployment_secret()),
+            store,
+        )
     }
 
     /// A window's start, `offset` seconds into window `index`.
@@ -2279,7 +2294,11 @@ mod tests {
         let bucket = cap.bucket(tenant, "oa_client", &hint);
         assert!(bucket.starts_with(&format!("ciba_hint_cap:{tenant}:")));
         assert!(!bucket.contains("alice") && !bucket.contains("oa_client"));
-        let other = CibaHintCap::derived_from(std::sync::Arc::new(MemStore::default()), b"other");
+        let other = CibaHintCap::derived_from(
+            std::sync::Arc::new(MemStore::default()),
+            // A secret that is not the shared one, so the buckets must differ.
+            Uuid::new_v4().as_bytes(),
+        );
         assert!(other.bucket(tenant, "oa_client", &hint) != bucket);
         // "login" "x" and "sub" "x" never share a bucket.
         let sub = Uuid::new_v4();
@@ -2324,7 +2343,7 @@ mod tests {
         }
         assert!(!four.admit(tenant, "oa_a", &hint, at(60, 2)).await.unwrap());
 
-        let one = CibaHintCap::derived_from(store, b"secret")
+        let one = CibaHintCap::derived_from(store, deployment_secret())
             .with_per_hint(std::num::NonZeroU32::new(1).unwrap());
         let other = HintName::Login("someone".into());
         assert!(one.admit(tenant, "oa_a", &other, at(60, 1)).await.unwrap());
@@ -2391,8 +2410,8 @@ mod tests {
     ) -> Vec<(DateTime<Utc>, Result<bool, String>)> {
         let per_hint = std::num::NonZeroU32::new(per_hint).unwrap();
         let replicas = [
-            CibaHintCap::derived_from(store.clone(), b"secret").with_per_hint(per_hint),
-            CibaHintCap::derived_from(store, b"secret").with_per_hint(per_hint),
+            CibaHintCap::derived_from(store.clone(), deployment_secret()).with_per_hint(per_hint),
+            CibaHintCap::derived_from(store, deployment_secret()).with_per_hint(per_hint),
         ];
         let tenant = Uuid::from_u128(7);
         let hint = HintName::Login("contended".into());

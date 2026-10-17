@@ -53,7 +53,6 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
-const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 const CSRF_TOKEN: &str = "test-csrf-token";
 
 const ALLOW: PermissionEffect = PermissionEffect::Allow;
@@ -195,7 +194,7 @@ impl World {
                 tenant_id: self.tenant,
                 username: format!("u{}", Uuid::new_v4().simple()),
                 email: format!("{}@example.com", Uuid::new_v4().simple()),
-                password: TEST_PASSWORD.into(),
+                password: axiam_test_support::test_password(),
                 metadata: None,
             })
             .await

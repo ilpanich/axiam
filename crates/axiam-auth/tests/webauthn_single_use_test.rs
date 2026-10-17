@@ -49,7 +49,18 @@ const TEST_PUBLIC_KEY: &str = "\
 MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
 -----END PUBLIC KEY-----";
 
-const MFA_KEY: [u8; 32] = [7u8; 32];
+/// The AES-256-GCM key the test deployment encrypts MFA material with: random
+/// per process, stable within one, so every step of a test sees the same key
+/// and no key-shaped literal appears in the source.
+fn mfa_key() -> [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        key
+    })
+}
 const RP_ID: &str = "localhost";
 const ORIGIN: &str = "http://localhost:8090";
 /// Rounds of the parallel double-submit per run; the test was also run 20
@@ -61,7 +72,7 @@ fn config() -> AuthConfig {
         jwt_private_key_pem: TEST_PRIVATE_KEY.into(),
         jwt_public_key_pem: TEST_PUBLIC_KEY.into(),
         jwt_issuer: "axiam-test".into(),
-        mfa_encryption_key: Some(MFA_KEY),
+        mfa_encryption_key: Some(mfa_key()),
         webauthn_rp_id: RP_ID.into(),
         webauthn_rp_origin: ORIGIN.into(),
         webauthn_rp_name: "AXIAM-Test".into(),
@@ -216,7 +227,7 @@ async fn world() -> World {
             name: "soft key".into(),
             credential_type: WebauthnCredentialType::Passkey,
             passkey_json: axiam_auth::totp::encrypt_secret(
-                &MFA_KEY,
+                &mfa_key(),
                 authenticator.passkey_json().as_bytes(),
             )
             .unwrap(),

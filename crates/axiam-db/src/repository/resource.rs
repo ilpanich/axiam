@@ -6,7 +6,7 @@ use axiam_core::models::resource::{CreateResource, Resource, UpdateResource};
 use axiam_core::repository::{PaginatedResult, Pagination, ResourceRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{RecordId, SurrealValue};
 use uuid::Uuid;
 
 use crate::error::DbError;
@@ -339,18 +339,17 @@ impl<C: Connection> SurrealResourceRepository<C> {
                 Some(Some(_)) => format!("{} {}", claim_hierarchy(), claim_parent()),
                 _ => String::new(),
             };
+            // Both edge endpoints are bound record ids (`$child`, `$new_parent`),
+            // never text formatted into the statement.
             query = format!(
                 "BEGIN TRANSACTION; \
-                 DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
+                 DELETE child_of WHERE in = $child AND in.tenant_id = $tenant_id; \
                  {claim} {query}"
             );
 
             // If new parent is Some, create new child_of edge.
-            if let Some(Some(new_parent)) = &input.parent_id {
-                let new_parent_str = new_parent.to_string();
-                query = format!(
-                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`"
-                );
+            if matches!(input.parent_id, Some(Some(_))) {
+                query = format!("{query}; RELATE $child -> child_of -> $new_parent");
             }
 
             query = format!("{query}; COMMIT TRANSACTION");
@@ -366,6 +365,15 @@ impl<C: Connection> SurrealResourceRepository<C> {
             .query(&query)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", tenant_id_str));
+        if parent_id_changed {
+            builder = builder.bind(("child", RecordId::new("resource", id_str.clone())));
+        }
+        if let Some(Some(new_parent)) = &input.parent_id {
+            builder = builder.bind((
+                "new_parent",
+                RecordId::new("resource", new_parent.to_string()),
+            ));
+        }
 
         if let Some(name) = input.name {
             builder = builder.bind(("name", name));
@@ -444,10 +452,10 @@ impl<C: Connection> SurrealResourceRepository<C> {
         // children through this path too, and an orphan made here is
         // indistinguishable from one made there.
         let (query, row_slot) = match parent_id_str.as_deref() {
-            Some(pid) => (
+            Some(_) => (
                 format!(
                     "BEGIN TRANSACTION; {claim} {base}; \
-                     RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`; \
+                     RELATE $child -> child_of -> $parent_record; \
                      COMMIT TRANSACTION",
                     claim = claim_parent(),
                 ),
@@ -465,6 +473,15 @@ impl<C: Connection> SurrealResourceRepository<C> {
             .bind(("name", input.name))
             .bind(("resource_type", input.resource_type))
             .bind(("parent_id", parent_id_str.clone()))
+            // The edge's endpoints, bound as record ids rather than formatted
+            // into the statement.
+            .bind(("child", RecordId::new("resource", id_str.clone())))
+            .bind((
+                "parent_record",
+                parent_id_str
+                    .clone()
+                    .map(|pid| RecordId::new("resource", pid)),
+            ))
             .bind(("metadata", metadata))
             .bind(("uma_registered_by", client_id.to_string()))
             .await
@@ -513,10 +530,10 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         // Slots with a parent: BEGIN=0, LET $parent=1, IF/THROW=2, CREATE=3,
         // RELATE=4, COMMIT=5. Without: CREATE=0.
         let (query, row_slot) = match parent_id_str.as_deref() {
-            Some(pid) => (
+            Some(_) => (
                 format!(
                     "BEGIN TRANSACTION; {claim} {base}; \
-                     RELATE resource:`{id_str}` -> child_of -> resource:`{pid}`; \
+                     RELATE $child -> child_of -> $parent_record; \
                      COMMIT TRANSACTION",
                     claim = claim_parent(),
                 ),
@@ -534,6 +551,15 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .bind(("name", input.name))
             .bind(("resource_type", input.resource_type))
             .bind(("parent_id", parent_id_str.clone()))
+            // The edge's endpoints, bound as record ids rather than formatted
+            // into the statement.
+            .bind(("child", RecordId::new("resource", id_str.clone())))
+            .bind((
+                "parent_record",
+                parent_id_str
+                    .clone()
+                    .map(|pid| RecordId::new("resource", pid)),
+            ))
             .bind(("metadata", metadata))
             .await
             .map_err(DbError::from)?;
@@ -637,14 +663,14 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         let query = format!(
             "BEGIN TRANSACTION; \
              {guard} \
-             LET $children = (SELECT VALUE id FROM child_of WHERE out = resource:`{id_str}`); \
+             LET $children = (SELECT VALUE id FROM child_of WHERE out = $node); \
              IF array::len($children) > 0 {{ \
                  THROW 'cannot delete resource with children'; \
              }}; \
              DELETE child_of WHERE \
-                 (in = resource:`{id_str}` AND in.tenant_id = $tenant_id) OR \
-                 (out = resource:`{id_str}` AND out.tenant_id = $tenant_id); \
-             DELETE on_resource WHERE out = resource:`{id_str}` AND out.tenant_id = $tenant_id; \
+                 (in = $node AND in.tenant_id = $tenant_id) OR \
+                 (out = $node AND out.tenant_id = $tenant_id); \
+             DELETE on_resource WHERE out = $node AND out.tenant_id = $tenant_id; \
              DELETE scope WHERE resource_id = $resource_id AND tenant_id = $tenant_id; \
              DELETE type::record('resource', $id) WHERE tenant_id = $tenant_id; \
              COMMIT TRANSACTION"
@@ -656,6 +682,8 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
             .current()
             .query(query)
             .bind(("id", id_str.clone()))
+            // The node the edges hang off, bound as a record id.
+            .bind(("node", RecordId::new("resource", id_str.clone())))
             .bind(("resource_id", id_str))
             .bind(("tenant_id", tenant_id_str))
             .await

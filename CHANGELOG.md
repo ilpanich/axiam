@@ -21,7 +21,7 @@ one entry below, ending in its number.
 
 **What needs an operator, first.**
 
-- **The schema moves from v94 to v102.** Migrations v95 – v102 run at startup
+- **The schema moves from v94 to v104.** Migrations v95 – v104 run at startup
   like every earlier one. Each is additive and none backfills: v95 and v96 add the
   Vault-forwarding backoff columns (v96 also `ca_certificate.vault_revoked_at`),
   v97 adds `tenant.purge_claimed_at`, v98 adds `certificate.user_id` and its
@@ -34,7 +34,10 @@ one entry below, ending in its number.
   network gate's role writes claim (#701), and **v102** adds
   `email_verification_token.email`, `webauthn_credential.sign_count` and the
   `webauthn_assertion` kind of the replay store (the atomicity audit's
-  single-use items, under Security below). A row written before the upgrade
+  single-use items, under Security below), and **v103** and **v104** add
+  `tenant.client_quota_epoch` and `user.mail_epoch`, the counters that make the
+  self-registered client quota and the mailed-token daily caps one transaction
+  with their counts (the atomicity audit's items 6 and 7). A row written before the upgrade
   reads as "none attempted, due now", "not bound", epoch 0 or signature counter
   0, and the first sweep or the name convention covers it. **Email-verification
   links mailed before the upgrade no longer verify anything:** they name no
@@ -377,6 +380,41 @@ one entry below, ending in its number.
   their reads, the correct one admitted after every wrong one committed: no
   session, the lock stands; 8 rounds a run, 20 of 20 runs). Threat model: T-36
   corrected.
+
+- **`dcr_max_clients` holds against registrations sent together (the 1.1.0
+  atomicity audit, item 6; Low).** `POST /oauth2/register` counted the tenant's
+  self-registered clients and created the client in a later statement, so N
+  registrations sent together each counted `max - 1` and all landed; a CIMD
+  `client_id` counted its rows before the document fetch and upserted after it,
+  with the same result for first appearances of different documents. The count
+  before the write stays as the early refusal (before an initial access token is
+  spent, before a fetch); the ceiling is now counted again inside the create's
+  own transaction, which refuses at it — the same `403 invalid_request` for a
+  registration, the same audited refusal for a CIMD client — and writes
+  `tenant.client_quota_epoch` (schema v103). SurrealDB detects only write-write
+  conflicts, so it is that shared write that makes overlapping creates for one
+  tenant conflict; the loser is retried on a fresh snapshot, where its count
+  sees the winner's row. Tests: `client_quota_race_test` (on `surrealkv`, six
+  registrations or first appearances at `max - 1` held at a barrier after their
+  counts: exactly one lands; 8 rounds a run, 20 of 20 runs). Threat model:
+  T-272 corrected, T-275 extended.
+
+- **A mailed token's daily cap holds against requests sent together, and a
+  burst of reset requests leaves one live link (the 1.1.0 atomicity audit, item
+  7; Low).** The password-reset cap (three a day) and the verification-resend
+  cap (two a day) were counts made before the mint, so requests sent together
+  each counted under the cap and each minted; for a reset, each request's
+  invalidation of the older links ran before the others' tokens existed, so
+  several links were live at once. The count, the invalidation and the new
+  token are now one transaction that refuses at the cap and writes
+  `user.mail_epoch` (schema v104), so overlapping mints for one account
+  conflict and the loser re-counts on a fresh snapshot. The responses are
+  unchanged: the public endpoints answer the same `200 {"sent": true}` whether
+  or not a mail was sent, and `POST /api/v1/users/me/resend-verification` its
+  `429` at the cap. Test: `mail_cap_race_test` (on `surrealkv`, six requests
+  through the real services held at a barrier after their counts: exactly the
+  cap's worth mint, one reset link is live; 8 rounds a run, 20 of 20 runs).
+  Threat model: T-41 corrected, T-29 extended.
 
 - **The CRL distribution point written into a certificate is the URL that was
   validated (#609, R1W1-11).** `CrlDistribution` checked the parsed URL but

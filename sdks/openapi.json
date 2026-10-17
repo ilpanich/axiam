@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.0",
-    "x-axiam-spec-digest": "sha256:cf0fc71c2061576b077afd48d9903f9f4ef26d66e9edbebe5e3020be89fc59a7"
+    "x-axiam-spec-digest": "sha256:f3039e259aba4f4706ef4a9dbc127bd5cbd8af7c79fe3bb71450609a96bba56f"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -6110,6 +6110,9 @@
           },
           "404": {
             "description": "OAuth2 client not found"
+          },
+          "409": {
+            "description": "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."
           },
           "422": {
             "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."

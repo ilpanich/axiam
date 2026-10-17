@@ -48,7 +48,9 @@ use axiam_db::repository::{
     SurrealScopeRepository, SurrealServiceAccountRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
-use axiam_db::{seed_default_roles, seed_permissions};
+use axiam_db::{
+    SharedRateLimitConfig, SharedRateLimitCounter, seed_default_roles, seed_permissions,
+};
 use serde_json::{Value, json};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -350,15 +352,27 @@ impl DynReactorGate for Gate {
     }
 }
 
+/// The routes under `$limits`, with the reactor `$gate` if one is given.
+///
+/// The cross-replica rate limiter is switched off in every app but the one
+/// `app!(@limiter ..)` builds; each route's in-memory governor still
+/// applies. The shared counter seeds a key it first sees partway through a
+/// wall-clock minute with up to 90% of the bucket's limit
+/// (`COLD_ENTRY_BURST_FRACTION`, for limits of 20 and above), so at the
+/// shipped thirty a test making five or six writes to one route, first seen in
+/// the last seconds of a minute, answered `429` where it asserts `409` or
+/// `200`: a flake by time of day, in tests of the routes' contract, not of the
+/// limiter. The limiter's own test keeps the real counter.
 macro_rules! app {
-    ($w:expr) => {
-        app!($w, RateLimitConfig::default(), None::<Arc<Gate>>)
+    (@limiter $w:expr, $limits:expr) => {
+        app!(@build $w, $limits, None::<Arc<Gate>>, true)
     };
-    ($w:expr, $limits:expr) => {
-        app!($w, $limits, None::<Arc<Gate>>)
-    };
-    ($w:expr, $limits:expr, $gate:expr) => {{
+    (@build $w:expr, $limits:expr, $gate:expr, $shared:expr) => {{
         let mut state = AppState::for_test($w.db.clone(), $w.auth.clone());
+        if !$shared {
+            state.shared_rate_limit =
+                SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+        }
         if let Some(gate) = $gate {
             state.events.reactor_gate = gate;
         }
@@ -371,6 +385,15 @@ macro_rules! app {
         )
         .await
     }};
+    ($w:expr) => {
+        app!($w, RateLimitConfig::default(), None::<Arc<Gate>>)
+    };
+    ($w:expr, $limits:expr) => {
+        app!($w, $limits, None::<Arc<Gate>>)
+    };
+    ($w:expr, $limits:expr, $gate:expr) => {
+        app!(@build $w, $limits, $gate, false)
+    };
 }
 
 /// Send `method uri body` as `token`; the status and the JSON body (or null).
@@ -2677,7 +2700,8 @@ async fn every_write_route_has_its_own_bucket_and_reads_are_not_limited() {
         network_admin_per_min: 1,
         ..RateLimitConfig::default()
     };
-    let app = app!(w, limits);
+    // Both layers, as in production: the shared counter and the governor.
+    let app = app!(@limiter w, limits);
     let id = Uuid::new_v4();
 
     let routes: Vec<(&str, String, Option<Value>)> = vec![

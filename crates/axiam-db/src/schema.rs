@@ -552,6 +552,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_opaque_directory_epoch",
         sql: SCHEMA_V106,
     },
+    Migration {
+        version: 107,
+        name: "account_deletion_purge_claim",
+        sql: SCHEMA_V107,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5121,6 +5126,30 @@ const SCHEMA_V106: &str = "\
 DEFINE FIELD IF NOT EXISTS opaque_directory_epoch ON TABLE tenant TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v107 — a deletion cancel and the purge sweep never both win
+// (the 1.1.0 atomicity audit, item 11)
+// -----------------------------------------------------------------------
+//
+// **`account_deletion.purge_claimed_at`** — when the purge sweep claimed the
+// request, before the first destructive step of the erasure. A cancel and the
+// sweep decided on reads made before their writes, and every write was
+// unconditional, so a cancel just before the deadline could land after the
+// sweep had selected the account: the caller was told "cancelled" while the
+// account was erased (or stripped of its credentials, groups, roles and
+// certificates). The sweep's claim re-checks that the account is still due and
+// writes this field; a cancel is one transaction that refuses a claimed (or
+// completed, or cancelled, or expired) request before it clears the account's
+// pending flag (`repository/account_deletion.rs`). Both write the request row,
+// so the engine serialises them. Operational state about the request, not
+// about the person: it holds a time and nothing else.
+//
+// Additive: one optional field, nothing backfilled (a request written before
+// the upgrade reads NONE — unclaimed).
+const SCHEMA_V107: &str = "\
+DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5388,6 +5417,25 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
+    /// purge claim, an optional field defined idempotently, and nothing else.
+    #[test]
+    fn v107_adds_only_the_purge_claim() {
+        let statements: Vec<&str> = SCHEMA_V107
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion \
+                 TYPE option<datetime>"
+            ],
+            "v107 defines the claim and nothing else"
+        );
     }
 
     /// Item 10 of the 1.1.0 atomicity audit — v106 is the tenant row's
@@ -6956,8 +7004,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&106),
-            "v106 is the newest migration (the 1.1.0 atomicity audit's item 10 — \
+            Some(&107),
+            "v107 is the newest migration (the 1.1.0 atomicity audit's item 11 — \
+             `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
+             destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \
+             never both win); v106 was the 1.1.0 atomicity audit's item 10 — \
              `tenant.opaque_directory_epoch`, which a directory save that leaves the directory \
              enabled and a settings write that makes opaque_mode `required` both compare and \
              move, so that each side's refusal and the other's write act as one transaction); \

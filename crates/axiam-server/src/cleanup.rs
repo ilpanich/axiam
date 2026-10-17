@@ -1913,13 +1913,34 @@ struct ErasureUnit<C: Connection> {
 impl<C: Connection> ErasureUnit<C> {
     /// The purge of `user` (steps listed at `CleanupTask::sweep_pending_purges`):
     /// `Ok(true)` once erased and recorded, `Ok(false)` when given up at the
-    /// stop before the point of no return — the account stays due.
+    /// stop before the point of no return — the account stays due — or when the
+    /// account is no longer due at the claim (its deletion was cancelled).
     async fn purge(
         self,
         user: axiam_core::models::user::User,
         pepper: [u8; 32],
+        now: chrono::DateTime<Utc>,
         work: AuditedWork,
     ) -> Result<bool, AxiamError> {
+        // Item 11 of the 1.1.0 atomicity audit: the erasure is claimed before
+        // its first destructive step, in a transaction that re-checks the
+        // account is still due at the sweep's `now`. A deletion cancelled since
+        // the sweep's read is skipped here, before anything is revoked; once
+        // claimed, a cancel is refused (`409`), so the subject is never told
+        // "cancelled" for an account this purge goes on to erase.
+        if !self
+            .account_deletion_repo
+            .claim_for_purge(user.tenant_id, user.id, now)
+            .await?
+        {
+            tracing::info!(
+                user_id = %user.id,
+                tenant_id = %user.tenant_id,
+                "purge skipped: the account's deletion was cancelled since the sweep read it"
+            );
+            return Ok(false);
+        }
+
         // Steps (a)…(b4) are idempotent and leave the account due: given up
         // where they are once the process is stopping.
         let Some(certificates_revoked) = work.until_stopped(self.prepare(&user)).await else {
@@ -2949,7 +2970,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                 );
                 break;
             }
-            match self.purge_single_user(&user, pepper).await {
+            match self.purge_single_user(&user, pepper, now).await {
                 Some(Ok(true)) => purged += 1,
                 // Given up at the stop before the account was anonymized (it
                 // stays due), or still running and left to the teardown's join
@@ -2989,6 +3010,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         &self,
         user: &axiam_core::models::user::User,
         pepper: [u8; 32],
+        now: chrono::DateTime<Utc>,
     ) -> Option<Result<bool, AxiamError>> {
         let unit = ErasureUnit {
             auth_svc: Arc::clone(&self.auth_svc),
@@ -3008,7 +3030,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         self.audited
             .run(with_cause(
                 Some(InitiatingEntity::System),
-                unit.purge(user, pepper, work),
+                unit.purge(user, pepper, now, work),
             ))
             .await
     }

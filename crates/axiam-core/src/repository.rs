@@ -5496,13 +5496,22 @@ pub trait AccountDeletionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Option<AccountDeletion>>> + Send;
 
     /// Mark as cancelled (user clicked cancel link in time).
+    ///
+    /// Conditional: only a request still `pending` and not yet claimed by the
+    /// purge sweep is cancelled; anything else is [`AxiamError::Conflict`] and
+    /// changes nothing (item 11 of the 1.1.0 atomicity audit). The cancel
+    /// endpoint uses the store's one-transaction cancel, which also re-enables
+    /// the account.
+    ///
+    /// [`AxiamError::Conflict`]: crate::error::AxiamError::Conflict
     fn mark_cancelled(
         &self,
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Mark as completed (purge ran successfully).
+    /// Mark as completed (purge ran successfully). Conditional on the request
+    /// still being `pending`: a cancelled request is never rewritten.
     fn mark_completed(
         &self,
         tenant_id: Uuid,

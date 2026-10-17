@@ -69,7 +69,7 @@ mod webauthn_attestation_policy;
 mod webauthn_credential;
 mod webhook;
 
-pub use account_deletion::SurrealAccountDeletionRepository;
+pub use account_deletion::{CancelOutcome, SurrealAccountDeletionRepository};
 pub use amqp_nonce_replay::SurrealAmqpNonceRepository;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;

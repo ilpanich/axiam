@@ -13,13 +13,14 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::crypto::decrypt_separate;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::gdpr::{AccountDeletionStatus, CreateExportJob};
+use axiam_core::models::gdpr::CreateExportJob;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
     AccountDeletionRepository, AuditLogRepository, ExportJobRepository, TenantRepository,
     UserRepository,
 };
 use axiam_db::SurrealAuditLogRepository;
+use axiam_db::repository::CancelOutcome;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -652,8 +653,11 @@ pub async fn request_account_delete<C: Connection + Clone>(
     tag = "gdpr",
     params(("token" = String, Query, description = "Single-use cancel token")),
     responses(
-        (status = 200, description = "Deletion cancelled"),
+        (status = 200, description = "Deletion cancelled; the account is active again"),
         (status = 400, description = "Token invalid or expired"),
+        (status = 403, description = "The token was already used, or the grace window has ended"),
+        (status = 404, description = "No deletion request carries this token"),
+        (status = 409, description = "The erasure has already started (the purge sweep claimed the request, or completed it): the deletion can no longer be cancelled, and nothing was changed"),
     )
 )]
 pub async fn cancel_account_delete<C: Connection + Clone>(
@@ -673,35 +677,43 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
             id: "by-token".into(),
         })?;
 
-    // Validate: must be pending and within grace window.
-    if deletion.status != AccountDeletionStatus::Pending {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "cancel token already used".into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
-    }
-    if deletion.scheduled_purge_at < Utc::now() {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "grace window expired — cannot cancel".into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
-    }
-
-    // Abort deletion: mark cancelled (single-use) + re-enable account.
-    state
+    // Item 11 of the 1.1.0 atomicity audit: the checks and the two writes —
+    // the request cancelled, the account re-enabled — are one transaction, and
+    // the purge sweep claims a request before its first destructive step. A
+    // cancel that loses to the sweep is told so; it is never answered
+    // "cancelled" for an account that is being erased.
+    match state
         .gdpr
         .account_deletion_repo
-        .mark_cancelled(deletion.tenant_id, deletion.id)
-        .await?;
-
-    state
-        .user_repo
-        .clear_deletion_pending(deletion.tenant_id, deletion.user_id)
-        .await?;
+        .cancel_pending(deletion.tenant_id, deletion.id)
+        .await?
+    {
+        CancelOutcome::Cancelled => {}
+        CancelOutcome::AlreadyCancelled => {
+            return Err(AxiamError::AuthorizationDenied {
+                reason: "cancel token already used".into(),
+                action: None,
+                resource_id: None,
+            }
+            .into());
+        }
+        CancelOutcome::Expired => {
+            return Err(AxiamError::AuthorizationDenied {
+                reason: "grace window expired — cannot cancel".into(),
+                action: None,
+                resource_id: None,
+            }
+            .into());
+        }
+        CancelOutcome::Erasing => {
+            return Err(AxiamError::Conflict {
+                reason: "the account's erasure has already started; the deletion can no longer \
+                         be cancelled"
+                    .into(),
+            }
+            .into());
+        }
+    }
 
     Ok(HttpResponse::Ok().json(CancelledResponse { cancelled: true }))
 }

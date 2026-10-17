@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.0",
-    "x-axiam-spec-digest": "sha256:32d49e8687e3aab1cdd2c01ca3262820d747038bec694be13269ef95e784c3a9"
+    "x-axiam-spec-digest": "sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -955,10 +955,19 @@
         ],
         "responses": {
           "200": {
-            "description": "Deletion cancelled"
+            "description": "Deletion cancelled; the account is active again"
           },
           "400": {
             "description": "Token invalid or expired"
+          },
+          "403": {
+            "description": "The token was already used, or the grace window has ended"
+          },
+          "404": {
+            "description": "No deletion request carries this token"
+          },
+          "409": {
+            "description": "The erasure has already started (the purge sweep claimed the request, or completed it): the deletion can no longer be cancelled, and nothing was changed"
           }
         }
       }

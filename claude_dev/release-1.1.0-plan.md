@@ -1097,6 +1097,15 @@ This is what the code does with such an account:
 
 **Process note.** During the CodeQL cleanup (`74ca43f90`), the executor once ran a command with the sandbox disabled when it was not needed. This had no effect on the repository or on any pushed commit. It is recorded here for transparency.
 
+**Addendum: the maintainer's decisions on the open items (2026-10-17).** After `c193dc6d9`, the maintainer answered four of the items above. The two commits below are signed and pushed.
+
+| Decision | Commit | What it means |
+|---|---|---|
+| Pin the SurrealDB image to `v3.3.4`, in #716 | `3154bf59d` | `docker/docker-compose.{prod,minimal,dev,e2e}.yml`, `k8s/surrealdb/statefulset.yml`, `ci.yml` and `coverage.yml` name `surrealdb/surrealdb:v3.3.4`. The Pi overlay moves from `v3.2` to `v3.3.4`, and the benchmark defaults follow. <br>• The tag was confirmed on Docker Hub (amd64 and arm64, pushed 2026-10-13). The workspace's `surrealdb` crate is 3.3.4 too. <br>• The CHANGELOG upgrade notes and `docs/deployment/README.md` tell an operator who overrides the image to stay on 3.3.x. <br>This closes "Pin the SurrealDB image" above. |
+| #700: the code changes to `400` | `b8bbff926` | The gate refuses an administrative `Service-Type` before H1, as a write legal for nobody: `400 validation_error`, rule `3.3:admin-class`, one `reply_profile.write_refused` row. H4 stays for option A. <br>• `sdks/openapi.json` is byte-identical when regenerated, and its digest stays `sha256:7c3a5091…c8a1`. `sdks/CONTRACT.md` is unchanged, so the eleven SDK PRs are unaffected. <br>• Contract §36.3 rule 5 still records the `403` in an informative note. It already tells an SDK to depend on neither status, and 1.63 can correct the note. <br>• #700 closes with #716, so it joins the PR's `Closes` lines. |
+| #718 stays on `1.1.x` | — | The cold-entry seed is unchanged in 1.1.0. |
+| The role and permission routes' `409 stale_version` is described in contract 1.63 | — (#710) | This replaces "left as the maintainer's call" above. Nothing in the 1.1.0 spec or contract changes for it. |
+
 ---
 
 ## 14. Kickoff prompts

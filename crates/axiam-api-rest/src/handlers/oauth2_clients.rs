@@ -891,6 +891,7 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "OAuth2 client updated",
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
+        (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
         (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
@@ -930,6 +931,19 @@ pub async fn update<C: Connection + Clone>(
         .map(validate_allowed_resources)
         .transpose()?;
 
+    // Item 9 of the 1.1.0 atomicity audit: every rule below is checked against
+    // ONE read of the row, and the write is conditional on that read
+    // (`update_if_unchanged`). Each rule used to read the row again and the
+    // write set only the patch's own fields, so two patches each validated
+    // against the row before the other could both land, leaving a merged row
+    // neither had validated. A row written since this read now answers `409`,
+    // and the caller reads it again. The version is the one read here, so the
+    // request carries nothing new.
+    let stored = state
+        .oauth2_client_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
+
     // T21.2 — `none` is a registration decision, and it stays one (I4).
     //
     // A PATCH may not move a client across the public/confidential line in
@@ -947,11 +961,7 @@ pub async fn update<C: Connection + Clone>(
     // meaningful — and impossible to take back once a deployment has rows that
     // relied on it.
     if let Some(requested_method) = req.token_endpoint_auth_method {
-        let existing = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
-        let existing_method = existing.token_endpoint_auth_method;
+        let existing_method = stored.token_endpoint_auth_method;
         if requested_method.is_public() != existing_method.is_public() {
             return Err(validation_err(format!(
                 "token_endpoint_auth_method cannot be changed from {} to {}: whether a client \
@@ -983,17 +993,13 @@ pub async fn update<C: Connection + Clone>(
         .as_ref()
         .is_some_and(|gts| gts.iter().any(|g| g == "authorization_code"));
     if adding_auth_code && req.redirect_uris.is_none() {
-        let existing = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
-        if existing.redirect_uris.is_empty() {
+        if stored.redirect_uris.is_empty() {
             return Err(validation_err(
                 "redirect_uris are required when enabling \
                  authorization_code grant",
             ));
         }
-        validate_redirect_uris(&existing.redirect_uris)?;
+        validate_redirect_uris(&stored.redirect_uris)?;
     }
 
     // G-7 — the CIBA metadata is validated against the row the patch will
@@ -1014,10 +1020,6 @@ pub async fn update<C: Connection + Clone>(
         || req.jwks.is_some()
         || req.jwks_uri.is_some()
     {
-        let stored = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
         let grants = req.grant_types.as_deref().unwrap_or(&stored.grant_types);
         let keep_stored = axiam_oauth2::ciba::holds_ciba_grant(grants);
         let stored_mode = stored
@@ -1068,10 +1070,6 @@ pub async fn update<C: Connection + Clone>(
     // the tenant's `dcr_allowed_scopes` does not offer. Checked before anything
     // is written, so a refusal leaves the row as it was.
     if let Some(ref requested) = req.scopes {
-        let stored = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
         let outside = scopes_outside_ceiling(&state, &stored, requested).await?;
         if !outside.is_empty() {
             return Ok(crate::error::unprocessable_entity(
@@ -1115,14 +1113,10 @@ pub async fn update<C: Connection + Clone>(
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to
     // `fapi2` on a client that has none of the rest is a perfectly well-formed
     // patch and a completely broken client; validating the patch alone would
-    // wave it through. The extra read happens only when the patch touches a
-    // profile-relevant field, so an ordinary rename still costs one write.
+    // wave it through. The merge is onto the row read above, the one the write
+    // is conditional on, so what is validated here is what will be stored.
     if update.touches_security_profile() {
-        let merged = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?
-            .with_update_applied(&update);
+        let merged = stored.clone().with_update_applied(&update);
         axiam_oauth2::fapi::validate_registration(&merged)
             .map_err(|e| validation_err(e.to_string()))?;
         // W7 — and on the update path too, on the **merged** row, so a patch
@@ -1134,7 +1128,7 @@ pub async fn update<C: Connection + Clone>(
 
     let client = state
         .oauth2_client_repo
-        .update(user.tenant_id, id, update)
+        .update_if_unchanged(user.tenant_id, id, update, stored.updated_at)
         .await?;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
 }

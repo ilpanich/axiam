@@ -18,9 +18,24 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, is_transaction_conflict, paginate, retry_hot_row, search_bind,
-    search_filter, take_first_or_not_found,
+    CountRow, classify_write_error, is_transaction_conflict, paginate, retry_hot_row,
+    retry_on_write_conflict, search_bind, search_filter, take_first_or_not_found,
 };
+
+/// An engine conflict that outlived the update's retries is contention (`503`),
+/// not a database fault; anything else passes through.
+fn contention_after_retries(e: AxiamError) -> AxiamError {
+    if crate::helpers::is_write_conflict(&e.to_string()) {
+        AxiamError::WriteContention
+    } else {
+        e
+    }
+}
+
+/// What a conditional update answers when the row moved since the caller's
+/// read ([`SurrealOAuth2ClientRepository::update_if_unchanged`]).
+const CLIENT_CHANGED_SINCE_READ: &str =
+    "the OAuth2 client changed since it was read; read it again and retry";
 
 /// Generate a random client ID with the `oa_` prefix (32 hex chars).
 fn generate_client_id() -> String {
@@ -725,6 +740,259 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
     }
 }
 
+impl<C: Connection> SurrealOAuth2ClientRepository<C> {
+    /// [`OAuth2ClientRepository::update`], written only if the row still
+    /// carries `expected_updated_at` — the version the caller read and
+    /// validated the patch against (item 9 of the 1.1.0 atomicity audit).
+    ///
+    /// `PUT /api/v1/oauth2-clients/{id}` validates a patch against the stored
+    /// row: the public/confidential line, the redirect URIs an added
+    /// `authorization_code` needs, the CIBA and FAPI rules on the merged row,
+    /// the scope ceiling. Each check read the row again, and the write set only
+    /// the patch's own fields, so two patches each validated against the row
+    /// before the other could both land and leave a merged row neither had
+    /// validated. Now the handler reads once, validates against that read, and
+    /// writes here, conditionally on that read: the version guard is in the
+    /// `WHERE`, so a row written since matches nothing and the answer is
+    /// [`AxiamError::Conflict`] (`409`), the client's cue to read it again.
+    /// Two overlapping patches also write the same key, so the engine aborts
+    /// one; it is retried and its guard then fails. `NotFound` when the row is
+    /// gone. The wire is unchanged: the version is the one the server read, not
+    /// one the request carries.
+    pub async fn update_if_unchanged(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateOAuth2Client,
+        expected_updated_at: DateTime<Utc>,
+    ) -> AxiamResult<OAuth2Client> {
+        retry_on_write_conflict(|| {
+            self.update_once(tenant_id, id, input.clone(), Some(expected_updated_at))
+        })
+        .await
+        .map_err(contention_after_retries)
+    }
+
+    /// One attempt at an update. With `expected_updated_at`, the write is
+    /// conditional on the row still carrying that version (see
+    /// [`Self::update_if_unchanged`]).
+    async fn update_once(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateOAuth2Client,
+        expected_updated_at: Option<DateTime<Utc>>,
+    ) -> AxiamResult<OAuth2Client> {
+        let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        let mut sets = Vec::new();
+        if input.name.is_some() {
+            sets.push("name = $name");
+        }
+        if input.redirect_uris.is_some() {
+            sets.push("redirect_uris = $redirect_uris");
+        }
+        if input.grant_types.is_some() {
+            sets.push("grant_types = $grant_types");
+        }
+        if input.scopes.is_some() {
+            sets.push("scopes = $scopes");
+        }
+        if input.post_logout_redirect_uris.is_some() {
+            sets.push("post_logout_redirect_uris = $post_logout_redirect_uris");
+        }
+        if input.backchannel_logout_uri.is_some() {
+            sets.push("backchannel_logout_uri = $backchannel_logout_uri");
+        }
+        if input.require_par.is_some() {
+            sets.push("require_par = $require_par");
+        }
+        if input.profile.is_some() {
+            sets.push("profile = $profile");
+        }
+        if input.token_endpoint_auth_method.is_some() {
+            sets.push("token_endpoint_auth_method = $token_endpoint_auth_method");
+        }
+        if input.tls_client_auth_subject_dn.is_some() {
+            sets.push("tls_client_auth_subject_dn = $tls_client_auth_subject_dn");
+        }
+        if input.tls_client_auth_san_dns.is_some() {
+            sets.push("tls_client_auth_san_dns = $tls_client_auth_san_dns");
+        }
+        if input.tls_client_auth_san_uri.is_some() {
+            sets.push("tls_client_auth_san_uri = $tls_client_auth_san_uri");
+        }
+        if input.self_signed_tls_client_auth_thumbprints.is_some() {
+            sets.push("self_signed_tls_client_auth_thumbprints = $self_signed_thumbprints");
+        }
+        if input.tls_client_certificate_bound_access_tokens.is_some() {
+            sets.push("tls_client_certificate_bound_access_tokens = $cert_bound_tokens");
+        }
+        if input.jwks.is_some() {
+            sets.push("jwks = $jwks");
+        }
+        if input.jwks_uri.is_some() {
+            sets.push("jwks_uri = $jwks_uri");
+        }
+        if input.dpop_bound_access_tokens.is_some() {
+            sets.push("dpop_bound_access_tokens = $dpop_bound_tokens");
+        }
+        if input.dpop_require_nonce.is_some() {
+            sets.push("dpop_require_nonce = $dpop_require_nonce");
+        }
+        if input.authn_request_params.is_some() {
+            sets.push("authn_request_params = $authn_request_params");
+        }
+        if input.allowed_resources.is_some() {
+            sets.push("allowed_resources = $allowed_resources");
+        }
+        if input.browser_sso.is_some() {
+            sets.push("browser_sso = $browser_sso");
+        }
+        if input.ciba.is_some() {
+            sets.push("backchannel_token_delivery_mode = $ciba_mode");
+            sets.push("backchannel_client_notification_endpoint = $ciba_endpoint");
+            sets.push("backchannel_authentication_request_signing_alg = $ciba_signing_alg");
+        }
+        sets.push("updated_at = time::now()");
+
+        // The tenant guard and, when given, the version guard are in the
+        // `WHERE`: another tenant's row, or a row written since the caller's
+        // read, matches nothing.
+        let version_guard = if expected_updated_at.is_some() {
+            " AND updated_at = $expected_updated_at"
+        } else {
+            ""
+        };
+        let query = format!(
+            "UPDATE type::record('oauth2_client', $id) SET {} \
+             WHERE tenant_id = $tenant_id{version_guard}",
+            sets.join(", ")
+        );
+
+        let db = self.db.current();
+        let mut builder = db
+            .query(&query)
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", tenant_id_str));
+        if let Some(expected) = expected_updated_at {
+            builder = builder.bind(("expected_updated_at", expected));
+        }
+
+        if let Some(name) = input.name {
+            builder = builder.bind(("name", name));
+        }
+        if let Some(redirect_uris) = input.redirect_uris {
+            builder = builder.bind(("redirect_uris", redirect_uris));
+        }
+        if let Some(grant_types) = input.grant_types {
+            builder = builder.bind(("grant_types", grant_types));
+        }
+        if let Some(scopes) = input.scopes {
+            builder = builder.bind(("scopes", scopes));
+        }
+        if let Some(uris) = input.post_logout_redirect_uris {
+            builder = builder.bind(("post_logout_redirect_uris", uris));
+        }
+        if let Some(uri) = input.backchannel_logout_uri {
+            // Empty string is the documented "clear it" sentinel
+            // (`UpdateOAuth2Client::backchannel_logout_uri`); it is not a valid
+            // URI, so it cannot collide with a real value.
+            let stored = if uri.is_empty() { None } else { Some(uri) };
+            builder = builder.bind(("backchannel_logout_uri", stored));
+        }
+        if let Some(require_par) = input.require_par {
+            builder = builder.bind(("require_par", require_par));
+        }
+        if let Some(profile) = input.profile {
+            builder = builder.bind(("profile", profile.as_str()));
+        }
+        if let Some(method) = input.token_endpoint_auth_method {
+            builder = builder.bind(("token_endpoint_auth_method", method.as_str()));
+        }
+        // The three `tls_client_auth_*` parameters take the empty string as
+        // their "clear it" sentinel, same as `backchannel_logout_uri` above:
+        // neither a DN nor a SAN can legally be empty, so the sentinel cannot
+        // collide with a real value, and a client migrated off `tls_client_auth`
+        // must be able to shed the expectation rather than carry it forever.
+        if let Some(dn) = input.tls_client_auth_subject_dn {
+            builder = builder.bind(("tls_client_auth_subject_dn", normalise_optional(Some(dn))));
+        }
+        if let Some(dns) = input.tls_client_auth_san_dns {
+            builder = builder.bind(("tls_client_auth_san_dns", normalise_optional(Some(dns))));
+        }
+        if let Some(uri) = input.tls_client_auth_san_uri {
+            builder = builder.bind(("tls_client_auth_san_uri", normalise_optional(Some(uri))));
+        }
+        if let Some(thumbprints) = input.self_signed_tls_client_auth_thumbprints {
+            builder = builder.bind(("self_signed_thumbprints", thumbprints));
+        }
+        // `jwks` and `jwks_uri` take the same empty-string "clear it" sentinel
+        // for the same reason: RFC 7591 §2 permits at most one of them, so
+        // migrating a client from an inline key set to a published one has to be
+        // able to remove the first.
+        if let Some(jwks) = input.jwks {
+            builder = builder.bind(("jwks", normalise_optional(Some(jwks))));
+        }
+        if let Some(uri) = input.jwks_uri {
+            builder = builder.bind(("jwks_uri", normalise_optional(Some(uri))));
+        }
+        if let Some(bound) = input.dpop_bound_access_tokens {
+            builder = builder.bind(("dpop_bound_tokens", bound));
+        }
+        if let Some(required) = input.dpop_require_nonce {
+            builder = builder.bind(("dpop_require_nonce", required));
+        }
+        if let Some(mode) = input.authn_request_params {
+            builder = builder.bind(("authn_request_params", mode.as_str()));
+        }
+        if let Some(resources) = input.allowed_resources {
+            builder = builder.bind(("allowed_resources", resources));
+        }
+        if let Some(enabled) = input.browser_sso {
+            builder = builder.bind(("browser_sso", enabled));
+        }
+        if let Some(bound) = input.tls_client_certificate_bound_access_tokens {
+            builder = builder.bind(("cert_bound_tokens", bound));
+        }
+        if let Some(ciba) = input.ciba {
+            builder = builder
+                .bind((
+                    "ciba_mode",
+                    ciba.backchannel_token_delivery_mode
+                        .map(|m| m.as_str().to_owned()),
+                ))
+                .bind((
+                    "ciba_signing_alg",
+                    ciba.backchannel_authentication_request_signing_alg
+                        .map(|a| a.as_str().to_owned()),
+                ))
+                .bind((
+                    "ciba_endpoint",
+                    normalise_optional(ciba.backchannel_client_notification_endpoint),
+                ));
+        }
+
+        let result = builder.await.map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() && expected_updated_at.is_some() {
+            // Present when read, gone or overtaken now: told apart by a read.
+            self.get_by_id(tenant_id, id).await?;
+            return Err(AxiamError::Conflict {
+                reason: CLIENT_CHANGED_SINCE_READ.into(),
+            });
+        }
+        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
+
+        Ok(row.try_into_client(id)?)
+    }
+}
+
 impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
     async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
         self.create_row(input, None, None)
@@ -979,195 +1247,9 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         id: Uuid,
         input: UpdateOAuth2Client,
     ) -> AxiamResult<OAuth2Client> {
-        let id_str = id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
-        let mut sets = Vec::new();
-        if input.name.is_some() {
-            sets.push("name = $name");
-        }
-        if input.redirect_uris.is_some() {
-            sets.push("redirect_uris = $redirect_uris");
-        }
-        if input.grant_types.is_some() {
-            sets.push("grant_types = $grant_types");
-        }
-        if input.scopes.is_some() {
-            sets.push("scopes = $scopes");
-        }
-        if input.post_logout_redirect_uris.is_some() {
-            sets.push("post_logout_redirect_uris = $post_logout_redirect_uris");
-        }
-        if input.backchannel_logout_uri.is_some() {
-            sets.push("backchannel_logout_uri = $backchannel_logout_uri");
-        }
-        if input.require_par.is_some() {
-            sets.push("require_par = $require_par");
-        }
-        if input.profile.is_some() {
-            sets.push("profile = $profile");
-        }
-        if input.token_endpoint_auth_method.is_some() {
-            sets.push("token_endpoint_auth_method = $token_endpoint_auth_method");
-        }
-        if input.tls_client_auth_subject_dn.is_some() {
-            sets.push("tls_client_auth_subject_dn = $tls_client_auth_subject_dn");
-        }
-        if input.tls_client_auth_san_dns.is_some() {
-            sets.push("tls_client_auth_san_dns = $tls_client_auth_san_dns");
-        }
-        if input.tls_client_auth_san_uri.is_some() {
-            sets.push("tls_client_auth_san_uri = $tls_client_auth_san_uri");
-        }
-        if input.self_signed_tls_client_auth_thumbprints.is_some() {
-            sets.push("self_signed_tls_client_auth_thumbprints = $self_signed_thumbprints");
-        }
-        if input.tls_client_certificate_bound_access_tokens.is_some() {
-            sets.push("tls_client_certificate_bound_access_tokens = $cert_bound_tokens");
-        }
-        if input.jwks.is_some() {
-            sets.push("jwks = $jwks");
-        }
-        if input.jwks_uri.is_some() {
-            sets.push("jwks_uri = $jwks_uri");
-        }
-        if input.dpop_bound_access_tokens.is_some() {
-            sets.push("dpop_bound_access_tokens = $dpop_bound_tokens");
-        }
-        if input.dpop_require_nonce.is_some() {
-            sets.push("dpop_require_nonce = $dpop_require_nonce");
-        }
-        if input.authn_request_params.is_some() {
-            sets.push("authn_request_params = $authn_request_params");
-        }
-        if input.allowed_resources.is_some() {
-            sets.push("allowed_resources = $allowed_resources");
-        }
-        if input.browser_sso.is_some() {
-            sets.push("browser_sso = $browser_sso");
-        }
-        if input.ciba.is_some() {
-            sets.push("backchannel_token_delivery_mode = $ciba_mode");
-            sets.push("backchannel_client_notification_endpoint = $ciba_endpoint");
-            sets.push("backchannel_authentication_request_signing_alg = $ciba_signing_alg");
-        }
-        sets.push("updated_at = time::now()");
-
-        let query = format!(
-            "UPDATE type::record('oauth2_client', $id) SET {} \
-             WHERE tenant_id = $tenant_id",
-            sets.join(", ")
-        );
-
-        let db = self.db.current();
-        let mut builder = db
-            .query(&query)
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str));
-
-        if let Some(name) = input.name {
-            builder = builder.bind(("name", name));
-        }
-        if let Some(redirect_uris) = input.redirect_uris {
-            builder = builder.bind(("redirect_uris", redirect_uris));
-        }
-        if let Some(grant_types) = input.grant_types {
-            builder = builder.bind(("grant_types", grant_types));
-        }
-        if let Some(scopes) = input.scopes {
-            builder = builder.bind(("scopes", scopes));
-        }
-        if let Some(uris) = input.post_logout_redirect_uris {
-            builder = builder.bind(("post_logout_redirect_uris", uris));
-        }
-        if let Some(uri) = input.backchannel_logout_uri {
-            // Empty string is the documented "clear it" sentinel
-            // (`UpdateOAuth2Client::backchannel_logout_uri`); it is not a valid
-            // URI, so it cannot collide with a real value.
-            let stored = if uri.is_empty() { None } else { Some(uri) };
-            builder = builder.bind(("backchannel_logout_uri", stored));
-        }
-        if let Some(require_par) = input.require_par {
-            builder = builder.bind(("require_par", require_par));
-        }
-        if let Some(profile) = input.profile {
-            builder = builder.bind(("profile", profile.as_str()));
-        }
-        if let Some(method) = input.token_endpoint_auth_method {
-            builder = builder.bind(("token_endpoint_auth_method", method.as_str()));
-        }
-        // The three `tls_client_auth_*` parameters take the empty string as
-        // their "clear it" sentinel, same as `backchannel_logout_uri` above:
-        // neither a DN nor a SAN can legally be empty, so the sentinel cannot
-        // collide with a real value, and a client migrated off `tls_client_auth`
-        // must be able to shed the expectation rather than carry it forever.
-        if let Some(dn) = input.tls_client_auth_subject_dn {
-            builder = builder.bind(("tls_client_auth_subject_dn", normalise_optional(Some(dn))));
-        }
-        if let Some(dns) = input.tls_client_auth_san_dns {
-            builder = builder.bind(("tls_client_auth_san_dns", normalise_optional(Some(dns))));
-        }
-        if let Some(uri) = input.tls_client_auth_san_uri {
-            builder = builder.bind(("tls_client_auth_san_uri", normalise_optional(Some(uri))));
-        }
-        if let Some(thumbprints) = input.self_signed_tls_client_auth_thumbprints {
-            builder = builder.bind(("self_signed_thumbprints", thumbprints));
-        }
-        // `jwks` and `jwks_uri` take the same empty-string "clear it" sentinel
-        // for the same reason: RFC 7591 §2 permits at most one of them, so
-        // migrating a client from an inline key set to a published one has to be
-        // able to remove the first.
-        if let Some(jwks) = input.jwks {
-            builder = builder.bind(("jwks", normalise_optional(Some(jwks))));
-        }
-        if let Some(uri) = input.jwks_uri {
-            builder = builder.bind(("jwks_uri", normalise_optional(Some(uri))));
-        }
-        if let Some(bound) = input.dpop_bound_access_tokens {
-            builder = builder.bind(("dpop_bound_tokens", bound));
-        }
-        if let Some(required) = input.dpop_require_nonce {
-            builder = builder.bind(("dpop_require_nonce", required));
-        }
-        if let Some(mode) = input.authn_request_params {
-            builder = builder.bind(("authn_request_params", mode.as_str()));
-        }
-        if let Some(resources) = input.allowed_resources {
-            builder = builder.bind(("allowed_resources", resources));
-        }
-        if let Some(enabled) = input.browser_sso {
-            builder = builder.bind(("browser_sso", enabled));
-        }
-        if let Some(bound) = input.tls_client_certificate_bound_access_tokens {
-            builder = builder.bind(("cert_bound_tokens", bound));
-        }
-        if let Some(ciba) = input.ciba {
-            builder = builder
-                .bind((
-                    "ciba_mode",
-                    ciba.backchannel_token_delivery_mode
-                        .map(|m| m.as_str().to_owned()),
-                ))
-                .bind((
-                    "ciba_signing_alg",
-                    ciba.backchannel_authentication_request_signing_alg
-                        .map(|a| a.as_str().to_owned()),
-                ))
-                .bind((
-                    "ciba_endpoint",
-                    normalise_optional(ciba.backchannel_client_notification_endpoint),
-                ));
-        }
-
-        let result = builder.await.map_err(DbError::from)?;
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        let rows: Vec<OAuth2ClientRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "oauth2_client", &id_str)?;
-
-        Ok(row.try_into_client(id)?)
+        retry_on_write_conflict(|| self.update_once(tenant_id, id, input.clone(), None))
+            .await
+            .map_err(contention_after_retries)
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {

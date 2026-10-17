@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, TxFail, classify_write_error, paginate, retry_on_write_conflict, search_bind,
+    search_filter, take_first_or_not_found,
+};
 
 #[derive(Debug, SurrealValue)]
 struct ResourceRow {
@@ -142,6 +145,77 @@ fn claim_parent() -> String {
     )
 }
 
+/// The message a re-parent throws when its new parent's ancestors include the
+/// resource being moved. Matched on the way back out as the cycle refusal.
+const HIERARCHY_CYCLE: &str = "axiam:resource_hierarchy_cycle";
+
+/// The message a re-parent throws when the new parent's ancestor chain is at
+/// the depth cap — the same refusal `get_ancestors` gives such a chain.
+const HIERARCHY_TOO_DEEP: &str = "axiam:resource_hierarchy_too_deep";
+
+/// The message a re-parent throws when the tenant row it claims is not there.
+const HIERARCHY_NO_TENANT: &str = "axiam:resource_hierarchy_no_tenant";
+
+/// The cycle refusal a re-parent answers, whether the Rust self-parent check or
+/// the transaction's ancestor walk found it.
+fn cycle_refusal() -> AxiamError {
+    AxiamError::Validation {
+        message: "cycle detected in resource hierarchy".into(),
+    }
+}
+
+/// SQL that claims the tenant's resource hierarchy for a re-parent and walks
+/// the new parent's ancestors inside the same transaction (item 8 of the 1.1.0
+/// atomicity audit).
+///
+/// # Why the walk alone is not enough
+///
+/// The cycle check was a walk of the new parent's ancestors made before the
+/// write, in statements of its own; `claim_parent` writes only the new parent.
+/// Two re-parents X→Y and Z→W, where Z is an ancestor of Y and X an ancestor of
+/// W, each walked a hierarchy in which the other's edge did not exist yet, each
+/// wrote a different `child_of` edge and a different parent, and both
+/// committed: X → Y ⇝ Z → W ⇝ X, a cycle that `get_ancestors` then reports as a
+/// depth overflow on every authorization check under it. Moving the walk into
+/// the transaction does not change that by itself: SurrealDB 3.3.4 is
+/// snapshot-isolated with write-write conflict detection only, so each
+/// transaction still walks its own snapshot and nothing it read is checked at
+/// commit.
+///
+/// So every re-parent writes one row the tenant's other re-parents also write:
+/// `tenant.hierarchy_epoch` (schema v105). Two overlapping re-parents in one
+/// tenant conflict on it; the loser is retried on a fresh snapshot
+/// ([`retry_on_write_conflict`]), where its walk sees the winner's edge
+/// and refuses the cycle. The epoch's next value is a `LET` of its own and the
+/// `UPDATE` only assigns it (`role::bump_statement` gives the stack-depth
+/// reason). Its value is never read beyond that.
+///
+/// A create never needs this: a new resource has no descendants, so no edge to
+/// it can close a cycle. The same holds for the reserved `/network` subtree,
+/// whose writes only ever create nodes (`network.rs`), and for a detach, which
+/// only removes an edge.
+///
+/// Reads the bound `$tenant_id`, `$id` (the resource moved) and `$parent_id`
+/// (its new parent), and fills [`HIERARCHY_CLAIM_SLOTS`] result slots.
+fn claim_hierarchy() -> String {
+    format!(
+        "LET $hierarchy = (SELECT VALUE hierarchy_epoch ?? 0 \
+             FROM type::record('tenant', $tenant_id)); \
+         IF array::len($hierarchy) = 0 {{ THROW '{HIERARCHY_NO_TENANT}'; }}; \
+         LET $next_hierarchy_epoch = $hierarchy[0] + 1; \
+         UPDATE type::record('tenant', $tenant_id) SET hierarchy_epoch = $next_hierarchy_epoch; \
+         LET $ancestors = (SELECT VALUE meta::id(id) FROM array::flatten(\
+             type::record('resource', $parent_id).{{..{depth}+path}}(\
+                 ->child_of->(resource WHERE tenant_id = $tenant_id)))); \
+         IF array::len($ancestors) >= {depth} {{ THROW '{HIERARCHY_TOO_DEEP}'; }}; \
+         IF $id IN $ancestors {{ THROW '{HIERARCHY_CYCLE}'; }};",
+        depth = MAX_ANCESTOR_DEPTH,
+    )
+}
+
+/// How many result slots [`claim_hierarchy`] fills.
+const HIERARCHY_CLAIM_SLOTS: usize = 7;
+
 /// Turns a `claim_parent` throw into `NotFound`, and anything else into a
 /// database error.
 ///
@@ -160,10 +234,175 @@ fn parent_claim_error(errors: Vec<String>, parent_id: &str) -> AxiamError {
     DbError::Migration(combined).into()
 }
 
+/// A re-parent's statement errors, read: the refusals its `THROW`s name first
+/// — a `THROW` fires on its own slot while the trailing statements report the
+/// generic "not executed due to a failed transaction", which is also a
+/// write-conflict marker — then what is left, classified, so an engine
+/// conflict is retried.
+fn reparent_error(errors: Vec<String>, tenant_id: Uuid, parent_id: &str) -> TxFail {
+    let combined = errors.join("; ");
+    if combined.contains(HIERARCHY_CYCLE) {
+        return TxFail::Refused(cycle_refusal());
+    }
+    if combined.contains(HIERARCHY_TOO_DEEP) {
+        // What `get_ancestors` answers for the same chain.
+        return TxFail::Refused(
+            DbError::Migration("resource hierarchy exceeds maximum depth — possible cycle".into())
+                .into(),
+        );
+    }
+    if combined.contains(HIERARCHY_NO_TENANT) {
+        return TxFail::Refused(AxiamError::NotFound {
+            entity: "tenant".into(),
+            id: tenant_id.to_string(),
+        });
+    }
+    if combined.contains(PARENT_GONE) {
+        return TxFail::Refused(AxiamError::NotFound {
+            entity: "resource".into(),
+            id: parent_id.to_string(),
+        });
+    }
+    TxFail::Db(classify_write_error(combined, "resource"))
+}
+
 impl<C: Connection> SurrealResourceRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
         Self { db }
+    }
+
+    /// One attempt at [`ResourceRepository::update`]: the write, and for a
+    /// re-parent the hierarchy claim, the ancestor walk and the parent claim,
+    /// as one transaction.
+    async fn update_once(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: UpdateResource,
+    ) -> Result<Resource, TxFail> {
+        let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        let mut sets = Vec::new();
+        if input.name.is_some() {
+            sets.push("name = $name");
+        }
+        if input.resource_type.is_some() {
+            sets.push("resource_type = $resource_type");
+        }
+        if input.parent_id.is_some() {
+            sets.push("parent_id = $parent_id");
+        }
+        if input.metadata.is_some() {
+            sets.push("metadata = $metadata");
+        }
+        sets.push("updated_at = time::now()");
+
+        let mut query = format!(
+            "UPDATE type::record('resource', $id) SET {} \
+             WHERE tenant_id = $tenant_id",
+            sets.join(", ")
+        );
+
+        // If parent_id is being changed, update the child_of edge.
+        //
+        // Re-parenting mutates two-to-three statements (DELETE the old
+        // child_of edge, UPDATE the record, optionally RELATE the new edge).
+        // They are one transaction so a failure after the DELETE (e.g. the
+        // RELATE hitting a UNIQUE violation) cannot leave the resource orphaned
+        // with no rollback — the same class the resource.delete transaction
+        // closed. The child_of edge carries no flat tenant_id column, so the
+        // DELETE is tenant-scoped via a node-tenant guard on its `in` endpoint
+        // (in.tenant_id); without it a foreign-tenant resource id could strip
+        // another tenant's parent edge.
+        //
+        // Attaching to a new parent opens with two claims:
+        //
+        // - CQ-B08 and item 8 of the 1.1.0 atomicity audit: the tenant's
+        //   hierarchy (`claim_hierarchy`), and the walk of the new parent's
+        //   ancestors that refuses a cycle, inside this transaction.
+        // - #308: the new parent itself (`claim_parent`) — re-parenting inserts
+        //   into the NEW parent's `child_of` range, the phantom the `create`
+        //   path had — which also refuses a parent that is gone or another
+        //   tenant's. Only the new one: detaching a child removes an edge, and
+        //   a delete racing that either sees the child and refuses or does not
+        //   and has nothing to orphan.
+        //
+        // Result slots become: BEGIN=0, DELETE child_of=1, then either
+        // [hierarchy claim=2..=8, LET $parent=9, IF/THROW=10, UPDATE=11,
+        // RELATE=12] when a new parent is claimed, or [UPDATE=2] when the
+        // child is being detached.
+        let parent_id_changed = input.parent_id.is_some();
+        if parent_id_changed {
+            let claim = match &input.parent_id {
+                Some(Some(_)) => format!("{} {}", claim_hierarchy(), claim_parent()),
+                _ => String::new(),
+            };
+            query = format!(
+                "BEGIN TRANSACTION; \
+                 DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
+                 {claim} {query}"
+            );
+
+            // If new parent is Some, create new child_of edge.
+            if let Some(Some(new_parent)) = &input.parent_id {
+                let new_parent_str = new_parent.to_string();
+                query = format!(
+                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`"
+                );
+            }
+
+            query = format!("{query}; COMMIT TRANSACTION");
+        }
+
+        let parent_id_str: Option<String> = input
+            .parent_id
+            .map(|opt| opt.map(|u| u.to_string()))
+            .unwrap_or(None);
+
+        let db = self.db.current();
+        let mut builder = db
+            .query(&query)
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", tenant_id_str));
+
+        if let Some(name) = input.name {
+            builder = builder.bind(("name", name));
+        }
+        if let Some(resource_type) = input.resource_type {
+            builder = builder.bind(("resource_type", resource_type));
+        }
+        if input.parent_id.is_some() {
+            builder = builder.bind(("parent_id", parent_id_str));
+        }
+        if let Some(metadata) = input.metadata {
+            builder = builder.bind(("metadata", metadata));
+        }
+
+        let mut result = builder.await.map_err(DbError::from)?;
+
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
+            return Err(match &input.parent_id {
+                Some(Some(new_parent)) => reparent_error(msgs, tenant_id, &new_parent.to_string()),
+                _ => TxFail::Db(classify_write_error(msgs.join("; "), "resource")),
+            });
+        }
+
+        // The UPDATE statement index depends on whether we wrapped the
+        // re-parent in a transaction, and on whether that re-parent claimed a
+        // new parent (see the slot map above).
+        let stmt_idx = match (parent_id_changed, &input.parent_id) {
+            (true, Some(Some(_))) => 2 + HIERARCHY_CLAIM_SLOTS + 2,
+            (true, _) => 2,
+            (false, _) => 0,
+        };
+        let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
+        let row = take_first_or_not_found(rows, "resource", &id_str)?;
+
+        Ok(row_to_resource(row, id)?)
     }
 
     /// Create a resource and stamp the UMA client that registered it (X2).
@@ -345,151 +584,19 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         id: Uuid,
         input: UpdateResource,
     ) -> AxiamResult<Resource> {
-        let id_str = id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
-        let mut sets = Vec::new();
-        if input.name.is_some() {
-            sets.push("name = $name");
+        // CQ-B08: self-parent is always a cycle, and needs no datastore to say
+        // so. Every other cycle is found by the walk inside the transaction.
+        if input.parent_id == Some(Some(id)) {
+            return Err(cycle_refusal());
         }
-        if input.resource_type.is_some() {
-            sets.push("resource_type = $resource_type");
-        }
-        if input.parent_id.is_some() {
-            sets.push("parent_id = $parent_id");
-        }
-        if input.metadata.is_some() {
-            sets.push("metadata = $metadata");
-        }
-        sets.push("updated_at = time::now()");
-
-        let mut query = format!(
-            "UPDATE type::record('resource', $id) SET {} \
-             WHERE tenant_id = $tenant_id",
-            sets.join(", ")
-        );
-
-        // If parent_id is being changed, update the child_of edge.
-        let parent_id_changed = input.parent_id.is_some();
-        if parent_id_changed {
-            // CQ-B08: cycle check — walk ancestors of the new parent;
-            // if we visit the current resource id, this re-parent would form a cycle.
-            if let Some(Some(new_parent)) = &input.parent_id {
-                // Self-parent is always a cycle.
-                if *new_parent == id {
-                    return Err(AxiamError::Validation {
-                        message: "cycle detected in resource hierarchy".into(),
-                    });
-                }
-                // Validate the new parent exists within the caller's tenant, so
-                // a re-parent cannot attach this resource under another tenant's
-                // node (get_by_id is tenant-scoped and returns NotFound
-                // otherwise).
-                self.get_by_id(tenant_id, *new_parent).await?;
-                // Walk the new parent's ancestors: if any equals `id`, it's a cycle.
-                let ancestors = self.get_ancestors(tenant_id, *new_parent).await?;
-                if ancestors.iter().any(|a| a.id == id) {
-                    return Err(AxiamError::Validation {
-                        message: "cycle detected in resource hierarchy".into(),
-                    });
-                }
-            }
-
-            // Re-parenting mutates two-to-three statements (DELETE the old
-            // child_of edge, UPDATE the record, optionally RELATE the new
-            // edge). Wrap them in one transaction so a failure after the
-            // DELETE (e.g. the RELATE hitting a UNIQUE violation) cannot leave
-            // the resource orphaned with no rollback — the same class the
-            // resource.delete transaction closed. The child_of edge carries no
-            // flat tenant_id column, so the DELETE is tenant-scoped via a
-            // node-tenant guard on its `in` endpoint (in.tenant_id); without
-            // it a foreign-tenant resource id could strip another tenant's
-            // parent edge.
-            //
-            // #308: re-parenting inserts into the NEW parent's `child_of`
-            // range, which is the same phantom the `create` path had, so the
-            // new parent is claimed here too. Only the new one: detaching a
-            // child removes an edge, and a delete racing that either sees the
-            // child and refuses or does not and has nothing to orphan.
-            //
-            // The `get_by_id` existence check above does NOT cover this — it is
-            // a read, outside the transaction, and a read cannot conflict with
-            // the delete. The claim is a write, and it throws if the parent
-            // went away, which is what makes losing the race an error rather
-            // than an orphan.
-            //
-            // Result slots become: BEGIN=0, DELETE child_of=1, then either
-            // [LET $parent=2, IF/THROW=3, UPDATE=4, RELATE=5] when a new parent
-            // is claimed, or [UPDATE=2] when the child is being detached.
-            let claim = match &input.parent_id {
-                Some(Some(_)) => claim_parent(),
-                _ => String::new(),
-            };
-            query = format!(
-                "BEGIN TRANSACTION; \
-                 DELETE child_of WHERE in = resource:`{id_str}` AND in.tenant_id = $tenant_id; \
-                 {claim} {query}"
-            );
-
-            // If new parent is Some, create new child_of edge.
-            if let Some(Some(new_parent)) = &input.parent_id {
-                let new_parent_str = new_parent.to_string();
-                query = format!(
-                    "{query}; RELATE resource:`{id_str}` -> child_of -> resource:`{new_parent_str}`"
-                );
-            }
-
-            query = format!("{query}; COMMIT TRANSACTION");
-        }
-
-        let parent_id_str: Option<String> = input
-            .parent_id
-            .map(|opt| opt.map(|u| u.to_string()))
-            .unwrap_or(None);
-
-        let db = self.db.current();
-        let mut builder = db
-            .query(&query)
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str));
-
-        if let Some(name) = input.name {
-            builder = builder.bind(("name", name));
-        }
-        if let Some(resource_type) = input.resource_type {
-            builder = builder.bind(("resource_type", resource_type));
-        }
-        if input.parent_id.is_some() {
-            builder = builder.bind(("parent_id", parent_id_str));
-        }
-        if let Some(metadata) = input.metadata {
-            builder = builder.bind(("metadata", metadata));
-        }
-
-        let mut result = builder.await.map_err(DbError::from)?;
-
-        let errors = result.take_errors();
-        if !errors.is_empty() {
-            let msgs: Vec<String> = errors.into_values().map(|e| e.to_string()).collect();
-            return Err(match &input.parent_id {
-                Some(Some(new_parent)) => parent_claim_error(msgs, &new_parent.to_string()),
-                _ => DbError::Migration(msgs.join("; ")).into(),
-            });
-        }
-
-        // The UPDATE statement index depends on whether we wrapped the
-        // re-parent in a transaction, and on whether that re-parent claimed a
-        // new parent: BEGIN=0, DELETE child_of=1, then [LET=2, IF=3, UPDATE=4]
-        // when attaching or [UPDATE=2] when detaching.
-        let stmt_idx = match (parent_id_changed, &input.parent_id) {
-            (true, Some(Some(_))) => 4,
-            (true, _) => 2,
-            (false, _) => 0,
-        };
-        let rows: Vec<ResourceRow> = result.take(stmt_idx).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "resource", &id_str)?;
-
-        row_to_resource(row, id).map_err(Into::into)
+        // A re-parent onto a new parent claims the tenant's hierarchy row
+        // (`claim_hierarchy`), so two overlapping ones conflict; the loser runs
+        // again on a fresh snapshot, where its walk sees the winner's edge. A
+        // conflicted transaction committed nothing, so the replay cannot
+        // double-apply.
+        retry_on_write_conflict(|| self.update_once(tenant_id, id, input.clone()))
+            .await
+            .map_err(AxiamError::from)
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {

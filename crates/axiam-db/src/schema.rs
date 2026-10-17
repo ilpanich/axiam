@@ -542,6 +542,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_mail_epoch",
         sql: SCHEMA_V104,
     },
+    Migration {
+        version: 105,
+        name: "tenant_hierarchy_epoch",
+        sql: SCHEMA_V105,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5066,6 +5071,28 @@ const SCHEMA_V104: &str = "\
 DEFINE FIELD IF NOT EXISTS mail_epoch ON TABLE user TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v105 — a re-parent's cycle check is one transaction
+// (the 1.1.0 atomicity audit, item 8)
+// -----------------------------------------------------------------------
+//
+// **`tenant.hierarchy_epoch`** — moves with every re-parent of a resource onto
+// a new parent. The cycle check walked the new parent's ancestors before the
+// write, in statements of its own, and the write claimed only the new parent,
+// so two re-parents that each closed half of a loop (X→Y and Z→W, with Z above
+// Y and X above W) both committed and made a cycle. The walk now runs inside
+// the re-parent's transaction, which writes this field on the tenant row
+// (`repository/resource.rs`, `claim_hierarchy`): the shared write is what makes
+// two overlapping re-parents in one tenant conflict, and the loser is retried
+// on a fresh snapshot, where its walk sees the winner's edge. Like
+// `tenant.client_quota_epoch` (v103) the value means nothing beyond "changed".
+//
+// Additive: one optional field, nothing backfilled (a tenant written before
+// the upgrade reads NONE, which the move treats as 0).
+const SCHEMA_V105: &str = "\
+DEFINE FIELD IF NOT EXISTS hierarchy_epoch ON TABLE tenant TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5333,6 +5360,23 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// Item 8 of the 1.1.0 atomicity audit — v105 is the tenant row's
+    /// hierarchy epoch, an optional field defined idempotently, and nothing
+    /// else.
+    #[test]
+    fn v105_adds_only_the_hierarchy_epoch() {
+        let statements: Vec<&str> = SCHEMA_V105
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS hierarchy_epoch ON TABLE tenant TYPE option<int>"],
+            "v105 defines the counter and nothing else"
+        );
     }
 
     /// Item 7 of the 1.1.0 atomicity audit — v104 is the user row's mail
@@ -6867,8 +6911,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&104),
-            "v104 is the newest migration (the 1.1.0 atomicity audit's item 7 — \
+            Some(&105),
+            "v105 is the newest migration (the 1.1.0 atomicity audit's item 8 — \
+             `tenant.hierarchy_epoch`, which every re-parent of a resource onto a new parent \
+             writes so that the cycle check and the move act as one transaction); v104 was the \
+             1.1.0 atomicity audit's item 7 — \
              `user.mail_epoch`, which every capped password-reset or verification mint writes \
              so that the daily cap and the mint act as one transaction); v103 was the 1.1.0 \
              atomicity audit's item 6 — `tenant.client_quota_epoch`, which every create of a \

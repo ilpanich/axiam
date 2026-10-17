@@ -51,7 +51,6 @@
 //! and nothing has to be rewritten.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
@@ -78,8 +77,8 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, paginate, parse_uuid, retry_on_write_conflict, search_bind,
-    search_filter, take_first_or_not_found,
+    CountRow, TxFail, classify_write_error, paginate, parse_uuid, retry_on_write_conflict,
+    search_bind, search_filter, take_first_or_not_found,
 };
 
 const SEGMENT_ENTITY: &str = "network_segment";
@@ -98,47 +97,6 @@ const SITE_GONE: &str = "axiam:network_site_gone";
 // ---------------------------------------------------------------------------
 // Errors out of a write transaction
 // ---------------------------------------------------------------------------
-
-/// What a write transaction came back with: an answer for the caller, or the
-/// datastore's own error (which may be a retryable write conflict).
-///
-/// `Display` renders the datastore's text for a database error, which is what
-/// [`retry_on_write_conflict`] reads to decide whether to run the attempt again.
-#[derive(Debug)]
-enum TxFail {
-    Refused(AxiamError),
-    Db(DbError),
-}
-
-impl fmt::Display for TxFail {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Refused(e) => write!(f, "{e}"),
-            Self::Db(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl From<TxFail> for AxiamError {
-    fn from(fail: TxFail) -> Self {
-        match fail {
-            TxFail::Refused(e) => e,
-            TxFail::Db(e) => e.into(),
-        }
-    }
-}
-
-impl From<DbError> for TxFail {
-    fn from(e: DbError) -> Self {
-        Self::Db(e)
-    }
-}
-
-impl From<surrealdb::Error> for TxFail {
-    fn from(e: surrealdb::Error) -> Self {
-        Self::Db(DbError::from(e))
-    }
-}
 
 fn conflict(reason: &str) -> TxFail {
     TxFail::Refused(AxiamError::Conflict {

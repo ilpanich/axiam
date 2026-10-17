@@ -306,10 +306,20 @@ jobs:
       #     ^0.13, so there is nothing to take. The parser only reads S3/Azure bucket
       #     responses; AXIAM talks to SurrealDB over HTTP and defines no buckets. Full note
       #     in deny.toml. Drop both when surrealdb moves off quick-xml <0.41.
+      #
+      #   RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369 — zip 8.6.0. It is only a
+      #     `[build-dependencies]` entry of utoipa-swagger-ui 10.0.1, the newest release, which
+      #     requires `zip = "8.6"`, so there is no upgrade path. Its build.rs never calls
+      #     `extract()` (0368, 0369): it uses its own `by_index` + `enclosed_name()` loop
+      #     restricted to `dist/` and creates no symlinks. It applies `set_permissions(unix_mode)`
+      #     (the 0367 pattern) only to the pinned swagger-ui release zip, at build time. Nothing
+      #     ships in the binary; the remaining exposure is the build host, and only if the
+      #     upstream zip were compromised. Full note in deny.toml. Tracking: ilpanich/axiam#719.
+      #     Drop all three when utoipa-swagger-ui moves to zip >=9.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched

@@ -56,6 +56,9 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # Cargo.lock through axiam-db's own dev-dependencies, as is `tempfile`.
 surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
 tempfile = "3"
+# A software P-256 authenticator for `webauthn_single_use_test` (signs the
+# assertions); already in Cargo.lock through rustls.
+ring = "0.17"
 tokio-test = { workspace = true }
 getrandom = "0.4.3"
 wiremock = "0.6.5"

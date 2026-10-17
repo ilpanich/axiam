@@ -2909,6 +2909,13 @@ pub enum ProofKind {
     /// CIBA Core §7.1.1 signed authentication request (G-7, D-61), scoped by
     /// `client_id` — the request object's `iss`, for RFC 7523's reason.
     CibaRequestObject,
+    /// A WebAuthn authentication ceremony's state token (item B of the 1.1.0
+    /// atomicity audit), recorded when an assertion against it verifies and
+    /// scoped by the ceremony (the token's `purpose`). The challenge travels in
+    /// a stateless token, so without this one captured (token, assertion) pair
+    /// signed in again for as long as the token lived, and two copies sent
+    /// together each opened a session.
+    WebauthnAssertion,
 }
 
 impl ProofKind {
@@ -2917,6 +2924,7 @@ impl ProofKind {
             Self::ClientAssertion => "client_assertion",
             Self::DpopProof => "dpop_proof",
             Self::CibaRequestObject => "ciba_request_object",
+            Self::WebauthnAssertion => "webauthn_assertion",
         }
     }
 }
@@ -5121,6 +5129,60 @@ pub trait WebauthnCredentialRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// Spend an authentication ceremony's state token (item B of the 1.1.0
+    /// atomicity audit): record its `jti` under `ceremony` (the token's
+    /// `purpose`) in the shared replay store, `oauth2_proof_replay`, kind
+    /// [`ProofKind::WebauthnAssertion`], until `expires_at` (the token's `exp`,
+    /// after which the sweep removes the row and the token is refused on its
+    /// own).
+    ///
+    /// `Ok(())` the first time, `Err(AxiamError::ReplayDetected)` on every
+    /// later attempt — decided by the UNIQUE index, not by a read, so of two
+    /// copies sent together exactly one passes.
+    ///
+    /// The default implementation refuses, so a test double that never
+    /// finishes a ceremony needs nothing new.
+    fn consume_assertion(
+        &self,
+        _tenant_id: Uuid,
+        _ceremony: &str,
+        _jti: &str,
+        _expires_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this credential repository does not record assertions".into(),
+            ))
+        }
+    }
+
+    /// Persist what a verified assertion reported — the authenticator's
+    /// signature counter, and `passkey_json` re-encrypted with the credential
+    /// updated from the result — and stamp `last_used_at`, **only if** the
+    /// counter moves forward (W3C WebAuthn §7.2 step 21): `counter` greater
+    /// than the stored one, or both zero (an authenticator that keeps no
+    /// counter). Compared inside the write, so two assertions carrying one
+    /// counter cannot both pass.
+    ///
+    /// `Ok(true)` when written; `Ok(false)` when the counter did not increase —
+    /// a signal that the credential's key may exist twice — and the caller
+    /// refuses the assertion.
+    ///
+    /// The default implementation refuses, as for [`Self::consume_assertion`].
+    fn advance_sign_count(
+        &self,
+        _tenant_id: Uuid,
+        _id: Uuid,
+        _counter: u32,
+        _passkey_json: String,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this credential repository does not record signature counters".into(),
+            ))
+        }
+    }
+
     /// Delete a WebAuthn credential.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
@@ -5636,6 +5698,7 @@ mod tests {
         // name.
         assert_eq!(ProofKind::ClientAssertion.as_str(), "client_assertion");
         assert_eq!(ProofKind::DpopProof.as_str(), "dpop_proof");
+        assert_eq!(ProofKind::WebauthnAssertion.as_str(), "webauthn_assertion");
         assert_ne!(
             ProofKind::ClientAssertion.as_str(),
             ProofKind::DpopProof.as_str()

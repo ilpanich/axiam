@@ -83,7 +83,7 @@
 //! rest of its life whatever the setting later becomes. The policy governs new
 //! enrolments.
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::mds::MdsEntry;
 use axiam_core::models::webauthn_credential::{
     CreateWebauthnCredential, WebauthnCredential, WebauthnCredentialType,
@@ -139,6 +139,12 @@ struct WebauthnStateClaims {
     purpose: String,
     /// AES-256-GCM encrypted, base64-encoded ceremony state JSON.
     state: String,
+    /// One per minted token (item B of the 1.1.0 atomicity audit). An
+    /// authentication ceremony's token is spent — this value recorded in the
+    /// replay store — when an assertion against it verifies, so a captured
+    /// (token, assertion) pair signs in once. Required: a token minted before
+    /// it existed is refused, and lived five minutes at most.
+    jti: String,
     iss: String,
     iat: i64,
     exp: i64,
@@ -468,19 +474,14 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .finish_discoverable_authentication(response, auth_state, &keys)
             .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
-        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
-        if let Some(cred) = credentials.iter().find(|c| c.credential_id == cred_id_b64)
-            && let Err(e) = self
-                .credential_repo
-                .update_last_used(tenant_id, cred.id)
-                .await
-        {
-            tracing::warn!(
-                credential_id = %cred.id,
-                error = %e,
-                "failed to update last_used_at for WebAuthn credential"
-            );
-        }
+        self.accept_assertion(
+            tenant_id,
+            state_token,
+            PURPOSE_AUTHENTICATE_DISCOVERABLE,
+            &credentials,
+            &auth_result,
+        )
+        .await?;
 
         Ok((claimed_user_id, org_id))
     }
@@ -508,26 +509,97 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .finish_passkey_authentication(response, &auth_state)
             .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
-        // Update last_used_at for the credential that was used.
-        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
         let credentials = self
             .credential_repo
             .list_by_user(tenant_id, user_id)
             .await?;
-        if let Some(cred) = credentials.iter().find(|c| c.credential_id == cred_id_b64)
-            && let Err(e) = self
-                .credential_repo
-                .update_last_used(tenant_id, cred.id)
-                .await
-        {
-            tracing::warn!(
-                credential_id = %cred.id,
-                error = %e,
-                "failed to update last_used_at for WebAuthn credential"
-            );
-        }
+        self.accept_assertion(
+            tenant_id,
+            state_token,
+            "webauthn_authenticate",
+            &credentials,
+            &auth_result,
+        )
+        .await?;
 
         Ok((user_id, org_id))
+    }
+
+    /// What every verified assertion must also do before it may sign anyone
+    /// in (item B of the 1.1.0 atomicity audit).
+    ///
+    /// 1. **Spend the state token.** The challenge travels in the stateless
+    ///    token, so nothing else makes it single-use: a captured (token,
+    ///    assertion) pair replayed within the token's lifetime verified again,
+    ///    and two copies sent together each opened a session. The token's
+    ///    `jti` goes into the replay store DPoP proofs use
+    ///    ([`WebauthnCredentialRepository::consume_assertion`]), and of any
+    ///    number of finishes with one token exactly one gets past this.
+    /// 2. **Advance the signature counter.** The credential is stored again
+    ///    with what the authenticator reported (`Passkey::update_credential`:
+    ///    the counter, the backup flags), only if the counter moved forward
+    ///    or the authenticator keeps none (W3C WebAuthn §7.2 step 21) —
+    ///    compared in the write, against the stored value
+    ///    ([`WebauthnCredentialRepository::advance_sign_count`]). `webauthn-rs`
+    ///    compares against the counter frozen into the ceremony state when it
+    ///    started; that comparison alone let two ceremonies started together
+    ///    accept one counter twice, and never saw a counter that was not
+    ///    stored at all.
+    ///
+    /// A replay answers as a stale state token, a counter that did not
+    /// increase as a rejected assertion; both `401`, as before.
+    async fn accept_assertion(
+        &self,
+        tenant_id: Uuid,
+        state_token: &str,
+        purpose: &str,
+        credentials: &[WebauthnCredential],
+        auth_result: &AuthenticationResult,
+    ) -> AxiamResult<()> {
+        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
+        // The credential the assertion verified against came from this list;
+        // one deleted since is no longer an authenticator of this account.
+        let credential = credentials
+            .iter()
+            .find(|c| c.credential_id == cred_id_b64)
+            .ok_or_else(|| AuthError::WebauthnAuthentication("assertion rejected".into()))?;
+
+        let (jti, expires_at) = self.state_token_replay_key(state_token, purpose)?;
+        self.credential_repo
+            .consume_assertion(tenant_id, purpose, &jti, expires_at)
+            .await
+            .map_err(|e| match e {
+                AxiamError::ReplayDetected => AxiamError::from(AuthError::WebauthnStateInvalid),
+                other => other,
+            })?;
+
+        let encryption_key = self.require_encryption_key()?;
+        let mut passkey = self.decrypt_passkey(&encryption_key, &credential.passkey_json)?;
+        passkey.update_credential(auth_result);
+        let passkey_json_plain = serde_json::to_string(&passkey)
+            .map_err(|e| AuthError::Crypto(format!("serialize passkey: {e}")))?;
+        let passkey_json_enc =
+            totp::encrypt_secret(&encryption_key, passkey_json_plain.as_bytes())?;
+
+        if !self
+            .credential_repo
+            .advance_sign_count(
+                tenant_id,
+                credential.id,
+                auth_result.counter(),
+                passkey_json_enc,
+            )
+            .await?
+        {
+            tracing::warn!(
+                credential_id = %credential.id,
+                counter = auth_result.counter(),
+                "WebAuthn assertion refused: the signature counter did not increase \
+                 (a cloned authenticator, or an assertion already accepted)"
+            );
+            return Err(AuthError::WebauthnAuthentication("assertion rejected".into()).into());
+        }
+        Ok(())
     }
 
     // ---- Private helpers ----
@@ -575,6 +647,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             org_id: org_id.to_string(),
             purpose: purpose.into(),
             state: encrypted_state,
+            jti: Uuid::new_v4().to_string(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
@@ -664,6 +737,34 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let state: T = serde_json::from_value(state_value)
             .map_err(|e| AuthError::Crypto(format!("state deserialize: {e}")))?;
         Ok((user_id, tenant_id, org_id, state))
+    }
+
+    /// The `(jti, exp)` of an authentication ceremony's state token, read
+    /// **after** verifying its signature, issuer, expiry and purpose — the key
+    /// [`Self::accept_assertion`] spends it under, and how long the replay row
+    /// must outlive it.
+    fn state_token_replay_key(
+        &self,
+        token: &str,
+        expected_purpose: &str,
+    ) -> Result<(String, chrono::DateTime<chrono::Utc>), AuthError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+
+        let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        if data.claims.purpose != expected_purpose || data.claims.jti.is_empty() {
+            return Err(AuthError::WebauthnStateInvalid);
+        }
+        let expires_at = chrono::DateTime::from_timestamp(data.claims.exp, 0)
+            .ok_or(AuthError::WebauthnStateInvalid)?;
+        Ok((data.claims.jti, expires_at))
     }
 
     /// Read a state token's `purpose` claim **after** verifying its
@@ -1657,6 +1758,7 @@ mod tests {
             org_id: o.to_string(),
             purpose: "webauthn_register".into(),
             state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+            jti: Uuid::new_v4().to_string(),
             iss: "axiam-test".into(),
             iat: past,
             exp: past + 300,
@@ -1708,6 +1810,7 @@ mod tests {
                 org_id: org.into(),
                 purpose: "webauthn_register".into(),
                 state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+                jti: Uuid::new_v4().to_string(),
                 iss: "axiam-test".into(),
                 iat: chrono::Utc::now().timestamp(),
                 exp: chrono::Utc::now().timestamp() + 300,

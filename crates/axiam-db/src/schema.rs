@@ -4988,8 +4988,27 @@ DEFINE FIELD IF NOT EXISTS holder_epoch ON TABLE role TYPE option<int>;
 // verified whatever address the account had moved to since. Optional and not
 // backfilled: a token minted before the upgrade carries none, and no longer
 // verifies anything (the CHANGELOG's upgrade notes say so; tokens live 24 h).
+//
+// **`oauth2_proof_replay.kind`** is re-defined to admit `webauthn_assertion`:
+// a WebAuthn authentication ceremony's state token is spent when an assertion
+// against it verifies, by recording its `jti` in the same table and under the
+// same UNIQUE `(tenant_id, kind, scope, jti)` index as a DPoP proof's — first
+// sighting by `CREATE`, replay by index violation, no read in the path, swept
+// by the same job. The re-definition only widens the ASSERT (v81's list plus
+// one value); every stored row satisfies it.
+//
+// **`webauthn_credential.sign_count`** — the authenticator's signature counter
+// as of the last accepted assertion (W3C WebAuthn §7.2 step 21). An assertion
+// is accepted only if its counter is greater, or both are zero, compared
+// inside the write that stores it (`repository/webauthn_credential.rs`,
+// `advance_sign_count`). Optional and not backfilled: a credential stored
+// before the upgrade reads as 0.
 const SCHEMA_V102: &str = "\
 DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token TYPE option<string>;
+DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
+    ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object',
+                      'webauthn_assertion'];
+DEFINE FIELD IF NOT EXISTS sign_count ON TABLE webauthn_credential TYPE option<int>;
 ";
 
 #[cfg(test)]
@@ -5227,22 +5246,38 @@ mod tests {
     }
 
     /// The atomicity audit's single-use items — v102 binds an email
-    /// verification token to its address, and nothing else.
+    /// verification token to its address, admits the WebAuthn assertion kind
+    /// to the replay store (widening, never narrowing, v81's list), and stores
+    /// a credential's signature counter; nothing else.
     #[test]
     fn v102_adds_only_the_single_use_bindings() {
-        let statements: Vec<&str> = SCHEMA_V102
+        let statements: Vec<String> = SCHEMA_V102
             .split(';')
-            .map(str::trim)
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|l| !l.is_empty())
             .collect();
         assert_eq!(
             statements,
             [
                 "DEFINE FIELD IF NOT EXISTS email ON TABLE email_verification_token \
-                 TYPE option<string>"
+                 TYPE option<string>",
+                "DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string \
+                 ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object', \
+                 'webauthn_assertion']",
+                "DEFINE FIELD IF NOT EXISTS sign_count ON TABLE webauthn_credential \
+                 TYPE option<int>",
             ],
             "v102 defines the bindings and nothing else"
         );
+        // Every kind a row may carry, the new one included.
+        for kind in [
+            axiam_core::repository::ProofKind::ClientAssertion,
+            axiam_core::repository::ProofKind::DpopProof,
+            axiam_core::repository::ProofKind::CibaRequestObject,
+            axiam_core::repository::ProofKind::WebauthnAssertion,
+        ] {
+            assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
+        }
     }
 
     /// #701 (R110W6-04) — v101 is the role row's two epochs, optional fields
@@ -6747,7 +6782,8 @@ mod tests {
             versions.last(),
             Some(&102),
             "v102 is the newest migration (the 1.1.0 atomicity audit's single-use items — \
-             `email_verification_token.email`, the address a verification token vouches for); \
+             `email_verification_token.email`, the address a verification token vouches for, \
+             the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`); \
              v101 was #701 (R110W6-04 — `role.grant_epoch` and \
              `role.holder_epoch`, which every role write the network gate decides moves and \
              compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \

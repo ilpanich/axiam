@@ -16,8 +16,7 @@ use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAu
 use axiam_core::models::gdpr::CreateExportJob;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
-    AccountDeletionRepository, AuditLogRepository, ExportJobRepository, TenantRepository,
-    UserRepository,
+    AuditLogRepository, ExportJobRepository, TenantRepository, UserRepository,
 };
 use axiam_db::SurrealAuditLogRepository;
 use axiam_db::repository::CancelOutcome;

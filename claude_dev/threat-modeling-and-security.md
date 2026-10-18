@@ -2249,6 +2249,10 @@ have to be re-established — nothing is assumed across a boundary.
 | Directory bind secret | AES-256-GCM at rest under an optional key; write-only, never returned or logged | The tenant's directory readable by whoever holds it |
 | SCIM target credentials | AES-256-GCM at rest; write-only, never returned or logged; sent only to the URL it was registered for | The tenant's downstream directory writable as AXIAM |
 | CIBA request identifiers | Stored as SHA-256 only; a ping request's identifier and notification token AES-256-GCM at rest; redeemable once, by the client that started the request | A user's approval turned into tokens by someone else |
+| SAML IdP signing key | RSA-4096, AES-256-GCM at rest under `pki_encryption_key`; one credential per tenant, rotated by a promote verb | Assertions for any user of the tenant, accepted by every service provider that pinned the certificate |
+| SSF push credentials | AES-256-GCM at rest under `pki_encryption_key`; never sent to another origin than the endpoint's | Forged event deliveries accepted by a receiver's push endpoint |
+| Network policy — segments, reply profiles, the `Session-Timeout` cap | A reserved resource subtree and permission namespace; every write through one gate that bounds it to what the writer may grant, conditional on the version read and audited with the values before and after | Devices re-placed onto other VLANs: a quarantine lifted, a fleet moved onto a privileged segment |
+| FreeRADIUS decision credential | A `Service` certificate whose key lives on the FreeRADIUS host, never in AXIAM; its token bound to that certificate and accepted only over mutual TLS that ends at AXIAM; `network:decide` granted per site | Placement answers for that server's sites, and audit volume up to its allowance, until the certificate is revoked |
 | Authorization graph | Private data tier, API-only mutation, audited | Silent privilege escalation |
 | Audit log | Append-only, OpenPGP-signed | Loss of accountability |
 
@@ -3186,6 +3190,71 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   property of the deployment). This is opt-in (`AXIAM__PKI__MDS_ENABLED=false` by
   default, zero outbound calls) and enforced only at registration — existing
   credentials are never auto-revoked on a policy change.
+
+### Network access (802.1X & RADIUS)
+
+AXIAM does not speak RADIUS. An operator-run FreeRADIUS terminates RADIUS and
+EAP-TLS against one tenant's signing CA (the recipe of `1.0.1`), and since
+`1.1.0` asks AXIAM, once per authentication, where a device belongs. What AXIAM
+runs for that is one decision route and a network management API; what
+FreeRADIUS runs is configuration this repository ships and tests end to end
+against the pinned upstream image.
+
+- **The decision answers one kind of caller.** `POST /api/v1/network/decide`
+  accepts only a service account's token bound to a certificate (RFC 8705
+  `cnf.x5t#S256`), presented over a mutual TLS connection that AXIAM's own
+  listener verified with that same certificate — a proxy that terminates TLS
+  cannot stand in. The certificate must still resolve to the same active account
+  on every request, so a revoked FreeRADIUS certificate stops at its next
+  request, not at its token's expiry. `network:decide` is checked on both nodes
+  of the site, and a credential for one site answers nothing about another (a
+  `403`, audited); the site key comes from FreeRADIUS's own client
+  configuration, never from the packet (T-468).
+- **A refusal is one answer.** Exactly `{"allow":false}`, whatever the cause —
+  unknown, revoked, expired, unbound or another tenant's certificate, an inactive
+  account, no candidate segment — after the same reads and one batch check. Three
+  timing residuals are stated, each visible only to the authenticated caller,
+  never to a device at a NAS (T-457). The certificate is resolved in the caller's
+  tenant only; on the recipe's side FreeRADIUS trusts one tenant's signing CA and
+  nothing above it (T-459).
+- **A reply is rendered from a closed dictionary.** A reply profile is a typed
+  record of `axiam-radius-reply/1` — eight attributes, no vendor attribute, no
+  free-form string, the administrative `Service-Type` values refused — and the
+  VLAN is the segment's, never a profile field. Every profile is re-validated
+  before it is rendered and clamped to the tenant's current `Session-Timeout`
+  cap; one that no longer validates makes its segment no candidate and is
+  audited. FreeRADIUS, in turn, never copies an attribute because AXIAM named it:
+  the shipped mapping sets each dictionary attribute by name, number and shape,
+  and refuses anything malformed (T-461, T-487).
+- **Placement is RBAC, and quarantine is a deny.** A device's service account
+  holds `network:join` on a segment of a reserved `/network` resource subtree;
+  quarantine is a deny of it on the access branch, which deny-override makes beat
+  every allow, so granting more cannot release a device and the device can never
+  release itself. No candidate is an Access-Reject, never a default VLAN.
+- **Network policy is bounded by what its writer may grant.** Every write — a
+  segment, a profile, the cap, and every role assignment, permission grant or
+  certificate binding that touches the `network:` namespace — passes one gate in
+  `axiam-authz`: you confer `network:join` only where you hold `network:grant`,
+  delegate only the meta permissions you hold, and never widen your own
+  placement. Network roles are never global and never assigned to a group, the
+  generic resource routes cannot reach the reserved subtree, and every write is
+  conditional on the version read and audited before and after (T-478 … T-480,
+  T-482, T-485). Three Low residuals of the gate are open and filed for `1.1.x`
+  (T-481, T-483, T-484).
+- **The audit trail carries no personal data from the network.** One append-only
+  row per decision, with the certificate's fingerprint, the site and the internal
+  reason — never its subject — and the request body is closed, so a MAC address
+  or a RADIUS `User-Name` cannot reach AXIAM. Volume is bounded by the caller's
+  own allowance, 6 000 decisions a minute by default (T-463, T-464).
+- **What the recipe's configuration carries.** `Message-Authenticator` required
+  on every client and globally, against Blast-RADIUS (T-449); EAP-TLS only and
+  TLS 1.3 only, with no TLS session cache (T-456); a missing or expired
+  revocation list refuses every device; nothing of FreeRADIUS vendored (T-454).
+  Three residuals are the operator's and are in the register below: the
+  EAP-TLS keys under MD5 obfuscation on plain UDP, for which RadSec is the answer
+  (T-450); a session already admitted lasts until `Session-Timeout`, with no CoA
+  (T-462); and in D4 AXIAM's availability is the network's, with its listener
+  exposed to the FreeRADIUS servers alone (T-486).
 
 ### Audit & accountability
 

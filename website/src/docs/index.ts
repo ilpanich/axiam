@@ -78,6 +78,7 @@ export const DOC_SECTIONS: DocSectionGroup[] = [
       "secrets",
       "settings",
       "pki",
+      "radius",
       "audit",
       "observability",
       "hardening",

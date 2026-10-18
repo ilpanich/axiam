@@ -1040,6 +1040,456 @@ export const OPERATE_PAGES: DocPage[] = [
             to: "docs",
             doc: "secrets",
           },
+          {
+            title: "802.1X & RADIUS",
+            body: "Admit devices to switch ports, Wi-Fi and VPN gateways with an AXIAM-issued certificate, FreeRADIUS terminating RADIUS and AXIAM deciding the VLAN.",
+            to: "docs",
+            doc: "radius",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "radius",
+    section: "Operate",
+    navLabel: "802.1X & RADIUS",
+    title: "802.1X & RADIUS network access",
+    intro:
+      "Admit devices to a switch port, an access point or a VPN gateway with a certificate AXIAM issued. FreeRADIUS terminates RADIUS and EAP-TLS; AXIAM is the certificate authority and, since 1.1.0, the place where the decision of which VLAN a device lands on is made.",
+    verifiedRelease: "1.1.0",
+    blocks: [
+      { type: "h", id: "scope", text: "What AXIAM does, and does not" },
+      {
+        type: "warn",
+        text: "**AXIAM does not speak RADIUS.** The G-11 spike declined a native RADIUS / RadSec listener (option A) and recorded the route documented here instead (option B): an operator-run **FreeRADIUS** in front, AXIAM's PKI behind it. The repository ships configuration files, a compose file that references the upstream FreeRADIUS image by digest, and an end-to-end test — nothing of FreeRADIUS itself, which is GPLv2.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["", ""],
+        rows: [
+          [
+            "Is",
+            "EAP-TLS only, TLS 1.3 only, for devices that hold a certificate the tenant's signing CA issued and that is bound to a service account. A device is admitted only if its certificate chains to that CA, is not revoked, **and** is placed — by a table on FreeRADIUS (D3) or by AXIAM's decision (D4).",
+          ],
+          [
+            "Is not",
+            "A password service. There is no PAP, CHAP, MS-CHAP or EAP-MD5 path, and AXIAM's Argon2id password store could not serve the last three anyway.",
+          ],
+          [
+            "Is not",
+            "Accounting, dynamic authorization (CoA, Disconnect-Request, RFC 5176) or a RADIUS proxy. Nothing in either profile can end a session a NAS has already admitted; `Session-Timeout` is the bound.",
+          ],
+          [
+            "Is not",
+            "A place a MAC address or a RADIUS `User-Name` reaches AXIAM. They stay in FreeRADIUS's own logs, which are personal data and yours to retain and erase.",
+          ],
+        ],
+      },
+      {
+        type: "code",
+        caption: "The shape",
+        code: " device ──EAP-TLS──▶ NAS (switch, AP, VPN) ──RADIUS / RadSec──▶ FreeRADIUS\n   │ leaf, issued by AXIAM\n   ▼\n organization CA ──signs──▶ tenant signing CA ──signs──▶ Device certificate\n\n FreeRADIUS  trusts  the tenant signing CA (ca_file), and only that\n             reads   its CRL, fetched from AXIAM by your job\n             D3      keeps the placement table\n             D4      asks POST /api/v1/network/decide, over mutual TLS",
+      },
+
+      { type: "h", id: "profiles", text: "Two profiles: D3 and D4" },
+      {
+        type: "p",
+        text: "The recipe has two profiles that share the PKI half and differ in who decides placement. **D3** (`1.0.1`) is self-contained on FreeRADIUS: a placement table you generate and a revocation list you fetch. **D4** (`1.1.0`) replaces the table with a call to AXIAM once per authentication, so VLAN policy, quarantine and revocation are AXIAM's — at the price of making AXIAM a service the network depends on.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["", "D3 — placement table", "D4 — decision per authentication"],
+        rows: [
+          [
+            "Who owns VLAN policy",
+            "Whoever writes the placement table on FreeRADIUS",
+            "AXIAM: network segments, reply profiles and `network:join` grants, with the audit trail",
+          ],
+          [
+            "A revoked certificate stops",
+            "When the revocation list reaches FreeRADIUS (the lag below), then at `Session-Timeout`",
+            "At the **next authentication**; a device already connected keeps its port until `Session-Timeout`",
+          ],
+          [
+            "A quarantine takes effect",
+            "When someone edits the table, then at `Session-Timeout`",
+            "At the next authentication; a connected device at `Session-Timeout`",
+          ],
+          [
+            "FreeRADIUS needs AXIAM",
+            "To fetch a file, now and then",
+            "**For every authentication** — AXIAM unreachable means every new device refused",
+          ],
+          [
+            "New on the AXIAM side",
+            "Nothing",
+            "One route, a service account for FreeRADIUS, a certificate for it",
+          ],
+        ],
+      },
+
+      { type: "h", id: "issue", text: "Issue and bind the devices" },
+      {
+        type: "p",
+        text: "Both profiles start here, and every step is the ordinary PKI flow described in [PKI & certificates](#/docs/pki). CA operations need an [organization-level principal](#/docs/organization-scope); the leaf calls are a tenant administrator's.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "A tenant signing CA for the devices FreeRADIUS serves",
+            body: "Beneath an organization CA. A signing CA may not outlive its parent, so give it a shorter validity.",
+            code: "curl -X POST https://axiam.example.com/api/v1/organizations/$ORG/tenants/$TENANT/signing-cas \\\n  -H \"Authorization: Bearer $ORG_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"parent_ca_id\":\"'$ROOT_CA'\",\"subject\":\"Plant A line 1 devices\",\"key_algorithm\":\"Ed25519\",\"validity_days\":364}'",
+          },
+          {
+            title: "A Device certificate, short-lived",
+            body: "`cert_type: Device` carries `clientAuth`, which an EAP-TLS peer certificate needs. A short `validity_days` is the one bound on a missed revocation that does not depend on a list being fresh. The private key is in this response and nowhere else.",
+            code: "curl -X POST https://axiam.example.com/api/v1/certificates \\\n  -H \"Authorization: Bearer $TENANT_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"issuer_ca_id\":\"'$SIGNING_CA'\",\"subject\":\"press-07\",\"cert_type\":\"Device\",\n       \"key_algorithm\":\"Ed25519\",\"validity_days\":30}'",
+          },
+          {
+            title: "Bind it to the service account that is the device",
+            body: "FreeRADIUS never reads the binding. AXIAM does: it is what the D3 table is generated from, what the D4 decision resolves the device to, and what lets a revocation end the device's AXIAM-side sign-in at once.",
+            code: "curl -X POST https://axiam.example.com/api/v1/service-accounts/$SA/bind-certificate \\\n  -H \"Authorization: Bearer $TENANT_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"certificate_id\":\"'$CERT'\"}'",
+          },
+          {
+            title: "Export the signing CA for FreeRADIUS's ca_file",
+            body: "The **tenant signing CA's** certificate, and only that — not the organization CA above it.",
+            code: "curl -s https://axiam.example.com/api/v1/organizations/$ORG/ca-certificates/$SIGNING_CA \\\n  -H \"Authorization: Bearer $TENANT_ADMIN_TOKEN\" | jq -r .public_cert_pem > ca.pem",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "Ed25519 keys issued since `1.1.0` come back as PKCS#8 version 1 (the RFC 8410 seed-only form), which OpenSSL 3.0 — and so `wpa_supplicant` and `eapol_test` on current distributions — reads as it is. A key issued before `1.1.0` is in the longer RFC 5958 form that library refuses: re-issue the certificate rather than converting the key. Check that your supplicants' TLS library supports Ed25519 at all, or use RSA-4096.",
+      },
+
+      { type: "h", id: "trust-anchor", text: "One tenant per trust anchor" },
+      {
+        type: "p",
+        text: "**The tenant boundary is the content of `ca_file`.** FreeRADIUS accepts a chain that ends at a CA it trusts directly, so trusting the tenant signing CA alone means a certificate from another tenant's signing CA — even one under the same organization root — leads to a CA this server does not hold and is refused. The end-to-end test issues two tenants' signing CAs under one root and checks exactly that, with the other tenant's device presenting its leaf, its leaf and signing CA, and its whole chain. A FreeRADIUS that serves two tenants needs two trust configurations (two servers, or two virtual servers on separate listeners), never two CAs in one file: with both in `ca_file`, a device of either tenant is admitted through any NAS the server answers.",
+      },
+      {
+        type: "warn",
+        text: "**A revoked signing CA is not noticed by FreeRADIUS.** With the signing CA as the anchor nothing above it is looked at, and the organization CA's list — the one that names it — is not loaded. When you revoke a signing CA, replace or remove `ca.pem` and **restart** FreeRADIUS. Replace the file atomically (write beside it, then `mv`): a reload that cannot read `ca.pem` logs `Error replacing X509 store` and **keeps the old store, which still trusts the CA you removed**. Alert on that line.",
+      },
+
+      { type: "h", id: "freeradius", text: "The FreeRADIUS settings that carry the security" },
+      {
+        type: "p",
+        text: "The recipe is a handful of files mounted over the image's own (`docker/radius/raddb/`). They are short on purpose; these are the settings that carry a security decision, and each is a line of FreeRADIUS configuration, not something AXIAM enforces for you.",
+      },
+      {
+        type: "list",
+        items: [
+          "**TLS 1.3 only** (`tls_min_version = \"1.3\"`, `tls_max_version = \"1.3\"`). A supplicant offering only TLS 1.2 is refused; many supplicants handle TLS 1.3 for EAP poorly, so try yours before rolling out, and treat lowering the floor as a deliberate downgrade for that fleet.",
+          "**EAP-TLS only.** No `md5`, `peap`, `ttls` or `mschapv2` block, and `ignore_unknown_eap_types = no`, so another method gets an EAP-Failure instead of a negotiation. The only virtual server that answers the network accepts an `Access-Request` carrying an `EAP-Message` and rejects every other kind.",
+          "**`check_crl = yes`.** A missing or expired list is a rejection of every device, not an admission of every device — fail closed, and the reason to monitor the fetch.",
+          "**No TLS session cache** (`cache { enable = no }`). A resumed session skips the certificate check, so a revoked device could otherwise be admitted again from a ticket.",
+          "**`require_message_authenticator = yes`** on every client **and** globally in `radiusd.conf` (the shipped default, `auto`, switches itself off for a client whose first packet lacks the attribute). This is the mitigation for Blast-RADIUS (CVE-2024-3596). The forgery is of the *response*, so **the NAS must do its half**: firmware with the CVE-2024-3596 fix that sends `Message-Authenticator` in every request and requires and verifies it in every Accept, Reject and Challenge. A NAS without such firmware is protected by nothing here — serve it over RadSec, or keep an on-path attacker off its segment.",
+          "**A shared secret per NAS**, at least 128 bits from a CSPRNG (`openssl rand -base64 24`), read from the environment, never from a committed file. List each NAS by its own address, not a subnet; a request from an address that is not a `client` is dropped unanswered.",
+        ],
+      },
+
+      { type: "h", id: "placement-table", text: "D3: the placement table" },
+      {
+        type: "p",
+        text: "In D3 a valid certificate is not enough: the device must also be in a placement table on FreeRADIUS, which is where its VLAN comes from. **An unplaced device is rejected**, not dropped onto the NAS's default VLAN. Generate the table from AXIAM's own list — the tenant's `Active` `Device` certificates whose `bound_service_account_id` is set (`GET /api/v1/certificates`) — after every issue, bind, unbind, revoke or re-issue, or on a timer; write it atomically and `HUP` FreeRADIUS. The generator script is in the guide.",
+      },
+      {
+        type: "warn",
+        text: "**Key the table on the certificate's serial, never its common name.** FreeRADIUS's `files` module reads an entry named `DEFAULT` as matching every key, and a certificate's subject is chosen by whoever requests it: one bound certificate named `DEFAULT` would place every certificate the signing CA ever issued, bound or not. A serial is hex AXIAM assigns from 20 random octets, cannot spell `DEFAULT` or `NONE`, and is unique per issuer (the database refuses a second certificate under one issuer's serial).",
+      },
+      {
+        type: "p",
+        text: "Each entry carries only the attributes AXIAM's reply dictionary would produce: the three VLAN attributes of RFC 3580 (`Tunnel-Type:0 = VLAN`, `Tunnel-Medium-Type:0 = IEEE-802`, `Tunnel-Private-Group-Id:0 = \"20\"`), `Session-Timeout`, and `Termination-Action = RADIUS-Request` so the NAS re-authenticates the device when the session ends rather than disconnecting it. Never `Tunnel-Password` or an `MS-MPPE-*` attribute: FreeRADIUS adds the EAP-TLS keys itself.",
+      },
+
+      { type: "h", id: "revocation", text: "Revocation: the list, and the lag" },
+      {
+        type: "p",
+        text: "AXIAM publishes each issuing CA's list at `GET /pki/v1/{org_id}/ca/{ca_id}/crl` — unauthenticated, signed by the CA, `nextUpdate` a day ahead by default (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`), and named in every certificate AXIAM signs as its CRL distribution point. FreeRADIUS reads lists from files, so a job has to bring it over. `docker/radius/fetch-crl.sh`, run every five minutes, installs a list only if the CA you trust signed it (checking OpenSSL's printed `verify OK`, not its exit status, which is `0` on a forged list), its CRL number is not lower than the installed one's, and the server said `200`; it installs atomically, holds a lock per URL, sends `If-None-Match`, and refuses a non-`https` URL unless told otherwise.",
+      },
+      {
+        type: "p",
+        text: "In D3 a revoked device keeps being admitted until AXIAM publishes the revocation (at once), your job fetches the list (the fetch interval — plus any shared cache's `max-age` on the path, up to half of `nextUpdate`, so fetch directly or through a cache told `no-cache`), FreeRADIUS reads it (`ca_path_reload_interval`, which FreeRADIUS raises to at least 300 seconds), and the device's current session ends (`Session-Timeout`). With the figures above and no cache, roughly an hour and ten minutes in the worst case. The levers are the three numbers, a shorter device `validity_days`, and D4.",
+      },
+      {
+        type: "warn",
+        text: "**Alert when the list file is older than half its lifetime.** A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. D4 keeps `check_crl = yes` as a second check, so the fetch job stays in D4 too unless you decide the decision is enough.",
+      },
+
+      { type: "h", id: "segments", text: "D4: network segments" },
+      {
+        type: "p",
+        text: "In D4 a tenant administrator describes the network in AXIAM. A **segment** is a node of a reserved `/network` subtree of the resource tree, with a VLAN, a placement rank and an envelope; because segments are resources, ordinary RBAC, the hierarchy cascade and [deny-override](#/docs/deny) apply to them unchanged. The tree has a fixed two-branch shape:",
+      },
+      {
+        type: "code",
+        code: "/network                        network_root      (one per tenant, created on first use)\n├── /network/zones              network_branch\n│   └── /network/zones/hq       network_site      site_key = \"hq\"\n│       ├── …/hq/corp           network_segment   kind=access, vlan 10, rank 10\n│       └── …/hq/iot            network_segment   kind=access, vlan 20, rank 20\n└── /network/quarantine         network_branch\n    └── /network/quarantine/hq  network_site      site_key = \"hq\"\n        └── …/hq/q              network_segment   kind=quarantine, vlan 999",
+      },
+      {
+        type: "list",
+        items: [
+          "**A site is a key, not a location.** VLAN 20 at headquarters is not VLAN 20 at a branch, so `vlan_id` (1–4094) and `rank` are unique per site. A single-site tenant uses the site key `default`. Site keys and segment names match `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`.",
+          "**`kind` is `access` or `quarantine`, fixed for the segment's life**, and decides the branch it lives under. There is no move: to move a segment, create the new one and delete the old.",
+          "**The envelope is `filter_ids`** — at most 32 `Filter-Id` names the segment's reply profile may choose from — written under a different permission from the profile itself, so the two duties can sit with two people.",
+          "**The generic resource routes refuse the reserved types.** A broad `resources:*` administrator cannot create a segment, move one out from under a deny, or delete the quarantine branch; the `network:` permission namespace is reserved too, so a tenant cannot mint a look-alike action.",
+        ],
+      },
+
+      { type: "h", id: "profiles-dictionary", text: "D4: reply profiles and the closed dictionary" },
+      {
+        type: "p",
+        text: "A segment has at most one **reply profile**: the attributes an Access-Accept carries for a device placed there. It is a **typed record, not an attribute list** — there is no field in which a writer names an attribute type — validated against a named, versioned dictionary, `axiam-radius-reply/1`. **The VLAN is not a profile field**: the three tunnel attributes are derived from the segment's `vlan_id`, so the only ways to put a device on VLAN 99 are to write the profile of the segment that owns VLAN 99, or to give a profiled segment VLAN 99, and both need `network:grant` on that segment.",
+      },
+      {
+        type: "table",
+        headers: ["Attribute", "#", "Source", "Allowed values"],
+        rows: [
+          ["Tunnel-Type", "64", "the segment", "`VLAN` (13), tag 0"],
+          ["Tunnel-Medium-Type", "65", "the segment", "`802` (6), tag 0"],
+          ["Tunnel-Private-Group-Id", "81", "the segment's `vlan_id`", "decimal `1`–`4094`, no sign or leading zero, no tag octet on the wire"],
+          ["Session-Timeout", "27", "`session_timeout_secs`", "300 up to the tenant cap; never 0"],
+          ["Termination-Action", "29", "`termination_action`", "`radius_request` (the default) or `default`"],
+          ["Idle-Timeout", "28", "`idle_timeout_secs`", "60 up to `session_timeout_secs`; optional"],
+          ["Filter-Id", "11", "`filter_id`", "one of the segment's `filter_ids`; optional"],
+          ["Service-Type", "6", "`service_type`", "`framed_user` or absent; optional"],
+        ],
+      },
+      {
+        type: "p",
+        text: "**Excluded on purpose:** every vendor-specific attribute (`Cisco-AVPair`, `Aruba-User-Role` and the like, whose meaning is the NAS's and unbounded), the administrative `Service-Type` values (they grant a login to the NAS itself and are refused with `400`), `Reply-Message`, `Class`, `Tunnel-Password`, the `MS-MPPE-*` keys and every protocol-owned attribute. A new attribute enters the dictionary only as a reviewed code change with its own type and bound; no API adds one. Request bodies are closed — an unknown member is a `400` naming it.",
+      },
+      {
+        type: "p",
+        text: "**The tenant cap.** `network.session_timeout_max_secs` (`GET`/`PUT /api/v1/network/policy`; default 3600, settable 300 to 86 400) bounds every profile's `Session-Timeout`, and with `Termination-Action = RADIUS-Request` it is the bound on how long a quarantine or a revocation waits for a connected device. Lowering it never rewrites a profile: every read, and every decision, returns the effective value `min(stored, cap)` with `session_timeout_clamped: true`. Raising it is allowed and audited. A stored profile that no longer validates — edited behind the API, say — makes its segment no candidate and is audited once per window; it is never rendered.",
+      },
+
+      { type: "h", id: "placement", text: "D4: how a device is placed, and quarantined" },
+      {
+        type: "p",
+        text: "A device's service account holds `network:join` on the segments it may be placed on. For each authentication AXIAM resolves the certificate to its bound, `Active` service account in the caller's tenant, then:",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Candidates",
+            body: "The site's enabled segments on which the account's `network:join` check is **allow** — one batch check, deny-override in force — and whose profile re-validates against its dictionary, its segment's envelope and the current cap.",
+          },
+          {
+            title: "The lowest-ranked access candidate wins",
+            body: "`rank` is unique per site, so the choice is deterministic and decided when the segments were written, not by query order.",
+          },
+          {
+            title: "Quarantine only when no access candidate remains",
+            body: "A `kind = quarantine` candidate is used only then; deny-override makes that the case for a quarantined device, so quarantine needs no precedence rule of its own.",
+          },
+          {
+            title: "No candidate is a refusal",
+            body: "There is no fallback segment: authenticated but unplaced is an Access-Reject, never a default VLAN.",
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "**Quarantine is a deny.** A role carrying `network:join` with `effect: \"deny\"`, assigned to the device at `/network/zones`, beats every allow below it — so an administrator who can grant joins somewhere in `zones` cannot release the device by granting more. A baseline allow of `network:join` at `/network/quarantine/<site>`, assigned at enrolment, decides whether a quarantined device lands on the quarantine VLAN or is refused. A deny at the `/network` root is the \"off the network\" switch. Release is the removal of the deny, which widens access and so needs `network:grant` at the node; the quarantined subject can never release itself.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Device's assignments", "On /network/zones/hq/iot", "On /network/quarantine/hq/q", "Placed on"],
+        rows: [
+          ["allow at `zones/hq/iot`; baseline", "allow", "allow", "`iot`"],
+          ["the above + deny at `/network/zones`", "deny", "allow", "`q` (quarantine)"],
+          ["the above + a new allow at `zones/hq/corp`", "deny (a child allow does not undo an inherited deny)", "allow", "`q` — adding allows cannot release a quarantine"],
+          ["deny at `/network/zones`, no baseline", "deny", "no grant", "refused"],
+          ["deny at `/network`", "deny", "deny", "refused"],
+        ],
+      },
+
+      { type: "h", id: "write-gate", text: "D4: who may change network policy" },
+      {
+        type: "p",
+        text: "Placement is conferred by a pair — the account's joins and its certificate binding — so a write to either edge, or to what a segment gives, is a grant. Every such write passes one server-side gate, evaluated at write time, uncached, with deny-override and the writer's own subject scope. The permissions live in the reserved `network:` namespace:",
+      },
+      {
+        type: "table",
+        headers: ["Permission", "Held by", "Meaning"],
+        rows: [
+          ["network:join", "each device's service account", "may be placed on this segment (cascades from site and branch)"],
+          ["network:read", "administrators", "read segments, profiles and the cap"],
+          ["network:segments_write", "network administrators", "the tree and each segment's envelope; the cap, at the `/network` root only"],
+          ["network:profiles_write", "network administrators", "create, replace or delete a segment's reply profile"],
+          ["network:grant", "network administrators", "confer `network:join` on a node: write a profile, move a profiled segment's placement, or assign or unassign a role carrying a `network:` grant"],
+          ["network:decide", "FreeRADIUS's service account", "ask for decisions for a site"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**A profile write needs `network:profiles_write` and `network:grant` on the segment**, every value inside its envelope and the cap, and for a quarantine segment `network:grant` on `/network/quarantine/<site>` as well. A profile delete asks the same, because no profile means no candidate and every device placed there moves.",
+          "**A segment replace that changes `vlan_id`, `rank` or `enabled` of a profiled segment, or a delete of one, also needs `network:grant`** — those are the fields that move every device placed there. A change of `filter_ids` alone needs `network:segments_write` only, and one that would strand the profile's `Filter-Id` is a `409` naming the profile.",
+          "**You delegate only what you hold.** Assigning a role carrying an allow or a deny of `network:join` at a node needs `network:grant` there; assigning a meta permission needs every one conferred; binding a certificate to an account that already holds joins needs `network:grant` at every such node.",
+          "**No subject widens its own placement (H6)**, whatever it holds: it cannot assign itself a join, release its own quarantine, or bind a certificate to itself.",
+          "**Network roles are never global, never assigned to a group** (group membership is written by SCIM and directory sync, and each would become a network grant), and a role carrying a `network:` deny is never assigned with `inherit: false`.",
+          "**Every write is conditional** on the `version` the caller read (a profile write also on the segment's `segment_version`); a stale one is `409` with `reason_code: stale_version`. Writes are metered per address by `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` (default 30), each write operation in its own bucket.",
+          "**Every write and every refusal leaves one audit row** with the values before and after; a refusal is a `403` naming the missing permission and node. A tenant can add a four-eyes rule through the reactor veto hooks `network.pre_segment_write` and `network.pre_profile_write`.",
+        ],
+      },
+      {
+        type: "note",
+        text: "The seeded `super-admin` role holds `network:read` and the meta permissions (never `network:join`), so a tenant can bootstrap its first network administrator; the seeded `admin` role holds none. The management API is for people: every one of its twelve operations answers a service-account token `401`. The admin console's **Network access** page (`network:read`) manages segments, profiles and the cap.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/network/segments", summary: "List the tenant's segments (`site`, `search`, paging)." },
+          { method: "POST", path: "/api/v1/network/segments", summary: "Create a segment: `kind`, `site_key`, `name`, `vlan_id`, `rank` (access only), `filter_ids`, `enabled`." },
+          { method: "GET", path: "/api/v1/network/segments/{id}", summary: "Read one segment." },
+          { method: "PUT", path: "/api/v1/network/segments/{id}", summary: "Replace its `vlan_id`, `filter_ids`, `rank` and `enabled`, conditional on `version`." },
+          { method: "DELETE", path: "/api/v1/network/segments/{id}?version=", summary: "Delete it, and its profile with it." },
+          { method: "GET", path: "/api/v1/network/profiles", summary: "List reply profiles, as the effective (clamped) values." },
+          { method: "POST", path: "/api/v1/network/profiles", summary: "Create a segment's profile: `segment_id`, `segment_version`, `profile`." },
+          { method: "GET", path: "/api/v1/network/profiles/{segment_id}", summary: "Read a segment's profile." },
+          { method: "PUT", path: "/api/v1/network/profiles/{segment_id}", summary: "Replace it, conditional on `version` and `segment_version`." },
+          { method: "DELETE", path: "/api/v1/network/profiles/{segment_id}?version=", summary: "Delete it; the segment stays and is no longer a candidate." },
+          { method: "GET", path: "/api/v1/network/policy", summary: "Read the tenant's `Session-Timeout` cap." },
+          { method: "PUT", path: "/api/v1/network/policy", summary: "Replace the cap (300–86 400 s), conditional on `version`." },
+          { method: "POST", path: "/api/v1/network/decide", summary: "The placement decision FreeRADIUS asks for — mTLS and a certificate-bound service-account token only; not SDK surface." },
+        ],
+      },
+      {
+        type: "codegroup",
+        caption: "A site with one access VLAN and a quarantine VLAN",
+        tabs: [
+          {
+            label: "curl",
+            code: "# The access segment, and its profile.\ncurl -X POST https://axiam.example.com/api/v1/network/segments \\\n  -H \"Authorization: Bearer $NETWORK_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"kind\":\"access\",\"site_key\":\"hq\",\"name\":\"iot\",\"vlan_id\":20,\"rank\":20,\"filter_ids\":[\"iot-acl\"]}'\n\ncurl -X POST https://axiam.example.com/api/v1/network/profiles \\\n  -H \"Authorization: Bearer $NETWORK_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"segment_id\":\"'$IOT'\",\"segment_version\":1,\n       \"profile\":{\"session_timeout_secs\":900,\"idle_timeout_secs\":600,\"filter_id\":\"iot-acl\",\"service_type\":\"framed_user\"}}'\n\n# The quarantine segment, and its profile.\ncurl -X POST https://axiam.example.com/api/v1/network/segments \\\n  -H \"Authorization: Bearer $NETWORK_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"kind\":\"quarantine\",\"site_key\":\"hq\",\"name\":\"q\",\"vlan_id\":999}'\n\ncurl -X POST https://axiam.example.com/api/v1/network/profiles \\\n  -H \"Authorization: Bearer $NETWORK_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"segment_id\":\"'$Q'\",\"segment_version\":1,\"profile\":{\"session_timeout_secs\":300}}'",
+          },
+        ],
+      },
+
+      { type: "h", id: "decide", text: "D4: the decision route" },
+      {
+        type: "p",
+        text: "For every EAP-TLS authentication FreeRADIUS's `rlm_rest` posts `POST /api/v1/network/decide` and copies the answer into the Access-Accept. What AXIAM needs from the caller is deliberately narrow:",
+      },
+      {
+        type: "list",
+        items: [
+          "**The caller is FreeRADIUS's own service account** — one per FreeRADIUS server — holding a `Service` certificate from the same signing CA, bound to it. It logs in with `POST /api/v1/auth/device` over mutual TLS, with no secret, and gets a 15-minute access token bound to that certificate (RFC 8705 `cnf.x5t#S256`); the recipe caches it for half its lifetime. A plain bearer token, a person's token or an OAuth2 client's is `401` before the body is read, and a revoked FreeRADIUS certificate stops at its next request.",
+          "**Mutual TLS must end at AXIAM's own listener.** The organization CA is flagged as an mTLS trust anchor and the listener asks for client certificates. A proxy, ingress or sidecar that terminates TLS and forwards the client certificate in a header cannot stand in: the token AXIAM issues behind it is not bound, and the route refuses every unbound token, so every device would be refused. A layer-4 pass-through is fine.",
+          "**`network:decide` on both nodes of each site** the server serves, `/network/zones/<site>` and `/network/quarantine/<site>`. A credential for one site answers nothing about another: the route is a `403`, audited.",
+          "**The site key comes from FreeRADIUS's own client configuration** (each `client`'s `shortname`), never from the RADIUS packet, so a NAS cannot ask about another site.",
+          "**The body is closed**: `{\"site\": …, \"fingerprint\": …}` (the SHA-256 of the certificate EAP-TLS verified) or `{\"site\": …, \"certificate\": …}` (its DER, base64). There is no place for a `Calling-Station-Id` or a `User-Name`.",
+        ],
+      },
+      {
+        type: "code",
+        caption: "The two answers. Everything else — 401, 403, 429, 5xx, a timeout — is a refusal too.",
+        code: "{\"allow\":false}\n\n{\"allow\":true,\"reply\":{\"dictionary\":\"axiam-radius-reply/1\",\"attributes\":[\n  {\"name\":\"Tunnel-Type\",\"number\":64,\"value\":13,\"tag\":0},\n  {\"name\":\"Tunnel-Medium-Type\",\"number\":65,\"value\":6,\"tag\":0},\n  {\"name\":\"Tunnel-Private-Group-Id\",\"number\":81,\"value\":\"20\"},\n  {\"name\":\"Session-Timeout\",\"number\":27,\"value\":900},\n  {\"name\":\"Termination-Action\",\"number\":29,\"value\":1},\n  {\"name\":\"Idle-Timeout\",\"number\":28,\"value\":600},\n  {\"name\":\"Filter-Id\",\"number\":11,\"value\":\"iot-acl\"},\n  {\"name\":\"Service-Type\",\"number\":6,\"value\":2}]}}",
+      },
+      {
+        type: "list",
+        items: [
+          "**A refusal carries no reason**, whatever it was — an unknown, revoked, expired, unbound or other tenant's certificate, an inactive account, no candidate segment. The reason is in the audit row (`network_decision.allowed` / `.denied`, one per decision, with the fingerprint, the site and the internal reason — never the certificate's subject).",
+          "**FreeRADIUS never copies an attribute because AXIAM named it.** The shipped `check-eap-tls` looks for each dictionary attribute by name, number and shape and sets it itself; anything else in the body (`Reply-Message`, `Class`, `Tunnel-Password`, a vendor attribute) is never read, and a missing or malformed one is a refusal. The end-to-end test sends eighteen malformed answers and checks that each is refused.",
+          "**There is no fallback placement and no cached decision.** AXIAM unreachable or slower than the 4-second timeout is a refusal. FreeRADIUS starts without AXIAM and refuses every device until it is back.",
+          "**Limits.** The route is metered per authenticated caller, `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` (6 000 a minute by default — a hundred authentications a second, a site's power-restore storm), with a backstop of ten times that per address for tokens that do not authenticate. Over it is a `429`, which the recipe turns into a refusal and the NAS retries. A FreeRADIUS server per site, each with its own account, keeps one site's storm out of another's bucket.",
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Expose AXIAM's native listener to the FreeRADIUS servers only.** AXIAM has one listener and it serves every route. Reached without an appending proxy in front, nothing appends to `X-Forwarded-For`, so every per-address limiter — `/auth/login`'s, `/auth/device`'s, `/oauth2/token`'s — keys on whatever a caller writes there. Let a firewall or network policy admit only the FreeRADIUS servers to it, and keep the HTTP ingress, with its appending proxy, for every other client. A setting that names the proxies whose header is honoured is planned for `1.1.x` ([#711](https://github.com/ilpanich/axiam/issues/711)).",
+      },
+
+      { type: "h", id: "radsec", text: "RadSec, where the NAS allows" },
+      {
+        type: "p",
+        text: "On RADIUS over UDP the EAP-TLS session keys (`MS-MPPE-Send-Key` and `Recv-Key`, which hold the Wi-Fi key) travel obfuscated with MD5 and the shared secret: anyone who captures the traffic and learns or guesses the secret recovers them. Where the NAS supports RADIUS over TLS (RadSec, RFC 6614), use it, with TLS 1.3 and client certificates required. Three cautions: the end-to-end test does not exercise it (`eapol_test` speaks UDP only), so the guide's block is a starting point; the CA that verifies NAS certificates must **not** be the device signing CA, or every device certificate would be accepted as a NAS; and `secret = radsec` is fixed by the RFC and protects nothing — TLS is the only protection there.",
+      },
+
+      { type: "h", id: "yours", text: "What stays yours" },
+      {
+        type: "list",
+        items: [
+          "Per NAS: firmware with the Blast-RADIUS fix, a strong per-NAS secret, RadSec where it is offered.",
+          "FreeRADIUS's own certificate for D4: issue it short-lived, renew and restart before it ends, revoke it in AXIAM if the host is compromised. Its key is a file readable by the `freerad` user alone, and the helper's `/var/run/axiam-d4` must be a `tmpfs`.",
+          "AXIAM's availability, in D4: run it as the service the network depends on.",
+          "The fetch job and its age alert, and atomic changes to `ca.pem` followed by a restart.",
+          "Sessions: `Session-Timeout` is the only bound on a session already admitted. Configure CoA on FreeRADIUS and the NAS if you need one ended rather than waited out.",
+          "FreeRADIUS's logs (`-X` prints every body, fingerprints included): treat them as personal data. Run production with `freeradius -f -l stdout`.",
+          "Moving the pinned FreeRADIUS image digest is a decision: re-run both end-to-end tests.",
+        ],
+      },
+
+      { type: "h", id: "tested", text: "What the end-to-end tests prove" },
+      {
+        type: "p",
+        text: "`crates/axiam-server/tests/radius_e2e.rs` (CI job `radius-e2e.yml`) drives AXIAM's real routes and the pinned FreeRADIUS image with `eapol_test`. The D3 test admits a bound device with the expected VLAN octets on the wire; refuses another tenant's and another organization's device however much of its chain it presents; shows a revoked device still admitted while FreeRADIUS holds the old list, then refused once the new one is read; refuses forged and older lists through `fetch-crl.sh` itself; refuses an unbound device although the table holds a certificate named `DEFAULT`; and refuses TLS 1.2, EAP-MD5 and a request without `Message-Authenticator`. The D4 test places a device from its segment's profile, caches the token, refuses an unbound certificate, refuses a revoked device at the next authentication while FreeRADIUS still holds the old list, moves a quarantined device from VLAN 20 to VLAN 999, refuses a wrong site key with a `403` and AXIAM unreachable, and copies no attribute outside the dictionary. Not covered: RadSec, supplicants other than `eapol_test`, a NAS that proxies or retransmits, more than one site, and performance.",
+      },
+
+      { type: "h", id: "threats", text: "In the threat model" },
+      {
+        type: "p",
+        text: "The [tenth diagram of the threat model](#/security/diagram/9) is this surface: 31 threats, of which the native listener's are recorded *not applicable* because it is not built. For the recipe, `Message-Authenticator` ([T-449](#/security/diagram/9/T-449)), EAP-TLS and TLS 1.3 only (T-456), one tenant's signing CA as the only anchor ([T-459](#/security/diagram/9/T-459)) and nothing of FreeRADIUS vendored (T-454) are mitigated. The decision route and the network write gate are mitigated with their tests (T-457, T-461, T-463, T-464, [T-468](#/security/diagram/9/T-468), [T-478](#/security/diagram/9/T-478) … T-480, T-482, T-485, T-487). Open, and in the Security section's open risk register: the MD5-obfuscated keys on plain UDP ([T-450](#/security/diagram/9/T-450)), a connected session lasting until `Session-Timeout` ([T-462](#/security/diagram/9/T-462)), AXIAM's availability being the network's ([T-486](#/security/diagram/9/T-486)), and three Low residuals of the write gate (T-481, T-483, T-484).",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "802.1X with an AXIAM-issued Device certificate — the normative guide",
+            href: `${GH_BLOB}/docs/pki/freeradius.md`,
+            note: "Every file of both profiles, the placement-table generator, the CRL fetch script's checks, the D4 `rlm_rest` mapping and its helper, RadSec, and the test matrices.",
+          },
+          {
+            label: "docker/radius/",
+            href: `${GH_BLOB}/docker/radius/README.md`,
+            note: "The FreeRADIUS configuration, `fetch-crl.sh`, and how to run the end-to-end tests locally.",
+          },
+          {
+            label: "SDK contract §36 — the network namespace",
+            href: `${GH_BLOB}/sdks/CONTRACT.md#§36-network-segments-reply-profiles-and-the-radius-decision-contract-162`,
+            note: "The twelve management operations every SDK implements, their shapes, conflict codes and errors, and why the decision route is not SDK surface.",
+          },
+          {
+            label: "Reply-profile design note",
+            href: `${GH_BLOB}/claude_dev/radius-reply-profile-design.md`,
+            note: "Why the dictionary is closed, the write gate's rules H1 … H6, quarantine by deny-override, and the residuals.",
+          },
+          {
+            label: "RADIUS / EAP-TLS spike — decision record",
+            href: `${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md`,
+            note: "Why AXIAM has no native RADIUS front end, and the condition under which that would be reopened.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "PKI & certificates",
+            body: "Signing CAs, Device and Service certificates, binding, the mTLS trust anchors and the revocation lists this recipe consumes.",
+            to: "docs",
+            doc: "pki",
+          },
+          {
+            title: "Deny rules",
+            body: "The deny-override rule a quarantine rests on, with its precedence table.",
+            to: "docs",
+            doc: "deny",
+          },
+          {
+            title: "Reactors",
+            body: "The veto hooks that put a four-eyes rule on segment and profile writes.",
+            to: "docs",
+            doc: "reactors",
+          },
         ],
       },
     ],

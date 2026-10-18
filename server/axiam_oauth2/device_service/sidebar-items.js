@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEVICE_CODE_GRANT_TYPE"],"struct":["DeviceAuthorizationRequest","DeviceAuthorizationResponse","DeviceAuthorizationService"]};
+window.SIDEBAR_ITEMS = {"constant":["DEVICE_CODE_GRANT_SPELLINGS","DEVICE_CODE_GRANT_TYPE"],"fn":["holds_device_grant"],"struct":["DeviceAuthorizationRequest","DeviceAuthorizationResponse","DeviceAuthorizationService","DeviceClient"]};

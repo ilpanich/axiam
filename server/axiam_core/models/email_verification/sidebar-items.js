@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CreateEmailVerificationToken","EmailVerificationToken"]};
+window.SIDEBAR_ITEMS = {"enum":["EmailVerificationRedemption"],"struct":["CreateEmailVerificationToken","EmailVerificationToken"]};

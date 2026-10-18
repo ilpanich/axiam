@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["SecretProviderKind"],"struct":["EnvSecretProvider","FileSecretProvider","VaultConfig","VaultSecretProvider"]};
+window.SIDEBAR_ITEMS = {"enum":["SecretProviderKind"],"fn":["bootstrap_client"],"struct":["EnvSecretProvider","FileSecretProvider","VaultConfig","VaultSecretProvider"]};

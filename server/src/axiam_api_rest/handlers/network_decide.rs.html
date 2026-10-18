@@ -1,0 +1,827 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/handlers/network_decide.rs`."><title>network_decide.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/handlers/</div>network_decide.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! `POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS D4,
+<a href=#2 id=2 data-nosnippet>2</a>//! W6.4; `claude_dev/radius-reply-profile-design.md` §4.3, §6.3, §7, §8; threat
+<a href=#3 id=3 data-nosnippet>3</a>//! T-468).
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! FreeRADIUS's `rlm_rest`, in `post-auth` after EAP-TLS succeeded, posts the
+<a href=#6 id=6 data-nosnippet>6</a>//! presented certificate (or its fingerprint) and the **site key from its own
+<a href=#7 id=7 data-nosnippet>7</a>//! client configuration**; AXIAM answers `{ "allow": false }` with **no
+<a href=#8 id=8 data-nosnippet>8</a>//! reason**, or `{ "allow": true, "reply": … }` with the attributes of the
+<a href=#9 id=9 data-nosnippet>9</a>//! segment the device is placed on, rendered from its typed reply profile.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! # The caller (T-468)
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! An authenticated oracle on "is this certificate good here", so its caller is
+<a href=#14 id=14 data-nosnippet>14</a>//! held to more than an ordinary machine route's:
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! * a **service account** (`aud = axiam:m2m`, `sub_kind = service_account`);
+<a href=#17 id=17 data-nosnippet>17</a>//!   a user's token, an OAuth2 client's and a user token narrowed to the machine
+<a href=#18 id=18 data-nosnippet>18</a>//!   audience are `401`;
+<a href=#19 id=19 data-nosnippet>19</a>//! * its token **bound to its own certificate**: `cnf.x5t#S256` present (a
+<a href=#20 id=20 data-nosnippet>20</a>//!   plain bearer token, or one bound only by DPoP, is `401`), presented over a
+<a href=#21 id=21 data-nosnippet>21</a>//!   connection whose TLS-verified client certificate is that one (the
+<a href=#22 id=22 data-nosnippet>22</a>//!   extractor's sender-constraint check), and that certificate resolves —
+<a href=#23 id=23 data-nosnippet>23</a>//!   through [`DeviceAuthService::authenticate_der`](axiam_pki::DeviceAuthService::authenticate_der),
+<a href=#24 id=24 data-nosnippet>24</a>//!   now, so a revoked caller certificate stops at the next request — to **this**
+<a href=#25 id=25 data-nosnippet>25</a>//!   service account in this tenant, which is `Active`;
+<a href=#26 id=26 data-nosnippet>26</a>//! * holding `network:decide` on every site node the decision reads (§4.2: "a
+<a href=#27 id=27 data-nosnippet>27</a>//!   site"), so a FreeRADIUS credential for HQ answers nothing about a branch
+<a href=#28 id=28 data-nosnippet>28</a>//!   office: `403`, audited;
+<a href=#29 id=29 data-nosnippet>29</a>//! * metered per **caller** (`network_decide_per_min`, D-6), not per address.
+<a href=#30 id=30 data-nosnippet>30</a>//!
+<a href=#31 id=31 data-nosnippet>31</a>//! The `network` permission family stays human-only
+<a href=#32 id=32 data-nosnippet>32</a>//! ([`HUMAN_ONLY_FAMILIES`](crate::permissions::HUMAN_ONLY_FAMILIES)); this one
+<a href=#33 id=33 data-nosnippet>33</a>//! route is the named exception,
+<a href=#34 id=34 data-nosnippet>34</a>//! [`CERTIFICATE_BOUND_MACHINE_ROUTES`](crate::permissions::CERTIFICATE_BOUND_MACHINE_ROUTES).
+<a href=#35 id=35 data-nosnippet>35</a>//!
+<a href=#36 id=36 data-nosnippet>36</a>//! # The decision (§4.3), at one cost (T-457)
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! Every request that gets past the caller's checks runs the same steps, in the
+<a href=#39 id=39 data-nosnippet>39</a>//! same order, whatever the certificate turns out to be:
+<a href=#40 id=40 data-nosnippet>40</a>//!
+<a href=#41 id=41 data-nosnippet>41</a>//! 1. the certificate row by fingerprint (global), then `authenticate_der`;
+<a href=#42 id=42 data-nosnippet>42</a>//!    **another tenant's certificate is refused** (§7), with the reject every
+<a href=#43 id=43 data-nosnippet>43</a>//!    other failure gets;
+<a href=#44 id=44 data-nosnippet>44</a>//! 2. the subject's account (the device's service account, or — when no
+<a href=#45 id=45 data-nosnippet>45</a>//!    certificate of this tenant resolved — the caller's own, as a decoy of the
+<a href=#46 id=46 data-nosnippet>46</a>//!    same shape) — `Active` or no placement;
+<a href=#47 id=47 data-nosnippet>47</a>//! 3. the site's segments, their stored profiles and the tenant's cap, each one
+<a href=#48 id=48 data-nosnippet>48</a>//!    query; every profile is re-validated and rendered (§3.4), and a profile
+<a href=#49 id=49 data-nosnippet>49</a>//!    that no longer validates makes its segment no candidate and is audited once
+<a href=#50 id=50 data-nosnippet>50</a>//!    per window;
+<a href=#51 id=51 data-nosnippet>51</a>//! 4. **one** `check_access_batch` of `network:join` over every enabled segment of
+<a href=#52 id=52 data-nosnippet>52</a>//!    the site, for the subject (the decoy included), through the decision cache,
+<a href=#53 id=53 data-nosnippet>53</a>//!    deny-override in force — which is what makes quarantine by deny work (§4.4);
+<a href=#54 id=54 data-nosnippet>54</a>//! 5. the lowest-ranked `access` candidate, else a `quarantine` one, else none;
+<a href=#55 id=55 data-nosnippet>55</a>//! 6. one audit row (T-463, §8), and the answer.
+<a href=#56 id=56 data-nosnippet>56</a>//!
+<a href=#57 id=57 data-nosnippet>57</a>//! "No candidate", "another tenant's certificate", "an inactive account" and a
+<a href=#58 id=58 data-nosnippet>58</a>//! placement therefore cost the same reads and the same batch; only the answer
+<a href=#59 id=59 data-nosnippet>59</a>//! differs. What `authenticate_der` itself does differs by its own early
+<a href=#60 id=60 data-nosnippet>60</a>//! refusals (an unknown or revoked certificate stops before the chain is
+<a href=#61 id=61 data-nosnippet>61</a>//! verified) — a residual recorded for the threat model, not hidden.
+<a href=#62 id=62 data-nosnippet>62</a>//!
+<a href=#63 id=63 data-nosnippet>63</a>//! # What is never on the wire, and never in the row
+<a href=#64 id=64 data-nosnippet>64</a>//!
+<a href=#65 id=65 data-nosnippet>65</a>//! The deny carries no reason. The audit row carries the internal reason, the
+<a href=#66 id=66 data-nosnippet>66</a>//! site, the certificate's SHA-256 fingerprint, and — for a certificate of this
+<a href=#67 id=67 data-nosnippet>67</a>//! tenant — its id and the service account it is bound to; **never** the
+<a href=#68 id=68 data-nosnippet>68</a>//! certificate's subject or alternative names, and the request accepts no
+<a href=#69 id=69 data-nosnippet>69</a>//! `Calling-Station-Id` or `User-Name` (an unknown key is a `400`), so none can
+<a href=#70 id=70 data-nosnippet>70</a>//! reach the trail (§8, T-464). A certificate of another tenant is recorded by
+<a href=#71 id=71 data-nosnippet>71</a>//! its fingerprint alone: the caller's tenant learns nothing about the other's.
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a></span><span class="kw">use </span>std::collections::BTreeSet;
+<a href=#74 id=74 data-nosnippet>74</a>
+<a href=#75 id=75 data-nosnippet>75</a><span class="kw">use </span>actix_web::error::JsonPayloadError;
+<a href=#76 id=76 data-nosnippet>76</a><span class="kw">use </span>actix_web::{FromRequest, HttpRequest, HttpResponse, web};
+<a href=#77 id=77 data-nosnippet>77</a><span class="kw">use </span>axiam_auth::token::SubjectKind;
+<a href=#78 id=78 data-nosnippet>78</a><span class="kw">use </span>axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
+<a href=#79 id=79 data-nosnippet>79</a><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#80 id=80 data-nosnippet>80</a><span class="kw">use </span>axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+<a href=#81 id=81 data-nosnippet>81</a><span class="kw">use </span>axiam_core::models::certificate::{Certificate, CertificateStatus};
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">use </span>axiam_core::models::network::{
+<a href=#83 id=83 data-nosnippet>83</a>    NETWORK_DECIDE, NETWORK_JOIN, NetworkSegment, NetworkSegmentKind, ProfileDefect,
+<a href=#84 id=84 data-nosnippet>84</a>    select_placement, site_node_id,
+<a href=#85 id=85 data-nosnippet>85</a>};
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">use </span>axiam_core::models::radius_reply::{RenderedReply, is_valid_identifier};
+<a href=#87 id=87 data-nosnippet>87</a><span class="kw">use </span>axiam_core::models::user::UserStatus;
+<a href=#88 id=88 data-nosnippet>88</a><span class="kw">use </span>axiam_core::repository::{
+<a href=#89 id=89 data-nosnippet>89</a>    AuditLogRepository, CertificateRepository, NetworkPolicyRepository, NetworkSegmentRepository,
+<a href=#90 id=90 data-nosnippet>90</a>    ReplyProfileRepository, ServiceAccountRepository,
+<a href=#91 id=91 data-nosnippet>91</a>};
+<a href=#92 id=92 data-nosnippet>92</a><span class="kw">use </span>axiam_db::repository::{
+<a href=#93 id=93 data-nosnippet>93</a>    SurrealNetworkPolicyRepository, SurrealNetworkSegmentRepository, SurrealReplyProfileRepository,
+<a href=#94 id=94 data-nosnippet>94</a>};
+<a href=#95 id=95 data-nosnippet>95</a><span class="kw">use </span>base64::Engine <span class="kw">as _</span>;
+<a href=#96 id=96 data-nosnippet>96</a><span class="kw">use </span>chrono::Utc;
+<a href=#97 id=97 data-nosnippet>97</a><span class="kw">use </span>serde::{Deserialize, Serialize};
+<a href=#98 id=98 data-nosnippet>98</a><span class="kw">use </span>serde_json::{Value, json};
+<a href=#99 id=99 data-nosnippet>99</a><span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#100 id=100 data-nosnippet>100</a><span class="kw">use </span>surrealdb::Connection;
+<a href=#101 id=101 data-nosnippet>101</a><span class="kw">use </span>utoipa::ToSchema;
+<a href=#102 id=102 data-nosnippet>102</a><span class="kw">use </span>uuid::Uuid;
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a><span class="kw">use </span><span class="kw">crate</span>::authz::AuthzData;
+<a href=#105 id=105 data-nosnippet>105</a><span class="kw">use </span><span class="kw">crate</span>::error::AxiamApiError;
+<a href=#106 id=106 data-nosnippet>106</a><span class="kw">use </span><span class="kw">crate</span>::extractors::auth::AuthenticatedServiceAccount;
+<a href=#107 id=107 data-nosnippet>107</a><span class="kw">use </span><span class="kw">crate</span>::extractors::cert_auth::VerifiedClientCert;
+<a href=#108 id=108 data-nosnippet>108</a><span class="kw">use </span><span class="kw">crate</span>::extractors::client_info::client_ip;
+<a href=#109 id=109 data-nosnippet>109</a><span class="kw">use </span><span class="kw">crate</span>::state::AppState;
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="doccomment">/// Audit action: a decision placed a device.
+<a href=#112 id=112 data-nosnippet>112</a></span><span class="kw">pub const </span>AUDIT_DECISION_ALLOWED: <span class="kw-2">&amp;</span>str = <span class="string">"network_decision.allowed"</span>;
+<a href=#113 id=113 data-nosnippet>113</a><span class="doccomment">/// Audit action: a decision refused a device (no placement).
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="kw">pub const </span>AUDIT_DECISION_DENIED: <span class="kw-2">&amp;</span>str = <span class="string">"network_decision.denied"</span>;
+<a href=#115 id=115 data-nosnippet>115</a><span class="doccomment">/// Audit action: a caller without `network:decide` on the site asked.
+<a href=#116 id=116 data-nosnippet>116</a></span><span class="kw">pub const </span>AUDIT_DECISION_REFUSED: <span class="kw-2">&amp;</span>str = <span class="string">"network_decision.refused"</span>;
+<a href=#117 id=117 data-nosnippet>117</a><span class="doccomment">/// Audit action: a stored reply profile no longer validates (design note §3.4,
+<a href=#118 id=118 data-nosnippet>118</a>/// §5.4); one row per profile per window.
+<a href=#119 id=119 data-nosnippet>119</a></span><span class="kw">pub const </span>AUDIT_PROFILE_INVALID: <span class="kw-2">&amp;</span>str = <span class="string">"reply_profile.invalid"</span>;
+<a href=#120 id=120 data-nosnippet>120</a><span class="doccomment">/// The shared-counter bucket name of the route (D-6).
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub const </span>BUCKET: <span class="kw-2">&amp;</span>str = <span class="string">"network_decide"</span>;
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a><span class="doccomment">/// The body limit: a DER certificate in base64 is a few kilobytes.
+<a href=#124 id=124 data-nosnippet>124</a></span><span class="kw">const </span>BODY_LIMIT: usize = <span class="number">32_768</span>;
+<a href=#125 id=125 data-nosnippet>125</a>
+<a href=#126 id=126 data-nosnippet>126</a><span class="doccomment">/// The 401 a token that is not bound to its own certificate gets.
+<a href=#127 id=127 data-nosnippet>127</a></span><span class="kw">pub const </span>CERTIFICATE_BOUND_REFUSAL: <span class="kw-2">&amp;</span>str = <span class="string">"the network decision route requires a service \
+<a href=#128 id=128 data-nosnippet>128</a>    account token bound to the caller's own certificate (cnf x5t#S256), presented over mTLS \
+<a href=#129 id=129 data-nosnippet>129</a>    with that certificate"</span>;
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#132 id=132 data-nosnippet>132</a>// Shapes
+<a href=#133 id=133 data-nosnippet>133</a>// ---------------------------------------------------------------------------
+<a href=#134 id=134 data-nosnippet>134</a>
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="doccomment">/// The body of `POST /api/v1/network/decide`. Closed: an unknown key — a MAC
+<a href=#136 id=136 data-nosnippet>136</a>/// address, a user name — is a `400` naming it, so nothing the design note's
+<a href=#137 id=137 data-nosnippet>137</a>/// §8 keeps out of the audit trail can be posted into it.
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="attr">#[derive(Debug, Deserialize, ToSchema)]
+<a href=#139 id=139 data-nosnippet>139</a>#[serde(deny_unknown_fields)]
+<a href=#140 id=140 data-nosnippet>140</a></span><span class="kw">pub struct </span>NetworkDecisionRequest {
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// The site key, from FreeRADIUS's own client configuration
+<a href=#142 id=142 data-nosnippet>142</a>    /// (`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`). Never taken from the packet.
+<a href=#143 id=143 data-nosnippet>143</a>    </span><span class="kw">pub </span>site: String,
+<a href=#144 id=144 data-nosnippet>144</a>    <span class="doccomment">/// The certificate the device presented in EAP-TLS, DER, standard base64.
+<a href=#145 id=145 data-nosnippet>145</a>    /// Exactly one of `certificate` and `fingerprint`.
+<a href=#146 id=146 data-nosnippet>146</a>    </span><span class="attr">#[serde(default)]
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="kw">pub </span>certificate: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#148 id=148 data-nosnippet>148</a>    <span class="doccomment">/// The SHA-256 of that certificate's DER, 64 hexadecimal digits. Exactly
+<a href=#149 id=149 data-nosnippet>149</a>    /// one of `certificate` and `fingerprint`.
+<a href=#150 id=150 data-nosnippet>150</a>    </span><span class="attr">#[serde(default)]
+<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">pub </span>fingerprint: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#152 id=152 data-nosnippet>152</a>}
+<a href=#153 id=153 data-nosnippet>153</a>
+<a href=#154 id=154 data-nosnippet>154</a><span class="doccomment">/// The decision: `{ "allow": false }` with **no reason**, or
+<a href=#155 id=155 data-nosnippet>155</a>/// `{ "allow": true, "reply": … }`.
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="attr">#[derive(Debug, Serialize, ToSchema)]
+<a href=#157 id=157 data-nosnippet>157</a></span><span class="kw">pub struct </span>NetworkDecisionResponse {
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="doccomment">/// Whether the device is placed. `false` carries nothing else, whatever
+<a href=#159 id=159 data-nosnippet>159</a>    /// the reason (T-457, T-468).
+<a href=#160 id=160 data-nosnippet>160</a>    </span><span class="kw">pub </span>allow: bool,
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="doccomment">/// The Access-Accept attributes of the segment the device is placed on:
+<a href=#162 id=162 data-nosnippet>162</a>    /// its tunnel triple (RFC 3580 §3.31) and its reply profile's fields, with
+<a href=#163 id=163 data-nosnippet>163</a>    /// `Session-Timeout` clamped to the tenant's cap. Only on an allow.
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#165 id=165 data-nosnippet>165</a>    </span><span class="kw">pub </span>reply: <span class="prelude-ty">Option</span>&lt;RenderedReply&gt;,
+<a href=#166 id=166 data-nosnippet>166</a>}
+<a href=#167 id=167 data-nosnippet>167</a>
+<a href=#168 id=168 data-nosnippet>168</a><span class="doccomment">/// The JSON extractor of the route: a body limit and a `400` that names the
+<a href=#169 id=169 data-nosnippet>169</a>/// offending key.
+<a href=#170 id=170 data-nosnippet>170</a></span><span class="kw">pub fn </span>json_config() -&gt; web::JsonConfig {
+<a href=#171 id=171 data-nosnippet>171</a>    web::JsonConfig::default().limit(BODY_LIMIT).error_handler(
+<a href=#172 id=172 data-nosnippet>172</a>        |err: JsonPayloadError, _req: <span class="kw-2">&amp;</span>HttpRequest| {
+<a href=#173 id=173 data-nosnippet>173</a>            <span class="kw">let </span>message = <span class="kw">match </span>err {
+<a href=#174 id=174 data-nosnippet>174</a>                JsonPayloadError::Deserialize(inner) =&gt; {
+<a href=#175 id=175 data-nosnippet>175</a>                    <span class="macro">format!</span>(<span class="string">"the request body is not a valid decision request: {inner}"</span>)
+<a href=#176 id=176 data-nosnippet>176</a>                }
+<a href=#177 id=177 data-nosnippet>177</a>                JsonPayloadError::ContentType =&gt; {
+<a href=#178 id=178 data-nosnippet>178</a>                    <span class="string">"the request body must be application/json"</span>.to_string()
+<a href=#179 id=179 data-nosnippet>179</a>                }
+<a href=#180 id=180 data-nosnippet>180</a>                JsonPayloadError::Overflow { .. }
+<a href=#181 id=181 data-nosnippet>181</a>                | JsonPayloadError::OverflowKnownLength { .. } =&gt; {
+<a href=#182 id=182 data-nosnippet>182</a>                    <span class="string">"the request body is too large"</span>.to_string()
+<a href=#183 id=183 data-nosnippet>183</a>                }
+<a href=#184 id=184 data-nosnippet>184</a>                <span class="kw">_ </span>=&gt; <span class="string">"the request body could not be read"</span>.to_string(),
+<a href=#185 id=185 data-nosnippet>185</a>            };
+<a href=#186 id=186 data-nosnippet>186</a>            AxiamApiError(AxiamError::Validation { message }).into()
+<a href=#187 id=187 data-nosnippet>187</a>        },
+<a href=#188 id=188 data-nosnippet>188</a>    )
+<a href=#189 id=189 data-nosnippet>189</a>}
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a><span class="doccomment">/// How the request named the certificate.
+<a href=#192 id=192 data-nosnippet>192</a></span><span class="kw">enum </span>Presented {
+<a href=#193 id=193 data-nosnippet>193</a>    Certificate(Vec&lt;u8&gt;),
+<a href=#194 id=194 data-nosnippet>194</a>    Fingerprint,
+<a href=#195 id=195 data-nosnippet>195</a>}
+<a href=#196 id=196 data-nosnippet>196</a>
+<a href=#197 id=197 data-nosnippet>197</a><span class="kw">impl </span>Presented {
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="kw">fn </span>as_str(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#200 id=200 data-nosnippet>200</a>            <span class="self">Self</span>::Certificate(<span class="kw">_</span>) =&gt; <span class="string">"certificate"</span>,
+<a href=#201 id=201 data-nosnippet>201</a>            <span class="self">Self</span>::Fingerprint =&gt; <span class="string">"fingerprint"</span>,
+<a href=#202 id=202 data-nosnippet>202</a>        }
+<a href=#203 id=203 data-nosnippet>203</a>    }
+<a href=#204 id=204 data-nosnippet>204</a>}
+<a href=#205 id=205 data-nosnippet>205</a>
+<a href=#206 id=206 data-nosnippet>206</a><span class="kw">fn </span>invalid(message: <span class="kw-2">&amp;</span>str) -&gt; AxiamApiError {
+<a href=#207 id=207 data-nosnippet>207</a>    AxiamApiError(AxiamError::Validation {
+<a href=#208 id=208 data-nosnippet>208</a>        message: message.to_owned(),
+<a href=#209 id=209 data-nosnippet>209</a>    })
+<a href=#210 id=210 data-nosnippet>210</a>}
+<a href=#211 id=211 data-nosnippet>211</a>
+<a href=#212 id=212 data-nosnippet>212</a><span class="doccomment">/// The body's site key, the presented certificate, and its fingerprint.
+<a href=#213 id=213 data-nosnippet>213</a></span><span class="kw">fn </span>parse_body(body: NetworkDecisionRequest) -&gt; <span class="prelude-ty">Result</span>&lt;(String, Presented, String), AxiamApiError&gt; {
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="kw">if </span>!is_valid_identifier(<span class="kw-2">&amp;</span>body.site) {
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(invalid(<span class="string">"site is not a valid site key"</span>));
+<a href=#216 id=216 data-nosnippet>216</a>    }
+<a href=#217 id=217 data-nosnippet>217</a>    <span class="kw">match </span>(body.certificate, body.fingerprint) {
+<a href=#218 id=218 data-nosnippet>218</a>        (<span class="prelude-val">Some</span>(b64), <span class="prelude-val">None</span>) =&gt; {
+<a href=#219 id=219 data-nosnippet>219</a>            <span class="kw">let </span>der = base64::engine::general_purpose::STANDARD
+<a href=#220 id=220 data-nosnippet>220</a>                .decode(b64.trim())
+<a href=#221 id=221 data-nosnippet>221</a>                .map_err(|<span class="kw">_</span>| invalid(<span class="string">"certificate is not standard base64"</span>))<span class="question-mark">?</span>;
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="kw">if </span>der.is_empty() {
+<a href=#223 id=223 data-nosnippet>223</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(invalid(<span class="string">"certificate is empty"</span>));
+<a href=#224 id=224 data-nosnippet>224</a>            }
+<a href=#225 id=225 data-nosnippet>225</a>            <span class="kw">let </span>fingerprint = hex::encode(Sha256::digest(<span class="kw-2">&amp;</span>der));
+<a href=#226 id=226 data-nosnippet>226</a>            <span class="prelude-val">Ok</span>((body.site, Presented::Certificate(der), fingerprint))
+<a href=#227 id=227 data-nosnippet>227</a>        }
+<a href=#228 id=228 data-nosnippet>228</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(fp)) =&gt; {
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="kw">let </span>fp = fp.trim().to_ascii_lowercase();
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="kw">if </span>fp.len() != <span class="number">64 </span>|| !fp.bytes().all(|b| b.is_ascii_hexdigit()) {
+<a href=#231 id=231 data-nosnippet>231</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(invalid(
+<a href=#232 id=232 data-nosnippet>232</a>                    <span class="string">"fingerprint must be the SHA-256 of the certificate's DER, 64 hex digits"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>                ));
+<a href=#234 id=234 data-nosnippet>234</a>            }
+<a href=#235 id=235 data-nosnippet>235</a>            <span class="prelude-val">Ok</span>((body.site, Presented::Fingerprint, fp))
+<a href=#236 id=236 data-nosnippet>236</a>        }
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(invalid(
+<a href=#238 id=238 data-nosnippet>238</a>            <span class="string">"exactly one of certificate and fingerprint is required"</span>,
+<a href=#239 id=239 data-nosnippet>239</a>        )),
+<a href=#240 id=240 data-nosnippet>240</a>    }
+<a href=#241 id=241 data-nosnippet>241</a>}
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#244 id=244 data-nosnippet>244</a>// The caller
+<a href=#245 id=245 data-nosnippet>245</a>// ---------------------------------------------------------------------------
+<a href=#246 id=246 data-nosnippet>246</a>
+<a href=#247 id=247 data-nosnippet>247</a></span><span class="kw">fn </span>unauthenticated(reason: <span class="kw-2">&amp;</span>str) -&gt; AxiamApiError {
+<a href=#248 id=248 data-nosnippet>248</a>    AxiamApiError(AxiamError::AuthenticationFailed {
+<a href=#249 id=249 data-nosnippet>249</a>        reason: reason.to_owned(),
+<a href=#250 id=250 data-nosnippet>250</a>    })
+<a href=#251 id=251 data-nosnippet>251</a>}
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a><span class="doccomment">/// A service-account caller whose token is bound to a certificate this
+<a href=#254 id=254 data-nosnippet>254</a>/// connection presented — the synchronous half of T-468's caller binding, run as
+<a href=#255 id=255 data-nosnippet>255</a>/// an extractor so that it answers before the body is read: a plain bearer
+<a href=#256 id=256 data-nosnippet>256</a>/// token is `401` whatever it posts.
+<a href=#257 id=257 data-nosnippet>257</a>///
+<a href=#258 id=258 data-nosnippet>258</a>/// The asynchronous half — that the certificate is still the caller's own and
+<a href=#259 id=259 data-nosnippet>259</a>/// valid, and the account active — is [`certificate_bound_caller`], the
+<a href=#260 id=260 data-nosnippet>260</a>/// handler's first step.
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">pub struct </span>CertificateBoundServiceAccount {
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// The authenticated machine token.
+<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">pub </span>account: AuthenticatedServiceAccount,
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// The service account's id (the token's `sub`).
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">pub </span>subject: Uuid,
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="doccomment">/// The TLS-verified certificate the token is bound to, DER.
+<a href=#267 id=267 data-nosnippet>267</a>    </span><span class="kw">pub </span>der: Vec&lt;u8&gt;,
+<a href=#268 id=268 data-nosnippet>268</a>}
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a><span class="kw">impl </span>FromRequest <span class="kw">for </span>CertificateBoundServiceAccount {
+<a href=#271 id=271 data-nosnippet>271</a>    <span class="kw">type </span>Error = AxiamApiError;
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">type </span>Future = std::pin::Pin&lt;Box&lt;<span class="kw">dyn </span>std::future::Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, <span class="self">Self</span>::Error&gt;&gt;&gt;&gt;;
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">fn </span>from_request(req: <span class="kw-2">&amp;</span>HttpRequest, payload: <span class="kw-2">&amp;mut </span>actix_web::dev::Payload) -&gt; <span class="self">Self</span>::Future {
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>account = AuthenticatedServiceAccount::from_request(req, payload);
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>req = req.clone();
+<a href=#277 id=277 data-nosnippet>277</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#278 id=278 data-nosnippet>278</a>            <span class="kw">let </span>account = account.<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#279 id=279 data-nosnippet>279</a>            <span class="kw">let </span>claims = <span class="kw-2">&amp;</span>account.claims.<span class="number">0</span>;
+<a href=#280 id=280 data-nosnippet>280</a>            <span class="kw">if </span>claims.sub_kind != SubjectKind::ServiceAccount {
+<a href=#281 id=281 data-nosnippet>281</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(
+<a href=#282 id=282 data-nosnippet>282</a>                    <span class="string">"the network decision route is a service account's; this machine token \
+<a href=#283 id=283 data-nosnippet>283</a>                     is not one"</span>,
+<a href=#284 id=284 data-nosnippet>284</a>                ));
+<a href=#285 id=285 data-nosnippet>285</a>            }
+<a href=#286 id=286 data-nosnippet>286</a>            <span class="kw">let </span>subject = Uuid::parse_str(<span class="kw-2">&amp;</span>account.subject)
+<a href=#287 id=287 data-nosnippet>287</a>                .map_err(|<span class="kw">_</span>| unauthenticated(<span class="string">"invalid sub claim"</span>))<span class="question-mark">?</span>;
+<a href=#288 id=288 data-nosnippet>288</a>            <span class="comment">// A bearer token, or one bound only by DPoP, is not what T-468
+<a href=#289 id=289 data-nosnippet>289</a>            // asks for: the binding must be to the caller's own certificate.
+<a href=#290 id=290 data-nosnippet>290</a>            </span><span class="kw">let </span><span class="prelude-val">Some</span>(bound_to) = claims
+<a href=#291 id=291 data-nosnippet>291</a>                .cnf
+<a href=#292 id=292 data-nosnippet>292</a>                .as_ref()
+<a href=#293 id=293 data-nosnippet>293</a>                .and_then(|cnf| cnf.certificate_thumbprint())
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="kw">else </span>{
+<a href=#295 id=295 data-nosnippet>295</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+<a href=#296 id=296 data-nosnippet>296</a>            };
+<a href=#297 id=297 data-nosnippet>297</a>            <span class="comment">// The extractor has already refused a bound token whose certificate
+<a href=#298 id=298 data-nosnippet>298</a>            // is not on this connection (`enforce_sender_constraint`); this
+<a href=#299 id=299 data-nosnippet>299</a>            // restates it here, where the rest of the rule needs the
+<a href=#300 id=300 data-nosnippet>300</a>            // certificate itself.
+<a href=#301 id=301 data-nosnippet>301</a>            </span><span class="kw">let </span><span class="prelude-val">Some</span>(verified) = req.conn_data::&lt;VerifiedClientCert&gt;() <span class="kw">else </span>{
+<a href=#302 id=302 data-nosnippet>302</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+<a href=#303 id=303 data-nosnippet>303</a>            };
+<a href=#304 id=304 data-nosnippet>304</a>            verified
+<a href=#305 id=305 data-nosnippet>305</a>                .check_usable_for_device_auth()
+<a href=#306 id=306 data-nosnippet>306</a>                .map_err(AxiamApiError::from)<span class="question-mark">?</span>;
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="kw">if </span>axiam_oauth2::mtls::thumbprint_s256(<span class="kw-2">&amp;</span>verified.der) != bound_to {
+<a href=#308 id=308 data-nosnippet>308</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+<a href=#309 id=309 data-nosnippet>309</a>            }
+<a href=#310 id=310 data-nosnippet>310</a>            <span class="kw">let </span>der = verified.der.clone();
+<a href=#311 id=311 data-nosnippet>311</a>            <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#312 id=312 data-nosnippet>312</a>                account,
+<a href=#313 id=313 data-nosnippet>313</a>                subject,
+<a href=#314 id=314 data-nosnippet>314</a>                der,
+<a href=#315 id=315 data-nosnippet>315</a>            })
+<a href=#316 id=316 data-nosnippet>316</a>        })
+<a href=#317 id=317 data-nosnippet>317</a>    }
+<a href=#318 id=318 data-nosnippet>318</a>}
+<a href=#319 id=319 data-nosnippet>319</a>
+<a href=#320 id=320 data-nosnippet>320</a><span class="doccomment">/// The asynchronous half of the caller binding: the certificate the token is
+<a href=#321 id=321 data-nosnippet>321</a>/// bound to is the caller's own **now** — revoked, expired, rebound to another
+<a href=#322 id=322 data-nosnippet>322</a>/// account or another tenant's, it stops here at the next request rather than
+<a href=#323 id=323 data-nosnippet>323</a>/// when the token expires — and the account is `Active`.
+<a href=#324 id=324 data-nosnippet>324</a></span><span class="kw">async fn </span>certificate_bound_caller&lt;C: Connection + Clone&gt;(
+<a href=#325 id=325 data-nosnippet>325</a>    caller: <span class="kw-2">&amp;</span>CertificateBoundServiceAccount,
+<a href=#326 id=326 data-nosnippet>326</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#327 id=327 data-nosnippet>327</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Uuid, AxiamApiError&gt; {
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="kw">let </span>tenant_id = caller.account.tenant_id;
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="kw">let </span>identity = state
+<a href=#330 id=330 data-nosnippet>330</a>        .pki
+<a href=#331 id=331 data-nosnippet>331</a>        .device_auth_service
+<a href=#332 id=332 data-nosnippet>332</a>        .authenticate_der(<span class="kw-2">&amp;</span>caller.der)
+<a href=#333 id=333 data-nosnippet>333</a>        .<span class="kw">await
+<a href=#334 id=334 data-nosnippet>334</a>        </span>.map_err(|<span class="kw">_</span>| unauthenticated(CERTIFICATE_BOUND_REFUSAL))<span class="question-mark">?</span>;
+<a href=#335 id=335 data-nosnippet>335</a>    <span class="kw">if </span>identity.service_account_id != caller.subject || identity.tenant_id != tenant_id {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+<a href=#337 id=337 data-nosnippet>337</a>    }
+<a href=#338 id=338 data-nosnippet>338</a>    <span class="kw">let </span>account = state
+<a href=#339 id=339 data-nosnippet>339</a>        .service_account_repo
+<a href=#340 id=340 data-nosnippet>340</a>        .get_by_id(tenant_id, caller.subject)
+<a href=#341 id=341 data-nosnippet>341</a>        .<span class="kw">await
+<a href=#342 id=342 data-nosnippet>342</a>        </span>.map_err(|<span class="kw">_</span>| unauthenticated(<span class="string">"the calling service account is not active"</span>))<span class="question-mark">?</span>;
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">if </span>account.status != UserStatus::Active {
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(unauthenticated(<span class="string">"the calling service account is not active"</span>));
+<a href=#345 id=345 data-nosnippet>345</a>    }
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="prelude-val">Ok</span>(caller.subject)
+<a href=#347 id=347 data-nosnippet>347</a>}
+<a href=#348 id=348 data-nosnippet>348</a>
+<a href=#349 id=349 data-nosnippet>349</a><span class="doccomment">/// Spend one decision of the caller's bucket (D-6): the shared counter when it
+<a href=#350 id=350 data-nosnippet>350</a>/// is on, the in-process keyed limiter when it is off.
+<a href=#351 id=351 data-nosnippet>351</a></span><span class="kw">fn </span>admit&lt;C: Connection + Clone&gt;(state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;, tenant_id: Uuid, caller: Uuid) -&gt; bool {
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="kw">let </span>per_min = state.rate_limit_cfg.network_decide_per_min;
+<a href=#353 id=353 data-nosnippet>353</a>    <span class="kw">if </span>state.shared_rate_limit.is_enabled() {
+<a href=#354 id=354 data-nosnippet>354</a>        state
+<a href=#355 id=355 data-nosnippet>355</a>            .shared_rate_limit
+<a href=#356 id=356 data-nosnippet>356</a>            .check_at(<span class="kw-2">&amp;</span>bucket_key(tenant_id, caller), Utc::now(), per_min)
+<a href=#357 id=357 data-nosnippet>357</a>    } <span class="kw">else </span>{
+<a href=#358 id=358 data-nosnippet>358</a>        state.network_decide.admit(tenant_id, caller, per_min)
+<a href=#359 id=359 data-nosnippet>359</a>    }
+<a href=#360 id=360 data-nosnippet>360</a>}
+<a href=#361 id=361 data-nosnippet>361</a>
+<a href=#362 id=362 data-nosnippet>362</a><span class="doccomment">/// The caller's bucket in the shared counter.
+<a href=#363 id=363 data-nosnippet>363</a></span><span class="kw">pub fn </span>bucket_key(tenant_id: Uuid, caller: Uuid) -&gt; String {
+<a href=#364 id=364 data-nosnippet>364</a>    <span class="macro">format!</span>(<span class="string">"{BUCKET}:{tenant_id}:{caller}"</span>)
+<a href=#365 id=365 data-nosnippet>365</a>}
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a><span class="kw">fn </span>too_many_requests() -&gt; HttpResponse {
+<a href=#368 id=368 data-nosnippet>368</a>    HttpResponse::TooManyRequests()
+<a href=#369 id=369 data-nosnippet>369</a>        .content_type(actix_web::http::header::ContentType::json())
+<a href=#370 id=370 data-nosnippet>370</a>        .insert_header((actix_web::http::header::RETRY_AFTER, <span class="string">"60"</span>))
+<a href=#371 id=371 data-nosnippet>371</a>        .body(<span class="string">r#"{"error":"rate_limit_exceeded"}"#</span>)
+<a href=#372 id=372 data-nosnippet>372</a>}
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#375 id=375 data-nosnippet>375</a>// The certificate
+<a href=#376 id=376 data-nosnippet>376</a>// ---------------------------------------------------------------------------
+<a href=#377 id=377 data-nosnippet>377</a>
+<a href=#378 id=378 data-nosnippet>378</a></span><span class="doccomment">/// What the presented certificate resolved to.
+<a href=#379 id=379 data-nosnippet>379</a></span><span class="kw">enum </span>Resolved {
+<a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// A certificate of the caller's tenant, bound to `service_account_id`.
+<a href=#381 id=381 data-nosnippet>381</a>    </span>Device {
+<a href=#382 id=382 data-nosnippet>382</a>        service_account_id: Uuid,
+<a href=#383 id=383 data-nosnippet>383</a>        certificate_id: Uuid,
+<a href=#384 id=384 data-nosnippet>384</a>    },
+<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// Refused, with the internal reason. `certificate_id` is set only for a
+<a href=#386 id=386 data-nosnippet>386</a>    /// certificate of the caller's tenant.
+<a href=#387 id=387 data-nosnippet>387</a>    </span>Refused {
+<a href=#388 id=388 data-nosnippet>388</a>        reason: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#389 id=389 data-nosnippet>389</a>        certificate_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#390 id=390 data-nosnippet>390</a>    },
+<a href=#391 id=391 data-nosnippet>391</a>}
+<a href=#392 id=392 data-nosnippet>392</a>
+<a href=#393 id=393 data-nosnippet>393</a><span class="doccomment">/// Resolve the presented certificate through `authenticate_der`, refusing one
+<a href=#394 id=394 data-nosnippet>394</a>/// of another tenant (§7). The row is read first, by fingerprint, for two
+<a href=#395 id=395 data-nosnippet>395</a>/// reasons: the fingerprint form has no DER without it, and a refusal of this
+<a href=#396 id=396 data-nosnippet>396</a>/// tenant's certificate can then be named from the row (revoked, expired)
+<a href=#397 id=397 data-nosnippet>397</a>/// rather than from the wording of an error message.
+<a href=#398 id=398 data-nosnippet>398</a></span><span class="kw">async fn </span>resolve_certificate&lt;C: Connection + Clone&gt;(
+<a href=#399 id=399 data-nosnippet>399</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#400 id=400 data-nosnippet>400</a>    tenant_id: Uuid,
+<a href=#401 id=401 data-nosnippet>401</a>    presented: <span class="kw-2">&amp;</span>Presented,
+<a href=#402 id=402 data-nosnippet>402</a>    fingerprint: <span class="kw-2">&amp;</span>str,
+<a href=#403 id=403 data-nosnippet>403</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Resolved, AxiamApiError&gt; {
+<a href=#404 id=404 data-nosnippet>404</a>    <span class="kw">let </span>row: <span class="prelude-ty">Option</span>&lt;Certificate&gt; = <span class="kw">match </span>state
+<a href=#405 id=405 data-nosnippet>405</a>        .pki
+<a href=#406 id=406 data-nosnippet>406</a>        .cert_repo
+<a href=#407 id=407 data-nosnippet>407</a>        .get_by_fingerprint_global(fingerprint)
+<a href=#408 id=408 data-nosnippet>408</a>        .<span class="kw">await
+<a href=#409 id=409 data-nosnippet>409</a>    </span>{
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="prelude-val">Ok</span>(row) =&gt; <span class="prelude-val">Some</span>(row),
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; <span class="prelude-val">None</span>,
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#413 id=413 data-nosnippet>413</a>    };
+<a href=#414 id=414 data-nosnippet>414</a>    <span class="kw">let </span>der = <span class="kw">match </span>(presented, <span class="kw-2">&amp;</span>row) {
+<a href=#415 id=415 data-nosnippet>415</a>        (Presented::Certificate(der), <span class="kw">_</span>) =&gt; <span class="prelude-val">Some</span>(der.clone()),
+<a href=#416 id=416 data-nosnippet>416</a>        (Presented::Fingerprint, <span class="prelude-val">Some</span>(row)) =&gt; pem_to_der(<span class="kw-2">&amp;</span>row.public_cert_pem),
+<a href=#417 id=417 data-nosnippet>417</a>        (Presented::Fingerprint, <span class="prelude-val">None</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#418 id=418 data-nosnippet>418</a>    };
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="kw">let </span>authenticated = <span class="kw">match </span>der {
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="prelude-val">Some</span>(der) =&gt; <span class="kw">match </span>state.pki.device_auth_service.authenticate_der(<span class="kw-2">&amp;</span>der).<span class="kw">await </span>{
+<a href=#421 id=421 data-nosnippet>421</a>            <span class="prelude-val">Ok</span>(identity) =&gt; <span class="prelude-val">Some</span>(identity),
+<a href=#422 id=422 data-nosnippet>422</a>            <span class="prelude-val">Err</span>(AxiamError::Certificate(<span class="kw">_</span>) | AxiamError::NotFound { .. }) =&gt; <span class="prelude-val">None</span>,
+<a href=#423 id=423 data-nosnippet>423</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#424 id=424 data-nosnippet>424</a>        },
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="prelude-val">None </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#426 id=426 data-nosnippet>426</a>    };
+<a href=#427 id=427 data-nosnippet>427</a>
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(row) = row.filter(|r| r.tenant_id == tenant_id) <span class="kw">else </span>{
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="comment">// Unknown anywhere, or another tenant's: one reason, so the caller's
+<a href=#430 id=430 data-nosnippet>430</a>        // tenant does not learn that the certificate exists elsewhere.
+<a href=#431 id=431 data-nosnippet>431</a>        </span><span class="kw">return </span><span class="prelude-val">Ok</span>(Resolved::Refused {
+<a href=#432 id=432 data-nosnippet>432</a>            reason: <span class="string">"certificate:not_in_tenant"</span>,
+<a href=#433 id=433 data-nosnippet>433</a>            certificate_id: <span class="prelude-val">None</span>,
+<a href=#434 id=434 data-nosnippet>434</a>        });
+<a href=#435 id=435 data-nosnippet>435</a>    };
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="kw">match </span>authenticated {
+<a href=#437 id=437 data-nosnippet>437</a>        <span class="prelude-val">Some</span>(identity) <span class="kw">if </span>identity.tenant_id == tenant_id &amp;&amp; identity.certificate_id == row.id =&gt; {
+<a href=#438 id=438 data-nosnippet>438</a>            <span class="prelude-val">Ok</span>(Resolved::Device {
+<a href=#439 id=439 data-nosnippet>439</a>                service_account_id: identity.service_account_id,
+<a href=#440 id=440 data-nosnippet>440</a>                certificate_id: row.id,
+<a href=#441 id=441 data-nosnippet>441</a>            })
+<a href=#442 id=442 data-nosnippet>442</a>        }
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">_ </span>=&gt; {
+<a href=#444 id=444 data-nosnippet>444</a>            <span class="kw">let </span>now = Utc::now();
+<a href=#445 id=445 data-nosnippet>445</a>            <span class="kw">let </span>reason = <span class="kw">if </span>row.status == CertificateStatus::Revoked {
+<a href=#446 id=446 data-nosnippet>446</a>                <span class="string">"certificate:revoked"
+<a href=#447 id=447 data-nosnippet>447</a>            </span>} <span class="kw">else if </span>row.status != CertificateStatus::Active
+<a href=#448 id=448 data-nosnippet>448</a>                || now &lt; row.not_before
+<a href=#449 id=449 data-nosnippet>449</a>                || now &gt; row.not_after
+<a href=#450 id=450 data-nosnippet>450</a>            {
+<a href=#451 id=451 data-nosnippet>451</a>                <span class="string">"certificate:expired"
+<a href=#452 id=452 data-nosnippet>452</a>            </span>} <span class="kw">else </span>{
+<a href=#453 id=453 data-nosnippet>453</a>                <span class="comment">// Unbound, not a client certificate type, or its chain does
+<a href=#454 id=454 data-nosnippet>454</a>                // not reach a trusted anchor.
+<a href=#455 id=455 data-nosnippet>455</a>                </span><span class="string">"certificate:refused"
+<a href=#456 id=456 data-nosnippet>456</a>            </span>};
+<a href=#457 id=457 data-nosnippet>457</a>            <span class="prelude-val">Ok</span>(Resolved::Refused {
+<a href=#458 id=458 data-nosnippet>458</a>                reason,
+<a href=#459 id=459 data-nosnippet>459</a>                certificate_id: <span class="prelude-val">Some</span>(row.id),
+<a href=#460 id=460 data-nosnippet>460</a>            })
+<a href=#461 id=461 data-nosnippet>461</a>        }
+<a href=#462 id=462 data-nosnippet>462</a>    }
+<a href=#463 id=463 data-nosnippet>463</a>}
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a><span class="kw">fn </span>pem_to_der(pem: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#466 id=466 data-nosnippet>466</a>    x509_parser::pem::parse_x509_pem(pem.as_bytes())
+<a href=#467 id=467 data-nosnippet>467</a>        .ok()
+<a href=#468 id=468 data-nosnippet>468</a>        .map(|(<span class="kw">_</span>, p)| p.contents)
+<a href=#469 id=469 data-nosnippet>469</a>}
+<a href=#470 id=470 data-nosnippet>470</a>
+<a href=#471 id=471 data-nosnippet>471</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#472 id=472 data-nosnippet>472</a>// Audit
+<a href=#473 id=473 data-nosnippet>473</a>// ---------------------------------------------------------------------------
+<a href=#474 id=474 data-nosnippet>474</a>
+<a href=#475 id=475 data-nosnippet>475</a></span><span class="kw">async fn </span>append&lt;C: Connection + Clone&gt;(state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;, entry: CreateAuditLogEntry) {
+<a href=#476 id=476 data-nosnippet>476</a>    <span class="kw">let </span>(tenant_id, action) = (entry.tenant_id, entry.action.clone());
+<a href=#477 id=477 data-nosnippet>477</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = state.audit_repo.append(entry).<span class="kw">await </span>{
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="macro">tracing::error!</span>(
+<a href=#479 id=479 data-nosnippet>479</a>            target: <span class="string">"axiam::network_decide"</span>,
+<a href=#480 id=480 data-nosnippet>480</a>            %tenant_id,
+<a href=#481 id=481 data-nosnippet>481</a>            action,
+<a href=#482 id=482 data-nosnippet>482</a>            %error,
+<a href=#483 id=483 data-nosnippet>483</a>            <span class="string">"a network decision audit row could not be written"
+<a href=#484 id=484 data-nosnippet>484</a>        </span>);
+<a href=#485 id=485 data-nosnippet>485</a>    }
+<a href=#486 id=486 data-nosnippet>486</a>}
+<a href=#487 id=487 data-nosnippet>487</a>
+<a href=#488 id=488 data-nosnippet>488</a><span class="doccomment">/// One `reply_profile.invalid` row per profile per window (§3.4).
+<a href=#489 id=489 data-nosnippet>489</a></span><span class="kw">async fn </span>audit_defect&lt;C: Connection + Clone&gt;(
+<a href=#490 id=490 data-nosnippet>490</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#491 id=491 data-nosnippet>491</a>    http_req: <span class="kw-2">&amp;</span>HttpRequest,
+<a href=#492 id=492 data-nosnippet>492</a>    tenant_id: Uuid,
+<a href=#493 id=493 data-nosnippet>493</a>    caller: Uuid,
+<a href=#494 id=494 data-nosnippet>494</a>    segment: <span class="kw-2">&amp;</span>NetworkSegment,
+<a href=#495 id=495 data-nosnippet>495</a>    version: u64,
+<a href=#496 id=496 data-nosnippet>496</a>    dictionary: <span class="kw-2">&amp;</span>str,
+<a href=#497 id=497 data-nosnippet>497</a>    defect: <span class="kw-2">&amp;</span>ProfileDefect,
+<a href=#498 id=498 data-nosnippet>498</a>) {
+<a href=#499 id=499 data-nosnippet>499</a>    <span class="kw">if </span>!state
+<a href=#500 id=500 data-nosnippet>500</a>        .network_decide
+<a href=#501 id=501 data-nosnippet>501</a>        .first_in_window(tenant_id, segment.id, version, defect.rule)
+<a href=#502 id=502 data-nosnippet>502</a>    {
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="kw">return</span>;
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>    append(
+<a href=#506 id=506 data-nosnippet>506</a>        state,
+<a href=#507 id=507 data-nosnippet>507</a>        CreateAuditLogEntry {
+<a href=#508 id=508 data-nosnippet>508</a>            tenant_id,
+<a href=#509 id=509 data-nosnippet>509</a>            actor_id: caller,
+<a href=#510 id=510 data-nosnippet>510</a>            actor_type: ActorType::ServiceAccount,
+<a href=#511 id=511 data-nosnippet>511</a>            action: AUDIT_PROFILE_INVALID.to_owned(),
+<a href=#512 id=512 data-nosnippet>512</a>            resource_id: <span class="prelude-val">Some</span>(segment.id),
+<a href=#513 id=513 data-nosnippet>513</a>            outcome: AuditOutcome::Failure,
+<a href=#514 id=514 data-nosnippet>514</a>            ip_address: client_ip(http_req),
+<a href=#515 id=515 data-nosnippet>515</a>            metadata: <span class="prelude-val">Some</span>(<span class="macro">json!</span>({
+<a href=#516 id=516 data-nosnippet>516</a>                <span class="string">"segment_id"</span>: segment.id,
+<a href=#517 id=517 data-nosnippet>517</a>                <span class="string">"path"</span>: segment.path(),
+<a href=#518 id=518 data-nosnippet>518</a>                <span class="string">"profile_version"</span>: version,
+<a href=#519 id=519 data-nosnippet>519</a>                <span class="string">"dictionary"</span>: dictionary,
+<a href=#520 id=520 data-nosnippet>520</a>                <span class="string">"rule"</span>: defect.rule,
+<a href=#521 id=521 data-nosnippet>521</a>                <span class="string">"reason"</span>: defect.reason,
+<a href=#522 id=522 data-nosnippet>522</a>                <span class="string">"window_secs"</span>: <span class="kw">crate</span>::network_decide_guard::INVALID_PROFILE_AUDIT_WINDOW.as_secs(),
+<a href=#523 id=523 data-nosnippet>523</a>            })),
+<a href=#524 id=524 data-nosnippet>524</a>        },
+<a href=#525 id=525 data-nosnippet>525</a>    )
+<a href=#526 id=526 data-nosnippet>526</a>    .<span class="kw">await</span>;
+<a href=#527 id=527 data-nosnippet>527</a>}
+<a href=#528 id=528 data-nosnippet>528</a>
+<a href=#529 id=529 data-nosnippet>529</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#530 id=530 data-nosnippet>530</a>// The route
+<a href=#531 id=531 data-nosnippet>531</a>// ---------------------------------------------------------------------------
+<a href=#532 id=532 data-nosnippet>532</a>
+<a href=#533 id=533 data-nosnippet>533</a></span><span class="doccomment">/// `POST /api/v1/network/decide`
+<a href=#534 id=534 data-nosnippet>534</a>///
+<a href=#535 id=535 data-nosnippet>535</a>/// The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS
+<a href=#536 id=536 data-nosnippet>536</a>/// authentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's
+<a href=#537 id=537 data-nosnippet>537</a>/// service account, over mTLS with a token bound to its own certificate.
+<a href=#538 id=538 data-nosnippet>538</a></span><span class="attr">#[utoipa::path(
+<a href=#539 id=539 data-nosnippet>539</a>    post,
+<a href=#540 id=540 data-nosnippet>540</a>    operation_id = <span class="string">"network_decide"</span>,
+<a href=#541 id=541 data-nosnippet>541</a>    path = <span class="string">"/api/v1/network/decide"</span>,
+<a href=#542 id=542 data-nosnippet>542</a>    tag = <span class="string">"network"</span>,
+<a href=#543 id=543 data-nosnippet>543</a>    request_body = NetworkDecisionRequest,
+<a href=#544 id=544 data-nosnippet>544</a>    responses(
+<a href=#545 id=545 data-nosnippet>545</a>        (status = <span class="number">200</span>, description = <span class="string">"The decision. `{\"allow\": false}` carries no reason, \
+<a href=#546 id=546 data-nosnippet>546</a>                                      whatever it was; `{\"allow\": true, \"reply\": …}` carries \
+<a href=#547 id=547 data-nosnippet>547</a>                                      the placed segment's tunnel attributes and its reply \
+<a href=#548 id=548 data-nosnippet>548</a>                                      profile's, `Session-Timeout` clamped to the tenant's cap. \
+<a href=#549 id=549 data-nosnippet>549</a>                                      `Tunnel-Type` and `Tunnel-Medium-Type` carry tag 0 on the \
+<a href=#550 id=550 data-nosnippet>550</a>                                      wire; `Tunnel-Private-Group-Id` carries no tag octet"</span>,
+<a href=#551 id=551 data-nosnippet>551</a>         body = NetworkDecisionResponse),
+<a href=#552 id=552 data-nosnippet>552</a>        (status = <span class="number">400</span>, description = <span class="string">"The body: an unknown key (named), a site key outside the \
+<a href=#553 id=553 data-nosnippet>553</a>                                      pattern, not exactly one of `certificate` and \
+<a href=#554 id=554 data-nosnippet>554</a>                                      `fingerprint`, or one that does not decode"</span>),
+<a href=#555 id=555 data-nosnippet>555</a>        (status = <span class="number">401</span>, description = <span class="string">"Not a service account, or its token is not bound \
+<a href=#556 id=556 data-nosnippet>556</a>                                      (`cnf.x5t#S256`) to the certificate this mTLS connection \
+<a href=#557 id=557 data-nosnippet>557</a>                                      presented, or that certificate is no longer the caller's \
+<a href=#558 id=558 data-nosnippet>558</a>                                      own and valid, or the account is not active"</span>),
+<a href=#559 id=559 data-nosnippet>559</a>        (status = <span class="number">403</span>, description = <span class="string">"The caller lacks `network:decide` on the site"</span>),
+<a href=#560 id=560 data-nosnippet>560</a>        (status = <span class="number">429</span>, description = <span class="string">"The caller's `network_decide_per_min` allowance is spent"</span>),
+<a href=#561 id=561 data-nosnippet>561</a>    ),
+<a href=#562 id=562 data-nosnippet>562</a>    security((<span class="string">"service_account" </span>= []</span>))
+<a href=#563 id=563 data-nosnippet>563</a>)]
+<a href=#564 id=564 data-nosnippet>564</a><span class="kw">pub async fn </span>decide&lt;C: Connection + Clone&gt;(
+<a href=#565 id=565 data-nosnippet>565</a>    http_req: HttpRequest,
+<a href=#566 id=566 data-nosnippet>566</a>    caller: CertificateBoundServiceAccount,
+<a href=#567 id=567 data-nosnippet>567</a>    authz: AuthzData,
+<a href=#568 id=568 data-nosnippet>568</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#569 id=569 data-nosnippet>569</a>    body: web::Json&lt;NetworkDecisionRequest&gt;,
+<a href=#570 id=570 data-nosnippet>570</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#571 id=571 data-nosnippet>571</a>    <span class="comment">// The bucket is the caller's own (D-6), spent as soon as the token is known
+<a href=#572 id=572 data-nosnippet>572</a>    // to be its — signed by AXIAM, and bound to the certificate whose key this
+<a href=#573 id=573 data-nosnippet>573</a>    // connection proved — and before anything is read for it.
+<a href=#574 id=574 data-nosnippet>574</a>    </span><span class="kw">let </span>tenant_id = caller.account.tenant_id;
+<a href=#575 id=575 data-nosnippet>575</a>    <span class="kw">if </span>!admit(<span class="kw-2">&amp;</span>state, tenant_id, caller.subject) {
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(too_many_requests());
+<a href=#577 id=577 data-nosnippet>577</a>    }
+<a href=#578 id=578 data-nosnippet>578</a>    <span class="kw">let </span>caller_id = certificate_bound_caller(<span class="kw-2">&amp;</span>caller, <span class="kw-2">&amp;</span>state).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#579 id=579 data-nosnippet>579</a>    <span class="kw">let </span>(site, presented, fingerprint) = parse_body(body.into_inner())<span class="question-mark">?</span>;
+<a href=#580 id=580 data-nosnippet>580</a>    <span class="kw">let </span>authz = authz.get_ref().as_ref();
+<a href=#581 id=581 data-nosnippet>581</a>
+<a href=#582 id=582 data-nosnippet>582</a>    <span class="comment">// The site: every segment of it, both branches, one query.
+<a href=#583 id=583 data-nosnippet>583</a>    </span><span class="kw">let </span>segments = SurrealNetworkSegmentRepository::new(state.db.clone())
+<a href=#584 id=584 data-nosnippet>584</a>        .list_site(tenant_id, <span class="kw-2">&amp;</span>site)
+<a href=#585 id=585 data-nosnippet>585</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#586 id=586 data-nosnippet>586</a>
+<a href=#587 id=587 data-nosnippet>587</a>    <span class="comment">// The caller holds `network:decide` on every site node the decision reads
+<a href=#588 id=588 data-nosnippet>588</a>    // (a site with no segment yet: on its `zones` node).
+<a href=#589 id=589 data-nosnippet>589</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>site_nodes: BTreeSet&lt;Uuid&gt; = segments
+<a href=#590 id=590 data-nosnippet>590</a>        .iter()
+<a href=#591 id=591 data-nosnippet>591</a>        .map(|s| site_node_id(tenant_id, s.kind, <span class="kw-2">&amp;</span>site))
+<a href=#592 id=592 data-nosnippet>592</a>        .collect();
+<a href=#593 id=593 data-nosnippet>593</a>    <span class="kw">if </span>site_nodes.is_empty() {
+<a href=#594 id=594 data-nosnippet>594</a>        site_nodes.insert(site_node_id(tenant_id, NetworkSegmentKind::Access, <span class="kw-2">&amp;</span>site));
+<a href=#595 id=595 data-nosnippet>595</a>    }
+<a href=#596 id=596 data-nosnippet>596</a>    <span class="kw">let </span>site_nodes: Vec&lt;Uuid&gt; = site_nodes.into_iter().collect();
+<a href=#597 id=597 data-nosnippet>597</a>    <span class="kw">let </span>decide_checks: Vec&lt;AccessRequest&gt; = site_nodes
+<a href=#598 id=598 data-nosnippet>598</a>        .iter()
+<a href=#599 id=599 data-nosnippet>599</a>        .map(|node| AccessRequest {
+<a href=#600 id=600 data-nosnippet>600</a>            tenant_id,
+<a href=#601 id=601 data-nosnippet>601</a>            subject_scope: SubjectScope::Tenant,
+<a href=#602 id=602 data-nosnippet>602</a>            subject_id: caller_id,
+<a href=#603 id=603 data-nosnippet>603</a>            action: NETWORK_DECIDE.to_owned(),
+<a href=#604 id=604 data-nosnippet>604</a>            resource_id: <span class="kw-2">*</span>node,
+<a href=#605 id=605 data-nosnippet>605</a>            scope: <span class="prelude-val">None</span>,
+<a href=#606 id=606 data-nosnippet>606</a>        })
+<a href=#607 id=607 data-nosnippet>607</a>        .collect();
+<a href=#608 id=608 data-nosnippet>608</a>    <span class="kw">let </span>answers = authz.check_access_batch(<span class="kw-2">&amp;</span>decide_checks).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#609 id=609 data-nosnippet>609</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>((node, decision)) = site_nodes
+<a href=#610 id=610 data-nosnippet>610</a>        .iter()
+<a href=#611 id=611 data-nosnippet>611</a>        .zip(<span class="kw-2">&amp;</span>answers)
+<a href=#612 id=612 data-nosnippet>612</a>        .find(|(<span class="kw">_</span>, d)| !<span class="macro">matches!</span>(d, AccessDecision::Allow))
+<a href=#613 id=613 data-nosnippet>613</a>    {
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">let </span>reason = <span class="kw">match </span>decision {
+<a href=#615 id=615 data-nosnippet>615</a>            AccessDecision::Deny(r) | AccessDecision::DeniedByRule(r) =&gt; r.clone(),
+<a href=#616 id=616 data-nosnippet>616</a>            AccessDecision::Allow =&gt; String::new(),
+<a href=#617 id=617 data-nosnippet>617</a>        };
+<a href=#618 id=618 data-nosnippet>618</a>        append(
+<a href=#619 id=619 data-nosnippet>619</a>            <span class="kw-2">&amp;</span>state,
+<a href=#620 id=620 data-nosnippet>620</a>            CreateAuditLogEntry {
+<a href=#621 id=621 data-nosnippet>621</a>                tenant_id,
+<a href=#622 id=622 data-nosnippet>622</a>                actor_id: caller_id,
+<a href=#623 id=623 data-nosnippet>623</a>                actor_type: ActorType::ServiceAccount,
+<a href=#624 id=624 data-nosnippet>624</a>                action: AUDIT_DECISION_REFUSED.to_owned(),
+<a href=#625 id=625 data-nosnippet>625</a>                resource_id: <span class="prelude-val">Some</span>(<span class="kw-2">*</span>node),
+<a href=#626 id=626 data-nosnippet>626</a>                outcome: AuditOutcome::Denied,
+<a href=#627 id=627 data-nosnippet>627</a>                ip_address: client_ip(<span class="kw-2">&amp;</span>http_req),
+<a href=#628 id=628 data-nosnippet>628</a>                metadata: <span class="prelude-val">Some</span>(<span class="macro">json!</span>({
+<a href=#629 id=629 data-nosnippet>629</a>                    <span class="string">"site"</span>: site,
+<a href=#630 id=630 data-nosnippet>630</a>                    <span class="string">"rule"</span>: <span class="string">"4.2:decide"</span>,
+<a href=#631 id=631 data-nosnippet>631</a>                    <span class="string">"missing_permission"</span>: NETWORK_DECIDE,
+<a href=#632 id=632 data-nosnippet>632</a>                    <span class="string">"node"</span>: node,
+<a href=#633 id=633 data-nosnippet>633</a>                    <span class="string">"reason"</span>: reason,
+<a href=#634 id=634 data-nosnippet>634</a>                    <span class="string">"status"</span>: <span class="number">403</span>,
+<a href=#635 id=635 data-nosnippet>635</a>                })),
+<a href=#636 id=636 data-nosnippet>636</a>            },
+<a href=#637 id=637 data-nosnippet>637</a>        )
+<a href=#638 id=638 data-nosnippet>638</a>        .<span class="kw">await</span>;
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::AuthorizationDenied {
+<a href=#640 id=640 data-nosnippet>640</a>            reason,
+<a href=#641 id=641 data-nosnippet>641</a>            action: <span class="prelude-val">Some</span>(NETWORK_DECIDE.to_owned()),
+<a href=#642 id=642 data-nosnippet>642</a>            resource_id: <span class="prelude-val">Some</span>(node.to_string()),
+<a href=#643 id=643 data-nosnippet>643</a>        }));
+<a href=#644 id=644 data-nosnippet>644</a>    }
+<a href=#645 id=645 data-nosnippet>645</a>
+<a href=#646 id=646 data-nosnippet>646</a>    <span class="comment">// 1. The certificate, then 2. the subject's account. When no certificate
+<a href=#647 id=647 data-nosnippet>647</a>    // of this tenant resolved, the caller's own account stands in as the
+<a href=#648 id=648 data-nosnippet>648</a>    // subject: an account that exists and holds role assignments, so the reads
+<a href=#649 id=649 data-nosnippet>649</a>    // and the batch below cost what a real device's do. Its answers are
+<a href=#650 id=650 data-nosnippet>650</a>    // discarded.
+<a href=#651 id=651 data-nosnippet>651</a>    </span><span class="kw">let </span>resolved = resolve_certificate(<span class="kw-2">&amp;</span>state, tenant_id, <span class="kw-2">&amp;</span>presented, <span class="kw-2">&amp;</span>fingerprint).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#652 id=652 data-nosnippet>652</a>    <span class="kw">let </span>(subject, device) = <span class="kw">match </span><span class="kw-2">&amp;</span>resolved {
+<a href=#653 id=653 data-nosnippet>653</a>        Resolved::Device {
+<a href=#654 id=654 data-nosnippet>654</a>            service_account_id, ..
+<a href=#655 id=655 data-nosnippet>655</a>        } =&gt; (<span class="kw-2">*</span>service_account_id, <span class="bool-val">true</span>),
+<a href=#656 id=656 data-nosnippet>656</a>        Resolved::Refused { .. } =&gt; (caller_id, <span class="bool-val">false</span>),
+<a href=#657 id=657 data-nosnippet>657</a>    };
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="kw">let </span>account_active = <span class="kw">match </span>state
+<a href=#659 id=659 data-nosnippet>659</a>        .service_account_repo
+<a href=#660 id=660 data-nosnippet>660</a>        .get_by_id(tenant_id, subject)
+<a href=#661 id=661 data-nosnippet>661</a>        .<span class="kw">await
+<a href=#662 id=662 data-nosnippet>662</a>    </span>{
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="prelude-val">Ok</span>(account) =&gt; account.status == UserStatus::Active,
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; <span class="bool-val">false</span>,
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#666 id=666 data-nosnippet>666</a>    };
+<a href=#667 id=667 data-nosnippet>667</a>
+<a href=#668 id=668 data-nosnippet>668</a>    <span class="comment">// 3. The profiles and the cap, each one query, every profile re-validated.
+<a href=#669 id=669 data-nosnippet>669</a>    </span><span class="kw">let </span>segment_ids: Vec&lt;Uuid&gt; = segments.iter().map(|s| s.id).collect();
+<a href=#670 id=670 data-nosnippet>670</a>    <span class="kw">let </span>stored = SurrealReplyProfileRepository::new(state.db.clone())
+<a href=#671 id=671 data-nosnippet>671</a>        .list_stored(tenant_id, <span class="kw-2">&amp;</span>segment_ids)
+<a href=#672 id=672 data-nosnippet>672</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#673 id=673 data-nosnippet>673</a>    <span class="kw">let </span>cap = SurrealNetworkPolicyRepository::new(state.db.clone())
+<a href=#674 id=674 data-nosnippet>674</a>        .get(tenant_id)
+<a href=#675 id=675 data-nosnippet>675</a>        .<span class="kw">await</span><span class="question-mark">?
+<a href=#676 id=676 data-nosnippet>676</a>        </span>.session_timeout_max_secs;
+<a href=#677 id=677 data-nosnippet>677</a>    <span class="kw">let </span><span class="kw-2">mut </span>rendered: Vec&lt;<span class="prelude-ty">Option</span>&lt;(RenderedReply, Value)&gt;&gt; = Vec::with_capacity(segments.len());
+<a href=#678 id=678 data-nosnippet>678</a>    <span class="kw">for </span>segment <span class="kw">in </span><span class="kw-2">&amp;</span>segments {
+<a href=#679 id=679 data-nosnippet>679</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(profile) = stored.iter().find(|p| p.segment_id == segment.id) <span class="kw">else </span>{
+<a href=#680 id=680 data-nosnippet>680</a>            <span class="comment">// No profile: no candidate, which only narrows (§5.2).
+<a href=#681 id=681 data-nosnippet>681</a>            </span>rendered.push(<span class="prelude-val">None</span>);
+<a href=#682 id=682 data-nosnippet>682</a>            <span class="kw">continue</span>;
+<a href=#683 id=683 data-nosnippet>683</a>        };
+<a href=#684 id=684 data-nosnippet>684</a>        <span class="kw">match </span>profile.revalidate(segment, cap) {
+<a href=#685 id=685 data-nosnippet>685</a>            <span class="prelude-val">Ok</span>((effective, reply)) =&gt; rendered.push(<span class="prelude-val">Some</span>((
+<a href=#686 id=686 data-nosnippet>686</a>                reply,
+<a href=#687 id=687 data-nosnippet>687</a>                <span class="macro">json!</span>({
+<a href=#688 id=688 data-nosnippet>688</a>                    <span class="string">"profile_version"</span>: profile.version,
+<a href=#689 id=689 data-nosnippet>689</a>                    <span class="string">"session_timeout_secs"</span>: effective.session_timeout_secs,
+<a href=#690 id=690 data-nosnippet>690</a>                    <span class="string">"session_timeout_clamped"</span>: effective.session_timeout_clamped,
+<a href=#691 id=691 data-nosnippet>691</a>                }),
+<a href=#692 id=692 data-nosnippet>692</a>            ))),
+<a href=#693 id=693 data-nosnippet>693</a>            <span class="prelude-val">Err</span>(defect) =&gt; {
+<a href=#694 id=694 data-nosnippet>694</a>                audit_defect(
+<a href=#695 id=695 data-nosnippet>695</a>                    <span class="kw-2">&amp;</span>state,
+<a href=#696 id=696 data-nosnippet>696</a>                    <span class="kw-2">&amp;</span>http_req,
+<a href=#697 id=697 data-nosnippet>697</a>                    tenant_id,
+<a href=#698 id=698 data-nosnippet>698</a>                    caller_id,
+<a href=#699 id=699 data-nosnippet>699</a>                    segment,
+<a href=#700 id=700 data-nosnippet>700</a>                    profile.version,
+<a href=#701 id=701 data-nosnippet>701</a>                    <span class="kw-2">&amp;</span>profile.dictionary,
+<a href=#702 id=702 data-nosnippet>702</a>                    <span class="kw-2">&amp;</span>defect,
+<a href=#703 id=703 data-nosnippet>703</a>                )
+<a href=#704 id=704 data-nosnippet>704</a>                .<span class="kw">await</span>;
+<a href=#705 id=705 data-nosnippet>705</a>                rendered.push(<span class="prelude-val">None</span>);
+<a href=#706 id=706 data-nosnippet>706</a>            }
+<a href=#707 id=707 data-nosnippet>707</a>        }
+<a href=#708 id=708 data-nosnippet>708</a>    }
+<a href=#709 id=709 data-nosnippet>709</a>
+<a href=#710 id=710 data-nosnippet>710</a>    <span class="comment">// 4. One batch of `network:join`, over every enabled segment of the site,
+<a href=#711 id=711 data-nosnippet>711</a>    // through the decision cache, deny-override in force.
+<a href=#712 id=712 data-nosnippet>712</a>    </span><span class="kw">let </span>enabled: Vec&lt;usize&gt; = (<span class="number">0</span>..segments.len())
+<a href=#713 id=713 data-nosnippet>713</a>        .filter(|i| segments[<span class="kw-2">*</span>i].enabled)
+<a href=#714 id=714 data-nosnippet>714</a>        .collect();
+<a href=#715 id=715 data-nosnippet>715</a>    <span class="kw">let </span>join_checks: Vec&lt;AccessRequest&gt; = enabled
+<a href=#716 id=716 data-nosnippet>716</a>        .iter()
+<a href=#717 id=717 data-nosnippet>717</a>        .map(|i| AccessRequest {
+<a href=#718 id=718 data-nosnippet>718</a>            tenant_id,
+<a href=#719 id=719 data-nosnippet>719</a>            subject_scope: SubjectScope::Tenant,
+<a href=#720 id=720 data-nosnippet>720</a>            subject_id: subject,
+<a href=#721 id=721 data-nosnippet>721</a>            action: NETWORK_JOIN.to_owned(),
+<a href=#722 id=722 data-nosnippet>722</a>            resource_id: segments[<span class="kw-2">*</span>i].id,
+<a href=#723 id=723 data-nosnippet>723</a>            scope: <span class="prelude-val">None</span>,
+<a href=#724 id=724 data-nosnippet>724</a>        })
+<a href=#725 id=725 data-nosnippet>725</a>        .collect();
+<a href=#726 id=726 data-nosnippet>726</a>    <span class="kw">let </span>join_answers = authz.check_access_batch(<span class="kw-2">&amp;</span>join_checks).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#727 id=727 data-nosnippet>727</a>    <span class="kw">let </span><span class="kw-2">mut </span>joinable = <span class="macro">vec!</span>[<span class="bool-val">false</span>; segments.len()];
+<a href=#728 id=728 data-nosnippet>728</a>    <span class="kw">for </span>(i, answer) <span class="kw">in </span>enabled.iter().zip(<span class="kw-2">&amp;</span>join_answers) {
+<a href=#729 id=729 data-nosnippet>729</a>        joinable[<span class="kw-2">*</span>i] = <span class="macro">matches!</span>(answer, AccessDecision::Allow);
+<a href=#730 id=730 data-nosnippet>730</a>    }
+<a href=#731 id=731 data-nosnippet>731</a>    <span class="kw">let </span>usable: Vec&lt;bool&gt; = rendered.iter().map(Option::is_some).collect();
+<a href=#732 id=732 data-nosnippet>732</a>
+<a href=#733 id=733 data-nosnippet>733</a>    <span class="comment">// 5. The placement — counted only for a device of this tenant whose
+<a href=#734 id=734 data-nosnippet>734</a>    // account may act.
+<a href=#735 id=735 data-nosnippet>735</a>    </span><span class="kw">let </span>placed = select_placement(<span class="kw-2">&amp;</span>segments, <span class="kw-2">&amp;</span>joinable, <span class="kw-2">&amp;</span>usable);
+<a href=#736 id=736 data-nosnippet>736</a>    <span class="kw">let </span>placement = placed
+<a href=#737 id=737 data-nosnippet>737</a>        .filter(|<span class="kw">_</span>| device &amp;&amp; account_active)
+<a href=#738 id=738 data-nosnippet>738</a>        .and_then(|i| rendered[i].take().map(|r| (i, r)));
+<a href=#739 id=739 data-nosnippet>739</a>
+<a href=#740 id=740 data-nosnippet>740</a>    <span class="comment">// 6. One row, and the answer.
+<a href=#741 id=741 data-nosnippet>741</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>metadata = <span class="macro">json!</span>({
+<a href=#742 id=742 data-nosnippet>742</a>        <span class="string">"site"</span>: site,
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="string">"presented"</span>: presented.as_str(),
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="string">"certificate_fingerprint"</span>: fingerprint,
+<a href=#745 id=745 data-nosnippet>745</a>        <span class="string">"method"</span>: <span class="string">"eap_tls"</span>,
+<a href=#746 id=746 data-nosnippet>746</a>        <span class="string">"transport"</span>: <span class="string">"rlm_rest"</span>,
+<a href=#747 id=747 data-nosnippet>747</a>        <span class="string">"candidates"</span>: segments.len(),
+<a href=#748 id=748 data-nosnippet>748</a>    });
+<a href=#749 id=749 data-nosnippet>749</a>    <span class="kw">if let </span>Resolved::Device {
+<a href=#750 id=750 data-nosnippet>750</a>        service_account_id,
+<a href=#751 id=751 data-nosnippet>751</a>        certificate_id,
+<a href=#752 id=752 data-nosnippet>752</a>    } = <span class="kw-2">&amp;</span>resolved
+<a href=#753 id=753 data-nosnippet>753</a>    {
+<a href=#754 id=754 data-nosnippet>754</a>        metadata[<span class="string">"subject_id"</span>] = <span class="macro">json!</span>(service_account_id);
+<a href=#755 id=755 data-nosnippet>755</a>        metadata[<span class="string">"certificate_id"</span>] = <span class="macro">json!</span>(certificate_id);
+<a href=#756 id=756 data-nosnippet>756</a>    }
+<a href=#757 id=757 data-nosnippet>757</a>    <span class="kw">if let </span>Resolved::Refused {
+<a href=#758 id=758 data-nosnippet>758</a>        certificate_id: <span class="prelude-val">Some</span>(id),
+<a href=#759 id=759 data-nosnippet>759</a>        ..
+<a href=#760 id=760 data-nosnippet>760</a>    } = <span class="kw-2">&amp;</span>resolved
+<a href=#761 id=761 data-nosnippet>761</a>    {
+<a href=#762 id=762 data-nosnippet>762</a>        metadata[<span class="string">"certificate_id"</span>] = <span class="macro">json!</span>(id);
+<a href=#763 id=763 data-nosnippet>763</a>    }
+<a href=#764 id=764 data-nosnippet>764</a>    <span class="kw">let </span>response = <span class="kw">match </span>placement {
+<a href=#765 id=765 data-nosnippet>765</a>        <span class="prelude-val">Some</span>((i, (reply, values))) =&gt; {
+<a href=#766 id=766 data-nosnippet>766</a>            <span class="kw">let </span>segment = <span class="kw-2">&amp;</span>segments[i];
+<a href=#767 id=767 data-nosnippet>767</a>            metadata[<span class="string">"reason"</span>] = <span class="macro">json!</span>(<span class="kw">match </span>segment.kind {
+<a href=#768 id=768 data-nosnippet>768</a>                NetworkSegmentKind::Access =&gt; <span class="string">"placement:access"</span>,
+<a href=#769 id=769 data-nosnippet>769</a>                NetworkSegmentKind::Quarantine =&gt; <span class="string">"placement:quarantine"</span>,
+<a href=#770 id=770 data-nosnippet>770</a>            });
+<a href=#771 id=771 data-nosnippet>771</a>            metadata[<span class="string">"segment_id"</span>] = <span class="macro">json!</span>(segment.id);
+<a href=#772 id=772 data-nosnippet>772</a>            metadata[<span class="string">"segment_kind"</span>] = <span class="macro">json!</span>(segment.kind.as_str());
+<a href=#773 id=773 data-nosnippet>773</a>            metadata[<span class="string">"vlan_id"</span>] = <span class="macro">json!</span>(segment.vlan_id);
+<a href=#774 id=774 data-nosnippet>774</a>            <span class="kw">if let </span>Value::Object(extra) = values {
+<a href=#775 id=775 data-nosnippet>775</a>                <span class="kw">for </span>(k, v) <span class="kw">in </span>extra {
+<a href=#776 id=776 data-nosnippet>776</a>                    metadata[k] = v;
+<a href=#777 id=777 data-nosnippet>777</a>                }
+<a href=#778 id=778 data-nosnippet>778</a>            }
+<a href=#779 id=779 data-nosnippet>779</a>            append(
+<a href=#780 id=780 data-nosnippet>780</a>                <span class="kw-2">&amp;</span>state,
+<a href=#781 id=781 data-nosnippet>781</a>                CreateAuditLogEntry {
+<a href=#782 id=782 data-nosnippet>782</a>                    tenant_id,
+<a href=#783 id=783 data-nosnippet>783</a>                    actor_id: caller_id,
+<a href=#784 id=784 data-nosnippet>784</a>                    actor_type: ActorType::ServiceAccount,
+<a href=#785 id=785 data-nosnippet>785</a>                    action: AUDIT_DECISION_ALLOWED.to_owned(),
+<a href=#786 id=786 data-nosnippet>786</a>                    resource_id: <span class="prelude-val">Some</span>(segment.id),
+<a href=#787 id=787 data-nosnippet>787</a>                    outcome: AuditOutcome::Success,
+<a href=#788 id=788 data-nosnippet>788</a>                    ip_address: client_ip(<span class="kw-2">&amp;</span>http_req),
+<a href=#789 id=789 data-nosnippet>789</a>                    metadata: <span class="prelude-val">Some</span>(metadata),
+<a href=#790 id=790 data-nosnippet>790</a>                },
+<a href=#791 id=791 data-nosnippet>791</a>            )
+<a href=#792 id=792 data-nosnippet>792</a>            .<span class="kw">await</span>;
+<a href=#793 id=793 data-nosnippet>793</a>            NetworkDecisionResponse {
+<a href=#794 id=794 data-nosnippet>794</a>                allow: <span class="bool-val">true</span>,
+<a href=#795 id=795 data-nosnippet>795</a>                reply: <span class="prelude-val">Some</span>(reply),
+<a href=#796 id=796 data-nosnippet>796</a>            }
+<a href=#797 id=797 data-nosnippet>797</a>        }
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="prelude-val">None </span>=&gt; {
+<a href=#799 id=799 data-nosnippet>799</a>            <span class="kw">let </span>reason = <span class="kw">match </span><span class="kw-2">&amp;</span>resolved {
+<a href=#800 id=800 data-nosnippet>800</a>                Resolved::Refused { reason, .. } =&gt; <span class="kw-2">*</span>reason,
+<a href=#801 id=801 data-nosnippet>801</a>                Resolved::Device { .. } <span class="kw">if </span>!account_active =&gt; <span class="string">"account:inactive"</span>,
+<a href=#802 id=802 data-nosnippet>802</a>                Resolved::Device { .. } =&gt; <span class="string">"placement:no_candidate"</span>,
+<a href=#803 id=803 data-nosnippet>803</a>            };
+<a href=#804 id=804 data-nosnippet>804</a>            metadata[<span class="string">"reason"</span>] = <span class="macro">json!</span>(reason);
+<a href=#805 id=805 data-nosnippet>805</a>            append(
+<a href=#806 id=806 data-nosnippet>806</a>                <span class="kw-2">&amp;</span>state,
+<a href=#807 id=807 data-nosnippet>807</a>                CreateAuditLogEntry {
+<a href=#808 id=808 data-nosnippet>808</a>                    tenant_id,
+<a href=#809 id=809 data-nosnippet>809</a>                    actor_id: caller_id,
+<a href=#810 id=810 data-nosnippet>810</a>                    actor_type: ActorType::ServiceAccount,
+<a href=#811 id=811 data-nosnippet>811</a>                    action: AUDIT_DECISION_DENIED.to_owned(),
+<a href=#812 id=812 data-nosnippet>812</a>                    resource_id: <span class="prelude-val">None</span>,
+<a href=#813 id=813 data-nosnippet>813</a>                    outcome: AuditOutcome::Denied,
+<a href=#814 id=814 data-nosnippet>814</a>                    ip_address: client_ip(<span class="kw-2">&amp;</span>http_req),
+<a href=#815 id=815 data-nosnippet>815</a>                    metadata: <span class="prelude-val">Some</span>(metadata),
+<a href=#816 id=816 data-nosnippet>816</a>                },
+<a href=#817 id=817 data-nosnippet>817</a>            )
+<a href=#818 id=818 data-nosnippet>818</a>            .<span class="kw">await</span>;
+<a href=#819 id=819 data-nosnippet>819</a>            NetworkDecisionResponse {
+<a href=#820 id=820 data-nosnippet>820</a>                allow: <span class="bool-val">false</span>,
+<a href=#821 id=821 data-nosnippet>821</a>                reply: <span class="prelude-val">None</span>,
+<a href=#822 id=822 data-nosnippet>822</a>            }
+<a href=#823 id=823 data-nosnippet>823</a>        }
+<a href=#824 id=824 data-nosnippet>824</a>    };
+<a href=#825 id=825 data-nosnippet>825</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(response))
+<a href=#826 id=826 data-nosnippet>826</a>}
+</code></pre></div></section></main></body></html>

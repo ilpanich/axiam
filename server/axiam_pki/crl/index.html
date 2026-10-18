@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Certificate revocation lists — one per issuing CA (RFC 5280 §5; #565, T-102)."><title>axiam_pki::crl - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module crl</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_pki/index.html">axiam_<wbr>pki</a><span class="version">1.0.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module crl</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-published" title="What is published">What is published</a></li><li><a href="#which-cas-publish-one" title="Which CAs publish one">Which CAs publish one</a></li><li><a href="#signing-on-request-and-the-cache-in-front-of-it" title="Signing on request, and the cache in front of it">Signing on request, and the cache in front of it</a></li><li><a href="#the-distribution-point" title="The distribution point">The distribution point</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>pki</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_pki</a></div><h1>Module <span>crl</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_pki/crl.rs.html#1-578">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Certificate revocation lists — one per issuing CA (RFC 5280 §5; #565,
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Certificate revocation lists — one per issuing CA (RFC 5280 §5; #565, T-102)."><title>axiam_pki::crl - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module crl</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_pki/index.html">axiam_<wbr>pki</a><span class="version">1.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module crl</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-published" title="What is published">What is published</a></li><li><a href="#which-cas-publish-one" title="Which CAs publish one">Which CAs publish one</a></li><li><a href="#signing-on-request-and-the-cache-in-front-of-it" title="Signing on request, and the cache in front of it">Signing on request, and the cache in front of it</a></li><li><a href="#the-same-list-from-every-replica-608" title="The same list from every replica (#608)">The same list from every replica (#608)</a></li><li><a href="#when-the-number-only-grows-615" title="When the number only grows (#615)">When the number only grows (#615)</a></li><li><a href="#the-distribution-point" title="The distribution point">The distribution point</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>pki</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_pki</a></div><h1>Module <span>crl</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_pki/crl.rs.html#1-1331">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Certificate revocation lists — one per issuing CA (RFC 5280 §5; #565,
 T-102).</p>
 <p>Revoking a certificate sets the status on its row. Until this module that
 status reached exactly the places that read the row — device sign-in, and
@@ -14,13 +14,16 @@ of a revocation, although every AXIAM CA carries the <code>cRLSign</code> bit.</
 the custodian the CA row names, through the same <code>load</code> the leaf path
 uses, so an RSA-4096 CA and an Ed25519 CA sign their lists exactly as they
 sign certificates;</li>
-<li><code>thisUpdate</code> the moment it was signed, <code>nextUpdate</code> a configurable
-interval later (<a href="constant.DEFAULT_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS"><code>DEFAULT_CRL_NEXT_UPDATE_SECS</code></a>) and never past the CA’s
-own <code>notAfter</code>;</li>
+<li><code>thisUpdate</code> the start of the refresh epoch it was signed in, or the
+newest revocation on it if later (#608, below); <code>nextUpdate</code> a
+configurable interval later (<a href="constant.DEFAULT_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS"><code>DEFAULT_CRL_NEXT_UPDATE_SECS</code></a>) and never
+past the CA’s own <code>notAfter</code>;</li>
 <li>a CRL number and an authority key identifier equal to the CA’s subject key
 identifier — the two extensions RFC 5280 §5.2 requires of every CRL;</li>
-<li>an entry for every certificate the CA signed and revoked that has not yet
-expired: its leaves in every tenant, and the subordinate CAs it signed, so
+<li>an entry for every certificate the CA signed and revoked that has not
+expired, or expired during the previous refresh epoch or this one (so it
+appears on a list issued after its expiry, as RFC 5280 §3.3 asks): its
+leaves in every tenant, and the subordinate CAs it signed, so
 an organization CA’s list names a revoked tenant signing CA. Each entry
 carries the serial read out of the certificate and the date AXIAM recorded
 the revocation. No reason code: AXIAM does not record one, and RFC 5280
@@ -46,18 +49,80 @@ relying parties read Vault’s list (<code>/v1/&lt;mount&gt;/issuer/&lt;issuer&g
 </ul>
 <h2 id="signing-on-request-and-the-cache-in-front-of-it"><a class="doc-anchor" href="#signing-on-request-and-the-cache-in-front-of-it">§</a>Signing on request, and the cache in front of it</h2>
 <p>A list is signed when it is first asked for and kept, per CA, until either
-the set of revoked certificates changes or half of its validity has passed;
-every request still reads the set, so a revocation is in the next response.
+the set of revoked certificates changes or its refresh epoch ends; every
+request still reads the set, so a revocation is in the next response.
 Two things follow. A relying party revalidating with <code>If-None-Match</code> gets a
 <code>304</code> until the list really changes, because an unchanged list is the same
 bytes. And a flood of requests costs one database read each and no
 signature, which matters on an unauthenticated route whose custodian may be
 a Vault round trip away.</p>
-<p>The CRL number is the signing time in milliseconds since the Unix epoch,
-and strictly greater than the last number this process issued for the CA.
-Monotonic across replicas and restarts for as long as the clocks are, which
-is what RFC 5280 §5.2.3 asks of it, without a counter every replica would
-have to agree on.</p>
+<p>That read is light (#607): each revoked certificate’s fingerprint and the
+date its entry states, never the certificate. The PEMs — what an entry’s
+serial is read from — are read only when the list is actually signed.</p>
+<p>Each CA is re-signed on its own (#607). One flight at a time re-signs a
+given CA’s list, through the custodian <code>load</code>, the crypto permit and the
+signature; requests for the same CA’s changed list wait for it, and nothing
+else does. A cached list is answered without waiting on any re-sign, this
+CA’s or another’s. The permit comes from the semaphore issuance and password
+hashing share, and a flight waits for one at most
+<a href="constant.DEFAULT_CRL_PERMIT_WAIT.html" title="constant axiam_pki::crl::DEFAULT_CRL_PERMIT_WAIT"><code>DEFAULT_CRL_PERMIT_WAIT</code></a>; past that it fails with <code>503</code>.</p>
+<p>The flight’s outcome is shared (#616). A request that finds one in flight
+waits for it at most the same permit wait, then answers <code>503</code>, and is handed
+what the flight ended with — its <code>503</code> included — instead of starting a
+re-sign of its own behind it. So callers queued on a saturated gate all
+answer within about one permit wait, not one wait each in turn, and an
+unauthenticated caller is never queued without bound. A waiter that read a
+later state than the flight signed (a revocation committed meanwhile)
+starts the next flight rather than take a list without it. A flight runs as
+a task of its own, so a caller hanging up does not abandon it: its list is
+cached for the next request.</p>
+<h2 id="the-same-list-from-every-replica-608"><a class="doc-anchor" href="#the-same-list-from-every-replica-608">§</a>The same list from every replica (#608)</h2>
+<p>Time is cut into <strong>refresh epochs</strong>, half the <code>nextUpdate</code> interval long and
+aligned to the Unix epoch, so every replica cuts at the same instants. What
+a list says is a function of the revocations in the store and of the epoch
+alone — <code>thisUpdate</code> is the epoch’s start or the newest revocation date on
+the list, whichever is later, but never past the epoch’s last second, and
+the CRL number is that <code>thisUpdate</code>, in seconds, above the entry count. Both
+CA key types sign deterministically (Ed25519, and RSA PKCS#1 v1.5), so two
+replicas signing the same state in the same epoch produce the same bytes and
+the same <code>ETag</code>, and a relying party behind a load balancer revalidates to
+<code>304</code>s wherever its request lands. A list served at the end of its epoch
+still has half its interval left.</p>
+<h2 id="when-the-number-only-grows-615"><a class="doc-anchor" href="#when-the-number-only-grows-615">§</a>When the number only grows (#615)</h2>
+<p>RFC 5280 §5.2.3 asks for a CRL number that increases. The derivation gives
+one — <code>list_identity</code> argues each step — on two conditions, and the
+datastore’s clock is not among them:</p>
+<ul>
+<li><strong>The interval is unchanged.</strong> Epochs are cut from it, so another
+<code>AXIAM__PKI__CRL_NEXT_UPDATE_SECS</code> cuts other epochs: raising it moves the
+current epoch’s start back, and lowering it ends an expired entry’s stay
+sooner, while <code>thisUpdate</code> may stay put. Either can step the number back
+once. A relying party that keeps its list until <code>nextUpdate</code> and refuses a
+lower number is offered a greater one when it fetches again at
+<code>nextUpdate</code> as long as the new interval is at most twice every interval
+its list may have been signed under: lowering is safe once every replica
+runs the new value, and raising goes in steps of at most a doubling, an
+old interval apart. The PKI guide (<code>docs/pki/README.md</code>) gives the
+operator the procedure.</li>
+<li><strong>The replicas’ clocks agree within half an epoch.</strong> A replica whose clock
+has passed a boundary serves the new epoch’s list and one that has not
+still serves the old, so a relying party alternating between the two can
+see the previous epoch’s number again for as long as the clocks disagree —
+never an older epoch’s, and never at its own <code>nextUpdate</code>, by which time
+every such replica is past the boundary.</li>
+</ul>
+<p>A revocation date is written by the datastore’s clock, which can be ahead of
+the signing replica’s and so lie past the end of the epoch. <code>thisUpdate</code> is
+clamped to the epoch’s last second and every entry’s stated date to
+<code>thisUpdate</code>, so no list states a time outside its epoch and the next
+epoch’s list, starting after every second of this one, has a greater number
+whatever left it (#615). What remains is that <code>thisUpdate</code> can be ahead of
+the replica’s clock — and a strict relying party’s — by as much as the
+datastore’s clock leads, never past the epoch’s end.</p>
+<p>The route’s <code>Cache-Control: max-age</code> runs to the end of the epoch — at most
+half the interval — not to <code>nextUpdate</code>, so a shared cache revalidates with
+the <code>ETag</code> at least that often instead of serving a list from before a
+revocation until <code>nextUpdate</code>.</p>
 <h2 id="the-distribution-point"><a class="doc-anchor" href="#the-distribution-point">§</a>The distribution point</h2>
 <p><a href="struct.CrlDistribution.html" title="struct axiam_pki::crl::CrlDistribution"><code>CrlDistribution</code></a> is the absolute URL of the route, built from the
 deployment’s public base URL. <code>CertService</code> and <code>CaService</code> write it into
@@ -69,7 +134,10 @@ says so at boot.</p>
 </div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CrlDistribution.html" title="struct axiam_pki::crl::CrlDistribution">CrlDistribution</a></dt><dd>Where a relying party finds a CA’s list: the absolute URL written into the
 CRL distribution points extension of every certificate signed after it is
 configured.</dd><dt><a class="struct" href="struct.CrlService.html" title="struct axiam_pki::crl::CrlService">CrlService</a></dt><dd>Signs and caches each issuing CA’s certificate revocation list.</dd><dt><a class="struct" href="struct.PublishedCrl.html" title="struct axiam_pki::crl::PublishedCrl">Published<wbr>Crl</a></dt><dd>A signed list, as the route serves it.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.CRL_MEDIA_TYPE.html" title="constant axiam_pki::crl::CRL_MEDIA_TYPE">CRL_<wbr>MEDIA_<wbr>TYPE</a></dt><dd>The media type a DER CRL is served as (RFC 5280 §4.2.1.13).</dd><dt><a class="constant" href="constant.DEFAULT_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS">DEFAULT_<wbr>CRL_<wbr>NEXT_<wbr>UPDATE_<wbr>SECS</a></dt><dd>Default interval between a list’s <code>thisUpdate</code> and its <code>nextUpdate</code>: one
-day. Env: <code>AXIAM__PKI__CRL_NEXT_UPDATE_SECS</code>.</dd><dt><a class="constant" href="constant.MAX_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS">MAX_<wbr>CRL_<wbr>NEXT_<wbr>UPDATE_<wbr>SECS</a></dt><dd>Longest accepted interval: seven days. Past it the list stops being a
+day. Env: <code>AXIAM__PKI__CRL_NEXT_UPDATE_SECS</code>.</dd><dt><a class="constant" href="constant.DEFAULT_CRL_PERMIT_WAIT.html" title="constant axiam_pki::crl::DEFAULT_CRL_PERMIT_WAIT">DEFAULT_<wbr>CRL_<wbr>PERMIT_<wbr>WAIT</a></dt><dd>How long a re-sign waits for a permit of the shared crypto semaphore before
+the route answers <code>503</code> (#607): five seconds, the default wait of the
+password-hash gate the semaphore also serves. It also bounds how long a
+request waits on a re-sign of the same CA’s list already in flight (#616).</dd><dt><a class="constant" href="constant.MAX_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::MAX_CRL_NEXT_UPDATE_SECS">MAX_<wbr>CRL_<wbr>NEXT_<wbr>UPDATE_<wbr>SECS</a></dt><dd>Longest accepted interval: seven days. Past it the list stops being a
 revocation channel anybody should rely on.</dd><dt><a class="constant" href="constant.MIN_CRL_NEXT_UPDATE_SECS.html" title="constant axiam_pki::crl::MIN_CRL_NEXT_UPDATE_SECS">MIN_<wbr>CRL_<wbr>NEXT_<wbr>UPDATE_<wbr>SECS</a></dt><dd>Shortest accepted interval: five minutes. Below it a relying party would
 spend more time fetching the list than trusting it.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.crl_path.html" title="fn axiam_pki::crl::crl_path">crl_<wbr>path</a></dt><dd>The route a CA’s list is published at, relative to the deployment’s public
 base URL.</dd><dt><a class="fn" href="fn.validate_next_update_secs.html" title="fn axiam_pki::crl::validate_next_update_secs">validate_<wbr>next_<wbr>update_<wbr>secs</a></dt><dd>Check an operator’s <code>nextUpdate</code> interval against

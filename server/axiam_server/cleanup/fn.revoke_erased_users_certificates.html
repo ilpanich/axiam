@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Revoke the still-active `User` certificates of an account the Art. 17 purge is erasing, and clear the free-form `metadata` of all its `User` certificates, returning how many were revoked (#533, R101W1-05) — the purge’s step (b4)."><title>revoke_erased_users_certificates in axiam_server::cleanup - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">revoke_erased_users_certificates</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_server/index.html">axiam_<wbr>server</a><span class="version">1.1.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>server::<wbr>cleanup</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_server</a>::<wbr><a href="index.html">cleanup</a></div><h1>Function <span class="fn">revoke_<wbr>erased_<wbr>users_<wbr>certificates</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_server/cleanup.rs.html#1508-1534">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn revoke_erased_users_certificates&lt;CR&gt;(
+    cert_repo: <a class="primitive" href="https://doc.rust-lang.org/1.99.1/std/primitive.reference.html">&amp;CR</a>,
+    user: &amp;<a class="struct" href="../../axiam_core/models/user/struct.User.html" title="struct axiam_core::models::user::User">User</a>,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.99.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.99.1/std/primitive.u64.html">u64</a>, <a class="enum" href="../../axiam_core/error/enum.AxiamError.html" title="enum axiam_core::error::AxiamError">AxiamError</a>&gt;<div class="where">where
+    CR: <a class="trait" href="../../axiam_core/repository/trait.CertificateRepository.html" title="trait axiam_core::repository::CertificateRepository">CertificateRepository</a>,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Revoke the still-active <code>User</code> certificates of an account the Art. 17 purge
+is erasing, and clear the free-form <code>metadata</code> of all its <code>User</code>
+certificates, returning how many were revoked (#533, R101W1-05) — the
+purge’s step (b4).</p>
+<p>Revoked, not deleted: each row carries <code>revoked_at</code>, so it stays on its
+issuer’s revocation list until it expires, and a <code>vault_pki</code> issuer’s list
+in Vault gets it from the cleanup job’s <code>vault_revocation</code> sweep. Deleting
+the row would make the certificate valid again to every relying party
+outside AXIAM — the retention <code>docs/compliance/gdpr-compliance.md</code> records
+for a deleted tenant’s certificates, here for one account’s.</p>
+<p>What the list does not need is cleared, as the tenant purge clears it:
+<code>metadata</code> is set to <code>{}</code> on every row that is the account’s, in any status
+(R101W1-05). What stays is the PEM, <code>subject</code>, <code>fingerprint</code>, the dates and
+<code>user_id</code>; the first three are what the list is computed from and what a
+relying party matches an entry against, and <code>user_id</code> is an internal random
+id of an account that is anonymized in place by the next step, so it names
+nobody once this purge has run — and it is the key a retried purge finds
+the rows by. The rows go when a certificate retention sweep
+(<a href="struct.CleanupTask.html" title="struct axiam_server::cleanup::CleanupTask"><code>CleanupTask</code></a>’s <code>certificate_retention</code>) finds them more than eight days
+past <code>notAfter</code>.</p>
+<p>Matches the binding (<code>certificate.user_id</code>, schema v98) and, for a row
+without one, the older convention on the account’s username and email —
+limited to certificates created since the account was and to names no other
+account of the tenant holds (R101W1-01), so a holder erasing their own
+account cannot revoke a namesake’s certificate — so it must run <strong>before</strong> <code>anonymize_user</code> overwrites them, which the purge
+does by calling it ahead of <a href="fn.run_erasure_pipeline_reporting.html" title="fn axiam_server::cleanup::run_erasure_pipeline_reporting"><code>run_erasure_pipeline_reporting</code></a>. The
+revocation comes first and the clearing second: <code>metadata.user_id</code> is one of
+the things the convention reads. Fatal there (<code>?</code>), like the credential
+deletions beside it: the account stays due and the next sweep retries, with
+its names in place; both writes are idempotent.</p>
+<p>A free function, and public, for the reason <a href="fn.run_erasure_pipeline.html" title="fn axiam_server::cleanup::run_erasure_pipeline"><code>run_erasure_pipeline</code></a> is.</p>
+</div></details></section></div></main></body></html>

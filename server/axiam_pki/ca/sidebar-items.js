@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_CA_VALIDITY_DAYS"],"struct":["CaService"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_CA_VALIDITY_DAYS"],"struct":["CaService","TenantCasRevoked"]};

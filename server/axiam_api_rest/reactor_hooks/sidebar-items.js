@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["grant_pre_assign","user_pre_create","user_pre_update"]};
+window.SIDEBAR_ITEMS = {"fn":["grant_pre_assign","network_pre_profile_write","network_pre_segment_write","user_pre_create","user_pre_update"]};

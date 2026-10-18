@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["create","delete","get","list","unlock","update"],"struct":["CreateUserRequest","UpdateUserRequest","UserResponse"]};
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_USER_CERTIFICATES_REVOKED"],"fn":["create","delete","get","list","unlock","update"],"struct":["CreateUserRequest","UpdateUserRequest","UserResponse"]};

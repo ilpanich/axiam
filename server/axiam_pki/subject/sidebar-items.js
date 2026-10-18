@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["subject_common_name"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_COMMON_NAME_CHARS"],"fn":["subject_common_name"]};

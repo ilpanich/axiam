@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_DECISION_ALLOWED","AUDIT_DECISION_DENIED","AUDIT_DECISION_REFUSED","AUDIT_PROFILE_INVALID","BUCKET","CERTIFICATE_BOUND_REFUSAL"],"fn":["bucket_key","decide","json_config"],"struct":["CertificateBoundServiceAccount","NetworkDecisionRequest","NetworkDecisionResponse"]};

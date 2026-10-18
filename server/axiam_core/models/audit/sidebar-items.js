@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["ActorType","AuditOutcome"],"struct":["AuditLogEntry","CreateAuditLogEntry"]};
+window.SIDEBAR_ITEMS = {"constant":["RESERVED_ACTION_NAMESPACES"],"enum":["ActorType","AuditOutcome"],"fn":["reserved_action_namespace"],"struct":["AuditLogEntry","CreateAuditLogEntry"]};

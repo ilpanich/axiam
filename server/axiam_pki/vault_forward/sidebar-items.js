@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BACKOFF_BASE","BACKOFF_CAP","CLAIM_LEASE","FAILING_AFTER_ATTEMPTS","MAX_REASON_CHARS"],"fn":["backoff","sanitise_reason"]};

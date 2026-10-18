@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AxiamApiError"]};
+window.SIDEBAR_ITEMS = {"fn":["unprocessable_entity"],"struct":["AxiamApiError"]};

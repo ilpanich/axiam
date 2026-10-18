@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SERIAL_LEN"],"fn":["certificate_serial_hex"]};

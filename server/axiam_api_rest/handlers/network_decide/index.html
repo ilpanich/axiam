@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS D4, W6.4; `claude_dev/radius-reply-profile-design.md` §4.3, §6.3, §7, §8; threat T-468)."><title>axiam_api_rest::handlers::network_decide - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module network_decide</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module network_<wbr>decide</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-caller-t-468" title="The caller (T-468)">The caller (T-468)</a></li><li><a href="#the-decision-43-at-one-cost-t-457" title="The decision (§4.3), at one cost (T-457)">The decision (§4.3), at one cost (T-457)</a></li><li><a href="#what-is-never-on-the-wire-and-never-in-the-row" title="What is never on the wire, and never in the row">What is never on the wire, and never in the row</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>handlers</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">handlers</a></div><h1>Module <span>network_<wbr>decide</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/handlers/network_decide.rs.html#1-826">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>POST /api/v1/network/decide</code> — the RADIUS placement decision (RADIUS D4,
+W6.4; <code>claude_dev/radius-reply-profile-design.md</code> §4.3, §6.3, §7, §8; threat
+T-468).</p>
+<p>FreeRADIUS’s <code>rlm_rest</code>, in <code>post-auth</code> after EAP-TLS succeeded, posts the
+presented certificate (or its fingerprint) and the <strong>site key from its own
+client configuration</strong>; AXIAM answers <code>{ "allow": false }</code> with <strong>no
+reason</strong>, or <code>{ "allow": true, "reply": … }</code> with the attributes of the
+segment the device is placed on, rendered from its typed reply profile.</p>
+<h2 id="the-caller-t-468"><a class="doc-anchor" href="#the-caller-t-468">§</a>The caller (T-468)</h2>
+<p>An authenticated oracle on “is this certificate good here”, so its caller is
+held to more than an ordinary machine route’s:</p>
+<ul>
+<li>a <strong>service account</strong> (<code>aud = axiam:m2m</code>, <code>sub_kind = service_account</code>);
+a user’s token, an OAuth2 client’s and a user token narrowed to the machine
+audience are <code>401</code>;</li>
+<li>its token <strong>bound to its own certificate</strong>: <code>cnf.x5t#S256</code> present (a
+plain bearer token, or one bound only by DPoP, is <code>401</code>), presented over a
+connection whose TLS-verified client certificate is that one (the
+extractor’s sender-constraint check), and that certificate resolves —
+through <a href="../../../axiam_pki/mtls/struct.DeviceAuthService.html#method.authenticate_der" title="method axiam_pki::mtls::DeviceAuthService::authenticate_der"><code>DeviceAuthService::authenticate_der</code></a>,
+now, so a revoked caller certificate stops at the next request — to <strong>this</strong>
+service account in this tenant, which is <code>Active</code>;</li>
+<li>holding <code>network:decide</code> on every site node the decision reads (§4.2: “a
+site”), so a FreeRADIUS credential for HQ answers nothing about a branch
+office: <code>403</code>, audited;</li>
+<li>metered per <strong>caller</strong> (<code>network_decide_per_min</code>, D-6), not per address.</li>
+</ul>
+<p>The <code>network</code> permission family stays human-only
+(<a href="../../permissions/constant.HUMAN_ONLY_FAMILIES.html" title="constant axiam_api_rest::permissions::HUMAN_ONLY_FAMILIES"><code>HUMAN_ONLY_FAMILIES</code></a>); this one
+route is the named exception,
+<a href="../../permissions/constant.CERTIFICATE_BOUND_MACHINE_ROUTES.html" title="constant axiam_api_rest::permissions::CERTIFICATE_BOUND_MACHINE_ROUTES"><code>CERTIFICATE_BOUND_MACHINE_ROUTES</code></a>.</p>
+<h2 id="the-decision-43-at-one-cost-t-457"><a class="doc-anchor" href="#the-decision-43-at-one-cost-t-457">§</a>The decision (§4.3), at one cost (T-457)</h2>
+<p>Every request that gets past the caller’s checks runs the same steps, in the
+same order, whatever the certificate turns out to be:</p>
+<ol>
+<li>the certificate row by fingerprint (global), then <code>authenticate_der</code>;
+<strong>another tenant’s certificate is refused</strong> (§7), with the reject every
+other failure gets;</li>
+<li>the subject’s account (the device’s service account, or — when no
+certificate of this tenant resolved — the caller’s own, as a decoy of the
+same shape) — <code>Active</code> or no placement;</li>
+<li>the site’s segments, their stored profiles and the tenant’s cap, each one
+query; every profile is re-validated and rendered (§3.4), and a profile
+that no longer validates makes its segment no candidate and is audited once
+per window;</li>
+<li><strong>one</strong> <code>check_access_batch</code> of <code>network:join</code> over every enabled segment of
+the site, for the subject (the decoy included), through the decision cache,
+deny-override in force — which is what makes quarantine by deny work (§4.4);</li>
+<li>the lowest-ranked <code>access</code> candidate, else a <code>quarantine</code> one, else none;</li>
+<li>one audit row (T-463, §8), and the answer.</li>
+</ol>
+<p>“No candidate”, “another tenant’s certificate”, “an inactive account” and a
+placement therefore cost the same reads and the same batch; only the answer
+differs. What <code>authenticate_der</code> itself does differs by its own early
+refusals (an unknown or revoked certificate stops before the chain is
+verified) — a residual recorded for the threat model, not hidden.</p>
+<h2 id="what-is-never-on-the-wire-and-never-in-the-row"><a class="doc-anchor" href="#what-is-never-on-the-wire-and-never-in-the-row">§</a>What is never on the wire, and never in the row</h2>
+<p>The deny carries no reason. The audit row carries the internal reason, the
+site, the certificate’s SHA-256 fingerprint, and — for a certificate of this
+tenant — its id and the service account it is bound to; <strong>never</strong> the
+certificate’s subject or alternative names, and the request accepts no
+<code>Calling-Station-Id</code> or <code>User-Name</code> (an unknown key is a <code>400</code>), so none can
+reach the trail (§8, T-464). A certificate of another tenant is recorded by
+its fingerprint alone: the caller’s tenant learns nothing about the other’s.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CertificateBoundServiceAccount.html" title="struct axiam_api_rest::handlers::network_decide::CertificateBoundServiceAccount">Certificate<wbr>Bound<wbr>Service<wbr>Account</a></dt><dd>A service-account caller whose token is bound to a certificate this
+connection presented — the synchronous half of T-468’s caller binding, run as
+an extractor so that it answers before the body is read: a plain bearer
+token is <code>401</code> whatever it posts.</dd><dt><a class="struct" href="struct.NetworkDecisionRequest.html" title="struct axiam_api_rest::handlers::network_decide::NetworkDecisionRequest">Network<wbr>Decision<wbr>Request</a></dt><dd>The body of <code>POST /api/v1/network/decide</code>. Closed: an unknown key — a MAC
+address, a user name — is a <code>400</code> naming it, so nothing the design note’s
+§8 keeps out of the audit trail can be posted into it.</dd><dt><a class="struct" href="struct.NetworkDecisionResponse.html" title="struct axiam_api_rest::handlers::network_decide::NetworkDecisionResponse">Network<wbr>Decision<wbr>Response</a></dt><dd>The decision: <code>{ "allow": false }</code> with <strong>no reason</strong>, or
+<code>{ "allow": true, "reply": … }</code>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.AUDIT_DECISION_ALLOWED.html" title="constant axiam_api_rest::handlers::network_decide::AUDIT_DECISION_ALLOWED">AUDIT_<wbr>DECISION_<wbr>ALLOWED</a></dt><dd>Audit action: a decision placed a device.</dd><dt><a class="constant" href="constant.AUDIT_DECISION_DENIED.html" title="constant axiam_api_rest::handlers::network_decide::AUDIT_DECISION_DENIED">AUDIT_<wbr>DECISION_<wbr>DENIED</a></dt><dd>Audit action: a decision refused a device (no placement).</dd><dt><a class="constant" href="constant.AUDIT_DECISION_REFUSED.html" title="constant axiam_api_rest::handlers::network_decide::AUDIT_DECISION_REFUSED">AUDIT_<wbr>DECISION_<wbr>REFUSED</a></dt><dd>Audit action: a caller without <code>network:decide</code> on the site asked.</dd><dt><a class="constant" href="constant.AUDIT_PROFILE_INVALID.html" title="constant axiam_api_rest::handlers::network_decide::AUDIT_PROFILE_INVALID">AUDIT_<wbr>PROFILE_<wbr>INVALID</a></dt><dd>Audit action: a stored reply profile no longer validates (design note §3.4,
+§5.4); one row per profile per window.</dd><dt><a class="constant" href="constant.BUCKET.html" title="constant axiam_api_rest::handlers::network_decide::BUCKET">BUCKET</a></dt><dd>The shared-counter bucket name of the route (D-6).</dd><dt><a class="constant" href="constant.CERTIFICATE_BOUND_REFUSAL.html" title="constant axiam_api_rest::handlers::network_decide::CERTIFICATE_BOUND_REFUSAL">CERTIFICATE_<wbr>BOUND_<wbr>REFUSAL</a></dt><dd>The 401 a token that is not bound to its own certificate gets.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.bucket_key.html" title="fn axiam_api_rest::handlers::network_decide::bucket_key">bucket_<wbr>key</a></dt><dd>The caller’s bucket in the shared counter.</dd><dt><a class="fn" href="fn.decide.html" title="fn axiam_api_rest::handlers::network_decide::decide">decide</a></dt><dd><code>POST /api/v1/network/decide</code></dd><dt><a class="fn" href="fn.json_config.html" title="fn axiam_api_rest::handlers::network_decide::json_config">json_<wbr>config</a></dt><dd>The JSON extractor of the route: a body limit and a <code>400</code> that names the
+offending key.</dd></dl></section></div></main></body></html>

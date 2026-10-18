@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["applies_to","apply_to_client","ceiling_for","narrow","unwired"],"struct":["UnwiredScopePolicy"],"trait":["ExternalClientScopePolicy"],"type":["SharedScopePolicy"]};

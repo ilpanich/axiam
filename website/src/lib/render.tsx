@@ -8,6 +8,10 @@ const inlineCodeStyle = {
   border: "1px solid rgba(0,212,255,.14)",
   borderRadius: 5,
   padding: "1px 5px",
+  // A long identifier (an environment variable, a route) has no break
+  // opportunity of its own and would widen a phone-width page; break it only
+  // where it would otherwise overflow.
+  overflowWrap: "anywhere",
 } as const;
 
 /**
@@ -15,19 +19,37 @@ const inlineCodeStyle = {
  * `**double-asterisk**` spans into bold, `*single-asterisk*` spans into
  * italics and `[label](#/docs/slug)` into a link. Code wins: asterisks and
  * brackets inside a backtick span are left alone, so a code sample never gets
- * reinterpreted as markup.
+ * reinterpreted as markup. A link's label may itself hold code
+ * (``[`fapi-conformance.yml`](…)``): the scan below matches code spans and
+ * links together, leftmost first, so a backtick inside a label no longer cuts
+ * the link in two and leaves its URL on the page as text.
  */
 export function renderInline(text: string): ReactNode {
-  const parts = text.split("`");
-  return parts.map((part, i) =>
-    i % 2 === 1 ? (
-      <code key={i} style={inlineCodeStyle}>
-        {part}
-      </code>
-    ) : (
-      <Fragment key={i}>{renderLinks(part)}</Fragment>
-    ),
-  );
+  const tokens: ReactNode[] = [];
+  const re = /`([^`]*)`|\[((?:[^\]`]|`[^`]*`)+)\]\(([^)\s]+)\)/g;
+  let last = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      tokens.push(<Fragment key={key++}>{renderBold(text.slice(last, match.index))}</Fragment>);
+    }
+    const [whole, code, label, href] = match;
+    tokens.push(
+      whole.startsWith("`") ? (
+        <code key={key++} style={inlineCodeStyle}>
+          {code}
+        </code>
+      ) : (
+        renderLink(label, href, key++)
+      ),
+    );
+    last = match.index + whole.length;
+  }
+  if (last < text.length) {
+    tokens.push(<Fragment key={key++}>{renderBold(text.slice(last))}</Fragment>);
+  }
+  return tokens;
 }
 
 const linkStyle = {
@@ -45,38 +67,18 @@ const linkStyle = {
  * middle-clickable, and can be copied out of the page — none of which is true
  * of a `<span onClick>`. External links are opened in a new tab.
  */
-function renderLinks(text: string): ReactNode {
-  if (!text.includes("](")) return renderBold(text);
-
-  const tokens: ReactNode[] = [];
-  const re = /\[([^\]]+)\]\(([^)]+)\)/g;
-  let last = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-  while ((match = re.exec(text)) !== null) {
-    if (match.index > last) {
-      tokens.push(
-        <Fragment key={key++}>{renderBold(text.slice(last, match.index))}</Fragment>,
-      );
-    }
-    const [, label, href] = match;
-    const external = /^https?:/.test(href);
-    tokens.push(
-      <a
-        key={key++}
-        href={href}
-        style={linkStyle}
-        {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
-      >
-        {renderBold(label)}
-      </a>,
-    );
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) {
-    tokens.push(<Fragment key={key++}>{renderBold(text.slice(last))}</Fragment>);
-  }
-  return tokens;
+function renderLink(label: string, href: string, key: number): ReactNode {
+  const external = /^https?:/.test(href);
+  return (
+    <a
+      key={key}
+      href={href}
+      style={linkStyle}
+      {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
+    >
+      {renderInline(label)}
+    </a>
+  );
 }
 
 function renderBold(text: string): ReactNode {

@@ -304,6 +304,19 @@ code {
   top: 90px;
   font-size: 13px;
 }
+/* A sticky column taller than the viewport only moves with the page, so its
+   lower entries are reachable only by scrolling the article to its end. Cap
+   each side column at the viewport below the header and let it scroll on its
+   own; `contain` keeps reaching its end from scrolling the article instead. */
+.ax-docs-side,
+.ax-docs-toc,
+.ax-sec-side {
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 212, 255, 0.25) transparent;
+}
 
 /* ---- Security section ---------------------------------------------------- */
 
@@ -419,6 +432,8 @@ code {
   .ax-docs-side {
     position: static;
     top: auto;
+    max-height: none;
+    overflow-y: visible;
     display: flex;
     flex-wrap: wrap;
     gap: 4px 2px;
@@ -442,6 +457,8 @@ code {
   .ax-sec-side {
     position: static;
     top: auto;
+    max-height: none;
+    overflow-y: visible;
     display: flex;
     flex-wrap: wrap;
     gap: 4px 2px;

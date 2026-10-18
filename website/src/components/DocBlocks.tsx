@@ -150,7 +150,7 @@ function Callout({
       <span style={{ color: styles.iconColor, fontSize: 18, lineHeight: 1 }}>
         {styles.icon}
       </span>
-      <p style={{ margin: 0, fontSize: 14, color: "#cbd5e1", lineHeight: 1.6 }}>
+      <p style={{ margin: 0, minWidth: 0, fontSize: 14, color: "#cbd5e1", lineHeight: 1.6 }}>
         {renderInline(text)}
       </p>
     </div>

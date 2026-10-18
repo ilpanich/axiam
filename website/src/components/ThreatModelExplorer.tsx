@@ -710,12 +710,22 @@ function ThreatCard({
           color={STATUS_COLOR[threat.status] ?? SLATE}
         />
       </div>
-      <p style={{ margin: "0 0 8px", fontSize: 13.5, color: "#cbd5e1", lineHeight: 1.6 }}>
+      <p
+        style={{
+          margin: "0 0 8px",
+          fontSize: 13.5,
+          color: "#cbd5e1",
+          lineHeight: 1.6,
+          overflowWrap: "anywhere",
+        }}
+      >
         {threat.description}
       </p>
       {/* `pre-line`: a few mitigations are written as several paragraphs in the
           model and carry the blank lines to prove it; without this they render
-          as one wall of text. */}
+          as one wall of text. `anywhere`: a mitigation names test paths
+          (`crates/…/tests/x.rs::a_long_test_name`) that have no break
+          opportunity and would otherwise widen a phone-width page. */}
       <p
         style={{
           margin: 0,
@@ -723,6 +733,7 @@ function ThreatCard({
           color: "#94a3b8",
           lineHeight: 1.6,
           whiteSpace: "pre-line",
+          overflowWrap: "anywhere",
         }}
       >
         <span

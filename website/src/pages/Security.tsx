@@ -1,9 +1,10 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type { Page } from "../types";
 import { SEC_GROUPS, SEC_SECTIONS } from "../security";
 import { SECURITY_VERIFIED_DATE, SECURITY_VERIFIED_RELEASE } from "../version";
 import { THREAT_MODEL_SUMMARY } from "../threatModelSummary";
 import Block from "../components/DocBlocks";
+import { useKeepActiveInView } from "../lib/keepActiveInView";
 
 /**
  * The Security section — AXIAM's public threat-modeling and security write-up.
@@ -65,6 +66,8 @@ const SECTION_IDS = SEC_SECTIONS.map((s) => s.id);
 
 export default function Security({ go }: SecurityProps) {
   const active = useActiveSection(SECTION_IDS);
+  const sideRef = useRef<HTMLElement>(null);
+  useKeepActiveInView(sideRef, active);
 
   return (
     <div>
@@ -143,7 +146,7 @@ export default function Security({ go }: SecurityProps) {
 
       {/* Section index + document */}
       <div className="ax-sec">
-        <aside className="ax-sec-side">
+        <aside className="ax-sec-side" ref={sideRef}>
           {SEC_GROUPS.map((group, gi) => (
             <div key={group.label}>
               <div

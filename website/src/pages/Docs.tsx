@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Page } from "../types";
 import {
   DOC_SECTIONS,
@@ -11,6 +11,7 @@ import {
 } from "../docs";
 import { renderInline } from "../lib/render";
 import Block from "../components/DocBlocks";
+import { useKeepActiveInView } from "../lib/keepActiveInView";
 
 interface DocsProps {
   go: (page: Page) => void;
@@ -118,6 +119,8 @@ function search(query: string): SearchEntry[] {
 export default function Docs({ go }: DocsProps) {
   const [slug, setSlug] = useState<string>(() => docSlugFromHash() ?? DEFAULT_SLUG);
   const [query, setQuery] = useState("");
+  const sideRef = useRef<HTMLElement>(null);
+  useKeepActiveInView(sideRef, slug);
 
   // Keep the view in step with the browser's back/forward buttons.
   useEffect(() => {
@@ -170,7 +173,7 @@ export default function Docs({ go }: DocsProps) {
   return (
     <div className="ax-docs">
       {/* Left nav */}
-      <aside className="ax-docs-side">
+      <aside className="ax-docs-side" ref={sideRef}>
         <div style={{ margin: "0 0 18px", padding: "0 12px" }}>
           <input
             type="search"

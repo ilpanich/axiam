@@ -371,7 +371,7 @@ export default function Docs({ go }: DocsProps) {
                 : {}),
             }}
           >
-            {h.text}
+            {renderInline(h.text)}
           </a>
         ))}
       </aside>

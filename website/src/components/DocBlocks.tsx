@@ -35,7 +35,7 @@ function CodeBlock({ block }: { block: Extract<DocBlock, { type: "code" }> }) {
             color: "#94a3b8",
           }}
         >
-          {block.caption}
+          {renderInline(block.caption)}
         </div>
       )}
       <pre
@@ -86,7 +86,7 @@ function Table({ block }: { block: Extract<DocBlock, { type: "table" }> }) {
                   whiteSpace: "nowrap",
                 }}
               >
-                {h}
+                {renderInline(h)}
               </th>
             ))}
           </tr>
@@ -370,7 +370,7 @@ function CodeGroup({ block }: { block: Extract<DocBlock, { type: "codegroup" }> 
               color: "#64748b",
             }}
           >
-            {block.caption}
+            {renderInline(block.caption)}
           </span>
         )}
       </div>
@@ -401,7 +401,7 @@ export default function Block({
     case "h":
       return (
         <h2 id={block.id} style={headingStyle}>
-          {block.text}
+          {renderInline(block.text)}
         </h2>
       );
     case "p":
@@ -477,8 +477,8 @@ export default function Block({
                 go(c.to);
               }}
             >
-              <div style={{ fontWeight: 700, marginBottom: 4 }}>{c.title}</div>
-              <div style={{ fontSize: 13, color: "#94a3b8" }}>{c.body}</div>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>{renderInline(c.title)}</div>
+              <div style={{ fontSize: 13, color: "#94a3b8" }}>{renderInline(c.body)}</div>
             </div>
           ))}
         </div>

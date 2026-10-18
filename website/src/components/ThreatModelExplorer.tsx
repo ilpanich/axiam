@@ -7,6 +7,7 @@ import {
   elementHash,
   threatHash,
 } from "../securityLinks";
+import { renderInline } from "../lib/render";
 
 /**
  * Interactive browser for the OWASP Threat Dragon model.
@@ -698,7 +699,7 @@ function ThreatCard({
       >
         <ThreatAnchor diagramId={diagramId} number={threat.number} />
         <span style={{ fontWeight: 700, fontSize: 14.5, color: "#e2e8f0" }}>
-          {threat.title}
+          {renderInline(threat.title)}
         </span>
         <Chip text={threat.type} color={PURPLE} />
         <Chip
@@ -719,7 +720,7 @@ function ThreatCard({
           overflowWrap: "anywhere",
         }}
       >
-        {threat.description}
+        {renderInline(threat.description)}
       </p>
       {/* `pre-line`: a few mitigations are written as several paragraphs in the
           model and carry the blank lines to prove it; without this they render
@@ -748,7 +749,7 @@ function ThreatCard({
               ? "Residual risk · "
               : "Required of a build · "}
         </span>
-        {threat.mitigation}
+        {renderInline(threat.mitigation)}
       </p>
     </div>
   );

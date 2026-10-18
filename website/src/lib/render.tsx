@@ -95,12 +95,31 @@ function renderBold(text: string): ReactNode {
   );
 }
 
+/**
+ * `*emphasis*`, but only where an asterisk reads as markup: an opening one
+ * after a space, punctuation or the start and before a non-space, a closing
+ * one after a non-space and before a space, punctuation or the end. Prose
+ * from the threat model names `/api/v1/*`, `v* tags` and "the * wildcard",
+ * and a bare split on `*` turned the text between two such paths italic.
+ */
+const ITALIC = /(^|[\s(\[{"'“‘—–-])\*(?=\S)([^*]*?\S)\*(?=$|[\s.,;:!?)\]}"'”’—–-])/g;
+
 function renderItalic(text: string): ReactNode {
   if (!text.includes("*")) return text;
-  const parts = text.split("*");
-  return parts.map((part, i) =>
-    i % 2 === 1 ? <em key={i}>{part}</em> : <Fragment key={i}>{part}</Fragment>,
-  );
+  const tokens: ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  ITALIC.lastIndex = 0;
+  while ((match = ITALIC.exec(text)) !== null) {
+    const [whole, lead, inner] = match;
+    tokens.push(<Fragment key={key++}>{text.slice(last, match.index) + lead}</Fragment>);
+    tokens.push(<em key={key++}>{inner}</em>);
+    last = match.index + whole.length;
+  }
+  if (last === 0) return text;
+  tokens.push(<Fragment key={key++}>{text.slice(last)}</Fragment>);
+  return tokens;
 }
 
 const KEYWORDS = new Set([

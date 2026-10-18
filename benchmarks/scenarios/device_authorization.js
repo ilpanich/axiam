@@ -13,11 +13,12 @@
 // and the gRPC-family scenarios — this is a limiter scenario first and is
 // never published as a head-to-head throughput number.
 //
-// Deliberately unauthenticated and stateless per call: RFC 8628 §3.1 requires
-// no client secret (this is the public-client half of the flow — "a
-// television cannot keep a secret"), and every well-formed request allocates
-// a *new* pending device grant and returns 200, so a single scenario body can
-// flood the endpoint indefinitely without any setup()-minted credential.
+// Stateless per call: every well-formed request allocates a *new* pending
+// device grant and returns 200, so a single scenario body can flood the
+// endpoint indefinitely without any setup()-minted credential. RFC 8628 §3.1's
+// "no client authentication" holds for public clients only; the seeded bench
+// client is confidential, so it sends its secret (#635) — without it every
+// request is a 401 invalid_client.
 import { cfg, baseUrl, loadStages, thresholds, tlsOptions, requireSeed } from './lib/config.js';
 import { doOp } from './lib/metrics.js';
 
@@ -48,7 +49,8 @@ export default function () {
   doOp({
     method: 'POST',
     url: `${baseUrl()}/oauth2/device_authorization?tenant_id=${cfg.tenantId}`,
-    body: formBody({ client_id: cfg.clientId, scope: 'openid' }),
+    // `formBody` drops an empty secret.
+    body: formBody({ client_id: cfg.clientId, client_secret: cfg.clientSecret, scope: 'openid' }),
     params: { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
     expect: 200,
   });

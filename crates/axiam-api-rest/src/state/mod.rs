@@ -202,8 +202,6 @@ pub type TokenServiceT<C> = TokenService<
 /// The REST layer keeps the seam at a single `match` arm on `grant_type`.
 pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
     SurrealDeviceGrantRepository<C>,
-    SurrealOAuth2ClientRepository<C>,
-    SurrealTenantRepository<C>,
     SurrealRefreshTokenRepository<C>,
     SurrealUserRepository<C>,
 >;
@@ -393,6 +391,11 @@ pub struct AppState<C: Connection + Clone> {
     /// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything. One per
     /// process, like the counter. See [`crate::ciba_list_limiter`].
     pub ciba_list_limiter: Arc<crate::ciba_list_limiter::CibaListLimiter>,
+    /// RADIUS D4 (W6.4): the decision route's per-caller limiter (spent when
+    /// the shared counter is off) and its one-row-per-window record of
+    /// defective reply profiles. One per process. See
+    /// [`crate::network_decide_guard`].
+    pub network_decide: Arc<crate::network_decide_guard::NetworkDecideGuards>,
     /// B3: the token endpoint serves every grant behind one route, so a
     /// per-grant limit cannot be route middleware — the grant is not knowable
     /// until the body has been read. The exchange arm reads its ceiling from
@@ -592,6 +595,10 @@ impl<C: Connection + Clone> AppState<C> {
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
+        // #654: the SAML verifiers' wait for that semaphore is Argon2id's. Only
+        // the SAML service reads it, so the binding is gated like its consumer.
+        #[cfg(feature = "saml")]
+        let hash_acquire_timeout_secs = auth_config.hash_acquire_timeout_secs;
         let pki_config = axiam_pki::PkiConfig {
             encryption_key: None,
             ..Default::default()
@@ -804,8 +811,6 @@ impl<C: Connection + Clone> AppState<C> {
         ));
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
-            oauth2_client_repo.clone(),
-            tenant_repo.clone(),
             refresh_token_repo.clone(),
             user_repo.clone(),
             auth_config.clone(),
@@ -884,6 +889,7 @@ impl<C: Connection + Clone> AppState<C> {
             // `flush_once()` itself.
             rate_limit_cfg: crate::config::rate_limit::RateLimitConfig::default(),
             ciba_list_limiter: Arc::new(Default::default()),
+            network_decide: Arc::new(Default::default()),
             shared_rate_limit: SharedRateLimitCounter::from_env(Arc::new(
                 SurrealRateLimitBucketRepository::new(db.clone()),
             )),
@@ -977,7 +983,10 @@ impl<C: Connection + Clone> AppState<C> {
                     assertion_replay_repo,
                     reqwest::Client::new(),
                 )
-                .with_crypto_semaphore(Arc::clone(&crypto_semaphore)),
+                .with_crypto_gate(axiam_federation::saml_gate::CryptoGate::new(
+                    Arc::clone(&crypto_semaphore),
+                    std::time::Duration::from_secs(hash_acquire_timeout_secs),
+                )),
             },
             // No encryption key in a test harness: the feature is then
             // unavailable, exactly as on a deployment without one, and a test

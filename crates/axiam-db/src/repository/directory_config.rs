@@ -30,7 +30,10 @@ use zeroize::Zeroizing;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{classify_write_error, parse_uuid, take_first_or_not_found};
+use crate::helpers::{
+    TxFail, classify_write_error, parse_uuid, retry_on_write_conflict, take_first_or_not_found,
+};
+use crate::repository::opaque_directory::{self, OpaqueDirectoryClaim};
 
 /// The key version written today. The column exists so a future rotation can
 /// tell which key sealed a row; `email_config` writes the same constant.
@@ -45,7 +48,7 @@ const PUBLIC_COLUMNS: &str = "meta::id(id) AS record_id, tenant_id, enabled, kin
     jit_provisioning, trust_anchors_pem, created_at, updated_at";
 
 /// One stored row of the group-mapping table (v74).
-#[derive(Debug, SurrealValue)]
+#[derive(Debug, Clone, SurrealValue)]
 struct GroupMappingRow {
     directory_group_dn: String,
     group_id: String,
@@ -279,8 +282,39 @@ fn seal(key: &[u8; 32], secret: &str) -> AxiamResult<(String, String)> {
         .map_err(|_| AxiamError::Crypto("the directory bind secret could not be encrypted".into()))
 }
 
-impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigRepository<C> {
-    async fn create(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
+/// The sealed secret a write stores: `(nonce_b64, ciphertext_b64)`.
+type Sealed = (String, String);
+
+impl<C: Connection> SurrealDirectoryConfigRepository<C> {
+    /// [`DirectoryConfigRepository::create`] under the tenant's opaque/directory
+    /// claim (item 10 of the 1.1.0 atomicity audit;
+    /// `repository/opaque_directory.rs`): the create and the claim's compare
+    /// are one transaction, and `Conflict` when the tenant's epoch moved since
+    /// the claim was read — a settings write made `opaque_mode` `required`
+    /// after the caller read the settings it decided on.
+    pub async fn create_claimed(
+        &self,
+        input: NewDirectoryConfig,
+        claim: OpaqueDirectoryClaim,
+    ) -> AxiamResult<DirectoryConfig> {
+        self.create_inner(input, Some(claim)).await
+    }
+
+    /// [`DirectoryConfigRepository::update`] under the tenant's claim, as
+    /// [`Self::create_claimed`].
+    pub async fn update_claimed(
+        &self,
+        input: NewDirectoryConfig,
+        claim: OpaqueDirectoryClaim,
+    ) -> AxiamResult<DirectoryConfig> {
+        self.update_inner(input, Some(claim)).await
+    }
+
+    async fn create_inner(
+        &self,
+        input: NewDirectoryConfig,
+        claim: Option<OpaqueDirectoryClaim>,
+    ) -> AxiamResult<DirectoryConfig> {
         let key = self.key_for_write()?;
         let secret = input
             .bind_secret
@@ -289,25 +323,43 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                 message: "a directory configuration requires a bind secret when it is created"
                     .into(),
             })?;
-        let (nonce, ciphertext) = seal(key, secret)?;
+        let sealed = seal(key, secret)?;
         self.check_group_mappings(input.tenant_id, &input.group_mappings)
             .await?;
-        let mapping_rows: Vec<GroupMappingRow> = input
-            .group_mappings
-            .iter()
-            .map(|m| GroupMappingRow {
-                directory_group_dn: m.directory_group_dn.clone(),
-                group_id: m.group_id.to_string(),
-            })
-            .collect();
+        let mapping_rows = mapping_rows(&input.group_mappings);
+        let interval = sync_interval(&input)?;
 
         let id = new_id();
         let tenant_id = input.tenant_id;
-        let result = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('directory_config', $id) SET \
+        // A conflicted attempt committed nothing, so the replay cannot create
+        // twice; the unique index on `tenant_id` is what makes a second create
+        // for the same tenant an `AlreadyExists` rather than a second
+        // configuration.
+        retry_on_write_conflict(|| {
+            self.create_tx(id, &input, &sealed, mapping_rows.clone(), interval, claim)
+        })
+        .await
+        .map_err(AxiamError::from)?;
+
+        let created = self.fetch_public(tenant_id).await?;
+        Ok(take_first_or_not_found(
+            created.into_iter().collect(),
+            "directory_config",
+            &tenant_id.to_string(),
+        )?)
+    }
+
+    /// One attempt at the create, opened by the claim when there is one.
+    async fn create_tx(
+        &self,
+        id: Uuid,
+        input: &NewDirectoryConfig,
+        sealed: &Sealed,
+        mapping_rows: Vec<GroupMappingRow>,
+        interval: i64,
+        claim: Option<OpaqueDirectoryClaim>,
+    ) -> Result<(), TxFail> {
+        let create = "CREATE type::record('directory_config', $id) SET \
                  tenant_id = $tenant_id, enabled = $enabled, kind = $kind, \
                  url = $url, start_tls = $start_tls, bind_dn = $bind_dn, \
                  bind_secret_ciphertext = $ciphertext, bind_secret_nonce = $nonce, \
@@ -322,54 +374,57 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                  sync_interval_secs = $sync_interval_secs, \
                  jit_provisioning = $jit_provisioning, \
                  trust_anchors_pem = $trust_anchors_pem, \
-                 created_at = time::now(), updated_at = time::now()",
-            )
+                 created_at = time::now(), updated_at = time::now()";
+        let query = claimed_query(create, claim);
+        let (nonce, ciphertext) = sealed.clone();
+        let db = self.db.current();
+        let mut q = db
+            .query(query)
             .bind(("id", id.to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("enabled", input.enabled))
             .bind(("kind", input.kind.as_str().to_string()))
-            .bind(("url", input.url))
+            .bind(("url", input.url.clone()))
             .bind(("start_tls", input.start_tls))
-            .bind(("bind_dn", input.bind_dn))
+            .bind(("bind_dn", input.bind_dn.clone()))
             .bind(("ciphertext", ciphertext))
             .bind(("nonce", nonce))
             .bind(("key_version", SECRET_KEY_VERSION))
-            .bind(("base_dn", input.base_dn))
-            .bind(("user_filter", input.user_filter))
-            .bind(("attr_username", input.user_attribute_map.username))
-            .bind(("attr_email", input.user_attribute_map.email))
-            .bind(("attr_display_name", input.user_attribute_map.display_name))
-            .bind(("attr_external_id", input.user_attribute_map.external_id))
-            .bind(("group_base_dn", input.group_base_dn))
-            .bind(("group_filter", input.group_filter))
-            .bind(("group_member_attribute", input.group_member_attribute))
+            .bind(("base_dn", input.base_dn.clone()))
+            .bind(("user_filter", input.user_filter.clone()))
+            .bind(("attr_username", input.user_attribute_map.username.clone()))
+            .bind(("attr_email", input.user_attribute_map.email.clone()))
+            .bind((
+                "attr_display_name",
+                input.user_attribute_map.display_name.clone(),
+            ))
+            .bind((
+                "attr_external_id",
+                input.user_attribute_map.external_id.clone(),
+            ))
+            .bind(("group_base_dn", input.group_base_dn.clone()))
+            .bind(("group_filter", input.group_filter.clone()))
+            .bind((
+                "group_member_attribute",
+                input.group_member_attribute.clone(),
+            ))
             .bind(("group_nesting_depth", i64::from(input.group_nesting_depth)))
             .bind(("group_mappings", mapping_rows))
-            .bind((
-                "sync_interval_secs",
-                i64::try_from(input.sync_interval_secs).map_err(|_| AxiamError::Validation {
-                    message: "sync_interval_secs is out of range".into(),
-                })?,
-            ))
+            .bind(("sync_interval_secs", interval))
             .bind(("jit_provisioning", input.jit_provisioning))
-            .bind(("trust_anchors_pem", input.trust_anchors_pem))
-            .await
-            .map_err(DbError::from)?;
-        // The unique index on `tenant_id` is what makes a second create for the
-        // same tenant an `AlreadyExists` rather than a second configuration.
-        result
-            .check()
-            .map_err(|e| classify_write_error(e, "directory_config"))?;
-
-        let created = self.fetch_public(tenant_id).await?;
-        Ok(take_first_or_not_found(
-            created.into_iter().collect(),
-            "directory_config",
-            &tenant_id.to_string(),
-        )?)
+            .bind(("trust_anchors_pem", input.trust_anchors_pem.clone()));
+        if let Some(claim) = claim {
+            q = q.bind(("opaque_claims", opaque_directory::bind_claims(&[claim])));
+        }
+        let result = q.await?;
+        write_outcome(result, claim)
     }
 
-    async fn update(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
+    async fn update_inner(
+        &self,
+        input: NewDirectoryConfig,
+        claim: Option<OpaqueDirectoryClaim>,
+    ) -> AxiamResult<DirectoryConfig> {
         // `None` keeps the stored ciphertext and nonce untouched; `Some` writes
         // both, under a fresh nonce. **The key is needed only to seal**: an
         // update that carries no secret (enabling or disabling the directory,
@@ -383,36 +438,9 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
         // D-30: before anything is written, so a refused table changes nothing.
         self.check_group_mappings(input.tenant_id, &input.group_mappings)
             .await?;
-        let mapping_rows: Vec<GroupMappingRow> = input
-            .group_mappings
-            .iter()
-            .map(|m| GroupMappingRow {
-                directory_group_dn: m.directory_group_dn.clone(),
-                group_id: m.group_id.to_string(),
-            })
-            .collect();
+        let mapping_rows = mapping_rows(&input.group_mappings);
+        let interval = sync_interval(&input)?;
 
-        let secret_sets = if sealed.is_some() {
-            "bind_secret_ciphertext = $ciphertext, bind_secret_nonce = $nonce, \
-             secret_key_version = $key_version, "
-        } else {
-            ""
-        };
-
-        // P23W2-01: a stored secret is never sent to a server it was not
-        // entered for. Without a new secret, the fields that decide where and
-        // how the service bind goes — the URL, StartTLS, the bind DN and the
-        // trust anchors — must equal the stored ones, or the update matches no
-        // row. Otherwise whoever may edit the configuration could point it at a
-        // host they control, with their own CA as the anchor, and receive the
-        // write-only secret (D-15) in the next service bind. The guard is in
-        // the `WHERE`, so the comparison and the write are one statement.
-        let connection_guard = if sealed.is_some() {
-            ""
-        } else {
-            " AND url = $url AND start_tls = $start_tls AND bind_dn = $bind_dn \
-             AND trust_anchors_pem = $trust_anchors_pem"
-        };
         let moved = sealed.is_none().then(|| {
             (
                 input.url.clone(),
@@ -423,59 +451,17 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
         });
 
         let tenant_id = input.tenant_id;
-        let interval =
-            i64::try_from(input.sync_interval_secs).map_err(|_| AxiamError::Validation {
-                message: "sync_interval_secs is out of range".into(),
-            })?;
-        let db = self.db.current();
-        let mut query = db
-            .query(format!(
-                "UPDATE directory_config SET {secret_sets}\
-                 enabled = $enabled, kind = $kind, url = $url, \
-                 start_tls = $start_tls, bind_dn = $bind_dn, base_dn = $base_dn, \
-                 user_filter = $user_filter, attr_username = $attr_username, \
-                 attr_email = $attr_email, attr_display_name = $attr_display_name, \
-                 attr_external_id = $attr_external_id, \
-                 group_base_dn = $group_base_dn, group_filter = $group_filter, \
-                 group_member_attribute = $group_member_attribute, \
-                 group_nesting_depth = $group_nesting_depth, \
-                 group_mappings = $group_mappings, \
-                 sync_interval_secs = $sync_interval_secs, \
-                 jit_provisioning = $jit_provisioning, \
-                 trust_anchors_pem = $trust_anchors_pem, \
-                 updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id{connection_guard}"
-            ))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("enabled", input.enabled))
-            .bind(("kind", input.kind.as_str().to_string()))
-            .bind(("url", input.url))
-            .bind(("start_tls", input.start_tls))
-            .bind(("bind_dn", input.bind_dn))
-            .bind(("base_dn", input.base_dn))
-            .bind(("user_filter", input.user_filter))
-            .bind(("attr_username", input.user_attribute_map.username))
-            .bind(("attr_email", input.user_attribute_map.email))
-            .bind(("attr_display_name", input.user_attribute_map.display_name))
-            .bind(("attr_external_id", input.user_attribute_map.external_id))
-            .bind(("group_base_dn", input.group_base_dn))
-            .bind(("group_filter", input.group_filter))
-            .bind(("group_member_attribute", input.group_member_attribute))
-            .bind(("group_nesting_depth", i64::from(input.group_nesting_depth)))
-            .bind(("group_mappings", mapping_rows))
-            .bind(("sync_interval_secs", interval))
-            .bind(("jit_provisioning", input.jit_provisioning))
-            .bind(("trust_anchors_pem", input.trust_anchors_pem));
-        if let Some((nonce, ciphertext)) = sealed {
-            query = query
-                .bind(("ciphertext", ciphertext))
-                .bind(("nonce", nonce))
-                .bind(("key_version", SECRET_KEY_VERSION));
-        }
-        let result = query.await.map_err(DbError::from)?;
-        result
-            .check()
-            .map_err(|e| classify_write_error(e, "directory_config"))?;
+        retry_on_write_conflict(|| {
+            self.update_tx(
+                &input,
+                sealed.as_ref(),
+                mapping_rows.clone(),
+                interval,
+                claim,
+            )
+        })
+        .await
+        .map_err(AxiamError::from)?;
 
         let updated = self.fetch_public(tenant_id).await?;
         let updated = take_first_or_not_found(
@@ -497,6 +483,156 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
             });
         }
         Ok(updated)
+    }
+
+    /// One attempt at the update, opened by the claim when there is one.
+    async fn update_tx(
+        &self,
+        input: &NewDirectoryConfig,
+        sealed: Option<&Sealed>,
+        mapping_rows: Vec<GroupMappingRow>,
+        interval: i64,
+        claim: Option<OpaqueDirectoryClaim>,
+    ) -> Result<(), TxFail> {
+        let secret_sets = if sealed.is_some() {
+            "bind_secret_ciphertext = $ciphertext, bind_secret_nonce = $nonce, \
+             secret_key_version = $key_version, "
+        } else {
+            ""
+        };
+
+        // P23W2-01: a stored secret is never sent to a server it was not
+        // entered for. Without a new secret, the fields that decide where and
+        // how the service bind goes — the URL, StartTLS, the bind DN and the
+        // trust anchors — must equal the stored ones, or the update matches no
+        // row. Otherwise whoever may edit the configuration could point it at a
+        // host they control, with their own CA as the anchor, and receive the
+        // write-only secret (D-15) in the next service bind. The guard is in
+        // the `WHERE`, so the comparison and the write are one statement.
+        let connection_guard = if sealed.is_some() {
+            ""
+        } else {
+            " AND url = $url AND start_tls = $start_tls AND bind_dn = $bind_dn \
+             AND trust_anchors_pem = $trust_anchors_pem"
+        };
+
+        let update = format!(
+            "UPDATE directory_config SET {secret_sets}\
+             enabled = $enabled, kind = $kind, url = $url, \
+             start_tls = $start_tls, bind_dn = $bind_dn, base_dn = $base_dn, \
+             user_filter = $user_filter, attr_username = $attr_username, \
+             attr_email = $attr_email, attr_display_name = $attr_display_name, \
+             attr_external_id = $attr_external_id, \
+             group_base_dn = $group_base_dn, group_filter = $group_filter, \
+             group_member_attribute = $group_member_attribute, \
+             group_nesting_depth = $group_nesting_depth, \
+             group_mappings = $group_mappings, \
+             sync_interval_secs = $sync_interval_secs, \
+             jit_provisioning = $jit_provisioning, \
+             trust_anchors_pem = $trust_anchors_pem, \
+             updated_at = time::now() \
+             WHERE tenant_id = $tenant_id{connection_guard}"
+        );
+        let query = claimed_query(&update, claim);
+        let db = self.db.current();
+        let mut q = db
+            .query(query)
+            .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("enabled", input.enabled))
+            .bind(("kind", input.kind.as_str().to_string()))
+            .bind(("url", input.url.clone()))
+            .bind(("start_tls", input.start_tls))
+            .bind(("bind_dn", input.bind_dn.clone()))
+            .bind(("base_dn", input.base_dn.clone()))
+            .bind(("user_filter", input.user_filter.clone()))
+            .bind(("attr_username", input.user_attribute_map.username.clone()))
+            .bind(("attr_email", input.user_attribute_map.email.clone()))
+            .bind((
+                "attr_display_name",
+                input.user_attribute_map.display_name.clone(),
+            ))
+            .bind((
+                "attr_external_id",
+                input.user_attribute_map.external_id.clone(),
+            ))
+            .bind(("group_base_dn", input.group_base_dn.clone()))
+            .bind(("group_filter", input.group_filter.clone()))
+            .bind((
+                "group_member_attribute",
+                input.group_member_attribute.clone(),
+            ))
+            .bind(("group_nesting_depth", i64::from(input.group_nesting_depth)))
+            .bind(("group_mappings", mapping_rows))
+            .bind(("sync_interval_secs", interval))
+            .bind(("jit_provisioning", input.jit_provisioning))
+            .bind(("trust_anchors_pem", input.trust_anchors_pem.clone()));
+        if let Some((nonce, ciphertext)) = sealed.cloned() {
+            q = q
+                .bind(("ciphertext", ciphertext))
+                .bind(("nonce", nonce))
+                .bind(("key_version", SECRET_KEY_VERSION));
+        }
+        if let Some(claim) = claim {
+            q = q.bind(("opaque_claims", opaque_directory::bind_claims(&[claim])));
+        }
+        let result = q.await?;
+        write_outcome(result, claim)
+    }
+}
+
+/// The stored form of a mapping table.
+fn mapping_rows(mappings: &[GroupMapping]) -> Vec<GroupMappingRow> {
+    mappings
+        .iter()
+        .map(|m| GroupMappingRow {
+            directory_group_dn: m.directory_group_dn.clone(),
+            group_id: m.group_id.to_string(),
+        })
+        .collect()
+}
+
+/// `sync_interval_secs` as the column stores it.
+fn sync_interval(input: &NewDirectoryConfig) -> AxiamResult<i64> {
+    i64::try_from(input.sync_interval_secs).map_err(|_| AxiamError::Validation {
+        message: "sync_interval_secs is out of range".into(),
+    })
+}
+
+/// A write statement alone, or — claimed — the claim and the write as one
+/// transaction (BEGIN, the claim's slot, the write, COMMIT).
+fn claimed_query(write: &str, claim: Option<OpaqueDirectoryClaim>) -> String {
+    match claim {
+        Some(_) => format!(
+            "BEGIN TRANSACTION; {claim}{write}; COMMIT TRANSACTION",
+            claim = opaque_directory::claim_statement(false),
+        ),
+        None => write.to_owned(),
+    }
+}
+
+/// A write's statement errors, read: a claimed write's stale refusal first
+/// (`opaque_directory::outcome`), otherwise classified — a UNIQUE violation is
+/// `AlreadyExists`, an engine conflict is retried.
+fn write_outcome(
+    mut result: surrealdb::IndexedResults,
+    claim: Option<OpaqueDirectoryClaim>,
+) -> Result<(), TxFail> {
+    match claim {
+        Some(_) => opaque_directory::outcome(result.take_errors(), "directory_config"),
+        None => result
+            .check()
+            .map(|_| ())
+            .map_err(|e| TxFail::Db(classify_write_error(e, "directory_config"))),
+    }
+}
+
+impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigRepository<C> {
+    async fn create(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
+        self.create_inner(input, None).await
+    }
+
+    async fn update(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
+        self.update_inner(input, None).await
     }
 
     async fn get_by_tenant(&self, tenant_id: Uuid) -> AxiamResult<Option<DirectoryConfig>> {

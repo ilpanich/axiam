@@ -22,7 +22,9 @@ use crate::models::{
     directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
-    email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
+    email_verification::{
+        CreateEmailVerificationToken, EmailVerificationRedemption, EmailVerificationToken,
+    },
     federation::{
         CreateFederationConfig, CreateFederationLink, FederationConfig, FederationLink,
         UpdateFederationConfig,
@@ -257,12 +259,46 @@ pub trait UserRepository: Send + Sync {
         tenant_id: Uuid,
         email: &str,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+    /// Apply `input` to one user.
+    ///
+    /// A write that changes the stored `email` also deletes, **in the same
+    /// transaction**, the user's unconsumed email-verification and
+    /// password-reset tokens: both were mailed to the old address, and neither
+    /// may outlive it (the atomicity audit's item A). Every writer inherits
+    /// this — self-service, an administrator, SCIM — because it is decided
+    /// here, against the stored value, and not by the caller.
     fn update(
         &self,
         tenant_id: Uuid,
         id: Uuid,
         input: UpdateUser,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+
+    /// Redeem an email-verification token by its hash, in **one transaction**:
+    /// consume the token, then mark the account's address verified (and a
+    /// `PendingVerification` account `Active`) only while the account's
+    /// `email` is still the address the token was minted for and is not yet
+    /// verified.
+    ///
+    /// The binding is the point: a token mailed to one address must never
+    /// verify another the account has moved to since. `NotFound` when the
+    /// token is unknown, expired, already consumed, or carries no address (a
+    /// token minted before schema v102).
+    ///
+    /// The default implementation refuses, so a test double that never redeems
+    /// a token needs nothing new.
+    fn redeem_email_verification(
+        &self,
+        _tenant_id: Uuid,
+        _token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<EmailVerificationRedemption>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not redeem email verification tokens".into(),
+            ))
+        }
+    }
+
     /// Soft-delete: sets status to Inactive.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 
@@ -316,6 +352,55 @@ pub trait UserRepository: Send + Sync {
         backoff_multiplier: f64,
         max_lockout_secs: i64,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Admit a sign-in whose credential has just verified — **unless** the
+    /// account is serving a lockout at this moment — and, when
+    /// `clear_failures`, reset the failed-login counter in the same write.
+    ///
+    /// Returns `Ok(true)` when the sign-in may proceed, `Ok(false)` when a
+    /// lockout is in force now (the caller refuses the sign-in exactly as a
+    /// wrong password is refused, and issues nothing).
+    ///
+    /// Item 5 of the 1.1.0 atomicity audit. A login reads the account, checks
+    /// the lock, verifies the password, and only then resets the counter. K
+    /// guesses sent together at threshold − 1 all pass the check; a wrong one
+    /// locks the account, and a correct one landing after that used to reset
+    /// the counter *and the lock* — up to K guesses per lockout cycle. The
+    /// reset is therefore conditional on the lock, inside the write
+    /// (`WHERE locked_until IS NONE OR locked_until <= time::now()`): a lock
+    /// committed first makes it match nothing, and one committed concurrently
+    /// conflicts with it on the user row, so the loser is retried and sees it.
+    ///
+    /// The default implementation reads and then writes — not atomic, which is
+    /// acceptable only for test doubles; the SurrealDB repository overrides it
+    /// with the one conditional statement.
+    fn admit_unless_locked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        clear_failures: bool,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async move {
+            let user = self.get_by_id(tenant_id, user_id).await?;
+            if user.locked_until.is_some_and(|until| until > Utc::now()) {
+                return Ok(false);
+            }
+            if clear_failures {
+                self.update(
+                    tenant_id,
+                    user_id,
+                    UpdateUser {
+                        failed_login_attempts: Some(0),
+                        last_failed_login_at: Some(None),
+                        locked_until: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(true)
+        }
+    }
 
     /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
     ///
@@ -730,6 +815,21 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         role_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleSubjectAssignment>>> + Send;
+
+    /// The role's two epochs (schema v101; R110W6-04), `None` when the role is
+    /// not the tenant's.
+    ///
+    /// The network gate reads them before anything else about the role and
+    /// hands them to the write as a [`crate::models::role::RoleClaim`].
+    /// Defaults to `None` — "this repository keeps no epochs, so no claim is
+    /// made" — for test doubles; the real repository overrides it.
+    fn get_role_epochs(
+        &self,
+        _tenant_id: Uuid,
+        _role_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::role::RoleEpochs>>> + Send {
+        async { Ok(None) }
+    }
 }
 
 pub trait PermissionRepository: Send + Sync {
@@ -1411,6 +1511,19 @@ pub struct AuditLogFilter {
 }
 
 pub trait AuditLogRepository: Send + Sync {
+    /// The datastore's own clock, read now.
+    ///
+    /// `audit_log.timestamp` is stamped by the datastore (`DEFAULT time::now()`),
+    /// never by the application. Anything that compares a bound with those
+    /// stamps — the tenant audit export's `exported_through`, which the purge
+    /// later deletes up to (T-118) — must therefore take the bound from the
+    /// same clock: an application host whose clock leads the datastore's by
+    /// δ would otherwise claim rows that were never paged, and a receipt
+    /// whose bound is later than its own stamp is refused by the deletion.
+    ///
+    /// An implementation that is not backed by a datastore returns its own
+    /// process clock; a wrapper must forward to the repository it wraps.
+    fn datastore_now(&self) -> impl Future<Output = AxiamResult<DateTime<Utc>>> + Send;
     /// Append a new audit log entry. No update or delete operations exist.
     fn append(
         &self,
@@ -1556,6 +1669,25 @@ pub trait OAuth2ClientRepository: Send + Sync {
         managed_by: ManagedBy,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// How many **confidential** clients hold any of `grant_types`, across
+    /// every **live** tenant, and in how many tenants (R110W3-02).
+    ///
+    /// Confidential means `token_endpoint_auth_method` is anything but `none`,
+    /// an absent value (a row older than the column) included: that is the
+    /// client the device grant has authenticated since 1.1.0 (#635). A client
+    /// of a tombstoned tenant is not counted, and neither is an orphaned row
+    /// whose tenant no longer exists: the purge is about to remove both.
+    ///
+    /// `grant_types` lists the spellings of one grant, so a caller that
+    /// accepts a URN and a bare name asks once. Deployment-wide and
+    /// tenant-free for the same reason as [`Self::list_all_by_managed_by`],
+    /// and answered by the datastore as two numbers: the caller never pages
+    /// a table, and no row of any client leaves the database.
+    fn count_confidential_with_grant(
+        &self,
+        grant_types: &[&str],
+    ) -> impl Future<Output = AxiamResult<crate::models::oauth2_client::ConfidentialGrantCount>> + Send;
+
     /// Every client with the given provenance, across **all** tenants
     /// (T21.4's sweeper).
     ///
@@ -1598,13 +1730,22 @@ pub trait OAuth2ClientRepository: Send + Sync {
     ///   client whose registration is a public document.
     /// * `created_at` survives a refresh; `updated_at` moves.
     ///
+    /// * **A first appearance counts against `max_clients`** — the tenant's
+    ///   `dcr_max_clients`, counted over its `cimd` rows — **inside the
+    ///   create's own transaction** (item 6 of the 1.1.0 atomicity audit). A
+    ///   caller's count made before the fetch is an early refusal, not the
+    ///   ceiling: N first appearances sent together each read `max - 1`
+    ///   there. A refresh never counts.
+    ///
     /// Returns the row as stored, so the caller acts on what was written
-    /// rather than on what it asked for.
+    /// rather than on what it asked for; `None` when no row existed and the
+    /// tenant already held `max_clients` of them, and nothing was written.
     fn upsert_cimd_client(
         &self,
         client_id: &str,
         input: CreateOAuth2Client,
-    ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+        max_clients: u32,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2Client>>> + Send;
 
     /// Stamp `last_authorized_at` (T21.4).
     ///
@@ -1641,11 +1782,21 @@ pub trait OAuth2ClientRepository: Send + Sync {
     /// caller was told about and could never manage. Implementations MUST
     /// refuse an input whose `managed_by` is not `dcr` — no other provenance
     /// is issued a management token.
+    ///
+    /// **`max_clients` is the ceiling, enforced in the create's transaction**
+    /// (`dcr_max_clients`; item 6 of the 1.1.0 atomicity audit): the tenant's
+    /// `dcr` rows are counted there, and at the ceiling nothing is written and
+    /// the answer is `None`. Implementations MUST make two overlapping creates
+    /// for one tenant conflict — a count alone does not, under snapshot
+    /// isolation — so that N registrations sent together cannot each count
+    /// `max - 1` and all land. The caller's own count, made earlier, is an
+    /// early refusal and nothing more.
     fn create_with_registration_access_token(
         &self,
         input: CreateOAuth2Client,
         registration_access_token_hash: &str,
-    ) -> impl Future<Output = AxiamResult<(OAuth2Client, String)>> + Send;
+        max_clients: u32,
+    ) -> impl Future<Output = AxiamResult<Option<(OAuth2Client, String)>>> + Send;
 
     /// The `dcr` client this management token belongs to, or `None`.
     ///
@@ -1830,9 +1981,11 @@ pub trait DeviceGrantRepository: Send + Sync {
     /// status — pending, approved, denied or redeemed (#517, #610). Returns
     /// the number deleted.
     ///
-    /// Called when the client is removed: a `managed_by: cimd` client is
-    /// re-materialised under the same `client_id`, and an approved grant left
-    /// behind would redeem against the new row. Scoped by tenant **and**
+    /// Called when the client is removed: the poll did not authenticate a
+    /// client before #635 (R101W3-01), so an approved grant left behind
+    /// redeemed whether or not its client existed, and it still must not
+    /// redeem against a row that names the `client_id` again. (A
+    /// `managed_by: cimd` client cannot hold this grant, #642 (a).) Scoped by tenant **and**
     /// client id, never by client id alone — the id is unique only within its
     /// tenant. Idempotent.
     ///
@@ -1979,8 +2132,7 @@ pub trait CibaRequestRepository: Send + Sync {
     ///
     /// Called when the client is removed: a pending request would otherwise
     /// stay listed on the approval surface for a client that no longer exists,
-    /// and an approved one could be redeemed once a `managed_by: cimd` client
-    /// is re-materialised under the same `client_id`. Scoped by tenant **and**
+    /// and an approved one must not outlive its client. Scoped by tenant **and**
     /// client id. Idempotent. A [`Self::redeem`] racing this delete either
     /// wrote first (and minted for the old client) or matches nothing.
     fn delete_all_for_client(
@@ -2776,6 +2928,13 @@ pub enum ProofKind {
     /// CIBA Core §7.1.1 signed authentication request (G-7, D-61), scoped by
     /// `client_id` — the request object's `iss`, for RFC 7523's reason.
     CibaRequestObject,
+    /// A WebAuthn authentication ceremony's state token (item B of the 1.1.0
+    /// atomicity audit), recorded when an assertion against it verifies and
+    /// scoped by the ceremony (the token's `purpose`). The challenge travels in
+    /// a stateless token, so without this one captured (token, assertion) pair
+    /// signed in again for as long as the token lived, and two copies sent
+    /// together each opened a session.
+    WebauthnAssertion,
 }
 
 impl ProofKind {
@@ -2784,6 +2943,7 @@ impl ProofKind {
             Self::ClientAssertion => "client_assertion",
             Self::DpopProof => "dpop_proof",
             Self::CibaRequestObject => "ciba_request_object",
+            Self::WebauthnAssertion => "webauthn_assertion",
         }
     }
 }
@@ -2955,15 +3115,18 @@ pub trait CaCertificateRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// Record that Vault refused a claimed CA row (#612), on the terms of
-    /// [`CertificateRepository::record_vault_forward_failure`].
+    /// [`CertificateRepository::record_vault_forward_failure`]: written only
+    /// while the row still holds `claimed_until`, the lease this caller's
+    /// claim wrote.
     fn record_vault_forward_failure(
         &self,
         organization_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// How many pending CA revocations have failed at least `min_attempts`
     /// times (#612): counted with the leaves' in `vault_revocation_failing`.
@@ -3082,14 +3245,23 @@ pub trait CertificateRepository: Send + Sync {
     /// truncated — a status and a short message, never a token or a response
     /// body) and when it is next due (#603). A row already forwarded is left
     /// alone.
+    ///
+    /// Conditional on the claim it follows (R101W1-09 (d)): written only while
+    /// the row's `vault_next_attempt_at` is still `claimed_until`, the
+    /// `lease_until` this caller's [`Self::claim_vault_forward`] wrote. An
+    /// attempt that outlived its lease, the row since claimed by another
+    /// replica, writes nothing, so it can neither move the new holder's lease
+    /// nor overwrite the count and reason that holder records. `true` when the
+    /// record was written.
     fn record_vault_forward_failure(
         &self,
         tenant_id: Uuid,
         id: Uuid,
+        claimed_until: DateTime<Utc>,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
         error: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// How many unforwarded revocations of an active `vault_pki` CA have
     /// failed at least `min_attempts` times (#603): the rows the sweep has all
@@ -3172,6 +3344,57 @@ pub trait CertificateRepository: Send + Sync {
         email: &str,
         user_created_at: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Clear the free-form `metadata` (set it to `{}`) of every `User`-type
+    /// certificate that belongs to `user_id`, in **any** status, and return how
+    /// many rows it matched (R101W1-05, #618) — the Art. 17 purge's scrub of
+    /// what the revocation list does not need.
+    ///
+    /// Matches exactly the rows [`Self::revoke_user_certificates`] matches —
+    /// the binding, then the convention with its two bounds — except that it
+    /// does not require the row to be active, so a certificate an operator had
+    /// revoked before the erasure is scrubbed too. Rows are kept, with their
+    /// PEM, `subject`, `user_id` and `revoked_at`: the revocation list is
+    /// computed from them. A row whose `metadata` is already empty is not
+    /// written (and not counted), which makes a retried purge a no-op.
+    ///
+    /// Called **after** `revoke_user_certificates` and before the account's
+    /// names are overwritten, for the same reason that is: the convention
+    /// reads them, and `metadata.user_id` is one of the things it reads, which
+    /// this call removes.
+    ///
+    /// Required, with no default, for the reason `revoke_user_certificates` is.
+    fn clear_user_certificates_metadata(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+        user_created_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete up to `limit` certificate rows of **live** tenants whose
+    /// `notAfter` passed more than eight days ago, in any status, and return
+    /// how many *this call* removed (R101W1-05, #618).
+    ///
+    /// The retention end of a certificate row. A revoked row is the evidence
+    /// its issuer's revocation list is computed from, and a list keeps an
+    /// expired entry for at most seven days (`axiam_pki::crl`, #608); the
+    /// eighth day is the margin for the datastore's clock against the
+    /// replicas'. Past it no list names the row and no relying party can need
+    /// it, so the CRL is the same with the row as without. An expired
+    /// certificate that was never revoked is on no list and goes with them.
+    /// A row's `cert_bound_to` edge goes with it.
+    ///
+    /// "Live" is a tenant row without a `deleted_at`: a deleted tenant's rows
+    /// belong to the tenant purge, which keeps them for the same eight days and
+    /// whose orphan scan then removes them. Touches no audit row.
+    ///
+    /// Bounded by `limit` so one pass cannot hold a long write; the caller
+    /// repeats while a full batch comes back. Safe for two replicas at once:
+    /// deleting a row the other has just deleted removes nothing and counts
+    /// nothing.
+    fn delete_past_retention(&self, limit: u32) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
@@ -4267,6 +4490,205 @@ pub trait ScimTargetStateRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Network segments, reply profiles and the tenant's session cap (tenant-scoped)
+// (RADIUS D4, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
+// ---------------------------------------------------------------------------
+
+/// Storage for network segments: nodes of the reserved `/network` subtree of
+/// the resource tree, with the sidecar row that holds the kind, the VLAN, the
+/// `Filter-Id` envelope and the placement rank. See [`crate::models::network`].
+///
+/// Every method is tenant-scoped: a segment of another tenant is not found,
+/// exactly as one that does not exist. Every write is conditional on the
+/// `version` the writer read.
+///
+/// The repository decides only what the data decides: a path outside
+/// `/network`, a kind that disagrees with its branch, a VLAN or a name outside
+/// its bounds, a VLAN or rank already taken at the site. Who may write is the
+/// authorization function's (design note §5.2), and every write method of this
+/// trait and of [`ReplyProfileRepository`] takes the
+/// [`crate::models::network::NetworkWriteClearance`] that function issues for
+/// exactly that write: one issued for another tenant, actor or target is
+/// `AuthorizationDenied` and nothing is written.
+pub trait NetworkSegmentRepository: Send + Sync {
+    /// Create a segment at `input.path`, making the `/network`, branch and site
+    /// nodes on first use, in one transaction.
+    ///
+    /// * `Validation` for a path outside `/network/{zones|quarantine}/<site>/<segment>`,
+    ///   a kind that disagrees with the branch, or a field outside its bounds.
+    /// * `AlreadyExists` when the site already has that name, VLAN or rank.
+    fn create(
+        &self,
+        input: crate::models::network::NewNetworkSegment,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One segment. `NotFound` when it does not exist in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One segment by its path. `Validation` for a path outside the reserved
+    /// shape, `NotFound` when no such segment exists in this tenant.
+    fn get_by_path(
+        &self,
+        tenant_id: Uuid,
+        path: &str,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// One page of the tenant's segments, by site then rank then name,
+    /// optionally narrowed to one site.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        site_key: Option<&str>,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::NetworkSegment>>> + Send;
+
+    /// Every segment of one site, in both branches (`access` and
+    /// `quarantine`), ordered by kind, then rank, then name: the decision
+    /// path's read (design note §4.3). Tenant-scoped like every read here. A
+    /// row that does not read back is left out (logged), which makes it no
+    /// candidate: fail closed.
+    fn list_site(
+        &self,
+        tenant_id: Uuid,
+        site_key: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::network::NetworkSegment>>> + Send;
+
+    /// Rewrite a segment's envelope.
+    ///
+    /// * `NotFound` when it does not exist in this tenant.
+    /// * `Conflict` when `expected_version` is stale, or when the new
+    ///   `filter_ids` would leave the segment's stored profile outside its
+    ///   envelope, or when the clearance is
+    ///   [frozen](crate::models::network::NetworkWriteClearance::freeze_profiled_placement)
+    ///   and the write would change `vlan_id`, `rank` or `enabled` of a
+    ///   segment that has a profile now (R110W6-03).
+    /// * `Validation` / `AlreadyExists` as for [`Self::create`].
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: crate::models::network::NetworkSegmentUpdate,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkSegment>> + Send;
+
+    /// Remove a segment **and its profile and its resource node**, in one
+    /// transaction. `NotFound` when it does not exist in this tenant,
+    /// `Conflict` on a stale `expected_version`, when the node has children,
+    /// or when the clearance is
+    /// [frozen](crate::models::network::NetworkWriteClearance::freeze_profiled_placement)
+    /// and the segment has a profile now (the decision of 2026-10-16).
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for the reply profile of a segment (at most one per segment).
+///
+/// A read returns the **effective** profile: `Session-Timeout` clamped to the
+/// tenant's current cap ([`crate::models::network::ReplyProfile`]). A write is
+/// conditional on the profile's own version **and** the owning segment's, and
+/// is validated against the envelope of the very segment row it is written
+/// under (design note §3.5, the T-416 lesson).
+pub trait ReplyProfileRepository: Send + Sync {
+    /// Create the segment's profile.
+    ///
+    /// * `NotFound` when the segment does not exist in this tenant.
+    /// * `Validation` for a value outside the dictionary, above the tenant cap,
+    ///   or a `filter_id` outside the segment's envelope (§5.2 H3).
+    /// * `Conflict` when `expected_segment_version` is stale.
+    /// * `AlreadyExists` when the segment already has a profile.
+    fn create(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: crate::models::network::NewReplyProfile,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// The segment's effective profile. `NotFound` when the segment has none
+    /// in this tenant.
+    fn get_by_segment(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// One page of the tenant's effective profiles, ordered by owning segment
+    /// id, optionally narrowed by [`Pagination::search`] (matched against the
+    /// profile's `filter_id` and its segment id). Each carries the tenant's
+    /// current cap as [`Self::get_by_segment`] does.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::network::ReplyProfile>>> + Send;
+
+    /// The stored profiles of `segment_ids` in this tenant, **as stored**, for
+    /// the decision path to re-validate (design note §3.4). A segment without a
+    /// profile is absent from the result; so is a row that does not read back
+    /// at all (logged). One query whatever the number of ids.
+    fn list_stored(
+        &self,
+        tenant_id: Uuid,
+        segment_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::network::StoredReplyProfile>>> + Send;
+
+    /// Replace the segment's profile. Errors as for [`Self::create`], with
+    /// `NotFound` for a segment without a profile and `Conflict` also for a
+    /// stale profile version.
+    fn replace(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        input: crate::models::network::ReplyProfileReplace,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::ReplyProfile>> + Send;
+
+    /// Delete the segment's profile (no profile means no candidate, which only
+    /// narrows). `NotFound` when it has none, `Conflict` on a stale version.
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        segment_id: Uuid,
+        expected_version: u64,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for the tenant's network policy: the cap on `Session-Timeout`
+/// (`network.session_timeout_max_secs`, design note §3.4).
+pub trait NetworkPolicyRepository: Send + Sync {
+    /// The tenant's policy; the default (a cap of 3600, version 0) when the
+    /// tenant never wrote one. A stored cap outside the settable range reads
+    /// as the nearest bound, so a row edited behind the API cannot widen it.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkPolicy>> + Send;
+
+    /// Write the tenant's policy, conditional on the version read (0 for a
+    /// tenant still on the default). `Validation` for a cap outside the
+    /// settable range, `Conflict` for a stale version, `AuthorizationDenied`
+    /// for a `clearance` the write gate did not issue for this tenant, this
+    /// actor and a [`crate::models::network::NetworkWriteTarget::PolicyWrite`].
+    fn set(
+        &self,
+        tenant_id: Uuid,
+        input: crate::models::network::SetNetworkPolicy,
+        clearance: &crate::models::network::NetworkWriteClearance,
+    ) -> impl Future<Output = AxiamResult<crate::models::network::NetworkPolicy>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
 // ---------------------------------------------------------------------------
 
@@ -4643,7 +5065,24 @@ pub trait EmailVerificationTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete expired and consumed tokens (garbage collection).
+    /// Store a new verification token unless the user already has
+    /// `daily_cap` minted today, counted **inside** the store's transaction
+    /// (item 7 of the 1.1.0 atomicity audit).
+    ///
+    /// `None` at the cap, having written nothing. Implementations MUST make
+    /// two overlapping mints for one user conflict — a count alone does not,
+    /// under snapshot isolation — so that N requests sent together cannot each
+    /// count under the cap and all mint. `NotFound` when the user is not the
+    /// tenant's. A caller's own [`Self::count_today`], made earlier, is an
+    /// early refusal and nothing more.
+    fn create_within_daily_cap(
+        &self,
+        input: CreateEmailVerificationToken,
+        daily_cap: u64,
+    ) -> impl Future<Output = AxiamResult<Option<EmailVerificationToken>>> + Send;
+
+    /// Delete expired and consumed tokens (garbage collection) — except those
+    /// minted since UTC midnight, which the daily cap still counts.
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
@@ -4680,7 +5119,8 @@ pub trait PasswordResetTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete expired and consumed tokens (garbage collection).
+    /// Delete expired and consumed tokens (garbage collection) — except those
+    /// minted since UTC midnight, which the daily cap still counts.
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Invalidate unconsumed tokens for a user (mark as consumed so
@@ -4690,6 +5130,24 @@ pub trait PasswordResetTokenRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Invalidate the user's unconsumed tokens and store a new one, as one
+    /// transaction, unless the user already has `daily_cap` tokens minted
+    /// today — counted **inside** that transaction (item 7 of the 1.1.0
+    /// atomicity audit).
+    ///
+    /// `None` at the cap, having written nothing. Implementations MUST make
+    /// two overlapping replacements for one user conflict — a count alone
+    /// does not, under snapshot isolation — so that N requests sent together
+    /// can neither each count under the cap and all mint, nor leave more than
+    /// one link live. `NotFound` when the user is not the tenant's. A caller's
+    /// own [`Self::count_today`], made earlier, is an early refusal and nothing
+    /// more.
+    fn replace_within_daily_cap(
+        &self,
+        input: CreatePasswordResetToken,
+        daily_cap: u64,
+    ) -> impl Future<Output = AxiamResult<Option<PasswordResetToken>>> + Send;
 }
 
 // -------------------------------------------------------------------
@@ -4725,6 +5183,60 @@ pub trait WebauthnCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Spend an authentication ceremony's state token (item B of the 1.1.0
+    /// atomicity audit): record its `jti` under `ceremony` (the token's
+    /// `purpose`) in the shared replay store, `oauth2_proof_replay`, kind
+    /// [`ProofKind::WebauthnAssertion`], until `expires_at` (the token's `exp`,
+    /// after which the sweep removes the row and the token is refused on its
+    /// own).
+    ///
+    /// `Ok(())` the first time, `Err(AxiamError::ReplayDetected)` on every
+    /// later attempt — decided by the UNIQUE index, not by a read, so of two
+    /// copies sent together exactly one passes.
+    ///
+    /// The default implementation refuses, so a test double that never
+    /// finishes a ceremony needs nothing new.
+    fn consume_assertion(
+        &self,
+        _tenant_id: Uuid,
+        _ceremony: &str,
+        _jti: &str,
+        _expires_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this credential repository does not record assertions".into(),
+            ))
+        }
+    }
+
+    /// Persist what a verified assertion reported — the authenticator's
+    /// signature counter, and `passkey_json` re-encrypted with the credential
+    /// updated from the result — and stamp `last_used_at`, **only if** the
+    /// counter moves forward (W3C WebAuthn §7.2 step 21): `counter` greater
+    /// than the stored one, or both zero (an authenticator that keeps no
+    /// counter). Compared inside the write, so two assertions carrying one
+    /// counter cannot both pass.
+    ///
+    /// `Ok(true)` when written; `Ok(false)` when the counter did not increase —
+    /// a signal that the credential's key may exist twice — and the caller
+    /// refuses the assertion.
+    ///
+    /// The default implementation refuses, as for [`Self::consume_assertion`].
+    fn advance_sign_count(
+        &self,
+        _tenant_id: Uuid,
+        _id: Uuid,
+        _counter: u32,
+        _passkey_json: String,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this credential repository does not record signature counters".into(),
+            ))
+        }
+    }
 
     /// Delete a WebAuthn credential.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
@@ -4986,13 +5498,22 @@ pub trait AccountDeletionRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Option<AccountDeletion>>> + Send;
 
     /// Mark as cancelled (user clicked cancel link in time).
+    ///
+    /// Conditional: only a request still `pending` and not yet claimed by the
+    /// purge sweep is cancelled; anything else is [`AxiamError::Conflict`] and
+    /// changes nothing (item 11 of the 1.1.0 atomicity audit). The cancel
+    /// endpoint uses the store's one-transaction cancel, which also re-enables
+    /// the account.
+    ///
+    /// [`AxiamError::Conflict`]: crate::error::AxiamError::Conflict
     fn mark_cancelled(
         &self,
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Mark as completed (purge ran successfully).
+    /// Mark as completed (purge ran successfully). Conditional on the request
+    /// still being `pending`: a cancelled request is never rewritten.
     fn mark_completed(
         &self,
         tenant_id: Uuid,
@@ -5241,6 +5762,7 @@ mod tests {
         // name.
         assert_eq!(ProofKind::ClientAssertion.as_str(), "client_assertion");
         assert_eq!(ProofKind::DpopProof.as_str(), "dpop_proof");
+        assert_eq!(ProofKind::WebauthnAssertion.as_str(), "webauthn_assertion");
         assert_ne!(
             ProofKind::ClientAssertion.as_str(),
             ProofKind::DpopProof.as_str()

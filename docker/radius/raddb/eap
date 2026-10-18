@@ -38,6 +38,14 @@ eap {
 
 		check_crl = yes
 
+		# The D4 profile (docs/pki/freeradius.md, "The decision per
+		# authentication") adds a `verify { ... }` hook here: FreeRADIUS 3.2.8
+		# shows the configuration the client certificate in one place only, a file
+		# that exists while that hook runs, and the decision needs its fingerprint.
+		# The D3 profile has no such file, which is what `$-INCLUDE` (include when
+		# present) is for: nothing changes for it.
+		$-INCLUDE /etc/freeradius/axiam-d4/verify.conf
+
 		# Only the device's own issuer (the tenant signing CA) is checked. With
 		# the tenant signing CA as the anchor there is nothing above it in the
 		# chain for check_all_crl to look at, and the list that would name a

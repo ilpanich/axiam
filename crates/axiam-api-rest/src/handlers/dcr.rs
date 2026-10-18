@@ -235,6 +235,12 @@ async fn register_inner<C: Connection + Clone>(
     // 4 — the per-tenant ceiling. After validation so that a malformed
     // request is told what is wrong with it rather than being turned away at
     // a quota it was never going to reach.
+    //
+    // This count is the early refusal, before an initial access token is
+    // spent on a registration that cannot land. It is not the ceiling: N
+    // registrations sent together each read `max - 1` here (item 6 of the
+    // 1.1.0 atomicity audit). The ceiling is the count the create makes again
+    // inside its own transaction (step 6).
     let existing = state
         .oauth2_client_repo
         .count_by_managed_by(tenant_id, ManagedBy::Dcr)
@@ -299,16 +305,30 @@ async fn register_inner<C: Connection + Clone>(
     // the credential its registrant is about to be given. Only the digest is
     // stored; the plaintext leaves in this response and nowhere else — it is
     // in no log line and no audit row.
+    //
+    // Item 6 of the 1.1.0 atomicity audit: the create counts the tenant's
+    // `dcr` rows again inside its own transaction, which also claims the
+    // tenant row, so concurrent registrations conflict there and the loser
+    // re-counts. At the ceiling nothing is written and the answer is the same
+    // refusal step 4 gives. A spent initial access token stays spent, as for
+    // any write that fails after step 5.
     let (registration_access_token, token_digest) = dcr::mint_registration_access_token();
     let (client, raw_secret) = state
         .oauth2_client_repo
-        .create_with_registration_access_token(validated.create, &token_digest)
+        .create_with_registration_access_token(
+            validated.create,
+            &token_digest,
+            policy.dcr_max_clients,
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = %e, %tenant_id, "could not write a registered client");
             DcrError::InvalidClientMetadata(
                 "the registration could not be stored; try again".into(),
             )
+        })?
+        .ok_or(DcrError::ClientQuotaExhausted {
+            limit: policy.dcr_max_clients,
         })?;
 
     audit_registration(state, http_req, tenant_id, Some(&client.client_id), None).await;

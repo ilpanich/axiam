@@ -17,6 +17,7 @@ pub mod mds;
 pub mod mtls;
 pub mod pgp;
 pub mod saml_signing;
+pub mod serial;
 pub mod ssrf;
 pub mod subject;
 pub mod vault_forward;
@@ -38,5 +39,6 @@ pub use pgp::PgpService;
 pub use saml_signing::{
     MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS, SamlIdpCredentialService, SamlIdpSigningKey,
 };
+pub use serial::certificate_serial_hex;
 pub use subject::subject_common_name;
 pub use vault_pki::{VaultPkiCaKeyStore, VaultPkiConfig, VaultPkiIssuer, VaultPkiLocator};

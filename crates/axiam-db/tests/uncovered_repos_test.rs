@@ -978,6 +978,7 @@ async fn email_verification_token_lifecycle() {
         tenant_id,
         user_id,
         token_hash: hash.into(),
+        email: "bound@example.com".into(),
         expires_at: Utc::now() + Duration::hours(24),
     })
     .await
@@ -985,6 +986,7 @@ async fn email_verification_token_lifecycle() {
 
     let got = repo.get_by_token_hash(tenant_id, hash).await.unwrap();
     assert_eq!(got.user_id, user_id);
+    assert_eq!(got.email.as_deref(), Some("bound@example.com"));
 
     let consumed = repo.consume(tenant_id, hash).await.unwrap();
     assert_eq!(consumed.user_id, user_id);
@@ -1003,6 +1005,7 @@ async fn email_verification_token_expired_is_not_returned() {
         tenant_id,
         user_id,
         token_hash: "expired".into(),
+        email: "bound@example.com".into(),
         expires_at: Utc::now() - Duration::hours(1),
     })
     .await

@@ -17,6 +17,7 @@
 pub mod boot;
 pub mod cleanup;
 pub mod cli;
+pub mod device_grant_scan;
 pub mod fatal_stop;
 pub mod healthcheck;
 pub mod job_health;

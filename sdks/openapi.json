@@ -9,8 +9,8 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.0.1",
-    "x-axiam-spec-digest": "sha256:cfa1f4582c9ebe66815213022c4c561ff532859044667da6ef77210579bf3502"
+    "version": "1.1.0",
+    "x-axiam-spec-digest": "sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -955,10 +955,19 @@
         ],
         "responses": {
           "200": {
-            "description": "Deletion cancelled"
+            "description": "Deletion cancelled; the account is active again"
           },
           "400": {
             "description": "Token invalid or expired"
+          },
+          "403": {
+            "description": "The token was already used, or the grace window has ended"
+          },
+          "404": {
+            "description": "No deletion request carries this token"
+          },
+          "409": {
+            "description": "The erasure has already started (the purge sweep claimed the request, or completed it): the deletion can no longer be cancelled, and nothing was changed"
           }
         }
       }
@@ -2617,7 +2626,7 @@
             "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
           },
           "429": {
-            "description": "The signed-in user's `ciba_approval_per_min` allowance of this route is spent"
+            "description": "The signed-in user's `ciba_approval_per_min` allowance of this route is spent, or the calling address has spent the route's per-address backstop, ten times that allowance (it answers requests whose token does not authenticate, which never reach the per-user count)"
           }
         },
         "security": [
@@ -4342,6 +4351,1028 @@
         ]
       }
     },
+    "/api/v1/network/decide": {
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`POST /api/v1/network/decide`",
+        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
+        "operationId": "network_decide",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetworkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The decision. `{\"allow\": false}` carries no reason, whatever it was; `{\"allow\": true, \"reply\": …}` carries the placed segment's tunnel attributes and its reply profile's, `Session-Timeout` clamped to the tenant's cap. `Tunnel-Type` and `Tunnel-Medium-Type` carry tag 0 on the wire; `Tunnel-Private-Group-Id` carries no tag octet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkDecisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body: an unknown key (named), a site key outside the pattern, not exactly one of `certificate` and `fingerprint`, or one that does not decode"
+          },
+          "401": {
+            "description": "Not a service account, or its token is not bound (`cnf.x5t#S256`) to the certificate this mTLS connection presented, or that certificate is no longer the caller's own and valid, or the account is not active"
+          },
+          "403": {
+            "description": "The caller lacks `network:decide` on the site"
+          },
+          "429": {
+            "description": "The caller's `network_decide_per_min` allowance is spent"
+          }
+        },
+        "security": [
+          {
+            "service_account": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/policy": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/policy`",
+        "description": "The tenant's `Session-Timeout` cap. A tenant that never wrote one reads the\ndefault (3600 seconds, `version` 0).",
+        "operationId": "get_policy",
+        "responses": {
+          "200": {
+            "description": "The tenant's network policy: the cap on a reply profile's `Session-Timeout` (3600 and `version` 0 until the tenant first writes one)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkPolicyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token (the network routes are human-only)"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on `/network`"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`PUT /api/v1/network/policy`",
+        "description": "A **replacement** of the tenant's `Session-Timeout` cap, conditional on\n`version`. Needs `network:segments_write` at the `/network` root (the cap is\nthe envelope every profile is clamped to); `network:profiles_write` alone\ndoes not suffice, nor does a grant at a site below the root.",
+        "operationId": "replace_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceNetworkPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new policy. Lowering the cap is always allowed, even below an existing profile's `session_timeout_secs`: the stored value is untouched and every read clamps it to the cap (`session_timeout_clamped`), so raising the cap again restores it — unless the profile was replaced meanwhile: a replace stores what it carries and is refused above the cap (H3), so one written back from a clamped read stores the clamped value. Raising the cap is allowed and audited as `network_policy.raised`; lowering as `network_policy.lowered`, each with the cap before and after",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkPolicyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`session_timeout_max_secs` outside 300 to 86 400, or an unknown field"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:segments_write` on `/network` (the response names the permission and the node)"
+          },
+          "409": {
+            "description": "`reason_code` `stale_version`: the policy changed since `version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/profiles": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/profiles`",
+        "operationId": "list_profiles",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's reply profiles, by owning segment id. Each is the effective profile: `session_timeout_secs` already lowered to the tenant's current cap (`session_timeout_clamped` says so). `search` matches `filter_id` and the segment id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A segment's reply profile as read: **the effective one**, with the\n`Session-Timeout` already clamped to the tenant's current cap (design note\n§3.4) and `Idle-Timeout` kept within it.",
+                        "required": [
+                          "segment_id",
+                          "tenant_id",
+                          "dictionary",
+                          "session_timeout_secs",
+                          "session_timeout_clamped",
+                          "termination_action",
+                          "version",
+                          "created_by",
+                          "updated_by",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Creation time."
+                          },
+                          "created_by": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The administrator who created it."
+                          },
+                          "dictionary": {
+                            "type": "string",
+                            "description": "The dictionary version the profile was validated against."
+                          },
+                          "filter_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "`Filter-Id`, one of the segment's declared names."
+                          },
+                          "idle_timeout_secs": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "format": "int32",
+                            "description": "`Idle-Timeout`, seconds, never above the effective `Session-Timeout`.",
+                            "minimum": 0
+                          },
+                          "segment_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning segment, which is also this profile's id: one profile per\nsegment, at most."
+                          },
+                          "service_type": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/RadiusServiceType",
+                                "description": "`Service-Type`."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "session_timeout_clamped": {
+                            "type": "boolean",
+                            "description": "Whether the stored value was above the cap and has been lowered."
+                          },
+                          "session_timeout_secs": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "`Session-Timeout`, seconds: the stored value lowered to the tenant's\ncurrent cap. This is the value a reply carries.",
+                            "minimum": 0
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "termination_action": {
+                            "$ref": "#/components/schemas/RadiusTerminationAction",
+                            "description": "`Termination-Action`."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Last write time."
+                          },
+                          "updated_by": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The administrator who last wrote it."
+                          },
+                          "version": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "The version the next replace or delete must name. Starts at 1.",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on `/network`"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`POST /api/v1/network/profiles`",
+        "operationId": "create_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNetworkReplyProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The profile was created; the body is the effective profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value outside the dictionary (an unknown key is named), or `idle_timeout_secs` / `session_timeout_secs` outside their bounds"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The write gate refused it (§5.2): the caller lacks `network:profiles_write` (H1) or `network:grant` (H2) on the segment, the `filter_id` is outside the segment's envelope or `session_timeout_secs` above the tenant cap (H3), the caller can itself join the segment (H6) — the response names the permission and the node when one is missing — or a reactor vetoed the write"
+          },
+          "404": {
+            "description": "No such segment in this tenant"
+          },
+          "409": {
+            "description": "`reason_code` `profile_exists` (`already_exists`): the segment already has a profile; or `stale_version`: the segment changed since `segment_version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/profiles/{segment_id}": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/profiles/{segment_id}`",
+        "operationId": "get_profile",
+        "parameters": [
+          {
+            "name": "segment_id",
+            "in": "path",
+            "description": "ID of the segment that owns the profile",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The segment's effective reply profile: `session_timeout_secs` is the stored value lowered to the tenant's current cap, and `session_timeout_clamped` says when it was. A replace above the cap is refused (H3), so writing back a clamped read cannot restore the stored value; raising the cap first restores it at read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on the segment"
+          },
+          "404": {
+            "description": "The segment does not exist in this tenant, or has no profile"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`PUT /api/v1/network/profiles/{segment_id}`",
+        "description": "A **replacement** of the segment's profile, conditional on the profile's\n`version` and the segment's.",
+        "operationId": "replace_profile",
+        "parameters": [
+          {
+            "name": "segment_id",
+            "in": "path",
+            "description": "ID of the segment that owns the profile",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceNetworkReplyProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new effective profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReplyProfile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value outside the dictionary or its bounds"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The write gate refused it (H1 … H6, as for create), or a reactor vetoed the write"
+          },
+          "404": {
+            "description": "No such segment in this tenant, or it has no profile"
+          },
+          "409": {
+            "description": "`reason_code` `stale_version`: the profile changed since `version` was read, or the segment since `segment_version`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`DELETE /api/v1/network/profiles/{segment_id}?version=`",
+        "description": "No profile means the segment is not a placement candidate, so the delete\nremoves every device placed on it: the write gate asks\n`network:profiles_write` (H1) and the placing right, `network:grant` on the\nsegment (and on `/network/quarantine/<site>` for a quarantine segment), and\nrefuses a caller that may join the segment (H6).",
+        "operationId": "delete_profile",
+        "parameters": [
+          {
+            "name": "segment_id",
+            "in": "path",
+            "description": "ID of the segment that owns the profile",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "The `version` of the segment (or profile) as the caller read it. A stale\none is `409`.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The profile was deleted"
+          },
+          "400": {
+            "description": "`version` is missing or not a number"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:profiles_write` on the segment, or `network:grant` on it (and, for a quarantine segment, on `/network/quarantine/<site>`) — deleting the profile removes every device placed there; or holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
+          },
+          "404": {
+            "description": "No such segment in this tenant, or it has no profile"
+          },
+          "409": {
+            "description": "`reason_code` `stale_version`: the profile changed since `version` was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/segments": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/segments`",
+        "operationId": "list_segments",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "site",
+            "in": "query",
+            "description": "Only the segments of this site key.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's network segments, by site, then rank, then name. `search` matches name, site key and id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A network segment, as the management API returns it.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "path",
+                          "name",
+                          "site_key",
+                          "kind",
+                          "vlan_id",
+                          "filter_ids",
+                          "enabled",
+                          "version",
+                          "created_by",
+                          "updated_by",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Creation time."
+                          },
+                          "created_by": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The administrator who created it."
+                          },
+                          "enabled": {
+                            "type": "boolean",
+                            "description": "Whether the segment is a placement candidate."
+                          },
+                          "filter_ids": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "The `Filter-Id` names the segment's profile may choose from."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The segment id; also the id of its resource node, which `check_access`\nis asked about, and of its reply profile."
+                          },
+                          "kind": {
+                            "$ref": "#/components/schemas/NetworkSegmentKind",
+                            "description": "`access` (under `/network/zones`) or `quarantine` (under\n`/network/quarantine`); fixed for the segment's life."
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "The segment's name, unique within its site."
+                          },
+                          "path": {
+                            "type": "string",
+                            "description": "The segment's place in the reserved subtree,\n`/network/{zones|quarantine}/<site_key>/<name>`."
+                          },
+                          "rank": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "format": "int32",
+                            "description": "The placement rank among a site's `access` segments (lowest wins);\nabsent for a quarantine segment.",
+                            "minimum": 0
+                          },
+                          "site_key": {
+                            "type": "string",
+                            "description": "The site key."
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Last write time."
+                          },
+                          "updated_by": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The administrator who last wrote it."
+                          },
+                          "version": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "The version the next replace or delete must name.",
+                            "minimum": 0
+                          },
+                          "vlan_id": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "The VLAN the tunnel attributes carry (1 to 4094), unique per site.",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token (the network routes are human-only)"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on `/network`"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`POST /api/v1/network/segments`",
+        "operationId": "create_segment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNetworkSegmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The segment was created, with the `/network`, branch and site nodes it needed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSegmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule — the message names the field — or a path outside `/network/{zones|quarantine}/<site>/<segment>`"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:segments_write` at the parent node (the response names the permission and the node), or a reactor vetoed the write"
+          },
+          "409": {
+            "description": "`already_exists` with `reason_code` `duplicate_name`, `duplicate_vlan` or `duplicate_rank`: the site already has a segment with this name, VLAN or rank; or `conflict` with `site_gone`: the site node was removed while the segment was being created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/network/segments/{id}": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`GET /api/v1/network/segments/{id}`",
+        "operationId": "get_segment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSegmentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:read` on the segment"
+          },
+          "404": {
+            "description": "No such segment in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`PUT /api/v1/network/segments/{id}`",
+        "description": "A **replacement** of the envelope, conditional on `version`. The kind and the\nsegment's place in the tree do not change.",
+        "operationId": "replace_segment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceNetworkSegmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The segment's new envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSegmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule — the message names the field"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:segments_write` on the segment; or the segment has a reply profile, the replace changes `vlan_id`, `rank` or `enabled`, and the caller lacks `network:grant` on the segment (and, for a quarantine segment, on `/network/quarantine/<site>`) — that change re-places every device that may join it; or the caller holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
+          },
+          "404": {
+            "description": "No such segment in this tenant"
+          },
+          "409": {
+            "description": "`reason_code` says which: `stale_version` — the segment changed since `version` was read, or a reply profile was written on it since; `strands_profile` — the new `filter_ids` would leave its reply profile outside the envelope (the message names the profile); `duplicate_vlan` / `duplicate_rank` (`already_exists`) — the site already has a segment with this VLAN or rank",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "network"
+        ],
+        "summary": "`DELETE /api/v1/network/segments/{id}?version=`",
+        "description": "The segment, **its reply profile** and its resource node, in one\ntransaction. Role assignments and grants naming the node are not touched;\nthe node is simply gone. A segment that has a profile takes the devices\nplaced on it along, so the write gate asks the placing right too\n(`network:grant` on the segment, and on `/network/quarantine/<site>` for a\nquarantine segment).",
+        "operationId": "delete_segment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "The `version` of the segment (or profile) as the caller read it. A stale\none is `409`.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The segment and its profile were deleted"
+          },
+          "400": {
+            "description": "`version` is missing or not a number"
+          },
+          "401": {
+            "description": "Not authenticated, or a service-account token"
+          },
+          "403": {
+            "description": "The caller lacks `network:segments_write` on the segment; or the segment has a reply profile and the caller lacks `network:grant` on the segment (and, for a quarantine segment, on `/network/quarantine/<site>`) — deleting it removes every device placed there; or it has a profile and the caller holds `network:join` on it (H6); or a reactor vetoed the write. The response names the missing permission and node"
+          },
+          "404": {
+            "description": "No such segment in this tenant"
+          },
+          "409": {
+            "description": "`reason_code` `stale_version`: the segment changed since `version` was read (a reply profile written on it since counts); or `has_children`: it has child resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/notification-rules": {
       "get": {
         "tags": [
@@ -5088,6 +6119,12 @@
           },
           "404": {
             "description": "OAuth2 client not found"
+          },
+          "409": {
+            "description": "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."
+          },
+          "422": {
+            "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."
           }
         },
         "security": [
@@ -5116,7 +6153,7 @@
         ],
         "responses": {
           "204": {
-            "description": "OAuth2 client deleted; its refresh tokens, authorization codes and pushed requests are revoked first"
+            "description": "OAuth2 client deleted; its refresh tokens, authorization codes, pushed requests, device grants and CIBA requests are revoked or deleted first"
           },
           "404": {
             "description": "OAuth2 client not found"
@@ -5608,7 +6645,7 @@
           "ca-certificates"
         ],
         "summary": "`POST /api/v1/organizations/{org_id}/ca-certificates`",
-        "description": "Generate a CA. What that means depends on the configured key custodian, and\ndeliberately not on the request:\n\n* Under `database` or `vault` custody, AXIAM generates a self-signed root\n  and returns its private key once, in `private_key_pem`.\n* Under `vault_pki` custody, Vault generates a root and a signing\n  intermediate beneath it, and the response has **no** `private_key_pem`\n  because the key never existed outside Vault. The root's certificate comes\n  back in `chain_pem`, which is the only copy anything outside Vault will\n  see.",
+        "description": "Generate a CA. What that means depends on the configured key custodian, and\ndeliberately not on the request:\n\n* Under `database` or `vault` custody, AXIAM generates a self-signed root\n  and returns its private key once, in `private_key_pem`: an unencrypted\n  PKCS#8 `PRIVATE KEY` block, which for Ed25519 is RFC 8410 version 1 (the\n  seed alone, no public-key attribute) so that OpenSSL 3.0 can read it.\n* Under `vault_pki` custody, Vault generates a root and a signing\n  intermediate beneath it, and the response has **no** `private_key_pem`\n  because the key never existed outside Vault. The root's certificate comes\n  back in `chain_pem`, which is the only copy anything outside Vault will\n  see.",
         "operationId": "generate",
         "parameters": [
           {
@@ -6162,7 +7199,7 @@
             "description": "Settings are internally inconsistent, enable OPAQUE on a server holding no OPAQUE keys, or turn ssf_enabled on while the deployment holds more than one tenant and serves no per-tenant issuers (D-55)"
           },
           "409": {
-            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"
           }
         },
         "security": [
@@ -6511,6 +7548,9 @@
           },
           "404": {
             "description": "Tenant not found"
+          },
+          "409": {
+            "description": "The tenant's audit trail was not exported first: no audit-export receipt less than 6 hours old exists, or the newest receipt claims to cover rows written after itself, which no export writes (R101W3-03). Nothing has changed; export again with POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export and retry"
           }
         },
         "security": [
@@ -10440,7 +11480,7 @@
             "description": "Override violates org baseline, enables OPAQUE on a server holding no OPAQUE keys, or turns ssf_enabled on while the deployment's tenants share one issuer (D-55)"
           },
           "409": {
-            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"
           }
         },
         "security": [
@@ -10547,7 +11587,7 @@
             "description": "Another tenant's configuration"
           },
           "409": {
-            "description": "An enabled directory under opaque_mode `required`"
+            "description": "An enabled directory under opaque_mode `required`; or the tenant's opaque_mode or directory changed after this request read them, so nothing was written — reload and retry"
           },
           "503": {
             "description": "The deployment has no directory encryption key"
@@ -10641,7 +11681,7 @@
             "description": "The tenant has no directory configuration"
           },
           "409": {
-            "description": "An enabled directory under opaque_mode `required`"
+            "description": "An enabled directory under opaque_mode `required`; or the tenant's opaque_mode or directory changed after this request read them, so nothing was written — reload and retry"
           },
           "503": {
             "description": "The deployment has no directory encryption key"
@@ -11794,7 +12834,7 @@
             "description": "An override is less restrictive than the org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
           },
           "409": {
-            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"
           }
         },
         "security": [
@@ -13866,7 +14906,7 @@
           "oauth2"
         ],
         "summary": "Build an OAuth2 JSON error response with the appropriate HTTP status.",
-        "description": "`POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).\n\nIssues a `device_code` (the secret the device polls with), a short\n`user_code` (the string a human reads off a screen and types elsewhere),\nand the `verification_uri` to send them to.\n\n**Unauthenticated by design.** RFC 8628 exists for input-constrained public\nclients — a television, a CLI, an IoT sensor — none of which can keep a\nclient secret, so there is no secret to present. What is still verified is\nthat `client_id` names a real client in this tenant that is registered for\nthis grant; without that check any string could mint pending grants and\nexhaust the user-code space, which is a denial of service against every\nlegitimate device at once.\n\nThe endpoint carries its own rate-limit bucket (see `server.rs`) rather\nthan sharing the generic token bucket: it is unauthenticated and it\nallocates state, which is a different abuse profile from the token\nendpoint's.",
+        "description": "`POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).\n\nIssues a `device_code` (the secret the device polls with), a short\n`user_code` (the string a human reads off a screen and types elsewhere),\nand the `verification_uri` to send them to.\n\n**The client authenticates by its registered method (#635).** RFC 8628\nexists for input-constrained clients — a television, a CLI, an IoT sensor —\nwhich are usually public: a client registered with\n`token_endpoint_auth_method: none` presents nothing, as before, and is\nrefused if it presents a credential. A confidential client presents its\ncredential here as at the token endpoint (RFC 8628 §3.1 → RFC 6749\n§3.2.1): its secret, a client assertion, or its certificate. Either way\n`client_id` must name a client of a live tenant that holds this grant;\nwithout that any string could mint pending grants and exhaust the\nuser-code space, which is a denial of service against every legitimate\ndevice at once. A failed client authentication is `401 invalid_client`\nwith the RFC 6749 §5.2 challenge, and is audited as at the token endpoint.\n\nThe endpoint carries its own rate-limit bucket (see `server.rs`) rather\nthan sharing the generic token bucket: it is reachable without a\ncredential and it allocates state, which is a different abuse profile from\nthe token endpoint's.",
         "operationId": "device_authorization",
         "parameters": [
           {
@@ -13902,6 +14942,16 @@
           },
           "400": {
             "description": "OAuth2 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Client authentication failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -14647,7 +15697,7 @@
           "pki"
         ],
         "summary": "`GET`/`HEAD /pki/v1/{org_id}/ca/{ca_id}/crl`",
-        "description": "The CA's current CRL (RFC 5280 §5), DER, as `application/pkix-crl`:\nsigned with the CA's own key, `nextUpdate` a configured interval after\n`thisUpdate` (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, one day by default), with\na CRL number and an authority key identifier, and an entry for every\ncertificate the CA signed and revoked that has not expired. Every\ncertificate AXIAM signs names this URL in its CRL distribution points\nextension when the deployment has a public base URL.\n\nUnauthenticated, because a relying party fetches the list before it can\nvalidate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).\n`ETag` is the list's digest and `Last-Modified` its `thisUpdate`; a matching\n`If-None-Match` answers `304`. `Cache-Control: public, max-age` runs to the\norigin's next scheduled re-sign — at most half the `nextUpdate` interval —\nand not to `nextUpdate` (#608): a shared cache revalidates with the `ETag`\nthat often rather than serving a list from before a revocation for the\nwhole interval. Every replica signs the same state in the same refresh\nepoch to the same bytes, CRL number and `ETag`, so revalidating behind a\nload balancer answers `304` wherever it lands.\n\n`404` for a CA that does not exist in that organization and, alike, for one\nthat publishes no list: a revoked or expired CA (its status is on its\nparent's list), an imported trust anchor AXIAM holds no key for, and a CA\nwhose key Vault's PKI engine holds.\n\n`503` when the list has to be re-signed and no permit of the crypto\nsemaphore — shared with issuance and password hashing — came free within\nfive seconds (#607). A list that has not changed is served from the cache\nand needs no permit, so the route keeps answering relying parties that\nalready hold the current list while the gate is saturated.",
+        "description": "The CA's current CRL (RFC 5280 §5), DER, as `application/pkix-crl`:\nsigned with the CA's own key, `nextUpdate` a configured interval after\n`thisUpdate` (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, one day by default), with\na CRL number and an authority key identifier, and an entry for every\ncertificate the CA signed and revoked that has not expired. Every\ncertificate AXIAM signs names this URL in its CRL distribution points\nextension when the deployment has a public base URL.\n\nUnauthenticated, because a relying party fetches the list before it can\nvalidate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).\n`ETag` is the list's digest and `Last-Modified` its `thisUpdate`; a matching\n`If-None-Match` answers `304`. `Cache-Control: public, max-age` runs to the\norigin's next scheduled re-sign — at most half the `nextUpdate` interval —\nand not to `nextUpdate` (#608): a shared cache revalidates with the `ETag`\nthat often rather than serving a list from before a revocation for the\nwhole interval. Every replica signs the same state in the same refresh\nepoch to the same bytes, CRL number and `ETag`, so revalidating behind a\nload balancer answers `304` wherever it lands.\n\n`404` for a CA that does not exist in that organization and, alike, for one\nthat publishes no list: a revoked or expired CA (its status is on its\nparent's list), an imported trust anchor AXIAM holds no key for, and a CA\nwhose key Vault's PKI engine holds.\n\n`503` when the list has to be re-signed and no permit of the crypto\nsemaphore — shared with issuance and password hashing — came free within\nfive seconds (#607), and also when the request waited that long (`permit_wait`)\non another request's in-flight re-sign of the same CA, since waiters share\nthat re-sign's outcome, failure included. A list that has not changed is served\nfrom the cache and needs no permit, so the route keeps answering relying\nparties that already hold the current list while the gate is saturated.",
         "operationId": "get_crl",
         "parameters": [
           {
@@ -16931,7 +17981,7 @@
           },
           "subject": {
             "type": "string",
-            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`."
+            "description": "The CA's common name, e.g. `ACME Corp Root CA`.\n\nA **common name**, not a distinguished name. A single `CN=` prefix is\naccepted and stripped; anything else containing `=` — `O=Acme,\nCN=ACME Corp Root CA` — is refused with `400`, as is a name of more than\n64 characters (RFC 5280 `ub-common-name`) or one holding a control\ncharacter, a tab or line break, an invisible or bidirectional formatting\ncharacter, or two spaces in a row."
           },
           "validity_days": {
             "type": "integer",
@@ -17016,7 +18066,8 @@
           },
           "metadata": {},
           "subject": {
-            "type": "string"
+            "type": "string",
+            "description": "The certificate's common name, e.g. `device-001`: a bare name or one\n`CN=` component, at most 64 characters (RFC 5280 `ub-common-name`),\nprintable — a control character, tab or line break, an invisible or\nbidirectional formatting character, or two spaces in a row is refused\nwith `400`. A name that is to be written into another system's\nconfiguration (a FreeRADIUS table, an ACL) should match\n`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`."
           },
           "subject_alt_names": {
             "type": [
@@ -17319,6 +18370,84 @@
             "minimum": 0
           }
         }
+      },
+      "CreateNetworkReplyProfileRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/network/profiles`.",
+        "required": [
+          "segment_id",
+          "segment_version",
+          "profile"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/NetworkReplyProfileInput",
+            "description": "The profile: a typed record of the `axiam-radius-reply/1` dictionary.\nThe VLAN is never a field; it is the segment's."
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The segment the profile belongs to (at most one profile per segment)."
+          },
+          "segment_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The segment's `version` as the caller read it: the envelope the profile\nwas written against. A segment written since is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateNetworkSegmentRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/network/segments`.",
+        "required": [
+          "kind",
+          "site_key",
+          "name",
+          "vlan_id"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the segment starts as a placement candidate. Defaults to `true`."
+          },
+          "filter_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `Filter-Id` names the segment's profile may choose from: its\nenvelope. At most 32, each matching the pattern above."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NetworkSegmentKind",
+            "description": "`access` or `quarantine`. Decides the branch the segment lives under."
+          },
+          "name": {
+            "type": "string",
+            "description": "The segment's name, same pattern, unique within the site."
+          },
+          "rank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The placement rank (unique within the site): required for `access`,\nabsent for `quarantine`.",
+            "minimum": 0
+          },
+          "site_key": {
+            "type": "string",
+            "description": "The site key (`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`). A single-site tenant\nuses `default`."
+          },
+          "vlan_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VLAN (1 to 4094), unique within the site.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "CreateNotificationRuleRequest": {
         "type": "object",
@@ -18208,20 +19337,41 @@
       },
       "DeviceAuthorizationRequest": {
         "type": "object",
-        "description": "`POST /oauth2/device_authorization` request (RFC 8628 §3.1).",
+        "description": "`POST /oauth2/device_authorization` request (RFC 8628 §3.1).\n\n`Debug` is written by hand so that the credentials never reach a log line.",
         "required": [
           "client_id"
         ],
         "properties": {
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7523 client assertion, for a client registered for\n`private_key_jwt` (#635)."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7521 §4.2 assertion type; must accompany `client_assertion`."
+          },
           "client_id": {
             "type": "string"
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client's secret, for a client registered for `client_secret_post`\n(#635, RFC 8628 §3.1 → RFC 6749 §2.3). A public client\n(`token_endpoint_auth_method: none`) sends none, and is refused if it\ndoes."
           },
           "resource": {
             "type": [
               "string",
               "null"
             ],
-            "description": "T21.3 / RFC 8707 §2 — the target service this device wants a token for.\n\nNamed here, where the device makes its request, because the poll that\nredeems the grant carries nothing but a `device_code`. Validated\nagainst the client's `allowed_resources` and stored on the grant;\nabsent leaves the flow exactly as it was (I2)."
+            "description": "T21.3 / RFC 8707 §2 — the target service this device wants a token for.\n\nNamed here, where the device makes its request, because a grant's\naudience is decided when the grant is made: the poll that redeems it\nmay only repeat it. Validated against the client's `allowed_resources`\nand stored on the grant; absent leaves the flow exactly as it was (I2)."
           },
           "scope": {
             "type": [
@@ -18963,7 +20113,7 @@
                   "string",
                   "null"
                 ],
-                "description": "PEM-encoded private key — returned only on generation, and only when\nthere is one to return.\n\nAbsent under `vault_pki` custody, where the key was generated inside\nVault and no API exports it. The field is omitted rather than sent as\n`null` so a client that has always read it keeps working unchanged for\nevery custodian that does produce a key."
+                "description": "PEM-encoded private key — returned only on generation, and only when\nthere is one to return.\n\nAn unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key is RFC 8410\nversion 1 (`version` INTEGER 0, the 32-byte seed and no embedded public\nkey), which OpenSSL 3.0 reads; an RSA-4096 key is the usual PKCS#8\n`RSAPrivateKey`.\n\nAbsent under `vault_pki` custody, where the key was generated inside\nVault and no API exports it. The field is omitted rather than sent as\n`null` so a client that has always read it keeps working unchanged for\nevery custodian that does produce a key."
               }
             }
           }
@@ -18990,7 +20140,7 @@
               },
               "private_key_pem": {
                 "type": "string",
-                "description": "PEM-encoded private key — returned only on generation."
+                "description": "PEM-encoded private key — returned only on generation.\n\nAn unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key AXIAM\ngenerated is RFC 8410 version 1 (`version` INTEGER 0, the 32-byte seed\nand no embedded public key), which OpenSSL 3.0 reads; the longer\nRFC 5958 v2 form it does not. An RSA-4096 key is the usual PKCS#8\n`RSAPrivateKey`."
               }
             }
           }
@@ -20146,6 +21296,399 @@
           "persistent",
           "email_address"
         ]
+      },
+      "NetworkConflictReason": {
+        "type": "string",
+        "description": "Why a network route answered `409`: the `reason_code` member of the body,\nbeside `error` (`sdks/CONTRACT.md` §36.3 rule 2, §36.4).\n\nThe vocabulary a client branches on, so that it never has to parse\n`message` (which stays for a human); open for decoding (§27.13), so a\nclient surfaces a value it does not know. The `error` slug is unchanged:\n`conflict` for a state conflict, `already_exists` for a uniqueness clash.",
+        "enum": [
+          "stale_version",
+          "strands_profile",
+          "has_children",
+          "duplicate_name",
+          "duplicate_vlan",
+          "duplicate_rank",
+          "profile_exists",
+          "site_gone",
+          "other"
+        ]
+      },
+      "NetworkConflictResponse": {
+        "type": "object",
+        "description": "The body of a network route's `409`, as the OpenAPI document shows it.",
+        "required": [
+          "error",
+          "message",
+          "reason_code"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "`conflict` for a state conflict, `already_exists` for a uniqueness\nclash — the crate's slugs, unchanged."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for a human. Never parsed: `reason_code` is what to branch on."
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/NetworkConflictReason",
+            "description": "Why the write conflicts."
+          }
+        }
+      },
+      "NetworkDecisionRequest": {
+        "type": "object",
+        "description": "The body of `POST /api/v1/network/decide`. Closed: an unknown key — a MAC\naddress, a user name — is a `400` naming it, so nothing the design note's\n§8 keeps out of the audit trail can be posted into it.",
+        "required": [
+          "site"
+        ],
+        "properties": {
+          "certificate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The certificate the device presented in EAP-TLS, DER, standard base64.\nExactly one of `certificate` and `fingerprint`."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of that certificate's DER, 64 hexadecimal digits. Exactly\none of `certificate` and `fingerprint`."
+          },
+          "site": {
+            "type": "string",
+            "description": "The site key, from FreeRADIUS's own client configuration\n(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`). Never taken from the packet."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NetworkDecisionResponse": {
+        "type": "object",
+        "description": "The decision: `{ \"allow\": false }` with **no reason**, or\n`{ \"allow\": true, \"reply\": … }`.",
+        "required": [
+          "allow"
+        ],
+        "properties": {
+          "allow": {
+            "type": "boolean",
+            "description": "Whether the device is placed. `false` carries nothing else, whatever\nthe reason (T-457, T-468)."
+          },
+          "reply": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RadiusRenderedReply",
+                "description": "The Access-Accept attributes of the segment the device is placed on:\nits tunnel triple (RFC 3580 §3.31) and its reply profile's fields, with\n`Session-Timeout` clamped to the tenant's cap. Only on an allow."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "NetworkPolicyResponse": {
+        "type": "object",
+        "description": "The tenant's network policy, as the management API returns it.",
+        "required": [
+          "tenant_id",
+          "session_timeout_max_secs",
+          "version"
+        ],
+        "properties": {
+          "session_timeout_max_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`network.session_timeout_max_secs`: the most a reply profile's\n`Session-Timeout` may be, in seconds (300 to 86 400; 3600 until the\ntenant writes one). A stored profile above it is clamped at read.",
+            "minimum": 0
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last write time; absent while it is the default."
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The administrator who last wrote it; absent while it is the default."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the next `PUT` must name; `0` until the tenant first writes.",
+            "minimum": 0
+          }
+        }
+      },
+      "NetworkReplyProfile": {
+        "type": "object",
+        "description": "A segment's reply profile as read: **the effective one**, with the\n`Session-Timeout` already clamped to the tenant's current cap (design note\n§3.4) and `Idle-Timeout` kept within it.",
+        "required": [
+          "segment_id",
+          "tenant_id",
+          "dictionary",
+          "session_timeout_secs",
+          "session_timeout_clamped",
+          "termination_action",
+          "version",
+          "created_by",
+          "updated_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who created it."
+          },
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the profile was validated against."
+          },
+          "filter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Filter-Id`, one of the segment's declared names."
+          },
+          "idle_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`Idle-Timeout`, seconds, never above the effective `Session-Timeout`.",
+            "minimum": 0
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning segment, which is also this profile's id: one profile per\nsegment, at most."
+          },
+          "service_type": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RadiusServiceType",
+                "description": "`Service-Type`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_timeout_clamped": {
+            "type": "boolean",
+            "description": "Whether the stored value was above the cap and has been lowered."
+          },
+          "session_timeout_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`Session-Timeout`, seconds: the stored value lowered to the tenant's\ncurrent cap. This is the value a reply carries.",
+            "minimum": 0
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "termination_action": {
+            "$ref": "#/components/schemas/RadiusTerminationAction",
+            "description": "`Termination-Action`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last write time."
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who last wrote it."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the next replace or delete must name. Starts at 1.",
+            "minimum": 0
+          }
+        }
+      },
+      "NetworkReplyProfileInput": {
+        "type": "object",
+        "description": "What a writer supplies for a profile. Closed: an unknown key is a refusal\nnaming it, never ignored (design note §3.4).",
+        "required": [
+          "session_timeout_secs"
+        ],
+        "properties": {
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the profile is written against; defaults to\n[`REPLY_DICTIONARY_V1`]. An unknown version is refused."
+          },
+          "filter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Filter-Id`: one of the owning segment's declared `filter_ids`."
+          },
+          "idle_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`Idle-Timeout`, seconds: [`IDLE_TIMEOUT_FLOOR_SECS`] up to\n`session_timeout_secs`.",
+            "minimum": 0
+          },
+          "service_type": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RadiusServiceType",
+                "description": "`Service-Type`: `framed_user` or absent under option B."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_timeout_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`Session-Timeout`, seconds: [`SESSION_TIMEOUT_FLOOR_SECS`] up to the\ntenant cap. Never zero.",
+            "minimum": 0
+          },
+          "termination_action": {
+            "$ref": "#/components/schemas/RadiusTerminationAction",
+            "description": "`Termination-Action`; defaults to `RADIUS-Request`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NetworkSegmentKind": {
+        "type": "string",
+        "description": "What a segment is for.",
+        "enum": [
+          "access",
+          "quarantine"
+        ]
+      },
+      "NetworkSegmentResponse": {
+        "type": "object",
+        "description": "A network segment, as the management API returns it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "path",
+          "name",
+          "site_key",
+          "kind",
+          "vlan_id",
+          "filter_ids",
+          "enabled",
+          "version",
+          "created_by",
+          "updated_by",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who created it."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the segment is a placement candidate."
+          },
+          "filter_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `Filter-Id` names the segment's profile may choose from."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The segment id; also the id of its resource node, which `check_access`\nis asked about, and of its reply profile."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NetworkSegmentKind",
+            "description": "`access` (under `/network/zones`) or `quarantine` (under\n`/network/quarantine`); fixed for the segment's life."
+          },
+          "name": {
+            "type": "string",
+            "description": "The segment's name, unique within its site."
+          },
+          "path": {
+            "type": "string",
+            "description": "The segment's place in the reserved subtree,\n`/network/{zones|quarantine}/<site_key>/<name>`."
+          },
+          "rank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The placement rank among a site's `access` segments (lowest wins);\nabsent for a quarantine segment.",
+            "minimum": 0
+          },
+          "site_key": {
+            "type": "string",
+            "description": "The site key."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last write time."
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The administrator who last wrote it."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the next replace or delete must name.",
+            "minimum": 0
+          },
+          "vlan_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VLAN the tunnel attributes carry (1 to 4094), unique per site.",
+            "minimum": 0
+          }
+        }
       },
       "NotificationEventType": {
         "type": "string",
@@ -22155,6 +23698,91 @@
           }
         }
       },
+      "RadiusRenderedReply": {
+        "type": "object",
+        "description": "A rendered reply: the closed set of attributes of one dictionary version,\nproduced from typed fields only (design note §3.4: never rendered as text by\nconcatenation).",
+        "required": [
+          "dictionary",
+          "attributes"
+        ],
+        "properties": {
+          "attributes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RadiusReplyAttribute"
+            },
+            "description": "The attributes, in dictionary order: the segment's tunnel triple, then\nthe profile's fields that are set."
+          },
+          "dictionary": {
+            "type": "string",
+            "description": "The dictionary version the attributes belong to."
+          }
+        }
+      },
+      "RadiusReplyAttribute": {
+        "type": "object",
+        "description": "One attribute of a rendered Access-Accept.",
+        "required": [
+          "name",
+          "number",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The attribute's name in FreeRADIUS's dictionary (`Tunnel-Type`, …)."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The attribute number (RFC 2865 / RFC 2868).",
+            "minimum": 0
+          },
+          "tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The RFC 2868 tag octet that goes **on the wire**, when one does.\n\n`0` on `Tunnel-Type` and `Tunnel-Medium-Type`: an integer tunnel\nattribute always carries its tag octet (`0x00`), which FreeRADIUS emits\nfor these with or without `:0`. **Absent** on `Tunnel-Private-Group-Id`:\nthe VLAN string goes on the wire with no tag octet in front of it (RFC\n2868 §3.6 allows that, since the string's first octet is above `0x1F`),\nwhich is exactly what FreeRADIUS 3.2.8 emits for the attribute written\nuntagged or tagged `:0` (verified on the wire, W5.4). Absent, too, on\nevery untagged attribute.",
+            "minimum": 0
+          },
+          "value": {
+            "$ref": "#/components/schemas/RadiusReplyValue",
+            "description": "The value, typed as the dictionary types it."
+          }
+        }
+      },
+      "RadiusReplyValue": {
+        "oneOf": [
+          {
+            "type": "integer",
+            "format": "int32",
+            "description": "An `integer` attribute's value.",
+            "minimum": 0
+          },
+          {
+            "type": "string",
+            "description": "A `string` attribute's value."
+          }
+        ],
+        "description": "The value of one rendered attribute: an integer, or the one string kind the\ndictionary admits (a decimal VLAN or a `Filter-Id` identifier)."
+      },
+      "RadiusServiceType": {
+        "type": "string",
+        "description": "`Service-Type` (RFC 2865 §5.6). Option B accepts only `framed_user`; the administrative values are refused with a 400.",
+        "enum": [
+          "framed_user"
+        ]
+      },
+      "RadiusTerminationAction": {
+        "type": "string",
+        "description": "`Termination-Action` (RFC 2865 §5.29).",
+        "enum": [
+          "default",
+          "radius_request"
+        ]
+      },
       "ReactorEventDescriptor": {
         "type": "object",
         "description": "One hookable event, as the registry describes it.",
@@ -22713,6 +24341,102 @@
             "description": "Reserved; always absent in this build. See\n`axiam_core::models::oauth2_registration_token::OAuth2RegistrationToken::used_by_client_id`\n— the registration a token produced is recorded in the audit log, not\nhere."
           }
         }
+      },
+      "ReplaceNetworkPolicyRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/network/policy`: a **replacement** of the policy.",
+        "required": [
+          "session_timeout_max_secs",
+          "version"
+        ],
+        "properties": {
+          "session_timeout_max_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The new cap on a reply profile's `Session-Timeout`, in seconds: 300 to\n86 400. Lowering it below an existing profile's value is fine (reads\nclamp); raising it is allowed and audited as a raise.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The policy's `version` as the caller read it (`0` for a tenant that has\nnever written one). A stale one is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplaceNetworkReplyProfileRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/network/profiles/{segment_id}`.",
+        "required": [
+          "version",
+          "segment_version",
+          "profile"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/NetworkReplyProfileInput",
+            "description": "The profile."
+          },
+          "segment_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The segment's `version` as the caller read it, as for\n[`CreateReplyProfileRequest::segment_version`].",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The profile's `version` as the caller read it. A stale one is `409`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplaceNetworkSegmentRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/network/segments/{id}`: a **replacement** of the\nenvelope. The kind and the place in the tree do not change.",
+        "required": [
+          "version",
+          "vlan_id",
+          "filter_ids",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the segment is a placement candidate."
+          },
+          "filter_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `Filter-Id` names the segment's profile may choose from. Removing\nthe one the profile uses is `409`, naming the profile."
+          },
+          "rank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The placement rank: required for an `access` segment, absent for a\n`quarantine` one.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The segment's `version` as the caller read it. A stale one is `409`.",
+            "minimum": 0
+          },
+          "vlan_id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VLAN (1 to 4094).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "RequestAuditHealth": {
         "type": "object",
@@ -24962,7 +26686,7 @@
       },
       "SignCertificateCsrRequest": {
         "type": "object",
-        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange.",
+        "description": "Body of `POST /api/v1/certificates/sign-csr`.\n\nNo `subject` and no `key_algorithm`: both are read out of the CSR, which is\nthe only place they can be stated without the row and the certificate being\nable to disagree. No key is returned, so there is no key field anywhere on\nthis exchange. The CSR's common name meets the rules of `subject` on\n`POST /api/v1/certificates` (printable, at most 64 characters) and is\nrefused, not rewritten, when it does not. So does the value of every other\nattribute of the CSR's subject, and a subject with more than one common\nname is refused.",
         "required": [
           "issuer_ca_id",
           "csr_pem",
@@ -27198,7 +28922,8 @@
             ],
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Replace the client's scopes. On a `managed_by: dcr | cimd` client a scope\nthe request adds that is outside the tenant's effective\n`dcr_allowed_scopes` is refused with `422` (#636); an\nadministrator-managed client is not bounded."
           },
           "self_signed_tls_client_auth_thumbprints": {
             "type": [
@@ -28478,6 +30203,10 @@
     {
       "name": "scim-targets",
       "description": "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"
+    },
+    {
+      "name": "network",
+      "description": "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS D4, claude_dev/radius-reply-profile-design.md)"
     },
     {
       "name": "ssf-receiver",

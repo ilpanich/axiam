@@ -285,26 +285,37 @@ where
             None
         };
 
-        // CIBA Core §10.1.1: an ID token is always returned (the scope always
-        // carries `openid`). It reports the approval: what was achieved, in the
-        // class the request asked for when the achievement satisfies it.
-        let achieved = Acr::from_wire(&approval.acr).unwrap_or(Acr::SingleFactor);
-        let evidence = IdTokenEvidence {
-            auth_time: Some(approval.auth_time.timestamp()),
-            acr: Some(report_acr(achieved, &redeemed.acr_values).to_owned()),
-            amr: axiam_core::models::session::Amr::encode_list(&approval.amr),
+        // CIBA Core §10.1.1: an ID token is returned when the scope carries
+        // `openid`, which `bc-authorize` requires of every request. It reports
+        // the approval: what was achieved, in the class the request asked for
+        // when the achievement satisfies it. The scope ceiling above can remove
+        // `openid` from an externally registered client's row (an administrator
+        // edited it after registration, #642 (c)); an ID token then would be an
+        // identity assertion the client holds no scope for, as the refresh
+        // grant already withholds it, so none is minted and the access token stands.
+        let id_token = if redeemed.scopes.iter().any(|s| s == "openid") {
+            let achieved = Acr::from_wire(&approval.acr).unwrap_or(Acr::SingleFactor);
+            let evidence = IdTokenEvidence {
+                auth_time: Some(approval.auth_time.timestamp()),
+                acr: Some(report_acr(achieved, &redeemed.acr_values).to_owned()),
+                amr: axiam_core::models::session::Amr::encode_list(&approval.amr),
+            };
+            Some(
+                issue_id_token(
+                    user_id,
+                    &client.client_id,
+                    None,
+                    Some(&user.username),
+                    &redeemed.scopes,
+                    &minting,
+                    Some(approval.session_id),
+                    &evidence,
+                )
+                .map_err(|e| OAuth2Error::ServerError(e.to_string()))?,
+            )
+        } else {
+            None
         };
-        let id_token = issue_id_token(
-            user_id,
-            &client.client_id,
-            None,
-            Some(&user.username),
-            &redeemed.scopes,
-            &minting,
-            Some(approval.session_id),
-            &evidence,
-        )
-        .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         tracing::debug!(
             client_id = %client.client_id,
@@ -318,7 +329,7 @@ where
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token,
             scope: Some(redeemed.scopes.join(" ")),
-            id_token: Some(id_token),
+            id_token,
         })
     }
 }

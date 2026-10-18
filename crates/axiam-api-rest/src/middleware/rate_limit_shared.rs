@@ -66,7 +66,8 @@ use surrealdb::Connection;
 
 use crate::config::rate_limit::{RateLimitConfig, RateLimitKeyMode};
 use crate::extractors::rate_limit::{
-    RateLimitClientId, XForwardedForKeyExtractor, extract_client_id,
+    RateLimitClientId, XForwardedForKeyExtractor, bucket_key_part, extract_client_id,
+    verified_principal,
 };
 use crate::state::AppState;
 
@@ -82,10 +83,7 @@ const WINDOW_SECS: i64 = 60;
 /// (D-01d parity — a rotating XFF must not yield a fresh bucket in either
 /// layer).
 fn trusted_hops() -> usize {
-    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
+    crate::extractors::rate_limit::configured_trusted_hops()
 }
 
 /// Truncates `now` down to the start of the current fixed
@@ -142,8 +140,9 @@ pub struct RateLimitShared<C: Connection + Clone> {
     limit: u32,
     /// D8: bucket-key derivation mode. Always [`RateLimitKeyMode::Ip`] for
     /// instances built via [`RateLimitShared::new`] — only
-    /// [`RateLimitShared::new_client_identity_aware`] ever sets this to
-    /// something else.
+    /// [`RateLimitShared::new_client_identity_aware`] and
+    /// [`RateLimitShared::keyed_on_principal`] ever set this to something
+    /// else.
     key_mode: RateLimitKeyMode,
     /// D8: whether this resource has a form-encoded OAuth2 `client_id` to
     /// peek at (`/oauth2/token`, `/oauth2/revoke`, `/oauth2/introspect`
@@ -192,6 +191,29 @@ impl<C: Connection + Clone> RateLimitShared<C> {
         Self {
             human: true,
             ..Self::new(endpoint, rate_limit_cfg.end_session_per_min)
+        }
+    }
+
+    /// Key this bucket on the request's **verified** principal `(tenant,
+    /// sub)`, with the address as the pre-authentication fallback (#633,
+    /// R101W2-05) — for an authenticated route, where the principal and not
+    /// the address is who spends the allowance.
+    ///
+    /// Wired on the five authenticated federation flow routes, after
+    /// [`Self::browser_preset`]. One token used from many addresses then
+    /// shares one allowance, and a backend relaying many users gives each
+    /// user their own. The principal is read from the audit middleware's
+    /// verified identity ([`verified_principal`]), never from an unverified
+    /// claim and never by verifying again; a request with no verified token
+    /// is keyed on its address. The in-process governor on the same route
+    /// must be built with the same mode (`server.rs`'s
+    /// `build_principal_governor`), and [`bucket_key_part`] makes both layers
+    /// derive the same key. The request body is never read.
+    pub fn keyed_on_principal(self) -> Self {
+        Self {
+            key_mode: RateLimitKeyMode::Principal,
+            client_identity_aware: false,
+            ..self
         }
     }
 
@@ -363,19 +385,22 @@ where
                 None
             };
 
-            // The bucket-key "identity" part: IP alone (`ip` mode, or
-            // fail-safe fallback when no client_id was found), the
-            // client_id alone, or the `(ip, client_id)` pair. Mirrors
-            // `extractors::rate_limit::ClientAwareKeyExtractor` exactly so
-            // this shared-store pre-check and the in-memory governor never
-            // disagree about which bucket a request belongs to.
-            let key_part = match (key_mode, &client_id) {
-                (RateLimitKeyMode::Ip, _) | (_, None) => ip.map(|ip| ip.to_string()),
-                (RateLimitKeyMode::ClientId, Some(cid)) => Some(format!("client:{cid}")),
-                (RateLimitKeyMode::IpClientId, Some(cid)) => {
-                    ip.map(|ip| format!("{ip}:client:{cid}"))
-                }
+            // #633: the verified principal, for the routes keyed on one —
+            // read from the audit middleware's cached identity, never
+            // verified here (see `verified_principal`).
+            let principal = match key_mode {
+                RateLimitKeyMode::Principal => verified_principal(&req),
+                _ => None,
             };
+
+            // The bucket-key "identity" part: IP alone (`ip` mode, or
+            // fail-safe fallback when no client_id or verified principal was
+            // found), the client_id alone, the `(ip, client_id)` pair, or the
+            // principal. The SAME function
+            // `extractors::rate_limit::ClientAwareKeyExtractor` calls, so this
+            // shared-store pre-check and the in-memory governor never
+            // disagree about which bucket a request belongs to.
+            let key_part = bucket_key_part(key_mode, ip, client_id.as_deref(), principal.as_ref());
 
             let now = Utc::now();
             // Carried past the decision so a downstream rejection can be
@@ -489,5 +514,27 @@ mod window_contract_tests {
 
         let plain = RateLimitShared::<surrealdb::engine::local::Db>::new("revoke", 30);
         assert!(!plain.human);
+    }
+
+    /// #633: keying on the principal changes the key and nothing else — the
+    /// browser preset's number and human seeding stay, and the body is never
+    /// read.
+    #[test]
+    fn keyed_on_principal_keeps_the_preset_and_reads_no_body() {
+        let cfg = RateLimitConfig {
+            end_session_per_min: 30,
+            ..RateLimitConfig::default()
+        };
+        let keyed = RateLimitShared::<surrealdb::engine::local::Db>::browser_preset(
+            "federation_oidc_authorize",
+            &cfg,
+        )
+        .keyed_on_principal();
+        assert_eq!(keyed.key_mode, RateLimitKeyMode::Principal);
+        assert_eq!(keyed.limit, 30);
+        assert_eq!(keyed.endpoint, "federation_oidc_authorize");
+        assert!(keyed.human);
+        assert!(!keyed.client_identity_aware);
+        assert_eq!(keyed.clone().key_mode, RateLimitKeyMode::Principal);
     }
 }

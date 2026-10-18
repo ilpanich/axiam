@@ -14,8 +14,10 @@ use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
-use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
-use axiam_core::models::oauth2_client::{CreateDeviceGrant, CreateOAuth2Client, DeviceGrantStatus};
+use axiam_core::models::oauth2_client::{
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateDeviceGrant, CreateOAuth2Client,
+    DeviceGrantStatus,
+};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
@@ -123,36 +125,16 @@ async fn setup() -> Fixture {
         .await
         .unwrap();
 
-    let (client, _secret) = SurrealOAuth2ClientRepository::new(db.clone())
-        .create(CreateOAuth2Client {
-            tenant_id: tenant.id,
-            name: "living-room-tv".into(),
-            redirect_uris: vec![],
-            grant_types: vec![DEVICE_CODE_GRANT_TYPE.into()],
-            scopes: vec!["openid".into()],
-            post_logout_redirect_uris: Vec::new(),
-            backchannel_logout_uri: None,
-            require_par: false,
-            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
-            token_endpoint_auth_method:
-                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
-            tls_client_auth_subject_dn: None,
-            tls_client_auth_san_dns: None,
-            tls_client_auth_san_uri: None,
-            self_signed_tls_client_auth_thumbprints: vec![],
-            tls_client_certificate_bound_access_tokens: false,
-            jwks: None,
-            jwks_uri: None,
-            dpop_bound_access_tokens: false,
-            dpop_require_nonce: false,
-            authn_request_params: AuthnRequestParamsMode::Ignore,
-            browser_sso: false,
-            allowed_resources: Vec::new(),
-            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
-            ciba: Default::default(),
-        })
-        .await
-        .unwrap();
+    // A television: public (`token_endpoint_auth_method: none`), the client
+    // RFC 8628 was written for and the shape every SDK's device flow drives.
+    let (client_id, _) = create_device_client(
+        &db,
+        tenant.id,
+        "living-room-tv",
+        ClientAuthMethod::None,
+        |_| {},
+    )
+    .await;
 
     Fixture {
         db,
@@ -160,8 +142,52 @@ async fn setup() -> Fixture {
         tenant_id: tenant.id,
         org_id: org.id,
         user_id: user.id,
-        client_id: client.client_id,
+        client_id,
     }
+}
+
+/// Register a client for the device grant directly in the store, as `name`,
+/// authenticating by `method`; `edit` adjusts the row before it is written
+/// (binding flags, profile, keys). Returns `(client_id, client_secret)`.
+async fn create_device_client(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    name: &str,
+    method: ClientAuthMethod,
+    edit: impl FnOnce(&mut CreateOAuth2Client),
+) -> (String, String) {
+    let mut input = CreateOAuth2Client {
+        tenant_id,
+        name: name.into(),
+        redirect_uris: vec![],
+        grant_types: vec![DEVICE_CODE_GRANT_TYPE.into()],
+        scopes: vec!["openid".into()],
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
+        profile: ClientProfile::Standard,
+        token_endpoint_auth_method: method,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: vec![],
+        tls_client_certificate_bound_access_tokens: false,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: AuthnRequestParamsMode::Ignore,
+        browser_sso: false,
+        allowed_resources: Vec::new(),
+        managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        ciba: Default::default(),
+    };
+    edit(&mut input);
+    let (client, secret) = SurrealOAuth2ClientRepository::new(db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    (client.client_id, secret)
 }
 
 fn mint_token(f: &Fixture) -> String {
@@ -197,6 +223,25 @@ macro_rules! test_app {
     };
 }
 
+/// [`test_app!`] over a state the test has adjusted (the `private_key_jwt`
+/// verifier `axiam-server` wires, for the FAPI test).
+macro_rules! test_app_with_state {
+    ($f:expr, $state:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($f.auth.clone()))
+                .app_data(web::Data::new($state))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    };
+}
+
 /// Seed a grant directly, so a test can start from any state in the machine
 /// without driving the whole ceremony. Returns the raw device code.
 async fn seed_grant(
@@ -220,6 +265,17 @@ async fn seed_grant_with_interval(
     expires_in_secs: i64,
     interval_secs: u64,
 ) -> (String, String) {
+    seed_grant_for(f, &f.client_id, status, expires_in_secs, interval_secs).await
+}
+
+/// As [`seed_grant_with_interval`], for a client other than the fixture's.
+async fn seed_grant_for(
+    f: &Fixture,
+    client_id: &str,
+    status: DeviceGrantStatus,
+    expires_in_secs: i64,
+    interval_secs: u64,
+) -> (String, String) {
     let repo = SurrealDeviceGrantRepository::new(f.db.clone());
     let device_code = format!("dc-{}", Uuid::new_v4().simple());
     // Generate through the real generator rather than inventing a string. The
@@ -236,7 +292,7 @@ async fn seed_grant_with_interval(
     let user_code = normalize_user_code(&user_code_display);
     repo.create(CreateDeviceGrant {
         tenant_id: f.tenant_id,
-        client_id: f.client_id.clone(),
+        client_id: client_id.to_owned(),
         device_code_hash: hash_device_code(&device_code),
         user_code: user_code.clone(),
         scopes: vec!["openid".into()],
@@ -277,6 +333,15 @@ macro_rules! post_token {
         let body: Value = test::read_body_json(resp).await;
         (status, body)
     }};
+}
+
+/// The form body of a device's poll: the grant, the device code and — RFC
+/// 8628 §3.4, required since #635 — the client it was issued to.
+fn poll_body(client_id: &str, device_code: &str) -> String {
+    format!(
+        "grant_type={}&device_code={device_code}&client_id={client_id}",
+        urlencoding(DEVICE_CODE_GRANT_TYPE)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +427,11 @@ async fn polling_without_a_device_code_is_invalid_request() {
     let (status, body) = post_token!(
         app,
         f.tenant_id,
-        format!("grant_type={}", urlencoding(DEVICE_CODE_GRANT_TYPE))
+        format!(
+            "grant_type={}&client_id={}",
+            urlencoding(DEVICE_CODE_GRANT_TYPE),
+            f.client_id
+        )
     );
     assert_eq!(status, 400);
     assert_eq!(body["error"], "invalid_request");
@@ -374,14 +443,7 @@ async fn polling_a_pending_grant_answers_authorization_pending() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
 
-    let (status, body) = post_token!(
-        app,
-        f.tenant_id,
-        format!(
-            "grant_type={}&device_code={device_code}",
-            urlencoding(DEVICE_CODE_GRANT_TYPE)
-        )
-    );
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
     // This is the NORMAL answer for most of a device flow's life, and it is
     // still an HTTP 400 with an OAuth2 error body per the RFC.
     assert_eq!(status, 400);
@@ -394,14 +456,7 @@ async fn polling_a_denied_grant_answers_access_denied_so_the_device_can_stop() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Denied, 600).await;
 
-    let (status, body) = post_token!(
-        app,
-        f.tenant_id,
-        format!(
-            "grant_type={}&device_code={device_code}",
-            urlencoding(DEVICE_CODE_GRANT_TYPE)
-        )
-    );
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
     assert_eq!(status, 400);
     // Distinct from `authorization_pending` on purpose: a device that has
     // been refused should stop immediately rather than poll out the full
@@ -415,14 +470,7 @@ async fn polling_an_expired_grant_answers_expired_token() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, -1).await;
 
-    let (status, body) = post_token!(
-        app,
-        f.tenant_id,
-        format!(
-            "grant_type={}&device_code={device_code}",
-            urlencoding(DEVICE_CODE_GRANT_TYPE)
-        )
-    );
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
     assert_eq!(status, 400);
     assert_eq!(body["error"], "expired_token");
 }
@@ -434,10 +482,7 @@ async fn an_unknown_device_code_is_invalid_grant() {
     let (status, body) = post_token!(
         app,
         f.tenant_id,
-        format!(
-            "grant_type={}&device_code=nothing-like-a-real-code",
-            urlencoding(DEVICE_CODE_GRANT_TYPE)
-        )
+        poll_body(&f.client_id, "nothing-like-a-real-code")
     );
     assert_eq!(status, 400);
     assert_eq!(body["error"], "invalid_grant");
@@ -449,10 +494,7 @@ async fn an_approved_grant_mints_tokens_exactly_once() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
 
-    let body_str = format!(
-        "grant_type={}&device_code={device_code}",
-        urlencoding(DEVICE_CODE_GRANT_TYPE)
-    );
+    let body_str = poll_body(&f.client_id, &device_code);
     let (status, body) = post_token!(app, f.tenant_id, body_str);
     assert_eq!(status, 200, "approved poll returned {body:?}");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
@@ -521,10 +563,7 @@ where
     )
     .await;
 
-    let body_str = format!(
-        "grant_type={}&device_code={device_code}",
-        urlencoding(DEVICE_CODE_GRANT_TYPE)
-    );
+    let body_str = poll_body(&f.client_id, &device_code);
     let (status, body) = post_token!(app, f.tenant_id, body_str);
     assert_eq!(status, 400, "poll after the change returned {body:?}");
     assert_eq!(body["error"], "invalid_grant", "{body:?}");
@@ -609,6 +648,629 @@ async fn a_user_deleted_after_approval_gets_no_tokens() {
         users.delete(tenant_id, user_id).await.unwrap();
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// #635 (R101W3-01) — the grant authenticates its client
+// ---------------------------------------------------------------------------
+
+/// POST a form to `path` with extra headers: `(status, json)`.
+macro_rules! post_form_with {
+    ($app:expr, $path:expr, $tenant_id:expr, $body:expr, [$($header:expr),* $(,)?]) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("{}?tenant_id={}", $path, $tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            $(.insert_header($header))*
+            .set_payload($body.to_string())
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body = test::read_body(resp).await;
+        (
+            status,
+            serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+        )
+    }};
+}
+
+/// The stored grant behind a device code.
+async fn stored_grant(
+    f: &Fixture,
+    device_code: &str,
+) -> axiam_core::models::oauth2_client::DeviceGrant {
+    SurrealDeviceGrantRepository::new(f.db.clone())
+        .get_by_device_code_hash(f.tenant_id, &hash_device_code(device_code))
+        .await
+        .unwrap()
+        .expect("the grant row exists")
+}
+
+/// The grant is exactly as it was approved: not spent, and no poll recorded
+/// (a recorded poll is what would make the real device's next one
+/// `slow_down`).
+async fn assert_untouched(f: &Fixture, device_code: &str, status: DeviceGrantStatus) {
+    let grant = stored_grant(f, device_code).await;
+    assert_eq!(grant.status, status, "the grant's state changed");
+    assert!(
+        grant.last_polled_at.is_none(),
+        "a refused poll was recorded against the grant"
+    );
+}
+
+/// RFC 8628 §3.4: the token request names its client. A poll without
+/// `client_id` is `invalid_request`, decided before the grant is read, so the
+/// device that then sends it still collects its tokens.
+#[actix_web::test]
+async fn a_poll_without_a_client_id_is_invalid_request_and_spends_nothing() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Approved, 600).await;
+
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        format!(
+            "grant_type={}&device_code={device_code}",
+            urlencoding(DEVICE_CODE_GRANT_TYPE)
+        )
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_request")),
+        "{body}"
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A confidential client's device grant needs the client's secret at both
+/// endpoints (RFC 8628 §3.1 and §3.4 → RFC 6749 §3.2.1). Without it, or with
+/// a wrong one, the start is refused and the poll is refused **before the
+/// grant is touched**: the approval is neither spent nor slowed, and the
+/// client holding its secret then redeems it. An unknown client and a wrong
+/// secret get one answer.
+#[actix_web::test]
+async fn a_confidential_clients_device_grant_needs_its_secret_at_the_poll() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, secret) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "kiosk",
+        ClientAuthMethod::ClientSecretPost,
+        |_| {},
+    )
+    .await;
+
+    // The start: refused without the secret and with a wrong one; served with
+    // it.
+    for credential in [String::new(), "&client_secret=wrong".to_owned()] {
+        let (status, body) = post_form_with!(
+            app,
+            "/oauth2/device_authorization",
+            f.tenant_id,
+            format!("client_id={client_id}&scope=openid{credential}"),
+            []
+        );
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (401, Some("invalid_client")),
+            "{body}"
+        );
+    }
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={client_id}&scope=openid&client_secret={secret}"),
+        []
+    );
+    assert_eq!(status, 200, "{body}");
+    let device_code = body["device_code"].as_str().unwrap().to_owned();
+    let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
+    assert!(
+        SurrealDeviceGrantRepository::new(f.db.clone())
+            .decide(f.tenant_id, &user_code, true, f.user_id)
+            .await
+            .unwrap()
+    );
+
+    // The poll: the device code alone, a wrong secret and an unknown client
+    // are one refusal, and none of them touches the approved grant.
+    let unknown_client = poll_body("oa_nobody", &device_code) + "&client_secret=wrong";
+    let mut refusals = Vec::new();
+    for body in [
+        poll_body(&client_id, &device_code),
+        poll_body(&client_id, &device_code) + "&client_secret=wrong",
+        unknown_client,
+    ] {
+        let (status, body) = post_token!(app, f.tenant_id, body);
+        assert_eq!(status, 401, "{body}");
+        assert!(body.get("access_token").is_none(), "{body}");
+        refusals.push(body);
+    }
+    assert_eq!(
+        refusals[1], refusals[2],
+        "a wrong secret and an unknown client must answer alike"
+    );
+    assert_eq!(refusals[0]["error"], "invalid_client");
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        poll_body(&client_id, &device_code) + &format!("&client_secret={secret}")
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!body["access_token"].as_str().unwrap().is_empty());
+}
+
+/// A poll naming a client other than the grant's is `invalid_grant` — the
+/// answer an unknown code gets — whatever the grant's state, so a caller who
+/// holds a leaked device code and a client of its own learns nothing about
+/// the grant, records no poll against it and cannot redeem it. The device's
+/// own poll, inside the interval the foreign one would have started, still
+/// redeems.
+#[actix_web::test]
+async fn a_foreign_client_id_is_invalid_grant_and_leaves_the_grant_untouched() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (other, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "attacker-tv",
+        ClientAuthMethod::None,
+        |_| {},
+    )
+    .await;
+
+    for state in [
+        DeviceGrantStatus::Pending,
+        DeviceGrantStatus::Denied,
+        DeviceGrantStatus::Approved,
+    ] {
+        let (device_code, _) = seed_grant(&f, state, 600).await;
+        let (status, body) = post_token!(app, f.tenant_id, poll_body(&other, &device_code));
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (400, Some("invalid_grant")),
+            "{state:?}: {body}"
+        );
+        assert_eq!(
+            body["error_description"], "unknown device code",
+            "{state:?}: a foreign client is told what an unknown code is told"
+        );
+        assert_untouched(&f, &device_code, state).await;
+
+        if state == DeviceGrantStatus::Approved {
+            let (status, body) =
+                post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+            assert_eq!(status, 200, "the device's own poll: {body}");
+        }
+    }
+}
+
+/// Removing the device grant from a client refuses a grant its user already
+/// approved (`invalid_client`), without spending it; a client that is gone is
+/// refused the same way. Put back, the grant redeems.
+#[actix_web::test]
+async fn removing_the_grant_type_refuses_an_already_approved_grant() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let set_grants = |grants: Vec<&'static str>| {
+        let db = f.db.clone();
+        let client_id = f.client_id.clone();
+        async move {
+            db.query("UPDATE oauth2_client SET grant_types = $g WHERE client_id = $c")
+                .bind(("g", grants))
+                .bind(("c", client_id))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+    };
+
+    set_grants(vec!["authorization_code"]).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    assert_eq!(
+        stored_grant(&f, &device_code).await.status,
+        DeviceGrantStatus::Approved
+    );
+    assert_eq!(refresh_token_rows(&f).await, 0);
+
+    set_grants(vec![DEVICE_CODE_GRANT_TYPE]).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A tombstoned tenant's client gets no user code and its approved grant does
+/// not redeem: the client's authentication reads the tenant, so both answer
+/// the `invalid_client` every other grant answers (#641 (a), (b)), and the
+/// poll no longer reaches the `server_error` its own tenant read gave.
+#[actix_web::test]
+async fn a_tombstoned_tenants_device_client_is_refused_at_both_endpoints() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    SurrealTenantRepository::new(f.db.clone())
+        .delete(f.tenant_id)
+        .await
+        .unwrap();
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={}&scope=openid", f.client_id),
+        []
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    assert!(body.get("access_token").is_none(), "{body}");
+}
+
+/// #641 (W3.7, c): tombstoning a tenant deletes its `device_grant` rows in the
+/// deletion's own transaction, as it does its CIBA requests, rather than
+/// leaving them to the purge: an approved grant is a bearer for an access
+/// token, and a user code is the tenant's own. Another tenant's grant stays.
+#[actix_web::test]
+async fn tombstoning_a_tenant_deletes_its_device_grants_and_no_other_tenants() {
+    let f = setup().await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    seed_grant_with_interval(&f, DeviceGrantStatus::Pending, 600, 5).await;
+    let bystander = Uuid::new_v4();
+    SurrealDeviceGrantRepository::new(f.db.clone())
+        .create(CreateDeviceGrant {
+            tenant_id: bystander,
+            client_id: f.client_id.clone(),
+            device_code_hash: hash_device_code("a-bystanders-device-code"),
+            user_code: normalize_user_code(&generate_user_code()),
+            scopes: vec!["openid".into()],
+            expires_at: Utc::now() + Duration::seconds(600),
+            interval_secs: 5,
+            resource: None,
+        })
+        .await
+        .unwrap();
+    let rows = |tenant: Uuid| {
+        let db = f.db.clone();
+        async move {
+            let mut r = db
+                .query(
+                    "SELECT count() AS total FROM device_grant \
+                     WHERE tenant_id = $tenant GROUP ALL",
+                )
+                .bind(("tenant", tenant.to_string()))
+                .await
+                .unwrap();
+            let r: Vec<axiam_db::CountRow> = r.take(0).unwrap();
+            r.first().map_or(0, |r| r.total)
+        }
+    };
+    assert_eq!(rows(f.tenant_id).await, 2);
+
+    SurrealTenantRepository::new(f.db.clone())
+        .delete(f.tenant_id)
+        .await
+        .unwrap();
+
+    // Before any purge: the row is gone, so there is no grant left to redeem
+    // and no user code left to approve, whatever the tenant read does.
+    assert_eq!(rows(f.tenant_id).await, 0, "the tombstoned tenant's grants");
+    assert_eq!(rows(bystander).await, 1, "another tenant's grant");
+    let app = test_app!(f);
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+}
+
+/// A public client that presents a credential is refused, at the start and at
+/// the poll, as at every other endpoint (T21.2): its registration names none
+/// to check it against.
+#[actix_web::test]
+async fn a_public_device_client_presenting_a_secret_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={}&client_secret=anything", f.client_id),
+        []
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        poll_body(&f.client_id, &device_code) + "&client_secret=anything"
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+}
+
+/// An Ed25519 keypair, its public JWK and that JWK's RFC 7638 thumbprint.
+struct ProofKey {
+    encoding: jsonwebtoken::EncodingKey,
+    jwk: Value,
+    jkt: String,
+}
+
+fn proof_key() -> ProofKey {
+    use base64::Engine;
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("generate Ed25519");
+    let encoding = jsonwebtoken::EncodingKey::from_ed_pem(kp.serialize_pem().as_bytes())
+        .expect("encoding key");
+    let raw = kp.public_key_raw();
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw[raw.len() - 32..]);
+    let jwk = serde_json::json!({ "kty": "OKP", "crv": "Ed25519", "x": x });
+    let parsed: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(jwk.clone()).expect("a well-formed OKP JWK");
+    let jkt = axiam_oauth2::jose::jwk_thumbprint(&parsed).expect("thumbprint");
+    ProofKey { encoding, jwk, jkt }
+}
+
+/// A DPoP proof for the token endpoint (RFC 9449 §4.2).
+fn dpop_proof(key: &ProofKey) -> String {
+    let header: jsonwebtoken::Header = serde_json::from_value(serde_json::json!({
+        "typ": axiam_oauth2::dpop::DPOP_TYP,
+        "alg": "EdDSA",
+        "jwk": key.jwk,
+    }))
+    .expect("proof header");
+    let claims = serde_json::json!({
+        "jti": Uuid::new_v4().to_string(),
+        "htm": "POST",
+        "htu": "https://id.test.example/oauth2/token",
+        "iat": Utc::now().timestamp(),
+    });
+    jsonwebtoken::encode(&header, &claims, &key.encoding).expect("sign the proof")
+}
+
+/// A client registered for DPoP-bound access tokens gets one from the device
+/// grant too: `cnf.jkt` names the proof's key and the token is announced as
+/// `DPoP`. Without a proof the poll is refused rather than downgraded to a
+/// bearer token, and the grant is not spent.
+#[actix_web::test]
+async fn a_dpop_bound_clients_device_token_carries_cnf_jkt() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "bound-tv",
+        ClientAuthMethod::None,
+        |c| c.dpop_bound_access_tokens = true,
+    )
+    .await;
+    let (device_code, _) =
+        seed_grant_for(&f, &client_id, DeviceGrantStatus::Approved, 600, 0).await;
+
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&client_id, &device_code));
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+
+    let key = proof_key();
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        poll_body(&client_id, &device_code),
+        [("DPoP", dpop_proof(&key))]
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["token_type"], "DPoP", "{body}");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(key.jkt.as_str()),
+        "{claims}"
+    );
+}
+
+/// An unbound client's device token is exactly what it always was: `Bearer`,
+/// no `cnf`.
+#[actix_web::test]
+async fn an_unbound_clients_device_token_stays_a_bearer_token() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["token_type"], "Bearer");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert!(claims.get("cnf").is_none(), "{claims}");
+}
+
+const ISSUER: &str = "https://id.test.example";
+
+/// A `private_key_jwt` client assertion for `client_id`.
+fn client_assertion(key: &ProofKey, client_id: &str) -> String {
+    let header: jsonwebtoken::Header =
+        serde_json::from_value(serde_json::json!({ "alg": "EdDSA" })).unwrap();
+    let now = Utc::now().timestamp();
+    let assertion = jsonwebtoken::encode(
+        &header,
+        &serde_json::json!({
+            "iss": client_id, "sub": client_id, "aud": ISSUER,
+            "iat": now, "exp": now + 60, "jti": Uuid::new_v4().to_string(),
+        }),
+        &key.encoding,
+    )
+    .unwrap();
+    format!(
+        "&client_assertion_type={}&client_assertion={assertion}",
+        urlencoding("urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+    )
+}
+
+/// FAPI 2.0: a `fapi2` device client must meet `fapi::enforce_token_request`
+/// at the poll as at every other grant — strong client authentication
+/// (`private_key_jwt` here), and the sender constraint its registration names
+/// (a DPoP proof, refused `invalid_dpop_proof` without one, the grant not
+/// spent). A `fapi2` row edited onto a shared secret is refused even with the
+/// right secret.
+#[actix_web::test]
+async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
+    let f = setup().await;
+    let mut state = AppState::for_test(f.db.clone(), f.auth.clone());
+    state.oauth2.token_service =
+        state
+            .oauth2
+            .token_service
+            .clone()
+            .with_assertion_verifier(Arc::new(
+                axiam_oauth2::private_key_jwt::JwksAssertionVerifier::new(
+                    axiam_federation::jwks_cache::JwksCache::new(),
+                    reqwest::Client::new(),
+                    axiam_db::repository::SurrealProofReplayRepository::new(f.db.clone()),
+                    ISSUER.into(),
+                    vec![format!("{ISSUER}/oauth2/token")],
+                ),
+            ));
+    let app = test_app_with_state!(f, state);
+
+    let signing = proof_key();
+    let jwks = serde_json::json!({ "keys": [signing.jwk.clone()] }).to_string();
+    let (client_id, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "fapi-terminal",
+        ClientAuthMethod::PrivateKeyJwt,
+        |c| {
+            c.profile = ClientProfile::Fapi2;
+            c.jwks = Some(jwks);
+            c.dpop_bound_access_tokens = true;
+        },
+    )
+    .await;
+
+    // The start authenticates the assertion.
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={client_id}&scope=openid"),
+        []
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!(
+            "client_id={client_id}&scope=openid{}",
+            client_assertion(&signing, &client_id)
+        ),
+        []
+    );
+    assert_eq!(status, 200, "{body}");
+    let device_code = body["device_code"].as_str().unwrap().to_owned();
+    let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
+    let repo = SurrealDeviceGrantRepository::new(f.db.clone());
+    assert!(
+        repo.decide(f.tenant_id, &user_code, true, f.user_id)
+            .await
+            .unwrap()
+    );
+
+    // Authenticated, but without the DPoP proof the profile requires.
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        poll_body(&client_id, &device_code) + &client_assertion(&signing, &client_id)
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_dpop_proof")),
+        "{body}"
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+
+    // Everything the profile asks for: a sender-constrained token.
+    let key = proof_key();
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        poll_body(&client_id, &device_code) + &client_assertion(&signing, &client_id),
+        [("DPoP", dpop_proof(&key))]
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["token_type"], "DPoP");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(key.jkt.as_str()),
+        "{claims}"
+    );
+
+    // A `fapi2` row on a shared secret — which registration validation never
+    // admits — is refused at the poll even with its secret and a proof.
+    let (edited, secret) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "edited-terminal",
+        ClientAuthMethod::ClientSecretPost,
+        |c| {
+            c.profile = ClientProfile::Fapi2;
+            c.dpop_bound_access_tokens = true;
+        },
+    )
+    .await;
+    let (device_code, _) = seed_grant_for(&f, &edited, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        poll_body(&edited, &device_code) + &format!("&client_secret={secret}"),
+        [("DPoP", dpop_proof(&key))]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -706,15 +1368,8 @@ async fn approving_lets_the_device_collect_its_tokens() {
 
     // End to end: the poll that was answering `authorization_pending` a moment
     // ago now returns tokens.
-    let (status, tokens) = post_token!(
-        app,
-        f.tenant_id,
-        format!(
-            "grant_type={}&device_code={device_code}",
-            urlencoding(DEVICE_CODE_GRANT_TYPE)
-        )
-    );
-    assert_eq!(status, 200, "post-approval poll returned {tokens:?}");
+    let (status, tokens) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "the post-approval poll returns tokens");
     assert!(!tokens["access_token"].as_str().unwrap().is_empty());
 }
 
@@ -929,4 +1584,171 @@ async fn discovery_advertises_the_device_endpoint_and_grant() {
 /// these tests that needs it — the grant-type URN's colons.
 fn urlencoding(s: &str) -> String {
     s.replace(':', "%3A")
+}
+
+// ---------------------------------------------------------------------------
+// The public-client bucket behind a reverse proxy (T21.2, R110W3-01)
+// ---------------------------------------------------------------------------
+
+/// The public-client bucket's allowance in these tests. The route limiters
+/// keep the shipped `token_per_min` (they are built from
+/// `RateLimitConfig::default()` in [`test_app_with_state!`]), so a `429` below
+/// can only be the handler's bucket.
+const PUBLIC_BUCKET_PER_MIN: u32 = 3;
+
+/// A forwarded address the flood comes from, and another a device sits at.
+/// Both reach the server through the same reverse proxy, [`TEST_PEER`].
+const ADDRESS_A: &str = "198.51.100.9";
+const ADDRESS_B: &str = "203.0.113.7";
+
+/// An app whose handler-side `token_per_min` is [`PUBLIC_BUCKET_PER_MIN`].
+macro_rules! public_bucket_app {
+    ($f:expr) => {{
+        let mut state = AppState::for_test($f.db.clone(), $f.auth.clone());
+        state.rate_limit_cfg.token_per_min = PUBLIC_BUCKET_PER_MIN;
+        test_app_with_state!($f, state)
+    }};
+}
+
+/// As [`post_token!`], through the proxy at [`TEST_PEER`], which appended
+/// `xff` (`X-Forwarded-For`, exactly as received by the server).
+macro_rules! post_token_via_proxy {
+    ($app:expr, $tenant_id:expr, $body:expr, $xff:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={}", $tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .insert_header(("X-Forwarded-For", $xff))
+            .set_payload($body.to_string())
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+/// A token request naming the fixture's public client and carrying no
+/// credential: what an unauthenticated caller can send for any public client.
+fn credential_less_body(client_id: &str) -> String {
+    format!("grant_type=authorization_code&code=guess&code_verifier=guess&client_id={client_id}")
+}
+
+/// T21.2: a credential-less flood from one address meets `429 slow_down`
+/// once it has spent the public-client bucket, still, behind a proxy.
+#[actix_web::test]
+async fn a_credential_less_flood_from_one_address_meets_slow_down() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    for _ in 0..PUBLIC_BUCKET_PER_MIN {
+        let (status, _) = post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            ADDRESS_A
+        );
+        assert_eq!(status, 400);
+    }
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
+}
+
+/// R110W3-01: behind one proxy, an address that fills the public client's
+/// bucket fills its own bucket only — another address's device poll and code
+/// exchange for the same client are answered by their grants, not `429`.
+#[actix_web::test]
+async fn a_flood_from_one_address_does_not_slow_down_another_addresss_device() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    for _ in 0..=PUBLIC_BUCKET_PER_MIN {
+        post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            ADDRESS_A
+        );
+    }
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (429, Some("slow_down")),
+        "the flooding address is slowed down"
+    );
+
+    let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        poll_body(&f.client_id, &device_code),
+        ADDRESS_B
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("authorization_pending")),
+        "the device at another address polls through"
+    );
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_B
+    );
+    assert_ne!(
+        status, 429,
+        "a code exchange from another address reaches its grant: {body}"
+    );
+}
+
+/// R110W3-01: under the shipped `trusted_hops = 0`, an `X-Forwarded-For`
+/// entry the caller wrote itself — to the left of the one the proxy appended —
+/// does not choose the bucket. Naming the device's address does not charge
+/// the flood to it.
+#[actix_web::test]
+async fn a_forged_forwarded_entry_does_not_charge_another_addresss_bucket() {
+    let f = setup().await;
+    let app = public_bucket_app!(f);
+    let forged = format!("{ADDRESS_B}, {ADDRESS_A}");
+    for _ in 0..PUBLIC_BUCKET_PER_MIN {
+        let (status, _) = post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            forged.as_str()
+        );
+        assert_eq!(status, 400);
+    }
+
+    let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        poll_body(&f.client_id, &device_code),
+        ADDRESS_B
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("authorization_pending")),
+        "the device whose address was forged polls through"
+    );
+    let (status, body) = post_token_via_proxy!(
+        app,
+        f.tenant_id,
+        credential_less_body(&f.client_id),
+        ADDRESS_A
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (429, Some("slow_down")),
+        "the forged requests were charged to the address that sent them"
+    );
 }

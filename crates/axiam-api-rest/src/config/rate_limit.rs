@@ -36,7 +36,9 @@ use serde::Deserialize;
 /// changes login's (or MFA's, or password-reset's, etc.) rate-limit
 /// behavior. See `server.rs` — those resources are wired with the plain
 /// `build_governor`/`RateLimitShared::new` constructors, which never read
-/// this field.
+/// this field. The one other key in the tree, [`Self::Principal`], is wired
+/// per route by `server.rs` (the five authenticated federation flow routes,
+/// #633) and is likewise independent of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKeyMode {
@@ -51,6 +53,29 @@ pub enum RateLimitKeyMode {
     /// from one IP doesn't automatically throttle the same client_id
     /// operating legitimately from a different IP.
     IpClientId,
+    /// Key on the **verified** principal `(tenant, sub)` of an authenticated
+    /// route, with the source IP as the pre-authentication fallback (#633,
+    /// R101W2-05).
+    ///
+    /// **A property of a route, never an operator choice.** It is wired by
+    /// `server.rs` onto the five authenticated federation flow routes
+    /// (`RateLimitShared::keyed_on_principal`) and cannot be selected through
+    /// `AXIAM__RATE_LIMIT__KEY`: the three OAuth2 endpoints that variable
+    /// governs carry no access token to key on. `skip_deserializing` makes
+    /// `principal` an unknown value there, refused at startup like any other.
+    ///
+    /// The principal is read only from the identity the audit middleware
+    /// verified (signature, expiry, issuer) and cached on the request
+    /// (`axiam_auth::token::CachedUserIdentity`), so the limiter adds no
+    /// signature verification of its own, on any path. A request whose token
+    /// does not verify — absent, forged, expired — has no cached identity and
+    /// is keyed on its address, exactly as before; it cannot reach a
+    /// principal's bucket by naming one. A sender-constrained token (one
+    /// carrying `cnf`) is keyed on the `(ip, tenant, sub)` triple instead:
+    /// its proof of possession is checked later, by the extractor, so at
+    /// this layer holding the token is not yet proof of being its principal.
+    #[serde(skip_deserializing)]
+    Principal,
 }
 
 impl RateLimitKeyMode {
@@ -61,6 +86,7 @@ impl RateLimitKeyMode {
             Self::Ip => "ip",
             Self::ClientId => "client_id",
             Self::IpClientId => "ip_client_id",
+            Self::Principal => "principal",
         }
     }
 
@@ -75,6 +101,10 @@ impl RateLimitKeyMode {
             Self::ClientId => KeyMintability::Full,
             // Half the key (`client_id`) is caller-chosen; the IP half is not.
             Self::IpClientId => KeyMintability::Partial,
+            // The principal half comes from a token whose signature verified;
+            // without one the key is the source IP. Neither is caller-chosen:
+            // a new bucket costs a new validly signed token.
+            Self::Principal => KeyMintability::None,
         }
     }
 }
@@ -182,6 +212,9 @@ pub struct MachineLimitPreset {
     pub device_login_per_min: u32,
     /// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
     pub bc_authorize_per_min: u32,
+    /// `POST /api/v1/network/decide` per minute per authenticated caller
+    /// (RADIUS D4, W6.4; maintainer decision D-6).
+    pub network_decide_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
     /// root (`axiam-server::main`). Kept here so the whole family has one
@@ -207,6 +240,9 @@ pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
 /// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` — G-7 (CIBA), preset.
 pub const ENV_BC_AUTHORIZE_PER_MIN: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` — #639 (CIBA hint cap), never
+/// preset.
+pub const ENV_BC_AUTHORIZE_PER_HINT: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
@@ -221,6 +257,10 @@ pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS D4 / W6.4, preset (D-6).
+pub const ENV_NETWORK_DECIDE_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN";
+/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS D4 / W6.3, never preset.
+pub const ENV_NETWORK_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
 pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CRL_PER_MIN` — #565 (T-102), never preset.
@@ -294,6 +334,12 @@ impl RateLimitProfile {
                 // of sign-in requests is the per-user notification bucket,
                 // which no preset moves.
                 bc_authorize_per_min: 600,
+                // RADIUS D4 (D-6): the shipped 6 000 in every profile. The
+                // bucket is the authenticated caller's (one FreeRADIUS service
+                // account), so a NAT'd fleet is not what moves it; a site's
+                // power-restore storm is, and that is the same storm whatever
+                // the deployment's network posture.
+                network_decide_per_min: 6_000,
                 grpc_authz_per_sec: 1_000,
             }),
             // Private-network sizing: 6 000/min token = 100/s per client
@@ -309,6 +355,7 @@ impl RateLimitProfile {
                 authz_check_per_min: 60_000,
                 device_login_per_min: 3_000,
                 bc_authorize_per_min: 6_000,
+                network_decide_per_min: 6_000,
                 grpc_authz_per_sec: 5_000,
             }),
         }
@@ -484,6 +531,27 @@ pub struct RateLimitConfig {
     /// notification a request sends a user is throttled per user by a fixed
     /// bucket no preset moves (`axiam_oauth2::ciba`'s notification limit).
     pub bc_authorize_per_min: u32,
+    /// Max `POST /oauth2/bc-authorize` calls **admitted per client per hint**
+    /// in any ten-minute stretch (default: 3 — #599, T-424; configurable since
+    /// #639). Not a per-minute rate and not a bucket of the route's limiters:
+    /// the CIBA hint cap (`axiam_oauth2::ciba::CibaHintCap`), counted in the
+    /// shared rate-limit table so it holds across replicas.
+    ///
+    /// It bounds how many open requests one client can hold for one person:
+    /// `requested_expiry` is the client's to choose, so without it a client
+    /// that may address a user could keep the user's pending list full of
+    /// short-lived requests of its own. Three is room for a retry or two while
+    /// the first is still on the user's phone. A call past it is refused
+    /// `429 slow_down`, before the hint is looked up, whoever the hint names
+    /// (D-63); a refused call is not counted, so a client that waits for the
+    /// window to pass is admitted again.
+    ///
+    /// **Raise it for a conformance or SDK integration run** — the OpenID
+    /// FAPI-CIBA test plan and the SDKs' CIBA suites drive many flows for one
+    /// test user from one client within minutes (`docs/conformance/README.md`).
+    /// Set every replica alike. Must be `>= 1` (checked at startup); never
+    /// preset — it bounds one user's attention, not the server's capacity.
+    pub bc_authorize_per_hint: u32,
     /// Max `/oauth2/end_session` requests per minute per IP (default: 30 —
     /// B5). Deliberately NOT part of [`MachineLimitPreset`]: like the other
     /// human-driven endpoints this is not sized from capacity.
@@ -594,6 +662,41 @@ pub struct RateLimitConfig {
     /// administering targets produces. One bucket per route; per-IP; never
     /// preset.
     pub scim_target_admin_per_min: u32,
+    /// Max writes per minute per IP to each of the network-segment management
+    /// routes — create, replace and delete a segment, create, replace and
+    /// delete a segment's reply profile, and replace the tenant's `Session-Timeout`
+    /// cap (default: 30 — RADIUS D4, W6.3,
+    /// `claude_dev/radius-reply-profile-design.md` §5.1). Reads are not in it.
+    /// A segment write decides which VLAN a device is placed on and a profile
+    /// write shapes what that placement gives, so each is a grant (§5.2); every
+    /// write also runs the write gate's reads and a reactor round trip. Thirty
+    /// a minute is far more than a person administering a network produces. One
+    /// bucket per route (seven, named `network_*`); per-IP; never preset.
+    pub network_admin_per_min: u32,
+    /// Max `POST /api/v1/network/decide` requests per minute **per
+    /// authenticated caller** (default: 6 000 — RADIUS D4, W6.4; maintainer
+    /// decision D-6; `claude_dev/radius-reply-profile-design.md` §6.3).
+    ///
+    /// The decision route's caller is a FreeRADIUS server's service account,
+    /// asking once per EAP-TLS authentication. Six thousand a minute is a
+    /// hundred a second: a power-restore storm at one site, where every access
+    /// point and device re-authenticates within a minute (spike §6.1).
+    ///
+    /// **Keyed on the token's `sub`, not on the address** (D-6, T-468): the
+    /// one thing that distinguishes two FreeRADIUS servers behind one NAT is
+    /// the credential each presents, and a stolen credential is bounded by its
+    /// own bucket whatever address it is used from. The key exists only once
+    /// the handler has authenticated the certificate-bound token, so the
+    /// bucket is spent there (`network_decide:{tenant}:{sub}`); the route also
+    /// carries a per-address backstop ten times this size, for a token that
+    /// does not authenticate.
+    ///
+    /// **In the machine presets** ([`MachineLimitPreset::network_decide_per_min`]),
+    /// at the same 6 000 in `gateway` and `mesh`: what sizes it is a site's
+    /// storm, which no network posture changes. An operator who pins
+    /// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` keeps their value under any
+    /// profile, as for every preset key.
+    pub network_decide_per_min: u32,
     /// Max requests per minute per IP to each of the CIBA approval routes — the
     /// signed-in user's half of a backchannel authentication request:
     /// `GET /api/v1/ciba/requests` (the pending list, #566),
@@ -791,6 +894,9 @@ impl Default for RateLimitConfig {
             // G-7 — half the token endpoint's: an initiation is rarer than
             // the token requests that follow it.
             bc_authorize_per_min: 60,
+            // #599 / #639 — see the field docs. Calls per client per hint per
+            // ten minutes, not per minute.
+            bc_authorize_per_hint: axiam_oauth2::ciba::DEFAULT_REQUESTS_PER_CLIENT_HINT,
             end_session_per_min: 30,
             // T21.4 — see the field docs. The smallest limit here, because
             // this is the only unauthenticated *write* endpoint.
@@ -806,6 +912,11 @@ impl Default for RateLimitConfig {
             ssf_admin_per_min: 30,
             // G-6 / T23.6.4 — see the field docs.
             scim_target_admin_per_min: 30,
+            // RADIUS D4 / W6.3 — see the field docs. Administrator writes that
+            // each place devices on a VLAN or shape what the placement gives.
+            network_admin_per_min: 30,
+            // RADIUS D4 / W6.4 (D-6) — see the field docs. Per caller.
+            network_decide_per_min: 6_000,
             // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
             ciba_approval_per_min: 30,
             // #565 (T-102) — see the field docs. A relying party fetches once
@@ -830,7 +941,25 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// What [`RateLimitConfig::validate`] (and
+/// [`RateLimitConfig::bc_authorize_per_hint_checked`]) says about a `0`.
+const BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE: &str =
+    "bc_authorize_per_hint must be >= 1 (AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT)";
+
 impl RateLimitConfig {
+    /// [`RateLimitConfig::bc_authorize_per_hint`], as the hint cap takes it.
+    ///
+    /// # Panics
+    ///
+    /// On `0`, with [`RateLimitConfig::validate`]'s message: the composition
+    /// root builds the CIBA service before it validates the rest of the
+    /// configuration, and a cap that refused every call is a misconfiguration
+    /// to stop at startup, not a deployment without CIBA.
+    pub fn bc_authorize_per_hint_checked(&self) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(self.bc_authorize_per_hint)
+            .unwrap_or_else(|| panic!("{BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE}"))
+    }
+
     /// Applies [`RateLimitConfig::profile`]'s preset to every machine-traffic
     /// limit the operator did **not** pin with an explicit
     /// `AXIAM__RATE_LIMIT__*` env var, reading the process environment.
@@ -904,6 +1033,11 @@ impl RateLimitConfig {
                 ENV_BC_AUTHORIZE_PER_MIN,
                 &mut self.bc_authorize_per_min,
                 preset.bc_authorize_per_min,
+            ),
+            (
+                ENV_NETWORK_DECIDE_PER_MIN,
+                &mut self.network_decide_per_min,
+                preset.network_decide_per_min,
             ),
         ] {
             if is_set(env) {
@@ -1024,6 +1158,11 @@ impl RateLimitConfig {
             "bc_authorize_per_min must be >= 1"
         );
         assert!(
+            self.bc_authorize_per_hint >= 1,
+            "{}",
+            BC_AUTHORIZE_PER_HINT_MUST_BE_POSITIVE
+        );
+        assert!(
             self.end_session_per_min >= 1,
             "end_session_per_min must be >= 1"
         );
@@ -1045,6 +1184,14 @@ impl RateLimitConfig {
         assert!(
             self.scim_target_admin_per_min >= 1,
             "scim_target_admin_per_min must be >= 1"
+        );
+        assert!(
+            self.network_admin_per_min >= 1,
+            "network_admin_per_min must be >= 1"
+        );
+        assert!(
+            self.network_decide_per_min >= 1,
+            "network_decide_per_min must be >= 1"
         );
         assert!(
             self.ciba_approval_per_min >= 1,
@@ -1183,6 +1330,8 @@ mod tests {
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
             (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
             (ENV_BC_AUTHORIZE_PER_MIN, d.bc_authorize_per_min),
+            (ENV_BC_AUTHORIZE_PER_HINT, d.bc_authorize_per_hint),
+            (ENV_NETWORK_DECIDE_PER_MIN, d.network_decide_per_min),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -1195,6 +1344,7 @@ mod tests {
             (ENV_SSF_PER_MIN, d.ssf_per_min),
             (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
             (ENV_SCIM_TARGET_ADMIN_PER_MIN, d.scim_target_admin_per_min),
+            (ENV_NETWORK_ADMIN_PER_MIN, d.network_admin_per_min),
             (ENV_CIBA_APPROVAL_PER_MIN, d.ciba_approval_per_min),
             (ENV_CRL_PER_MIN, d.crl_per_min),
             (ENV_EMAIL_TEST_PER_MIN, d.email_test_per_min),
@@ -1237,6 +1387,7 @@ mod tests {
                 (ENV_AUTHZ_CHECK_PER_MIN, cfg.authz_check_per_min),
                 (ENV_DEVICE_LOGIN_PER_MIN, cfg.device_login_per_min),
                 (ENV_BC_AUTHORIZE_PER_MIN, cfg.bc_authorize_per_min),
+                (ENV_NETWORK_DECIDE_PER_MIN, cfg.network_decide_per_min),
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1270,9 +1421,11 @@ mod tests {
                 cfg.scim_target_admin_per_min,
                 shipped.scim_target_admin_per_min
             );
+            assert_eq!(cfg.network_admin_per_min, shipped.network_admin_per_min);
             assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
             assert_eq!(cfg.crl_per_min, shipped.crl_per_min);
             assert_eq!(cfg.email_test_per_min, shipped.email_test_per_min);
+            assert_eq!(cfg.bc_authorize_per_hint, shipped.bc_authorize_per_hint);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1285,9 +1438,11 @@ mod tests {
                 ENV_SSF_PER_MIN,
                 ENV_SSF_ADMIN_PER_MIN,
                 ENV_SCIM_TARGET_ADMIN_PER_MIN,
+                ENV_NETWORK_ADMIN_PER_MIN,
                 ENV_CIBA_APPROVAL_PER_MIN,
                 ENV_CRL_PER_MIN,
                 ENV_EMAIL_TEST_PER_MIN,
+                ENV_BC_AUTHORIZE_PER_HINT,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1503,9 +1658,12 @@ mod tests {
         assert_eq!(d.ssf_per_min, 60);
         assert_eq!(d.ssf_admin_per_min, 30);
         assert_eq!(d.scim_target_admin_per_min, 30);
+        assert_eq!(d.network_admin_per_min, 30);
+        assert_eq!(d.network_decide_per_min, 6_000);
         assert_eq!(d.ciba_approval_per_min, 30);
         assert_eq!(d.crl_per_min, 60);
         assert_eq!(d.email_test_per_min, 10);
+        assert_eq!(d.bc_authorize_per_hint, 3);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from
@@ -1639,6 +1797,61 @@ mod tests {
             posture.overrides_display(),
             format!("{ENV_KEY},{ENV_TOKEN_PER_MIN}")
         );
+    }
+
+    /// #639: the CIBA hint cap's allowance ships at the cap's own default
+    /// (three), no profile moves it, and `0` — a cap that refused every
+    /// `bc-authorize` — is refused at startup.
+    #[test]
+    fn bc_authorize_per_hint_defaults_to_three_and_is_never_preset() {
+        let shipped = RateLimitConfig::default();
+        assert_eq!(shipped.bc_authorize_per_hint, 3);
+        assert_eq!(
+            shipped.bc_authorize_per_hint,
+            axiam_oauth2::ciba::DEFAULT_REQUESTS_PER_CLIENT_HINT
+        );
+        assert_eq!(shipped.bc_authorize_per_hint_checked().get(), 3);
+        for profile in [RateLimitProfile::Gateway, RateLimitProfile::Mesh] {
+            let mut cfg = RateLimitConfig {
+                profile,
+                bc_authorize_per_hint: 40,
+                ..RateLimitConfig::default()
+            };
+            let posture = cfg.apply_profile(|_| false);
+            assert_eq!(cfg.bc_authorize_per_hint, 40, "{profile:?}");
+            assert!(
+                !posture
+                    .operator_overrides
+                    .contains(&ENV_BC_AUTHORIZE_PER_HINT)
+            );
+        }
+        // Deserialized under the name the environment variable maps to.
+        let cfg: RateLimitConfig = serde_json::from_str(r#"{"bc_authorize_per_hint": 4}"#).unwrap();
+        assert_eq!(cfg.bc_authorize_per_hint, 4);
+        assert_eq!(
+            ENV_BC_AUTHORIZE_PER_HINT,
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bc_authorize_per_hint must be >= 1")]
+    fn a_zero_bc_authorize_per_hint_is_refused_at_validation() {
+        RateLimitConfig {
+            bc_authorize_per_hint: 0,
+            ..RateLimitConfig::default()
+        }
+        .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "bc_authorize_per_hint must be >= 1")]
+    fn a_zero_bc_authorize_per_hint_is_refused_by_the_accessor() {
+        RateLimitConfig {
+            bc_authorize_per_hint: 0,
+            ..RateLimitConfig::default()
+        }
+        .bc_authorize_per_hint_checked();
     }
 
     /// Non-negotiable invariant: **no profile may raise a human endpoint.**
@@ -1851,5 +2064,19 @@ mod tests {
             RateLimitKeyMode::IpClientId.mintability(),
             KeyMintability::Partial
         );
+        assert_eq!(
+            RateLimitKeyMode::Principal.mintability(),
+            KeyMintability::None
+        );
+    }
+
+    /// #633: the principal key is a property of the authenticated routes it
+    /// is wired onto, not an operator setting — `AXIAM__RATE_LIMIT__KEY`
+    /// governs the three OAuth2 endpoints, which carry no access token, so
+    /// `principal` must be refused there rather than silently key nothing.
+    #[test]
+    fn the_principal_key_mode_cannot_be_selected_from_the_environment() {
+        assert!(serde_json::from_str::<RateLimitKeyMode>("\"principal\"").is_err());
+        assert_eq!(RateLimitKeyMode::Principal.as_str(), "principal");
     }
 }

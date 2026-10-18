@@ -977,6 +977,325 @@ async fn a_cleanup_tick_that_sleeps_past_the_bound_does_not_delay_the_exit_past_
 }
 
 // ---------------------------------------------------------------------------
+// The lease-loss REST cut, end to end (#628, review R101W4-08)
+// ---------------------------------------------------------------------------
+
+/// Boot the minimal profile on an ephemeral port with `step` as the cleanup
+/// task's first step; the backstop only records that it ran.
+fn boot_for_the_cut(
+    db: &Surreal<Db>,
+    step: CleanupStepForTests,
+) -> (
+    u16,
+    Arc<std::sync::atomic::AtomicBool>,
+    tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+) {
+    let mut config = minimal_config();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("the client-secret hasher installs");
+    config
+        .auth
+        .resolve_keys()
+        .expect("the Ed25519 keys parse (CQ-B14)");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rest_port = listener.local_addr().unwrap().port();
+    config.server.port = rest_port;
+    let backstop_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&backstop_ran);
+    let (pool, health) = pool_over(db);
+    let opts = ServeOptions {
+        rest_listener: Some(listener),
+        lease_timing: short_lease(),
+        lease_lost_backstop: Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst)
+        }),
+        cleanup_step_for_tests: Some(step),
+        ..ServeOptions::default()
+    };
+    (
+        rest_port,
+        backstop_ran,
+        serve_on_big_stack(config, pool, health, opts),
+    )
+}
+
+/// Wait until the REST listener answers: the cleanup task's first tick starts
+/// before the listener runs, and a connection made before then sits in the
+/// socket's backlog, never accepted, until the stop closes the listener.
+async fn until_serving(port: u16) {
+    let http = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
+    eventually("the REST listener", async || {
+        let resp = http
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+            .ok()?;
+        resp.status().is_success().then_some(())
+    })
+    .await;
+}
+
+/// A sign-in body, sent in two parts. Complete, it still lacks the fields a
+/// sign-in needs, so it is refused (`400`) without any password hashing.
+const HELD_BODY: (&str, &str) = ("{\"username_or_email\":", " \"someone\"}");
+
+/// A sign-in whose body is held back: the head is complete, so the request is
+/// routed and its handler waits for the JSON body — a request in flight, as a
+/// handler asleep on a slow datastore is, that no drain sees finish while the
+/// rest is held ([`finish_the_held_body`] releases it). No request-head timeout
+/// applies once the head is in. (A connection whose head is still incomplete
+/// is not a request in flight: actix closes it at the stop.)
+async fn a_sign_in_whose_body_is_held(port: u16) -> tokio::net::TcpStream {
+    let (start, end) = HELD_BODY;
+    let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let head = format!(
+        "POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{start}",
+        start.len() + end.len()
+    );
+    conn.write_all(head.as_bytes()).await.unwrap();
+    conn
+}
+
+/// Send the rest of [`a_sign_in_whose_body_is_held`]'s body.
+async fn finish_the_held_body(conn: &mut tokio::net::TcpStream) {
+    conn.write_all(HELD_BODY.1.as_bytes()).await.unwrap();
+}
+
+/// Another instance takes the lease over. Its write can collide with the
+/// running instance's renewal (every 100 ms here); a conflicted write commits
+/// nothing, so it is retried as the repository's own writes are.
+async fn take_the_lease_over(db: &Surreal<Db>) {
+    axiam_db::helpers::retry_on_write_conflict(|| async {
+        db.query(
+            "UPDATE type::record('minimal_profile_lease', 'instance') \
+             SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
+        )
+        .await?
+        .check()
+        .map(drop)
+    })
+    .await
+    .expect("the takeover is written");
+}
+
+/// Read `conn` until the server closes it; what it sent first, if anything.
+async fn until_closed(conn: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match conn.read(&mut buf).await {
+            Ok(0) | Err(_) => return seen,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+/// How many audit rows name `action`, in any trail.
+async fn audit_rows_named(db: &Surreal<Db>, action: &str) -> usize {
+    let mut found = db
+        .query("SELECT count() AS n FROM audit_log WHERE action = $action GROUP ALL")
+        .bind(("action", action.to_owned()))
+        .await
+        .unwrap();
+    let counts: Vec<serde_json::Value> = found.take(0).unwrap();
+    counts
+        .first()
+        .and_then(|row| row["n"].as_u64())
+        .unwrap_or(0) as usize
+}
+
+/// #628 (R101W4-08): the lease-loss REST cut, driven through the real
+/// listener. #598 made a lost lease end the requests still in flight
+/// `LEASE_LOSS_STOP.rest` after the loss by dropping the actix server; until
+/// now only the timing of the callback was tested
+/// (`profile::tests::a_lost_lease_cuts_the_requests_in_flight_before_the_backstop`).
+///
+/// Here a request's handler is still waiting when the lease is lost: its
+/// connection is closed without a response about 5 s after the loss — not at
+/// actix's 20 s drain, not at the lease's 15 s backstop — while the teardown
+/// after the cut, the audit drain among it, is still to run (a cleanup tick
+/// asleep at the stop holds the teardown's last step for its bound, so the
+/// order is observable). A request that finished inside the 5 s has its audit
+/// row; the cut one has none (T-444, residual (a)). The instance then stops in
+/// order and exits non-zero, with the backstop never run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_lease_closes_a_request_still_running_at_the_cut_and_the_audit_drain_runs_after_it()
+{
+    let db = fresh_db().await;
+    let (entered_tx, mut entered) = tokio::sync::watch::channel(false);
+    let step: CleanupStepForTests = Arc::new(move || {
+        let entered_tx = entered_tx.clone();
+        Box::pin(async move {
+            entered_tx.send_replace(true);
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+        })
+    });
+    let (rest_port, backstop_ran, mut stopped) = boot_for_the_cut(&db, step);
+    tokio::time::timeout(Duration::from_secs(30), entered.wait_for(|on| *on))
+        .await
+        .expect("the cleanup task starts its first tick")
+        .expect("the step's sender lives as long as the task");
+    until_serving(rest_port).await;
+
+    // Two requests in flight at the loss, each waiting for its body: one is
+    // never given the rest, the other is, inside the cut's 5 s.
+    let mut cut = a_sign_in_whose_body_is_held(rest_port).await;
+    let mut finishes = a_sign_in_whose_body_is_held(rest_port).await;
+    // Both are accepted and routed before the listener stops.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let lost_at = std::time::Instant::now();
+    take_the_lease_over(&db).await;
+
+    // The renewal sees the loss within 100 ms; the stop stops the listener and
+    // the drain waits for both connections.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    finish_the_held_body(&mut finishes).await;
+    let answered = String::from_utf8(until_closed(&mut finishes).await).unwrap();
+    assert!(
+        answered.starts_with("HTTP/1.1 400"),
+        "a request still in flight inside the 5 s is served: {answered:?}"
+    );
+
+    let unanswered = until_closed(&mut cut).await;
+    let closed_after = lost_at.elapsed();
+    assert!(
+        unanswered.is_empty(),
+        "the cut request gets no response, only a closed connection"
+    );
+    assert!(
+        closed_after >= LEASE_LOSS_STOP.rest && closed_after < LEASE_LOSS_STOP.rest * 2,
+        "the connection is closed at the cut, about {:?} after the loss — not at actix's \
+         drain or the backstop ({closed_after:?})",
+        LEASE_LOSS_STOP.rest
+    );
+    assert!(
+        matches!(
+            stopped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "the teardown — the audit drain among it — still runs after the cut"
+    );
+
+    let grace = short_lease().lost_stop_deadline;
+    let result = tokio::time::timeout(grace, stopped)
+        .await
+        .expect("the instance stops after the cut")
+        .expect("the server thread reported");
+    let took = lost_at.elapsed();
+    let message = result
+        .expect_err("a lost lease is a non-zero exit")
+        .to_string();
+    assert!(message.contains("lease"), "{message}");
+    assert!(
+        took >= LEASE_LOSS_STOP.rest + LEASE_LOSS_STOP.cleanup,
+        "the teardown ran after the cut, to the cleanup bound ({took:?})"
+    );
+    assert!(
+        took < grace,
+        "the instance exited inside the lease's backstop deadline ({took:?} >= {grace:?})"
+    );
+    assert!(
+        !backstop_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the orderly stop finished — the cut included — before the backstop was needed"
+    );
+
+    // The audit drain ran: the row of the request served inside the 5 s is
+    // in the trail. The cut request has none (it would make two).
+    assert_eq!(audit_rows_named(&db, "POST /api/v1/auth/login").await, 1);
+}
+
+/// #628: after a lost lease the cleanup task is told to stop at the loss, not
+/// once the REST drain, the cut and the gRPC stop are over — up to 7 s later,
+/// during which a successor may already hold the lease and this instance could
+/// still start a sweep, an erasure or a tenant purge beside it.
+///
+/// A request still in flight holds the REST drain open until the cut (5 s); the
+/// cleanup task's first tick is held at its first step until 1 s after the
+/// loss, and an expired row waits for that tick's sweeps. The tick starts no
+/// sweep: the row is still there when the instance has stopped. Before #628
+/// the stop reached the cleanup task only after the cut, so the tick swept it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_lease_tells_the_cleanup_task_to_stop_at_the_loss_not_after_the_cut() {
+    use axiam_core::repository::AmqpNonceRepository;
+
+    let db = fresh_db().await;
+    axiam_db::SurrealAmqpNonceRepository::new(db.clone())
+        .insert_nonce(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            chrono::Utc::now() - chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let expired_rows = async || {
+        let mut found = db
+            .query("SELECT count() AS n FROM amqp_nonce_replay GROUP ALL")
+            .await
+            .unwrap();
+        let counts: Vec<serde_json::Value> = found.take(0).unwrap();
+        counts
+            .first()
+            .and_then(|row| row["n"].as_u64())
+            .unwrap_or(0)
+    };
+    assert_eq!(expired_rows().await, 1);
+
+    // The first tick says it started, then waits for the test.
+    let (entered_tx, mut entered) = tokio::sync::watch::channel(false);
+    let (go_tx, go) = tokio::sync::watch::channel(false);
+    let step: CleanupStepForTests = Arc::new(move || {
+        let entered_tx = entered_tx.clone();
+        let mut go = go.clone();
+        Box::pin(async move {
+            entered_tx.send_replace(true);
+            let _ = go.wait_for(|go| *go).await;
+        })
+    });
+    let (rest_port, backstop_ran, stopped) = boot_for_the_cut(&db, step);
+    tokio::time::timeout(Duration::from_secs(30), entered.wait_for(|on| *on))
+        .await
+        .expect("the cleanup task starts its first tick")
+        .expect("the step's sender lives as long as the task");
+    until_serving(rest_port).await;
+
+    let mut cut = a_sign_in_whose_body_is_held(rest_port).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    take_the_lease_over(&db).await;
+
+    // The loss is seen within 100 ms; the REST drain runs until the cut, 5 s.
+    // Let the tick go on well inside that.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    go_tx.send_replace(true);
+
+    let result = tokio::time::timeout(short_lease().lost_stop_deadline, stopped)
+        .await
+        .expect("the instance stops")
+        .expect("the server thread reported");
+    let message = result
+        .expect_err("a lost lease is a non-zero exit")
+        .to_string();
+    assert!(message.contains("lease"), "{message}");
+    assert!(
+        until_closed(&mut cut).await.is_empty(),
+        "the request was cut"
+    );
+    assert!(!backstop_ran.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        expired_rows().await,
+        1,
+        "the tick released after the loss started no sweep"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // A delivery lost at the stop (P23W5-A4)
 // ---------------------------------------------------------------------------
 

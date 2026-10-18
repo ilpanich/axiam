@@ -323,6 +323,7 @@ async fn world_org() -> (Surreal<TestDb>, Uuid) {
 async fn world_tenants(
     db: &Surreal<TestDb>,
     org_id: Uuid,
+    auth: AuthConfig,
 ) -> (Uuid, Uuid, web::Data<AppState<TestDb>>) {
     let tenant_id = create_tenant(db, org_id, "saml-a").await;
     let other_tenant_id = create_tenant(db, org_id, "saml-b").await;
@@ -330,7 +331,6 @@ async fn world_tenants(
         create_user(db, tenant_id, name).await;
     }
     create_user(db, other_tenant_id, "bob").await;
-    let auth = auth_config();
     let (state, custodians) = world_state(db, &auth);
     install_credential(db, &custodians, org_id, tenant_id).await;
     install_credential(db, &custodians, org_id, other_tenant_id).await;
@@ -338,8 +338,13 @@ async fn world_tenants(
 }
 
 async fn world() -> World {
+    world_with(auth_config()).await
+}
+
+/// [`world`] under `auth` (a test that needs another `hash_acquire_timeout_secs`).
+async fn world_with(auth: AuthConfig) -> World {
     let (db, org_id) = Box::pin(world_org()).await;
-    let (tenant_id, other_tenant_id, state) = Box::pin(world_tenants(&db, org_id)).await;
+    let (tenant_id, other_tenant_id, state) = Box::pin(world_tenants(&db, org_id, auth)).await;
     World {
         db,
         org_id,
@@ -3091,4 +3096,69 @@ async fn the_request_log_records_no_message_parameter_of_slo() {
     for probe in [message, relay, signature] {
         assert!(!log.contains(probe), "a message parameter reached the log");
     }
+}
+
+// ---------------------------------------------------------------------------
+// #654 (R101-02): the receiver's wait for the crypto gate is bounded
+// ---------------------------------------------------------------------------
+
+/// **#654 (R101-02).** The SLO receiver verifies a POST-bound signature under the
+/// same bounded wait as the SSO receiver: with every crypto permit held, a signed
+/// `LogoutRequest` is answered `503` within `hash_acquire_timeout_secs` plus a
+/// margin, and nothing is claimed or revoked.
+#[actix_rt::test]
+async fn r101_02_a_signed_logout_post_is_answered_503_when_the_crypto_gate_stays_held() {
+    const WAIT_SECS: u64 = 1;
+    let w = world_with(AuthConfig {
+        hash_acquire_timeout_secs: WAIT_SECS,
+        ..auth_config()
+    })
+    .await;
+    register(&w, Sp::new("a", Some(SamlBinding::HttpPost))).await;
+    let app = app!(w);
+    let gate = Arc::clone(&w.state.crypto_semaphore);
+    let held = gate
+        .clone()
+        .acquire_many_owned(u32::try_from(gate.available_permits()).unwrap())
+        .await
+        .unwrap();
+
+    let req = LogoutReq::new(
+        &w,
+        "a",
+        &SignedOn {
+            index: "_index".into(),
+            name_id: "name-id".into(),
+        },
+    );
+    let started = std::time::Instant::now();
+    let resp = request_from(&app, &w, "a", SamlBinding::HttpPost, &req, None).await;
+    let took = started.elapsed();
+
+    assert_eq!(resp.status().as_u16(), 503, "a saturated gate is a 503");
+    assert_eq!(header(&resp, "retry-after"), "5");
+    assert!(
+        took >= std::time::Duration::from_secs(WAIT_SECS),
+        "{took:?}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(WAIT_SECS + 3),
+        "{took:?}"
+    );
+    assert!(runs(&w).await.is_empty(), "no logout run was claimed");
+
+    // With a permit free again the same receiver verifies: the request is
+    // judged on its merits (it names a session that does not exist), not
+    // refused as busy.
+    drop(held);
+    let again = LogoutReq::new(
+        &w,
+        "a",
+        &SignedOn {
+            index: "_index".into(),
+            name_id: "name-id".into(),
+        },
+    );
+    let resp = request_from(&app, &w, "a", SamlBinding::HttpPost, &again, None).await;
+    assert_ne!(resp.status().as_u16(), 503, "served once a permit is free");
 }

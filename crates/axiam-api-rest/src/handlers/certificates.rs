@@ -29,6 +29,13 @@ use axiam_pki::{CustodianRevocation, IssuingScope};
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificateRequest {
     pub issuer_ca_id: Uuid,
+    /// The certificate's common name, e.g. `device-001`: a bare name or one
+    /// `CN=` component, at most 64 characters (RFC 5280 `ub-common-name`),
+    /// printable — a control character, tab or line break, an invisible or
+    /// bidirectional formatting character, or two spaces in a row is refused
+    /// with `400`. A name that is to be written into another system's
+    /// configuration (a FreeRADIUS table, an ACL) should match
+    /// `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
     pub subject: String,
     pub cert_type: CertificateType,
     pub key_algorithm: KeyAlgorithm,
@@ -71,24 +78,109 @@ async fn check_bound_user<C: Connection + Clone>(
     let Some(user_id) = user_id else {
         return Ok(());
     };
+    if bound_user_is_live(state, principal.tenant_id, user_id).await? {
+        Ok(())
+    } else {
+        Err(unbound_user_refused())
+    }
+}
+
+/// The refusal of a `user_id` that names no live account of the tenant.
+fn unbound_user_refused() -> AxiamApiError {
+    AxiamApiError(AxiamError::Validation {
+        message: "user_id does not name a user of this tenant".into(),
+    })
+}
+
+/// Whether `user_id` names an account of `tenant_id` that is neither deleted
+/// nor erased (#533). A read that fails for any reason but "no such user" is
+/// an error, never an answer.
+async fn bound_user_is_live<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, AxiamError> {
     use axiam_core::models::user::UserStatus;
     use axiam_core::repository::UserRepository as _;
-    let refused = || {
-        AxiamApiError(AxiamError::Validation {
-            message: "user_id does not name a user of this tenant".into(),
-        })
+    match state.user_repo.get_by_id(tenant_id, user_id).await {
+        Ok(user) => Ok(!matches!(
+            user.status,
+            UserStatus::Deleted | UserStatus::Anonymized
+        )),
+        Err(AxiamError::NotFound { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// R101W1-09 (b) — the half of the user binding that runs after the
+/// certificate exists.
+///
+/// [`check_bound_user`] reads the account before the certificate is made, and
+/// an administrator's deletion can land between that read and the row being
+/// stored: the deletion's revocation then ran before there was a row to
+/// revoke, and the new certificate would stay active, bound to a deleted
+/// account. So the account is read again once the row exists. When it is gone,
+/// or cannot be read, the new certificate is revoked — dated, on its issuer's
+/// list, and forwarded to Vault as any revocation is — and the request answers
+/// what the first check would have: the `400` for an account that is gone, the
+/// read's own error otherwise. Nothing of the issuance reaches the caller: a
+/// generated private key is not returned for a certificate that was revoked
+/// before anyone held it.
+///
+/// With the deletion's second revocation by binding, after its tombstone
+/// (`handlers::users::delete`), this closes the window: a row stored before
+/// that pass is revoked by it, and a row stored after it reads the account
+/// back as deleted here.
+async fn revoke_unless_bound_user_lives<C: Connection + Clone>(
+    bound_user: Option<Uuid>,
+    certificate_id: Uuid,
+    principal: &AuthenticatedPrincipal,
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+) -> Result<(), AxiamApiError> {
+    let Some(user_id) = bound_user else {
+        return Ok(());
+    };
+    let refusal = match bound_user_is_live(state, principal.tenant_id, user_id).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => unbound_user_refused(),
+        Err(error) => error.into(),
     };
     match state
-        .user_repo
-        .get_by_id(principal.tenant_id, user_id)
+        .pki
+        .cert_service
+        .revoke(principal.tenant_id, certificate_id)
         .await
     {
-        Ok(user) if matches!(user.status, UserStatus::Deleted | UserStatus::Anonymized) => {
-            Err(refused())
+        Ok(custodian) => {
+            tracing::warn!(
+                tenant_id = %principal.tenant_id,
+                certificate_id = %certificate_id,
+                user_id = %user_id,
+                "the account a certificate was issued for was deleted during the issuance; \
+                 the certificate is revoked and not returned"
+            );
+            audit_pending_vault_revocation(
+                state,
+                principal,
+                certificate_id,
+                custodian,
+                client_ip(http_req),
+            )
+            .await;
+            Err(refusal)
         }
-        Ok(_) => Ok(()),
-        Err(AxiamError::NotFound { .. }) => Err(refused()),
-        Err(error) => Err(error.into()),
+        Err(error) => {
+            tracing::error!(
+                tenant_id = %principal.tenant_id,
+                certificate_id = %certificate_id,
+                user_id = %user_id,
+                %error,
+                "a certificate issued for an account deleted during the issuance could not be \
+                 revoked; revoke it by id"
+            );
+            Err(error.into())
+        }
     }
 }
 
@@ -164,6 +256,7 @@ pub async fn generate<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<CreateCertificateRequest>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
@@ -204,11 +297,22 @@ pub async fn generate<C: Connection + Clone>(
     // the body (DF-017).
     let scope = issuing_scope(&principal, state.get_ref()).await;
 
+    let bound_user = input.user_id;
     let result = state
         .pki
         .cert_service
         .generate(principal.org_id, scope, input, max_validity, &server_names)
         .await?;
+    // R101W1-09 (b): the account may have been deleted since the check; the
+    // key goes nowhere if it was.
+    revoke_unless_bound_user_lives(
+        bound_user,
+        result.certificate.id,
+        &principal,
+        state.get_ref(),
+        &http_req,
+    )
+    .await?;
     Ok(HttpResponse::Created().json(result))
 }
 
@@ -217,7 +321,11 @@ pub async fn generate<C: Connection + Clone>(
 /// No `subject` and no `key_algorithm`: both are read out of the CSR, which is
 /// the only place they can be stated without the row and the certificate being
 /// able to disagree. No key is returned, so there is no key field anywhere on
-/// this exchange.
+/// this exchange. The CSR's common name meets the rules of `subject` on
+/// `POST /api/v1/certificates` (printable, at most 64 characters) and is
+/// refused, not rewritten, when it does not. So does the value of every other
+/// attribute of the CSR's subject, and a subject with more than one common
+/// name is refused.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignCertificateCsrRequest {
     pub issuer_ca_id: Uuid,
@@ -288,6 +396,7 @@ pub async fn sign_csr<C: Connection + Clone>(
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<SignCertificateCsrRequest>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, AxiamApiError> {
     RequirePermission::new("certificates:generate", Uuid::nil())
         .check(&principal, authz.get_ref().as_ref())
@@ -324,11 +433,21 @@ pub async fn sign_csr<C: Connection + Clone>(
 
     let scope = issuing_scope(&principal, state.get_ref()).await;
 
+    let bound_user = input.user_id;
     let certificate = state
         .pki
         .cert_service
         .sign_csr(principal.org_id, scope, input, max_validity, &server_names)
         .await?;
+    // R101W1-09 (b), as for `generate`.
+    revoke_unless_bound_user_lives(
+        bound_user,
+        certificate.id,
+        &principal,
+        state.get_ref(),
+        &http_req,
+    )
+    .await?;
     Ok(HttpResponse::Created().json(certificate))
 }
 
@@ -475,23 +594,47 @@ pub async fn revoke<C: Connection + Clone>(
         .cert_service
         .revoke(principal.tenant_id, id)
         .await?;
-    if let CustodianRevocation::Pending { reason } = custodian
-        && let Err(error) = state
-            .audit_repo
-            .append(CreateAuditLogEntry {
-                tenant_id: principal.tenant_id,
-                actor_id: principal.subject_id,
-                actor_type: principal.actor_type(),
-                action: AUDIT_VAULT_REVOCATION_PENDING.to_string(),
-                resource_id: Some(id),
-                outcome: AuditOutcome::Failure,
-                ip_address: client_ip(&http_req),
-                metadata: Some(serde_json::json!({
-                    "certificate_id": id,
-                    "reason": reason,
-                })),
-            })
-            .await
+    audit_pending_vault_revocation(
+        state.get_ref(),
+        &principal,
+        id,
+        custodian,
+        client_ip(&http_req),
+    )
+    .await;
+    Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
+}
+
+/// A revocation Vault did not take ([`CustodianRevocation::Pending`]) is
+/// recorded as [`AUDIT_VAULT_REVOCATION_PENDING`] in the caller's tenant, with
+/// the sanitised reason; the cleanup job's sweep retries the forward. A failed
+/// append is logged, never the request's failure: the revocation stands.
+async fn audit_pending_vault_revocation<C: Connection + Clone>(
+    state: &AppState<C>,
+    principal: &AuthenticatedPrincipal,
+    id: Uuid,
+    custodian: CustodianRevocation,
+    ip_address: Option<String>,
+) {
+    let CustodianRevocation::Pending { reason } = custodian else {
+        return;
+    };
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: principal.tenant_id,
+            actor_id: principal.subject_id,
+            actor_type: principal.actor_type(),
+            action: AUDIT_VAULT_REVOCATION_PENDING.to_string(),
+            resource_id: Some(id),
+            outcome: AuditOutcome::Failure,
+            ip_address,
+            metadata: Some(serde_json::json!({
+                "certificate_id": id,
+                "reason": axiam_pki::vault_forward::sanitise_reason(&reason),
+            })),
+        })
+        .await
     {
         tracing::error!(
             tenant_id = %principal.tenant_id,
@@ -500,7 +643,6 @@ pub async fn revoke<C: Connection + Clone>(
             "a pending Vault revocation could not be audited"
         );
     }
-    Ok(HttpResponse::Ok().json(serde_json::json!({"status": "revoked"})))
 }
 
 /// `POST /api/v1/service-accounts/{sa_id}/bind-certificate`
@@ -595,6 +737,21 @@ pub async fn bind<C: Connection + Clone>(
         .service_account_repo
         .get_by_id(principal.tenant_id, sa_id)
         .await?;
+
+    // §5.3 (correction R101W6-03) and H6: placement is the pair (the
+    // account's joins, the binding), so binding to an account that holds a
+    // `network:join` allow needs `network:grant` at every such node; and no
+    // service account binds a certificate to itself.
+    let _cleared = crate::network_gate::authorize(
+        &principal,
+        authz.get_ref().as_ref(),
+        &state,
+        axiam_authz::network_gate::NetworkWrite::CertificateBind {
+            certificate_id: cert.id,
+            service_account_id: sa_id,
+        },
+    )
+    .await?;
 
     state
         .pki

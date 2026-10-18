@@ -383,7 +383,7 @@ async fn i2_a_code_flow_without_resource_still_mints_the_user_audience() {
              &client_id={client_id}&client_secret={secret}&code_verifier={VERIFIER}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         aud_of(tokens["access_token"].as_str().unwrap()),
         axiam_auth::token::AUD_USER,
@@ -456,7 +456,7 @@ async fn the_code_grant_mints_the_named_resource_as_the_audience() {
              &client_id={client_id}&client_secret={secret}&code_verifier={VERIFIER}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         aud_of(tokens["access_token"].as_str().unwrap()),
         MCP,
@@ -533,10 +533,7 @@ async fn a_code_may_be_redeemed_for_its_own_resource_and_no_other() {
              &client_id={client_id}&client_secret={secret}&code_verifier={VERIFIER}&resource={MCP}"
         )
     );
-    assert_eq!(
-        status, 200,
-        "repeating the bound value is allowed: {tokens}"
-    );
+    assert_eq!(status, 200, "repeating the bound value is allowed");
     assert_eq!(aud_of(tokens["access_token"].as_str().unwrap()), MCP);
 
     // 2. Naming a *different registered* resource is refused. Registered, so
@@ -768,7 +765,7 @@ async fn par_carries_the_resource_and_the_query_string_cannot_override_it() {
              &client_id={client_id}&client_secret={secret}&code_verifier={VERIFIER}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         aud_of(tokens["access_token"].as_str().unwrap()),
         MCP,
@@ -823,6 +820,9 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
             "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
             "scopes": ["openid"],
             "allowed_resources": [MCP, MCP_TWO],
+            // A television: public, so it polls with its `client_id` alone
+            // (RFC 8628 §3.4; #635).
+            "token_endpoint_auth_method": "none",
         })
     );
     let client_id = client["client_id"].as_str().unwrap();
@@ -885,7 +885,7 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         "/oauth2/token",
         format!(
             "grant_type=urn:ietf:params:oauth:grant-type:device_code\
-             &device_code={device_code}&resource={MCP_TWO}"
+             &device_code={device_code}&client_id={client_id}&resource={MCP_TWO}"
         )
     );
     assert_eq!(status, 400, "{body}");
@@ -899,10 +899,11 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         f,
         "/oauth2/token",
         format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(aud_of(tokens["access_token"].as_str().unwrap()), MCP);
 
     // I2: a device flow that names no resource still mints `axiam:user`.
@@ -912,10 +913,11 @@ async fn the_device_flow_carries_the_resource_from_authorization_to_token() {
         f,
         "/oauth2/token",
         format!(
-            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}"
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code\
+             &device_code={device_code}&client_id={client_id}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         aud_of(tokens["access_token"].as_str().unwrap()),
         axiam_auth::token::AUD_USER
@@ -936,6 +938,7 @@ async fn the_device_authorization_endpoint_refuses_an_unregistered_resource() {
             "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
             "scopes": ["openid"],
             "allowed_resources": [MCP],
+            "token_endpoint_auth_method": "none",
         })
     );
     let client_id = client["client_id"].as_str().unwrap();
@@ -985,7 +988,7 @@ async fn the_client_credentials_grant_addresses_a_resource_or_stays_m2m() {
              &scope=read&resource={MCP}"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(aud_of(tokens["access_token"].as_str().unwrap()), MCP);
 
     let (status, tokens) = post_form!(
@@ -996,7 +999,7 @@ async fn the_client_credentials_grant_addresses_a_resource_or_stays_m2m() {
             "grant_type=client_credentials&client_id={client_id}&client_secret={secret}&scope=read"
         )
     );
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         aud_of(tokens["access_token"].as_str().unwrap()),
         axiam_auth::token::AUD_M2M,
@@ -1326,10 +1329,10 @@ async fn a_dpop_bound_token_carries_both_the_confirmation_and_the_resource() {
     let resp = test::call_service(&app, req).await;
     let status = resp.status().as_u16();
     let tokens: Value = test::read_body_json(resp).await;
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "the token request is granted");
     assert_eq!(
         tokens["token_type"], "DPoP",
-        "a bound token is announced as one (RFC 9449 section 5): {tokens}"
+        "a bound token is announced as one (RFC 9449 section 5)"
     );
 
     let access = tokens["access_token"].as_str().unwrap();

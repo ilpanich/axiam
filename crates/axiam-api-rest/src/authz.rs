@@ -70,6 +70,21 @@ pub trait AuthzChecker: Send + Sync {
         request: &'a AccessRequest,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>>;
 
+    /// Evaluate a check from the datastore, bypassing any decision cache.
+    ///
+    /// For the write-time gates of [`crate::network_gate`]: a decision that
+    /// clears a *write* must reflect the grants as they are now, not as a
+    /// replica cached them. The default is [`Self::check_access`], which is
+    /// exactly right for every checker without a cache (the test doubles);
+    /// the real [`AuthorizationEngine`] overrides it with its uncached
+    /// evaluation.
+    fn check_access_uncached<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        self.check_access(request)
+    }
+
     /// Evaluate an ordered batch of checks, returning decisions in input order
     /// (result `i` ↔ `requests[i]`).
     ///
@@ -155,6 +170,13 @@ where
         Box::pin(AuthorizationEngine::check_access(self, request))
     }
 
+    fn check_access_uncached<'a>(
+        &'a self,
+        request: &'a AccessRequest,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<AccessDecision>> + Send + 'a>> {
+        Box::pin(AuthorizationEngine::check_access_uncached(self, request))
+    }
+
     fn check_access_batch<'a>(
         &'a self,
         requests: &'a [AccessRequest],
@@ -177,6 +199,14 @@ where
         Box::pin(AuthorizationEngine::invalidate_subject(
             self, tenant_id, subject_id,
         ))
+    }
+}
+
+/// The network gate's write-time check, through the type-erased checker the
+/// handlers hold (`axiam_authz::network_gate`).
+impl axiam_authz::network_gate::WriteTimeAccess for dyn AuthzChecker {
+    async fn check_at_write_time(&self, request: &AccessRequest) -> AxiamResult<AccessDecision> {
+        self.check_access_uncached(request).await
     }
 }
 

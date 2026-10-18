@@ -824,9 +824,11 @@ async fn a_document_cannot_rewrite_an_administrators_client() {
             managed_by: ManagedBy::Cimd,
             ciba: Default::default(),
         },
+        20,
     )
     .await
-    .expect("seeded");
+    .expect("seeded")
+    .expect("under the ceiling");
     f.db.query("UPDATE oauth2_client SET managed_by = 'admin' WHERE client_id = $c")
         .bind(("c", client_id.clone()))
         .await

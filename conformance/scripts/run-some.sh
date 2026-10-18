@@ -40,6 +40,12 @@ shift 2
 . "$SCRIPTS/lib-env.sh"
 conf_load
 
+# Checked before anything else happens, and before it reaches `$(( ... ))`,
+# where a non-numeric value is code (R101W4-02; conf_require_uint says how).
+# `10#` pins base 10 so a leading zero is not read as octal.
+conf_require_uint CONFORMANCE_MODULE_TIMEOUT "${CONFORMANCE_MODULE_TIMEOUT:-300}" || exit 2
+module_timeout=$((10#${CONFORMANCE_MODULE_TIMEOUT:-300}))
+
 BASE="${SUITE_BASE_URL:-https://localhost.emobix.co.uk:8442}"
 OUT="${RUN_SOME_OUT:-$HERE/.run/some}"
 mkdir -p "$OUT"
@@ -80,7 +86,7 @@ for module in "$@"; do
   # The same generous cap run-plan.sh uses, and for the same two reasons: an
   # interactive module sits in WAITING until the browser driver acts, and
   # several modules deliberately wait out the 60-second PAR window.
-  deadline=$(( $(date +%s) + ${CONFORMANCE_MODULE_TIMEOUT:-300} ))
+  deadline=$(( $(date +%s) + module_timeout ))
   status=""; result=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
     INFO=$("${CURL[@]}" "$BASE/api/info/$TEST_ID" 2>/dev/null || echo '{}')

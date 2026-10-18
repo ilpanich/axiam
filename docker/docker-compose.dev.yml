@@ -10,7 +10,9 @@ services:
     restart: "no"
 
   surrealdb:
-    image: surrealdb/surrealdb:v3
+    # Pinned, not the floating `v3`: 1.1.0's race fixes rely on SurrealDB
+    # 3.3.4's write-write conflict detection. Stay on 3.3.x if you override it.
+    image: surrealdb/surrealdb:v3.3.4
     container_name: axiam-surrealdb
     depends_on:
       surrealdb-init:

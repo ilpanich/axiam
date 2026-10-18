@@ -1257,19 +1257,26 @@ impl Harness {
 // Registration: one test per server per scenario
 // ===========================================================================
 
+// Each scenario's future is boxed. Unboxed, the test's future (~24 KiB, the
+// whole harness inline) is moved by value through actix's and tokio's
+// `block_on` layers, and in a debug build each of those frames keeps its own
+// copy: about 340 KiB of a 2 MiB test thread gone before the first poll. The
+// embedded SurrealDB engine runs every query inline on that same thread, and
+// its debug frames are large, so that was headroom the scenarios needed. Boxed,
+// what crosses those layers is a pointer.
 macro_rules! scenario {
     ($openldap:ident, $samba:ident, $body:ident) => {
         #[actix_rt::test]
         async fn $openldap() {
             if let Some(flavor) = gate(Flavor::OpenLdap) {
-                $body(flavor).await;
+                Box::pin($body(flavor)).await;
             }
         }
 
         #[actix_rt::test]
         async fn $samba() {
             if let Some(flavor) = gate(Flavor::Samba) {
-                $body(flavor).await;
+                Box::pin($body(flavor)).await;
             }
         }
     };

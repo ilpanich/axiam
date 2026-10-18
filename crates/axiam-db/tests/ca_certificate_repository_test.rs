@@ -528,15 +528,20 @@ async fn of_concurrent_ca_claims_exactly_one_wins_and_a_refusal_backs_the_row_of
     );
     assert!(due_ids(&repo, Utc::now()).await.is_empty());
 
+    // Another organization's write on the claim's lease changes nothing.
+    assert!(
+        !repo
+            .record_vault_forward_failure(Uuid::new_v4(), child.id, lease, 99, Utc::now(), "no")
+            .await
+            .unwrap()
+    );
     // A refusal: one attempt, a bounded reason, due again after its backoff.
     let next = Utc::now() + Duration::minutes(1);
-    repo.record_vault_forward_failure(org_id, child.id, 1, next, &"x".repeat(1_000))
-        .await
-        .unwrap();
-    // Another organization's write changes nothing.
-    repo.record_vault_forward_failure(Uuid::new_v4(), child.id, 99, Utc::now(), "no")
-        .await
-        .unwrap();
+    assert!(
+        repo.record_vault_forward_failure(org_id, child.id, lease, 1, next, &"x".repeat(1_000))
+            .await
+            .unwrap()
+    );
     assert!(due_ids(&repo, Utc::now()).await.is_empty());
     let later = repo
         .list_due_vault_forwards(Utc::now() + Duration::minutes(5), 10)
@@ -559,4 +564,70 @@ async fn of_concurrent_ca_claims_exactly_one_wins_and_a_refusal_backs_the_row_of
             .unwrap()
     );
     assert_eq!(repo.count_vault_forwards_failing(1).await.unwrap(), 0);
+}
+
+/// R101W1-09 (d): a refusal is recorded only on the lease its claim wrote. A
+/// replica whose attempt outlived its lease, the CA row since claimed by
+/// another, writes nothing — neither the count nor the date that holds the new
+/// claimant's lease.
+#[tokio::test]
+async fn a_ca_failure_recorded_on_a_lapsed_claim_writes_nothing() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    let db = common::serialising_db().await;
+    let org_id = Uuid::new_v4();
+    let repo = SurrealCaCertificateRepository::new(db.handle());
+    let parent = repo
+        .create(child_ca(org_id, None, CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    let child = repo
+        .create(child_ca(org_id, Some(parent.id), CaKeyCustody::VaultPki))
+        .await
+        .unwrap();
+    repo.revoke(org_id, child.id).await.unwrap();
+
+    // Replica A claims with a lease that has already run out.
+    let lapsed = Utc::now() - Duration::seconds(1);
+    assert!(
+        repo.claim_vault_forward(org_id, child.id, None, lapsed)
+            .await
+            .unwrap()
+    );
+    // Replica B reads the row due again and claims it over A's lease.
+    let due = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(due[0].next_attempt_at, Some(lapsed));
+    let current = Utc::now() + Duration::minutes(2);
+    assert!(
+        repo.claim_vault_forward(org_id, child.id, Some(lapsed), current)
+            .await
+            .unwrap()
+    );
+
+    // A's late refusal writes nothing: B's lease and the count stand.
+    assert!(
+        !repo
+            .record_vault_forward_failure(org_id, child.id, lapsed, 7, Utc::now(), "late")
+            .await
+            .unwrap()
+    );
+    let row = repo
+        .list_due_vault_forwards(Utc::now() + Duration::hours(1), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            row[0].attempts,
+            row[0].next_attempt_at,
+            row[0].last_error.as_deref()
+        ),
+        (0, Some(current), None)
+    );
+    // B's refusal, on its own lease, is recorded.
+    assert!(
+        repo.record_vault_forward_failure(org_id, child.id, current, 1, Utc::now(), "refused")
+            .await
+            .unwrap()
+    );
+    let row = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
+    assert_eq!(row[0].attempts, 1);
 }

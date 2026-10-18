@@ -309,6 +309,9 @@ impl MockAuditRepo {
 }
 
 impl AuditLogRepository for MockAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         let entry = AuditLogEntry {
             id: Uuid::new_v4(),

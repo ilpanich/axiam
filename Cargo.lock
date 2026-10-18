@@ -397,9 +397,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ammonia"
-version = "4.2.3"
+version = "4.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061e83b03c2681c18a6787d956e355c74e0b98ba7ba3d69b0822ade1e6f1d716"
+checksum = "1f45dfa685e1ec33b1bf1a3b93b8047cbdbef41b6040deebbe6bea7720a45574"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-amqp"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "actix-web",
  "axiam-audit",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-grpc"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-amqp",
  "axiam-auth",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-rest"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "actix-cors",
  "actix-governor",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-audit"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "actix-web",
  "axiam-auth",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-auth"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2 0.6.0",
@@ -936,6 +936,7 @@ dependencies = [
  "rand 0.10.3",
  "rcgen",
  "reqwest 0.12.28",
+ "ring",
  "secrecy",
  "serde",
  "serde_json",
@@ -944,6 +945,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "surrealdb",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-test",
@@ -960,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-authz"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-core",
  "axiam-db",
@@ -980,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -996,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-db"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "arc-swap",
@@ -1009,6 +1011,7 @@ dependencies = [
  "chrono",
  "hex",
  "rand 0.10.3",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1025,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-directory"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-auth",
  "axiam-authz",
@@ -1056,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-email"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-core",
  "axiam-pki",
@@ -1076,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-federation"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1111,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-oauth2"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1144,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "argon2 0.6.0",
  "getrandom 0.4.3",
@@ -1159,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque-ffi"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "axiam-opaque",
  "getrandom 0.4.3",
@@ -1167,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-pki"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "axiam-core",
@@ -1202,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-scim"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1233,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-server"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1290,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-test-support"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "uuid",
 ]
@@ -6786,9 +6789,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -8350,7 +8353,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -9901,9 +9904,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

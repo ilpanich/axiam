@@ -25,7 +25,8 @@ use axiam_core::repository::{
 };
 use axiam_oauth2::error::OAuth2Error;
 use axiam_oauth2::token::{
-    IntrospectRequest, RevokeRequest, TokenRequest, TokenRequestContext, TokenService,
+    CLIENT_AUTH_FAILED, IntrospectRequest, RevokeRequest, TokenRequest, TokenRequestContext,
+    TokenService,
 };
 use chrono::Utc;
 use std::sync::{Arc, Mutex};
@@ -215,8 +216,10 @@ impl OAuth2ClientRepository for MockClientRepo {
         &self,
         _: axiam_core::models::oauth2_client::CreateOAuth2Client,
         _: &str,
-    ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
-    {
+        _: u32,
+    ) -> axiam_core::error::AxiamResult<
+        Option<(axiam_core::models::oauth2_client::OAuth2Client, String)>,
+    > {
         unimplemented!("RFC 7592 is not exercised by this double")
     }
     async fn get_by_registration_access_token(
@@ -255,7 +258,8 @@ impl OAuth2ClientRepository for MockClientRepo {
         &self,
         _client_id: &str,
         _i: CreateOAuth2Client,
-    ) -> AxiamResult<OAuth2Client> {
+        _: u32,
+    ) -> AxiamResult<Option<OAuth2Client>> {
         unimplemented!()
     }
     async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<OAuth2Client> {
@@ -301,6 +305,13 @@ impl OAuth2ClientRepository for MockClientRepo {
         _tid: Uuid,
         _managed_by: axiam_core::models::oauth2_client::ManagedBy,
     ) -> AxiamResult<u64> {
+        unimplemented!()
+    }
+
+    async fn count_confidential_with_grant(
+        &self,
+        _grant_types: &[&str],
+    ) -> AxiamResult<axiam_core::models::oauth2_client::ConfidentialGrantCount> {
         unimplemented!()
     }
 
@@ -961,6 +972,9 @@ type AuditLog = Arc<Mutex<Vec<axiam_core::models::audit::CreateAuditLogEntry>>>;
 struct MockAuditRepo(AuditLog);
 
 impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
+    async fn datastore_now(&self) -> axiam_core::error::AxiamResult<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::Utc::now())
+    }
     async fn append(
         &self,
         input: axiam_core::models::audit::CreateAuditLogEntry,
@@ -3129,7 +3143,7 @@ async fn legacy_sha256_client_secret_still_authenticates_and_is_upgraded() {
     );
     assert!(
         new_hash.starts_with(V2_PREFIX),
-        "the replacement must be in the current scheme: {new_hash}"
+        "the replacement must be in the current scheme"
     );
     assert_eq!(new_hash, &hash_client_secret(SECRET));
 }
@@ -3417,6 +3431,71 @@ async fn an_unknown_service_account_is_invalid_client() {
         .await
         .expect_err("unknown client");
     assert!(matches!(err, OAuth2Error::InvalidClient(_)), "got {err:?}");
+}
+
+/// #641 (W3.7, d; T-472): the `sa_` client-credentials path reads its tenant as
+/// every other grant does, and a tombstoned tenant answers the same
+/// `invalid_client` a wrong secret gets: after one verify, at every request
+/// shape, scope or none (the scope check is not an oracle for the tenant).
+#[tokio::test]
+async fn a_tombstoned_tenants_service_account_authenticates_nowhere() {
+    let secret = "sa-secret-value";
+    let tenant = Uuid::new_v4();
+    let build = |tenants: TenantOutcome| {
+        let sa = make_service_account(tenant, hash_client_secret(secret), UserStatus::Active);
+        let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+        TokenService::new(
+            MockClientRepo(ClientOutcome::NotFound, log.clone()),
+            MockSaRepo(SaOutcome::Found(Box::new(sa)), log),
+            MockCodeRepo::none(),
+            MockTenantRepo::new(tenants),
+            MockRefreshRepo::new(),
+            MockUserRepo,
+            MockSessionRepo::default(),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+            not_issued_here(),
+        )
+    };
+    let id = "sa_deadbeefdeadbeefdeadbeefdeadbeef";
+
+    // Live tenant: the same account authenticates, so the refusal is the tenant's.
+    assert!(
+        build(TenantOutcome::Found)
+            .exchange(tenant, sa_req(id, secret), &no_cert())
+            .await
+            .is_ok()
+    );
+
+    let gone = build(TenantOutcome::NotFound);
+    for (what, req) in [
+        ("the right secret", sa_req(id, secret)),
+        ("a wrong secret", sa_req(id, "wrong")),
+        ("a scope", {
+            let mut r = sa_req(id, secret);
+            r.scope = Some("admin:everything".into());
+            r
+        }),
+    ] {
+        let err = gone
+            .exchange(tenant, req, &no_cert())
+            .await
+            .expect_err("a tombstoned tenant issues nothing");
+        assert_eq!(err.error_code(), "invalid_client", "{what}: {err:?}");
+        assert_eq!(
+            err.to_string(),
+            OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()).to_string(),
+            "{what}: the same description a wrong secret gets"
+        );
+    }
+
+    // A datastore fault stays a server error, never bad credentials.
+    let err = build(TenantOutcome::Db)
+        .exchange(tenant, sa_req(id, secret), &no_cert())
+        .await
+        .expect_err("a failing tenant read");
+    assert_eq!(err.error_code(), "server_error", "{err:?}");
 }
 
 /// A service account registers no scopes, so the subset rule leaves the empty

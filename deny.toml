@@ -113,6 +113,23 @@ ignore = [
     # quick-xml >=0.41.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). Parser only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). NsReader only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
+    # RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369: zip 8.6.0 — 0367 is a
+    # `set_permissions(unix_mode)` pattern on extraction; 0368 and 0369 are in `ZipArchive::extract()`
+    # (path/symlink handling). Solution: upgrade to zip >=9. Tracking: ilpanich/axiam#719.
+    #
+    # `zip` 8.6.0 is only a `[build-dependencies]` entry of utoipa-swagger-ui 10.0.1, which is the
+    # newest release and requires `zip = "8.6"`, so there is no upgrade path to take.
+    #
+    # Exposure: its build.rs never calls `extract()` (0368 and 0369). It runs its own `by_index` +
+    # `enclosed_name()` loop restricted to `dist/` and creates no symlinks. It applies
+    # `set_permissions(unix_mode)` (the 0367 pattern) only to the pinned swagger-ui release zip, at
+    # build time. None of it ships in the binary; the remaining exposure is the build host, and only
+    # if the upstream swagger-ui zip were itself compromised.
+    #
+    # Review date: 2026-11-17. DROP ALL THREE when utoipa-swagger-ui moves to zip >=9 (#719).
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 is a build-dependency only of utoipa-swagger-ui 10.0.1 (newest; requires zip 8.6). build.rs applies set_permissions(unix_mode) only to the pinned swagger-ui release zip at build time; nothing ships in the binary. Drop when utoipa-swagger-ui moves to zip >=9 (#719). Review: 2026-11-17" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 is a build-dependency only of utoipa-swagger-ui 10.0.1 (newest; requires zip 8.6). build.rs never calls extract(); it uses its own by_index + enclosed_name() loop restricted to dist/ and creates no symlinks. Nothing ships in the binary. Drop when utoipa-swagger-ui moves to zip >=9 (#719). Review: 2026-11-17" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 is a build-dependency only of utoipa-swagger-ui 10.0.1 (newest; requires zip 8.6). build.rs never calls extract(); it uses its own by_index + enclosed_name() loop restricted to dist/ and creates no symlinks. Nothing ships in the binary. Drop when utoipa-swagger-ui moves to zip >=9 (#719). Review: 2026-11-17" },
 ]
 
 [licenses]

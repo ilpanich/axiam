@@ -635,3 +635,213 @@ async fn reconcile_leaves_the_organization_scopes_grants_alone() {
     let held = actions_of(&db, scope_id, roles.super_admin_role_id).await;
     assert!(held.contains(&"ca_certificates:manage".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// The reserved `network:` namespace (RADIUS D4, W6.2)
+// ---------------------------------------------------------------------------
+
+/// The nine `network:*` permissions, as the registry carries them.
+const NETWORK_REGISTRY: &[(&str, &str)] = &[
+    ("users:list", "List users"),
+    ("network:join", "join"),
+    ("network:admin", "admin"),
+    ("network:read", "read"),
+    ("network:segments_write", "segments"),
+    ("network:profiles_write", "profiles"),
+    ("network:grant", "grant"),
+    ("network:grant_admin", "grant admin"),
+    ("network:decide", "decide"),
+    ("network:export", "export"),
+];
+
+/// The seeded super-admin is the one global role allowed to carry `network:`
+/// permissions (design note §4.2 rule 1's bootstrap exemption), and carries
+/// exactly the meta set and `network:read`: never `network:join`, which would
+/// place any device holding it on every segment, nor the administrative
+/// class. The seeded admin and viewer carry none.
+#[tokio::test]
+async fn seeded_roles_hold_only_the_bootstrap_part_of_the_network_namespace() {
+    use axiam_core::models::network::SEEDED_SUPER_ADMIN_NETWORK_ACTIONS;
+
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+
+    let network = |actions: Vec<String>| -> Vec<String> {
+        let mut n: Vec<String> = actions
+            .into_iter()
+            .filter(|a| a.starts_with("network:"))
+            .collect();
+        n.sort();
+        n
+    };
+    let mut expected: Vec<String> = SEEDED_SUPER_ADMIN_NETWORK_ACTIONS
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        network(actions_of(&db, tenant_id, roles.super_admin_role_id).await),
+        expected
+    );
+    assert!(network(actions_of(&db, tenant_id, roles.admin_role_id).await).is_empty());
+    assert!(network(actions_of(&db, tenant_id, roles.viewer_role_id).await).is_empty());
+    // The rest of the registry is unaffected.
+    assert!(
+        actions_of(&db, tenant_id, roles.admin_role_id)
+            .await
+            .contains(&"users:list".to_owned())
+    );
+}
+
+/// A tenant seeded by W6.1's build gave both administrative roles the whole
+/// namespace; the boot-time reconcile takes back what the rule withholds, and
+/// a second run changes nothing.
+#[tokio::test]
+async fn reconcile_takes_back_the_network_grants_the_seeded_roles_must_not_hold() {
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let all = perm_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 1000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    // What the earlier build did: every network: permission on both roles.
+    let mut added = 0;
+    for p in all.iter().filter(|p| p.action.starts_with("network:")) {
+        for role in [roles.super_admin_role_id, roles.admin_role_id] {
+            if !actions_of(&db, tenant_id, role).await.contains(&p.action) {
+                perm_repo
+                    .grant_to_role(tenant_id, role, p.id)
+                    .await
+                    .unwrap();
+                added += 1;
+            }
+        }
+    }
+    // join, admin, grant_admin on super-admin; all nine on admin.
+    assert_eq!(added, 3 + 9);
+
+    let outcome = reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            granted: 0,
+            revoked: 12
+        }
+    );
+    assert!(
+        !actions_of(&db, tenant_id, roles.super_admin_role_id)
+            .await
+            .contains(&"network:join".to_owned())
+    );
+    assert_eq!(
+        reconcile_default_role_grants(&db, tenant_id).await.unwrap(),
+        ReconcileOutcome::default()
+    );
+}
+
+/// R110W6-04: the boot reconcile is bound by §4.2 rule 2 too. A super-admin
+/// that a group holds (a release before 1.1.0 allowed it) is not given the
+/// `network:` meta permissions — the grant's own transaction refuses them —
+/// and the reconcile withholds them instead of failing the boot; everything
+/// else is reconciled as usual. Once no group holds the role, the next
+/// reconcile grants them.
+#[tokio::test]
+async fn reconcile_withholds_network_grants_from_a_group_held_super_admin() {
+    use axiam_core::models::group::CreateGroup;
+    use axiam_core::models::role::AssignmentScope;
+    use axiam_core::repository::{GroupRepository, RoleRepository};
+    use axiam_db::repository::{SurrealGroupRepository, SurrealRoleRepository};
+
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, REGISTRY).await.unwrap();
+    let roles = seed_default_roles(&db, tenant_id, REGISTRY).await.unwrap();
+    let group = SurrealGroupRepository::new(db.clone())
+        .create(CreateGroup {
+            tenant_id,
+            name: "operators".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    role_repo
+        .assign_to_group(
+            tenant_id,
+            group,
+            roles.super_admin_role_id,
+            AssignmentScope::from(None),
+        )
+        .await
+        .unwrap();
+    // An upgrade adds the reserved catalogue (here: one meta permission) and
+    // an ordinary one.
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    for action in ["network:read", "webhooks:create"] {
+        perm_repo
+            .create(CreatePermission {
+                tenant_id,
+                action: action.into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let outcome = reconcile_default_role_grants(&db, tenant_id)
+        .await
+        .expect("a group-held super-admin does not fail the reconcile");
+    // `webhooks:create` to super-admin and admin; `network:read` withheld.
+    assert_eq!(outcome.granted, 2, "{outcome:?}");
+    let held = |perms: Vec<axiam_core::models::permission::Permission>| {
+        perms.into_iter().map(|p| p.action).collect::<Vec<_>>()
+    };
+    let super_admin = held(
+        perm_repo
+            .get_role_permissions(tenant_id, roles.super_admin_role_id)
+            .await
+            .unwrap(),
+    );
+    assert!(super_admin.contains(&"webhooks:create".to_owned()));
+    assert!(
+        !super_admin.contains(&"network:read".to_owned()),
+        "{super_admin:?}"
+    );
+
+    // No group holds it any more: the next reconcile grants it.
+    role_repo
+        .unassign_from_group(tenant_id, group, roles.super_admin_role_id, None)
+        .await
+        .unwrap();
+    let outcome = reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+    assert_eq!(outcome.granted, 1, "{outcome:?}");
+    assert!(
+        held(
+            perm_repo
+                .get_role_permissions(tenant_id, roles.super_admin_role_id)
+                .await
+                .unwrap()
+        )
+        .contains(&"network:read".to_owned())
+    );
+}

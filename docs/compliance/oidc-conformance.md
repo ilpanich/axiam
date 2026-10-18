@@ -577,6 +577,11 @@ nothing has been submitted to the OpenID Foundation. T-434 records why no unit t
 for that: certification is a run of the Foundation's suite. Nothing in this file or in the
 OAuth2 matrix claims FAPI-CIBA conformance.
 
+When a FAPI-CIBA plan is added, its server must raise the per-hint allowance
+(`AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT`, three by default, #639): the plan names one
+client and one test user in every module. `conformance/scripts/serve-axiam.sh` already does;
+see [`../conformance/README.md`](../conformance/README.md#the-ciba-hint-cap-and-a-ciba-run).
+
 ---
 
 ---

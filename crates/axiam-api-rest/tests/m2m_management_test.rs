@@ -23,9 +23,10 @@ use std::sync::{Arc, Mutex};
 use actix_web::http::Method;
 use actix_web::{App, HttpResponse, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::handlers::network_decide::CERTIFICATE_BOUND_REFUSAL;
 use axiam_api_rest::permissions::{
-    HUMAN_ONLY_FAMILIES, M2M_MANAGEMENT_FAMILIES, PERMISSION_REGISTRY, PUBLIC_PATHS,
-    ROUTE_PERMISSION_MAP,
+    CERTIFICATE_BOUND_MACHINE_ROUTES, HUMAN_ONLY_FAMILIES, M2M_MANAGEMENT_FAMILIES,
+    PERMISSION_REGISTRY, PUBLIC_PATHS, ROUTE_PERMISSION_MAP,
 };
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::{
@@ -357,6 +358,14 @@ fn admits_machines(permission: &str) -> bool {
     M2M_MANAGEMENT_FAMILIES.contains(&family_of(permission))
 }
 
+/// A route of a human-only family admitted, by name, for a certificate-bound
+/// service-account token only (`CERTIFICATE_BOUND_MACHINE_ROUTES`).
+fn certificate_bound(method: &str, path: &str) -> bool {
+    CERTIFICATE_BOUND_MACHINE_ROUTES
+        .iter()
+        .any(|(m, p, _)| *m == method && *p == path)
+}
+
 // -------------------------------------------------------------------------
 // (a) The boundary is D-5, pinned — and derived, not hand-listed per route
 // -------------------------------------------------------------------------
@@ -445,7 +454,24 @@ async fn the_route_map_admits_a_service_account_exactly_on_the_d5_families() {
         let (admin_status, admin_body) = call(&app, bearer(&method, &uri, &admin_token)).await;
         let route = format!("{method} {pattern} ({permission})");
 
-        if admits_machines(permission) {
+        if certificate_bound(method.as_str(), pattern) {
+            // The named exception: a machine is its caller, but only with a
+            // token bound to its own certificate. Both sweep tokens are plain
+            // bearer tokens, so both are refused — by that rule, not by the
+            // audience, and before RBAC is asked.
+            refused += 1;
+            for (who, status, body) in [
+                ("no-role", bare_status, &bare_body),
+                ("super-admin", admin_status, &admin_body),
+            ] {
+                assert_eq!(status, 401, "{route}: {who} account: {body}");
+                assert_eq!(
+                    body["message"],
+                    format!("Authentication failed: {CERTIFICATE_BOUND_REFUSAL}"),
+                    "{route}: {who} account"
+                );
+            }
+        } else if admits_machines(permission) {
             admitted += 1;
             assert_ne!(bare_status, 401, "{route}: no-role account: {bare_body}");
             assert_ne!(
@@ -496,6 +522,70 @@ async fn the_route_map_admits_a_service_account_exactly_on_the_d5_families() {
         guarded >= bodyless,
         "only {guarded} admitted routes reached the RBAC guard; {bodyless} have no body"
     );
+}
+
+/// RADIUS D4 (W6.4): the `network` family stays human-only, and its one
+/// machine caller is admitted by name. `POST /api/v1/network/decide` is the
+/// only entry of `CERTIFICATE_BOUND_MACHINE_ROUTES`, is in the route map under
+/// `network:decide`, lists the service-account scheme in the spec, refuses a
+/// person's token and a plain bearer service-account token (even one holding
+/// `super-admin`) with `401`, while every other `network` route still refuses
+/// any service account with the audience refusal. The positive direction — a
+/// token bound to the caller's own certificate, over mTLS — is
+/// `network_decide_test.rs`'s, which runs a real listener.
+#[actix_rt::test]
+async fn the_decision_route_is_the_network_familys_one_machine_exception() {
+    assert!(HUMAN_ONLY_FAMILIES.contains(&"network"));
+    assert!(!M2M_MANAGEMENT_FAMILIES.contains(&"network"));
+    assert_eq!(
+        CERTIFICATE_BOUND_MACHINE_ROUTES,
+        &[("POST", "/api/v1/network/decide", "network:decide")]
+    );
+    for (method, path, permission) in CERTIFICATE_BOUND_MACHINE_ROUTES {
+        assert!(
+            ROUTE_PERMISSION_MAP.contains(&(*method, *path, *permission)),
+            "{method} {path} is not in the route map"
+        );
+    }
+
+    let w = world().await;
+    let auth = test_auth_config();
+    let authz = engine(&w.db);
+    let admin = service_account(&w.db, w.tenant_id, Some("super-admin")).await;
+    let sa_token = service_account_token(&auth, admin, w.tenant_id, w.org_id);
+    let person = user(&w.db, w.tenant_id, Some("super-admin")).await;
+    let person_token = user_token(&auth, person, w.tenant_id, w.org_id);
+    let app = app!(w.db, auth, authz);
+    let body = serde_json::json!({"site": "hq", "fingerprint": "00".repeat(32)});
+
+    let (status, resp) = call(
+        &app,
+        bearer(&Method::POST, "/api/v1/network/decide", &sa_token).set_json(body.clone()),
+    )
+    .await;
+    assert_eq!(status, 401, "{resp}");
+    assert_eq!(
+        resp["message"],
+        format!("Authentication failed: {CERTIFICATE_BOUND_REFUSAL}")
+    );
+    let (status, resp) = call(
+        &app,
+        bearer(&Method::POST, "/api/v1/network/decide", &person_token).set_json(body),
+    )
+    .await;
+    assert_eq!(status, 401, "a person is not the decision's caller: {resp}");
+
+    let id = Uuid::new_v4();
+    for (method, uri) in [
+        (Method::GET, "/api/v1/network/segments".to_owned()),
+        (Method::POST, "/api/v1/network/segments".to_owned()),
+        (Method::DELETE, format!("/api/v1/network/segments/{id}")),
+        (Method::PUT, format!("/api/v1/network/profiles/{id}")),
+    ] {
+        let (status, resp) = call(&app, bearer(&method, &uri, &sa_token)).await;
+        assert_eq!(status, 401, "{method} {uri}: {resp}");
+        assert_eq!(resp["message"], AUDIENCE_REFUSAL, "{method} {uri}");
+    }
 }
 
 /// G-6 / T23.6.4: the outbound SCIM target registry holds a credential to an
@@ -640,8 +730,9 @@ async fn the_spec_lists_the_service_account_scheme_exactly_where_the_code_admits
         for (method, op) in item.as_object().unwrap() {
             let key = (method.to_uppercase(), path.clone());
             let lists = security_schemes(op).contains("service_account");
-            let admits =
-                mapped.get(&key).is_some_and(|p| admits_machines(p)) || checks.contains(&key);
+            let admits = mapped.get(&key).is_some_and(|p| admits_machines(p))
+                || checks.contains(&key)
+                || certificate_bound(&key.0, &key.1);
             assert_eq!(lists, admits, "{} {}: spec and code disagree", key.0, key.1);
             listed += usize::from(lists);
         }
@@ -650,7 +741,8 @@ async fn the_spec_lists_the_service_account_scheme_exactly_where_the_code_admits
         .iter()
         .filter(|(_, _, p)| admits_machines(p))
         .count()
-        + checks.len();
+        + checks.len()
+        + CERTIFICATE_BOUND_MACHINE_ROUTES.len();
     assert_eq!(
         listed, expected,
         "an admitted route is missing from the spec"

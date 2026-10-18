@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, retry_hot_row, take_first_or_not_found};
+use crate::repository::mail_cap;
 
 #[derive(Debug, SurrealValue)]
 struct TokenRow {
@@ -242,15 +243,23 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {
+        // A token minted since UTC midnight is kept, dead or alive, until the
+        // day is over: the daily cap counts the account's tokens minted today
+        // (`count_today`, and the capped mint's own count in `mail_cap`), so
+        // deleting a consumed or expired one lowered the count and handed the
+        // account its cap again within the same day. What is kept is a hash
+        // that no longer redeems anything, for at most a day — and the account's
+        // own erasure still deletes it.
         let result = self
             .db
             .current()
             .query(
                 "DELETE FROM password_reset_token \
-                 WHERE expires_at < time::now() \
-                    OR consumed_at IS NOT NONE \
+                 WHERE (expires_at < time::now() OR consumed_at IS NOT NONE) \
+                    AND created_at < $day_start \
                  RETURN BEFORE",
             )
+            .bind(("day_start", crate::repository::mail_cap::day_start()))
             .await
             .map_err(DbError::from)?;
 
@@ -286,5 +295,65 @@ impl<C: Connection> PasswordResetTokenRepository for SurrealPasswordResetTokenRe
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let rows: Vec<TokenRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.len() as u64)
+    }
+
+    /// Item 7 of the 1.1.0 atomicity audit — the cap, the invalidation of the
+    /// earlier links and the new token in one transaction that claims the
+    /// user row (`mail_cap`). Of N requests sent together at most the cap's
+    /// remainder mint, and each one's invalidation sees the tokens the
+    /// earlier winners minted, so exactly one link is live afterwards.
+    async fn replace_within_daily_cap(
+        &self,
+        input: CreatePasswordResetToken,
+        daily_cap: u64,
+    ) -> AxiamResult<Option<PasswordResetToken>> {
+        let id = new_id();
+        let id_str = id.to_string();
+        let user_id_str = input.user_id.to_string();
+        let query = format!(
+            "BEGIN TRANSACTION; {claim}\
+             UPDATE password_reset_token SET consumed_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                 AND consumed_at IS NONE; \
+             CREATE type::record('password_reset_token', $id) SET \
+                 tenant_id = $tenant_id, \
+                 user_id = $user_id, \
+                 token_hash = $token_hash, \
+                 expires_at = $expires_at, \
+                 consumed_at = NONE; \
+             COMMIT TRANSACTION",
+            claim = mail_cap::claim("password_reset_token"),
+        );
+        // Result slots: BEGIN, the claim's, the invalidation, the CREATE.
+        let create_slot = 1 + mail_cap::CLAIM_SLOTS + 1;
+        let daily_cap = i64::try_from(daily_cap).unwrap_or(i64::MAX);
+        let day_start = mail_cap::day_start();
+
+        let rows = retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("id", id_str.clone()))
+                .bind(("tenant_id", input.tenant_id.to_string()))
+                .bind(("user_id", user_id_str.clone()))
+                .bind(("token_hash", input.token_hash.clone()))
+                .bind(("expires_at", input.expires_at))
+                .bind(("day_start", day_start))
+                .bind(("daily_cap", daily_cap))
+                .await
+                .map_err(DbError::from)?;
+            if mail_cap::outcome(result.take_errors(), "password_reset_token", &user_id_str)? {
+                return Ok(None);
+            }
+            let rows: Vec<TokenRow> = result.take(create_slot).map_err(DbError::from)?;
+            Ok(Some(rows))
+        })
+        .await?;
+        let Some(rows) = rows else {
+            return Ok(None);
+        };
+        let row = take_first_or_not_found(rows, "password_reset_token", &id_str)?;
+        Ok(Some(row.into_token(id)?))
     }
 }

@@ -1,7 +1,9 @@
 //! AMQP consumer for audit event ingestion from external services.
 
 use axiam_core::error::AxiamError;
-use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+use axiam_core::models::audit::{
+    ActorType, AuditOutcome, CreateAuditLogEntry, reserved_action_namespace,
+};
 use axiam_core::repository::{AmqpNonceRepository, AuditLogRepository};
 use chrono::Utc;
 use futures_lite::StreamExt;
@@ -45,9 +47,11 @@ pub enum AuditIngestOutcome {
     Ack,
     /// The delivery must be rejected with `nack(requeue: false)` — malformed
     /// payload, unsigned/invalid signature, key_version below the minimum,
-    /// stale/future `issued_at`, a replayed nonce, a nonce-store error, an
-    /// unknown `actor_type`/`outcome`, or a persistence failure. Every one of
-    /// these mapped to the same `requeue: false` nack in the original loop.
+    /// stale/future `issued_at`, an action in a namespace the server reserves
+    /// for its control records (`tenants.*`, `gdpr.*`; R101W3-03), a replayed
+    /// nonce, a nonce-store error, an unknown `actor_type`/`outcome`, or a
+    /// persistence failure. Every one of these is the same `requeue: false`
+    /// nack.
     NackDrop,
 }
 
@@ -121,6 +125,22 @@ where
             tenant_id = %tenant_id,
             issued_at = %msg.issued_at,
             "AuditEventMessage issued_at outside freshness window — rejecting (NEW-4)"
+        );
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    // R101W3-03 (#637): the server's control records are the server's alone.
+    // A `tenants.audit_exported` receipt authorises a tenant's deletion and
+    // bounds what its purge deletes; `tenants.deleted` / `tenants.purged` and
+    // the `gdpr.*` records are evidence the server reads back. A tenant's
+    // producers hold its signing subkey, so a valid signature does not make
+    // one of these theirs to write. Refused before the nonce is recorded; the
+    // log names the namespace, never the action or the payload.
+    if let Some(namespace) = reserved_action_namespace(&msg.action) {
+        warn!(
+            tenant_id = %tenant_id,
+            reserved_namespace = namespace,
+            "AuditEventMessage carries an action reserved for the server's control records — rejecting (R101W3-03)"
         );
         return AuditIngestOutcome::NackDrop;
     }

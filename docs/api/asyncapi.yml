@@ -691,6 +691,13 @@ components:
           type: string
         action:
           type: string
+          description: >-
+            Any action outside the namespaces the server reserves for its own
+            control records: `tenants.` and `gdpr.` (ASCII case ignored), such
+            as the `tenants.audit_exported` receipt that authorises a tenant
+            deletion. A validly signed message carrying one is refused (nack,
+            no requeue, so dead-lettered) and nothing is persisted (R101W3-03,
+            #637).
         resource_id:
           type: string
           format: uuid

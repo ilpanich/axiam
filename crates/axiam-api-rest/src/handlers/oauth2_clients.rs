@@ -189,6 +189,10 @@ pub struct UpdateOAuth2ClientRequest {
     pub name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
     pub grant_types: Option<Vec<String>>,
+    /// Replace the client's scopes. On a `managed_by: dcr | cimd` client a scope
+    /// the request adds that is outside the tenant's effective
+    /// `dcr_allowed_scopes` is refused with `422` (#636); an
+    /// administrator-managed client is not bounded.
     pub scopes: Option<Vec<String>>,
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Pass an empty string to clear a previously registered URI — the one
@@ -594,6 +598,53 @@ async fn reject_sensitive_scopes_when_disabled<C: Connection + Clone>(
     )))
 }
 
+/// #636 (R101W3-02) — the scopes `requested` would **newly** put on a
+/// `managed_by: dcr | cimd` client that lie outside the tenant's effective
+/// `dcr_allowed_scopes`.
+///
+/// The ceiling (#613) withholds such a scope at every read point, so letting
+/// the administrator API write one is accepting what will never be served.
+/// Shares [`axiam_oauth2::scope_ceiling::applies_to`] with the read points (an
+/// administrator's client is not bounded) and the same
+/// [`SettingsScopePolicy`](crate::scope_policy::SettingsScopePolicy) that
+/// resolves organization baseline and tenant override for them, so the
+/// write-time and grant-time answers cannot disagree.
+///
+/// Only scopes the row does **not already hold** count. A scope the stored row
+/// holds beyond a ceiling that has since narrowed is already withheld at grant
+/// time — the row keeps working with the scopes inside the ceiling — so a
+/// request that merely re-sends it (a form posting the whole record back) adds
+/// nothing, and refusing it would strand an otherwise editable row. An edit
+/// that does not send `scopes` never reaches this function.
+///
+/// A failed read of the policy is an error, never "no ceiling": fail closed.
+async fn scopes_outside_ceiling<C: Connection + Clone>(
+    state: &AppState<C>,
+    stored: &OAuth2Client,
+    requested: &[String],
+) -> Result<Vec<String>, AxiamApiError> {
+    if !axiam_oauth2::scope_ceiling::applies_to(stored.managed_by) {
+        return Ok(Vec::new());
+    }
+    let policy = crate::scope_policy::SettingsScopePolicy::new(
+        state.tenant_repo.clone(),
+        state.settings_repo.clone(),
+        std::sync::Arc::clone(&state.tenant_org_cache),
+    );
+    let ceiling = axiam_oauth2::scope_ceiling::ExternalClientScopePolicy::allowed_scopes(
+        &policy,
+        stored.tenant_id,
+    )
+    .await?;
+    let mut outside: Vec<String> = Vec::new();
+    for scope in requested {
+        if !ceiling.contains(scope) && !stored.scopes.contains(scope) && !outside.contains(scope) {
+            outside.push(scope.clone());
+        }
+    }
+    Ok(outside)
+}
+
 /// Grants a public client may never be registered for (T21.2).
 ///
 /// Both mint a token on the strength of the client's own credential, and a
@@ -840,6 +891,8 @@ pub async fn get<C: Connection + Clone>(
         (status = 200, description = "OAuth2 client updated",
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
+        (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
+        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
 )]
@@ -878,6 +931,19 @@ pub async fn update<C: Connection + Clone>(
         .map(validate_allowed_resources)
         .transpose()?;
 
+    // Item 9 of the 1.1.0 atomicity audit: every rule below is checked against
+    // ONE read of the row, and the write is conditional on that read
+    // (`update_if_unchanged`). Each rule used to read the row again and the
+    // write set only the patch's own fields, so two patches each validated
+    // against the row before the other could both land, leaving a merged row
+    // neither had validated. A row written since this read now answers `409`,
+    // and the caller reads it again. The version is the one read here, so the
+    // request carries nothing new.
+    let stored = state
+        .oauth2_client_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
+
     // T21.2 — `none` is a registration decision, and it stays one (I4).
     //
     // A PATCH may not move a client across the public/confidential line in
@@ -895,11 +961,7 @@ pub async fn update<C: Connection + Clone>(
     // meaningful — and impossible to take back once a deployment has rows that
     // relied on it.
     if let Some(requested_method) = req.token_endpoint_auth_method {
-        let existing = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
-        let existing_method = existing.token_endpoint_auth_method;
+        let existing_method = stored.token_endpoint_auth_method;
         if requested_method.is_public() != existing_method.is_public() {
             return Err(validation_err(format!(
                 "token_endpoint_auth_method cannot be changed from {} to {}: whether a client \
@@ -931,17 +993,13 @@ pub async fn update<C: Connection + Clone>(
         .as_ref()
         .is_some_and(|gts| gts.iter().any(|g| g == "authorization_code"));
     if adding_auth_code && req.redirect_uris.is_none() {
-        let existing = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
-        if existing.redirect_uris.is_empty() {
+        if stored.redirect_uris.is_empty() {
             return Err(validation_err(
                 "redirect_uris are required when enabling \
                  authorization_code grant",
             ));
         }
-        validate_redirect_uris(&existing.redirect_uris)?;
+        validate_redirect_uris(&stored.redirect_uris)?;
     }
 
     // G-7 — the CIBA metadata is validated against the row the patch will
@@ -962,10 +1020,6 @@ pub async fn update<C: Connection + Clone>(
         || req.jwks.is_some()
         || req.jwks_uri.is_some()
     {
-        let stored = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?;
         let grants = req.grant_types.as_deref().unwrap_or(&stored.grant_types);
         let keep_stored = axiam_oauth2::ciba::holds_ciba_grant(grants);
         let stored_mode = stored
@@ -1012,6 +1066,25 @@ pub async fn update<C: Connection + Clone>(
         None
     };
 
+    // #636 (R101W3-02) — a self-registered (`dcr`) or CIMD client holds no scope
+    // the tenant's `dcr_allowed_scopes` does not offer. Checked before anything
+    // is written, so a refusal leaves the row as it was.
+    if let Some(ref requested) = req.scopes {
+        let outside = scopes_outside_ceiling(&state, &stored, requested).await?;
+        if !outside.is_empty() {
+            return Ok(crate::error::unprocessable_entity(
+                "scope_exceeds_ceiling",
+                format!(
+                    "the scope(s) {} are outside the tenant's dcr_allowed_scopes, and this \
+                     client is managed_by {} so it can never be served them; add them to \
+                     dcr_allowed_scopes first, or register an administrator-managed client",
+                    outside.join(", "),
+                    stored.managed_by,
+                ),
+            ));
+        }
+    }
+
     let update = UpdateOAuth2Client {
         name: req.name,
         redirect_uris: req.redirect_uris,
@@ -1040,14 +1113,10 @@ pub async fn update<C: Connection + Clone>(
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to
     // `fapi2` on a client that has none of the rest is a perfectly well-formed
     // patch and a completely broken client; validating the patch alone would
-    // wave it through. The extra read happens only when the patch touches a
-    // profile-relevant field, so an ordinary rename still costs one write.
+    // wave it through. The merge is onto the row read above, the one the write
+    // is conditional on, so what is validated here is what will be stored.
     if update.touches_security_profile() {
-        let merged = state
-            .oauth2_client_repo
-            .get_by_id(user.tenant_id, id)
-            .await?
-            .with_update_applied(&update);
+        let merged = stored.clone().with_update_applied(&update);
         axiam_oauth2::fapi::validate_registration(&merged)
             .map_err(|e| validation_err(e.to_string()))?;
         // W7 — and on the update path too, on the **merged** row, so a patch
@@ -1059,7 +1128,7 @@ pub async fn update<C: Connection + Clone>(
 
     let client = state
         .oauth2_client_repo
-        .update(user.tenant_id, id, update)
+        .update_if_unchanged(user.tenant_id, id, update, stored.updated_at)
         .await?;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
 }
@@ -1071,7 +1140,7 @@ pub async fn update<C: Connection + Clone>(
     tag = "oauth2-clients",
     params(("id" = Uuid, Path, description = "OAuth2 client ID")),
     responses(
-        (status = 204, description = "OAuth2 client deleted; its refresh tokens, authorization codes and pushed requests are revoked first"),
+        (status = 204, description = "OAuth2 client deleted; its refresh tokens, authorization codes, pushed requests, device grants and CIBA requests are revoked or deleted first"),
         (status = 404, description = "OAuth2 client not found"),
     ),
     security(("bearer" = []))

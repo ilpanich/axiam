@@ -13,13 +13,13 @@ use actix_web::{HttpResponse, web};
 use axiam_auth::crypto::decrypt_separate;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::gdpr::{AccountDeletionStatus, CreateExportJob};
+use axiam_core::models::gdpr::CreateExportJob;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::repository::{
-    AccountDeletionRepository, AuditLogRepository, ExportJobRepository, TenantRepository,
-    UserRepository,
+    AuditLogRepository, ExportJobRepository, TenantRepository, UserRepository,
 };
 use axiam_db::SurrealAuditLogRepository;
+use axiam_db::repository::CancelOutcome;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -140,7 +140,7 @@ async fn append_gdpr_audit<S: AuditWriteSink>(
 /// Intended to point at a mounted volume so the file survives container
 /// restarts. The request-audit middleware's lost rows go to the same file
 /// (T-108). Absent = the file sink is skipped for this event (the structured
-/// tracing event sink below still fires unconditionally on failure).
+/// tracing event sink, emitted ahead of the file, fires unconditionally on failure).
 pub const GDPR_AUDIT_DLQ_FILE_ENV: &str = axiam_audit::dead_letter::DEAD_LETTER_FILE_ENV;
 
 /// Injectable seam for the GDPR audit DB-write (SECHRD-12).
@@ -199,14 +199,48 @@ pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: Cr
 
 /// Dead-letter a failed GDPR audit record to the two durable sinks (D-02).
 ///
+/// The structured event is emitted FIRST, before the first `await` (R101W4-04,
+/// #625). The file append is awaited, and a future dropped there — the cleanup
+/// task's bounded join aborting the erasure's `gdpr.user_pseudonymized` write
+/// (#598), the lease-loss cut, a handler dropped when its client goes — would
+/// otherwise skip an event that does not depend on the file's result. Emitted
+/// ahead of any suspension point, it cannot be skipped by a cancellation.
+///
 /// The file append runs on the runtime's blocking pool and is synced to the
 /// device before it returns (#594): the handler awaits it, so a record that was
 /// reported as dead-lettered is on disk, and no actix worker blocks on the file.
+/// The blocking task runs to completion if its awaiter is dropped, so the file
+/// sink needs no protection of its own from a cancellation.
+///
+/// Why the awaited write is not also spawned (#625): the callers are the cleanup
+/// ticker and two request handlers, and the first is *meant* to be cut — its
+/// bounded stop-join (#598) is what keeps a stop from waiting on a tenant purge
+/// or an erasure. A detached `dead_letter_audit` would escape that join: no one
+/// awaits it at shutdown, and a task still suspended on the blocking write when
+/// the runtime is dropped is dropped with it, losing the one thing spawning would
+/// add — the file-failure log. The event is what operators alert on and it needs
+/// no task to survive; a write that fails after its awaiter was cut is the
+/// residual, recorded in the threat model beside the rest of T-108.
 async fn dead_letter_audit(
     entry: CreateAuditLogEntry,
     occurred_at: DateTime<Utc>,
     db_error: &AxiamError,
 ) {
+    // Sink 2 of D-02, emitted before sink 1: the structured `tracing` audit
+    // event — the "audit syslog" sink (RESEARCH Assumption A4: satisfied by a
+    // structured tracing JSON event captured by the container log driver, NOT a
+    // literal syslog(3) socket; the distroless deployment has no local syslogd,
+    // per 06-01 decisions). The fields are the ones operators' queries match.
+    tracing::error!(
+        target: "axiam.audit.dlq",
+        tenant_id = %entry.tenant_id,
+        actor_id = %entry.actor_id,
+        action = %entry.action,
+        resource_id = ?entry.resource_id,
+        db_error = %db_error,
+        "gdpr_audit_dlq"
+    );
+
     // Sink 1: append-only local file on a mounted volume (T-24-62). Opened
     // with `.append(true)` — an existing file is never truncated/rewritten,
     // matching AXIAM's append-only audit posture. The line is the one the
@@ -218,11 +252,12 @@ async fn dead_letter_audit(
         Some(target) => {
             let path = target.path.display().to_string();
             // A join error (the write task panicked) is an I/O error like any
-            // other: logged, and the structured event below still fires.
+            // other: logged on its own event, the structured event above having
+            // fired already.
             // The reason is the datastore refusing the write; its error text is
-            // logged below and on the event, never written to the file.
+            // logged above and on the event, never written to the file.
             let record = axiam_audit::dead_letter::DeadLetterRecord::new(
-                entry.clone(),
+                entry,
                 occurred_at,
                 axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
             );
@@ -238,24 +273,10 @@ async fn dead_letter_audit(
             tracing::warn!(
                 env_var = GDPR_AUDIT_DLQ_FILE_ENV,
                 "gdpr: audit dead-letter FILE sink skipped (env var not set); \
-                 structured event sink below still fires"
+                 structured event above already fired"
             );
         }
     }
-
-    // Sink 2: structured `tracing` audit event — the "audit syslog" sink
-    // (RESEARCH Assumption A4: satisfied by a structured tracing JSON event
-    // captured by the container log driver, NOT a literal syslog(3) socket;
-    // the distroless deployment has no local syslogd, per 06-01 decisions).
-    tracing::error!(
-        target: "axiam.audit.dlq",
-        tenant_id = %entry.tenant_id,
-        actor_id = %entry.actor_id,
-        action = %entry.action,
-        resource_id = ?entry.resource_id,
-        db_error = %db_error,
-        "gdpr_audit_dlq"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -631,8 +652,11 @@ pub async fn request_account_delete<C: Connection + Clone>(
     tag = "gdpr",
     params(("token" = String, Query, description = "Single-use cancel token")),
     responses(
-        (status = 200, description = "Deletion cancelled"),
+        (status = 200, description = "Deletion cancelled; the account is active again"),
         (status = 400, description = "Token invalid or expired"),
+        (status = 403, description = "The token was already used, or the grace window has ended"),
+        (status = 404, description = "No deletion request carries this token"),
+        (status = 409, description = "The erasure has already started (the purge sweep claimed the request, or completed it): the deletion can no longer be cancelled, and nothing was changed"),
     )
 )]
 pub async fn cancel_account_delete<C: Connection + Clone>(
@@ -652,35 +676,43 @@ pub async fn cancel_account_delete<C: Connection + Clone>(
             id: "by-token".into(),
         })?;
 
-    // Validate: must be pending and within grace window.
-    if deletion.status != AccountDeletionStatus::Pending {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "cancel token already used".into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
-    }
-    if deletion.scheduled_purge_at < Utc::now() {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "grace window expired — cannot cancel".into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
-    }
-
-    // Abort deletion: mark cancelled (single-use) + re-enable account.
-    state
+    // Item 11 of the 1.1.0 atomicity audit: the checks and the two writes —
+    // the request cancelled, the account re-enabled — are one transaction, and
+    // the purge sweep claims a request before its first destructive step. A
+    // cancel that loses to the sweep is told so; it is never answered
+    // "cancelled" for an account that is being erased.
+    match state
         .gdpr
         .account_deletion_repo
-        .mark_cancelled(deletion.tenant_id, deletion.id)
-        .await?;
-
-    state
-        .user_repo
-        .clear_deletion_pending(deletion.tenant_id, deletion.user_id)
-        .await?;
+        .cancel_pending(deletion.tenant_id, deletion.id)
+        .await?
+    {
+        CancelOutcome::Cancelled => {}
+        CancelOutcome::AlreadyCancelled => {
+            return Err(AxiamError::AuthorizationDenied {
+                reason: "cancel token already used".into(),
+                action: None,
+                resource_id: None,
+            }
+            .into());
+        }
+        CancelOutcome::Expired => {
+            return Err(AxiamError::AuthorizationDenied {
+                reason: "grace window expired — cannot cancel".into(),
+                action: None,
+                resource_id: None,
+            }
+            .into());
+        }
+        CancelOutcome::Erasing => {
+            return Err(AxiamError::Conflict {
+                reason: "the account's erasure has already started; the deletion can no longer \
+                         be cancelled"
+                    .into(),
+            }
+            .into());
+        }
+    }
 
     Ok(HttpResponse::Ok().json(CancelledResponse { cancelled: true }))
 }

@@ -45,9 +45,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      # The instrumented `cargo llvm-cov --workspace` build, the second
+      # instrumented build for the gRPC `client` feature set (which recompiles
+      # surrealdb and friends under different features) and their profraw files
+      # all land in `target/llvm-cov-target`. By the "Enforce coverage floor"
+      # step the runner was down to 12 MB free ("You are running out of disk
+      # space"), and Swatinem/rust-cache's post step then died with ENOSPC while
+      # saving the cache: the job's own steps all passed. So reclaim more of the
+      # image up front. None of these toolchains is used by this job (Rust,
+      # Docker, openssl and apt are all it needs); `|| true` keeps a path that a
+      # future runner image drops from failing the step.
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo rm -rf /usr/local/.ghcup /usr/share/swift /opt/az /opt/microsoft /opt/google /usr/local/julia* /usr/local/share/powershell /usr/local/share/chromium /usr/lib/jvm || true
           sudo docker image prune --all --force || true
           df -h
 
@@ -63,7 +74,7 @@ jobs:
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v3 start \
+            surrealdb/surrealdb:v3.3.4 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
@@ -179,6 +190,30 @@ jobs:
           format: lcov
           flag-name: rust-workspace
           parallel: true
+
+      # Runs after the upload (and after a failed gate too, hence `always()`),
+      # BEFORE rust-cache's post step: that step tars `target/` — which holds
+      # `target/llvm-cov-target` — into a temporary archive, so it needs free
+      # space on top of what `target/` already occupies. The raw profiling data
+      # and the executables are the parts of `target/` that are both large and
+      # worthless to the next run: the report and the floor above have already
+      # been computed.
+      # `lcov.info` is spent once uploaded. Dropping these changes no reported
+      # number and no check; dependency artifacts, the actual point of the
+      # cache, are untouched. `cargo llvm-cov clean --profraw-only` removes the
+      # *.profraw files; the first `find` also takes the merged *.profdata. The
+      # second removes the instrumented test executables, the bulk of
+      # `target/`: `llvm-cov report` reads them, so they could not go earlier,
+      # but it has finished. Only extension-less executables match; `*.rlib`,
+      # `*.rmeta`, `*.d` and proc-macro `*.so` all carry a dot and stay.
+      - name: Free profiling data before the cache is saved
+        if: always()
+        run: |
+          cargo llvm-cov clean --profraw-only || true
+          find target/llvm-cov-target -type f \( -name '*.profraw' -o -name '*.profdata' \) -delete || true
+          find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete || true
+          rm -f lcov.info
+          df -h
 
   frontend-coverage:
     name: vitest --coverage (frontend) -> Coveralls

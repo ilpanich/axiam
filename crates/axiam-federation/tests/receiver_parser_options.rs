@@ -95,3 +95,38 @@ fn the_receiver_options_read_utf8_whatever_the_declaration_says() {
         "control: the declaration honoured"
     );
 }
+
+/// The IdP's self-checks of its own signed output (`verify_output`,
+/// `verify_root_signed`) parse with the receiver options too (R101W2-06,
+/// #634). `Parser::parse_string` runs with recovery on, so a serializer bug
+/// would be repaired into a tree no SP parses instead of being refused. The
+/// result of the check is `SigningFailed` either way, so the parse call itself
+/// is what is pinned: a revert of either site fails here.
+#[test]
+fn the_idp_self_checks_parse_with_the_receiver_options() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/saml_idp/sign.rs");
+    let source = std::fs::read_to_string(&path).expect("sign.rs is readable");
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+
+    assert!(
+        !compact.contains(".parse_string("),
+        "sign.rs parses with Parser::parse_string (recovery on); use receiver_parser_options()"
+    );
+    assert_eq!(
+        compact.matches("parse_string_with_options(").count(),
+        2,
+        "verify_output and verify_root_signed each parse once"
+    );
+    assert_eq!(
+        compact
+            .matches(".as_bytes(),receiver_parser_options())")
+            .count(),
+        2,
+        "both parses use receiver_parser_options()"
+    );
+}

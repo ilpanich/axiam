@@ -59,6 +59,26 @@ impl actix_web::FromRequest for ProtectionApiToken {
     }
 }
 
+/// The network gate's view of a resource server writing through the
+/// Protection API.
+///
+/// A PAT names an OAuth2 client, not an RBAC subject, so the writer carries the
+/// nil subject and the client id as a label for the audit row. The gate is
+/// handed [`crate::authz::DenyAllAuthzChecker`]: the resource writes it decides
+/// here consult no permission (a reserved type or node is refused whoever
+/// writes), and if one ever did, a resource server would hold none.
+fn uma_gate_actor(pat: &ProtectionApiToken) -> crate::network_gate::GateActor {
+    crate::network_gate::GateActor {
+        writer: axiam_authz::network_gate::GateWriter {
+            tenant_id: pat.tenant_id,
+            subject_id: Uuid::nil(),
+            subject_scope: axiam_authz::types::SubjectScope::Tenant,
+        },
+        actor_type: axiam_core::models::audit::ActorType::ServiceAccount,
+        label: Some(pat.client_id.clone()),
+    }
+}
+
 fn extract_pat(req: &actix_web::HttpRequest) -> Result<ProtectionApiToken, AxiamApiError> {
     let claims = crate::extractors::auth::parse_validated_claims(req)?.0;
 
@@ -271,6 +291,24 @@ pub async fn register_resource_set<C: Connection + Clone>(
     body: web::Json<ResourceSet>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let body = body.into_inner();
+    let resource_type = if body.resource_type.is_empty() {
+        "uma_resource".to_string()
+    } else {
+        body.resource_type
+    };
+
+    // §4.1 of the network design note: a resource server cannot register a
+    // `network_*` resource either.
+    let _cleared = crate::network_gate::authorize_as(
+        &uma_gate_actor(&pat),
+        &crate::authz::DenyAllAuthzChecker,
+        &state,
+        axiam_authz::network_gate::NetworkWrite::ResourceCreate {
+            resource_type: &resource_type,
+            parent_id: None,
+        },
+    )
+    .await?;
 
     let resource = state
         .resource_repo
@@ -281,11 +319,7 @@ pub async fn register_resource_set<C: Connection + Clone>(
                 // UMA's `type` is a free-form string and AXIAM's is too, but a
                 // resource server that omits it should not end up with an
                 // empty-string type that sorts oddly in the admin UI.
-                resource_type: if body.resource_type.is_empty() {
-                    "uma_resource".to_string()
-                } else {
-                    body.resource_type
-                },
+                resource_type,
                 parent_id: None,
                 metadata: None,
             },
@@ -371,6 +405,20 @@ pub async fn update_resource_set<C: Connection + Clone>(
     // Read first so an unknown id answers 404 before anything is written.
     state.resource_repo.get_by_id(pat.tenant_id, id).await?;
 
+    // §4.1 of the network design note: no reserved node is renamed or retyped
+    // here, and no resource takes a `network_*` type.
+    let _cleared = crate::network_gate::authorize_as(
+        &uma_gate_actor(&pat),
+        &crate::authz::DenyAllAuthzChecker,
+        &state,
+        axiam_authz::network_gate::NetworkWrite::ResourceUpdate {
+            resource_id: id,
+            resource_type: (!body.resource_type.is_empty()).then_some(body.resource_type.as_str()),
+            parent_id: None,
+        },
+    )
+    .await?;
+
     let resource = state
         .resource_repo
         .update(
@@ -417,6 +465,15 @@ pub async fn delete_resource_set<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let id = path.into_inner();
     state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    // §4.1 of the network design note: a resource server cannot delete a node
+    // of the reserved `/network` subtree (the quarantine branch, say).
+    let _cleared = crate::network_gate::authorize_as(
+        &uma_gate_actor(&pat),
+        &crate::authz::DenyAllAuthzChecker,
+        &state,
+        axiam_authz::network_gate::NetworkWrite::ResourceDelete { resource_id: id },
+    )
+    .await?;
     state.resource_repo.delete(pat.tenant_id, id).await?;
 
     tracing::info!(

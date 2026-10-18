@@ -118,6 +118,13 @@ async fn cert_generate_against_active_ca_succeeds() {
         !generated.private_key_pem.is_empty(),
         "leaf private key must be returned"
     );
+    // #651: an Ed25519 key is returned as PKCS#8 version 1 (INTEGER 0, seed
+    // only, 48 octets of DER) because OpenSSL 3.0 reads no other.
+    let der = pem::parse(&generated.private_key_pem)
+        .expect("the returned key is one PEM block")
+        .into_contents();
+    assert_eq!(der.len(), 48, "a seed-only PKCS#8 v1 key is 48 octets");
+    assert_eq!(&der[2..5], &[0x02, 0x01, 0x00], "version INTEGER 0");
 }
 
 // ---------------------------------------------------------------------------

@@ -121,8 +121,9 @@ impl fmt::Display for ProfileRefusal {
                 f,
                 "{SWITCH} (the minimal profile has no reactor transport) but the datastore \
                  holds {count} enabled reactor registration(s). A fail_closed reactor with no \
-                 transport denies login.post_auth, user.pre_create, user.pre_update and \
-                 grant.pre_assign in every tenant that registered one. Disable or delete those \
+                 transport denies login.post_auth, user.pre_create, user.pre_update, \
+                 grant.pre_assign, network.pre_profile_write and network.pre_segment_write \
+                 in every tenant that registered one. Disable or delete those \
                  registrations (PUT /api/v1/reactors/{{id}} with enabled: false) and start \
                  again, or run the full profile (AXIAM__AMQP__ENABLED=true)."
             ),
@@ -230,14 +231,16 @@ pub fn signal_on_lease_lost(lost: watch::Sender<bool>) -> OnLeaseLost {
 }
 
 /// Once `lost` is raised: log it, call `stop` (the composition root's orderly
-/// stop: the REST listener stops accepting and finishes what is in flight, the
-/// teardown after it drains the audit queue and the cleanup task, and `serve`
-/// returns an error, so the process exits non-zero); if the process is still
-/// here `cut_after` later, call `cut` (the composition root ends the requests
-/// still in flight, #598); and if it is still here `deadline` after the stop
-/// began, run `backstop`. The composition root aborts the returned task when
-/// its teardown has finished, which disarms the cut and the backstop. A
-/// dropped `lost` sender without the flag raised ends the task quietly.
+/// stop: the cleanup task is told to stop at once — a successor may hold the
+/// lease from now on (#628) — the REST listener stops accepting and finishes
+/// what is in flight, the teardown after it drains the audit queue and joins
+/// the cleanup task, and `serve` returns an error, so the process exits
+/// non-zero); if the process is still here `cut_after` later, call `cut` (the
+/// composition root ends the requests still in flight, #598); and if it is
+/// still here `deadline` after the stop began, run `backstop`. The composition
+/// root aborts the returned task when its teardown has finished, which disarms
+/// the cut and the backstop. A dropped `lost` sender without the flag raised
+/// ends the task quietly.
 ///
 /// The cut exists because the REST listener's drain is an actix setting fixed
 /// at bind time (`shutdown_timeout`, sized for `SIGTERM`), and a lost lease's
@@ -321,6 +324,43 @@ pub fn spawn_lease_renewal<C: Connection>(
             }
         }
     })
+}
+
+/// Give the lease up at an orderly stop, waiting at most `bound` for `release`
+/// (the repository's conditional `DELETE`) (#628). `true` when it was given up.
+///
+/// The release runs in the teardown of a stop that still holds the lease
+/// (`SIGTERM`, a dead component), between the gRPC stop and the outbound
+/// drain, and is a step of the stop's budget
+/// (`boot::ShutdownBudget::lease_release`): a datastore that does not answer
+/// at the stop — the release retries on a write conflict, too — would
+/// otherwise hold the teardown outside the checked arithmetic. Abandoning it
+/// is safe: a release that did not land leaves the row to its TTL, so a
+/// successor waits that out (at most [`LeaseTiming::ttl`]) as it would after
+/// a crash; one that lands after the bound gave up only what was this
+/// instance's.
+pub async fn release_lease_within<F>(release: F, bound: Duration) -> bool
+where
+    F: std::future::Future<Output = axiam_core::error::AxiamResult<()>>,
+{
+    match tokio::time::timeout(bound, release).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            warn!(
+                error = %e,
+                "could not release the minimal-profile lease — a successor waits out its TTL"
+            );
+            false
+        }
+        Err(_) => {
+            warn!(
+                deadline_secs = bound.as_secs_f64(),
+                "the minimal-profile lease release did not finish in time — abandoned; a \
+                 successor waits out its TTL"
+            );
+            false
+        }
+    }
 }
 
 /// Everything the minimal profile checks at boot, in order: the broadcast
@@ -511,6 +551,50 @@ mod tests {
         task.abort();
         tokio::time::sleep(deadline).await;
         assert_eq!(backstops.load(Ordering::SeqCst), 0, "disarmed");
+    }
+
+    // ---- the lease release at an orderly stop is bounded (#628) ----
+
+    /// A datastore that does not answer the release holds the `SIGTERM`
+    /// teardown for `ORDERLY_STOP.lease_release`, not until the orchestrator's
+    /// kill: the release is abandoned there and the stop runs on.
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_release_that_does_not_answer_is_abandoned_at_its_bound() {
+        let bound = crate::boot::ORDERLY_STOP.lease_release;
+        assert_eq!(bound, Duration::from_secs(1));
+        let started = tokio::time::Instant::now();
+        let released = release_lease_within(std::future::pending(), bound).await;
+        let waited = started.elapsed();
+        assert!(
+            !released,
+            "a release that never answered is not reported done"
+        );
+        assert!(
+            waited >= bound && waited < bound + Duration::from_millis(50),
+            "abandoned at the bound, not before and not long after: {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_release_that_answers_in_time_gives_the_lease_up() {
+        let leases = SurrealMinimalProfileLeaseRepository::new(db().await);
+        acquire_lease(&leases, "a", FAST).await.unwrap();
+        assert!(
+            release_lease_within(leases.release("a"), crate::boot::ORDERLY_STOP.lease_release)
+                .await
+        );
+        assert!(
+            leases.current().await.unwrap().is_none(),
+            "a successor finds the lease free at once"
+        );
+
+        // A refused release is reported, not taken for done.
+        let refused = async {
+            Err(axiam_core::error::AxiamError::Internal(
+                "the datastore refused".into(),
+            ))
+        };
+        assert!(!release_lease_within(refused, Duration::from_secs(1)).await);
     }
 
     #[tokio::test]

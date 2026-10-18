@@ -890,6 +890,14 @@ impl CaKeyStore for VaultPkiCaKeyStore {
     /// ([`VaultPkiLocator::signing_issuer`]) — because `sign-intermediate`
     /// stores what it signs in that mount, and that mount's issuer's list is
     /// the one a relying party walking the chain consults for this CA.
+    ///
+    /// Where that mount is also the one holding the CA's own issuer (a parent
+    /// whose locator records no root), Vault refuses the call — "adding issuer
+    /// … to its own CRL is not allowed" — until the issuer is deleted; the
+    /// caller releases first, and the sweep releases again when this is refused
+    /// (`ca::forward_ca_revocation_releasing`, R101W1-04). Vault's
+    /// `POST <mount>/issuer/<child>/revoke` would revoke the issuer in place,
+    /// but exists only from Vault 1.11 and is not used.
     fn revoke_signed_ca<'a>(
         &'a self,
         parent: &'a CaKeyRef,

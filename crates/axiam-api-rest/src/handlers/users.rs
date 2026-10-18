@@ -567,25 +567,59 @@ pub async fn delete<C: Connection + Clone>(
         // reads the account's username and email. So this runs before the
         // tombstone overwrites them, and a failure aborts the delete as the
         // session revocation's does: retried after the tombstone, the
-        // convention would have nothing left to match. An account that does
-        // not exist (the delete below then answers 404) is matched by its id
-        // alone. R101W1-01: the convention matches only certificates issued
-        // since the account's `created_at`, under a name no other account
-        // holds — so deleting `Alice` leaves `alice`'s certificate alone.
-        let (username, email, created_at) = target.as_ref().map_or_else(
-            || ("", "", chrono::Utc::now()),
-            |t| (t.username.as_str(), t.email.as_str(), t.created_at),
-        );
-        let certificates_revoked = {
-            use axiam_core::repository::CertificateRepository as _;
-            state
-                .pki
-                .cert_repo
-                .revoke_user_certificates(user.tenant_id, target_id, username, email, created_at)
-                .await?
+        // convention would have nothing left to match. R101W1-01: the
+        // convention matches only certificates issued since the account's
+        // `created_at`, under a name no other account holds — so deleting
+        // `Alice` leaves `alice`'s certificate alone.
+        //
+        // R101W1-09 (c): an account that does not exist revokes nothing — the
+        // delete below answers 404, and a `404` must not have revoked the
+        // certificates whose `metadata.user_id` happens to name the id.
+        use axiam_core::repository::CertificateRepository as _;
+        let mut certificates_revoked = match target.as_ref() {
+            Some(t) => {
+                state
+                    .pki
+                    .cert_repo
+                    .revoke_user_certificates(
+                        user.tenant_id,
+                        target_id,
+                        &t.username,
+                        &t.email,
+                        t.created_at,
+                    )
+                    .await?
+            }
+            None => 0,
         };
 
         state.user_repo.delete(user.tenant_id, target_id).await?;
+
+        // R101W1-09 (b): an issuance bound to this account that read it alive
+        // before the tombstone may have stored its certificate after the
+        // revocation above ran. Once more, now that the tombstone is written,
+        // by the binding and `metadata.user_id` only (the names are gone):
+        // an issuance that stores its row after this pass reads the account
+        // back afterwards, finds it deleted and revokes the row itself
+        // (`handlers::certificates`). Best effort — the account is deleted
+        // either way, and the window this closes is one request wide.
+        if let Some(t) = target.as_ref() {
+            match state
+                .pki
+                .cert_repo
+                .revoke_user_certificates(user.tenant_id, target_id, "", "", t.created_at)
+                .await
+            {
+                Ok(late) => certificates_revoked += late,
+                Err(error) => tracing::error!(
+                    tenant_id = %user.tenant_id,
+                    user_id = %target_id,
+                    %error,
+                    "a certificate issued while the account was being deleted could not be \
+                     revoked; revoke the account's certificates by id"
+                ),
+            }
+        }
 
         if let Some(subject) = purged_subject {
             state

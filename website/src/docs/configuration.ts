@@ -428,6 +428,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "60",
           ],
           [
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT",
+            "Max CIBA backchannel authentication requests one client may have admitted for one hint (a login_hint as sent, or an id_token_hint's subject) in any ten-minute stretch \u2014 the longest a request may live, so also the most open requests one client can hold for one person. Not a per-minute rate. A call past it is refused 429 slow_down before the hint is looked up, whoever it names; a refused call is not counted. Shared by every replica through the rate-limit table (set them alike); no profile preset moves it. Raise it only for a conformance or SDK integration run, which drives many flows for one test user from one client (docs/conformance/README.md). Must be at least 1.",
+            "3",
+          ],
+          [
             "AXIAM__RATE_LIMIT__DCR_PER_MIN",
             "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
             "5",
@@ -456,6 +461,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN",
             "Max writes per minute, per IP, to the outbound SCIM target registry API under /api/v1/scim-targets: create, update, delete and reconcile now. Each write can repoint where a tenant's user directory, and the target's credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
             "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the network-segment management API: create, replace and delete a segment under /api/v1/network/segments, a segment's reply profile under /api/v1/network/profiles, and PUT /api/v1/network/policy, the tenant's Session-Timeout cap. A segment write decides which VLAN a device is placed on and a profile write shapes what the placement gives. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN",
+            "Max requests per minute to POST /api/v1/network/decide, the RADIUS placement decision a FreeRADIUS server asks for once per EAP-TLS authentication, per authenticated caller (the token's sub, a service account whose token is bound to its own certificate), not per address. Six thousand is a site's power-restore storm. A per-address backstop of ten times this covers tokens that do not authenticate. 6000 under every profile preset.",
+            "6000",
           ],
           [
             "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN",

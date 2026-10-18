@@ -28,7 +28,10 @@ pub struct CreateCaCertificateRequest {
     ///
     /// A **common name**, not a distinguished name. A single `CN=` prefix is
     /// accepted and stripped; anything else containing `=` — `O=Acme,
-    /// CN=ACME Corp Root CA` — is refused with `400`.
+    /// CN=ACME Corp Root CA` — is refused with `400`, as is a name of more than
+    /// 64 characters (RFC 5280 `ub-common-name`) or one holding a control
+    /// character, a tab or line break, an invisible or bidirectional formatting
+    /// character, or two spaces in a row.
     pub subject: String,
     pub key_algorithm: KeyAlgorithm,
     /// Validity duration in days.
@@ -60,7 +63,9 @@ pub struct CreateCaCertificateRequest {
 /// deliberately not on the request:
 ///
 /// * Under `database` or `vault` custody, AXIAM generates a self-signed root
-///   and returns its private key once, in `private_key_pem`.
+///   and returns its private key once, in `private_key_pem`: an unencrypted
+///   PKCS#8 `PRIVATE KEY` block, which for Ed25519 is RFC 8410 version 1 (the
+///   seed alone, no public-key attribute) so that OpenSSL 3.0 can read it.
 /// * Under `vault_pki` custody, Vault generates a root and a signing
 ///   intermediate beneath it, and the response has **no** `private_key_pem`
 ///   because the key never existed outside Vault. The root's certificate comes
@@ -393,7 +398,7 @@ pub async fn revoke<C: Connection + Clone>(
                 metadata: Some(serde_json::json!({
                     "organization_id": org_id,
                     "ca_certificate_id": id,
-                    "reason": reason,
+                    "reason": axiam_pki::vault_forward::sanitise_reason(&reason),
                 })),
             })
             .await

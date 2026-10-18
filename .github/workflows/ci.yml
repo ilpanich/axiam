@@ -64,6 +64,18 @@ jobs:
         if: always()
         run: python3 scripts/check-crate-layering.py --graph
 
+      # T-454 -- the FreeRADIUS recipe REFERENCES an upstream (GPLv2) image and
+      # vendors nothing. radius_e2e.rs pulls the digest and runs; nothing it
+      # asserts would fail if a Dockerfile or a FROM line entered docker/radius/,
+      # or if the compose file's image: slid back to a movable tag (R101W6-11).
+      # It is a tripwire on that shape, not a scan for vendored code: binaries,
+      # sources and files outside docker/radius/ are not looked at (R110W5-04).
+      # The crate half is cargo-deny's licence allow-list (deny.toml).
+      - name: RADIUS recipe vendors-nothing self-test (fixtures)
+        run: python3 scripts/check-radius-vendors-nothing.py --self-test
+      - name: RADIUS recipe vendors nothing and pins its image by digest
+        run: python3 scripts/check-radius-vendors-nothing.py
+
       # F5 -- UNIQUE-violation detection is a security decision (a replayed
       # assertion refused or accepted), and D-09 already said it may live in
       # exactly one place. Five call sites had their own copy anyway. This is
@@ -170,6 +182,13 @@ jobs:
       # so a change to them is seen on a pull request, not at the next dispatch.
       - name: Conformance gate rules (fixtures)
         run: python3 -m unittest discover -s conformance/scripts -p 'test_*.py' --verbose
+
+      # The conformance scripts take `module_timeout` (a workflow dispatch input)
+      # into bash arithmetic, where `a[$(cmd)]` is command execution (R101W4-02).
+      # They must refuse anything but digits BEFORE the arithmetic; the test feeds
+      # them the payload and checks that it neither runs nor passes.
+      - name: Conformance scripts refuse non-numeric knobs
+        run: bash conformance/scripts/tests/validate_inputs_test.sh
 
   build:
     name: Build
@@ -287,10 +306,20 @@ jobs:
       #     ^0.13, so there is nothing to take. The parser only reads S3/Azure bucket
       #     responses; AXIAM talks to SurrealDB over HTTP and defines no buckets. Full note
       #     in deny.toml. Drop both when surrealdb moves off quick-xml <0.41.
+      #
+      #   RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369 — zip 8.6.0. It is only a
+      #     `[build-dependencies]` entry of utoipa-swagger-ui 10.0.1, the newest release, which
+      #     requires `zip = "8.6"`, so there is no upgrade path. Its build.rs never calls
+      #     `extract()` (0368, 0369): it uses its own `by_index` + `enclosed_name()` loop
+      #     restricted to `dist/` and creates no symlinks. It applies `set_permissions(unix_mode)`
+      #     (the 0367 pattern) only to the pinned swagger-ui release zip, at build time. Nothing
+      #     ships in the binary; the remaining exposure is the build host, and only if the
+      #     upstream zip were compromised. Full note in deny.toml. Tracking: ilpanich/axiam#719.
+      #     Drop all three when utoipa-swagger-ui moves to zip >=9.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched
@@ -510,9 +539,16 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Measured on a failing run: after `cargo test --workspace` the runner
+      # had 4.4G free of 145G and `target/` alone was 104G; the next feature
+      # set (`-p axiam-amqp`, below) then needed fresh dependency artifacts and
+      # died with "No space left on device" at 63 MB free. None of the toolchains
+      # removed here is used by this job; `|| true` keeps a path that a future
+      # runner image drops from failing the step.
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo rm -rf /usr/local/.ghcup /usr/share/swift /opt/az /opt/microsoft /opt/google /usr/local/julia* /usr/local/share/powershell /usr/local/share/chromium /usr/lib/jvm || true
           sudo docker image prune --all --force || true
           df -h
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f  # stable (2026-03-27)
@@ -522,7 +558,7 @@ jobs:
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v3 start \
+            surrealdb/surrealdb:v3.3.4 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
@@ -573,6 +609,22 @@ jobs:
       # pass (the suite only began running once libxmlsec1 was installed, so
       # surfacing the whole picture at once is far cheaper than one-per-run).
       - run: cargo test --workspace --no-fail-fast
+      # The bulk of that 104G is, by construction, the linked test executables —
+      # one per integration-test target across the workspace, most of them
+      # carrying the SurrealDB tree. The step prints `target/debug/deps` before
+      # and after, so the log shows the saving. They have all just run, and nothing below reuses them:
+      # the steps after this one build their own, differently-featured, test
+      # targets. Deleting them frees the room those builds need. Libraries,
+      # build-script output and fingerprints stay, so no dependency is rebuilt
+      # (an executable that is missing is simply relinked if something does ask
+      # for it). Only extension-less executables are touched: `*.rlib`, `*.rmeta`,
+      # `*.d` and proc-macro `*.so` all carry a dot. No test step is dropped.
+      - name: Drop test executables that have already run
+        run: |
+          du -sh target/debug/deps
+          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          du -sh target/debug/deps
+          df -h /
       # The two steps below relink axiam-api-grpc under a different feature set
       # and are where the job ran out of disk. Report free space here so the
       # next capacity failure is diagnosable from the log directly, instead of

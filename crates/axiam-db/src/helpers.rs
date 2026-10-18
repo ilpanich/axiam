@@ -136,6 +136,54 @@ where
     }
 }
 
+/// What one attempt at a write transaction came back with: an answer for the
+/// caller ([`TxFail::Refused`] — a `THROW` the transaction made on purpose), or
+/// the datastore's own error ([`TxFail::Db`]), which may be a retryable write
+/// conflict.
+///
+/// `Display` renders the datastore's text for a database error, which is what
+/// [`retry_on_write_conflict`] reads to decide whether to run the attempt
+/// again. A refusal must be told apart from the statement errors **before** it
+/// is wrapped: a `THROW` fires on its own slot while the statements after it
+/// report "not executed due to a failed transaction", which is itself a
+/// write-conflict marker — so a refusal left as a database error would be
+/// retried as a conflict.
+#[derive(Debug)]
+pub(crate) enum TxFail {
+    Refused(axiam_core::error::AxiamError),
+    Db(DbError),
+}
+
+impl std::fmt::Display for TxFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(e) => write!(f, "{e}"),
+            Self::Db(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<TxFail> for axiam_core::error::AxiamError {
+    fn from(fail: TxFail) -> Self {
+        match fail {
+            TxFail::Refused(e) => e,
+            TxFail::Db(e) => e.into(),
+        }
+    }
+}
+
+impl From<DbError> for TxFail {
+    fn from(e: DbError) -> Self {
+        Self::Db(e)
+    }
+}
+
+impl From<surrealdb::Error> for TxFail {
+    fn from(e: surrealdb::Error) -> Self {
+        Self::Db(DbError::from(e))
+    }
+}
+
 /// How many attempts a write to a row that is hot by design gets before its
 /// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' four are sized for an occasional
 /// collision; a SCIM target's delivery state (every delivery of every message

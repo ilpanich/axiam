@@ -57,14 +57,15 @@ HEALTHY = [
 
 
 class GateTest(unittest.TestCase):
-    def check(self, *modules, baseline=BASELINE, plan=PLAN, unattended=UNATTENDED):
+    def check(self, *modules, baseline=BASELINE, plan=PLAN, unattended=UNATTENDED,
+              only=None, new_plans=None):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
             if modules:
                 (tmp / f"{plan}.results.json").write_text(json.dumps(run_of(*modules)))
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = gate.gate(tmp, baseline, unattended)
+                rc = gate.gate(tmp, baseline, unattended, only, new_plans)
             return rc, out.getvalue(), err.getvalue()
 
     def test_a_pass_with_the_interactive_module_waiting(self):
@@ -129,13 +130,88 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("happy-flow is WAITING", err)
 
-    def test_a_plan_without_a_main_baseline_still_tolerates_waiting(self):
-        # The pre-existing leniency for an unknown plan is unchanged: only
-        # outright failures are checked there.
+    def test_a_new_plan_still_tolerates_waiting_but_says_it_is_new(self):
+        # The leniency for a plan no baseline names is unchanged once --new-plan
+        # says so: only outright failures are checked there, and the output says
+        # it is a new plan.
         rc, out, err = self.check(module("m", "PASSED"), module("n", status="WAITING"),
-                                  baseline={"plans": {}}, unattended={"plans": {}})
+                                  baseline={"plans": {}}, unattended={"plans": {}},
+                                  only=[PLAN], new_plans=[PLAN])
         self.assertEqual(rc, 0, err)
         self.assertIn("n WAITING", out)
+        self.assertIn(f"{PLAN}: NEW PLAN (--new-plan)", out)
+
+    def test_a_plan_absent_from_the_baseline_is_refused_without_new_plan(self):
+        # R101W4-10 (#630): the tolerant path used to pass this silently.
+        for only in (None, [PLAN]):
+            rc, out, err = self.check(module("m", "PASSED"), baseline={"plans": {}},
+                                      unattended={"plans": {}}, only=only)
+            self.assertEqual(rc, 1, only)
+            self.assertIn(f"{PLAN}: the plan is not in baseline.json and --new-plan {PLAN} was not given", err)
+            self.assertNotIn("NEW PLAN", out)
+
+    def test_a_typo_in_plan_is_refused_even_with_a_result_file_for_the_real_one(self):
+        # `--plan` names a plan nobody baselined (and nothing wrote): red, and the
+        # message says the plan is unknown, not only that its result is missing.
+        rc, _, err = self.check(*HEALTHY, only=[PLAN, PLAN + "x"])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"{PLAN}x: no result file", err)
+        self.assertIn(f"{PLAN}x: the plan is not in baseline.json and --new-plan", err)
+
+    def test_a_new_plan_is_still_gated_on_outright_failures(self):
+        rc, _, err = self.check(module("m", "PASSED"), module("n", "FAILED"),
+                                baseline={"plans": {}}, unattended={"plans": {}},
+                                only=[PLAN], new_plans=[PLAN])
+        self.assertEqual(rc, 1)
+        self.assertIn("n ended FAILED", err)
+
+    def test_a_new_plan_that_evaluated_nothing_is_a_regression(self):
+        rc, _, err = self.check(module("n", status="WAITING"), baseline={"plans": {}},
+                                unattended={"plans": {}}, only=[PLAN], new_plans=[PLAN])
+        self.assertEqual(rc, 1)
+        self.assertIn("nothing was evaluated", err)
+
+    def test_new_plan_for_a_plan_the_baseline_names_is_refused(self):
+        # A flag left behind after the plan was baselined would downgrade its
+        # checks (no WAITING check), so it is red rather than ignored.
+        rc, _, err = self.check(*HEALTHY, only=[PLAN], new_plans=[PLAN])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"{PLAN}: --new-plan, but baseline.json already names this plan", err)
+
+    def test_new_plan_without_plan_is_refused(self):
+        # Not among --plan: it has no required result file, so the flag alone
+        # must not be able to excuse anything.
+        rc, _, err = self.check(*HEALTHY, new_plans=["brand-new-plan"])
+        self.assertEqual(rc, 1)
+        self.assertIn("brand-new-plan: --new-plan, but the plan is not among the --plan arguments", err)
+
+    def test_new_plan_does_not_excuse_another_unknown_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            for name in ("p-new", "p-typo"):
+                (tmp / f"{name}.results.json").write_text(json.dumps(run_of(module("m", "PASSED"))))
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = gate.gate(tmp, {"plans": {}}, {"plans": {}}, ["p-new", "p-typo"], ["p-new"])
+            self.assertEqual(rc, 1)
+            self.assertIn("p-typo: the plan is not in baseline.json", err.getvalue())
+            self.assertNotIn("p-new: the plan is not in baseline.json", err.getvalue())
+
+    def test_main_takes_new_plan_from_the_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            (tmp / "p-new.results.json").write_text(json.dumps(run_of(module("m", "PASSED"))))
+            base, unattended = tmp / "baseline.json", tmp / "baseline-unattended.json"
+            base.write_text(json.dumps(BASELINE))
+            unattended.write_text(json.dumps(UNATTENDED))
+            argv = ["gate.py", "--results", str(tmp), "--baseline", str(base),
+                    "--baseline-unattended", str(unattended), "--plan", "p-new"]
+            for extra, want in (([], 1), (["--new-plan", "p-new"], 0)):
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(sys, "argv", argv + extra), \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    self.assertEqual(gate.main(), want, err.getvalue())
+            self.assertIn("NEW PLAN", out.getvalue())
 
     def test_skipped_is_tolerated(self):
         rc, out, err = self.check(module("happy-flow", "SKIPPED"), *HEALTHY[:1], *HEALTHY[2:])
@@ -177,11 +253,12 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("nothing was evaluated", err)
 
-    def test_a_plan_without_a_baseline_checks_outright_failures_only(self):
-        rc, out, err = self.check(module("m", "PASSED"), baseline={"plans": {}}, unattended={"plans": {}})
+    def test_a_new_plan_checks_outright_failures_only(self):
+        kw = dict(baseline={"plans": {}}, unattended={"plans": {}}, only=[PLAN], new_plans=[PLAN])
+        rc, out, err = self.check(module("m", "PASSED"), **kw)
         self.assertEqual(rc, 0, err)
-        self.assertIn("no baseline for this plan", out)
-        rc, _, _ = self.check(module("m", "FAILED"), baseline={"plans": {}}, unattended={"plans": {}})
+        self.assertIn("NEW PLAN", out)
+        rc, _, _ = self.check(module("m", "FAILED"), **kw)
         self.assertEqual(rc, 1)
 
     def test_only_restricts_the_gate_to_the_named_plans(self):

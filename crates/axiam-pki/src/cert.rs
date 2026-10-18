@@ -27,7 +27,7 @@ use crate::PkiConfig;
 use crate::ca::{self, CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
 use crate::crl::CrlDistribution;
-use crate::crypto::{compute_fingerprint, generate_keypair};
+use crate::crypto::{compute_fingerprint, generate_keypair, private_key_pem};
 use crate::subject::subject_common_name;
 use crate::vault_forward;
 
@@ -542,7 +542,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
 
                 // Generate end-entity key pair.
                 let ee_key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = ee_key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&ee_key_pair)?;
 
                 // Build end-entity certificate request — from the same
                 // function `sign_csr` overwrites a caller's parameters with, so
@@ -608,7 +608,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             let key_algorithm = input.key_algorithm.clone();
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
                 let ee_key_pair = generate_keypair(&key_algorithm)?;
-                let private_key_pem = ee_key_pair.serialize_pem();
+                let private_key_pem = private_key_pem(&ee_key_pair)?;
 
                 let mut params = CertificateParams::new(Vec::<String>::new())
                     .map_err(|e| AxiamError::Certificate(e.to_string()))?;
@@ -1132,24 +1132,33 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     let attempts = candidate.attempts.saturating_add(1);
                     let wait = chrono::Duration::from_std(vault_forward::backoff(attempts))
                         .unwrap_or_else(|_| chrono::Duration::hours(6));
-                    if let Err(e) = self
+                    match self
                         .cert_repo
                         .record_vault_forward_failure(
                             certificate.tenant_id,
                             certificate.id,
+                            lease_until,
                             attempts,
                             Utc::now() + wait,
                             &vault_forward::sanitise_reason(&reason),
                         )
                         .await
                     {
+                        Ok(true) => {}
+                        // R101W1-09 (d): the attempt outlived its lease and
+                        // the row is another replica's now (or forwarded);
+                        // that replica records its own outcome.
+                        Ok(false) => tracing::debug!(
+                            certificate_id = %certificate.id,
+                            "the claim on a refused Vault forward lapsed; its failure is not recorded"
+                        ),
                         // The claim's lease still holds the row back; it is
                         // attempted again when that runs out.
-                        tracing::warn!(
+                        Err(e) => tracing::warn!(
                             certificate_id = %certificate.id,
                             error = %e,
                             "the failed Vault forward could not be recorded"
-                        );
+                        ),
                     }
                     // A row past the threshold is `failing_revocations`' to
                     // report; failing the pass for it too would keep this job
@@ -1173,6 +1182,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     /// revoked subordinate CAs whose parent's list in Vault does not name them
     /// yet, claimed, attempted once each and backed off on a refusal exactly
     /// as the leaves are.
+    ///
+    /// A CA Vault refuses because it is still an issuer in its parent's mount
+    /// ("adding issuer … to its own CRL is not allowed") has its issuer removed
+    /// again before the forward (R101W1-04, [`ca::forward_ca_revocation_releasing`]).
     async fn forward_pending_ca_revocations(
         &self,
         deadline: tokio::time::Instant,
@@ -1221,8 +1234,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     continue;
                 }
             }
-            match ca::forward_ca_revocation(&self.ca_repo, &self.custodians, revoked, 1, deadline)
-                .await
+            match ca::forward_ca_revocation_releasing(
+                &self.ca_repo,
+                &self.custodians,
+                revoked,
+                candidate.last_error.as_deref(),
+                1,
+                deadline,
+            )
+            .await
             {
                 CustodianRevocation::Forwarded => *forwarded += 1,
                 CustodianRevocation::NotNeeded => {}
@@ -1230,22 +1250,28 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     let attempts = candidate.attempts.saturating_add(1);
                     let wait = chrono::Duration::from_std(vault_forward::backoff(attempts))
                         .unwrap_or_else(|_| chrono::Duration::hours(6));
-                    if let Err(e) = self
+                    match self
                         .ca_repo
                         .record_vault_forward_failure(
                             revoked.organization_id,
                             revoked.id,
+                            lease_until,
                             attempts,
                             Utc::now() + wait,
                             &vault_forward::sanitise_reason(&reason),
                         )
                         .await
                     {
-                        tracing::warn!(
+                        Ok(true) => {}
+                        Ok(false) => tracing::debug!(
+                            ca_id = %revoked.id,
+                            "the claim on a refused Vault forward of a CA lapsed; its failure is not recorded"
+                        ),
+                        Err(e) => tracing::warn!(
                             ca_id = %revoked.id,
                             error = %e,
                             "the failed Vault forward of a CA could not be recorded"
-                        );
+                        ),
                     }
                     if attempts < vault_forward::FAILING_AFTER_ATTEMPTS {
                         *failed += 1;
@@ -1289,7 +1315,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 certificate_id = %certificate.id,
                 tenant_id = %certificate.tenant_id,
                 issuer_ca_id = %certificate.issuer_ca_id,
-                reason = %reason,
+                reason = %vault_forward::sanitise_reason(&reason),
                 "certificate revoked in AXIAM but not yet in Vault, whose revocation list \
                  therefore does not name it; the cleanup job retries"
             );
@@ -1477,6 +1503,9 @@ fn leaf_params(
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::NoCa;
+    // #653: 20 CSPRNG octets. Unset, rcgen hashes the public key, and two leaves
+    // on one key (a CSR signed twice) would share a serial — and a CRL entry.
+    params.serial_number = Some(crate::serial::random_serial());
     params.subject_alt_names = san_types(sans)?;
     params.crl_distribution_points = crl_point.into_iter().collect();
     params.key_usages = profile

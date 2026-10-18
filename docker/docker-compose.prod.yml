@@ -315,12 +315,12 @@ services:
       # fail closed — but with a less obvious message than "vault is unhealthy".
       vault:
         condition: service_healthy
-    # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC, 2 s
-    # for the in-process outbound queues, 5 s for the audit queue and 5 s for the
-    # cleanup task: 37 s (`ORDERLY_STOP`, `boot.rs`; #569, #598). Compose's
-    # default grace period is 10 s, which would kill a stop with a request still
-    # running before the audit rows are written, so allow those 37 s and a
-    # margin. What a stop can cut is in docs/deployment/README.md, "Stopping, and
+    # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC, 1 s
+    # for the minimal profile's lease release, 2 s for the in-process outbound
+    # queues, 5 s for the audit queue and 5 s for the cleanup task: 38 s
+    # (`ORDERLY_STOP`, `boot.rs`; #569, #598, #628). Compose's default grace
+    # period is 10 s, which would kill a stop with a request still running
+    # before the audit rows are written, so allow those 38 s and a margin. What a stop can cut is in docs/deployment/README.md, "Stopping, and
     # the grace period".
     stop_grace_period: 40s
     healthcheck:
@@ -405,7 +405,9 @@ services:
   # SurrealDB — document/graph database
   # ---------------------------------------------------------------------------
   surrealdb:
-    image: surrealdb/surrealdb:v3
+    # Pinned, not the floating `v3`: 1.1.0's race fixes rely on SurrealDB
+    # 3.3.4's write-write conflict detection. Stay on 3.3.x if you override it.
+    image: surrealdb/surrealdb:v3.3.4
     container_name: axiam-surrealdb
     depends_on:
       surrealdb-init:

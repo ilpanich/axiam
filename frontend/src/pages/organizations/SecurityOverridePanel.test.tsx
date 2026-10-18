@@ -217,6 +217,23 @@ describe("TenantSecurityOverridePanel", () => {
     );
   });
 
+  it("words a 409 that lost to a directory enable as changed elsewhere — reload", async () => {
+    mockGets({ notFound: true });
+    apiMock.put.mockRejectedValue({
+      response: { status: 409, data: { error: "conflict", message: "the tenant's directory or its opaque_mode changed since this request read them; reload and retry" } },
+    });
+    renderWithProviders(<TenantSecurityOverridePanel tenantId="t1" />);
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Override password policy/ })
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save Overrides" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Changed by someone else — reload and try again."
+    );
+  });
+
   it("clears every override back to the baseline", async () => {
     mockGets({ min_length: 16 });
     apiMock.delete.mockResolvedValue(res(undefined));

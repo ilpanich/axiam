@@ -189,7 +189,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
       {
         type: "p",
-        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **28 namespaces** and names the **190** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **29 namespaces** and names the **202** that make up the surface (190 across 28 until contract 1.62 added the `network` namespace), and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
       },
       {
         type: "p",
@@ -2489,6 +2489,20 @@ w.WriteHeader(http.StatusOK)`,
             "`fail_closed`",
             "Veto a role or permission assignment (four-eyes workflows). Veto-only.",
           ],
+          [
+            "network.pre_profile_write",
+            "yes",
+            "nothing — veto only",
+            "`fail_closed`",
+            "Veto a RADIUS reply-profile create, replace or delete (four-eyes on network policy). Veto-only.",
+          ],
+          [
+            "network.pre_segment_write",
+            "yes",
+            "nothing — veto only",
+            "`fail_closed`",
+            "Veto a network segment create, replace or delete (four-eyes on network policy). Veto-only.",
+          ],
         ],
       },
       {
@@ -2497,7 +2511,7 @@ w.WriteHeader(http.StatusOK)`,
       },
       {
         type: "p",
-        text: "**The asymmetry in the last column is the most instructive fact on this page.** `token.pre_issue` defaults to fail-open because its mutation is optional enrichment — an unreachable reactor costs you a claim, and degrading a feature is the right answer. The other four default to fail-closed because they can veto: a fraud check that times out has not passed, and an unreachable approver is not an approval. A registration that names several events inherits the **strictest** default among them, in either array order.",
+        text: "**The asymmetry in the last column is the most instructive fact on this page.** `token.pre_issue` defaults to fail-open because its mutation is optional enrichment — an unreachable reactor costs you a claim, and degrading a feature is the right answer. The other six default to fail-closed because they can veto: a fraud check that times out has not passed, and an unreachable approver is not an approval. A registration that names several events inherits the **strictest** default among them, in either array order.",
       },
       {
         type: "note",
@@ -2514,7 +2528,7 @@ w.WriteHeader(http.StatusOK)`,
       },
       {
         type: "p",
-        text: "All five events above are interceptable, so the registry's `interceptable` flag has no effect today. It is carried because a sixth event may be listen-only, and the rule is already fixed: a listener may subscribe to **every** registered event, including one the registry marks non-interceptable — precisely because it cannot influence it.",
+        text: "All seven events above are interceptable, so the registry's `interceptable` flag has no effect today. It is carried because a sixth event may be listen-only, and the rule is already fixed: a listener may subscribe to **every** registered event, including one the registry marks non-interceptable — precisely because it cannot influence it.",
       },
       { type: "h", id: "vs", text: "Reactor or webhook?" },
       {
@@ -2542,7 +2556,7 @@ w.WriteHeader(http.StatusOK)`,
           [
             "If it is unreachable",
             "Retried, then dead-lettered; the operation already happened",
-            "The registration's `failure_policy` decides — and for four of the five events the default is to refuse",
+            "The registration's `failure_policy` decides — and for six of the seven events the default is to refuse",
           ],
         ],
       },

@@ -5,6 +5,7 @@ use axiam_core::id::new_id;
 use axiam_core::models::permission::{
     CreatePermission, Permission, PermissionEffect, PermissionGrant, UpdatePermission,
 };
+use axiam_core::models::role::RoleClaim;
 use axiam_core::repository::{PaginatedResult, Pagination, PermissionRepository};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -15,7 +16,12 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, paginate, search_bind, search_filter, take_first_or_not_found,
+    CountRow, classify_write_error, paginate, retry_on_write_conflict, search_bind, search_filter,
+    take_first_or_not_found,
+};
+use crate::repository::role::{
+    Claims, Epoch, NETWORK_ACTION_REGEX, NETWORK_GRANT_TO_GROUP_HELD_ROLE, ROLE_EPOCH_STALE,
+    bump_statement, claim_binds, claim_statements, role_tx_outcome,
 };
 
 #[derive(Debug, SurrealValue)]
@@ -221,71 +227,216 @@ impl<C: Connection> SurrealPermissionRepository<C> {
         permission_id: Uuid,
         scope_ids: Vec<Uuid>,
         effect: PermissionEffect,
+        claim: Option<&RoleClaim>,
     ) -> AxiamResult<()> {
         let role_id_str = role_id.to_string();
         let perm_id_str = permission_id.to_string();
 
         // SEC-058/SECFIX-02: mirror grant_to_role's tenant guard on BOTH branches —
         // this method is the REST-reachable path (POST /api/v1/roles/{id}/permissions).
-        let result = if scope_ids.is_empty() {
+        // Also verify every scope_id belongs to the caller's tenant before RELATE.
+        let (scope_guard, scope_check, scope_value) = if scope_ids.is_empty() {
             // Wildcard — same as grant_to_role
-            let query = format!(
-                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-                 IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
-                     THROW 'cross-tenant edge denied';\
-                 }};\
-                 RELATE role:`{role_id_str}` -> grants -> \
-                 permission:`{perm_id_str}` SET scope_ids = NONE, effect = $effect;"
-            );
-            self.db
-                .current()
-                .query(query)
-                .bind(("tid", tenant_id.to_string()))
-                .bind(("effect", effect.as_str().to_string()))
-                .await
-                .map_err(DbError::from)?
+            ("", "", "NONE")
         } else {
-            let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
-            // Also verify every scope_id belongs to the caller's tenant before RELATE.
-            let query = format!(
-                "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-                 LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-                 LET $sc = (SELECT id FROM scope WHERE tenant_id = $tid AND meta::id(id) IN $scope_ids);\
-                 IF array::len($ro) = 0 OR array::len($pe) = 0 \
-                    OR array::len($sc) != array::len($scope_ids) {{\
-                     THROW 'cross-tenant edge denied';\
-                 }};\
-                 RELATE role:`{role_id_str}` -> grants -> \
-                 permission:`{perm_id_str}` SET scope_ids = $scope_ids, effect = $effect;"
-            );
-            self.db
-                .current()
-                .query(query)
-                .bind(("tid", tenant_id.to_string()))
-                .bind(("scope_ids", scope_strs))
-                .bind(("effect", effect.as_str().to_string()))
-                .await
-                .map_err(DbError::from)?
+            (
+                "LET $sc = (SELECT id FROM scope WHERE tenant_id = $tid AND meta::id(id) IN $scope_ids); ",
+                " OR array::len($sc) != array::len($scope_ids)",
+                "$scope_ids",
+            )
         };
+        let network = network_grant_statements(&role_id_str);
+        let query = format!(
+            "BEGIN TRANSACTION; \
+             LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid); \
+             LET $pe = (SELECT VALUE action FROM permission:`{perm_id_str}` WHERE tenant_id = $tid); \
+             {scope_guard}\
+             IF array::len($ro) = 0 OR array::len($pe) = 0{scope_check} {{ \
+                 THROW 'cross-tenant edge denied'; \
+             }}; \
+             {network}\
+             RELATE role:`{role_id_str}` -> grants -> \
+             permission:`{perm_id_str}` SET scope_ids = {scope_value}, effect = $effect; \
+             COMMIT TRANSACTION"
+        );
+        let scope_strs: Vec<String> = scope_ids.iter().map(|id| id.to_string()).collect();
+        let (claimed, claim_grants, claim_holders) = claim_binds(claim);
 
-        if let Err(e) = result.check() {
-            let msg = e.to_string();
-            if msg.contains("cross-tenant edge denied") {
-                return Err(AxiamError::AuthorizationDenied {
-                    reason: "cross-tenant permission grant denied".into(),
-                    action: None,
-                    resource_id: None,
-                });
-            }
+        let outcome = retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("tid", tenant_id.to_string()))
+                .bind(("scope_ids", scope_strs.clone()))
+                .bind(("effect", effect.as_str().to_string()))
+                .bind(("claimed", claimed))
+                .bind(("claim_grants", claim_grants))
+                .bind(("claim_holders", claim_holders))
+                .await
+                .map_err(DbError::from)?;
             // This is the REST-reachable path
             // (POST /api/v1/roles/{id}/permissions) — mirror grant_to_role's
-            // classify_write_error so a duplicate grant surfaces as 409, not 500.
-            return Err(classify_write_error(msg, "permission_grant").into());
+            // classify_write_error so a duplicate grant surfaces as 409, not 500;
+            // an engine conflict is retried, and past the attempts
+            // `WriteContention`.
+            role_tx_outcome(
+                result.take_errors(),
+                "permission_grant",
+                &role_id_str,
+                "cross-tenant permission grant denied",
+            )
+        })
+        .await;
+        match outcome.map_err(AxiamError::from)? {
+            None => Ok(()),
+            Some(refusal) => Err(refusal),
         }
-
-        Ok(())
     }
+
+    /// [`PermissionRepository::grant_to_role_with_effect`], claiming `claim`
+    /// (R110W6-04; the notes above `role::ROLE_EPOCH_STALE`).
+    ///
+    /// # Errors
+    ///
+    /// As the trait method, plus `Conflict` ("the role changed since it was
+    /// read") when the claim's epochs have moved, or when a group holds the
+    /// role and the permission is in `network:`.
+    pub async fn grant_to_role_claimed(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        scope_ids: Vec<Uuid>,
+        effect: PermissionEffect,
+        claim: Option<RoleClaim>,
+    ) -> AxiamResult<()> {
+        self.relate_grant(
+            tenant_id,
+            role_id,
+            permission_id,
+            scope_ids,
+            effect,
+            claim.as_ref(),
+        )
+        .await
+    }
+
+    /// [`PermissionRepository::revoke_from_role`], claiming `claim`
+    /// (R110W6-04).
+    ///
+    /// A `network:` revoke compares both epochs, moves `grant_epoch`, and —
+    /// with a claim — deletes only the grant the gate read: the edge must
+    /// still carry the effect the gate read (`claim.revoked_effect`), or be
+    /// absent if it read none. Otherwise the revoke could delete a deny an
+    /// administrator wrote after the gate looked, releasing a quarantine
+    /// without `network:grant` (H6 read "allow" or "none"). A revoke outside
+    /// the namespace is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As the trait method, plus `Conflict` ("the role changed since it was
+    /// read") when the claim no longer holds.
+    pub async fn revoke_from_role_claimed(
+        &self,
+        tenant_id: Uuid,
+        role_id: Uuid,
+        permission_id: Uuid,
+        claim: Option<RoleClaim>,
+    ) -> AxiamResult<()> {
+        let role_id_str = role_id.to_string();
+        let perm_id_str = permission_id.to_string();
+        let claim_check = claim_statements(
+            &role_id_str,
+            Claims {
+                grants: true,
+                holders: true,
+            },
+        );
+        let bump = bump_statement(&role_id_str, Epoch::Grants);
+
+        // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
+        let query = format!(
+            "BEGIN TRANSACTION; \
+             LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid); \
+             LET $pe = (SELECT VALUE action FROM permission:`{perm_id_str}` WHERE tenant_id = $tid); \
+             IF array::len($ro) = 0 OR array::len($pe) = 0 {{ \
+                 THROW 'cross-tenant edge denied'; \
+             }}; \
+             IF string::matches($pe[0], {NETWORK_ACTION_REGEX}) {{ \
+                 {claim_check}\
+                 LET $now = (SELECT VALUE (effect ?? 'allow') FROM grants \
+                     WHERE in = role:`{role_id_str}` AND out = permission:`{perm_id_str}`); \
+                 IF $check_effect AND $now != $expect_effect {{ THROW '{ROLE_EPOCH_STALE}'; }}; \
+                 {bump}\
+             }}; \
+             DELETE grants WHERE \
+             in = role:`{role_id_str}` AND \
+             out = permission:`{perm_id_str}`; \
+             COMMIT TRANSACTION"
+        );
+        let (claimed, claim_grants, claim_holders) = claim_binds(claim.as_ref());
+        let (check_effect, expect_effect): (bool, Vec<String>) =
+            match claim.and_then(|c| c.revoked_effect) {
+                None => (false, Vec::new()),
+                Some(read) => (
+                    true,
+                    read.map(|e| e.as_str().to_owned()).into_iter().collect(),
+                ),
+            };
+
+        let outcome = retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("tid", tenant_id.to_string()))
+                .bind(("claimed", claimed))
+                .bind(("claim_grants", claim_grants))
+                .bind(("claim_holders", claim_holders))
+                .bind(("check_effect", check_effect))
+                .bind(("expect_effect", expect_effect.clone()))
+                .await
+                .map_err(DbError::from)?;
+            role_tx_outcome(
+                result.take_errors(),
+                "permission_grant",
+                &role_id_str,
+                "cross-tenant permission revocation denied",
+            )
+        })
+        .await;
+        match outcome.map_err(AxiamError::from)? {
+            None => Ok(()),
+            Some(refusal) => Err(refusal),
+        }
+    }
+}
+
+/// The statements a grant runs after its tenant guard, when the permission
+/// (`$pe[0]`, its action) is in `network:` (R110W6-04; the notes above
+/// `role::ROLE_EPOCH_STALE`): the claim on both epochs, §4.2 rule 2 re-read
+/// (a group holding the role refuses the grant, whoever asks — the seeder's
+/// reconcile included), and the `grant_epoch` move. A grant outside the
+/// namespace runs none of them.
+fn network_grant_statements(role_id: &str) -> String {
+    let claim_check = claim_statements(
+        role_id,
+        Claims {
+            grants: true,
+            holders: true,
+        },
+    );
+    let bump = bump_statement(role_id, Epoch::Grants);
+    format!(
+        "IF string::matches($pe[0], {NETWORK_ACTION_REGEX}) {{ \
+             {claim_check}\
+             LET $held = (SELECT VALUE id FROM has_role \
+                 WHERE out = role:`{role_id}` AND record::tb(in) = 'group' LIMIT 1); \
+             IF array::len($held) > 0 {{ THROW '{NETWORK_GRANT_TO_GROUP_HELD_ROLE}'; }}; \
+             {bump}\
+         }}; "
+    )
 }
 
 impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
@@ -515,39 +666,51 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
     ) -> AxiamResult<()> {
         let role_id_str = role_id.to_string();
         let perm_id_str = permission_id.to_string();
+        // The seeder's path (`seed_default_roles`, `reconcile_default_role_grants`).
+        // A `network:` grant here runs the same in-transaction rule 2 and
+        // `grant_epoch` move as the REST path (R110W6-04), with no claim: a
+        // group holding the role refuses it, and a claimed write racing it
+        // loses.
+        let network = network_grant_statements(&role_id_str);
 
         // CQ-B07: verify both endpoints belong to the same tenant before RELATE.
         let query = format!(
-            "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-             LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-             IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
-                 THROW 'cross-tenant edge denied';\
-             }};\
+            "BEGIN TRANSACTION; \
+             LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid); \
+             LET $pe = (SELECT VALUE action FROM permission:`{perm_id_str}` WHERE tenant_id = $tid); \
+             IF array::len($ro) = 0 OR array::len($pe) = 0 {{ \
+                 THROW 'cross-tenant edge denied'; \
+             }}; \
+             {network}\
              RELATE role:`{role_id_str}` -> grants -> \
-             permission:`{perm_id_str}` SET scope_ids = NONE;"
+             permission:`{perm_id_str}` SET scope_ids = NONE; \
+             COMMIT TRANSACTION"
         );
+        let (claimed, claim_grants, claim_holders) = claim_binds(None);
 
-        let result = self
-            .db
-            .current()
-            .query(query)
-            .bind(("tid", tenant_id.to_string()))
-            .await
-            .map_err(DbError::from)?;
-
-        if let Err(e) = result.check() {
-            let msg = e.to_string();
-            if msg.contains("cross-tenant edge denied") {
-                return Err(AxiamError::AuthorizationDenied {
-                    reason: "cross-tenant permission grant denied".into(),
-                    action: None,
-                    resource_id: None,
-                });
-            }
-            return Err(classify_write_error(msg, "permission_grant").into());
+        let outcome = retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(query.as_str())
+                .bind(("tid", tenant_id.to_string()))
+                .bind(("claimed", claimed))
+                .bind(("claim_grants", claim_grants))
+                .bind(("claim_holders", claim_holders))
+                .await
+                .map_err(DbError::from)?;
+            role_tx_outcome(
+                result.take_errors(),
+                "permission_grant",
+                &role_id_str,
+                "cross-tenant permission grant denied",
+            )
+        })
+        .await;
+        match outcome.map_err(AxiamError::from)? {
+            None => Ok(()),
+            Some(refusal) => Err(refusal),
         }
-
-        Ok(())
     }
 
     async fn revoke_from_role(
@@ -556,42 +719,8 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         role_id: Uuid,
         permission_id: Uuid,
     ) -> AxiamResult<()> {
-        let role_id_str = role_id.to_string();
-        let perm_id_str = permission_id.to_string();
-
-        // CQ-B07: verify both endpoints belong to the same tenant before DELETE.
-        let query = format!(
-            "LET $ro = (SELECT id FROM role:`{role_id_str}` WHERE tenant_id = $tid);\
-             LET $pe = (SELECT id FROM permission:`{perm_id_str}` WHERE tenant_id = $tid);\
-             IF array::len($ro) = 0 OR array::len($pe) = 0 {{\
-                 THROW 'cross-tenant edge denied';\
-             }};\
-             DELETE grants WHERE \
-             in = role:`{role_id_str}` AND \
-             out = permission:`{perm_id_str}`"
-        );
-
-        let result = self
-            .db
-            .current()
-            .query(query)
-            .bind(("tid", tenant_id.to_string()))
+        self.revoke_from_role_claimed(tenant_id, role_id, permission_id, None)
             .await
-            .map_err(DbError::from)?;
-
-        if let Err(e) = result.check() {
-            let msg = e.to_string();
-            if msg.contains("cross-tenant edge denied") {
-                return Err(AxiamError::AuthorizationDenied {
-                    reason: "cross-tenant permission revocation denied".into(),
-                    action: None,
-                    resource_id: None,
-                });
-            }
-            return Err(DbError::Migration(msg).into());
-        }
-
-        Ok(())
     }
 
     async fn get_role_permissions(
@@ -636,7 +765,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         scope_ids: Vec<Uuid>,
         effect: PermissionEffect,
     ) -> AxiamResult<()> {
-        self.relate_grant(tenant_id, role_id, permission_id, scope_ids, effect)
+        self.relate_grant(tenant_id, role_id, permission_id, scope_ids, effect, None)
             .await
     }
 
@@ -655,6 +784,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
             permission_id,
             scope_ids,
             PermissionEffect::Allow,
+            None,
         )
         .await
     }

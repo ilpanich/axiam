@@ -42,17 +42,20 @@
 //! Whether the hint named a real user who may sign in (D-63): a request for
 //! nobody is stored and answered like any other, and simply expires.
 //!
-//! The per-(client, hint) cap keeps to this (#599, T-424): a client's fourth
-//! `bc-authorize` for one hint within the cap's window (ten minutes, the longest
-//! a request may live) is refused with `429 slow_down`, the per-client
-//! limiter's answer, whether the hint names a real user or nobody. It counts
-//! calls for the hint as the request carried it, in the shared rate-limit
+//! The per-(client, hint) cap keeps to this (#599, T-424): a client's
+//! `bc-authorize` for one hint past its allowance (three by default) within the
+//! cap's window (ten minutes, the longest a request may live) is refused with
+//! `429 slow_down`, the per-client limiter's answer, whether the hint names a
+//! real user or nobody. It counts admitted calls for the hint as the request
+//! carried it, in the shared rate-limit
 //! table, before the hint is looked up, so neither its answer nor its cost
 //! depends on whom the hint names; an approved, denied or expired request still
 //! counts until the window has passed. (Corrected 2026-10-13: as first built
 //! the cap counted the resolved user's open requests, never refused a hint
 //! naming nobody, and so told the client which hints named users.) See
-//! `ciba::MAX_REQUESTS_PER_CLIENT_HINT`.
+//! `ciba::DEFAULT_REQUESTS_PER_CLIENT_HINT` (the allowance is
+//! `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT`, #639; refused calls are not
+//! counted).
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};

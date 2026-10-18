@@ -527,6 +527,11 @@ pub struct GeneratedCaCertificate {
     /// PEM-encoded private key — returned only on generation, and only when
     /// there is one to return.
     ///
+    /// An unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key is RFC 8410
+    /// version 1 (`version` INTEGER 0, the 32-byte seed and no embedded public
+    /// key), which OpenSSL 3.0 reads; an RSA-4096 key is the usual PKCS#8
+    /// `RSAPrivateKey`.
+    ///
     /// Absent under `vault_pki` custody, where the key was generated inside
     /// Vault and no API exports it. The field is omitted rather than sent as
     /// `null` so a client that has always read it keeps working unchanged for
@@ -915,6 +920,12 @@ pub struct GeneratedCertificate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_pem: Option<String>,
     /// PEM-encoded private key — returned only on generation.
+    ///
+    /// An unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key AXIAM
+    /// generated is RFC 8410 version 1 (`version` INTEGER 0, the 32-byte seed
+    /// and no embedded public key), which OpenSSL 3.0 reads; the longer
+    /// RFC 5958 v2 form it does not. An RSA-4096 key is the usual PKCS#8
+    /// `RSAPrivateKey`.
     pub private_key_pem: String,
 }
 

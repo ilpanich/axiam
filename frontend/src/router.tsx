@@ -30,6 +30,7 @@ import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
 import { DirectoryPage } from "@/pages/directory/DirectoryPage";
 import { SamlPage } from "@/pages/saml/SamlPage";
+import { NetworkAccessPage } from "@/pages/network/NetworkAccessPage";
 import { ScimTargetsPage } from "@/pages/scim-targets/ScimTargetsPage";
 import { SsfStreamsPage } from "@/pages/ssf/SsfStreamsPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
@@ -326,6 +327,16 @@ export const router = createBrowserRouter([
             path: "scim-targets",
             element: <ScimTargetsPage />,
             handle: { crumb: "SCIM Targets" },
+          },
+        ],
+      },
+      {
+        element: <ProtectedRoute permission="network:read" />,
+        children: [
+          {
+            path: "network",
+            element: <NetworkAccessPage />,
+            handle: { crumb: "Network access" },
           },
         ],
       },

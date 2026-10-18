@@ -31,7 +31,7 @@ import { SurfaceSwitches } from "@/pages/settings/surfaceSwitches";
 import { DcrPolicyFields } from "@/pages/settings/dcrPolicy";
 import { OpaquePolicyFields } from "@/components/OpaquePolicyFields";
 import type { WebauthnUserVerification } from "@/services/organizations";
-import { getApiErrorMessage } from "@/lib/apiError";
+import { getApiErrorMessage, staleWriteMessage } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { FormDialog } from "@/components/FormDialog";
@@ -1112,11 +1112,14 @@ function SettingsTab({
       // Prefer the server's own text: a rejected settings write explains which
       // field it refused and why, which "Request failed with status code 400"
       // does not. The Error branch stays as the fallback for transport errors.
+      // A `409` that lost to another request's write (a tenant's directory was
+      // enabled since this page read it) is worded as every lost write is.
       setSaveError(
-        getApiErrorMessage(
-          err,
-          err instanceof Error ? err.message : "Failed to save settings."
-        )
+        staleWriteMessage(err) ??
+          getApiErrorMessage(
+            err,
+            err instanceof Error ? err.message : "Failed to save settings."
+          )
       );
     },
   });

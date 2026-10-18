@@ -2,8 +2,10 @@
 //! and resend with rate limiting.
 
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::email_verification::CreateEmailVerificationToken;
-use axiam_core::models::user::{UpdateUser, User, UserStatus};
+use axiam_core::models::email_verification::{
+    CreateEmailVerificationToken, EmailVerificationRedemption,
+};
+use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{
     EmailVerificationTokenRepository, FederationLinkRepository, UserRepository,
 };
@@ -54,14 +56,19 @@ where
         }
     }
 
-    /// Generate a verification token for a user.
+    /// Generate a verification token for a user's address.
     ///
     /// Returns `(raw_token, expires_at)`. The raw token is used to
-    /// build the action URL; only the SHA-256 hash is stored.
+    /// build the action URL; only the SHA-256 hash is stored, together with
+    /// `email` — the address the token is mailed to. Redemption verifies the
+    /// account only while its address is still exactly `email` (item A of the
+    /// 1.1.0 atomicity audit): a token never vouches for an address it was not
+    /// sent to.
     pub async fn initiate_verification(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+        email: &str,
     ) -> AxiamResult<(String, chrono::DateTime<chrono::Utc>)> {
         let raw_token = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_token);
@@ -72,6 +79,7 @@ where
                 tenant_id,
                 user_id,
                 token_hash,
+                email: email.to_owned(),
                 expires_at,
             })
             .await?;
@@ -81,14 +89,21 @@ where
 
     /// Verify an email using the raw token.
     ///
-    /// Atomically consumes the token and activates the user.
+    /// One transaction consumes the token and marks the address verified
+    /// (activating a `PendingVerification` account), and only while the
+    /// account's address is still the one the token was minted for
+    /// ([`UserRepository::redeem_email_verification`]). A token for an
+    /// address the account has left, and a token minted before 1.1.0 (which
+    /// names no address), are refused exactly as an unknown token is.
+    ///
+    /// Only `PendingVerification` becomes `Active`: an admin-disabled or
+    /// locked account is not reactivated by verifying its address.
     pub async fn verify_email(&self, tenant_id: Uuid, raw_token: &str) -> AxiamResult<()> {
         let token_hash = token::hash_refresh_token(raw_token);
 
-        // Atomically consume -- fails if expired or already used.
-        let consumed = self
-            .token_repo
-            .consume(tenant_id, &token_hash)
+        let outcome = self
+            .user_repo
+            .redeem_email_verification(tenant_id, &token_hash)
             .await
             .map_err(|e| match e {
                 AxiamError::NotFound { .. } => {
@@ -97,32 +112,15 @@ where
                 other => other,
             })?;
 
-        // Check the user exists and hasn't already verified.
-        let user = self
-            .user_repo
-            .get_by_id(tenant_id, consumed.user_id)
-            .await?;
-
-        if user.email_verified_at.is_some() {
-            return Err(AuthError::EmailAlreadyVerified.into());
+        match outcome {
+            EmailVerificationRedemption::Verified { .. } => Ok(()),
+            EmailVerificationRedemption::AlreadyVerified => {
+                Err(AuthError::EmailAlreadyVerified.into())
+            }
+            EmailVerificationRedemption::AddressMismatch => {
+                Err(AuthError::VerificationTokenInvalid.into())
+            }
         }
-
-        // Update email_verified_at and, if appropriate, activate the
-        // user. Only transition to Active from PendingVerification to
-        // avoid reactivating admin-disabled or locked accounts.
-        let mut update = UpdateUser {
-            email_verified_at: Some(Some(Utc::now())),
-            ..Default::default()
-        };
-        if user.status == UserStatus::PendingVerification {
-            update.status = Some(UserStatus::Active);
-        }
-
-        self.user_repo
-            .update(tenant_id, consumed.user_id, update)
-            .await?;
-
-        Ok(())
     }
 
     /// Whether a verification mail may be minted for this user.
@@ -155,7 +153,8 @@ where
     ///
     /// Returns `Ok(Some((raw_token, user_id, expires_at)))` on
     /// success, `Ok(None)` if the email doesn't exist or the address is
-    /// already verified (to prevent user enumeration).
+    /// already verified (to prevent user enumeration). The token is bound to
+    /// the address stored on the account, which is the one it is mailed to.
     pub async fn resend_verification(
         &self,
         tenant_id: Uuid,
@@ -172,15 +171,43 @@ where
             return Ok(None);
         }
 
-        // Rate limit: max resends per day.
+        // Rate limit: max resends per day. This count is the early refusal;
+        // the cap itself is counted again inside the mint below (item 7 of the
+        // 1.1.0 atomicity audit), because requests sent together each read a
+        // count under the cap here.
         let count = self.token_repo.count_today(tenant_id, user.id).await?;
         if count >= MAX_RESENDS_PER_DAY {
             return Err(AxiamError::RateLimited);
         }
 
-        let (raw_token, expires_at) = self.initiate_verification(tenant_id, user.id).await?;
+        let raw_token = token::generate_refresh_token();
+        let token_hash = token::hash_refresh_token(&raw_token);
+        let expires_at = Utc::now() + Duration::hours(TOKEN_EXPIRY_HOURS);
 
-        Ok(Some((raw_token, user.id, expires_at)))
+        // One transaction: the cap and the token, bound to the address on the
+        // account (the one it is mailed to). Concurrent resends for one account
+        // conflict on the user row, so at most the cap's remainder mint.
+        match self
+            .token_repo
+            .create_within_daily_cap(
+                CreateEmailVerificationToken {
+                    tenant_id,
+                    user_id: user.id,
+                    token_hash,
+                    email: user.email.clone(),
+                    expires_at,
+                },
+                MAX_RESENDS_PER_DAY,
+            )
+            .await
+        {
+            Ok(Some(_)) => Ok(Some((raw_token, user.id, expires_at))),
+            Ok(None) => Err(AxiamError::RateLimited),
+            // The account went between the lookup and the mint: answered as an
+            // unknown address is, so the race reveals nothing either.
+            Err(AxiamError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Check if a user has any federation links (social/external
@@ -197,7 +224,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiam_core::models::user::{CreateUser, UserStatus};
+    use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
     use axiam_core::repository::UserRepository;
     use axiam_db::{
         SurrealEmailVerificationTokenRepository, SurrealFederationLinkRepository,
@@ -287,7 +314,10 @@ mod tests {
 
         let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
 
-        let (raw_token, _expires) = svc.initiate_verification(tid, user.id).await.unwrap();
+        let (raw_token, _expires) = svc
+            .initiate_verification(tid, user.id, &user.email)
+            .await
+            .unwrap();
 
         svc.verify_email(tid, &raw_token).await.unwrap();
 
@@ -296,12 +326,117 @@ mod tests {
         assert!(updated.email_verified_at.is_some());
     }
 
+    /// Item A of the 1.1.0 atomicity audit, the attack: a token minted for the
+    /// address the account had (A) is redeemed after the account moved to an
+    /// address it does not own (B). It must verify nothing — B stays
+    /// unverified and the account stays `PendingVerification`.
+    #[tokio::test]
+    async fn a_token_for_the_old_address_does_not_verify_the_new_one() {
+        let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
+        let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
+
+        let (raw_token, _) = svc
+            .initiate_verification(tid, user.id, &user.email)
+            .await
+            .unwrap();
+
+        // The self-service change (`PUT /users/{me}`, SEC-050).
+        user_repo
+            .update(
+                tid,
+                user.id,
+                UpdateUser {
+                    email: Some("victim@b.example".into()),
+                    email_verified_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc.verify_email(tid, &raw_token).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AxiamError::Validation { ref message }
+                    if message == &AuthError::VerificationTokenInvalid.to_string()
+            ),
+            "the old address's token is refused as an invalid token: {err:?}"
+        );
+        let after = user_repo.get_by_id(tid, user.id).await.unwrap();
+        assert_eq!(after.email, "victim@b.example");
+        assert!(after.email_verified_at.is_none(), "B must not be verified");
+        assert_eq!(after.status, UserStatus::PendingVerification);
+    }
+
+    /// The binding itself, not only the deletion an address change makes: a
+    /// live token that names an address other than the account's verifies
+    /// nothing, and is spent.
+    #[tokio::test]
+    async fn a_token_bound_to_another_address_verifies_nothing() {
+        let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
+        let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
+
+        let (raw_token, _) = svc
+            .initiate_verification(tid, user.id, "someone-else@example.com")
+            .await
+            .unwrap();
+
+        assert!(svc.verify_email(tid, &raw_token).await.is_err());
+        let after = user_repo.get_by_id(tid, user.id).await.unwrap();
+        assert!(after.email_verified_at.is_none());
+        assert_eq!(after.status, UserStatus::PendingVerification);
+        // Spent: it is not retried against a later state.
+        assert!(svc.verify_email(tid, &raw_token).await.is_err());
+    }
+
+    /// A token minted before v102 names no address and so vouches for none
+    /// (the CHANGELOG's upgrade notes): refused like an unknown token.
+    #[tokio::test]
+    async fn a_token_minted_before_the_upgrade_is_refused() {
+        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+            .await
+            .unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        run_migrations(&db).await.unwrap();
+        let (_org, tid) = create_org_tenant(&db).await;
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let user = create_test_user(&user_repo, tid).await;
+        let svc = EmailVerificationService::new(
+            user_repo.clone(),
+            SurrealEmailVerificationTokenRepository::new(db.clone()),
+            SurrealFederationLinkRepository::new(db.clone()),
+        );
+
+        // The row exactly as 1.0 wrote it: no `email`.
+        let raw_token = token::generate_refresh_token();
+        db.query(
+            "CREATE email_verification_token SET tenant_id = $tid, user_id = $uid, \
+             token_hash = $hash, expires_at = time::now() + 1h, consumed_at = NONE",
+        )
+        .bind(("tid", tid.to_string()))
+        .bind(("uid", user.id.to_string()))
+        .bind(("hash", token::hash_refresh_token(&raw_token)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert!(svc.verify_email(tid, &raw_token).await.is_err());
+        let after = user_repo.get_by_id(tid, user.id).await.unwrap();
+        assert!(after.email_verified_at.is_none());
+        assert_eq!(after.status, UserStatus::PendingVerification);
+    }
+
     #[tokio::test]
     async fn replay_consumed_token_fails() {
         let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
         let svc = EmailVerificationService::new(user_repo, token_repo, fed_repo);
 
-        let (raw_token, _expires) = svc.initiate_verification(tid, user.id).await.unwrap();
+        let (raw_token, _expires) = svc
+            .initiate_verification(tid, user.id, &user.email)
+            .await
+            .unwrap();
 
         // First use succeeds.
         svc.verify_email(tid, &raw_token).await.unwrap();
@@ -397,7 +532,10 @@ mod tests {
         let (user_repo, token_repo, fed_repo, tid, user) = full_setup().await;
         let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
 
-        let (raw_token, _) = svc.initiate_verification(tid, user.id).await.unwrap();
+        let (raw_token, _) = svc
+            .initiate_verification(tid, user.id, &user.email)
+            .await
+            .unwrap();
         svc.verify_email(tid, &raw_token).await.unwrap();
 
         assert!(
@@ -465,7 +603,10 @@ mod tests {
 
         let svc = EmailVerificationService::new(user_repo.clone(), token_repo, fed_repo);
 
-        let (raw_token, _expires) = svc.initiate_verification(tid, user.id).await.unwrap();
+        let (raw_token, _expires) = svc
+            .initiate_verification(tid, user.id, &user.email)
+            .await
+            .unwrap();
 
         svc.verify_email(tid, &raw_token).await.unwrap();
 

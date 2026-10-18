@@ -683,7 +683,7 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
 
     async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
         // Every status, expired or not: an approved request is the one that
-        // redeems against a re-materialised client, a pending one is listed
+        // must not outlive its client, a pending one is listed
         // on the approval surface for a client that no longer exists. Tenant
         // AND client id, as `client_id` is unique only within its tenant.
         let mut result = self

@@ -62,13 +62,17 @@ images:
   # depend on. A major tag that rolls to 3.3 under a running Pi rolls that
   # measurement out from under it too.
   #
-  # `v3.2` rather than a digest: it still takes patch releases, which is what
-  # you want on a datastore, and the property above was measured across the
-  # 3.2.x line rather than on one build. Pin the digest instead if you would
-  # rather approve every change by hand — `scripts/surreal-engine-versions.sh`
-  # is the tool for checking what moved.
+  # 1.1.0 moves this from `v3.2` to `v3.3.4`, the tag the base StatefulSet,
+  # the Compose files and CI pin. 1.1.0's race fixes (#701 and the atomicity
+  # audit's items 5 – 11) rely on SurrealDB 3.3.4's write-write conflict
+  # detection — two overlapping writes to one claimed row cannot both commit —
+  # and that guarantee was read from 3.3.4 (claude_dev/release-1.1.0-plan.md
+  # §13.9). An exact tag rather than `v3.3`: stay on 3.3.x, but take a patch
+  # release deliberately and re-check the guarantee when you do. Pin the digest
+  # instead if you would rather approve every change by hand —
+  # `scripts/surreal-engine-versions.sh` is the tool for checking what moved.
   - name: surrealdb/surrealdb
-    newTag: v3.2
+    newTag: v3.3.4
 
 patches:
   # D7 / K8S-F6 — one replica each, and no HPA.

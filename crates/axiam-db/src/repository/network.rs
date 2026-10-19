@@ -93,8 +93,10 @@ const STALE_PROFILE: &str = "axiam:reply_profile_version_stale";
 const STRANDS_PROFILE: &str = "axiam:segment_update_strands_profile";
 // The gate cleared the replace or delete on a read that found no profile (or no
 // placement change); the row the write replaces or deletes says otherwise. A
-// read again goes back through the gate, which now asks `network:grant`.
-const PLACEMENT_RACED: &str = "axiam:segment_update_moves_a_profiled_placement";
+// read again goes back through the gate, which now asks `network:grant`. The
+// `axiam:` prefix keeps the marker from colliding with any text a user can put
+// in a field the transaction echoes.
+const PLACEMENT_RACED: &str = "axiam:profiled_placement_raced";
 const HAS_CHILDREN: &str = "axiam:network_segment_has_children";
 const SITE_GONE: &str = "axiam:network_site_gone";
 

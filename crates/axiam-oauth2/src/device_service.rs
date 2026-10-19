@@ -113,8 +113,7 @@ impl DeviceClient {
 }
 
 /// `POST /oauth2/device_authorization` request (RFC 8628 §3.1).
-///
-/// `Debug` is written by hand so that the credentials never reach a log line.
+// `Debug` is written by hand so that the credentials never reach a log line.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeviceAuthorizationRequest {
     /// Optional (#683): a `client_secret_basic` client names itself in the

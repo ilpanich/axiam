@@ -2321,8 +2321,8 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // from a deliberately small, human-typable space). Sharing the
             // token bucket would let ordinary token traffic pay for — or mask
             // — an attempt to exhaust that space. Per-IP, never client-keyed:
-            // RFC 8628 clients are public, so `client_id` is caller-supplied
-            // and worthless as a bucket key here.
+            // Callers are unauthenticated until the handler, so `client_id`
+            // is caller-supplied and worthless as a bucket key here.
             .service(
                 web::resource("/device_authorization")
                     .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))

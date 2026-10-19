@@ -298,8 +298,8 @@ where
         // `openid`, which `bc-authorize` requires of every request. It reports
         // the approval: what was achieved, in the class the request asked for
         // when the achievement satisfies it. The scope ceiling above can remove
-        // `openid` from an externally registered client's row (an administrator
-        // edited it after registration, #642 (c)); an ID token then would be an
+        // `openid` from an externally registered client's row (when the
+        // tenant's `dcr_allowed_scopes` drops it, #642 (c)); an ID token then would be an
         // identity assertion the client holds no scope for, as the refresh
         // grant already withholds it, so none is minted and the access token stands.
         let id_token = if redeemed.scopes.iter().any(|s| s == "openid") {

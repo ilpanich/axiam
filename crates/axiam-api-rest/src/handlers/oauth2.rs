@@ -4287,8 +4287,6 @@ fn build_error_redirect(
         .finish()
 }
 
-/// Build an OAuth2 JSON error response with the appropriate HTTP status.
-///
 /// `POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).
 ///
 /// Issues a `device_code` (the secret the device polls with), a short

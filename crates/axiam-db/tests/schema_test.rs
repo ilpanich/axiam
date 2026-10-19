@@ -147,3 +147,70 @@ async fn unique_index_prevents_duplicate_slugs() {
 
     assert!(result.is_err(), "duplicate slug should be rejected");
 }
+
+/// #704 (R110W6-07) — a datastore that recorded 1 … 98 and 100 (it ran a build
+/// that carried v100 but not v99) applies v99 on its next start. The runner
+/// used to apply only versions above the highest recorded one, so v99 — the
+/// certificate serial column and its issuer-unique index (#653) — was skipped
+/// for ever.
+#[tokio::test]
+async fn a_version_below_the_highest_recorded_is_still_applied() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let mut all: Vec<u32> = result.take(0).unwrap();
+    all.sort_unstable();
+
+    // Un-apply v99 (its DDL and its record) and forget every version above
+    // 100, leaving exactly 1 … 98 and 100 recorded (86 … 89 were never
+    // claimed, so "1 … 98" is every listed version up to 98).
+    db.query(
+        "REMOVE INDEX idx_certificate_issuer_serial ON TABLE certificate; \
+         REMOVE INDEX idx_ca_certificate_parent_serial ON TABLE ca_certificate; \
+         REMOVE FIELD serial ON TABLE certificate; \
+         REMOVE FIELD serial ON TABLE ca_certificate; \
+         DELETE _migration WHERE version = 99 OR version > 100;",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let mut before: Vec<u32> = result.take(0).unwrap();
+    before.sort_unstable();
+    let expected_before: Vec<u32> = all
+        .iter()
+        .copied()
+        .filter(|&v| v <= 98 || v == 100)
+        .collect();
+    assert!(expected_before.contains(&98) && !expected_before.contains(&99));
+    assert_eq!(before, expected_before);
+
+    axiam_db::run_migrations(&db)
+        .await
+        .expect("a migration below the highest recorded must apply");
+
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let mut after: Vec<u32> = result.take(0).unwrap();
+    after.sort_unstable();
+    assert_eq!(after, all, "every listed migration is recorded once");
+
+    let mut result = db.query("INFO FOR TABLE certificate").await.unwrap();
+    let info: Option<surrealdb_types::Value> = result.take(0).unwrap();
+    let info = format!("{:?}", info.expect("INFO FOR TABLE should return a value"));
+    assert!(
+        info.contains("idx_certificate_issuer_serial"),
+        "v99 must have applied: idx_certificate_issuer_serial is missing"
+    );
+}

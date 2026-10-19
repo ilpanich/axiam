@@ -4,9 +4,11 @@
 //! UUIDs are stored as strings. Enums are stored as strings with
 //! ASSERT constraints for validation.
 
+use std::collections::HashSet;
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
-use tracing::info;
+
+use tracing::{info, warn};
 
 use crate::error::DbError;
 
@@ -27,13 +29,6 @@ DEFINE TABLE IF NOT EXISTS _migration_lock SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS locked_at ON TABLE _migration_lock TYPE datetime \
     DEFAULT time::now();
 ";
-
-#[derive(Debug, SurrealValue)]
-struct MigrationRecord {
-    version: u32,
-    #[allow(dead_code)]
-    name: String,
-}
 
 struct Migration {
     version: u32,
@@ -2489,7 +2484,13 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 /// Run all pending migrations against the given SurrealDB client.
 ///
 /// Creates `_migration` and `_migration_lock` tracking tables on first run,
-/// then applies each pending migration atomically: the schema DDL and the
+/// then applies, in ascending version order, **every listed migration whose
+/// version is not recorded** — not merely those above the highest recorded
+/// one (#704, R110W6-07). A datastore that recorded v100 without v99 (one that
+/// ran a build carrying v100 but not v99) therefore applies v99 on its next
+/// start instead of skipping it for ever; such an out-of-order application is
+/// logged at `warn`. Every migration is idempotent DDL, so applying one late is
+/// safe. Each pending migration is applied atomically: the schema DDL and the
 /// version-record INSERT are wrapped in a single `BEGIN TRANSACTION …
 /// COMMIT TRANSACTION` so that a mid-step failure leaves the row
 /// re-selectable (CQ-B06 / REQ-14 AC-5).
@@ -2516,20 +2517,28 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
     .check()
     .map_err(|e| DbError::Migration(format!("failed to acquire _migration_lock: {e}")))?;
 
-    // Determine current schema version.
-    let mut result = db
-        .query("SELECT * FROM _migration ORDER BY version DESC LIMIT 1")
-        .await?;
-    let records: Vec<MigrationRecord> = result.take(0)?;
-    let current_version = records.first().map(|m| m.version).unwrap_or(0);
+    // Every recorded version, not just the highest: a gap below the highest
+    // (v100 recorded, v99 not) is a migration still to apply (#704).
+    let mut result = db.query("SELECT VALUE version FROM _migration").await?;
+    let recorded: HashSet<u32> = result.take::<Vec<u32>>(0)?.into_iter().collect();
+    let highest_recorded = recorded.iter().copied().max().unwrap_or(0);
 
     for migration in MIGRATIONS {
-        if migration.version > current_version {
-            info!(
-                version = migration.version,
-                name = migration.name,
-                "Applying migration"
-            );
+        if !recorded.contains(&migration.version) {
+            if migration.version < highest_recorded {
+                warn!(
+                    version = migration.version,
+                    name = migration.name,
+                    highest_recorded,
+                    "Applying migration out of order: a later version is already recorded"
+                );
+            } else {
+                info!(
+                    version = migration.version,
+                    name = migration.name,
+                    "Applying migration"
+                );
+            }
 
             // Wrap the schema DDL and the version-record INSERT in a single
             // transaction (CQ-B06).  If the DDL succeeds but the INSERT
@@ -7288,6 +7297,30 @@ mod tests {
                 "Migrations must be in ascending version order"
             );
         }
+    }
+
+    /// Versions that were never claimed and never will be: the 1.0.0 release
+    /// waves split the numbers (W2 taking 85 … 89, W1 90 onwards) and W2 used
+    /// only 85. Released datastores have recorded 90 and later, so the hole is
+    /// permanent; it is named here so that it is the only one.
+    const UNCLAIMED_VERSIONS: std::ops::RangeInclusive<u32> = 86..=89;
+
+    /// #704 (R110W6-07) — the list is exactly versions 1 … N, in order, with no
+    /// gap and no repeat, whatever N is, except the one historical hole
+    /// [`UNCLAIMED_VERSIONS`]. The runner applies every listed version that is
+    /// not recorded, so a version missing from the list would be a migration no
+    /// datastore ever receives, and nothing else would notice.
+    #[test]
+    fn migrations_are_contiguous() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let newest = *versions.last().expect("at least one migration");
+        let expected: Vec<u32> = (1..=newest)
+            .filter(|v| !UNCLAIMED_VERSIONS.contains(v))
+            .collect();
+        assert_eq!(
+            versions, expected,
+            "migration versions must be exactly 1 … N in order (86 … 89 excepted)"
+        );
     }
 
     /// T23.7.1 (continued) / D-61 — v81 stores the signing algorithm, admits

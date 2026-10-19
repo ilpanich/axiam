@@ -189,6 +189,25 @@ async fn recent_export_receipt<C: Connection + Clone>(
     }))
 }
 
+/// The tenant `metadata` key the server once read as "this row is an orphan
+/// purge's claim marker". It has no meaning in a caller's metadata and is
+/// refused there (#664).
+const RESERVED_METADATA_KEY: &str = "orphan_purge";
+
+/// `422` when `metadata` carries [`RESERVED_METADATA_KEY`] at its top level.
+fn reject_reserved_metadata(metadata: Option<&serde_json::Value>) -> Option<HttpResponse> {
+    metadata
+        .and_then(|m| m.get(RESERVED_METADATA_KEY))
+        .map(|_| {
+            crate::error::unprocessable_entity(
+                "reserved_metadata_key",
+                format!(
+                    "`{RESERVED_METADATA_KEY}` is reserved and cannot be set in tenant metadata"
+                ),
+            )
+        })
+}
+
 /// Request body for tenant creation (organization_id comes from the URL path).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTenantRequest {
@@ -261,6 +280,10 @@ pub async fn create<C: Connection + Clone>(
                 axiam_core::models::tenant::ORGANIZATION_TENANT_SLUG
             ),
         }));
+    }
+
+    if let Some(refusal) = reject_reserved_metadata(req.metadata.as_ref()) {
+        return Ok(refusal);
     }
 
     let input = CreateTenant {
@@ -639,10 +662,11 @@ pub async fn update<C: Connection + Clone>(
         }
         .into());
     }
-    let tenant = state
-        .tenant_repo
-        .update(path.tenant_id, body.into_inner())
-        .await?;
+    let body = body.into_inner();
+    if let Some(refusal) = reject_reserved_metadata(body.metadata.as_ref()) {
+        return Ok(refusal);
+    }
+    let tenant = state.tenant_repo.update(path.tenant_id, body).await?;
     Ok(HttpResponse::Ok().json(tenant))
 }
 

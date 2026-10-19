@@ -15,9 +15,14 @@ use crate::helpers::{
     CountRow, classify_write_error, paginate, retry_hot_row, take_first_or_not_found,
 };
 
-/// The `metadata` key of the tenant row an orphan purge's claim writes
-/// (R101W1-09 (a); [`SurrealTenantRepository::claim_orphan_purge`]).
-const ORPHAN_PURGE_MARKER: &str = "orphan_purge";
+/// The condition, on a `tenant` row selected by record id (`$id`, `$nil`),
+/// that makes it an orphan purge's claim marker
+/// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): the nil
+/// organization id and the `orphan-purge-<id>` slug. A tenant is created under
+/// a real organization, so no API writes the pair, whereas `metadata` is
+/// caller-supplied and no key in it can mark a row (#664).
+const ORPHAN_MARKER_CONDITION: &str =
+    "organization_id = $nil AND slug = string::concat('orphan-purge-', $id)";
 
 /// D-55: bumped whenever this process creates or deletes a tenant or an
 /// organization, **after** the write commits, so a tenant count cached at an
@@ -346,16 +351,17 @@ impl<C: Connection> SurrealTenantRepository<C> {
     }
 
     /// `None` when `id` has no tombstoned tenant row; otherwise whether that
-    /// row is an orphan purge's claim marker ([`ORPHAN_PURGE_MARKER`]).
+    /// row is an orphan purge's claim marker ([`ORPHAN_MARKER_CONDITION`]).
     async fn tombstoned_row_is_orphan_marker(&self, id: Uuid) -> AxiamResult<Option<bool>> {
         let mut result = self
             .db
             .current()
             .query(format!(
-                "SELECT VALUE metadata.{ORPHAN_PURGE_MARKER} = true \
+                "SELECT VALUE ({ORPHAN_MARKER_CONDITION}) \
                  FROM type::record('tenant', $id) WHERE deleted_at != NONE"
             ))
             .bind(("id", id.to_string()))
+            .bind(("nil", Uuid::nil().to_string()))
             .await
             .map_err(DbError::from)?
             .check()
@@ -434,7 +440,7 @@ impl<C: Connection> SurrealTenantRepository<C> {
     ///
     /// An orphan has no tenant row for [`Self::claim_purge`] to stamp, so the
     /// claim **is** a row: a tombstoned tenant row under the orphan's own id,
-    /// with `metadata.orphan_purge = true` and `purge_claimed_at = now`. A
+    /// with the nil organization id, the slug `orphan-purge-<id>` and `purge_claimed_at = now`. A
     /// record id is unique, so of replicas whose orphan scans coincide exactly
     /// one `CREATE` succeeds (the `bootstrap_lock` and `organization_scope`
     /// pattern); the others fail on the existing id, or lose the optimistic
@@ -454,16 +460,16 @@ impl<C: Connection> SurrealTenantRepository<C> {
             let mut result = self
                 .db
                 .current()
-                .query(format!(
+                .query(
                     "CREATE type::record('tenant', $id) SET \
                        organization_id = $nil, \
                        name = 'orphaned tenant id', \
                        slug = $slug, \
-                       metadata = {{ {ORPHAN_PURGE_MARKER}: true }}, \
+                       metadata = {}, \
                        deleted_at = $now, \
                        purge_claimed_at = $now \
-                     RETURN VALUE meta::id(id)"
-                ))
+                     RETURN VALUE meta::id(id)",
+                )
                 .bind(("id", id.to_string()))
                 .bind(("nil", Uuid::nil().to_string()))
                 .bind(("slug", format!("orphan-purge-{id}")))
@@ -493,10 +499,11 @@ impl<C: Connection> SurrealTenantRepository<C> {
                 .current()
                 .query(format!(
                     "DELETE type::record('tenant', $id) \
-                     WHERE metadata.{ORPHAN_PURGE_MARKER} = true \
+                     WHERE {ORPHAN_MARKER_CONDITION} \
                        AND purge_claimed_at = $claimed_at"
                 ))
                 .bind(("id", id.to_string()))
+                .bind(("nil", Uuid::nil().to_string()))
                 .bind(("claimed_at", claimed_at))
                 .await
                 .map_err(DbError::from)?
@@ -574,10 +581,11 @@ impl<C: Connection> SurrealTenantRepository<C> {
                 .db
                 .current()
                 .query(format!(
-                    "SELECT VALUE metadata.{ORPHAN_PURGE_MARKER} = true \
+                    "SELECT VALUE ({ORPHAN_MARKER_CONDITION}) \
                      FROM type::record('tenant', $id)"
                 ))
                 .bind(("id", id.to_string()))
+                .bind(("nil", Uuid::nil().to_string()))
                 .await
                 .map_err(DbError::from)?
                 .check()

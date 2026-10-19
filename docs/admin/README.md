@@ -170,6 +170,13 @@ POST /api/v1/organizations/{org_id}/tenants
 { "name": "Production", "slug": "prod", "metadata": {} }
 ```
 
+A tenant's `metadata` is free-form JSON for your own use, with one reserved
+key: `orphan_purge` is refused (`422`, `reserved_metadata_key`) on create and
+update. It once marked the claim row of an orphan purge; the server now
+recognises that row by what no API writes (the nil organization id and an
+`orphan-purge-<id>` slug), so a tenant's metadata can never change how its data
+is purged.
+
 Creating a tenant automatically seeds its default permission registry so RBAC
 works immediately — you do not need to manually create the baseline
 permission set before assigning roles in a new tenant.

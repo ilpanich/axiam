@@ -544,7 +544,22 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.5 W5
 
+- **Head:** `fd9992b4f` on `claude/release-1.1.1-w5` (10 commits on `main`, every one carrying a `gpgsig`; merge into the plan branch follows W1 … W4, in order).
+- **Commits:** W5.1 `b930db3` (the rename, D-1 default Static/Live), W5.2 `2dab9f6` (#693), W5.3 `b915783` (#694), W5.4 `64cf8ce` (#695), W5.5 `7424392` (#696), W5.6 `c90c8c1` (#697, #713), W5.7 `4cd4a10c9` (#707), W5.8 `8450bc2` (#698, #711's sentence), W5.9 `fd9992b4f` (F4 review, `claude_dev/security-review-release-1.1.1-w5-2026-10-19.md`).
+- **Executors:** every task ran at its row's model (Sonnet 5.5; W5.9 Opus 5.5); none stopped short; no re-size.
+- **Where the tree overruled the plan:** W5.1 also renamed ~30 "RADIUS D4" comments the §6.1 table did not list (other crates, scripts, the console e2e matrix) and found `docs/pki/README.md` carries no D3/D4; W5.3's trap already existed in `fetch-crl.sh`, so the commit adds the test (TERM, HUP; INT is ignored by a backgrounded shell) and the header text only; W5.6 added twelve paths, the two issues' full lists, not eleven; W5.7's retry needs `axiam_decide { invalid = 1 }`, since `rlm_rest` returns `invalid` for a `401` and the review's form never reached the retry; W5.8 found §5's exposure paragraph already present and replaced only its "planned" sentence.
+- **Oracles:** `freeradius -XC` (pinned 3.2.8) passes on both profiles and on the guide's RadSec block, and refuses the block without `tls_max_version` (orchestrator, W5.7, W5.9); the local RADIUS e2e passes on both profiles (W5.9); `radius-e2e.yml` dispatched by the orchestrator: run 39302612696 on `c90c8c1` and run 39306303259 on `8450bc2`, both **success**; `fetch-crl-test.sh` 85/85 under `dash` and `bash`.
+- **F4 (W5.9):** no Critical, High or Medium. Low #720 (concurrent `401`s can put the refused token back in the cache; fail-closed), Informational #721 … #725, all on `1.1.x` for 1.1.2.
+- **For W7.1:** contract §36's "RADIUS D4" (two places) → "the Live profile", "(formerly RADIUS D4)" once. **For W8.3:** T-462 (exit 3, `no-cache`), T-486's concurrency caveat (#720, #722), T-487's "eighteen" stand-in answers (now nineteen), `docs/compliance/FINDINGS.md:64`, `website/src/data.ts:501`. **For W8.4:** the moved file names and variables, and that a 1.1.0 `raddb` set mixed with 1.1.1 files, or a kept `AXIAM_D4_URL`, rejects every device (fail closed); `fetch-crl.sh`'s new exit status 3.
+
 ### 12.6 W6
+
+- **Head:** `45ffae3` on `claude/release-1.1.1-w6` (2 commits on `main`, both carrying a `gpgsig`).
+- **Commits:** W6.1 `a9cb5a9` (#699: `bench-quick` anchors `BENCH_CERTS_DIR` and writes `results/quick/meta.json`), W6.2 `45ffae3` (#691: the five cleanup steps guarded by `steps.inputs.outcome == 'success'`).
+- **W6.3 (#719):** the sparse index read once on 2026-10-19 at ~18:03 UTC: `utoipa-swagger-ui` newest non-yanked **10.0.1 → `zip ^8.6`** (10.0.0 → `^8.6`). No release on `zip ≥ 9`: no commit; **#719 stays open on `1.1.x` and the PR does not name it (D-9).**
+- **Where the tree overruled the plan:** the `justfile` is `benchmarks/justfile` and the runner `benchmarks/runner/run-benchmark.sh`; `bench-quick` wrote no `meta.json` before; the fifth guarded step ("Collect … logs") was `failure() || …`, not `always()`, and carries the guard ANDed.
+- **Workflow dispatch (W6.2's oracle):** the orchestrator dispatched `fapi-conformance.yml` on the branch with `plan_name=Bad_Name` (run 39299314310): exactly one red step, "Validate dispatch inputs"; the five guarded steps skipped.
+- **Executors:** Sonnet 5.5 for all three, as the rows name; no re-size. No F4 of its own (W8.2 reads it).
 
 ### 12.7 W7 — the contract, the eleven SDKs and the conformance review
 

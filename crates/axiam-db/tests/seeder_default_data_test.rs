@@ -845,3 +845,151 @@ async fn reconcile_withholds_network_grants_from_a_group_held_super_admin() {
         .contains(&"network:read".to_owned())
     );
 }
+
+/// #702 (R110W6-05, T-483): the organization scope's super-admin is global and
+/// reaches every tenant of the organization, so it holds none of the six
+/// `network:` permissions an ordinary tenant's super-admin is seeded with.
+#[tokio::test]
+async fn the_organization_scope_super_admin_holds_no_network_permission() {
+    let (db, org, _ordinary) = setup().await;
+    let scope = org_scope_tenant(&db, org).await;
+    seed_permissions(&db, scope, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, scope, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+
+    for role in [
+        roles.super_admin_role_id,
+        roles.admin_role_id,
+        roles.viewer_role_id,
+    ] {
+        let held = actions_of(&db, scope, role).await;
+        assert!(
+            held.iter().all(|a| !a.starts_with("network:")),
+            "no network: permission in the organization scope: {held:?}"
+        );
+    }
+    // The rest of the registry is unaffected, and a reconcile adds nothing back.
+    assert!(
+        !actions_of(&db, scope, roles.super_admin_role_id)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        reconcile_default_role_grants(&db, scope).await.unwrap(),
+        ReconcileOutcome::default()
+    );
+}
+
+/// A deployment seeded before the fix holds the six on the organization scope's
+/// super-admin. The boot reconcile revokes them, writes one audit row per
+/// revocation, leaves the ordinary tenant's super-admin alone, and a second run
+/// changes nothing.
+#[tokio::test]
+async fn reconcile_revokes_the_network_grants_from_an_upgraded_organization_scope() {
+    use axiam_core::models::network::SEEDED_SUPER_ADMIN_NETWORK_ACTIONS;
+    use axiam_core::repository::AuditLogRepository;
+
+    let (db, org, ordinary) = setup().await;
+    let scope = org_scope_tenant(&db, org).await;
+    seed_permissions(&db, scope, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    seed_permissions(&db, ordinary, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, scope, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+    let ordinary_roles = seed_default_roles(&db, ordinary, NETWORK_REGISTRY)
+        .await
+        .unwrap();
+
+    // The state 1.1.0 left: the six, granted to the organization scope's
+    // super-admin.
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    for p in perm_repo
+        .list(
+            scope,
+            Pagination {
+                offset: 0,
+                limit: 1000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .filter(|p| SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&p.action.as_str()))
+    {
+        perm_repo
+            .grant_to_role(scope, roles.super_admin_role_id, p.id)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        actions_of(&db, scope, roles.super_admin_role_id)
+            .await
+            .iter()
+            .filter(|a| a.starts_with("network:"))
+            .count(),
+        SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
+    );
+
+    let outcome = reconcile_default_role_grants(&db, scope).await.unwrap();
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            granted: 0,
+            revoked: SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
+        }
+    );
+    assert!(
+        actions_of(&db, scope, roles.super_admin_role_id)
+            .await
+            .iter()
+            .all(|a| !a.starts_with("network:"))
+    );
+    let rows = axiam_db::repository::SurrealAuditLogRepository::new(db.clone())
+        .list(
+            scope,
+            axiam_core::repository::AuditLogFilter {
+                action: Some("network_role.permission_revoked_by_reconcile".into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(rows.len(), SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len());
+    assert!(
+        rows.iter()
+            .all(|r| r.resource_id == Some(roles.super_admin_role_id))
+    );
+
+    assert_eq!(
+        reconcile_default_role_grants(&db, scope).await.unwrap(),
+        ReconcileOutcome::default()
+    );
+    // The ordinary tenant's super-admin keeps its six.
+    assert_eq!(
+        reconcile_default_role_grants(&db, ordinary).await.unwrap(),
+        ReconcileOutcome::default()
+    );
+    assert_eq!(
+        actions_of(&db, ordinary, ordinary_roles.super_admin_role_id)
+            .await
+            .iter()
+            .filter(|a| a.starts_with("network:"))
+            .count(),
+        SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
+    );
+}

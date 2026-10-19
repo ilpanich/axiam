@@ -1398,6 +1398,7 @@ async fn serialising_world() -> (Arc<World>, tempfile::TempDir) {
 async fn gate(
     w: &World,
     writer: Uuid,
+    subject_scope: SubjectScope,
     write: axiam_authz::network_gate::NetworkWrite<'_>,
 ) -> axiam_authz::network_gate::GateVerdict {
     use axiam_authz::network_gate::{GateWriter, RepositoryGateStore, authorize_network_write};
@@ -1422,7 +1423,7 @@ async fn gate(
     let writer = GateWriter {
         tenant_id: w.tenant,
         subject_id: writer,
-        subject_scope: SubjectScope::Tenant,
+        subject_scope,
     };
     authorize_network_write(&engine, &store, writer, write)
         .await
@@ -1475,7 +1476,7 @@ async fn send(
             is_global: Some(true),
         },
     };
-    let claim = match gate(&w, writer, write).await {
+    let claim = match gate(&w, writer, SubjectScope::Tenant, write).await {
         Ok(cleared) => cleared.role_claim(),
         Err(refusal) => panic!("{request:?}: the gate refused on its own read: {refusal:?}"),
     };
@@ -1828,4 +1829,80 @@ async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
         }
     }
     println!("quarantine won {quarantined}, revoke won {released} of {ROUNDS}");
+}
+
+/// #702 (R110W6-05, T-483): an organization-level administrator is not a network
+/// administrator in a child tenant. The organization scope's seeded super-admin
+/// is global, so it reaches every tenant of the organization; it holds no
+/// `network:` permission, and the gate refuses it `network:grant` at the child
+/// tenant's `/network` while clearing the child tenant's own super-admin.
+#[actix_rt::test]
+async fn an_organization_level_writer_is_refused_network_grant_in_a_child_tenant() {
+    let w = World::new().await;
+    w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    let org_tenant = SurrealTenantRepository::new(w.db.clone())
+        .create(CreateTenant {
+            organization_id: w.org,
+            kind: TenantKind::Organization,
+            name: "Org scope".into(),
+            slug: "org-scope".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    seed_permissions(&w.db, org_tenant, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&w.db, org_tenant, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let org_admin = SurrealUserRepository::new(w.db.clone())
+        .create(CreateUser {
+            tenant_id: org_tenant,
+            username: "org-admin".into(),
+            email: "org-admin@example.com".into(),
+            password: axiam_test_support::test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    w.roles()
+        .assign_to_user(
+            org_tenant,
+            org_admin,
+            roles.super_admin_role_id,
+            AssignmentScope::from(None),
+        )
+        .await
+        .unwrap();
+
+    // A role carrying `network:join`, assigned to a user: a write that needs
+    // `network:grant` at `/network` of the child tenant (§5.3).
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let target = w.user(&[]).await;
+    let assign = || axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::User(target),
+        resource_id: None,
+        inherit: true,
+    };
+
+    let org_scope = SubjectScope::Organization {
+        tenant_id: org_tenant,
+    };
+    assert!(
+        gate(&w, org_admin, org_scope, assign()).await.is_err(),
+        "the organization scope's super-admin holds no network:grant in the child tenant"
+    );
+
+    // The control: the child tenant's own super-admin clears the same write.
+    let local = w.user(&[(w.role_named("super-admin").await, None)]).await;
+    assert!(
+        gate(&w, local, SubjectScope::Tenant, assign())
+            .await
+            .is_ok(),
+        "the child tenant's own super-admin still holds network:grant"
+    );
 }

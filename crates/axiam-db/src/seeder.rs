@@ -10,10 +10,13 @@
 //! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
 use axiam_core::error::AxiamError;
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::network::{SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, is_network_action};
 use axiam_core::models::role::CreateRole;
 use axiam_core::permission_scope::is_organization_level_action;
-use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository, TenantRepository};
+use axiam_core::repository::{
+    AuditLogRepository, Pagination, PermissionRepository, RoleRepository, TenantRepository,
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
@@ -24,7 +27,8 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::helpers::{CountRow, classify_write_error};
 use crate::repository::{
-    SurrealPermissionRepository, SurrealRoleRepository, SurrealTenantRepository,
+    SurrealAuditLogRepository, SurrealPermissionRepository, SurrealRoleRepository,
+    SurrealTenantRepository,
 };
 
 /// Row struct for reading a seeder_state record.
@@ -292,22 +296,25 @@ async fn mint_setup_token<C: Connection>(db: &Surreal<C>) -> Result<String, DbEr
     Ok(token)
 }
 
-/// Whether the seeded roles of `tenant_id` may hold organization-level
-/// actions — true only for the organization's own scope.
+/// Whether `tenant_id` is the organization's own scope — the only tenant whose
+/// seeded roles may hold organization-level actions — or `None` when the tenant
+/// cannot be resolved.
 ///
-/// Fails **closed**: a tenant that cannot be resolved is treated as ordinary,
-/// so the organization-level actions are withheld. Being wrong in that
-/// direction costs an operator a grant they can add back by hand; being wrong
-/// in the other seeds the escalation this filter exists to prevent.
-async fn tenant_may_hold_organization_actions<C: Connection>(
+/// The callers fail closed in opposite directions, so the unresolved case is
+/// theirs to settle: the organization-level actions are withheld from a tenant
+/// that is not known to be the organization scope (being wrong costs an
+/// operator a grant they can add back by hand; the other way seeds the
+/// escalation the filter exists to prevent), and the `network:` permissions
+/// are withheld from one that is not known to be an ordinary tenant (#702).
+async fn tenant_is_organization_scope<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,
-) -> bool {
+) -> Option<bool> {
     SurrealTenantRepository::new(db.clone())
         .get_by_id(tenant_id)
         .await
+        .ok()
         .map(|t| t.is_organization_scope())
-        .unwrap_or(false)
 }
 
 /// Seed the three default roles — super-admin, admin, and viewer — for the
@@ -454,7 +461,9 @@ pub async fn seed_default_roles<C: Connection>(
 
     // B-04 defence in depth: an ordinary tenant's roles are not seeded with
     // organization-level actions. See this function's doc comment.
-    let may_hold_org_actions = tenant_may_hold_organization_actions(db, tenant_id).await;
+    let organization_scope = tenant_is_organization_scope(db, tenant_id).await;
+    let may_hold_org_actions = organization_scope == Some(true);
+    let network_super_admin = organization_scope == Some(false);
     let withheld = |action: &str| !may_hold_org_actions && is_organization_level_action(action);
 
     for perm in &permissions.items {
@@ -464,7 +473,9 @@ pub async fn seed_default_roles<C: Connection>(
 
         // super-admin gets ALL permissions, except the parts of the reserved
         // `network:` namespace a bootstrap role must not carry (see above).
-        if super_admin_may_hold(&perm.action) && !super_admin_have.contains(&perm.id) {
+        if super_admin_may_hold(&perm.action, network_super_admin)
+            && !super_admin_have.contains(&perm.id)
+        {
             grant_to_role_idempotent(&perm_repo, tenant_id, super_admin_id, perm.id)
                 .await
                 .map_err(|e| {
@@ -511,10 +522,17 @@ pub async fn seed_default_roles<C: Connection>(
 }
 
 /// Whether the seeded `super-admin` may hold `action`: everything outside the
-/// reserved `network:` namespace, and [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`]
-/// inside it.
-fn super_admin_may_hold(action: &str) -> bool {
-    !is_network_action(action) || SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&action)
+/// reserved `network:` namespace, and inside it [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`]
+/// in an ordinary tenant only.
+///
+/// `ordinary_tenant` is false for the organization's own scope, whose
+/// super-admin is global and so reaches every tenant of the organization: the
+/// exemption would carry the network meta permissions across tenants (#702,
+/// T-483), which the design note's §7 rules out. It is also false for a tenant
+/// that could not be resolved, so the question fails closed.
+fn super_admin_may_hold(action: &str, ordinary_tenant: bool) -> bool {
+    !is_network_action(action)
+        || (ordinary_tenant && SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&action))
 }
 
 /// Whether the seeded `admin` may hold `action`: everything but
@@ -636,6 +654,50 @@ async fn grant_to_role_idempotent<C: Connection>(
     }
 }
 
+/// Record one `network:` revocation of the boot reconcile as an audit row.
+///
+/// A capability taken away from a role is something a reviewer must be able to
+/// find afterwards, and the boot log line is not durable. The actor is the
+/// system; the row names the role, the permission and the action. A failed
+/// write is logged and does not stop the boot: the revocation has already
+/// happened, and refusing to start would leave the escalation in place.
+async fn audit_network_revocation<C: Connection>(
+    db: &Surreal<C>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+    role: &str,
+    action: &str,
+    permission_id: Uuid,
+) {
+    let entry = CreateAuditLogEntry {
+        tenant_id,
+        actor_id: Uuid::nil(),
+        actor_type: ActorType::System,
+        action: "network_role.permission_revoked_by_reconcile".to_owned(),
+        resource_id: Some(role_id),
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: Some(serde_json::json!({
+            "role": role,
+            "permission": action,
+            "permission_id": permission_id.to_string(),
+            "reason": "the seeded role may not hold this network: permission in this tenant",
+        })),
+    };
+    if let Err(e) = SurrealAuditLogRepository::new(db.clone())
+        .append(entry)
+        .await
+    {
+        tracing::error!(
+            %tenant_id,
+            %role_id,
+            action,
+            error = %e,
+            "audit write for a network: permission revocation failed (non-fatal)"
+        );
+    }
+}
+
 /// What [`reconcile_default_role_grants`] changed for one tenant.
 ///
 /// Two counters rather than one, because they mean opposite things to an
@@ -691,7 +753,9 @@ impl ReconcileOutcome {
 /// * actions of the reserved `network:` namespace that
 ///   [`seed_default_roles`] does not give the role (every one for `admin`,
 ///   `network:join` and the administrative class for `super-admin`), in every
-///   tenant.
+///   tenant; and in the organization's own scope, where the super-admin is
+///   global and would carry them into every tenant of the organization, all of
+///   them (#702, T-483). One audit row is written per revocation.
 ///
 /// It is not a general "make the grants match the seeding rules" pass: an
 /// operator who deliberately granted `users:delete` to `viewer` keeps it. Only
@@ -758,7 +822,9 @@ pub async fn reconcile_default_role_grants<C: Connection>(
     // B-04 defence in depth — see this function's doc comment. In an ordinary
     // tenant the organization-level actions are neither granted below nor left
     // in place if a previous version granted them.
-    let may_hold_org_actions = tenant_may_hold_organization_actions(db, tenant_id).await;
+    let organization_scope = tenant_is_organization_scope(db, tenant_id).await;
+    let may_hold_org_actions = organization_scope == Some(true);
+    let network_super_admin = organization_scope == Some(false);
 
     let mut outcome = ReconcileOutcome::default();
     for perm in &permissions.items {
@@ -768,14 +834,15 @@ pub async fn reconcile_default_role_grants<C: Connection>(
         // administrative roles are touched, as for the organization-level
         // actions below.
         if is_network_action(&perm.action)
-            && (!super_admin_may_hold(&perm.action) || !admin_may_hold(&perm.action))
+            && (!super_admin_may_hold(&perm.action, network_super_admin)
+                || !admin_may_hold(&perm.action))
         {
             for (role_id, have, role, may) in [
                 (
                     super_admin_id,
                     &sa_have,
                     "super-admin",
-                    super_admin_may_hold(&perm.action),
+                    super_admin_may_hold(&perm.action, network_super_admin),
                 ),
                 (admin_id, &admin_have, "admin", admin_may_hold(&perm.action)),
             ] {
@@ -790,9 +857,13 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                             ))
                         })?;
                     outcome.revoked += 1;
+                    audit_network_revocation(db, tenant_id, role_id, role, &perm.action, perm.id)
+                        .await;
                 }
             }
-            if super_admin_may_hold(&perm.action) && !sa_have.contains(&perm.id) {
+            if super_admin_may_hold(&perm.action, network_super_admin)
+                && !sa_have.contains(&perm.id)
+            {
                 // §4.2 rule 2 binds the reconcile too (R110W6-04): the
                 // grant's own transaction refuses a `network:` permission to
                 // a super-admin a group holds — which a release before 1.1.0

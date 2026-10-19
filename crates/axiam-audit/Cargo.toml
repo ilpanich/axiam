@@ -20,4 +20,5 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

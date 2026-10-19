@@ -229,9 +229,7 @@ pub async fn refused_after_clearance<C: Connection + Clone>(
         ),
         _ => return Err(AxiamApiError(error)),
     };
-    let AxiamError::Conflict { reason } = &error else {
-        return Err(AxiamApiError(error));
-    };
+    let reason = error.to_string();
     let actor = GateActor::principal(principal);
     let entry = CreateAuditLogEntry {
         tenant_id: actor.writer.tenant_id,

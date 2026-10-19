@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`RoleRepository`].
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::{AxiamError, AxiamResult, NetworkConflict};
 use axiam_core::id::new_id;
 use axiam_core::models::role::{
     AssignmentScope, CreateRole, Role, RoleAssignment, RoleClaim, RoleEpochs,
@@ -208,16 +208,13 @@ pub(crate) const NETWORK_ACTION_REGEX: &str = r"/^\s*(?i-u:network:)/";
 /// The `409` a write refused by its claim or by the in-transaction rule 2
 /// answers.
 ///
-/// "changed since it was read" is the sentence `NetworkConflictReason::of`
-/// reads as `stale_version`: the gate read the role before the other write
-/// landed, and a request sent again goes back through the gate, which decides
-/// on the role as it now is.
+/// A [`NetworkConflict::StaleRole`]: the REST layer reads it as `stale_version`
+/// — the gate read the role before the other write landed, and a request sent
+/// again goes back through the gate, which decides on the role as it now is.
 pub(crate) fn network_role_raced(what_landed: &str) -> AxiamError {
-    AxiamError::Conflict {
-        reason: format!(
-            "the role changed since it was read ({what_landed}); read it again and retry"
-        ),
-    }
+    AxiamError::Network(NetworkConflict::StaleRole {
+        what_landed: what_landed.into(),
+    })
 }
 
 /// Which epochs a write compares against its claim.

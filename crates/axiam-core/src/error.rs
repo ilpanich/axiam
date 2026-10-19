@@ -131,6 +131,15 @@ pub enum AxiamError {
     #[error("the datastore is busy; retry this request")]
     WriteContention,
 
+    /// A refusal of a network route (segment, reply profile, policy, or a
+    /// network role write), typed so the REST layer maps it to its `409`
+    /// `reason_code` without reading the sentence back.
+    ///
+    /// `Display` is the exact sentence the wire carries; `409` like
+    /// [`Self::Conflict`] and [`Self::AlreadyExists`].
+    #[error("{0}")]
+    Network(NetworkConflict),
+
     #[error("SAML assertion replay detected")]
     ReplayDetected,
 
@@ -139,3 +148,130 @@ pub enum AxiamError {
 }
 
 pub type AxiamResult<T> = Result<T, AxiamError>;
+
+/// Why a network write was refused with `409`.
+///
+/// Raised at the repository boundary, from the markers the write transactions
+/// `THROW` and the checks the repositories make themselves; the REST layer maps
+/// each variant to its `reason_code` in one place. `Display` is the sentence
+/// the response carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkConflict {
+    /// The segment's version is not the one the writer read.
+    StaleSegment,
+    /// The reply profile's version is not the one the writer read.
+    StaleProfile,
+    /// The tenant network policy's version is not the one the writer read.
+    StalePolicy,
+    /// A reply profile was written on the segment between the gate's read and
+    /// the write.
+    PlacementRaced,
+    /// The role changed between the gate's read and the write; `what_landed`
+    /// says what.
+    StaleRole { what_landed: String },
+    /// The new `filter_ids` would leave the segment's reply profile outside its
+    /// envelope. `segment_id` and `filter_id` name the profile and the
+    /// `filter_id` it uses, once the caller has looked them up.
+    StrandsProfile {
+        segment_id: Option<uuid::Uuid>,
+        filter_id: Option<String>,
+    },
+    /// The segment still has child resources.
+    HasChildren,
+    /// The segment's site was removed while the segment was being written.
+    SiteGone,
+    /// The site already has a segment with this `vlan_id`.
+    DuplicateVlan,
+    /// The site already has a segment with this rank.
+    DuplicateRank,
+    /// The site already has a segment of this name.
+    DuplicateName,
+    /// The segment already has a reply profile.
+    ProfileExists,
+}
+
+impl NetworkConflict {
+    /// `true` for a uniqueness clash, which answers the `already_exists` slug;
+    /// every other variant answers `conflict`.
+    #[must_use]
+    pub fn is_uniqueness(&self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateVlan | Self::DuplicateRank | Self::DuplicateName | Self::ProfileExists
+        )
+    }
+
+    /// `true` when the write lost to another one: read again and retry.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        matches!(
+            self,
+            Self::StaleSegment
+                | Self::StaleProfile
+                | Self::StalePolicy
+                | Self::PlacementRaced
+                | Self::StaleRole { .. }
+        )
+    }
+}
+
+impl std::fmt::Display for NetworkConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleSegment => f.write_str(
+                "the network segment changed since it was read; read it again and retry",
+            ),
+            Self::StaleProfile => {
+                f.write_str("the reply profile changed since it was read; read it again and retry")
+            }
+            Self::StalePolicy => {
+                f.write_str("the network policy changed since it was read; read it again and retry")
+            }
+            Self::PlacementRaced => f.write_str(
+                "the network segment changed since it was read (a reply profile was written on \
+                 it); read it again and retry",
+            ),
+            Self::StaleRole { what_landed } => write!(
+                f,
+                "the role changed since it was read ({what_landed}); read it again and retry"
+            ),
+            Self::StrandsProfile {
+                segment_id: Some(segment_id),
+                filter_id: Some(filter_id),
+            } => write!(
+                f,
+                "the segment's reply profile {segment_id} uses filter_id '{filter_id}', which \
+                 the new filter_ids remove; change or delete the profile first"
+            ),
+            Self::StrandsProfile {
+                segment_id: Some(segment_id),
+                filter_id: None,
+            } => write!(
+                f,
+                "the new filter_ids would leave the segment's reply profile {segment_id} \
+                 outside its envelope; change or delete the profile first"
+            ),
+            Self::StrandsProfile { .. } => f.write_str(
+                "the new filter_ids would leave the segment's reply profile outside its \
+                 envelope; change or delete the profile first",
+            ),
+            Self::HasChildren => f.write_str("the network segment has child resources"),
+            Self::SiteGone => f.write_str(
+                "the network site was removed while the segment was being written; retry",
+            ),
+            Self::DuplicateVlan => f.write_str(
+                "Entity already exists: network_segment: the site already has a segment with \
+                 this vlan_id",
+            ),
+            Self::DuplicateRank => f.write_str(
+                "Entity already exists: network_segment: the site already has a segment with \
+                 this rank",
+            ),
+            Self::DuplicateName => f.write_str(
+                "Entity already exists: network_segment: the site already has a segment of \
+                 this name",
+            ),
+            Self::ProfileExists => f.write_str("Entity already exists: reply_profile"),
+        }
+    }
+}

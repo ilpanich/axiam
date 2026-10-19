@@ -12,7 +12,7 @@ mod common;
 
 use std::sync::Arc;
 
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, NetworkConflict};
 use axiam_core::models::group::CreateGroup;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::permission::{CreatePermission, PermissionEffect};
@@ -164,10 +164,7 @@ impl World {
 #[track_caller]
 fn assert_raced(result: Result<(), AxiamError>) {
     match result {
-        Err(AxiamError::Conflict { reason }) => assert!(
-            reason.contains("the role changed since it was read"),
-            "{reason}"
-        ),
+        Err(AxiamError::Network(NetworkConflict::StaleRole { .. })) => {}
         other => panic!("expected the rule-2 conflict, got {other:?}"),
     }
 }
@@ -348,8 +345,10 @@ async fn a_network_grant_racing_a_group_assignment_never_lands_both() {
         );
         for refused in [&granted, &assigned].into_iter().filter(|r| r.is_err()) {
             assert!(
-                matches!(refused, Err(AxiamError::Conflict { reason })
-                    if reason.contains("the role changed since it was read")),
+                matches!(
+                    refused,
+                    Err(AxiamError::Network(NetworkConflict::StaleRole { .. }))
+                ),
                 "round {round}: the loser is the rule-2 409, got {refused:?}"
             );
         }

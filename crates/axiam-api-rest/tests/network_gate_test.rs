@@ -1604,8 +1604,12 @@ where
         );
         for refused in [&ra, &rb].into_iter().filter(|r| r.is_err()) {
             assert!(
-                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
-                    if reason.contains("the role changed since it was read")),
+                matches!(
+                    refused,
+                    Err(axiam_core::error::AxiamError::Network(
+                        axiam_core::error::NetworkConflict::StaleRole { .. }
+                    ))
+                ),
                 "round {round}: the loser is the 409, got {refused:?}"
             );
         }
@@ -1808,8 +1812,12 @@ async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
         );
         for refused in [&denied, &revoked].into_iter().filter(|r| r.is_err()) {
             assert!(
-                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
-                    if reason.contains("the role changed since it was read")),
+                matches!(
+                    refused,
+                    Err(axiam_core::error::AxiamError::Network(
+                        axiam_core::error::NetworkConflict::StaleRole { .. }
+                    ))
+                ),
                 "round {round}: {refused:?}"
             );
         }

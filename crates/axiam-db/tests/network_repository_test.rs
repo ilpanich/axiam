@@ -9,7 +9,7 @@
 //! conditional on the version read; another tenant's rows are invisible; and a
 //! profile's `Session-Timeout` is clamped to the tenant's *current* cap at read.
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::{AxiamError, AxiamResult, NetworkConflict};
 use axiam_core::models::network::{
     NetworkPolicy, NetworkSegment, NetworkSegmentKind, NetworkSegmentUpdate, NetworkWriteClearance,
     NetworkWriteTarget, NewNetworkSegment, NewReplyProfile, RESOURCE_TYPE_NETWORK_BRANCH,
@@ -272,7 +272,7 @@ fn is_validation(e: &AxiamError) -> bool {
 }
 
 fn is_conflict(e: &AxiamError) -> bool {
-    matches!(e, AxiamError::Conflict { .. })
+    matches!(e, AxiamError::Network(_))
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +615,7 @@ async fn a_profile_round_trips() {
         .await
         .unwrap_err();
     assert!(
-        matches!(again, AxiamError::AlreadyExists { .. }),
+        matches!(again, AxiamError::Network(NetworkConflict::ProfileExists)),
         "{again:?}"
     );
 
@@ -887,7 +887,12 @@ async fn a_site_cannot_repeat_a_name_a_vlan_or_a_rank() {
     ] {
         let err = segments(&db).create(dup).await.unwrap_err();
         assert!(
-            matches!(err, AxiamError::AlreadyExists { .. }),
+            matches!(
+                (what, &err),
+                ("name", AxiamError::Network(NetworkConflict::DuplicateName))
+                    | ("vlan", AxiamError::Network(NetworkConflict::DuplicateVlan))
+                    | ("rank", AxiamError::Network(NetworkConflict::DuplicateRank))
+            ),
             "a repeated {what}: {err:?}"
         );
     }

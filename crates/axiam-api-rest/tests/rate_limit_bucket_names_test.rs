@@ -22,7 +22,7 @@
 //! kept beside them would be a second thing to keep in step. The scan covers
 //! `crates/*/src` (so a bucket registered from another crate, like
 //! `axiam-scim`'s, is seen), reads the first argument of `new`,
-//! `browser_preset` and `new_client_identity_aware`, and resolves a `const`
+//! `browser_preset`, `admin_preset` and `new_client_identity_aware`, and resolves a `const`
 //! name in the same file. It refuses, rather than skips, a constructor it does
 //! not know and a name it cannot resolve, and
 //! `the_scan_finds_the_registrations` fails if a reformat ever makes it read
@@ -33,7 +33,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The constructors whose first argument is the shared-counter endpoint name.
-const CONSTRUCTORS: [&str; 3] = ["new", "browser_preset", "new_client_identity_aware"];
+const CONSTRUCTORS: [&str; 4] = [
+    "new",
+    "browser_preset",
+    "admin_preset",
+    "new_client_identity_aware",
+];
 
 /// Buckets that are registered more than once **on purpose**: several routes of
 /// one API deliberately spend a single allowance. Each entry names the exact
@@ -350,5 +355,27 @@ fn a_bucket_name_the_scan_cannot_read_is_refused() {
     registrations_in(
         "synthetic.rs",
         "x.wrap(RateLimitShared::<C>::new(format!(\"a\"), 1));",
+    );
+}
+
+/// `admin_preset` registers a bucket like `browser_preset` does, so its name
+/// enters the uniqueness check (#718).
+#[test]
+fn an_admin_preset_registration_is_read() {
+    let regs = registrations_in(
+        "synthetic.rs",
+        "a.wrap(RateLimitShared::<C>::admin_preset(\"admin_x\", 5));",
+    );
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].name, "admin_x");
+}
+
+/// A constructor the scan does not know is refused, never skipped.
+#[test]
+#[should_panic(expected = "is not a constructor this scan knows")]
+fn an_unknown_constructor_is_refused() {
+    registrations_in(
+        "synthetic.rs",
+        "a.wrap(RateLimitShared::<C>::mystery_preset(\"x\", 5));",
     );
 }

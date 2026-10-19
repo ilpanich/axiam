@@ -385,7 +385,7 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "ca_certificate"))?;
         let row: Option<CaCertificateRow> = result.take(0).map_err(DbError::from)?;
         let row = row.ok_or_else(|| DbError::NotFound {
             entity: "ca_certificate".into(),

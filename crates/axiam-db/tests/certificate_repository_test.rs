@@ -3,6 +3,7 @@
 //! Uses the in-memory SurrealDB engine — no external services required.
 
 use axiam_core::ca_keys::CaKeyCustody;
+use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
     CertificateStatus, CertificateType, KeyAlgorithm, StoreCaCertificate, StoreCertificate,
 };
@@ -873,9 +874,14 @@ async fn one_issuer_cannot_issue_a_serial_twice() {
         public_cert_pem: pem_with_serial(&serial, "second"),
         ..sample_cert(tenant_id, issuer, "fp-serial-2")
     };
+    // #669: a typed conflict (409), not the `Migration` error that read as a
+    // broken schema and answered 500.
     assert!(
-        repo.create(twin).await.is_err(),
-        "the same serial under the same issuer must be refused"
+        matches!(
+            repo.create(twin).await,
+            Err(AxiamError::AlreadyExists { ref entity }) if entity == "certificate"
+        ),
+        "the same serial under the same issuer must be a typed conflict"
     );
 
     let elsewhere = StoreCertificate {
@@ -926,15 +932,17 @@ async fn ca_serials_are_unique_under_a_parent_and_free_among_roots() {
     .await
     .unwrap();
     assert!(
-        repo.create(sample_ca(
-            org,
-            Some(root_a.id),
-            pem_with_serial(&serial, "d"),
-            "fp-int-d",
-        ))
-        .await
-        .is_err(),
-        "two intermediates under one parent must not share a serial"
+        matches!(
+            repo.create(sample_ca(
+                org,
+                Some(root_a.id),
+                pem_with_serial(&serial, "d"),
+                "fp-int-d",
+            ))
+            .await,
+            Err(AxiamError::AlreadyExists { ref entity }) if entity == "ca_certificate"
+        ),
+        "two intermediates under one parent must be a typed conflict (#669)"
     );
 }
 

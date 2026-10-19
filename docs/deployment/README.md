@@ -860,7 +860,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 |---|---|
 | `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). Also the allowance of the second, narrower bucket a token request carrying **no client credential** is counted in, which is always keyed on `client_id` and the client's address together — the address the route limiters key on under `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, not the proxy's — see [Public clients](../admin/public-clients.md#rate-limiting). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). A token request carrying **no client credential** (a public client) is counted here like any other; a flood from one address meets `429` `rate_limit_exceeded` — see [Public clients](../admin/public-clients.md#rate-limiting). The 1.1.0 second bucket for such requests was removed in 1.1.1 (#685). |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
 | `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN` | Max WebAuthn ceremony requests per minute per key (default `10`). Applies to each of the six `/auth/webauthn/*` routes independently, so it is the per-minute ceremony allowance — deliberately equal to `LOGIN_PER_MIN`. |

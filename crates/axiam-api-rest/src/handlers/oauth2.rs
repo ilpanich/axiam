@@ -38,7 +38,6 @@ use axiam_db::{SurrealAuditLogRepository, SurrealTenantRepository};
 use crate::extractors::auth::{AuthenticatedUser, MaybeAuthenticatedUser};
 use crate::extractors::cert_auth::VerifiedClientCert;
 use crate::extractors::client_info::{client_ip, peer_ip};
-use crate::extractors::rate_limit::rate_limit_client_ip;
 use crate::state::AppState;
 
 /// Cap for the caller-supplied `client_id` recorded in a failed-client-auth
@@ -2171,66 +2170,16 @@ async fn token_inner<C: Connection + Clone>(
         Err(response) => return *response,
     };
 
-    // T21.2 — the public-client bucket.
-    //
-    // Every request to this endpoint already passes the endpoint's own
-    // rate limit, keyed by `AXIAM__RATE_LIMIT__KEY` (`ip` by default,
-    // `client_id` or `ip_client_id` on a NAT'd fleet — see
-    // `config::rate_limit`). This is a second, narrower bucket for the one
-    // request shape T21.2 makes reachable: a token request carrying **no
-    // client credential at all**.
-    //
-    // Keyed on `client_id` AND the client's address, never on either alone.
-    // `client_id` alone would be a bucket an unauthenticated caller mints by
-    // rotating a value they choose (`KeyMintability::Full`); the address alone
-    // would put every public client behind one NAT gateway — every developer
-    // in an office, every desktop client on one residential connection — into
-    // a single allowance. The pair is what the `ip_client_id` mode was added
-    // for, applied here unconditionally because for a credential-less request
-    // it is the only defensible key.
-    //
-    // R110W3-01: the address is the one the route's own limiters key this
-    // request on (`rate_limit_client_ip`: the rightmost untrusted
-    // `X-Forwarded-For` hop under `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, else the
-    // transport peer — T-212's mitigation), not the transport peer. It was the
-    // peer until then, and behind the shipped reverse proxy the peer is the
-    // proxy: every caller of one public client shared one allowance, so one
-    // address sending `token_per_min` credential-less requests a minute — all
-    // of which the route limiter admits — answered every other caller's code
-    // exchange, refresh and, since #635, every device's poll `429 slow_down`.
-    // The audit rows below keep `peer_ip` (SEC-087); this is a key, not a
-    // record.
-    //
-    // Decidable from the request alone, so it costs no lookup and creates no
-    // client-existence oracle: it applies equally to a real public client, an
-    // unknown `client_id`, and a confidential client whose caller forgot the
-    // secret. All three were refused `invalid_client` before T21.2 and two of
-    // them still are — the only thing that changes for them is that a caller
-    // hammering the endpoint with no credential now gets `slow_down` first.
-    // `token_per_min` is the limit, deliberately reusing the endpoint's own
-    // number rather than adding a knob: a public client's token request is a
-    // token request, and an operator who has retuned one has retuned both.
-    if ctx.carries_no_client_credential(form.client_secret.as_deref()) {
-        let bucket = format!(
-            "oauth2_token_public:{}:{}:{}",
-            tenant_id,
-            form.client_id.as_deref().unwrap_or("-"),
-            rate_limit_client_ip(&req).map_or_else(|| "-".into(), |ip| ip.to_string()),
-        );
-        if !state.shared_rate_limit.check_at(
-            &bucket,
-            chrono::Utc::now(),
-            state.rate_limit_cfg.token_per_min,
-        ) {
-            return HttpResponse::TooManyRequests()
-                .append_header(("Cache-Control", "no-store"))
-                .json(OAuth2ErrorResponse {
-                    error: "slow_down".into(),
-                    error_description: "token rate limit exceeded for this client and address"
-                        .into(),
-                });
-        }
-    }
+    // There is deliberately no second, per-`(client_id, address)` bucket for a
+    // request that carries no client credential (#685, D-3). T21.2 added one
+    // and R110W3-01 re-keyed it; with the route's limiters selecting the same
+    // address from the same `token_per_min`, it could only refuse a request
+    // the route had already admitted, never before it — a backstop that added
+    // no refusal of its own and a second `429` (`slow_down`) a public client
+    // had to tell apart from the device grant's own. A credential-less flood
+    // from one address meets the route's `rate_limit_exceeded` first; the
+    // device poll's `slow_down` is the poll-interval answer alone
+    // (`poll_device_grant`).
 
     // B3 / RFC 8693. Like the device grant, its own service behind one match
     // arm. The exchanging client must be confidential — it is a service, not
@@ -2264,8 +2213,8 @@ async fn token_inner<C: Connection + Clone>(
         return handle_uma_ticket(tenant_id, form, &state, &authz, &ctx).await;
     }
 
-    // G-7 / CIBA Core §10.1. Dispatched here, after the shared context, the
-    // DPoP verification and the public-client bucket, so the CIBA grant is
+    // G-7 / CIBA Core §10.1. Dispatched here, after the shared context and the
+    // DPoP verification, so the CIBA grant is
     // counted by every limiter this endpoint has (the route's governor and
     // shared counter included) and its client-authentication failures reach
     // the same `oauth2.client_auth_failed` audit below — the Keycloak 26.7.x

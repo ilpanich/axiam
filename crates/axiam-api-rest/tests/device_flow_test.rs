@@ -1587,26 +1587,46 @@ fn urlencoding(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The public-client bucket behind a reverse proxy (T21.2, R110W3-01)
+// A public client behind a reverse proxy (#685, D-3)
+//
+// There is no per-`(client_id, address)` bucket for a credential-less token
+// request: the route's own limiter is the answer, `429 rate_limit_exceeded`.
+// The device grant's poll-interval `slow_down` is a different answer, tested
+// last.
 // ---------------------------------------------------------------------------
 
-/// The public-client bucket's allowance in these tests. The route limiters
-/// keep the shipped `token_per_min` (they are built from
-/// `RateLimitConfig::default()` in [`test_app_with_state!`]), so a `429` below
-/// can only be the handler's bucket.
-const PUBLIC_BUCKET_PER_MIN: u32 = 3;
+/// The route limiters' allowance in these tests.
+const ROUTE_TOKEN_PER_MIN: u32 = 3;
 
 /// A forwarded address the flood comes from, and another a device sits at.
 /// Both reach the server through the same reverse proxy, [`TEST_PEER`].
 const ADDRESS_A: &str = "198.51.100.9";
 const ADDRESS_B: &str = "203.0.113.7";
 
-/// An app whose handler-side `token_per_min` is [`PUBLIC_BUCKET_PER_MIN`].
-macro_rules! public_bucket_app {
+/// An app whose `/oauth2/token` route limiters allow [`ROUTE_TOKEN_PER_MIN`]
+/// and whose handler state is the shipped one, so a `429` below can only be
+/// the route's.
+macro_rules! low_route_limit_app {
     ($f:expr) => {{
-        let mut state = AppState::for_test($f.db.clone(), $f.auth.clone());
-        state.rate_limit_cfg.token_per_min = PUBLIC_BUCKET_PER_MIN;
-        test_app_with_state!($f, state)
+        let state = AppState::for_test($f.db.clone(), $f.auth.clone());
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($f.auth.clone()))
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(
+                        cfg,
+                        &RateLimitConfig {
+                            token_per_min: ROUTE_TOKEN_PER_MIN,
+                            ..RateLimitConfig::default()
+                        },
+                    )
+                }),
+        )
+        .await
     }};
 }
 
@@ -1634,56 +1654,57 @@ fn credential_less_body(client_id: &str) -> String {
     format!("grant_type=authorization_code&code=guess&code_verifier=guess&client_id={client_id}")
 }
 
-/// T21.2: a credential-less flood from one address meets `429 slow_down`
-/// once it has spent the public-client bucket, still, behind a proxy.
+/// #685: a credential-less flood from one address against one public client
+/// meets the route limiter's `429 rate_limit_exceeded` — and no request of the
+/// flood, before or after the limit, is answered `slow_down`.
 #[actix_web::test]
-async fn a_credential_less_flood_from_one_address_meets_slow_down() {
+async fn a_credential_less_flood_from_one_address_meets_rate_limit_exceeded() {
     let f = setup().await;
-    let app = public_bucket_app!(f);
-    for _ in 0..PUBLIC_BUCKET_PER_MIN {
+    let app = low_route_limit_app!(f);
+    let mut limited = None;
+    for _ in 0..(ROUTE_TOKEN_PER_MIN * 20) {
+        let (status, body) = post_token_via_proxy!(
+            app,
+            f.tenant_id,
+            credential_less_body(&f.client_id),
+            ADDRESS_A
+        );
+        assert_ne!(
+            body["error"].as_str(),
+            Some("slow_down"),
+            "a public client's token request is never answered slow_down by a bucket: {body}"
+        );
+        if status == 429 {
+            limited = Some(body);
+            break;
+        }
+        assert_eq!(status, 400, "the grant refuses the guessed code: {body}");
+    }
+    let body = limited.expect("the route limiter never refused the flood");
+    assert_eq!(body["error"].as_str(), Some("rate_limit_exceeded"));
+}
+
+/// Behind one proxy, an address that spends the route's allowance spends its
+/// own: another address's device poll for the same public client is answered
+/// by the grant, not `429`.
+#[actix_web::test]
+async fn a_flood_from_one_address_does_not_limit_another_addresss_device() {
+    let f = setup().await;
+    let app = low_route_limit_app!(f);
+    let mut limited = false;
+    for _ in 0..(ROUTE_TOKEN_PER_MIN * 20) {
         let (status, _) = post_token_via_proxy!(
             app,
             f.tenant_id,
             credential_less_body(&f.client_id),
             ADDRESS_A
         );
-        assert_eq!(status, 400);
+        if status == 429 {
+            limited = true;
+            break;
+        }
     }
-    let (status, body) = post_token_via_proxy!(
-        app,
-        f.tenant_id,
-        credential_less_body(&f.client_id),
-        ADDRESS_A
-    );
-    assert_eq!((status, body["error"].as_str()), (429, Some("slow_down")));
-}
-
-/// R110W3-01: behind one proxy, an address that fills the public client's
-/// bucket fills its own bucket only — another address's device poll and code
-/// exchange for the same client are answered by their grants, not `429`.
-#[actix_web::test]
-async fn a_flood_from_one_address_does_not_slow_down_another_addresss_device() {
-    let f = setup().await;
-    let app = public_bucket_app!(f);
-    for _ in 0..=PUBLIC_BUCKET_PER_MIN {
-        post_token_via_proxy!(
-            app,
-            f.tenant_id,
-            credential_less_body(&f.client_id),
-            ADDRESS_A
-        );
-    }
-    let (status, body) = post_token_via_proxy!(
-        app,
-        f.tenant_id,
-        credential_less_body(&f.client_id),
-        ADDRESS_A
-    );
-    assert_eq!(
-        (status, body["error"].as_str()),
-        (429, Some("slow_down")),
-        "the flooding address is slowed down"
-    );
+    assert!(limited, "the flooding address is limited");
 
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
     let (status, body) = post_token_via_proxy!(
@@ -1697,37 +1718,14 @@ async fn a_flood_from_one_address_does_not_slow_down_another_addresss_device() {
         (400, Some("authorization_pending")),
         "the device at another address polls through"
     );
-    let (status, body) = post_token_via_proxy!(
-        app,
-        f.tenant_id,
-        credential_less_body(&f.client_id),
-        ADDRESS_B
-    );
-    assert_ne!(
-        status, 429,
-        "a code exchange from another address reaches its grant: {body}"
-    );
 }
 
-/// R110W3-01: under the shipped `trusted_hops = 0`, an `X-Forwarded-For`
-/// entry the caller wrote itself — to the left of the one the proxy appended —
-/// does not choose the bucket. Naming the device's address does not charge
-/// the flood to it.
+/// The device grant's own `slow_down` (RFC 8628 §3.5) is unchanged: a poll
+/// faster than the grant's interval is a `400 slow_down`, not a `429`.
 #[actix_web::test]
-async fn a_forged_forwarded_entry_does_not_charge_another_addresss_bucket() {
+async fn a_device_polling_faster_than_its_interval_is_still_told_slow_down() {
     let f = setup().await;
-    let app = public_bucket_app!(f);
-    let forged = format!("{ADDRESS_B}, {ADDRESS_A}");
-    for _ in 0..PUBLIC_BUCKET_PER_MIN {
-        let (status, _) = post_token_via_proxy!(
-            app,
-            f.tenant_id,
-            credential_less_body(&f.client_id),
-            forged.as_str()
-        );
-        assert_eq!(status, 400);
-    }
-
+    let app = test_app!(f);
     let (device_code, _) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
     let (status, body) = post_token_via_proxy!(
         app,
@@ -1737,18 +1735,13 @@ async fn a_forged_forwarded_entry_does_not_charge_another_addresss_bucket() {
     );
     assert_eq!(
         (status, body["error"].as_str()),
-        (400, Some("authorization_pending")),
-        "the device whose address was forged polls through"
+        (400, Some("authorization_pending"))
     );
     let (status, body) = post_token_via_proxy!(
         app,
         f.tenant_id,
-        credential_less_body(&f.client_id),
-        ADDRESS_A
+        poll_body(&f.client_id, &device_code),
+        ADDRESS_B
     );
-    assert_eq!(
-        (status, body["error"].as_str()),
-        (429, Some("slow_down")),
-        "the forged requests were charged to the address that sent them"
-    );
+    assert_eq!((status, body["error"].as_str()), (400, Some("slow_down")));
 }

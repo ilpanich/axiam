@@ -63,9 +63,9 @@ use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::HttpMessage;
+use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
 use actix_web::http::header::{ContentType, HeaderMap, RETRY_AFTER};
-use actix_web::{HttpRequest, HttpResponse};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -141,8 +141,7 @@ impl XForwardedForKeyExtractor {
 ///
 /// The one reading of the variable every REST limiter keyed on the client's
 /// address uses: the route governors (`server.rs`), the shared counter
-/// (`middleware::rate_limit_shared`) and the token endpoint's public-client
-/// bucket ([`rate_limit_client_ip`]). Read per call, as the shared counter has
+/// (`middleware::rate_limit_shared`). Read per call, as the shared counter has
 /// always read it, so they cannot disagree about which address a request is.
 pub fn configured_trusted_hops() -> usize {
     std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
@@ -203,31 +202,6 @@ fn select_rate_limit_ip(
         }
     }
     (peer, discarded_hops)
-}
-
-/// The address the route limiters key `req` on, under the
-/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`
-/// in force — for a limit a handler applies itself.
-///
-/// R110W3-01: the token endpoint's public-client bucket keyed on the transport
-/// peer, which behind the shipped reverse proxy is the proxy, so every caller
-/// of one public client shared one allowance that any single address could
-/// fill. This is the same selection [`XForwardedForKeyExtractor`] makes for
-/// the route's governor and shared counter on the same request (one function,
-/// [`select_rate_limit_ip`]), so a handler's bucket can be no easier to mint
-/// and no coarser than the route's. It records no R-4 discard: the route's
-/// extractor has already counted this request.
-///
-/// A rate-limit key, never an audit value: an audit row keeps
-/// [`super::client_info::peer_ip`] (SEC-087).
-pub fn rate_limit_client_ip(req: &HttpRequest) -> Option<IpAddr> {
-    select_rate_limit_ip(
-        req.headers(),
-        req.peer_addr(),
-        configured_trusted_hops(),
-        &TrustedProxies::configured(),
-    )
-    .0
 }
 
 impl KeyExtractor for XForwardedForKeyExtractor {
@@ -851,8 +825,7 @@ mod client_aware_tests {
     }
 }
 
-/// R110W3-01: the one selection the route limiters and the token endpoint's
-/// public-client bucket share.
+/// R110W3-01: the one selection the route limiters make of the caller's address.
 #[cfg(test)]
 mod address_selection_tests {
     use super::*;
@@ -919,28 +892,6 @@ mod address_selection_tests {
             (None, Some(1)),
             "no peer and nothing trusted is no key"
         );
-    }
-
-    #[test]
-    fn the_handlers_address_is_the_route_extractors_key() {
-        // `rate_limit_client_ip` reads the configured hops (`0` unless the
-        // environment says otherwise); the governor on the same route reads
-        // the same value. Whatever it is, the two agree on every shape.
-        let extractor = XForwardedForKeyExtractor::configured();
-        for xff in [None, Some(A), Some("x"), Some("203.0.113.7, 198.51.100.9")] {
-            let build = || {
-                let mut req = TestRequest::post().peer_addr(PROXY.parse().unwrap());
-                if let Some(value) = xff {
-                    req = req.insert_header(("X-Forwarded-For", value));
-                }
-                req
-            };
-            assert_eq!(
-                rate_limit_client_ip(&build().to_http_request()),
-                extractor.extract(&build().to_srv_request()).ok(),
-                "xff: {xff:?}"
-            );
-        }
     }
 
     #[test]

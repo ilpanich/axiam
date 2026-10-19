@@ -525,6 +525,15 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.0 Base commit
 
+- **Base:** `main` at `6b15aa36a` (the plan's own commit on top of `6b7b258`), 2026-10-19. `claude/release-1.1.1` and
+  `claude/release-1.1.1-w1` … `-w6` were cut from it on 2026-10-19 by the orchestrator.
+- **Decisions (§11):** no maintainer answer on any issue or on the plan when the waves started (issues read
+  2026-10-19 17:52 UTC); every default applies — D-1 Static/Live, D-2 option 1, D-3 remove, D-4 yes, D-5 all
+  three, D-6 yes, D-7 add the markers, D-8 texts only, D-9 stays open unless a release exists, D-10 1.1.1.
+- **Execution:** each task is one cloud session (Claude Code on the web) at the model its row names, started by
+  the orchestrator with the §13 kickoff of its wave and the task's row; tasks of one wave run one after another on
+  the wave branch, the six waves side by side.
+
 ### 12.1 W1
 
 ### 12.2 W2

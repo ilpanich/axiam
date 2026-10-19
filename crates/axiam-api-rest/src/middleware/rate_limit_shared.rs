@@ -185,6 +185,22 @@ impl<C: Connection + Clone> RateLimitShared<C> {
         }
     }
 
+    /// The **administrative preset**: `limit` (one of the 30-a-minute
+    /// `*_admin_per_min` families) per IP, for an administrator's console
+    /// writes.
+    ///
+    /// Like [`Self::browser_preset`] it skips the counter's cold-entry seed:
+    /// at 30 a minute the seed left an administrator whose first write to a
+    /// family landed in a minute's last seconds only three to five writes in
+    /// it (#718). What bounds these routes is the small absolute number; the
+    /// sliding-window carry still applies.
+    pub fn admin_preset(endpoint: &'static str, limit: u32) -> Self {
+        Self {
+            human: true,
+            ..Self::new(endpoint, limit)
+        }
+    }
+
     /// Key this bucket on the request's **verified** principal `(tenant,
     /// sub)`, with the address as the pre-authentication fallback (#633,
     /// R101W2-05) — for an authenticated route, where the principal and not
@@ -486,6 +502,15 @@ mod window_contract_tests {
 
         assert_eq!(start.timestamp() % WINDOW_SECS, 0, "aligned to the window");
         assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
+    }
+
+    /// The administrative preset marks its bucket human-facing too (#718).
+    #[test]
+    fn the_admin_preset_is_human_facing() {
+        let admin =
+            RateLimitShared::<surrealdb::engine::local::Db>::admin_preset("network_admin", 30);
+        assert!(admin.human);
+        assert_eq!(admin.limit, 30);
     }
 
     /// The browser-endpoint preset takes its number from

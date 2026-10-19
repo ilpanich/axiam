@@ -388,6 +388,17 @@ buckets say which they are (`RateLimitShared::browser_preset`, counted by
 `SharedRateLimitCounter::check_at_human`). Every machine bucket of 20 or more
 keeps the seed.
 
+The **administrative presets** — `directory_admin_per_min`, `saml_admin_per_min`,
+`ssf_admin_per_min`, `scim_target_admin_per_min` and `network_admin_per_min`,
+30 each — skip the seed as well (`RateLimitShared::admin_preset`, counted by
+`check_at_human`; #718): an administrator whose first write to a family landed
+in a minute's last seconds used to have three to five writes left in it. Which
+families seed and which do not:
+
+| Seeds (machine buckets, limit 20 and up) | Does not seed |
+|---|---|
+| `token`, `introspect`, `revoke`, `authz_check`, the other OAuth2 machine endpoints, the gRPC families, `scim`, `crl`, `network_decide` | `login`, `register`, `password_reset`, `mfa` (limit below 20); the browser preset (`end_session_per_min`, 30); the CIBA approval bucket (30); the five administrative presets (30) |
+
 That exemption is not a loosening, it is a correction. Pro-rata seeding is a
 *rate-smoothing* device, and smoothing a budget of five requests is meaningless:
 at `mfa 5/min`, "two thirds of the window has elapsed" rounds to three

@@ -1878,7 +1878,9 @@ out-of-memory kill does none of that and loses what is queued.
 
 The cleanup task is told to stop **before** the lease is given up: once it is,
 a successor may start, and this instance must not start work beside it. After a
-lost lease it is told at the loss itself, not once the requests in flight have
+lost lease it is told at the loss as the renewal detects it — up to `renew_every`
+(10 s) after a successor took over the expired lease, and in that gap this
+instance's cleanup task runs beside it — not once the requests in flight have
 been drained or cut. (Corrected 2026-10-15, #628: before 1.1.0 the cleanup task
 was told only after the lease release — and after a lost lease, after the REST
 cut and the gRPC stop, up to 7 s in, so the old instance could still start an
@@ -1916,7 +1918,8 @@ finished rather than wait for it:
   row — after which no later sweep finds the work again. Before it, the work
   gives itself up as soon as the stop begins: the account stays due, the tenant
   stays deleted and its purge claim is released, so the next start does the
-  work at once; it never crosses that point once the stop has begun. So a stop
+  work at once; once the stop has begun it starts no new crossing (a crossing
+  already being sent completes). So a stop
   can leave unfinished only:
   - an erasure or a tenant purge that crossed its point of no return **before**
     the stop began and still had not written its audit row when the bound ran

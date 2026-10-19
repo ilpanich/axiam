@@ -696,6 +696,15 @@ clears it), so a login is one in many authentications, not one in each; the
 device-login limiter (`AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, per address) is
 therefore not what a storm spends.
 
+**When AXIAM refuses the cached token.** A `401` from the decision means the token
+no longer serves: FreeRADIUS's certificate was revoked and re-issued, the account's
+binding was rotated, or AXIAM's signing key changed. The recipe drops the cache
+entry at once and, when the token came from the cache, logs in again and asks the
+decision **once** more; a token fetched in that same authentication is not retried.
+A second `401`, a `403` and every other failure are an Access-Reject as before, so
+a rotation costs one extra login rather than up to half a token's life
+(7.5 minutes by default) of refused authentications ([#707](https://github.com/ilpanich/axiam/issues/707); T-486).
+
 ### The FreeRADIUS configuration
 
 The Live profile changes the Static profile's files as little as it can: the base compose file

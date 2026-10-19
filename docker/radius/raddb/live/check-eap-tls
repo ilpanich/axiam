@@ -16,7 +16,8 @@
 #
 # EVERY failure is a reject: AXIAM unreachable, a TLS or HTTP error, a status
 # other than 2xx, a body that is not the allow this recipe knows. There is no
-# fallback placement and no cached decision: only the token is cached.
+# fallback placement and no cached decision: only the token is cached, and a
+# `401` from the decision drops it (one retry with a new token, never more).
 
 server check-eap-tls {
 	authorize {
@@ -37,7 +38,9 @@ server check-eap-tls {
 			Tmp-String-2 := "-"
 			Tmp-String-3 := "-"
 			Tmp-String-4 := "-"
+			Tmp-String-5 := "-"
 			Tmp-Integer-0 := 0
+			Tmp-Integer-1 := 0
 		}
 
 		# 1. The site key, from this client's own configuration, and the
@@ -75,6 +78,7 @@ server check-eap-tls {
 			}
 			update control {
 				Tmp-String-2 := "%{1}"
+				Tmp-Integer-1 := 1
 			}
 			# The entry lives for half the token's life.
 			if (&control:Tmp-String-4 !~ /"expires_in"\s*:\s*([1-9][0-9]{2,5})/) {
@@ -96,9 +100,76 @@ server check-eap-tls {
 		update control {
 			REST-HTTP-Header := "Authorization: Bearer %{control:Tmp-String-2}"
 		}
-		axiam_decide
+		#    rlm_rest answers a 401 with `invalid`, which ends a post-auth section
+		#    at once; priority 1 lets this section carry on and look at the status.
+		#    Every other result keeps its own action, so a 403 or a 5xx still ends
+		#    the section as before.
+		axiam_decide {
+			invalid = 1
+		}
 		if (!(ok || updated)) {
-			reject
+			# A 401 says the token is no good to AXIAM now: the FreeRADIUS
+			# certificate was revoked and re-issued, or AXIAM's signing key
+			# rotated. Its cache entry is dropped at once, whatever follows, so it
+			# is not served for the rest of its half life (#707). When the token
+			# came from the cache, a new one is fetched and the decision asked
+			# ONCE more; a token fetched a moment ago is not retried. A second
+			# 401, a 403 and every other failure stay a reject.
+			update control {
+				Tmp-String-5 := "%{reply:REST-HTTP-Status-Code}"
+			}
+			update reply {
+				REST-HTTP-Body !* ANY
+				REST-HTTP-Status-Code !* ANY
+			}
+			if (&control:Tmp-String-5 !~ /^401$/) {
+				reject
+			}
+			update control {
+				Cache-Status-Only !* ANY
+				Cache-TTL := 0
+			}
+			axiam_token_cache
+			if (&control:Tmp-Integer-1 != 0) {
+				reject
+			}
+			update control {
+				Tmp-String-2 := "-"
+			}
+			axiam_token
+			if (!(ok || updated)) {
+				reject
+			}
+			update control {
+				Tmp-String-4 := "%{reply:REST-HTTP-Body}"
+			}
+			update reply {
+				REST-HTTP-Body !* ANY
+				REST-HTTP-Status-Code !* ANY
+			}
+			if (&control:Tmp-String-4 !~ /"access_token"\s*:\s*"([A-Za-z0-9._~+\/=-]+)"/) {
+				reject
+			}
+			update control {
+				Tmp-String-2 := "%{1}"
+			}
+			if (&control:Tmp-String-4 !~ /"expires_in"\s*:\s*([1-9][0-9]{2,5})/) {
+				reject
+			}
+			update control {
+				Cache-TTL := "%{expr:%{1} / 2}"
+			}
+			axiam_token_cache
+			if (&control:Tmp-String-2 !~ /^[A-Za-z0-9._~+\/=-]+$/) {
+				reject
+			}
+			update control {
+				REST-HTTP-Header := "Authorization: Bearer %{control:Tmp-String-2}"
+			}
+			axiam_decide
+			if (!(ok || updated)) {
+				reject
+			}
 		}
 		update control {
 			Tmp-String-3 := "%{reply:REST-HTTP-Body}"

@@ -2545,8 +2545,31 @@ fn serve_axiam(
     authz: Arc<dyn AuthzChecker>,
     tls: rustls::ServerConfig,
 ) -> Axiam {
+    serve_axiam_on(0, state, auth, authz, tls)
+}
+
+/// [`serve_axiam`] on `port` (`0`: any). A port just released by a stopped listener
+/// can take a moment to be free again, so a bind that fails is tried again for a few
+/// seconds.
+fn serve_axiam_on(
+    port: u16,
+    state: AppState<TestDb>,
+    auth: AuthConfig,
+    authz: Arc<dyn AuthzChecker>,
+    tls: rustls::ServerConfig,
+) -> Axiam {
     // All interfaces: the container reaches the host at its network's gateway.
-    let listener = TcpListener::bind("0.0.0.0:0").expect("a port for AXIAM");
+    let mut tries = 0;
+    let listener = loop {
+        match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(listener) => break listener,
+            Err(_) if port != 0 && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("a port for AXIAM: {error}"),
+        }
+    };
     let port = listener.local_addr().expect("its address").port();
     let server = HttpServer::new(move || {
         App::new()
@@ -2847,16 +2870,17 @@ async fn decision_per_authentication() {
     // ---- AXIAM's listener, and the stack -----------------------------------
     let client_ca = work.join("client-ca.pem");
     std::fs::write(&client_ca, &root.pem).expect("the client CA bundle can be written");
-    let tls = axiam_server::tls::build_rustls_server_config(&TlsConfig {
+    let tls_config = TlsConfig {
         enabled: true,
         cert_path: Some(work.join("axiam.pem")),
         key_path: Some(work.join("axiam.key")),
         client_auth: ClientAuth::Optional,
         client_ca_path: Some(client_ca),
         ..TlsConfig::default()
-    })
-    .expect("AXIAM's TLS configuration");
-    let axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
+    };
+    let tls = axiam_server::tls::build_rustls_server_config(&tls_config)
+        .expect("AXIAM's TLS configuration");
+    let mut axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
     let host_ip = gateway_of(&ip);
     let axiam_url = format!("https://{AXIAM_HOST}:{}", axiam.port);
 
@@ -3087,6 +3111,102 @@ async fn decision_per_authentication() {
          baseline) refused",
     );
 
+    // ---- a 401 from the decision drops the cached token (#707) ----------------------
+    // The cache holds a token bound to FreeRADIUS's certificate. The account's binding is
+    // rotated under it: a new Service certificate is issued, bound to a new account that
+    // decides for the site, the old certificate is revoked, FreeRADIUS is given the new
+    // one, and AXIAM's listener is restarted on its port so that FreeRADIUS's next
+    // connection presents it. FreeRADIUS is NOT restarted, so the cache still holds the
+    // old token: the decision answers 401 to it (its `cnf` is the old certificate), and
+    // the recipe must log in again and ask once more, with no wait for the entry to age.
+    let warm = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        warm.accepted && warm.log.contains("Found entry for \"axiam-decide-caller\""),
+        "rotation: a cached token before the rotation:\n{}",
+        warm.report()
+    );
+    let (status, leaf) = try_issue(&api, &plant, 0, &line1, "freeradius-hq-2", "Service").await;
+    assert_eq!(status, 201, "rotation: FreeRADIUS's new certificate");
+    let rotated = write_device(&leaf, "freeradius-hq-2", &work);
+    let rotated_account: Uuid = bind(&api, &plant, 0, &rotated)
+        .await
+        .parse()
+        .expect("the service account id");
+    for kind in [NetworkSegmentKind::Access, NetworkSegmentKind::Quarantine] {
+        net.grant(
+            rotated_account,
+            &[(NETWORK_DECIDE, PermissionEffect::Allow)],
+            site_node_id(tenant, kind, SITE),
+        )
+        .await;
+    }
+    let (status, _) = api
+        .post(
+            &format!("/api/v1/certificates/{}/revoke", caller.id),
+            &plant.tenants[0].1,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "rotation: the old certificate is revoked");
+    let chain = write_chain(&work, "freeradius-hq-2-chain", &[&rotated.pem, &line1.pem]);
+    std::fs::copy(&chain, trust.join("rest-chain.pem")).expect("the chain can be copied");
+    std::fs::copy(&rotated.key, trust.join("rest.key")).expect("the key can be copied");
+    set_readable(&trust.join("rest-chain.pem"));
+    set_readable(&trust.join("rest.key"));
+    axiam.handle.stop(false).await;
+    // A configuration of its own, so that no session ticket of the old one resumes
+    // a connection as the old certificate.
+    axiam = serve_axiam_on(
+        axiam.port,
+        state.clone(),
+        auth.clone(),
+        Arc::clone(&engine),
+        axiam_server::tls::build_rustls_server_config(&tls_config)
+            .expect("AXIAM's TLS configuration, again"),
+    );
+    let healed = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        healed.accepted,
+        "rotation: the authentication after the 401 is admitted, with no wait for the entry:\n{}",
+        healed.report()
+    );
+    assert_tunnel(&healed, "20", "rotation");
+    assert!(
+        healed
+            .log
+            .contains("Found entry for \"axiam-decide-caller\"")
+            && healed.log.contains("401")
+            && healed.log.contains("/api/v1/auth/device"),
+        "rotation: the cached token was tried, answered 401, and a new one was fetched:\n{}",
+        healed.log
+    );
+    assert!(
+        healed.log.matches("/api/v1/network/decide").count() >= 2,
+        "rotation: the decision was asked twice, once with each token:\n{}",
+        healed.log
+    );
+    let again = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        again.accepted
+            && again
+                .log
+                .contains("Found entry for \"axiam-decide-caller\"")
+            && !again.log.contains("/api/v1/auth/device"),
+        "rotation: the new token is the one cached now:\n{}",
+        again.report()
+    );
+    say(
+        "rotation",
+        "the binding rotated under the cached token: the 401 dropped it, a new login and one \
+         more decision admitted press-07 at once; the next authentication used the new token",
+    );
+
     // ---- a wrong site key ------------------------------------------------------
     // The key is FreeRADIUS's own configuration (the client's `shortname`), and
     // the caller's grant is for hq alone: another site is a 403 and a refusal.
@@ -3258,6 +3378,10 @@ async fn decision_per_authentication() {
             (403, r#"{"error":"authorization_denied"}"#.to_string()),
         ),
         ("a 500", (500, r#"{"error":"boom"}"#.to_string())),
+        (
+            "a 401 that the new token gets too",
+            (401, r#"{"error":"unauthorized"}"#.to_string()),
+        ),
     ];
     let count = refusals.len();
     for (what, (status, body)) in refusals {

@@ -556,6 +556,20 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
             .expect("valid GovernorConfig for gRPC rate limiter"),
     );
 
+    // #673: the map is swept with the REST ones (`axiam_core::limiter_sweep`).
+    // `tower_governor` evicts nothing, and the key is an address.
+    let weak = Arc::downgrade(config.limiter());
+    axiam_core::limiter_sweep::register(move || match weak.upgrade() {
+        Some(limiter) => {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+            axiam_core::limiter_sweep::SweepOutcome::Swept {
+                remaining: limiter.len(),
+            }
+        }
+        None => axiam_core::limiter_sweep::SweepOutcome::Dropped,
+    });
+
     GovernorLayer::new(config)
 }
 

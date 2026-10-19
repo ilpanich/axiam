@@ -2765,6 +2765,13 @@ where
     // returned, before the gRPC stop and the lease release; after a lost lease
     // the lease-loss stop sends it at the loss (#628).
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
+    // #673: the in-process rate-limiter maps (REST and gRPC) are swept once a
+    // minute. The task ends on the same signal as the cleanup task, so it stops
+    // with the server; it holds nothing a cut could leave half done.
+    let _limiter_sweep = crate::limiter_sweep::spawn(
+        cleanup_shutdown_rx.clone(),
+        crate::limiter_sweep::SWEEP_EVERY,
+    );
     // Mail publisher for export-ready notifications from the cleanup task.
     let cleanup_mail_publisher: Arc<MailTransportPublisher> = Arc::new(match &amqp {
         Some(amqp) => {

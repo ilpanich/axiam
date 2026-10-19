@@ -530,8 +530,10 @@ bucket from somewhere else.
 
 **2. A rotating `client_id` also grows the bucket keyspace.** Distinct
 keys accumulate in the in-memory governor and in the shared
-`rate_limit_bucket` table. Neither is unbounded in practice (windows
-expire and the cleanup task sweeps), but a sustained rotation flood is a
+`rate_limit_bucket` table. Neither is unbounded in practice (since 1.1.1 a
+task sweeps every governor's map once a minute, the time a cell takes to
+replenish, and the cleanup task sweeps the table; before 1.1.1 the governor
+maps were never swept), but a sustained rotation flood is a
 resource-consumption vector, and each rejected request still costs one
 client lookup. Front an internet-exposed `client_id`-mode deployment with
 something that rate-limits by IP before AXIAM sees the request.

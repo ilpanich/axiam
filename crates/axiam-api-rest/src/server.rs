@@ -2,11 +2,17 @@
 
 use actix_cors::Cors;
 use actix_governor::Governor;
+use actix_governor::GovernorConfig;
 use actix_governor::GovernorConfigBuilder;
+use actix_governor::KeyExtractor;
+use actix_governor::governor::clock::QuantaInstant;
 use actix_governor::governor::middleware::NoOpMiddleware;
+use actix_governor::governor::middleware::RateLimitingMiddleware;
 use actix_web::http::header;
 use actix_web::web;
+use axiam_core::limiter_sweep::{self, SweepOutcome};
 use axiam_db::DbClient;
+use std::sync::Arc;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
@@ -46,6 +52,34 @@ const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
 /// burst of calls with a token that does not authenticate does.
 pub const NETWORK_DECIDE_BACKSTOP_FACTOR: u32 = 10;
 
+/// #673 (R110W2-05): wrap `config` in its middleware and register its map with
+/// the sweeper (`axiam_core::limiter_sweep`).
+///
+/// `actix-governor` evicts nothing, so a map grows by one cell per key it has
+/// seen — an address an IPv6 sender rotates at will, or a principal. Every
+/// in-process governor of this crate is finished here, so every one is swept by
+/// the one interval task the composition root spawns. The registry holds the
+/// limiter weakly: it never outlives the app that built it.
+fn governor_swept<K, M>(config: GovernorConfig<K, M>) -> Governor<K, M>
+where
+    K: KeyExtractor,
+    K::Key: Send + Sync + 'static,
+    M: RateLimitingMiddleware<QuantaInstant> + Send + Sync + 'static,
+{
+    let weak = Arc::downgrade(&config.limiter());
+    limiter_sweep::register(move || match weak.upgrade() {
+        Some(limiter) => {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+            SweepOutcome::Swept {
+                remaining: limiter.len(),
+            }
+        }
+        None => SweepOutcome::Dropped,
+    });
+    Governor::new(&config)
+}
+
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
 ///
@@ -81,7 +115,7 @@ pub fn build_governor(
         .key_extractor(XForwardedForKeyExtractor::configured())
         .finish()
         .expect("valid governor config");
-    Governor::new(&config)
+    governor_swept(config)
 }
 
 /// D8: build a per-endpoint Governor middleware instance for the three
@@ -113,7 +147,7 @@ fn build_client_aware_governor(
         ))
         .finish()
         .expect("valid governor config");
-    Governor::new(&config)
+    governor_swept(config)
 }
 
 /// #633: the in-process governor for a route keyed on its **verified**

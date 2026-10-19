@@ -135,6 +135,25 @@ impl Principal {
         .unwrap()
     }
 
+    /// A DPoP-bound token (RFC 9449 `cnf.jkt`): its holder must also sign a
+    /// proof for each request, which the extractor checks after the limiter.
+    fn dpop_token(&self, auth: &AuthConfig) -> String {
+        issue_access_token_bound(
+            self.user_id,
+            self.tenant_id,
+            self.org_id,
+            &[],
+            auth,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Some(CnfClaim {
+                jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".into()),
+                ..CnfClaim::default()
+            }),
+        )
+        .unwrap()
+    }
+
     /// The same claims, expired an hour ago (past the decoder's 60 s leeway)
     /// and signed with the real key: a token that once verified.
     fn expired_token(&self, auth: &AuthConfig) -> String {
@@ -228,6 +247,23 @@ fn oidc_authorize(token: &str, from: SocketAddr) -> actix_http::Request {
         .uri("/api/v1/federation/oidc/authorize")
         .peer_addr(from)
         .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "config_id": Uuid::new_v4(),
+            "redirect_uri": "",
+            "state": "some-state",
+            "nonce": "some-nonce"
+        }))
+        .to_request()
+}
+
+/// `oidc_authorize` under the `DPoP` authorization scheme, with no proof.
+fn oidc_authorize_dpop(token: &str, from: SocketAddr) -> actix_http::Request {
+    test::TestRequest::post()
+        .uri("/api/v1/federation/oidc/authorize")
+        .peer_addr(from)
+        .insert_header(("Authorization", format!("DPoP {token}")))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(serde_json::json!({
@@ -506,6 +542,34 @@ async fn a_sender_constrained_token_is_keyed_on_its_address_and_principal_togeth
     for i in 0..PER_MIN {
         let got = status(&app, oidc_authorize(&bearer, peer(40))).await;
         assert_eq!(got, 400, "alice's bearer request {i} has her own bucket");
+    }
+}
+
+/// #670: a DPoP-scheme request is attributed by the audit middleware, so its
+/// bound token is keyed on `(ip, principal)`: two users behind one address each
+/// have an allowance of their own, where keyed on the address alone they would
+/// share one. Without a proof the extractor still refuses it (`401`, never the
+/// `400` a verified caller gets).
+#[actix_rt::test]
+async fn a_dpop_scheme_token_is_keyed_on_its_address_and_principal_together() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let app = routes_app!(db, auth, enabled_counter(&db), audit: true);
+    let tenant = Uuid::new_v4();
+    let org = Uuid::new_v4();
+    let alice = Principal::new(tenant, org).dpop_token(&auth);
+    let bob = Principal::new(tenant, org).dpop_token(&auth);
+
+    for (who, token) in [("alice", &alice), ("bob", &bob)] {
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize_dpop(token, peer(50))).await;
+            assert_eq!(
+                got, 401,
+                "{who}'s proofless request {i} is refused, not limited"
+            );
+        }
+        let got = status(&app, oidc_authorize_dpop(token, peer(50))).await;
+        assert_eq!(got, 429, "{who}'s allowance ends on their own count");
     }
 }
 

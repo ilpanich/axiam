@@ -5165,8 +5165,19 @@ DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE optio
 // client address and per endpoint. Additive: one index, nothing backfilled
 // (the engine builds it from the rows present). Version 108 belongs to the
 // 1.1.1 W1 branch and is not defined here.
+//
+// **`oauth2_refresh_token.dpop_jkt` (#681, RFC 9449 §5).** The thumbprint of
+// the DPoP key a public DPoP-bound client's refresh token is bound to; the
+// refresh grant requires a proof by that key and copies it to the successor.
+// Added to this unreleased migration rather than as a v110 (plan §10: one
+// migration per wave). `option<string>`, no index (the row is found by
+// `token_hash`), and **no backfill**: nothing recorded which key a pre-v109
+// token was used with, and inventing one would bind it to whoever presents it
+// next. Such a row reads `NONE`, which a public DPoP-bound client's refresh
+// refuses and every other client's ignores.
 const SCHEMA_V109: &str = "\
 DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at ON TABLE rate_limit_bucket FIELDS updated_at;
+DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token TYPE option<string>;
 ";
 
 #[cfg(test)]
@@ -5438,21 +5449,28 @@ mod tests {
         }
     }
 
-    /// #676 — v109 is the sweep's `updated_at` index, defined idempotently,
-    /// and nothing else: no `UPDATE`, `REMOVE`, `DELETE`, `OVERWRITE` or
-    /// backfill.
-    #[test]
-    fn v109_adds_only_the_sweep_index() {
-        let statements: Vec<&str> = SCHEMA_V109
+    fn v109_statements() -> Vec<&'static str> {
+        SCHEMA_V109
             .split(';')
             .map(str::trim)
             .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// #676 — on `rate_limit_bucket`, v109 is the sweep's `updated_at` index,
+    /// defined idempotently, and nothing else; and the whole migration is
+    /// additive: no `UPDATE`, `REMOVE`, `DELETE`, `OVERWRITE` or backfill.
+    #[test]
+    fn v109_adds_only_the_sweep_index() {
+        let on_buckets: Vec<&str> = v109_statements()
+            .into_iter()
+            .filter(|s| s.contains("rate_limit_bucket"))
             .collect();
         assert_eq!(
-            statements,
+            on_buckets,
             ["DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at \
                  ON TABLE rate_limit_bucket FIELDS updated_at"],
-            "v109 defines the index and nothing else"
+            "v109 defines the index on the buckets and nothing else"
         );
         for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
             assert!(
@@ -5460,6 +5478,23 @@ mod tests {
                 "v109 must not contain {forbidden}: it is additive DDL only"
             );
         }
+    }
+
+    /// #681 — v109 also gives the refresh token its optional `dpop_jkt`,
+    /// defined idempotently and backfilled by nothing, and those two
+    /// statements are the whole migration.
+    #[test]
+    fn v109_adds_the_refresh_tokens_optional_dpop_jkt_and_nothing_else() {
+        assert_eq!(
+            v109_statements(),
+            [
+                "DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at \
+                 ON TABLE rate_limit_bucket FIELDS updated_at",
+                "DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token \
+                 TYPE option<string>",
+            ],
+            "v109 defines the index and the field and nothing else"
+        );
     }
 
     /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
@@ -7049,7 +7084,8 @@ mod tests {
             versions.last(),
             Some(&109),
             "v109 is the newest migration (#676 — the `rate_limit_bucket.updated_at` index the \
-             cleanup sweep selects on; v108 is the 1.1.1 W1 branch's and merges first); \
+             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`; v108 is the \
+             1.1.1 W1 branch's and merges first); \
              v107 was the 1.1.0 atomicity audit's item 11 — \
              `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
              destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \

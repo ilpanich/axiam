@@ -79,6 +79,7 @@ async fn insert_token_expiring(
         auth_time: None,
         acr: None,
         amr: Vec::new(),
+        dpop_jkt: None,
     })
     .await
     .unwrap();

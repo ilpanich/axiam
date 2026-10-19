@@ -1470,6 +1470,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) -> (String, Stri
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                dpop_jkt: None,
                 expires_at: Utc::now() + Duration::days(30),
             })
             .await

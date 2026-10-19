@@ -432,6 +432,7 @@ async fn deleting_a_client_revokes_its_refresh_tokens() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            dpop_jkt: None,
             expires_at: chrono::Utc::now() + chrono::Duration::days(30),
         })
         .await

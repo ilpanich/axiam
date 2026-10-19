@@ -233,6 +233,7 @@ where
         // `tenant` is the one client authentication read (R1W1-03).
         let cnf = self.certificate_binding_for(&client, ctx)?;
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
+        let refresh_jkt = crate::dpop::refresh_token_binding(&client, cnf.as_ref());
         let ext = self
             .pre_issue_ext_claims(
                 tenant_id,
@@ -279,6 +280,10 @@ where
                     auth_time: Some(approval.auth_time),
                     acr: Some(approval.acr.clone()),
                     amr: approval.amr.clone(),
+                    // #681 — `None`: registration refuses a public CIBA
+                    // client (`CibaRegistrationError::PublicClient`). Asked rather than
+                    // assumed, so the rule has one implementation.
+                    dpop_jkt: refresh_jkt.clone(),
                     expires_at: Utc::now()
                         + chrono::Duration::seconds(self.refresh_token_lifetime_secs),
                 })

@@ -96,6 +96,73 @@ pub fn token_type_for(cnf: Option<&axiam_auth::token::CnfClaim>) -> String {
     }
 }
 
+/// RFC 9449 §5 — the DPoP key a refresh token minted beside `cnf` is bound to
+/// (#681), or `None` when it is bound to none.
+///
+/// `Some(jkt)` only for a **public** client registered for DPoP-bound tokens
+/// (`token_endpoint_auth_method: none`, `dpop_bound_access_tokens`): §5 binds
+/// "refresh tokens issued to public clients" to the key, because such a client
+/// has no credential and the key is all that ties a refresh token to it. A
+/// confidential client proves itself at every refresh by its credential, and
+/// §5 leaves its tokens unbound; a client not registered for DPoP sends no
+/// proof to bind to. For both this is `None`, and their refresh is unchanged.
+///
+/// `cnf` is the binding [`crate::token::TokenService::certificate_binding_for`]
+/// decided for this request, which for such a client always names the proof's
+/// key: a request without a verified proof was refused before it got here.
+pub fn refresh_token_binding(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+    cnf: Option<&axiam_auth::token::CnfClaim>,
+) -> Option<String> {
+    if !(client.token_endpoint_auth_method.is_public() && crate::fapi::wants_dpop_binding(client)) {
+        return None;
+    }
+    cnf.and_then(axiam_auth::token::CnfClaim::dpop_thumbprint)
+        .map(str::to_owned)
+}
+
+/// RFC 9449 §5 at the refresh grant (#681): a refresh token of a public
+/// DPoP-bound client is redeemed only with a proof by the key it is bound to.
+///
+/// `bound` is the stored token's `dpop_jkt`; `cnf` is this request's binding,
+/// as for [`refresh_token_binding`]. For every other client this is `Ok` and
+/// reads nothing. For such a client:
+///
+/// - a token bound to the proof's key is admitted, and its successor is bound
+///   to the same key ([`refresh_token_binding`] of the same `cnf`);
+/// - a token bound to another key is `invalid_grant`: a stolen token no longer
+///   refreshes under the thief's key;
+/// - a token bound to **no** key is `invalid_grant` too. It was issued before
+///   v109, or while the client was confidential (an administrator's `PUT` may
+///   since have made a device-only client public, #675) or not DPoP-bound.
+///   Binding it to whichever key presents it first would bind a stolen token
+///   to its thief, and the server cannot tell the two apart; the device signs
+///   in again instead, once.
+///
+/// # Errors
+///
+/// [`OAuth2Error::InvalidGrant`] in the two refusals above.
+///
+/// [`OAuth2Error::InvalidGrant`]: crate::error::OAuth2Error::InvalidGrant
+pub fn enforce_refresh_token_binding(
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+    bound: Option<&str>,
+    cnf: Option<&axiam_auth::token::CnfClaim>,
+) -> Result<(), crate::error::OAuth2Error> {
+    let Some(presented) = refresh_token_binding(client, cnf) else {
+        return Ok(());
+    };
+    match bound {
+        Some(bound) if bound == presented => Ok(()),
+        Some(_) => Err(crate::error::OAuth2Error::InvalidGrant(
+            "refresh token is bound to another DPoP key".into(),
+        )),
+        None => Err(crate::error::OAuth2Error::InvalidGrant(
+            "refresh token is bound to no DPoP key; this client's refresh tokens must be".into(),
+        )),
+    }
+}
+
 /// How far `iat` may be from now, in either direction, for a proof to be fresh
 /// (RFC 9449 §4.3 step 12 leaves the window to the server).
 ///
@@ -1032,5 +1099,97 @@ mod tests {
         for junk in ["", "not.a.jwt", "a.b", "....."] {
             assert!(verify_dpop_proof(junk, &expectation(NOW)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_binding_tests {
+    use super::*;
+    use axiam_auth::token::CnfClaim;
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, ManagedBy, OAuth2Client,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn client(method: ClientAuthMethod, dpop: bool) -> OAuth2Client {
+        OAuth2Client {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            client_id: "oa_test".into(),
+            client_secret_hash: String::new(),
+            name: "test".into(),
+            redirect_uris: vec![],
+            grant_types: vec!["refresh_token".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: vec![],
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: method,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: dpop,
+            dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            allowed_resources: Vec::new(),
+            managed_by: ManagedBy::Admin,
+            last_authorized_at: None,
+            ciba: Default::default(),
+        }
+    }
+
+    fn jkt(k: &str) -> CnfClaim {
+        CnfClaim::from_dpop_thumbprint(k)
+    }
+
+    /// #681 — only a public DPoP-bound client's refresh token is bound.
+    #[test]
+    fn only_a_public_dpop_bound_clients_refresh_token_is_bound() {
+        let public_dpop = client(ClientAuthMethod::None, true);
+        assert_eq!(
+            refresh_token_binding(&public_dpop, Some(&jkt("k1"))).as_deref(),
+            Some("k1")
+        );
+        for unbound in [
+            client(ClientAuthMethod::ClientSecretPost, true),
+            client(ClientAuthMethod::None, false),
+        ] {
+            assert_eq!(refresh_token_binding(&unbound, Some(&jkt("k1"))), None);
+        }
+        let cert_only = CnfClaim::from_certificate_thumbprint("x5t");
+        assert_eq!(refresh_token_binding(&public_dpop, Some(&cert_only)), None);
+    }
+
+    /// #681 — the bound key is admitted; another key, or none, is refused.
+    #[test]
+    fn a_public_dpop_clients_refresh_needs_the_bound_key() {
+        let c = client(ClientAuthMethod::None, true);
+        assert!(enforce_refresh_token_binding(&c, Some("k1"), Some(&jkt("k1"))).is_ok());
+        for bound in [Some("k2"), None] {
+            assert!(matches!(
+                enforce_refresh_token_binding(&c, bound, Some(&jkt("k1"))),
+                Err(crate::error::OAuth2Error::InvalidGrant(_))
+            ));
+        }
+    }
+
+    /// #681 — a confidential client's refresh, and a non-DPoP public
+    /// client's, read no binding at all.
+    #[test]
+    fn other_clients_refresh_is_unchanged() {
+        let confidential = client(ClientAuthMethod::ClientSecretPost, true);
+        assert!(enforce_refresh_token_binding(&confidential, None, Some(&jkt("k1"))).is_ok());
+        assert!(enforce_refresh_token_binding(&confidential, Some("k2"), Some(&jkt("k1"))).is_ok());
+        let public_bearer = client(ClientAuthMethod::None, false);
+        assert!(enforce_refresh_token_binding(&public_bearer, None, None).is_ok());
     }
 }

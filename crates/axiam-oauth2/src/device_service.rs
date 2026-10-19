@@ -485,6 +485,10 @@ where
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                // #681 / RFC 9449 §5 — a public DPoP-bound device's refresh
+                // token is bound to the key its poll proved; `None` for every
+                // other client.
+                dpop_jkt: crate::dpop::refresh_token_binding(&client.client, client.cnf.as_ref()),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await

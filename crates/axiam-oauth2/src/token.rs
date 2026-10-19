@@ -2215,6 +2215,8 @@ where
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
+        // #681 — and a public client's refresh token is bound to the same key.
+        let refresh_jkt = crate::dpop::refresh_token_binding(&client, cnf.as_ref());
         // X1 — the code has already been consumed at this point, so a veto
         // costs the caller the code. That is the correct order: the code is
         // single-use and PKCE-verified, and leaving it spendable while an
@@ -2323,6 +2325,9 @@ where
                     auth_time: auth_code.auth_time,
                     acr: auth_code.acr.clone(),
                     amr: auth_code.amr.clone(),
+                    // #681 / RFC 9449 §5 — the key this request proved, for a
+                    // public DPoP-bound client; `None` for every other client.
+                    dpop_jkt: refresh_jkt,
                     expires_at: refresh_expires,
                 })
                 .await
@@ -2852,6 +2857,18 @@ where
         // renewing tokens bound to it, and would survive a certificate
         // rotation the operator performed precisely to revoke access.
         let cnf = self.certificate_binding_for(&client, ctx)?;
+        // #681 / RFC 9449 §5 — a public DPoP-bound client's refresh token is
+        // redeemed only by a proof with the key it was bound to; the
+        // successor is bound to the same key. Asked of the registration *now*,
+        // as `cnf` is: every other client reads no binding, and its refresh is
+        // what it was. Decided before the reactor hook runs and before
+        // anything is minted or rotated, so a refusal spends nothing.
+        crate::dpop::enforce_refresh_token_binding(
+            &client,
+            stored.dpop_jkt.as_deref(),
+            cnf.as_ref(),
+        )?;
+        let refresh_jkt = crate::dpop::refresh_token_binding(&client, cnf.as_ref());
         // Read before `cnf` is moved into the claims. RFC 9449 §5: a DPoP-bound
         // token is announced as such, and everything else stays `Bearer`.
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
@@ -2980,6 +2997,9 @@ where
                 auth_time: stored.auth_time,
                 acr: stored.acr.clone(),
                 amr: stored.amr.clone(),
+                // #681 — the key the predecessor was bound to, which this
+                // request has just proved; `None` for every other client.
+                dpop_jkt: refresh_jkt,
                 expires_at: refresh_expires,
             })
             .await

@@ -190,6 +190,14 @@ client the request would produce hold the device grant
   to the same rules a public registration is: no `fapi2` profile, and no mTLS
   binding, `jwks` or `jwks_uri` beside `none` — clear those in the same
   request if the client carries them.
+* **A DPoP-bound client's devices sign in again, once** (since 1.1.1, #681).
+  A public client registered with `dpop_bound_access_tokens` has its refresh
+  tokens bound to its device's DPoP key (see
+  [Refresh tokens of a DPoP-bound public client](#refresh-tokens-of-a-dpop-bound-public-client)),
+  and the refresh tokens issued while it was confidential are bound to none,
+  so each is refused `invalid_grant` at its next refresh and the device runs
+  the device flow again. A client not registered for DPoP keeps its refresh
+  tokens.
 
 **Every other conversion stays refused** with `400`, and writes nothing:
 
@@ -359,6 +367,30 @@ curl -X POST "https://id.example.com/oauth2/token?tenant_id=$TENANT_ID" \
 
 Refreshing takes the same shape — `grant_type=refresh_token`,
 `refresh_token=…`, `client_id=…`, and no secret.
+
+### Refresh tokens of a DPoP-bound public client
+
+A public client has no credential, so a refresh token is all a thief needs to
+keep a grant alive. RFC 9449 §5 therefore binds the refresh tokens of a
+**public** client that uses DPoP to the client's key, and since 1.1.1 AXIAM
+does so (#681) for every public client registered with
+`dpop_bound_access_tokens: true`, whatever the grant (authorization code or
+device):
+
+* The refresh token is bound to the key of the DPoP proof sent with the
+  request that obtained it.
+* A refresh must carry a proof by **that** key. A proof by another key is
+  refused `400 invalid_grant`, and the token is not spent: the client that
+  holds the key can still refresh it. The successor is bound to the same key.
+* A refresh token bound to no key is refused `invalid_grant`. That covers a
+  token issued before the upgrade to 1.1.1, one issued while the client was
+  confidential or not yet registered for DPoP. The client signs in again once
+  and gets a bound one. The server does not bind such a token to the first key
+  that presents it, because that key may be a thief's.
+
+A client that rotates its DPoP key must therefore obtain a new grant; keep the
+key for as long as the refresh token. A confidential client's refresh tokens,
+and a public client's that does not use DPoP, are unchanged.
 
 ---
 

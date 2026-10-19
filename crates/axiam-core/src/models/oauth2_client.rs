@@ -1168,6 +1168,19 @@ pub struct RefreshToken {
     /// grant with no browser session behind it.
     #[serde(default)]
     pub amr: Vec<Amr>,
+    /// #681 / RFC 9449 §5 — the JWK thumbprint (`jkt`) of the DPoP key this
+    /// token is bound to.
+    ///
+    /// Set only for a **public** client registered for DPoP-bound tokens: such
+    /// a client has no credential, so without the binding a stolen refresh
+    /// token refreshes under the thief's key. The refresh grant then requires a
+    /// proof by this key and copies it to the successor. `None` for every
+    /// other client, whose refresh is unchanged (a confidential client proves
+    /// itself by its credential), and for every row written before schema
+    /// v109 — which a public DPoP-bound client's refresh refuses rather than
+    /// binds to whichever key presents it first.
+    #[serde(default)]
+    pub dpop_jkt: Option<String>,
 }
 
 /// Input for creating a new refresh token.
@@ -1192,6 +1205,8 @@ pub struct CreateRefreshToken {
     pub acr: Option<String>,
     /// X7.2 / D-9 — see [`RefreshToken::amr`].
     pub amr: Vec<Amr>,
+    /// #681 — see [`RefreshToken::dpop_jkt`].
+    pub dpop_jkt: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 

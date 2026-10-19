@@ -1227,6 +1227,226 @@ async fn a_device_grant_token_is_refused_403_at_the_device_routes_and_401_elsewh
     );
 }
 
+/// A refresh request for `client_id`, with whatever `extra` the client needs.
+fn refresh_body(client_id: &str, refresh_token: &str, extra: &str) -> String {
+    format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={client_id}{extra}",
+        urlencoding(refresh_token)
+    )
+}
+
+/// Poll an approved grant of `client_id` with a proof by `key`, and return
+/// the token response.
+async fn poll_with_key(
+    f: &Fixture,
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    client_id: &str,
+    key: &ProofKey,
+    extra: &str,
+) -> Value {
+    let (device_code, _) = seed_grant_for(f, client_id, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        poll_body(client_id, &device_code) + extra,
+        [("DPoP", dpop_proof(key))]
+    );
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
+/// #681 (ii), D-6, RFC 9449 §5 — a public DPoP-bound client's refresh token
+/// is bound to the key its device proved at the poll. A refresh with another
+/// key — a stolen token under the thief's key — is `invalid_grant` and spends
+/// nothing; with the same key it is admitted, and the successor is bound to
+/// that key again.
+#[actix_web::test]
+async fn a_public_dpop_clients_refresh_token_is_bound_to_its_key() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "bound-tv-refresh",
+        ClientAuthMethod::None,
+        |c| {
+            c.dpop_bound_access_tokens = true;
+            c.grant_types.push("refresh_token".into());
+        },
+    )
+    .await;
+    let device_key = proof_key();
+    let thief_key = proof_key();
+    let tokens = poll_with_key(&f, &app, &client_id, &device_key, "").await;
+    let refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(&client_id, &refresh, ""),
+        [("DPoP", dpop_proof(&thief_key))]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "another key refreshed the token: {body}"
+    );
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(&client_id, &refresh, ""),
+        [("DPoP", dpop_proof(&device_key))]
+    );
+    assert_eq!(status, 200, "the refused attempt spent the token: {body}");
+    assert_eq!(body["token_type"], "DPoP");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(claims["cnf"]["jkt"].as_str(), Some(device_key.jkt.as_str()));
+    let successor = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(&client_id, &successor, ""),
+        [("DPoP", dpop_proof(&thief_key))]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "the successor lost the binding: {body}"
+    );
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(&client_id, &successor, ""),
+        [("DPoP", dpop_proof(&device_key))]
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// #681 (ii) — a refresh token bound to no key (written before v109, or while
+/// the client was confidential, before W3.1's conversion) is refused for a
+/// public DPoP-bound client rather than bound to whichever key presents it
+/// first.
+#[actix_web::test]
+async fn a_public_dpop_clients_unbound_refresh_token_is_refused() {
+    use axiam_core::models::oauth2_client::CreateRefreshToken;
+    use axiam_core::repository::RefreshTokenRepository;
+
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "converted-tv",
+        ClientAuthMethod::None,
+        |c| {
+            c.dpop_bound_access_tokens = true;
+            c.grant_types.push("refresh_token".into());
+        },
+    )
+    .await;
+    let raw = axiam_auth::token::generate_refresh_token();
+    axiam_db::repository::SurrealRefreshTokenRepository::new(f.db.clone())
+        .create(CreateRefreshToken {
+            tenant_id: f.tenant_id,
+            token_hash: axiam_auth::token::hash_refresh_token(&raw),
+            client_id: client_id.clone(),
+            user_id: Some(f.user_id),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: Vec::new(),
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+            dpop_jkt: None,
+            expires_at: Utc::now() + Duration::days(1),
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(&client_id, &raw, ""),
+        [("DPoP", dpop_proof(&proof_key()))]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "{body}"
+    );
+}
+
+/// #681 (ii) — a confidential DPoP-bound client's refresh is unchanged: it
+/// proves itself by its secret, and each refresh binds the new access token to
+/// whatever key that request proves. A public client registered without DPoP
+/// refreshes as before too.
+#[actix_web::test]
+async fn a_confidential_or_bearer_clients_refresh_is_unchanged() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, secret) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "confidential-bound-tv",
+        ClientAuthMethod::ClientSecretPost,
+        |c| {
+            c.dpop_bound_access_tokens = true;
+            c.grant_types.push("refresh_token".into());
+        },
+    )
+    .await;
+    let secret_param = format!("&client_secret={}", urlencoding(&secret));
+    let tokens = poll_with_key(&f, &app, &client_id, &proof_key(), &secret_param).await;
+    let other_key = proof_key();
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/token",
+        f.tenant_id,
+        refresh_body(
+            &client_id,
+            tokens["refresh_token"].as_str().unwrap(),
+            &secret_param
+        ),
+        [("DPoP", dpop_proof(&other_key))]
+    );
+    assert_eq!(status, 200, "{body}");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(claims["cnf"]["jkt"].as_str(), Some(other_key.jkt.as_str()));
+
+    let (bearer_id, _) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "bearer-tv",
+        ClientAuthMethod::None,
+        |c| c.grant_types.push("refresh_token".into()),
+    )
+    .await;
+    let (device_code, _) =
+        seed_grant_for(&f, &bearer_id, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&bearer_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        refresh_body(&bearer_id, body["refresh_token"].as_str().unwrap(), "")
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["token_type"], "Bearer");
+}
+
 const ISSUER: &str = "https://id.test.example";
 
 /// A `private_key_jwt` client assertion for `client_id`.

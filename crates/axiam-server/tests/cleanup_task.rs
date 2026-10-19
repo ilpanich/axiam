@@ -1179,6 +1179,7 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(90),
         })
         .await

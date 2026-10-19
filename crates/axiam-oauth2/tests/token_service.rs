@@ -571,6 +571,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 auth_time: i.auth_time,
                 acr: i.acr,
                 amr: i.amr,
+                dpop_jkt: i.dpop_jkt,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -846,6 +847,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         auth_time: None,
         acr: None,
         amr: Vec::new(),
+        dpop_jkt: None,
     }
 }
 
@@ -5786,4 +5788,128 @@ async fn the_ciba_token_path_costs_one_verify_whichever_arm_refuses() {
     let (n, _) =
         verifies_of(svc.exchange_ciba(client_tenant(), req, &no_cert(), &NeverReached)).await;
     assert_eq!(n, 1, "wrong secret");
+}
+
+// ---------------------------------------------------------------------------
+// #681 (ii), RFC 9449 §5 — a public DPoP-bound client's refresh tokens are
+// bound to its key
+// ---------------------------------------------------------------------------
+
+fn public_dpop_client(grants: &[&str]) -> Box<OAuth2Client> {
+    let mut client = public_registered(grants);
+    client.scopes = vec!["openid".into()];
+    client.client_secret_hash = String::new();
+    client.dpop_bound_access_tokens = true;
+    client
+}
+
+fn bound_refresh(jkt: Option<&str>) -> RefreshToken {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    stored.dpop_jkt = jkt.map(str::to_owned);
+    stored
+}
+
+fn public_refresh_req() -> TokenRequest {
+    let mut req = refresh_req("tok");
+    req.client_secret = None;
+    req
+}
+
+/// The code grant binds a public DPoP-bound client's refresh token to the key
+/// its token request proved; a confidential DPoP-bound client's stays unbound.
+#[tokio::test]
+async fn r681_the_code_grant_binds_only_a_public_dpop_clients_refresh_token() {
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(public_dpop_client(&["authorization_code", "refresh_token"])),
+        MockCodeRepo::ok(make_auth_code(&["openid"], Some(PKCE_CHALLENGE))),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let mut req = auth_code_req(Some(PKCE_VERIFIER));
+    req.client_secret = None;
+    svc.exchange(Uuid::new_v4(), req, &proof_for(KEY_A))
+        .await
+        .expect("the public client's code redeems");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt.as_deref(), Some(KEY_A));
+
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let mut confidential = make_client(&["authorization_code", "refresh_token"], &["openid"]);
+    confidential.dpop_bound_access_tokens = true;
+    let svc = build(
+        ClientOutcome::Found(confidential),
+        MockCodeRepo::ok(make_auth_code(&["openid"], Some(PKCE_CHALLENGE))),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(
+        Uuid::new_v4(),
+        auth_code_req(Some(PKCE_VERIFIER)),
+        &proof_for(KEY_A),
+    )
+    .await
+    .expect("the confidential client's code redeems");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
+}
+
+/// A public DPoP-bound client's refresh: another key, or a token bound to no
+/// key, is `invalid_grant` and writes no successor; the bound key is admitted
+/// and the successor is bound to it.
+#[tokio::test]
+async fn r681_a_public_dpop_clients_refresh_needs_the_bound_key() {
+    for (bound, proof) in [(Some(KEY_A), KEY_B), (None, KEY_A)] {
+        let refresh = MockRefreshRepo::new().with_get(bound_refresh(bound));
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), public_refresh_req(), &proof_for(proof))
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "invalid_grant", "bound {bound:?}");
+        assert!(created.lock().unwrap().is_empty(), "a refusal rotated");
+    }
+
+    let refresh = MockRefreshRepo::new().with_get(bound_refresh(Some(KEY_A)));
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), public_refresh_req(), &proof_for(KEY_A))
+        .await
+        .expect("the bound key refreshes");
+    assert_eq!(resp.token_type, "DPoP");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt.as_deref(), Some(KEY_A));
+}
+
+/// A confidential DPoP-bound client's refresh is unchanged: an unbound token
+/// refreshes under whatever key the request proves, and stays unbound.
+#[tokio::test]
+async fn r681_a_confidential_clients_refresh_is_unchanged() {
+    let refresh = MockRefreshRepo::new().with_get(bound_refresh(None));
+    let created = refresh.created.clone();
+    let mut client = make_client(&["refresh_token"], &["openid"]);
+    client.dpop_bound_access_tokens = true;
+    let svc = build(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &proof_for(KEY_B))
+        .await
+        .expect("a confidential client's refresh needs no bound key");
+    assert_eq!(resp.token_type, "DPoP");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
 }

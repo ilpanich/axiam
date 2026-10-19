@@ -181,6 +181,17 @@ What that means at AXIAM's own routes:
   as it did (its response does not echo an access token's `client_id`), and
   revocation acts on the refresh token, which its client revokes as before.
 
+The poll also returns a refresh token, which a client holding the
+`refresh_token` grant redeems with `grant_type=refresh_token` and its
+authentication. For a **public**
+client registered for DPoP-bound tokens it is, since 1.1.1, bound to the key
+the poll's DPoP proof named (RFC 9449 §5, #681). Each refresh must carry a
+proof by that key: another key, or a refresh token bound to none (one issued
+before 1.1.1, or while the client was confidential), is `400 invalid_grant`,
+and the device runs the flow again. A confidential client's refresh tokens
+are unchanged. See
+[Refresh tokens of a DPoP-bound public client](../admin/public-clients.md#refresh-tokens-of-a-dpop-bound-public-client).
+
 ## Rate limits
 
 Three buckets, none of them sized from benchmark capacity:

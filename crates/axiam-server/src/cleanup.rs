@@ -232,8 +232,10 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// hour. A purge that does not finish releases its claim — one that fails, one
 /// given up because the process is stopping, and (#655) one aborted or
 /// panicking, from a drop guard — so the next tick, or the next start, resumes
-/// it at once; only a process that ends before the release is written (a
-/// `SIGKILL`, or a stop that runs out of time) leaves the tenant to the lease.
+/// it at once; only a process that ends before the release is written leaves
+/// the tenant to the lease: a `SIGKILL`, or a unit cut at the stop's bound,
+/// whose guard releases the claim from a spawned task that the process exit may
+/// cancel (#687).
 pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 
 /// How long a unit's claim on its pending-record marker (#689) keeps a sweep
@@ -242,7 +244,8 @@ pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 /// point of no return and its record, which the teardown bounds at seconds; a
 /// unit that is cut releases it from a drop guard, so the next start records
 /// the work at once, and only a process that ends before the release is
-/// written leaves the marker to this lease.
+/// written — a `SIGKILL`, or a unit cut at the stop's bound, whose spawned
+/// release the process exit may cancel (#687) — leaves the marker to this lease.
 pub const PENDING_RECORD_LEASE: Duration = TENANT_PURGE_LEASE;
 
 // ---------------------------------------------------------------------------
@@ -875,8 +878,13 @@ async fn record_tenant_purged<S: AuditWriteSink>(
 /// a panic, a release that was itself cut — drops the guard still holding the
 /// claim, and the drop spawns the release on the runtime. Without that, the
 /// next start's sweep found a claim younger than [`TENANT_PURGE_LEASE`] and
-/// skipped the tenant for up to an hour. A drop during the runtime's own
-/// shutdown cannot write anything; the claim then lapses with its lease.
+/// skipped the tenant for up to an hour. That release is a spawned task, and
+/// nothing waits for it: a unit cut at the teardown's bound (the one exit where
+/// the guard is the only release, typically a datastore too slow to answer the
+/// awaited one) is dropped inside [`AuditedWork::join`], and the process exit
+/// that follows drops the runtime, which cancels the task unless it has already
+/// landed. The tenant then waits out [`TENANT_PURGE_LEASE`] (#687; awaiting the
+/// release at the bound was declined, since it needs a budget line of its own).
 struct PurgeClaim<C: Connection> {
     tenants: Arc<SurrealTenantRepository<C>>,
     tenant_id: Uuid,
@@ -1024,8 +1032,10 @@ impl<C: Connection> PendingMarker<C> {
 ///
 /// Like [`PurgeClaim`], an exit that cannot await — the unit aborted at the
 /// teardown's bound, a panic — drops the guard still holding the claim, and the
-/// drop spawns the release on the runtime; a drop during the runtime's own
-/// shutdown cannot write anything, and the marker then lapses with the lease.
+/// drop spawns the release on the runtime. A unit cut at the teardown's bound
+/// drops it just before the process exit drops the runtime, which cancels a
+/// release that has not landed (see [`PurgeClaim`]); the marker then lapses with
+/// the lease (#687).
 /// Every write is conditional on `stamp`, so a marker another replica has
 /// taken over is left to it.
 struct RecordClaim<C: Connection> {

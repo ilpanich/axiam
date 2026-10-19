@@ -3322,6 +3322,101 @@ async fn a_tenant_purge_that_panics_or_is_cut_releases_its_claim() {
     assert_eq!(purge_records_of(&db, cut).await, 1);
 }
 
+/// #687 (R110W4-01): the guard's release is a task spawned from `drop`, and
+/// nothing waits for it. A unit cut by the teardown's `join` at its bound is the
+/// one exit where the guard is the only release; the process exit that follows
+/// drops the runtime, which cancels a release that has not landed, and the
+/// tenant then waits out the claim's lease. The documented behaviour, pinned
+/// here, is that outcome — not that the claim is always released.
+///
+/// A release that never answers is a release the runtime ends before it runs:
+/// the unit's runtime polls one task per turn (`event_interval(1)`), so `join`
+/// returns the turn after the unit is dropped, with the spawned release alive
+/// and not yet polled, and the runtime is dropped right after. The datastore
+/// lives on the test's own runtime and is only used by the unit's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_purge_cut_at_the_bound_keeps_its_claim_when_the_runtime_ends_right_after() {
+    let db = setup_db().await;
+    let org = new_org(&db, "purge-cut-at-exit").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let doomed = tenant_with_a_user(&db, org, "cut-at-exit").await;
+    tenants.delete(doomed).await.unwrap();
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::TenantRowsPurged(doomed),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let process = {
+        let (tenants, audit, work) = (Arc::clone(&tenants), Arc::clone(&audit), work.clone());
+        std::thread::spawn(move || {
+            let mut entered = entered;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .event_interval(1)
+                .build()
+                .expect("the unit's runtime");
+            let sweeping = work.clone();
+            runtime.spawn(async move {
+                let _ = sweep_tenant_purge(&tenants, &audit, false, &sweeping).await;
+            });
+            runtime.block_on(wait_until_entered(&mut entered));
+
+            // The teardown's bound has run out on a unit that is still inside
+            // its step (the stop is not set: with it set, the unit gives itself
+            // up and awaits its release, which is the path that works).
+            let _running = stop_tx;
+            let cut = !runtime.block_on(work.join(tokio::time::Instant::now()));
+            let release_pending = runtime.metrics().num_alive_tasks();
+            // Process exit: `main` returns and the runtime is dropped.
+            drop(runtime);
+            (cut, release_pending)
+        })
+    };
+    let (cut, pending) = tokio::task::block_in_place(|| process.join().expect("the unit's thread"));
+    assert!(cut, "the unit was cut by join");
+    assert!(
+        pending > 0,
+        "the guard's release was spawned and had not run when the runtime ended"
+    );
+
+    // The release never landed: the claim is still set, the tenant row is still
+    // there, and nothing was recorded.
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE).unwrap();
+    assert!(
+        !tenants
+            .claim_purge(doomed, Utc::now(), lease)
+            .await
+            .unwrap(),
+        "the claim is still set after the runtime ended"
+    );
+    assert!(tenants.list_tombstoned().await.unwrap().contains(&doomed));
+    assert_eq!(purge_records_of(&db, doomed).await, 0);
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, false, &never_stopping())
+            .await
+            .unwrap(),
+        0,
+        "the next start's sweep skips the tenant: the claim is younger than its lease"
+    );
+
+    // Only the lease frees it.
+    assert!(
+        tenants
+            .claim_purge(
+                doomed,
+                Utc::now() + lease + chrono::TimeDelta::seconds(1),
+                lease
+            )
+            .await
+            .unwrap(),
+        "once the lease has run out, the tenant can be claimed again"
+    );
+}
+
 /// #714 (R110-04): an orphan purge holds its claim guard from the marker's
 /// `CREATE`. A unit held right after its claim — where the read of the rows
 /// left used to run with no guard — across a stop, and then aborted by the

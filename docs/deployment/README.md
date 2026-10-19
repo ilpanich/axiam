@@ -1941,9 +1941,10 @@ finished rather than wait for it:
     again. The log says `recorded an erasure whose unit was cut before its
     record` or `recorded a tenant purge whose unit was cut before its record`.
     The marker is the next start's at once when the cut work's drop guard
-    released it; a process that ended before the release was written (a
-    `SIGKILL`) leaves it to the one-hour lease, after which any replica's sweep
-    records it. A row dead-lettered by the cut work (the datastore refused it)
+    released it; when the release was not written — a `SIGKILL`, or a unit cut
+    at the teardown's bound, whose guard releases the marker from a spawned task
+    that the process exit may cancel — it is left to the one-hour lease, after
+    which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
     is not in the datastore, so the sweep writes it there too: replay the
     dead-letter file with that in mind;
   - a data export cut after it was marked ready and before its mail was queued:
@@ -1951,8 +1952,12 @@ finished rather than wait for it:
 
   A tenant purge cut or failing anywhere else releases its claim (from a drop
   guard, for a cut or a panic), so the next start's sweep no longer skips the
-  tenant for the claim's one-hour lease; only a process that ends before the
-  release is written (a `SIGKILL`) still leaves the tenant to the lease. The
+  tenant for the claim's one-hour lease. Only a release that is not written
+  still leaves the tenant to the lease: a `SIGKILL`, and a unit **cut at the
+  stop's bound** (typically a datastore too slow to answer the awaited release),
+  which releases its claim from a spawned task that the process exit may cancel
+  (the stop does not wait for it). (Corrected 2026-10-19, #687: this text named
+  only the `SIGKILL`.) The
   purge of an orphaned tenant id holds its claim the same way from the moment
   its claim marker is written, and writes the marker only while the id still has
   rows to purge, so the next start's sweep takes a cut one over at once and

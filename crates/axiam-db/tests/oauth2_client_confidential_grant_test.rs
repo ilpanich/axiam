@@ -142,3 +142,61 @@ async fn it_counts_confidential_device_clients_and_nothing_else() {
     let urn_only = repo.count_confidential_with_grant(&[URN]).await.unwrap();
     assert_eq!((urn_only.clients, urn_only.tenants), (2, 1));
 }
+
+/// #675 (D-4) — an update that sets a public method clears the secret hash in
+/// the same write, so a converted device client holds no secret and leaves the
+/// boot warning's count; an update that keeps a confidential method keeps it.
+#[tokio::test]
+async fn an_update_to_none_clears_the_secret_hash_in_the_same_write() {
+    use axiam_core::models::oauth2_client::{ClientAuthMethod, UpdateOAuth2Client};
+
+    let (db, org) = setup().await;
+    let repo = SurrealOAuth2ClientRepository::new(db.clone());
+    let a = tenant(&db, org, "tenant-convert").await;
+    let converted = client(&db, a, &[URN, "refresh_token"], None).await;
+    let kept = client(&db, a, &[URN], None).await;
+    assert_eq!(
+        repo.count_confidential_with_grant(&SPELLINGS)
+            .await
+            .unwrap()
+            .clients,
+        2
+    );
+
+    for (client_id, method) in [
+        (&converted, ClientAuthMethod::None),
+        (&kept, ClientAuthMethod::ClientSecretBasic),
+    ] {
+        let row = repo.get_by_client_id(a, client_id).await.unwrap();
+        assert!(!row.client_secret_hash.is_empty());
+        let updated = repo
+            .update_if_unchanged(
+                a,
+                row.id,
+                UpdateOAuth2Client {
+                    token_endpoint_auth_method: Some(method),
+                    ..Default::default()
+                },
+                row.updated_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.token_endpoint_auth_method, method);
+        assert_eq!(
+            updated.client_secret_hash.is_empty(),
+            method.is_public(),
+            "{method:?}"
+        );
+        let reread = repo.get_by_client_id(a, client_id).await.unwrap();
+        assert_eq!(reread.client_secret_hash, updated.client_secret_hash);
+    }
+
+    let count = repo
+        .count_confidential_with_grant(&SPELLINGS)
+        .await
+        .unwrap();
+    assert_eq!(
+        count.clients, 1,
+        "the converted client is no longer counted"
+    );
+}

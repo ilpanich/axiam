@@ -811,8 +811,16 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
         if input.profile.is_some() {
             sets.push("profile = $profile");
         }
-        if input.token_endpoint_auth_method.is_some() {
+        if let Some(method) = input.token_endpoint_auth_method {
             sets.push("token_endpoint_auth_method = $token_endpoint_auth_method");
+            // #675 (D-4) — a public row holds no secret, as `create_row` writes
+            // it. Cleared in the same statement that sets `none`, so no reader
+            // ever sees a public method beside a live hash; on a row that is
+            // already public the hash is already empty and this writes nothing
+            // new.
+            if method.is_public() {
+                sets.push("client_secret_hash = ''");
+            }
         }
         if input.tls_client_auth_subject_dn.is_some() {
             sets.push("tls_client_auth_subject_dn = $tls_client_auth_subject_dn");

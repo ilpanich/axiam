@@ -218,8 +218,14 @@ grant, it logs one `WARN` with their number and the number of tenants they
 belong to (`N confidential OAuth2 client(s) in M tenant(s) hold the device-code
 grant …`; counts only, no client id or name). Each of them answers
 `401 invalid_client` at `/oauth2/device_authorization` and at the poll unless
-its device sends the credential. A client cannot be changed between public and
-confidential, so a device that holds no secret needs a new public client.
+its device sends the credential. Since 1.1.1 an administrator can make such a
+client public in place — `PUT /api/v1/oauth2-clients/{id}` with
+`"token_endpoint_auth_method": "none"`, admitted only when its grants are the
+device grant and `refresh_token` alone — which clears its secret in the same
+write and writes one `oauth2.client_converted_to_public` audit row; its
+devices keep their `client_id`. Every other change between public and
+confidential is still refused. See
+[Converting a confidential device client to public](../admin/public-clients.md#converting-a-confidential-device-client-to-public).
 
 ## Not implemented
 

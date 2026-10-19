@@ -1752,3 +1752,238 @@ async fn a_forged_forwarded_entry_does_not_charge_another_addresss_bucket() {
         "the forged requests were charged to the address that sent them"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A confidential device client made public by the admin PUT (#675, D-4)
+// ---------------------------------------------------------------------------
+
+/// The stored row behind a `client_id`.
+async fn stored_client(
+    f: &Fixture,
+    client_id: &str,
+) -> axiam_core::models::oauth2_client::OAuth2Client {
+    SurrealOAuth2ClientRepository::new(f.db.clone())
+        .get_by_client_id(f.tenant_id, client_id)
+        .await
+        .unwrap()
+}
+
+/// `PUT /api/v1/oauth2-clients/{id}` with `patch`, as an administrator.
+macro_rules! put_client {
+    ($app:expr, $f:expr, $id:expr, $patch:expr) => {{
+        let req = test::TestRequest::put()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/oauth2-clients/{}", $id))
+            .insert_header(("Authorization", format!("Bearer {}", mint_token(&$f))))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json($patch)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body = test::read_body(resp).await;
+        (
+            status,
+            serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+        )
+    }};
+}
+
+/// The audit rows of conversions to public written for `client_id`.
+async fn conversion_rows(f: &Fixture, client_id: &str) -> Vec<Value> {
+    let mut result =
+        f.db.query(
+            "SELECT action, outcome, metadata FROM audit_log \
+             WHERE action = $action AND metadata.client_id = $client_id",
+        )
+        .bind((
+            "action",
+            axiam_api_rest::handlers::oauth2_clients::CLIENT_CONVERTED_TO_PUBLIC_ACTION,
+        ))
+        .bind(("client_id", client_id.to_owned()))
+        .await
+        .unwrap();
+    result.take(0).unwrap()
+}
+
+/// The 1.0.x quickstart's shape: a device client registered with the default
+/// `client_secret_post`, whose devices send `client_id` alone and are refused
+/// since #635. The `PUT` makes it public, clears the hash in the same write,
+/// writes one audit row naming the conversion, and the device flow then runs
+/// end to end on `client_id` alone; the old secret is refused like any other
+/// credential a public client presents.
+#[actix_web::test]
+async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only_its_client_id() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, secret) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "quickstart-device",
+        ClientAuthMethod::ClientSecretPost,
+        |c| c.grant_types.push("refresh_token".into()),
+    )
+    .await;
+    let before = stored_client(&f, &client_id).await;
+    assert!(!before.client_secret_hash.is_empty());
+
+    // Before: the device's own request is refused.
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={client_id}&scope=openid"),
+        []
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client"))
+    );
+
+    let (status, body) = put_client!(
+        app,
+        f,
+        before.id,
+        serde_json::json!({ "token_endpoint_auth_method": "none" })
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["token_endpoint_auth_method"], "none");
+    assert!(body.get("client_secret").is_none(), "{body}");
+    let after = stored_client(&f, &client_id).await;
+    assert!(after.token_endpoint_auth_method.is_public());
+    assert_eq!(
+        after.client_secret_hash, "",
+        "the secret is cleared in the write that makes the client public"
+    );
+    assert_eq!(
+        after.client_id, client_id,
+        "the devices keep their client_id"
+    );
+
+    let rows = conversion_rows(&f, &client_id).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one audit row names the conversion: {rows:?}"
+    );
+    assert_eq!(rows[0]["metadata"]["from"], "client_secret_post");
+    assert_eq!(rows[0]["metadata"]["to"], "none");
+
+    // After: the start and the poll on `client_id` alone.
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        format!("client_id={client_id}&scope=openid"),
+        []
+    );
+    assert_eq!(status, 200, "{body}");
+    let device_code = body["device_code"].as_str().unwrap().to_owned();
+    let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
+    assert!(
+        SurrealDeviceGrantRepository::new(f.db.clone())
+            .decide(f.tenant_id, &user_code, true, f.user_id)
+            .await
+            .unwrap()
+    );
+
+    // The secret it held is now a credential on a public client: refused, and
+    // the approved grant is left as it was.
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        poll_body(&client_id, &device_code) + &format!("&client_secret={secret}")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client"))
+    );
+    assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
+
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body["access_token"].as_str().unwrap().is_empty());
+}
+
+/// Every other conversion stays refused, and a refusal writes nothing: a
+/// client that also holds `client_credentials` or CIBA, a client that tries to
+/// shed such a grant in the same request, a client without the device grant,
+/// and the converse — a public device client made confidential.
+#[actix_web::test]
+async fn every_other_change_across_the_public_line_is_still_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let mut cases = Vec::new();
+    for (name, grants, patch) in [
+        (
+            "with-client-credentials",
+            vec![DEVICE_CODE_GRANT_TYPE, "client_credentials"],
+            serde_json::json!({ "token_endpoint_auth_method": "none" }),
+        ),
+        (
+            "with-ciba",
+            vec![
+                DEVICE_CODE_GRANT_TYPE,
+                axiam_core::models::ciba::CIBA_GRANT_TYPE,
+            ],
+            serde_json::json!({ "token_endpoint_auth_method": "none" }),
+        ),
+        (
+            "shedding-client-credentials",
+            vec![DEVICE_CODE_GRANT_TYPE, "client_credentials"],
+            serde_json::json!({
+                "token_endpoint_auth_method": "none",
+                "grant_types": [DEVICE_CODE_GRANT_TYPE],
+            }),
+        ),
+        (
+            "refresh-only",
+            vec!["refresh_token"],
+            serde_json::json!({ "token_endpoint_auth_method": "none" }),
+        ),
+    ] {
+        let (client_id, _) = create_device_client(
+            &f.db,
+            f.tenant_id,
+            name,
+            ClientAuthMethod::ClientSecretPost,
+            |c| {
+                c.grant_types = grants.iter().map(|g| (*g).to_owned()).collect();
+                if c.grant_types
+                    .iter()
+                    .any(|g| g == axiam_core::models::ciba::CIBA_GRANT_TYPE)
+                {
+                    c.ciba.backchannel_token_delivery_mode =
+                        Some(axiam_core::models::ciba::CibaDeliveryMode::Poll);
+                }
+            },
+        )
+        .await;
+        cases.push((client_id, patch));
+    }
+    // The converse: the fixture's public device client.
+    cases.push((
+        f.client_id.clone(),
+        serde_json::json!({ "token_endpoint_auth_method": "client_secret_post" }),
+    ));
+
+    for (client_id, patch) in cases {
+        let before = stored_client(&f, &client_id).await;
+        let (status, body) = put_client!(app, f, before.id, patch.clone());
+        assert_eq!(status, 400, "{client_id} {patch}: {body}");
+        assert!(
+            body.to_string()
+                .contains("token_endpoint_auth_method cannot be changed"),
+            "refused by the public-line rule, not another: {body}"
+        );
+        let after = stored_client(&f, &client_id).await;
+        assert_eq!(
+            after.token_endpoint_auth_method, before.token_endpoint_auth_method,
+            "{patch}"
+        );
+        assert_eq!(after.client_secret_hash, before.client_secret_hash);
+        assert_eq!(after.grant_types, before.grant_types);
+        assert!(conversion_rows(&f, &client_id).await.is_empty());
+    }
+}

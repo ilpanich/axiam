@@ -79,8 +79,12 @@ device code is looked at**: an unknown client or a failed credential is
 `401 invalid_client`, as is a client that no longer holds the grant — so an
 approved grant is refused once the grant type is removed from its client — and
 a `client_id` that is not the grant's is answered `invalid_grant`, exactly as an
-unknown code. None of these spends the code or records a poll against it, so a
-leaked device code is worth nothing to anyone but its client. A client
+unknown code. None of these spends the code or records a poll against it, so for a
+confidential client a leaked device code is worth nothing without the client's
+credential. A public client's device code remains the grant's only secret
+(RFC 8628 §5.2, §5.6): anyone can name its `client_id`, so keep the code on the
+device and out of logs; a DPoP-bound public client's tokens are bound to the
+key of whoever redeems it. A client
 registered for sender-constrained tokens gets one here too: a DPoP proof binds
 the token (`cnf.jkt`, `token_type: DPoP`), a client certificate binds it
 (`cnf.x5t#S256`), and a poll without the proof or certificate the registration

@@ -40,7 +40,10 @@
 //! unknown device code, before it records the poll or looks at the grant's
 //! state: a caller holding a leaked device code learns nothing about it, and
 //! cannot spend it, slow it down or redeem it under a client it can
-//! authenticate as.
+//! authenticate as. For a confidential client that makes a leaked code worth
+//! nothing without the client's credential; a public client's device code
+//! remains the grant's only secret (RFC 8628 §5.2, §5.6), since anyone can
+//! name its `client_id`.
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, AccessTokenSpec, CnfClaim};

@@ -344,6 +344,10 @@ left untouched so no other cell's fixture changes under it).
    into `results/e4-seed-10`. Skip 100× — the seeding alone is long.
 2. **bench-quick** (~4 min; needs a live p3 stack + seed): X5 certificate/DPoP binding
    overhead. Output in `results/quick/` — deliberately outside `bench-report`.
+   `bench-quick` anchors `BENCH_CERTS_DIR` to an absolute `profiles/certs` itself (#699;
+   before that it failed at k6 init on `p3-mtls`) and writes `results/quick/meta.json`
+   (`image`, `image_digest`, `image_id`, `build_ref`, window, VUs) like the matrix
+   recipes do — read the image and `build_ref` from there when writing the result up.
 
 **SKIP — not runnable today. Both entries changed at alpha38; read them again even if
 you ran this round before.**

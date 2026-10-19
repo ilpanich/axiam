@@ -1117,6 +1117,116 @@ async fn an_unbound_clients_device_token_stays_a_bearer_token() {
     assert!(claims.get("cnf").is_none(), "{claims}");
 }
 
+/// #681 (R110W3-08, RFC 9068 §2.2) — a device-grant access token names the
+/// client it was granted to, as a CIBA token does, and no session: the
+/// approval happened in another browser, and the device has none.
+#[actix_web::test]
+async fn a_device_grant_token_names_its_client_and_no_session() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    let claims = decode_unverified(body["access_token"].as_str().unwrap());
+    assert_eq!(
+        claims["client_id"].as_str(),
+        Some(f.client_id.as_str()),
+        "{claims}"
+    );
+    assert!(claims.get("sid").is_none(), "{claims}");
+}
+
+/// [`test_app!`] with the session check the production server registers, so a
+/// token is admitted only while the session it names is live.
+macro_rules! test_app_with_session_check {
+    ($f:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($f.auth.clone()))
+                .app_data(web::Data::new(Arc::new(
+                    axiam_db::repository::SurrealSessionRepository::new($f.db.clone()),
+                )
+                    as Arc<dyn axiam_api_rest::SessionValidator>))
+                .app_data(web::Data::new(AppState::for_test(
+                    $f.db.clone(),
+                    $f.auth.clone(),
+                )))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    };
+}
+
+/// #681, T-447 — with the session check in place, as in production, the
+/// device's own token is refused at the approval surface with `403
+/// authorization_denied` because it is a client's token, not `401` because it
+/// names no session. Everywhere else it is refused by the session check
+/// exactly as before: the claim opens no route.
+#[actix_web::test]
+async fn a_device_grant_token_is_refused_403_at_the_device_routes_and_401_elsewhere() {
+    let f = setup().await;
+    let app = test_app_with_session_check!(f);
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    let device_token = body["access_token"].as_str().unwrap().to_owned();
+    let (pending_code, user_code) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/device/verify?user_code={user_code}"))
+            .insert_header(("Authorization", format!("Bearer {device_token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 403);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied", "{body}");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/device/decide")
+            .insert_header(("Authorization", format!("Bearer {device_token}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .set_json(serde_json::json!({"user_code": user_code, "approved": true}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 403);
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "authorization_denied", "{body}");
+    assert_eq!(
+        stored_grant(&f, &pending_code).await.status,
+        DeviceGrantStatus::Pending,
+        "the device token decided a grant"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/me")
+            .insert_header(("Authorization", format!("Bearer {device_token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "the device token reached a session-validated route"
+    );
+}
+
 const ISSUER: &str = "https://id.test.example";
 
 /// A `private_key_jwt` client assertion for `client_id`.

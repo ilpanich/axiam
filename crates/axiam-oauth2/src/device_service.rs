@@ -43,7 +43,7 @@
 //! authenticate as.
 
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_USER, CnfClaim, issue_access_token_bound};
+use axiam_auth::token::{AUD_USER, AccessTokenSpec, CnfClaim};
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{
     CreateDeviceGrant, CreateRefreshToken, DeviceGrantStatus, OAuth2Client,
@@ -502,16 +502,24 @@ where
         // token this grant always minted. Read before `cnf` is moved: RFC 9449
         // §5 announces a DPoP-bound token as such.
         let token_type = crate::dpop::token_type_for(client.cnf.as_ref());
-        let access_token = issue_access_token_bound(
+        // #681 (R110W3-08) — RFC 9068 §2.2's `client_id`, as the CIBA grant
+        // names its client: the device the user approved is the party this
+        // token was granted to. It is what the approval surfaces read to
+        // refuse a client's token (T-447, `minted_for_client`), so a device
+        // token is refused there for what it is, not for the session it
+        // lacks. And no `sid`: the approval happened in another browser, and
+        // there is no session of the device's for the claim to name.
+        let access_token = AccessTokenSpec::user(
             user.id,
             tenant_id,
             client.organization_id,
-            &redeemed.scopes,
-            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
-            audience,
-            client.cnf.clone(),
         )
+        .aud(audience)
+        .scopes(&redeemed.scopes)
+        .cnf(client.cnf.clone())
+        .client_id(Some(client.client_id()))
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         let scope = if redeemed.scopes.is_empty() {

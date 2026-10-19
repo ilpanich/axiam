@@ -134,12 +134,16 @@ They are **authenticated and CSRF-protected**, which is why they live under
   §5.4 warns about, seen from the other side.
 - **Only a console sign-in may call them.** An access token AXIAM minted for
   an OAuth2 client — through the code, refresh, CIBA or device grant — names
-  the user too, but it is answered `403` on both endpoints, before the code is
-  looked up:
+  the user too, but it is answered `403` on both endpoints, before its session
+  is checked and before the code is looked up:
 
   ```json
-  {"error": "authorization_denied", "message": "A console sign-in is required to approve a device."}
+  {"error": "authorization_denied", "message": "Authorization denied: a console sign-in is required; this token was minted for an OAuth2 client"}
   ```
+
+  The refusal reads the token's `client_id` claim, and since 1.1.1 the device
+  grant's own token carries one too (see [§4](#4-what-the-device-receives)); it
+  used to be answered `401` here only because it names no session.
 
   Without this rule a relying party holding one of its user's tokens could
   start a device authorization for a device client it controls — so it knows
@@ -157,6 +161,25 @@ are the same code.
 an oracle for which codes are live, and the code space is small by
 construction — 8 characters from a 20-letter alphabet, because a human has to
 read them off a screen.
+
+## 4. What the device receives
+
+The access token is a user token (`sub` is the approving user, `aud` is
+`axiam:user` or the `resource` the device named) and, since 1.1.1, it names
+the client it was granted to in RFC 9068 §2.2's `client_id` claim, as the
+CIBA grant's does (#681). It carries **no `sid`**: the approval happened in
+another browser, and the device has no AXIAM session for the claim to name.
+
+What that means at AXIAM's own routes:
+
+- Every route that checks the caller's session — `/api/v1/*` and UserInfo —
+  answers it `401`, as it always has. It is a token for the resource servers
+  the device was granted, not a console sign-in.
+- The two approval endpoints above answer it `403 authorization_denied`, for
+  what it is (a client's token), before the session is checked.
+- Introspection and revocation do not read the claim: introspection answers
+  as it did (its response does not echo an access token's `client_id`), and
+  revocation acts on the refresh token, which its client revokes as before.
 
 ## Rate limits
 

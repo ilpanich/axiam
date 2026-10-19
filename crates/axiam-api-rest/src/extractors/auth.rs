@@ -367,12 +367,15 @@ impl AuthenticatedUser {
     /// code, refresh, CIBA or device grant — rather than for a console
     /// sign-in, whose token carries no `client_id`.
     ///
-    /// Such a token names the user and a live session, and this extractor
-    /// admits it like a console sign-in's (it reads `sid` so that the token
-    /// works at UserInfo). An approval surface — the CIBA approval page, the
-    /// device verification page — is the person's own act and refuses it with
-    /// `403` (T-447): a relying party holding one of its user's tokens must
-    /// not approve in the user's name.
+    /// A code, refresh or CIBA token names the user and a live session, and
+    /// this extractor admits it like a console sign-in's (it reads `sid` so
+    /// that the token works at UserInfo). A device-grant token names no
+    /// session and is refused `401` here, as it always was (#681). An approval
+    /// surface — the CIBA approval page, the device verification page — is the
+    /// person's own act and refuses every one of them with `403` (T-447): a
+    /// relying party holding one of its user's tokens must not approve in the
+    /// user's name. The device page does it through [`ConsoleSignIn`], before
+    /// the session check, so the refusal does not depend on a session.
     pub fn minted_for_client(&self) -> bool {
         self.claims.0.client_id.is_some()
     }
@@ -388,8 +391,51 @@ impl actix_web::FromRequest for AuthenticatedUser {
         // resolvers (each an `Arc`) so the returned future is `'static`.
         let user_result = extract_user(req);
         let handles = RequestScopeHandles::read(req);
-        Box::pin(async move { handles.apply(user_result?).await })
+        Box::pin(async move { handles.apply(user_result?, Admit::AnyUserToken).await })
     }
+}
+
+/// An [`AuthenticatedUser`] whose token is a console sign-in's: one AXIAM did
+/// **not** mint for an OAuth2 client (T-447, #681).
+///
+/// For an approval surface — the device verification page — which is the
+/// person's own act. A token from the code, refresh, CIBA or device grant is
+/// refused `403 authorization_denied`, and refused **before** the session
+/// check: the refusal rests on [`AuthenticatedUser::minted_for_client`], which
+/// every such token answers, and not on whether the token happens to name a
+/// live session. A device-grant token names none, and was refused `401` by the
+/// session check alone until it carried its `client_id`; a client token that
+/// did name one would have reached the handler. Both now get the one answer.
+///
+/// Everything else is [`AuthenticatedUser`]'s, in its order: the token's
+/// signature, audience and binding, the DPoP proof's single use, then the
+/// session, then the active tenant. A console sign-in's token carries no
+/// `client_id` and is admitted exactly as it is by [`AuthenticatedUser`].
+pub struct ConsoleSignIn(pub AuthenticatedUser);
+
+impl actix_web::FromRequest for ConsoleSignIn {
+    type Error = AxiamApiError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let user_result = extract_user(req);
+        let handles = RequestScopeHandles::read(req);
+        Box::pin(async move {
+            handles
+                .apply(user_result?, Admit::ConsoleSignInOnly)
+                .await
+                .map(Self)
+        })
+    }
+}
+
+/// Which user tokens [`RequestScopeHandles::apply`] admits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admit {
+    /// Every user token, a client's included ([`AuthenticatedUser`]).
+    AnyUserToken,
+    /// A console sign-in's only ([`ConsoleSignIn`]).
+    ConsoleSignInOnly,
 }
 
 /// The request-scoped inputs the second half of authentication needs, lifted
@@ -444,7 +490,11 @@ impl RequestScopeHandles {
         }
     }
 
-    async fn apply(self, mut user: AuthenticatedUser) -> Result<AuthenticatedUser, AxiamApiError> {
+    async fn apply(
+        self,
+        mut user: AuthenticatedUser,
+        admit: Admit,
+    ) -> Result<AuthenticatedUser, AxiamApiError> {
         let Self {
             validator,
             tenants,
@@ -460,6 +510,20 @@ impl RequestScopeHandles {
         // `record_verified_proof`, which is a no-op otherwise, so no request to
         // an unbound token pays anything for this.
         record_verified_proof(dpop, replay_guard).await?;
+
+        // T-447 / #681 — an approval surface refuses a client's token on what
+        // it is, before the session store is asked about it: see
+        // [`ConsoleSignIn`].
+        if admit == Admit::ConsoleSignInOnly && user.minted_for_client() {
+            return Err(AxiamError::AuthorizationDenied {
+                reason: "a console sign-in is required; this token was minted for an OAuth2 \
+                         client"
+                    .into(),
+                action: None,
+                resource_id: None,
+            }
+            .into());
+        }
 
         // REQ-7 / D-15: reject access tokens whose session has been revoked
         // (row deleted on password change/reset/MFA reset) or expired. The
@@ -1113,7 +1177,9 @@ pub(crate) async fn authenticate_presented_token(
     // authenticates from the body rather than through it (`POST
     // /oauth2/userinfo`, RFC 6750 §2.2).
     enforce_tenant_path_binding(req, user.principal_tenant_id)?;
-    RequestScopeHandles::read(req).apply(user).await
+    RequestScopeHandles::read(req)
+        .apply(user, Admit::AnyUserToken)
+        .await
 }
 
 /// Enforce the audience narrowing policy for user-facing routes and
@@ -1473,7 +1539,10 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
             match start? {
                 // Session revocation, then active-tenant resolution — the
                 // user extractor's own asynchronous half, not a second copy.
-                PrincipalStart::User(user) => handles.apply(user).await.map(Self::from),
+                PrincipalStart::User(user) => handles
+                    .apply(user, Admit::AnyUserToken)
+                    .await
+                    .map(Self::from),
                 PrincipalStart::Machine(mut principal) => {
                     // RFC 9449 §11.1: a machine token can carry `cnf` exactly
                     // as a user token can, and a proof single-use on one route

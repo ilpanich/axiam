@@ -263,5 +263,22 @@ newcap; ctl file "$T/lists/L1.der" etag '"t1"' redirect "https://127.0.0.1:1/"; 
 t "03: a redirect is not followed even with the opt-in" '[ $rc -eq 1 ] && msg | grep -q "HTTP 302" && [ "$(reqs)" = 1 ]'
 newcap; serve 1 '"t1"'; runu "https://127.0.0.1:$PORT/crl"
 t "03: https:// is attempted (a TLS failure against the plain server, not a scheme refusal)" '[ $rc -eq 1 ] && msg | grep -q "curl exit" && [ ! -e "$(installed)" ]'
+# ---- R110W5-06 -----------------------------------------------------------------
+echo "-- R110W5-06"
+# dash runs no EXIT trap when a signal kills it; the script's HUP/INT/TERM trap
+# turns the signal into `exit 1`, which does (INT is not tested: a shell started in the
+# background ignores SIGINT). A run killed mid-fetch (the stand-in
+# answers after 3 s) must leave no mktemp directory and no .incoming.* behind.
+for sig in TERM HUP; do
+  newcap; serve 1 '"t1"' delay 3; rm -rf "$T/tmp06"; mkdir "$T/tmp06"
+  env TMPDIR="$T/tmp06" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err" & pk=$!
+  sleep 1
+  mid=$(ls -A "$T/tmp06" | wc -l | tr -d ' ')
+  kill -$sig $pk 2>/dev/null; wait $pk; rc=$?
+  t "06/$sig: the run was in flight (its work directory existed) when signalled" '[ "$mid" -ge 1 ]'
+  t "06/$sig: a killed run exits non-zero and installs nothing" '[ $rc -ne 0 ] && [ ! -e "$(installed)" ]'
+  t "06/$sig: a killed run leaves no work directory and no .incoming.*" '[ -z "$(ls -A "$T/tmp06")" ] && [ -z "$(ls -A "$CAPATH" | grep "^\.incoming\.")" ]'
+done
+ctl file "$T/lists/L1.der" etag '"t1"'
 echo "== $passes passed, $fails failed"
 exit $fails

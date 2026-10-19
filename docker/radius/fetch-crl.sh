@@ -66,6 +66,11 @@
 # reason is on stderr. Alert on a non-zero exit, and on a list in `capath` older
 # than half its lifetime (the guide says why).
 #
+# A run killed by HUP, INT or TERM (a cron or systemd timeout) cleans up like any
+# other: the signal trap turns it into `exit 1`, and so runs the EXIT trap, which
+# `dash` does not do on a signal alone (R110W5-06). Its temporary directory and
+# any `.incoming.*` file are removed; only SIGKILL leaves them.
+#
 # Needs: sh, curl, openssl, sed, sort, tr, cut, head, tail, mktemp, date; `flock`
 # is used when it is there.
 

@@ -1049,15 +1049,19 @@ where
     }
 
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
+    // #671: the PKI routes wait for a crypto permit as long as Argon2id does.
+    let pki_permit_wait = std::time::Duration::from_secs(config.auth.hash_acquire_timeout_secs);
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
     )
-    .with_crl_distribution(crl_distribution.clone());
+    .with_crl_distribution(crl_distribution.clone())
+    .with_permit_wait(pki_permit_wait);
     let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo());
-    let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
+    let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore))
+        .with_permit_wait(pki_permit_wait);
     let cert_service = CertService::new(
         ca_cert_repo,
         cert_repo.clone(),
@@ -1068,7 +1072,8 @@ where
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
     )
-    .with_crl_distribution(crl_distribution);
+    .with_crl_distribution(crl_distribution)
+    .with_permit_wait(pki_permit_wait);
     let crl_service = axiam_pki::CrlService::new(
         SurrealCaCertificateRepository::new(pool.handle_for_repo()),
         cert_repo.clone(),

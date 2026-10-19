@@ -2093,3 +2093,72 @@ async fn r101_02_a_signed_sso_post_is_answered_503_when_the_crypto_gate_stays_he
         .await;
     assert_eq!(resp.status().as_u16(), 303, "served once a permit is free");
 }
+
+// ---------------------------------------------------------------------------
+// #671 (R110W2-03): the assertion's own signing waits a bounded time
+// ---------------------------------------------------------------------------
+
+/// **#671 (R110W2-03, T-102).** Signing the assertion waits for the crypto gate
+/// as long as the receiver does. With every permit held, the continue leg of a
+/// signed-in browser is answered with the retry page — `503`, `Retry-After`,
+/// no cookie, no assertion — within `hash_acquire_timeout_secs` plus a margin,
+/// instead of queueing behind the holder; once a permit is free a new request
+/// is served.
+#[actix_rt::test]
+async fn r110w2_03_assertion_signing_answers_the_retry_page_when_the_crypto_gate_stays_held() {
+    const WAIT_SECS: u64 = 1;
+    let w = world_with(AuthConfig {
+        hash_acquire_timeout_secs: WAIT_SECS,
+        ..auth_config()
+    })
+    .await;
+    register_sp(&w, sp_input()).await;
+    let app = app!(w);
+    let mut browser = Browser::default();
+    browser.sign_in(&app, &w, "alice").await;
+    let req = Req::new(w.tenant_id);
+    let cont = start(
+        &app,
+        &mut browser,
+        w.tenant_id,
+        &redirect_query(&req.xml(None), None, None),
+    )
+    .await;
+
+    let held = hold_every_permit(&w).await;
+    let started = std::time::Instant::now();
+    let resp = browser.get(&app, &cont).await;
+    let took = started.elapsed();
+
+    assert_eq!(resp.status().as_u16(), 503, "a saturated gate is a 503");
+    assert_eq!(header(&resp, "retry-after"), "5");
+    assert!(
+        took >= std::time::Duration::from_secs(WAIT_SECS),
+        "waited the bound ({took:?})"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(WAIT_SECS + 3),
+        "and not much longer ({took:?})"
+    );
+    assert!(!sets_binding_cookie(&resp), "no binding cookie");
+    assert!(
+        !body_of(resp).await.contains("SAMLResponse"),
+        "and no assertion"
+    );
+    drop(held);
+
+    let mut again = Req::new(w.tenant_id);
+    again.acs_url = Some(ACS.into());
+    let cont = start(
+        &app,
+        &mut browser,
+        w.tenant_id,
+        &redirect_query(&again.xml(None), None, None),
+    )
+    .await;
+    assert_eq!(
+        browser.get(&app, &cont).await.status().as_u16(),
+        200,
+        "served once a permit is free"
+    );
+}

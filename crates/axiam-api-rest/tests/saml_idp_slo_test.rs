@@ -3162,3 +3162,56 @@ async fn r101_02_a_signed_logout_post_is_answered_503_when_the_crypto_gate_stays
     let resp = request_from(&app, &w, "a", SamlBinding::HttpPost, &again, None).await;
     assert_ne!(resp.status().as_u16(), 503, "served once a permit is free");
 }
+
+/// **#671 (R110W2-03, T-102).** Signing a logout message waits for the crypto
+/// gate no longer than the receiver does. A Redirect-binding request (its
+/// detached-signature check is ungated, by decision) from SP A, with every
+/// permit held and SP B still to be told: B's request cannot be signed within
+/// `hash_acquire_timeout_secs`, which makes the run partial rather than hanging
+/// it; the closing `LogoutResponse` cannot be signed either, so the browser gets
+/// AXIAM's own logged-out page. The session is revoked either way.
+#[actix_rt::test]
+async fn r110w2_03_logout_signing_under_a_held_gate_is_a_partial_run_within_the_bound() {
+    const WAIT_SECS: u64 = 1;
+    let w = world_with(AuthConfig {
+        hash_acquire_timeout_secs: WAIT_SECS,
+        ..auth_config()
+    })
+    .await;
+    register(&w, Sp::new("a", Some(SamlBinding::HttpRedirect))).await;
+    register(&w, Sp::new("b", Some(SamlBinding::HttpRedirect))).await;
+    let app = app!(w);
+    let mut alice = Browser::default();
+    alice.sign_in(&app, &w, "alice").await;
+    let on_a = sign_on(&app, &mut alice, &w, "a").await;
+    sign_on(&app, &mut alice, &w, "b").await;
+    let session = the_session(&w).await;
+    let req = LogoutReq::new(&w, "a", &on_a);
+
+    let gate = Arc::clone(&w.state.crypto_semaphore);
+    let held = gate
+        .clone()
+        .acquire_many_owned(u32::try_from(gate.available_permits()).unwrap())
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let resp = request_from(&app, &w, "a", SamlBinding::HttpRedirect, &req, None).await;
+    let took = started.elapsed();
+    drop(held);
+
+    assert_eq!(resp.status().as_u16(), 200, "AXIAM's logged-out page");
+    assert!(
+        took >= std::time::Duration::from_secs(WAIT_SECS),
+        "waited the bound ({took:?})"
+    );
+    // Two signings, each bounded: B's request, then the closing response.
+    assert!(
+        took < std::time::Duration::from_secs(2 * WAIT_SECS + 3),
+        "and not much longer ({took:?})"
+    );
+    assert!(!session_alive(&w, w.tenant_id, session).await, "revoked");
+    let state = runs(&w).await;
+    assert_eq!(state[0]["status"], "finished");
+    assert_eq!(state[0]["partial"], true, "B was not told");
+    assert_eq!(state[0]["sps_told"], 0);
+}

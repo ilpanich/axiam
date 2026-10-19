@@ -774,7 +774,15 @@ where
             return Err("credential");
         }
     };
-    let permit = state.crypto_semaphore.clone().acquire_owned().await;
+    // The wait is bounded (#671). A gate that stays busy, or is closed, is a
+    // message that was not signed: `next_hop` marks the hop partial and moves on.
+    let permit = match super::saml_idp::crypto_gate(state)
+        .acquire("saml_idp_slo_sign")
+        .await
+    {
+        Ok(permit) => permit,
+        Err(_) => return Err("signing"),
+    };
     let issuer = std::sync::Arc::clone(&state.saml_idp.issuer);
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;

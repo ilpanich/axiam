@@ -32,6 +32,8 @@ pub struct PgpService<R> {
     config: PkiConfig,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
+    /// How long an acquire of that semaphore waits before `503` (#671).
+    permit_wait: std::time::Duration,
 }
 
 impl<R: PgpKeyRepository> PgpService<R> {
@@ -40,7 +42,16 @@ impl<R: PgpKeyRepository> PgpService<R> {
             repo,
             config,
             crypto_semaphore,
+            permit_wait: crate::permit::DEFAULT_PERMIT_WAIT,
         }
+    }
+
+    /// Replace the default wait for a crypto permit with the deployment's
+    /// `hash_acquire_timeout_secs` (#671).
+    #[must_use]
+    pub fn with_permit_wait(mut self, wait: std::time::Duration) -> Self {
+        self.permit_wait = wait;
+        self
     }
 
     /// Generate an OpenPGP keypair.
@@ -51,11 +62,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
         let user_id = format!("{} <{}>", input.name, input.email);
 
         // CPU-bound PGP keygen runs in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         let algorithm = input.algorithm.clone();
         let (private_key_armored, public_key_armored, fingerprint) =
@@ -157,11 +165,8 @@ impl<R: PgpKeyRepository> PgpService<R> {
             .map_err(|e| AxiamError::Crypto(format!("invalid UTF-8 in private key: {e}")))?;
 
         // CPU-bound PGP signing runs in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         // Serialize entries to JSON
         let entry_ids: Vec<Uuid> = entries.iter().map(|e| e.id).collect();

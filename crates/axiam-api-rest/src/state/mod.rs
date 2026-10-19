@@ -681,7 +681,10 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         )
-        .with_crl_distribution(crl_distribution.clone());
+        .with_crl_distribution(crl_distribution.clone())
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
@@ -714,7 +717,10 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         )
-        .with_crl_distribution(crl_distribution);
+        .with_crl_distribution(crl_distribution)
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let crl_service = axiam_pki::CrlService::new(
             ca_cert_repo.clone(),
             cert_repo.clone(),
@@ -726,7 +732,10 @@ impl<C: Connection + Clone> AppState<C> {
             pgp_repo.clone(),
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
-        );
+        )
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_cert_repo.clone());
         let service_account_repo = SurrealServiceAccountRepository::new(db.clone());
         let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), None);

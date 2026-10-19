@@ -3751,3 +3751,437 @@ async fn a_certificate_bound_between_the_first_revocation_and_the_anonymization_
         "another account's certificate is left alone"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #689 (R110W4-03) — a unit cut past its point of no return is recorded by the
+// next start, exactly once
+// ---------------------------------------------------------------------------
+
+use axiam_server::cleanup::{PENDING_RECORD_LEASE, record_owed_erasures, record_pending_purges};
+
+fn record_lease() -> chrono::TimeDelta {
+    chrono::TimeDelta::from_std(PENDING_RECORD_LEASE).unwrap()
+}
+
+/// The `tenant_purge_pending` markers standing for `tenant`.
+async fn purge_markers_of(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> usize {
+    let mut result = db
+        .query("SELECT VALUE meta::id(id) FROM tenant_purge_pending WHERE meta::id(id) = $id")
+        .bind(("id", tenant.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let ids: Vec<String> = result.take(0).unwrap();
+    ids.len()
+}
+
+/// Whether `user`'s erasure-record marker is set.
+async fn erasure_marker_set(db: &Surreal<surrealdb::engine::local::Db>, user: Uuid) -> bool {
+    let mut result = db
+        .query("SELECT VALUE erasure_audit_pending FROM type::record('user', $id)")
+        .bind(("id", user.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let stamps: Vec<Option<chrono::DateTime<Utc>>> = result.take(0).unwrap();
+    stamps.into_iter().next().flatten().is_some()
+}
+
+/// The next start's tenant purge sweep, repeated briefly: the cut unit's guard
+/// releases its marker from a spawned task, so give it a moment — never
+/// anything like the lease.
+async fn next_start_records_the_purge(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenants: &Arc<SurrealTenantRepository<surrealdb::engine::local::Db>>,
+    audit: &Arc<SurrealAuditLogRepository<surrealdb::engine::local::Db>>,
+    tenant: Uuid,
+) {
+    let next_start = never_stopping();
+    for _ in 0..50 {
+        sweep_tenant_purge(tenants, audit, true, &next_start)
+            .await
+            .expect("the next start's sweep");
+        if purge_records_of(db, tenant).await > 0 && purge_markers_of(db, tenant).await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        purge_records_of(db, tenant).await,
+        1,
+        "the next start writes the record the cut unit owed"
+    );
+    assert_eq!(
+        purge_markers_of(db, tenant).await,
+        0,
+        "and clears the marker"
+    );
+    sweep_tenant_purge(tenants, audit, true, &next_start)
+        .await
+        .unwrap();
+    assert_eq!(
+        purge_records_of(db, tenant).await,
+        1,
+        "tenants.purged exists exactly once"
+    );
+}
+
+/// A sweep started while `tenants`' purge unit is held at `at`, spawned on a
+/// stop channel the test controls.
+fn held_purge_tick(
+    tenants: &Arc<SurrealTenantRepository<surrealdb::engine::local::Db>>,
+    audit: &Arc<SurrealAuditLogRepository<surrealdb::engine::local::Db>>,
+    scan_orphans: bool,
+    at: UnitStep,
+) -> (
+    tokio::task::JoinHandle<()>,
+    AuditedWork,
+    watch::Sender<bool>,
+    watch::Receiver<bool>,
+) {
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        at,
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = {
+        let (tenants, audit, work) = (Arc::clone(tenants), Arc::clone(audit), work.clone());
+        tokio::spawn(async move {
+            let _ = sweep_tenant_purge(&tenants, &audit, scan_orphans, &work).await;
+        })
+    };
+    (tick, work, stop_tx, entered)
+}
+
+/// #689: a tombstoned tenant's purge held past its point of no return — the
+/// tenant row removed, `tenants.purged` not yet written — across a stop, and
+/// cut by the teardown at its bound. Before the marker the record was lost: no
+/// sweep found the tenant again. Now the removal left `tenant_purge_pending`,
+/// and the next start records the purge once, with what the unit would have
+/// written. While the unit holds the marker, another replica's sweep records
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_purge_cut_past_its_point_of_no_return_is_recorded_by_the_next_start_once() {
+    let db = setup_db().await;
+    let org = new_org(&db, "purge-past-pnr").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let doomed = tenant_with_a_user(&db, org, "cut-past-pnr").await;
+    tenants.delete(doomed).await.unwrap();
+
+    let (tick, work, stop_tx, mut entered) =
+        held_purge_tick(&tenants, &audit, false, UnitStep::TenantRowRemoved(doomed));
+    wait_until_entered(&mut entered).await;
+    assert!(
+        tenants.list_tombstoned().await.unwrap().is_empty(),
+        "the tenant row is gone: past the point of no return"
+    );
+    assert_eq!(purge_markers_of(&db, doomed).await, 1, "the marker stands");
+    assert_eq!(
+        record_pending_purges(&tenants, audit.as_ref(), record_lease(), &never_stopping())
+            .await
+            .unwrap(),
+        0,
+        "while the unit holds the marker, another replica's sweep records nothing"
+    );
+
+    stop_tx.send_replace(true);
+    assert!(
+        !join_like_the_teardown(tick, &work, Duration::from_millis(200)).await,
+        "the unit was cut where it was held"
+    );
+    assert_eq!(
+        purge_records_of(&db, doomed).await,
+        0,
+        "nothing was recorded"
+    );
+
+    next_start_records_the_purge(&db, &tenants, &audit, doomed).await;
+    let record = purged_records(&db)
+        .await
+        .into_iter()
+        .find(|e| e.resource_id == Some(doomed))
+        .unwrap();
+    assert_eq!(record.metadata["orphan"], false);
+    assert!(record.metadata["audit_rows_deleted"].is_u64());
+}
+
+/// #689: the same for an orphaned id, whose point of no return is the removal
+/// of its claim marker: the next start records it once, as an orphan, and a
+/// scan that predates that writes no marker and records nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_orphan_purge_cut_past_its_point_of_no_return_is_recorded_by_the_next_start_once() {
+    let db = setup_db().await;
+    let org = new_org(&db, "orphan-past-pnr").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let orphan = tenant_with_a_user(&db, org, "orphan-cut-past-pnr").await;
+    db.query("DELETE type::record('tenant', $id)")
+        .bind(("id", orphan.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (tick, work, stop_tx, mut entered) =
+        held_purge_tick(&tenants, &audit, true, UnitStep::TenantRowRemoved(orphan));
+    wait_until_entered(&mut entered).await;
+    assert_eq!(users_in(&db, orphan).await, 0, "the rows are purged");
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(purge_markers_of(&db, orphan).await, 1);
+
+    stop_tx.send_replace(true);
+    assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(200)).await);
+    assert_eq!(purge_records_of(&db, orphan).await, 0);
+
+    next_start_records_the_purge(&db, &tenants, &audit, orphan).await;
+    let record = purged_records(&db)
+        .await
+        .into_iter()
+        .find(|e| e.resource_id == Some(orphan))
+        .unwrap();
+    assert_eq!(record.metadata["orphan"], true);
+    assert!(
+        !tenants
+            .claim_orphan_purge(orphan, Utc::now())
+            .await
+            .unwrap()
+    );
+}
+
+/// #689: a purge cut after its record and before it cleared its marker is not
+/// recorded twice: the next start finds `tenants.purged` written since the
+/// removal and only clears the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_purge_cut_between_its_record_and_its_marker_is_not_recorded_twice() {
+    let db = setup_db().await;
+    let org = new_org(&db, "purge-after-record").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let doomed = tenant_with_a_user(&db, org, "cut-after-record").await;
+    tenants.delete(doomed).await.unwrap();
+
+    let (tick, work, stop_tx, mut entered) =
+        held_purge_tick(&tenants, &audit, false, UnitStep::Recorded(doomed));
+    wait_until_entered(&mut entered).await;
+    assert_eq!(purge_records_of(&db, doomed).await, 1, "recorded");
+    assert_eq!(purge_markers_of(&db, doomed).await, 1, "not yet cleared");
+
+    stop_tx.send_replace(true);
+    assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(200)).await);
+
+    next_start_records_the_purge(&db, &tenants, &audit, doomed).await;
+}
+
+/// #689: two replicas' sweeps that find one released marker at once record it
+/// once between them: each claim is conditional on the claim read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sweeps_finding_one_pending_purge_record_it_once() {
+    let db = setup_db().await;
+    let org = new_org(&db, "pending-race").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    let doomed = tenant_with_a_user(&db, org, "pending-race").await;
+    tenants.delete(doomed).await.unwrap();
+    // A unit cut past its point of no return whose guard released the marker.
+    let report = tenants.purge_tombstoned_rows(doomed).await.unwrap();
+    let stamp = Utc::now();
+    tenants
+        .remove_purged_tenant(doomed, &report, stamp)
+        .await
+        .unwrap();
+    tenants.release_purge_record(doomed, stamp).await.unwrap();
+
+    let (one, other) = (never_stopping(), never_stopping());
+    let (a, b) = tokio::join!(
+        record_pending_purges(&tenants, audit.as_ref(), record_lease(), &one),
+        record_pending_purges(&tenants, audit.as_ref(), record_lease(), &other),
+    );
+    assert_eq!(a.unwrap() + b.unwrap(), 1, "one of the two recorded it");
+    assert_eq!(purge_records_of(&db, doomed).await, 1);
+    assert_eq!(purge_markers_of(&db, doomed).await, 0);
+}
+
+/// The next start's GDPR sweep recording what a cut erasure owed, repeated
+/// briefly for the cut unit's spawned release; then once more, which records
+/// nothing.
+async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::Db>, user: &User) {
+    let (audit, deletions) = (
+        SurrealAuditLogRepository::new(db.clone()),
+        SurrealAccountDeletionRepository::new(db.clone()),
+    );
+    for _ in 0..50 {
+        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
+            .await
+            .expect("the next start's sweep");
+        if !pseudonymized_rows(db, user.tenant_id).await.is_empty()
+            && !erasure_marker_set(db, user.id).await
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        pseudonymized_rows(db, user.tenant_id).await.len(),
+        1,
+        "gdpr.user_pseudonymized exists exactly once"
+    );
+    assert!(
+        !erasure_marker_set(db, user.id).await,
+        "the marker is cleared"
+    );
+    assert!(
+        deletions
+            .find_pending_by_user_id(user.tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the deletion request, if any, is completed"
+    );
+}
+
+/// #689 (i): an erasure with its deletion request, held past the
+/// anonymization and cut at the teardown's bound. Before the change the
+/// record was lost and the request stayed pending for ever; now the next
+/// start's GDPR sweep writes `gdpr.user_pseudonymized` — with the pseudonym on
+/// the row — and completes the request, once. While the unit holds the
+/// marker, another replica's sweep records nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_cut_past_its_point_of_no_return_is_recorded_by_the_next_start_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "cut_past_pnr").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::ErasureAnonymized(user.id),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    assert!(erasure_marker_set(&db, user.id).await, "the marker stands");
+    let (audit, deletions) = (
+        SurrealAuditLogRepository::new(db.clone()),
+        SurrealAccountDeletionRepository::new(db.clone()),
+    );
+    assert_eq!(
+        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
+            .await
+            .unwrap(),
+        0,
+        "while the unit holds the marker, another replica's sweep records nothing"
+    );
+
+    stop_tx.send_replace(true);
+    assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(300)).await);
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    next_start_records_the_erasure(&db, &user).await;
+    let row = &pseudonymized_rows(&db, tenant_id).await[0];
+    assert_eq!(row.actor_id, user.id);
+    assert_eq!(row.metadata["pseudonym"], "DELETED_USER_held0000000001");
+    assert_eq!(row.metadata["recovered"], true);
+}
+
+/// #689 (ii): an erasure with no deletion request row is recorded through the
+/// account's own marker, `user.erasure_audit_pending`, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_without_a_request_cut_past_its_point_of_no_return_is_recorded_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = user_due_for_erasure(&db, tenant_id, "cut_no_request").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::ErasureAnonymized(user.id),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    stop_tx.send_replace(true);
+    assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(300)).await);
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+    assert!(erasure_marker_set(&db, user.id).await);
+
+    next_start_records_the_erasure(&db, &user).await;
+}
+
+/// #689: an erasure cut after its record and before it settled is not recorded
+/// twice; the next start completes the request and clears the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_cut_between_its_record_and_its_completion_is_not_recorded_twice() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "cut_after_record").await;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::Recorded(user.id),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 1);
+    assert!(
+        SurrealAccountDeletionRepository::new(db.clone())
+            .find_pending_by_user_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "(i): the record is written before the completion"
+    );
+    stop_tx.send_replace(true);
+    assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(300)).await);
+
+    next_start_records_the_erasure(&db, &user).await;
+    assert!(
+        pseudonymized_rows(&db, tenant_id).await[0].metadata["recovered"].is_null(),
+        "the row is the unit's own"
+    );
+}
+
+/// #689 (i): an erasure cut before schema v108 left its account anonymized and
+/// its request pending, with no marker. The sweep completes the request and
+/// writes the record, once.
+#[tokio::test]
+async fn a_pending_request_whose_account_is_anonymized_is_completed_and_recorded_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "pre_v108").await;
+    let users = SurrealUserRepository::new(db.clone());
+    users
+        .anonymize_user(
+            tenant_id,
+            user.id,
+            "hashed_pre_v108",
+            "DELETED_USER_pre0000000001",
+        )
+        .await
+        .unwrap();
+    // What an anonymization before v108 left: no marker.
+    db.query("UPDATE type::record('user', $id) SET erasure_audit_pending = NONE")
+        .bind(("id", user.id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    next_start_records_the_erasure(&db, &user).await;
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await[0].metadata["pseudonym"],
+        "DELETED_USER_pre0000000001"
+    );
+}

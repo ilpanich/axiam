@@ -235,7 +235,10 @@ revocation that stays published (Art. 6(1)(f)), as part of the security of
 processing (Art. 32). Art. 17(3)(b) (a legal obligation, or a task in the public
 interest) is not the basis: no provision obliges AXIAM to publish the list, and
 the exemption fits a security retention poorly. Recorded in threat T-187. The
-`gdpr.user_pseudonymized` audit row carries `certificates_revoked`. Proved by
+`gdpr.user_pseudonymized` audit row carries `certificates_revoked` — `null`, beside
+`recovered: true`, on the row the next start writes for an erasure a stop cut between
+the anonymization and its record (#689; the deployment guide's "What a stop can
+cut"), since the count was that purge's alone. Proved by
 [`cleanup_task.rs::the_purge_revokes_the_erased_accounts_certificates_before_it_anonymizes`](../../crates/axiam-server/tests/cleanup_task.rs)
 and
 [`req14_gdpr_test.rs::a_retried_purge_neither_re_revokes_nor_re_dates_a_certificate`](../../crates/axiam-server/tests/req14_gdpr_test.rs);

@@ -3497,9 +3497,10 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
 /// leave, listed in T-444: an erasure or tenant purge that crossed its point of
 /// no return before the stop and still had not written its audit row
 /// (`gdpr.user_pseudonymized`; `tenants.purged`) when the bound ran out — the
-/// whole teardown window after the stop, for its last statements — and an
-/// export cut after it was marked ready and before its mail was queued (a
-/// download nobody was told about, which expires).
+/// whole teardown window after the stop, for its last statements — whose row
+/// the next start writes from the marker the point of no return left (#689);
+/// and an export cut after it was marked ready and before its mail was queued
+/// (a download nobody was told about, which expires).
 async fn join_cleanup<T>(
     mut handle: tokio::task::JoinHandle<T>,
     units: &cleanup::AuditedWork,
@@ -3526,7 +3527,7 @@ async fn join_cleanup<T>(
             deadline_secs = bound.as_secs_f64(),
             "an erasure or tenant purge that had passed its point of no return did not reach \
              its audit row in time — it is cut where it is, and its `gdpr.user_pseudonymized` \
-             or `tenants.purged` row may be missing (see T-444)"
+             or `tenants.purged` row is written by the next start's sweep (see T-444)"
         );
     }
 }

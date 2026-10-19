@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{TxFail, classify_write_error, parse_uuid, retry_on_write_conflict};
+use crate::helpers::{
+    CountRow, TxFail, classify_write_error, parse_uuid, retry_hot_row, retry_on_write_conflict,
+};
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -458,6 +460,292 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             combined,
             "account_deletion",
         )))
+    }
+}
+
+/// An erasure whose `gdpr.user_pseudonymized` record is owed (#689), claimed by
+/// [`SurrealAccountDeletionRepository::claim_owed_erasure_records`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwedErasureRecord {
+    /// The erased account's tenant.
+    pub tenant_id: Uuid,
+    /// The erased account.
+    pub user_id: Uuid,
+    /// Its GDPR pseudonym, as the anonymization wrote it over the username.
+    pub pseudonym: String,
+    /// The claim this call holds on the account's marker.
+    pub claimed_at: DateTime<Utc>,
+}
+
+/// The erasure-record marker, `user.erasure_audit_pending` (#689, schema v108).
+///
+/// The anonymization — the erasure's point of no return — sets it to its own
+/// time in its own transaction (`SurrealUserRepository::anonymize_user`); the
+/// value is the claim's stamp. The erasure reads it back
+/// ([`Self::erasure_record_stamp`]), writes `gdpr.user_pseudonymized`, and
+/// then clears it, completing the account's deletion request in the same
+/// transaction ([`Self::settle_erasure_record`]). An erasure cut in between
+/// leaves it set, and the next GDPR sweep, on any replica, claims it
+/// ([`Self::claim_owed_erasure_records`]) once it is released
+/// ([`Self::release_erasure_record`]: the Unix epoch) or older than the lease,
+/// writes the record unless it is already there
+/// ([`Self::erasure_recorded`]), and settles it. Every write is conditional
+/// on the stamp read, so the erasure and a sweep, or two sweeps, never both
+/// own the marker.
+impl<C: Connection> SurrealAccountDeletionRepository<C> {
+    /// The stamp of `user_id`'s erasure-record marker, `None` when no record
+    /// is owed (or the account is not in `tenant_id`).
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn erasure_record_stamp(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Option<DateTime<Utc>>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE erasure_audit_pending FROM type::record('user', $user_id) \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let stamps: Vec<Option<DateTime<Utc>>> = result.take(0).map_err(DbError::from)?;
+        Ok(stamps.into_iter().next().flatten())
+    }
+
+    /// The erasure's record is written: clear `user_id`'s marker and, in the
+    /// same transaction, complete its pending deletion request — only while
+    /// the marker still carries `stamp`, the claim the caller holds. `true`
+    /// when this call cleared it; `false` when the marker was taken over (the
+    /// replica that took it settles it) or is already clear.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure; nothing changed, and the next sweep finds the
+    /// record written and settles the marker.
+    pub async fn settle_erasure_record(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        stamp: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        retry_on_write_conflict(|| self.settle_tx(tenant_id, user_id, stamp))
+            .await
+            .map_err(AxiamError::from)
+    }
+
+    async fn settle_tx(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        stamp: DateTime<Utc>,
+    ) -> Result<bool, TxFail> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "BEGIN TRANSACTION; \
+                 LET $cleared = (UPDATE type::record('user', $user_id) \
+                     SET erasure_audit_pending = NONE \
+                     WHERE tenant_id = $tenant_id AND erasure_audit_pending = $stamp \
+                     RETURN VALUE meta::id(id)); \
+                 IF array::len($cleared) > 0 { \
+                     UPDATE account_deletion SET status = 'completed' \
+                     WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                       AND status = 'pending' RETURN NONE; \
+                 }; \
+                 RETURN array::len($cleared); \
+                 COMMIT TRANSACTION;",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("stamp", stamp))
+            .await?;
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(TxFail::Db(classify_write_error(combined, "user")));
+        }
+        let cleared: Option<i64> = result.take(3)?;
+        Ok(cleared.unwrap_or(0) > 0)
+    }
+
+    /// Give up the claim `stamp` on `user_id`'s marker without recording it,
+    /// so the next sweep takes it over at once rather than after the lease: the
+    /// stamp becomes the Unix epoch, older than any lease. A marker another
+    /// replica has since taken over carries a different stamp and is left
+    /// alone.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure; the marker then lapses with its lease.
+    pub async fn release_erasure_record(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        stamp: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        retry_hot_row(|| async {
+            self.db
+                .current()
+                .query(
+                    "UPDATE type::record('user', $user_id) SET erasure_audit_pending = $epoch \
+                     WHERE tenant_id = $tenant_id AND erasure_audit_pending = $stamp",
+                )
+                .bind(("user_id", user_id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("stamp", stamp))
+                .bind(("epoch", DateTime::<Utc>::UNIX_EPOCH))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "user"))?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Claim, at `now`, every erasure whose record is owed and that nobody is
+    /// recording: an anonymized account whose marker is released or stamped at
+    /// or before `now - lease`, and (#689 (i)) an anonymized account with no
+    /// marker whose deletion request is still pending — an erasure cut before
+    /// schema v108 between its anonymization and its completion. Each claim
+    /// stamps the marker with `now`, conditionally on the value read, so of
+    /// two sweeps that read one account exactly one takes it. What is returned
+    /// is this call's to record, then to settle
+    /// ([`Self::settle_erasure_record`]) or give up
+    /// ([`Self::release_erasure_record`]).
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn claim_owed_erasure_records(
+        &self,
+        now: DateTime<Utc>,
+        lease: chrono::TimeDelta,
+    ) -> AxiamResult<Vec<OwedErasureRecord>> {
+        #[derive(Debug, SurrealValue)]
+        struct OwedRow {
+            record_id: String,
+            tenant_id: String,
+            username: String,
+            stamp: Option<DateTime<Utc>>,
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, tenant_id, username, \
+                     erasure_audit_pending AS stamp \
+                 FROM user WHERE erasure_audit_pending != NONE \
+                   AND erasure_audit_pending <= $cutoff AND status = 'Anonymized'; \
+                 SELECT meta::id(id) AS record_id, tenant_id, username, \
+                     erasure_audit_pending AS stamp \
+                 FROM user WHERE meta::id(id) IN \
+                     (SELECT VALUE user_id FROM account_deletion WHERE status = 'pending') \
+                   AND status = 'Anonymized' AND erasure_audit_pending = NONE;",
+            )
+            .bind(("cutoff", now - lease))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let mut owed: Vec<OwedRow> = result.take(0).map_err(DbError::from)?;
+        let unmarked: Vec<OwedRow> = result.take(1).map_err(DbError::from)?;
+        owed.extend(unmarked);
+
+        let mut claimed = Vec::new();
+        for row in owed {
+            let (Ok(user_id), Ok(tenant_id)) = (
+                Uuid::parse_str(&row.record_id),
+                Uuid::parse_str(&row.tenant_id),
+            ) else {
+                continue;
+            };
+            // Conditional on the marker read: NONE, or the stale stamp.
+            let condition = if row.stamp.is_some() {
+                "erasure_audit_pending = $read"
+            } else {
+                "erasure_audit_pending = NONE"
+            };
+            let statement = format!(
+                "UPDATE type::record('user', $user_id) SET erasure_audit_pending = $now \
+                 WHERE tenant_id = $tenant_id AND status = 'Anonymized' AND {condition} \
+                 RETURN VALUE meta::id(id)"
+            );
+            let won = retry_hot_row(|| async {
+                let mut result = self
+                    .db
+                    .current()
+                    .query(statement.as_str())
+                    .bind(("user_id", row.record_id.clone()))
+                    .bind(("tenant_id", row.tenant_id.clone()))
+                    .bind(("now", now))
+                    .bind(("read", row.stamp))
+                    .await
+                    .map_err(DbError::from)?
+                    .check()
+                    .map_err(|e| classify_write_error(e, "user"))?;
+                let ids: Vec<String> = result.take(0).map_err(DbError::from)?;
+                Ok::<_, DbError>(!ids.is_empty())
+            })
+            .await?;
+            if won {
+                claimed.push(OwedErasureRecord {
+                    tenant_id,
+                    user_id,
+                    pseudonym: row.username,
+                    claimed_at: now,
+                });
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Whether `tenant_id`'s audit trail holds `action` written with
+    /// `user_id` as its actor — for `gdpr.user_pseudonymized`, whether the
+    /// erasure's record was written before its marker could be cleared
+    /// (#689). An account is erased once, so the first such row is the one.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn erasure_recorded(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        action: &str,
+    ) -> AxiamResult<bool> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM audit_log \
+                 WHERE tenant_id = $tenant_id AND actor_id = $user_id AND action = $action \
+                 GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("action", action.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().is_some_and(|r| r.total > 0))
     }
 }
 

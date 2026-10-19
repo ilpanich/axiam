@@ -69,7 +69,7 @@ mod webauthn_attestation_policy;
 mod webauthn_credential;
 mod webhook;
 
-pub use account_deletion::{CancelOutcome, SurrealAccountDeletionRepository};
+pub use account_deletion::{CancelOutcome, OwedErasureRecord, SurrealAccountDeletionRepository};
 pub use amqp_nonce_replay::SurrealAmqpNonceRepository;
 pub use audit::SurrealAuditLogRepository;
 pub use ca_certificate::SurrealCaCertificateRepository;
@@ -134,7 +134,7 @@ pub use ssf_event_buffer::SurrealSsfEventBufferRepository;
 pub use ssf_step_up::SurrealSsfStepUpRepository;
 pub use ssf_stream::SurrealSsfStreamRepository;
 pub use sso_handoff_code::SurrealSsoHandoffCodeRepository;
-pub use tenant::SurrealTenantRepository;
+pub use tenant::{PendingPurgeRecord, SurrealTenantRepository};
 pub use user::SurrealUserRepository;
 pub use webauthn_attestation_policy::SurrealWebauthnAttestationPolicyRepository;
 pub use webauthn_credential::SurrealWebauthnCredentialRepository;

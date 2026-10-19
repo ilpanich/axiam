@@ -1579,9 +1579,16 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     /// - metadata → `{}`
     /// - locked_until / last_failed_login_at → NULL
     /// - status → `Anonymized`
+    /// - erasure_audit_pending → the write's own time (#689, schema v108)
     ///
     /// The row and its `id` are kept to preserve referential integrity for
     /// `created_by`/owner foreign-key references.
+    ///
+    /// This is the erasure's point of no return, so the marker that its
+    /// `gdpr.user_pseudonymized` record is owed is written in the same
+    /// transaction: the erasure clears it with the record, and a sweep finds it
+    /// if the erasure was cut in between (`SurrealAccountDeletionRepository`'s
+    /// erasure-record methods).
     async fn anonymize_user(
         &self,
         tenant_id: Uuid,
@@ -1609,6 +1616,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
              deletion_pending = false, \
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
+             erasure_audit_pending = time::now(), \
              updated_at = time::now() \
              WHERE tenant_id = $tenant_id; \
              {SAML_ERASURE_STATEMENTS} \

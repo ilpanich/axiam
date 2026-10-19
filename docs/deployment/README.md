@@ -1922,12 +1922,30 @@ finished rather than wait for it:
     the stop began and still had not written its audit row when the bound ran
     out — `gdpr.user_pseudonymized` (and the completion of the deletion request)
     for an erasure, `tenants.purged` (the export time the purge used and how many
-    audit entries it deleted and kept) for a tenant purge. The erasure and its
-    proof, or the purge, stand; the row is never written. It takes a datastore
+    audit entries it deleted and kept) for a tenant purge. It takes a datastore
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`;
+    not reach its audit row in time`. The erasure and its proof, or the purge,
+    stand, and **the next start writes the row** (#689, schema v108): the point
+    of no return leaves a marker in its own transaction —
+    `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
+    row keyed by the tenant id — which the work clears with its row, and the
+    first GDPR purge sweep and tenant purge sweep of the next start, on any
+    replica, write what a marker still stands for, once. For a tenant purge
+    that is the row the cut purge would have written (the marker keeps its
+    export time and counts); for an erasure it carries the pseudonym, `recovered:
+    true` and `certificates_revoked: null` (the count was the cut purge's alone),
+    and the deletion request is completed in the same transaction as the marker
+    is cleared. A row the cut work had already written is found and not written
+    again. The log says `recorded an erasure whose unit was cut before its
+    record` or `recorded a tenant purge whose unit was cut before its record`.
+    The marker is the next start's at once when the cut work's drop guard
+    released it; a process that ended before the release was written (a
+    `SIGKILL`) leaves it to the one-hour lease, after which any replica's sweep
+    records it. A row dead-lettered by the cut work (the datastore refused it)
+    is not in the datastore, so the sweep writes it there too: replay the
+    dead-letter file with that in mind;
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 

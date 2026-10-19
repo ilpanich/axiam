@@ -200,3 +200,38 @@ async fn an_update_to_none_clears_the_secret_hash_in_the_same_write() {
         "the converted client is no longer counted"
     );
 }
+
+/// R110-02 (#712) — the live-tenant filter is read once, not once per client
+/// row. 201 live tenants, one confidential device client in one of them and
+/// 2 000 in a tombstoned tenant: the inline subquery re-evaluated per row made
+/// this shape take tens of seconds; the count must come back inside the boot
+/// scan's 5 s deadline.
+#[tokio::test]
+async fn the_count_does_not_scan_the_tenant_table_per_client() {
+    use std::time::{Duration, Instant};
+
+    let (db, org) = setup().await;
+    let repo = SurrealOAuth2ClientRepository::new(db.clone());
+    let mut live = Vec::new();
+    for i in 0..201 {
+        live.push(tenant(&db, org, &format!("live-{i}")).await);
+    }
+    let gone = tenant(&db, org, "tenant-tombstoned").await;
+    client(&db, live[0], &[URN], None).await;
+    for _ in 0..2_000 {
+        client(&db, gone, &[URN], None).await;
+    }
+    SurrealTenantRepository::new(db.clone())
+        .delete(gone)
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let count = repo
+        .count_confidential_with_grant(&SPELLINGS)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!((count.clients, count.tenants), (1, 1));
+    assert!(took < Duration::from_secs(5), "count took {took:?}");
+}

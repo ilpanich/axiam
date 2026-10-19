@@ -781,6 +781,10 @@ pub enum UnitStep {
     /// not yet completed its `account_deletion` row or written
     /// `gdpr.user_pseudonymized`: past the erasure's point of no return.
     ErasureAnonymized(Uuid),
+    /// An erasure has finished steps (a)…(b4) and not yet started the erasure
+    /// pipeline: the window in which a certificate bound to the account can
+    /// still be issued after (b4) revoked.
+    ErasurePrepared(Uuid),
 }
 
 /// A step [`AuditedWork::with_step_for_tests`] runs at each [`UnitStep`].
@@ -1781,10 +1785,11 @@ pub struct ErasureSubject<'a> {
 /// Those of [`run_erasure_pipeline_reporting`], before anything is recorded.
 /// The completion and the audit row are not fallible here: a failed completion
 /// is logged, and a failed audit write is dead-lettered (SECHRD-12).
-pub async fn erase_and_record<A, EP, U, C>(
+pub async fn erase_and_record<A, EP, U, CR, C>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
     user_repo: &U,
+    cert_repo: &CR,
     account_deletion_repo: &SurrealAccountDeletionRepository<C>,
     sink: Option<&dyn SsfSystemAccountSink>,
     subject: ErasureSubject<'_>,
@@ -1794,6 +1799,7 @@ where
     A: AuditLogRepository + AuditWriteSink,
     EP: ErasureProofRepository,
     U: UserRepository,
+    CR: axiam_core::repository::CertificateRepository,
     C: Connection,
 {
     let ErasureSubject {
@@ -1803,6 +1809,7 @@ where
         email_hash,
         certificates_revoked,
     } = subject;
+    work.step(UnitStep::ErasurePrepared(user_id)).await;
     // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
     // (now FATAL, was swallowed) -> anonymize the user row -> write the
     // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
@@ -1827,6 +1834,31 @@ where
         return Ok(false);
     }
     work.step(UnitStep::ErasureAnonymized(user_id)).await;
+
+    // (#668) A second revocation, by binding only, outside the pinned pipeline
+    // order: a certificate issued for the account between (b4) and the
+    // anonymization is still active. The account's names are gone by now, so
+    // empty names leave only the `user_id` binding (and `metadata.user_id`) to
+    // match. Best effort and idempotent: past the point of no return a failure
+    // is logged and never un-records the erasure.
+    match cert_repo
+        .revoke_user_certificates(tenant_id, user_id, "", "", Utc::now())
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            %tenant_id,
+            %user_id,
+            revoked = n,
+            "cleanup: revoked certificates issued for the erased account after its first revocation"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            %tenant_id,
+            %user_id,
+            "cleanup: second certificate revocation after anonymization failed"
+        ),
+    }
 
     // (f) Mark the account_deletion row as completed (lookup by user_id).
     // Run AFTER the erasure pipeline succeeds — if the pipeline failed
@@ -1969,6 +2001,7 @@ impl<C: Connection> ErasureUnit<C> {
             self.audit_repo.as_ref(),
             self.erasure_proof_repo.as_ref(),
             self.user_repo.as_ref(),
+            self.cert_repo.as_ref(),
             self.account_deletion_repo.as_ref(),
             self.ssf_sink.as_deref(),
             ErasureSubject {

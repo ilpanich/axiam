@@ -3370,11 +3370,12 @@ fn erasure_tick(
     user: &User,
     work: &AuditedWork,
 ) -> tokio::task::JoinHandle<()> {
-    let (audit, proofs, users, deletions) = (
+    let (audit, proofs, users, deletions, certs) = (
         SurrealAuditLogRepository::new(db.clone()),
         SurrealErasureProofRepository::new(db.clone()),
         SurrealUserRepository::new(db.clone()),
         SurrealAccountDeletionRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db.clone()),
     );
     let (tenant_id, user_id, work) = (user.tenant_id, user.id, work.clone());
     tokio::spawn(async move {
@@ -3385,6 +3386,7 @@ fn erasure_tick(
                     &audit,
                     &proofs,
                     &users,
+                    &certs,
                     &deletions,
                     None,
                     ErasureSubject {
@@ -3503,17 +3505,19 @@ async fn an_erasure_does_not_start_its_anonymization_once_the_process_is_stoppin
     let (stop_tx, stop_rx) = watch::channel(false);
     stop_tx.send_replace(true);
     let work = AuditedWork::new(stop_rx);
-    let (audit, proofs, users, deletions) = (
+    let (audit, proofs, users, deletions, certs) = (
         SurrealAuditLogRepository::new(db.clone()),
         SurrealErasureProofRepository::new(db.clone()),
         SurrealUserRepository::new(db.clone()),
         SurrealAccountDeletionRepository::new(db.clone()),
+        SurrealCertificateRepository::new(db.clone()),
     );
 
     let erased = erase_and_record(
         &audit,
         &proofs,
         &users,
+        &certs,
         &deletions,
         None,
         ErasureSubject {
@@ -3549,5 +3553,88 @@ async fn an_erasure_does_not_start_its_anonymization_once_the_process_is_stoppin
             .unwrap()
             .is_some(),
         "the deletion request is still pending"
+    );
+}
+
+/// #668 — the purge revokes at step (b4) and anonymizes afterwards, so a bound
+/// certificate issued in between survived. A step hook issues one at
+/// [`UnitStep::ErasurePrepared`]; the second revocation, by binding, after the
+/// anonymization revokes it, and leaves another account's certificate alone.
+#[tokio::test]
+async fn a_certificate_bound_between_the_first_revocation_and_the_anonymization_is_revoked_after_it()
+ {
+    use axiam_core::models::certificate::{
+        CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    };
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "late_bound").await;
+    let certs = Arc::new(SurrealCertificateRepository::new(db.clone()));
+    let leaf = move |fingerprint: &str, user_id: Uuid| StoreCertificate {
+        tenant_id,
+        issuer_ca_id: Uuid::new_v4(),
+        subject: "device".into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - chrono::Duration::minutes(1),
+        not_after: Utc::now() + chrono::Duration::days(30),
+        metadata: serde_json::json!({}),
+        user_id: Some(user_id),
+    };
+    let other = certs
+        .create(leaf("fp-668-other", Uuid::new_v4()))
+        .await
+        .unwrap();
+    let issued = Arc::new(std::sync::Mutex::new(None));
+    let hook: UnitStepForTests = {
+        let (certs, issued, user_id) = (Arc::clone(&certs), Arc::clone(&issued), user.id);
+        Arc::new(move |step| {
+            let (certs, issued) = (Arc::clone(&certs), Arc::clone(&issued));
+            let cert = leaf("fp-668-late", user_id);
+            Box::pin(async move {
+                if step == UnitStep::ErasurePrepared(user_id) {
+                    let created = certs.create(cert).await.unwrap();
+                    *issued.lock().unwrap() = Some(created.id);
+                }
+            })
+        })
+    };
+    let work = never_stopping().with_step_for_tests(Some(hook));
+    let erased = erase_and_record(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &SurrealErasureProofRepository::new(db.clone()),
+        &SurrealUserRepository::new(db.clone()),
+        certs.as_ref(),
+        &SurrealAccountDeletionRepository::new(db.clone()),
+        None,
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: "DELETED_USER_668000000001",
+            email_hash: "hashed_668",
+            certificates_revoked: 0,
+        },
+        &work,
+    )
+    .await
+    .expect("the erasure");
+    assert!(erased);
+
+    let late = issued
+        .lock()
+        .unwrap()
+        .expect("the hook issued a certificate");
+    assert_eq!(
+        certs.get_by_id(tenant_id, late).await.unwrap().status,
+        CertificateStatus::Revoked,
+        "the late bound certificate is revoked after the anonymization"
+    );
+    assert_eq!(
+        certs.get_by_id(tenant_id, other.id).await.unwrap().status,
+        CertificateStatus::Active,
+        "another account's certificate is left alone"
     );
 }

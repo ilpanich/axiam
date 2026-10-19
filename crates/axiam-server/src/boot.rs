@@ -1576,6 +1576,35 @@ where
         trusted_hops + 1
     );
 
+    // #711 (R110-01, T-212): which peers may write `X-Forwarded-For` at all.
+    // Parsed here so a list that does not parse stops the boot instead of
+    // silently reading every peer's header; every extractor then reads the
+    // same list (`TrustedProxies::configured`). The empty list keeps the
+    // header read from every peer — the shipped `k8s/` topology re-encrypts
+    // from ingress-nginx to this native TLS listener — so on a native TLS
+    // listener it is said once, here: that is the listener a client with no
+    // proxy in front (the FreeRADIUS recipe's mutual TLS) reaches directly.
+    let trusted_proxies = axiam_core::forwarded_for::TrustedProxies::from_env()
+        .unwrap_or_else(|e| panic!("invalid rate-limit configuration: {e}"));
+    if let Some(warning) = trusted_proxies.boot_warning(config.server.tls.enabled) {
+        tracing::warn!(
+            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
+            "{warning}"
+        );
+    } else if !trusted_proxies.is_empty() {
+        let networks: Vec<String> = trusted_proxies
+            .networks()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::info!(
+            trusted_proxies = %networks.join(","),
+            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
+             peers; every other request is keyed on its own address. Both listeners \
+             read the same list."
+        );
+    }
+
     // §4 item 1 (security-analysis-2026-08-02): the bucket key for
     // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
     // BEFORE the credential check, so under `AXIAM__RATE_LIMIT__KEY=client_id`

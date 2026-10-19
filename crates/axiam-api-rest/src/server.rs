@@ -11,9 +11,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
 use crate::config::rate_limit::RateLimitKeyMode;
-use crate::extractors::rate_limit::{
-    ClientAwareKeyExtractor, XForwardedForKeyExtractor, configured_trusted_hops,
-};
+use crate::extractors::rate_limit::{ClientAwareKeyExtractor, XForwardedForKeyExtractor};
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
@@ -74,11 +72,13 @@ pub fn build_governor(
     // client on the internet to that proxy's address. The rule is
     // `trusted_hops = proxies - 1`; the derivation and the table live on
     // `extractors::rate_limit`.
-    let trusted_hops = configured_trusted_hops();
+    //
+    // #711: and only from a peer `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` names,
+    // when it names any; every other peer is keyed on itself.
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
-        .key_extractor(XForwardedForKeyExtractor::with_trusted_hops(trusted_hops))
+        .key_extractor(XForwardedForKeyExtractor::configured())
         .finish()
         .expect("valid governor config");
     Governor::new(&config)
@@ -104,12 +104,11 @@ fn build_client_aware_governor(
     requests_per_min: u32,
     key_mode: RateLimitKeyMode,
 ) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
-    let trusted_hops = configured_trusted_hops();
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
         .key_extractor(ClientAwareKeyExtractor::new(
-            XForwardedForKeyExtractor::with_trusted_hops(trusted_hops),
+            XForwardedForKeyExtractor::configured(),
             key_mode,
         ))
         .finish()

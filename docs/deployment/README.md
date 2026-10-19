@@ -886,6 +886,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
+| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on logs one `WARN` at boot saying so. An entry that does not parse stops the boot. Both listeners (REST and gRPC) read it. See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, device login, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
@@ -932,7 +933,7 @@ the socket peer. Therefore:
 
 | Topology | Header the server sees | Value |
 |---|---|---|
-| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything; *(absent)* → `peer_addr()` | `0` — see below |
+| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; list the proxies in `TRUSTED_PROXIES` — see below |
 | `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
 | Compose/Pi — Caddy → server | `<client>` | **`0`** |
 | Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
@@ -944,21 +945,31 @@ the client sends a forged `X-Forwarded-For`** — the proxy appends the real pee
 to the right of the forgery and the extractor reads from the right. That
 property is why `0` is the shipped default rather than merely a convenient one.
 
-**With no appending proxy, the header is the caller's.** The first row of the
-table holds only for a caller that sends no `X-Forwarded-For`. Nothing appends
-to the header on a direct connection, or through a layer-4 pass-through, so the
-rightmost entry — the one `0` selects — is whatever the caller wrote, and a
-caller who rotates it gets a fresh bucket per request on every per-address
-limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS decision
-route's backstop) and one more entry in each limiter's in-process map. No value
-of `TRUSTED_HOPS` repairs that. Do not expose the listener to the internet
-without the appending proxy; where a client must reach it directly — the
-FreeRADIUS recipe's D4 profile, whose mutual TLS has to end at AXIAM
-([`docs/pki/freeradius.md`](../pki/freeradius.md#the-connection-mutual-tls-that-ends-at-axiam))
-— admit only that client to it with a firewall or a network policy. A setting
-that names the proxies whose header is honoured is planned for `1.1.x`
-([#711](https://github.com/ilpanich/axiam/issues/711); T-212). *(Corrected
-2026-10-16: the row said the header was absent on a direct connection, R110-05.)*
+**With no appending proxy, the header is the caller's.** Nothing appends to
+`X-Forwarded-For` on a direct connection, or through a layer-4 pass-through, so
+the rightmost entry — the one `0` selects — is whatever the caller wrote, at
+the default `TRUSTED_HOPS = 0` as at any other value. Unless the proxies are
+named, a caller who rotates it gets a fresh bucket per request on every
+per-address limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS
+decision route's backstop) and one more entry in each limiter's in-process map.
+No value of `TRUSTED_HOPS` repairs that; `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`
+does. Set it to the addresses your appending proxies connect from (the ingress
+controller's pods, Caddy's container network): their requests are keyed under
+`TRUSTED_HOPS` exactly as before, and a request from any other peer is keyed on
+that peer, whatever it wrote — so the direct client chooses nothing.
+
+Left empty (the default), every peer's header is read, which is what the server
+did before the setting existed. It stays the default because the server cannot
+tell a re-encrypting proxy from a direct client without it: the shipped
+Kubernetes topology runs native TLS behind ingress-nginx, and keying every
+native-TLS peer on itself would collapse its clients into the ingress's bucket.
+A server with native TLS on and the list empty therefore logs one `WARN` at
+boot naming the variable. Even with the list set, do not expose the listener to
+the internet without the appending proxy: a client that reaches it directly is
+limited per address, not per proxy-reported client, and every route is served
+there. *(Corrected 2026-10-16: the row said the header was absent on a direct
+connection, R110-05. Amended 2026-10-19: `TRUSTED_PROXIES` added, #711; the row
+now says what a direct server sees when the caller writes the header, #715 (b).)*
 
 Setting the value to the proxy *count* instead makes
 `trusted_hops >= hops.len()`; the extractor then discards the header entirely

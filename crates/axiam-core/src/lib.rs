@@ -3,6 +3,7 @@
 pub mod audit_minimisation;
 pub mod ca_keys;
 pub mod error;
+pub mod forwarded_for;
 pub mod id;
 pub mod ip_class;
 pub mod models;

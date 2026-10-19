@@ -77,15 +77,6 @@ use crate::state::AppState;
 /// it fails open by design (RESEARCH.md "Don't Hand-Roll").
 const WINDOW_SECS: i64 = 60;
 
-/// Reads the SAME `AXIAM__RATE_LIMIT__TRUSTED_HOPS` env var
-/// `server.rs::build_governor` uses, so the shared-store bucket key and the
-/// in-memory governor's key are derived from the identical client IP
-/// (D-01d parity — a rotating XFF must not yield a fresh bucket in either
-/// layer).
-fn trusted_hops() -> usize {
-    crate::extractors::rate_limit::configured_trusted_hops()
-}
-
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
 ///
@@ -329,8 +320,11 @@ where
         let inner = Rc::clone(&self.inner);
 
         // Reuse the EXACT fixed IP-key extraction logic (D-01d) so the
-        // shared bucket key and the in-memory governor's key agree.
-        let extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
+        // shared bucket key and the in-memory governor's key agree: the same
+        // `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and `..._TRUSTED_PROXIES`
+        // `server.rs::build_governor` reads (a rotating XFF must not yield a
+        // fresh bucket in either layer).
+        let extractor = XForwardedForKeyExtractor::configured();
         let ip = extractor.extract(&req).ok();
 
         // The process-wide write-behind counter is read from

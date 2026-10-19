@@ -1,5 +1,5 @@
 //! Network segments, reply profiles and the tenant's session cap against the
-//! real datastore (RADIUS D4, W6.1, schema v100;
+//! real datastore (RADIUS Live profile, W6.1, schema v100;
 //! `claude_dev/radius-reply-profile-design.md` §3 and §4).
 //!
 //! What lives in the datastore rather than in plain Rust, and is pinned here: a

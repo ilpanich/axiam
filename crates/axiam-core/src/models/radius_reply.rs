@@ -1,5 +1,5 @@
 //! The RADIUS reply-profile dictionary `axiam-radius-reply/1` and the typed
-//! profile built from it (RADIUS D4, `claude_dev/radius-reply-profile-design.md`
+//! profile built from it (RADIUS Live profile, `claude_dev/radius-reply-profile-design.md`
 //! §3).
 //!
 //! # A typed record, not an attribute list

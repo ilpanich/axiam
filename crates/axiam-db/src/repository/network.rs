@@ -1,5 +1,5 @@
 //! SurrealDB implementations of [`NetworkSegmentRepository`],
-//! [`ReplyProfileRepository`] and [`NetworkPolicyRepository`] (RADIUS D4, W6.1,
+//! [`ReplyProfileRepository`] and [`NetworkPolicyRepository`] (RADIUS Live profile, W6.1,
 //! schema v100; `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
 //!
 //! # Segments are resources

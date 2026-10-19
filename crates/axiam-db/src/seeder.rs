@@ -334,7 +334,7 @@ async fn tenant_may_hold_organization_actions<C: Connection>(
 /// (B-04) — so the grant is not made in the first place. The organization's
 /// own scope is seeded with everything.
 ///
-/// # The reserved `network:` namespace (RADIUS D4, W6.2)
+/// # The reserved `network:` namespace (RADIUS Live profile, W6.2)
 ///
 /// The two global administrative roles are **not** given the whole `network:`
 /// namespace. `super-admin` gets

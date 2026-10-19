@@ -5337,7 +5337,7 @@ mod tests {
         }
     }
 
-    /// #563 (D4), W6.1 — v100 defines the three network tables, their fields
+    /// #563 (the Live profile), W6.1 — v100 defines the three network tables, their fields
     /// and their indexes, every one idempotently, touches no existing table,
     /// and rewrites no row.
     #[test]

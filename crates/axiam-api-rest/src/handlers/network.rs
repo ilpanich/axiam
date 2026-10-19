@@ -1,4 +1,4 @@
-//! The network-segment and RADIUS reply-profile management routes (RADIUS D4,
+//! The network-segment and RADIUS reply-profile management routes (RADIUS Live profile,
 //! W6.3; `claude_dev/radius-reply-profile-design.md` §4, §5).
 //!
 //! Ten operations under `/api/v1/network`, in the `network` OpenAPI tag and the

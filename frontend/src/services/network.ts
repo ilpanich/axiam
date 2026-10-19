@@ -2,7 +2,7 @@ import api from "@/lib/api";
 import { fetchAllPages } from "@/services/_pagination";
 
 /**
- * Network access administration client (RADIUS D4, W6.8).
+ * Network access administration client (RADIUS Live profile, W6.8).
  *
  * Source of truth for every shape below: contract §36 (`sdks/CONTRACT.md`,
  * "Network segments, reply profiles and the RADIUS decision"),

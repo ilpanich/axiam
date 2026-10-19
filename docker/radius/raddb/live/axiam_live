@@ -1,5 +1,5 @@
-# The modules of the D4 profile (docker/docker-compose.radius-d4.yml mounts this
-# file where the D3 profile's placement-table module is, so under D4 there is no
+# The modules of the Live profile (docker/docker-compose.radius-live.yml mounts this
+# file where the Static profile's placement-table module is, so under the Live profile there is no
 # table). docs/pki/freeradius.md, "The decision per authentication".
 #
 # FreeRADIUS calls AXIAM twice per authentication at most:
@@ -20,7 +20,7 @@
 # and bind"). axiam-ca.pem is the CA that signed AXIAM's own server certificate.
 
 rest axiam_token {
-	connect_uri = "$ENV{AXIAM_D4_URL}"
+	connect_uri = "$ENV{AXIAM_LIVE_URL}"
 	connect_timeout = 3.0
 	http_negotiation = 1.1
 
@@ -59,7 +59,7 @@ rest axiam_token {
 }
 
 rest axiam_decide {
-	connect_uri = "$ENV{AXIAM_D4_URL}"
+	connect_uri = "$ENV{AXIAM_LIVE_URL}"
 	connect_timeout = 3.0
 	http_negotiation = 1.1
 

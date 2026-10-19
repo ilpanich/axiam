@@ -953,7 +953,7 @@ limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS decision
 route's backstop) and one more entry in each limiter's in-process map. No value
 of `TRUSTED_HOPS` repairs that. Do not expose the listener to the internet
 without the appending proxy; where a client must reach it directly — the
-FreeRADIUS recipe's D4 profile, whose mutual TLS has to end at AXIAM
+FreeRADIUS recipe's Live profile, whose mutual TLS has to end at AXIAM
 ([`docs/pki/freeradius.md`](../pki/freeradius.md#the-connection-mutual-tls-that-ends-at-axiam))
 — admit only that client to it with a firewall or a network policy. A setting
 that names the proxies whose header is honoured is planned for `1.1.x`

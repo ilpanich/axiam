@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.0",
-    "x-axiam-spec-digest": "sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1"
+    "x-axiam-spec-digest": "sha256:6c8919ebd971d662a80dd3003fc7aeef114ca8e20da695212be71052fcdc5857"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4357,7 +4357,7 @@
           "network"
         ],
         "summary": "`POST /api/v1/network/decide`",
-        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
+        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS Live profile). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
         "operationId": "network_decide",
         "requestBody": {
           "content": {
@@ -30206,7 +30206,7 @@
     },
     {
       "name": "network",
-      "description": "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS D4, claude_dev/radius-reply-profile-design.md)"
+      "description": "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS Live profile, claude_dev/radius-reply-profile-design.md)"
     },
     {
       "name": "ssf-receiver",

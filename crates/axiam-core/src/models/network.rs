@@ -1,5 +1,5 @@
 //! Network segments, their reply profiles and the tenant's session cap (RADIUS
-//! D4, `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
+//! Live profile, `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
 //!
 //! # Segments are resources
 //!

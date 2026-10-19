@@ -90,7 +90,7 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   // route both gate on `ssf_streams:read`; the writes are gated inside the page.
   { path: "/ssf", label: "SSF Streams", navPermission: "ssf_streams:read", routePermission: "ssf_streams:read" },
   { path: "/reactors", label: "Reactors", navPermission: "reactors:list", routePermission: "reactors:list" },
-  // RADIUS D4 (W6.8): network segments, reply profiles and the tenant's
+  // RADIUS Live profile (W6.8): network segments, reply profiles and the tenant's
   // Session-Timeout cap. `navSections.tsx` and `router.tsx` both gate on
   // `network:read`; the writes are gated inside the page. Acts on the caller's
   // own tenant, so it is not `organizationOnly`.

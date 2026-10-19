@@ -1,5 +1,5 @@
-# The placement decision, D4 profile: AXIAM decides, per authentication
-# (docker/docker-compose.radius-d4.yml mounts this file over ../check-eap-tls).
+# The placement decision, Live profile: AXIAM decides, per authentication
+# (docker/docker-compose.radius-live.yml mounts this file over ../check-eap-tls).
 # docs/pki/freeradius.md, "The decision per authentication".
 #
 # EAP-TLS has verified the certificate (chain to the tenant signing CA, CRL, and
@@ -44,7 +44,7 @@ server check-eap-tls {
 		#    fingerprint of the certificate EAP-TLS just verified.
 		update control {
 			Tmp-String-1 := "%{client:shortname}"
-			Tmp-String-0 := "%{axiam_take:/bin/sh /etc/freeradius/axiam-d4/axiam-d4.sh take %{TLS-Client-Cert-Serial}}"
+			Tmp-String-0 := "%{axiam_take:/bin/sh /etc/freeradius/axiam-live/axiam-live.sh take %{TLS-Client-Cert-Serial}}"
 		}
 		if (&control:Tmp-String-1 !~ /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/) {
 			reject

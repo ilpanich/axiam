@@ -1934,7 +1934,13 @@ finished rather than wait for it:
   A tenant purge cut or failing anywhere else releases its claim (from a drop
   guard, for a cut or a panic), so the next start's sweep no longer skips the
   tenant for the claim's one-hour lease; only a process that ends before the
-  release is written (a `SIGKILL`) still leaves the tenant to the lease.
+  release is written (a `SIGKILL`) still leaves the tenant to the lease. The
+  purge of an orphaned tenant id holds its claim the same way from the moment
+  its claim marker is written, and writes the marker only while the id still has
+  rows to purge, so the next start's sweep takes a cut one over at once and
+  records it once. (Corrected 2026-10-19, #714: before 1.1.1 a cut while the
+  orphan purge read whether rows were left held the id for the lease, and could
+  record an id another replica had already purged a second time.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for

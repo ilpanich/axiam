@@ -379,8 +379,8 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// id is claimed the same way, by a marker row
 /// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): replicas
 /// whose daily scans coincide purge and record it once, and a scan that
-/// predates another replica's finished purge finds nothing left and records
-/// nothing.
+/// predates another replica's finished purge finds nothing left, writes no
+/// marker and records nothing (#714).
 ///
 /// Each tenant's purge, from its claim to its record, is one unit of
 /// [`AuditedWork`] (#655): a task of its own, which aborting the cleanup task
@@ -589,16 +589,21 @@ where
 /// One orphaned tenant id's purge and its `tenants.purged` record: one unit of
 /// [`AuditedWork`] (#655), claimed by a marker row (R101W1-09 (a)).
 ///
-/// [`SurrealTenantRepository::begin_orphan_purge`] claims the id by writing
-/// its marker, a tombstoned tenant row, and finds whether it still has rows:
-/// another replica's claim, or a scan that predates a finished purge, is
-/// skipped and records nothing. Then the unit runs as
-/// [`purge_tombstoned_unit`] does: the rows
+/// The unit arms its [`PurgeClaim`] **before**
+/// [`SurrealTenantRepository::claim_orphan_purge`] writes the marker, keyed by
+/// the stamp the marker will carry, so the marker is guarded from the instant
+/// it exists (#714): a cut anywhere from the `CREATE` on releases the claim,
+/// and the release is conditional on the stamp, so it changes nothing when the
+/// `CREATE` did not land. The claim writes the marker only while the id still
+/// owns a row to purge: another replica's claim, or a scan that predates a
+/// finished purge, is skipped, writes nothing and records nothing. Then the
+/// unit runs as [`purge_tombstoned_unit`] does: the rows
 /// ([`SurrealTenantRepository::purge_orphan_rows`]), then the removal of the
 /// marker ([`SurrealTenantRepository::remove_purged_tenant`]) as the point of
 /// no return, and the record only when this unit removed it. Given up at the
-/// stop, or cut, the marker stays tombstoned with its claim released, and the
-/// tombstoned-tenant sweep purges it as the orphan it is.
+/// stop, failed, or cut, the marker stays tombstoned with its claim released,
+/// and the tombstoned-tenant sweep purges it at once as the orphan it is, and
+/// records it — a marker always stands for a purge nobody has recorded.
 async fn purge_orphan_unit<C, S>(
     tenants: Arc<SurrealTenantRepository<C>>,
     audit: Arc<S>,
@@ -609,26 +614,38 @@ where
     C: Connection,
     S: AuditWriteSink,
 {
-    let Some(claimed_at) = tenants.begin_orphan_purge(tenant_id).await? else {
-        return Ok(PurgeOutcome::Skipped);
-    };
-    // As in `purge_tombstoned_unit`: every exit but a removed marker releases
-    // the claim, so the marker is the tombstoned-tenant sweep's at once.
+    let claimed_at = Utc::now();
+    // Armed before the marker exists (#714): every exit from here but a
+    // removed marker — or a claim that wrote none — releases the claim, so the
+    // marker is the tombstoned-tenant sweep's at once.
     let claim = PurgeClaim {
         tenants: Arc::clone(&tenants),
         tenant_id,
         claimed_at,
         held: true,
     };
+    match tenants.claim_orphan_purge(tenant_id, claimed_at).await {
+        Ok(true) => {}
+        // No marker of ours: another replica's, nothing left, or no orphan.
+        Ok(false) => {
+            claim.settle();
+            tenants.orphan_claim_refusal(tenant_id).await?;
+            return Ok(PurgeOutcome::Skipped);
+        }
+        // The marker may have landed: release it, by its stamp.
+        Err(e) => {
+            claim.release().await;
+            return Err(e);
+        }
+    }
+    work.step(UnitStep::OrphanClaimed(tenant_id)).await;
     let report = match work
-        .until_stopped(tenants.purge_orphan_rows(tenant_id, claimed_at))
+        .until_stopped(tenants.purge_orphan_rows(tenant_id))
         .await
     {
         Some(Ok(report)) => report,
-        // The failed purge dropped its marker (R101W1-09 (a)): the next scan
-        // finds the id again.
         Some(Err(e)) => {
-            claim.settle();
+            claim.release().await;
             return Err(e);
         }
         None => {
@@ -696,7 +713,9 @@ async fn record_tenant_purged<S: AuditWriteSink>(
 }
 
 /// A replica's claim on a tombstoned tenant's purge (#610), released on every
-/// exit but a removed tenant row (#655).
+/// exit but a removed tenant row (#655). An orphan purge arms it before its
+/// claim marker is written, so the marker is guarded from the instant it
+/// exists (#714).
 ///
 /// The purge releases it itself, awaited, where it can — a failure, or giving
 /// up at the stop. Every other exit — the unit aborted at the teardown's bound,
@@ -785,6 +804,10 @@ pub enum UnitStep {
     /// pipeline: the window in which a certificate bound to the account can
     /// still be issued after (b4) revoked.
     ErasurePrepared(Uuid),
+    /// An orphan purge has written its claim marker and not yet started on the
+    /// rows: where a cut used to find the marker with no guard to release it
+    /// (#714).
+    OrphanClaimed(Uuid),
 }
 
 /// A step [`AuditedWork::with_step_for_tests`] runs at each [`UnitStep`].

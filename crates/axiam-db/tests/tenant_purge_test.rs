@@ -636,6 +636,19 @@ async fn one_replica_claims_an_orphans_purge_and_a_stale_scan_records_nothing() 
     assert!(tenants.purge_orphan(orphan).await.unwrap().is_none());
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
     assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
+    // #714: the claim itself is conditional on rows left, so a stale claim
+    // never writes a marker that a takeover could record a second time.
+    assert!(
+        !tenants
+            .claim_orphan_purge(orphan, Utc::now())
+            .await
+            .unwrap(),
+        "an id with nothing left to purge is not claimed"
+    );
+    assert!(
+        tenants.list_tombstoned().await.unwrap().is_empty(),
+        "and no marker is written"
+    );
 }
 
 /// The issue's test (R1W1-04, #602, D-5): the purge deletes the audit rows at

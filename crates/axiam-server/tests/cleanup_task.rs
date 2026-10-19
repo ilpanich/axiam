@@ -3322,6 +3322,119 @@ async fn a_tenant_purge_that_panics_or_is_cut_releases_its_claim() {
     assert_eq!(purge_records_of(&db, cut).await, 1);
 }
 
+/// #714 (R110-04): an orphan purge holds its claim guard from the marker's
+/// `CREATE`. A unit held right after its claim — where the read of the rows
+/// left used to run with no guard — across a stop, and then aborted by the
+/// teardown at its bound, releases the claim: the next start's
+/// tombstoned-tenant sweep (no orphan scan) takes the marker over at once,
+/// without waiting out the lease, purges the id as the orphan it is and
+/// records it once. A scan that predates that purge then writes no marker and
+/// records nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_orphan_purge_cut_right_after_its_claim_is_taken_over_at_once_and_recorded_once() {
+    let db = setup_db().await;
+    let org = new_org(&db, "orphan-cut").await;
+    let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+    let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+    // What a deletion made before the tombstone left behind.
+    let orphan = tenant_with_a_user(&db, org, "cut-after-claim").await;
+    db.query("DELETE type::record('tenant', $id)")
+        .bind(("id", orphan.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(tenants.orphaned_tenant_ids().await.unwrap(), vec![orphan]);
+
+    // The first start: its tick claims the orphan and holds there.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+        UnitStep::OrphanClaimed(orphan),
+        entered_tx,
+        Arc::new(Notify::new()),
+    )));
+    let tick = {
+        let (tenants, audit, work) = (Arc::clone(&tenants), Arc::clone(&audit), work.clone());
+        tokio::spawn(async move {
+            sweep_tenant_purge(&tenants, &audit, true, &work)
+                .await
+                .expect("a stop is not a failure of the sweep");
+        })
+    };
+    wait_until_entered(&mut entered).await;
+    assert_eq!(
+        tenants.list_tombstoned().await.unwrap(),
+        vec![orphan],
+        "the claim marker stands"
+    );
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE).unwrap();
+    assert!(
+        !tenants
+            .claim_purge(orphan, Utc::now(), lease)
+            .await
+            .unwrap(),
+        "while the unit holds it, the claim keeps another replica off the marker"
+    );
+
+    // The stop, and the teardown's cut at its bound.
+    stop_tx.send_replace(true);
+    assert!(
+        !join_like_the_teardown(tick, &work, Duration::from_millis(200)).await,
+        "the unit was cut where it was held"
+    );
+    assert_eq!(users_in(&db, orphan).await, 1, "nothing was purged yet");
+    assert_eq!(purge_records_of(&db, orphan).await, 0);
+
+    // The next start's sweep, without an orphan scan, takes the marker over at
+    // once. The guard's release is spawned when the unit is dropped: give it a
+    // moment, without ever waiting anything like the lease.
+    let next_start = never_stopping();
+    let mut purged = 0;
+    for _ in 0..50 {
+        purged = sweep_tenant_purge(&tenants, &audit, false, &next_start)
+            .await
+            .unwrap();
+        if purged == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        purged, 1,
+        "the marker is still held by the claim of a cut unit"
+    );
+    assert_eq!(users_in(&db, orphan).await, 0);
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    let records: Vec<_> = purged_records(&db)
+        .await
+        .into_iter()
+        .filter(|e| e.resource_id == Some(orphan))
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].metadata["orphan"], true);
+
+    // A scan that predates that purge claims nothing: no marker, no record.
+    assert!(
+        !tenants
+            .claim_orphan_purge(orphan, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, true, &next_start)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        purge_records_of(&db, orphan).await,
+        1,
+        "tenants.purged exists exactly once for the id"
+    );
+}
+
 /// An account due for erasure, with its pending `account_deletion` row.
 async fn erasure_due_with_its_request(
     db: &Surreal<surrealdb::engine::local::Db>,

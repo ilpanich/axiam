@@ -900,10 +900,14 @@ enum HintName {
 /// *What it costs.* A refusal may be spurious only while another call for the
 /// same hint is between its count and its take-back, or when a call is
 /// overtaken at a window boundary (or by a replica whose clock runs ahead).
-/// A store error after the count leaves the count in place (strict: the
-/// allowance is one smaller until the window passes) and the call fails with
-/// `server_error`; a take-back that fails leaves it in place too, and the call
-/// is refused as decided.
+/// A write conflict on the count itself that outlives its retries counted
+/// nothing and refuses the call (`slow_down`, #678): concurrent calls for one
+/// hint write one record, so contention on it is the cap doing its work, not a
+/// fault. Any other store error on the count fails the call with
+/// `server_error`; so does a failed read after it, which leaves the count in
+/// place (strict: the allowance is one smaller until the window passes). A
+/// take-back that fails leaves the count in place too, and the call is refused
+/// as decided.
 ///
 /// A row is read until the end of the window after the one it was written in,
 /// so the server's `rate_limit_bucket` sweep deletes a row once it is more
@@ -1023,9 +1027,21 @@ impl CibaHintCap {
         // Concurrent calls for one hint write one record: the datastore
         // aborts all but one with a retryable write conflict, and an aborted
         // statement wrote nothing, so it is replayed (not counted twice).
-        let current = retry_on_write_conflict(|| self.store.increment_by(&own, start(index), 1))
-            .await
-            .map_err(failed)?;
+        let current = match retry_on_write_conflict(|| {
+            self.store.increment_by(&own, start(index), 1)
+        })
+        .await
+        {
+            Ok(current) => current,
+            // A conflict that outlived the retries counted nothing, so
+            // there is nothing to take back: the call is refused
+            // (`slow_down`), which is strict, rather than failed (#678).
+            Err(e) if axiam_db::helpers::is_write_conflict(&e.to_string()) => {
+                tracing::debug!(error = %e, "the CIBA hint cap's count kept conflicting; the call is refused");
+                return Ok(false);
+            }
+            Err(e) => return Err(failed(e)),
+        };
         let previous = match self.store.peek_bucket(&slot(index - 1)).await {
             Ok(None) => PreviousWindow::Counted(0),
             Ok(Some((stored, count))) => match stored.cmp(&start(index - 1)) {
@@ -2517,11 +2533,12 @@ mod tests {
             let admitted = concurrent_calls(store.clone(), 4, &stamps).await;
             let n = admitted.iter().filter(|(_, ok)| *ok == Ok(true)).count();
             assert!(n <= 4, "round {round}: {admitted:?}");
-            // A call whose write conflict outlived its retries fails with
-            // `server_error` and admits nothing; with none, exactly four.
-            if admitted.iter().all(|(_, ok)| ok.is_ok()) {
-                assert_eq!(n, 4, "round {round}: {admitted:?}");
-            }
+            // A call whose write conflict outlived its retries is refused
+            // (#678), never failed; so no call errs.
+            assert!(
+                admitted.iter().all(|(_, ok)| ok.is_ok()),
+                "round {round}: {admitted:?}"
+            );
 
             let stamps: Vec<DateTime<Utc>> = (0..10)
                 .map(|i| {
@@ -2544,5 +2561,74 @@ mod tests {
                 "round {round}: {admitted:?}"
             );
         }
+    }
+
+    /// A store whose count fails with `error` on every attempt; the take-back
+    /// and the read answer as an empty store would.
+    struct FailingCount(fn() -> axiam_db::DbError);
+
+    impl axiam_db::SharedRateLimitStore for FailingCount {
+        fn increment_by<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+            _delta: u64,
+        ) -> axiam_db::StoreIncrementFuture<'a> {
+            Box::pin(async move { Err((self.0)()) })
+        }
+
+        fn peek_bucket<'a>(&'a self, _key: &'a str) -> axiam_db::StorePeekFuture<'a> {
+            Box::pin(async move { Ok(None) })
+        }
+
+        fn decrement<'a>(
+            &'a self,
+            _key: &'a str,
+            _window_start: DateTime<Utc>,
+        ) -> axiam_db::StoreDecrementFuture<'a> {
+            Box::pin(async move { Ok(false) })
+        }
+    }
+
+    /// #678: a count whose write conflict survives every retry counted
+    /// nothing, so the call is refused (`slow_down`), not failed.
+    #[tokio::test]
+    async fn a_count_that_conflicts_on_every_attempt_refuses_the_call() {
+        let store = std::sync::Arc::new(FailingCount(|| {
+            axiam_db::DbError::Conflict("Transaction conflict: read or write conflict".into())
+        }));
+        let cap = CibaHintCap::derived_from(store, deployment_secret());
+        let hint = HintName::Login("contended".into());
+        let admitted = cap.admit(Uuid::new_v4(), "oa_a", &hint, at(90, 1)).await;
+        assert!(!admitted.unwrap());
+    }
+
+    /// #678: any other fault on the count is still `server_error`.
+    #[tokio::test]
+    async fn a_count_that_fails_otherwise_is_a_server_error() {
+        let store = std::sync::Arc::new(FailingCount(|| {
+            axiam_db::DbError::Migration("connection refused".into())
+        }));
+        let cap = CibaHintCap::derived_from(store, deployment_secret());
+        let hint = HintName::Login("down".into());
+        let out = cap.admit(Uuid::new_v4(), "oa_a", &hint, at(90, 1)).await;
+        assert!(matches!(out, Err(OAuth2Error::ServerError(_))), "{out:?}");
+    }
+
+    /// #678: forty concurrent calls for one hint against the datastore are
+    /// each admitted or refused, none fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forty_concurrent_calls_produce_no_server_error() {
+        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
+            .await
+            .unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        axiam_db::run_migrations(&db).await.unwrap();
+        let store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore> =
+            std::sync::Arc::new(axiam_db::SurrealRateLimitBucketRepository::new(db));
+        let admitted = concurrent_calls(store, 4, &vec![at(3000, 3); 40]).await;
+        assert!(admitted.iter().all(|(_, ok)| ok.is_ok()), "{admitted:?}");
+        let n = admitted.iter().filter(|(_, ok)| *ok == Ok(true)).count();
+        assert!(n <= 4, "{admitted:?}");
     }
 }

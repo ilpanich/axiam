@@ -63,8 +63,13 @@
 #
 # Exit 0: installed, unchanged, or another run holds the lock. Exit 1: the list
 # was refused or could not be fetched; the installed list is untouched and the
-# reason is on stderr. Alert on a non-zero exit, and on a list in `capath` older
-# than half its lifetime (the guide says why).
+# reason is on stderr. Exit 3: the list in `capath` for this CA expires in less
+# than a quarter of its lifetime (`nextUpdate` minus `lastUpdate`), or has
+# expired; that is read off the list itself, after a 200, a 304 or a refusal
+# alike, and takes the place of exit 0 or 1 (the refusal's reason is still on
+# stderr), because FreeRADIUS refuses every device of the tenant once the list
+# passes its `nextUpdate` (R110W5-07). AXIAM re-signs at half the lifetime, so a
+# healthy list never gets there. Exit 2: wrong usage. Alert on any non-zero exit.
 #
 # A run killed by HUP, INT or TERM (a cron or systemd timeout) cleans up like any
 # other: the signal trap turns it into `exit 1`, and so runs the EXIT trap, which
@@ -79,9 +84,70 @@ LC_ALL=C
 export LC_ALL
 umask 022
 
+armed= # set once the lock is ours: from then on an exit also looks at the list's age
 fail() {
 	echo "fetch-crl: $*" >&2
+	if [ -n "$armed" ] && near_expiry; then exit 3; fi
 	exit 1
+}
+
+# Seconds since the epoch of an OpenSSL date, `Oct  9 12:00:00 2026 GMT`
+# (the civil-date arithmetic keeps this off GNU `date -d`).
+epoch_of() {
+	# shellcheck disable=SC2086
+	set -- $1
+	[ "$#" -ge 4 ] || return 1
+	case $1 in
+	Jan) m=1 ;; Feb) m=2 ;; Mar) m=3 ;; Apr) m=4 ;; May) m=5 ;; Jun) m=6 ;;
+	Jul) m=7 ;; Aug) m=8 ;; Sep) m=9 ;; Oct) m=10 ;; Nov) m=11 ;; Dec) m=12 ;;
+	*) return 1 ;;
+	esac
+	d=$2 y=$4 hms=$3
+	hh=${hms%%:*} rest=${hms#*:}
+	mm=${rest%%:*} ss=${rest#*:}
+	for v in d y hh mm ss; do
+		eval "x=\$$v"
+		case $x in '' | *[!0-9]*) return 1 ;; esac
+		while :; do
+			case $x in 0?*) x=${x#0} ;; *) break ;; esac
+		done
+		eval "$v=\$x"
+	done
+	[ "$m" -gt 2 ] || y=$((y - 1))
+	era=$((y / 400))
+	yoe=$((y - era * 400))
+	doy=$(((153 * ((m + 9) % 12) + 2) / 5 + d - 1))
+	doe=$((yoe * 365 + yoe / 4 - yoe / 100 + doy))
+	printf '%s' $(((era * 146097 + doe - 719468) * 86400 + hh * 3600 + mm * 60 + ss))
+}
+
+# True (and a line on stderr) when the installed list for this CA has less than a
+# quarter of its lifetime left. False when there is no list, or its dates cannot
+# be read: the exit status is then the one the run would have had.
+near_expiry() {
+	ca_hash=$(openssl x509 -in "$ca_file" -noout -subject_hash 2>/dev/null) || return 1
+	case $ca_hash in *[!0-9a-f]* | '') return 1 ;; esac
+	crl_file="$capath/$ca_hash.r0"
+	[ -f "$crl_file" ] || return 1
+	dates=$(openssl crl -in "$crl_file" -noout -lastupdate -nextupdate 2>/dev/null) || return 1
+	last=$(printf '%s\n' "$dates" | sed -n 's/^lastUpdate=//p')
+	next=$(printf '%s\n' "$dates" | sed -n 's/^nextUpdate=//p')
+	last=$(epoch_of "$last") && next=$(epoch_of "$next") || return 1
+	left=$((next - $(date +%s)))
+	life=$((next - last))
+	if [ "$left" -le 0 ]; then
+		echo "fetch-crl: the installed list $crl_file expired $((-left / 60)) min ago; FreeRADIUS refuses every device of the tenant" >&2
+		return 0
+	fi
+	[ $((left * 4)) -lt "$life" ] || return 1
+	echo "fetch-crl: the installed list $crl_file expires in $((left / 60)) min, less than a quarter of its $((life / 60)) min lifetime" >&2
+}
+
+# The end of a run that did not fail: 3 when the installed list is near its
+# `nextUpdate`, else 0.
+finish() {
+	if near_expiry; then exit 3; fi
+	exit 0
 }
 
 [ "$#" -eq 3 ] || {
@@ -174,6 +240,7 @@ else
 	lock_held=1
 	printf '%s\n%s\n' "$$" "$(date +%s)" >"$lock_dir/owner"
 fi
+armed=1
 
 # A CRL number as upper-case hex without leading zeros, for comparison; fails
 # when the list carries none.
@@ -284,7 +351,7 @@ case $code in
 304)
 	[ -n "$etag" ] || fail "refusing a 304 to a request that held no ETag"
 	echo "fetch-crl: unchanged (304); $capath/$installed stays"
-	exit 0
+	finish
 	;;
 *) fail "$url answered HTTP $code; the installed list stays" ;;
 esac
@@ -338,3 +405,4 @@ else
 	rm -f "$state"
 fi
 echo "fetch-crl: installed $target (CRL number 0x$new)"
+finish

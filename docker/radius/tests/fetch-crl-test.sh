@@ -5,7 +5,7 @@
 # Runs docker/radius/fetch-crl.sh under <shell> against a stand-in for AXIAM's
 # CRL route (crl-stub.py) and a throwaway CA, and checks what the script's header
 # promises: the ETag handling (R110W5-01), the lock (R110W5-02), curl's options
-# (R110W5-03). No FreeRADIUS, no docker, no AXIAM: needs sh, bash, curl, openssl,
+# (R110W5-03), the exit status 3 of a list near its nextUpdate (R110W5-07). No FreeRADIUS, no docker, no AXIAM: needs sh, bash, curl, openssl,
 # python3 (and flock for the flock half of the lock cases). The stand-in is plain
 # HTTP on a loopback port, so the runs set FETCH_CRL_ALLOW_HTTP=1 except where a
 # case is about that.
@@ -31,7 +31,18 @@ mkcrl() { # mkcrl <dir> <crl number, hex, two digits> <out.der>: a list the CA s
   openssl ca -config "$1/cnf" -cert "$CA" -keyfile "$T/ca/key.pem" -gencrl -out "$1/crl.pem" 2>/dev/null &&
     openssl crl -in "$1/crl.pem" -outform DER -out "$3"
 }
+mkcrl_dated() { # mkcrl_dated <dir> <number> <out.der> <lastUpdate> <nextUpdate> (YYYYMMDDHHMMSSZ)
+  mkdir -p "$1"; : >"$1/index.txt"; printf '%s\n' "$2" >"$1/crlnumber"
+  printf '[ca]\ndefault_ca=x\n[x]\ndatabase=%s/index.txt\ncrlnumber=%s/crlnumber\ndefault_md=default\n' "$1" "$1" >"$1/cnf"
+  openssl ca -config "$1/cnf" -cert "$CA" -keyfile "$T/ca/key.pem" -gencrl -crl_lastupdate "$4" -crl_nextupdate "$5" -out "$1/crl.pem" 2>/dev/null &&
+    openssl crl -in "$1/crl.pem" -outform DER -out "$3"
+}
+at() { python3 -c 'import sys,datetime as d; print((d.datetime.now(d.timezone.utc)+d.timedelta(seconds=int(sys.argv[1]))).strftime("%Y%m%d%H%M%SZ"))' "$1"; }
 for n in 1 2 3 10; do mkcrl "$T/mk$n" "$(printf %02d "$n")" "$T/lists/L$n.der" || { echo "cannot make a list"; exit 99; }; done
+# 20: a day's list with 100 minutes left (6.9 %: near); 21: with 12 h left (50 %: not); 22: expired
+mkcrl_dated "$T/mk20" 20 "$T/lists/L20.der" "$(at -85700)" "$(at 6000)" || { echo "cannot make a list"; exit 99; }
+mkcrl_dated "$T/mk21" 21 "$T/lists/L21.der" "$(at -43200)" "$(at 43200)" || { echo "cannot make a list"; exit 99; }
+mkcrl_dated "$T/mk22" 22 "$T/lists/L22.der" "$(at -90000)" "$(at -3600)" || { echo "cannot make a list"; exit 99; }
 : >"$T/ctl"; : >"$T/req.log"
 python3 "$HERE/crl-stub.py" "$T/ctl" "$T/req.log" "$T/port" 2>/dev/null & SRVPID=$!
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$T/port" ] && break; sleep 0.25; done
@@ -280,5 +291,32 @@ for sig in TERM HUP; do
   t "06/$sig: a killed run leaves no work directory and no .incoming.*" '[ -z "$(ls -A "$T/tmp06")" ] && [ -z "$(ls -A "$CAPATH" | grep "^\.incoming\.")" ]'
 done
 ctl file "$T/lists/L1.der" etag '"t1"'
+
+# ---- R110W5-07 -----------------------------------------------------------------
+echo "-- R110W5-07"
+newcap; serve 1 '"t1"'; run
+t "07: a fresh list (a day left of a day): exit 0" '[ $rc -eq 0 ] && [ "$(capnum)" = 1 ]'
+newcap; serve 21 '"t21"'; run
+t "07: half the lifetime left: installed, exit 0" '[ $rc -eq 0 ] && [ "$(capnum)" = 21 ]'
+run
+t "07: ... and its 304: exit 0" '[ $rc -eq 0 ] && msg | grep -q "unchanged (304)"'
+newcap; serve 20 '"t20"'; run
+t "07: a list with under a quarter left, just installed: exit 3, installed" '[ $rc -eq 3 ] && [ "$(capnum)" = 20 ] && msg | grep -q "less than a quarter"'
+run
+t "07: its 304: exit 3 (the list is not touched), saying when it expires" '[ $rc -eq 3 ] && msg | grep -q "unchanged (304)" && msg | grep -q "expires in" && [ "$(reqs)" = 1 ]'
+serve 21 '"t21"'; run
+t "07: a newer list with half its life left replaces it: exit 0 again" '[ $rc -eq 0 ] && [ "$(capnum)" = 21 ]'
+ctl file "$T/bad.der" etag '"x"'; run
+t "07: a refusal beside a healthy list stays exit 1" '[ $rc -eq 1 ]'
+newcap; serve 20 '"t20"'; run; ctl file "$T/bad.der" etag '"x"'; run
+t "07: a refusal beside a list near its end: exit 3, with the refusal on stderr" '[ $rc -eq 3 ] && msg | grep -q "refusing the list" && msg | grep -q "less than a quarter"'
+newcap; serve 20 '"t20"'; run; ctl file "$T/lists/L20.der" etag '"t20"' redirect "http://127.0.0.1:1/"; run
+t "07: an HTTP error beside a list near its end: exit 3" '[ $rc -eq 3 ] && msg | grep -q "HTTP 302"'
+newcap; serve 22 '"t22"'; run
+t "07: an expired list: exit 3, saying so" '[ $rc -eq 3 ] && msg | grep -q "expired"'
+newcap; ctl file "$T/bad.der" etag '"x"'; run
+t "07: nothing installed yet, and a refusal: exit 1 (no list to age)" '[ $rc -eq 1 ]'
+newcap; serve 20 '"t20"'; run; printf 'garbage\n' >"$(installed)"; ctl file "$T/bad.der" etag '"x"'; run
+t "07: an unreadable installed list does not turn a refusal into exit 3" '[ $rc -eq 1 ]'
 echo "== $passes passed, $fails failed"
 exit $fails

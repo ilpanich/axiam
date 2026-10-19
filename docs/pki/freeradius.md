@@ -454,8 +454,8 @@ fetch-crl.sh "https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl" \
     /etc/freeradius/axiam/ca.pem /etc/freeradius/axiam/capath
 ```
 
-It installs a list only if all of these hold, and otherwise exits 1, says why on
-stderr and leaves the installed list alone:
+It installs a list only if all of these hold, and otherwise exits 1 (or 3, below),
+says why on stderr and leaves the installed list alone:
 
 - **The CA you trust signed it.** The check is the *text* `openssl crl -verify`
   prints, which must be exactly `verify OK`, not its exit status: OpenSSL 3.0
@@ -511,7 +511,7 @@ or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. With
 the lock, two runs that fetch different lists can leave the older one in place
 under the newer one's tag, and a revocation then waits until AXIAM's list next
 changes, up to half its lifetime, with a file fresh enough to silence the
-age alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
+exit-status alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
 looks it up.
 
 Use HTTPS, and the script holds you to it: the URL must start with `https://`,
@@ -534,8 +534,16 @@ reported as the status it is and the installed list stays). Before curl 8.4,
 `--max-filesize` does not stop a chunked body without a declared size; only
 `--max-time` (20 seconds) does (R110W5-03).
 
-The alert on a list that is older than half its lifetime
-([below](#the-revocation-lag)) is what catches a fetch that no longer moves.
+**Alert on any non-zero exit status.** Exit `1` is a list refused or a fetch that
+failed (the reason is on stderr). Exit `3` means the list installed in `ca_path`
+for this CA has less than a quarter of its lifetime (`nextUpdate` minus
+`lastUpdate`) left, or has expired: the script reads that off the list, after a
+`200`, a `304` and a refusal alike, and exit `3` replaces the `0` or `1` the run
+would have had (a refusal's reason is still on stderr). AXIAM re-signs at half the
+lifetime, so a healthy list never gets there; a fetch that no longer moves, or a
+server that keeps answering `304` to an old list, does, with at least a quarter of
+the lifetime still to act in ([below](#the-revocation-lag)). A run that finds the
+lock held exits `0` and checks nothing (R110W5-07).
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request
@@ -587,8 +595,9 @@ Two ways this goes wrong:
 - **The fetch stops.** Once a list is past its `nextUpdate`, OpenSSL treats it as
   an error and FreeRADIUS refuses **every** device of the tenant, because
   `allow_expired_crl` is left at its default, `no`. That is fail-closed, and a
-  full outage a day later. Alert when the file in `capath` is older than half
-  the list's lifetime.
+  full outage a day later. Alert on a non-zero exit status of the fetch job:
+  `fetch-crl.sh` exits `3` when the installed list has less than a quarter of its
+  lifetime left ([above](#4-keep-the-revocation-list-fresh)), and `1` when the fetch itself fails.
 - **`ca.pem` is replaced non-atomically, or deleted without a restart.** The
   reload re-reads it as well as the lists; a reload that cannot read it logs `Error
   replacing X509 store` and leaves the old trust in force

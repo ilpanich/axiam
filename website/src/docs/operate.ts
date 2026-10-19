@@ -1219,7 +1219,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**Alert when the list file is older than half its lifetime.** A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. The Live profile keeps `check_crl = yes` as a second check, so the fetch job stays in the Live profile too unless you decide the decision is enough.",
+        text: "**Alert on a non-zero exit status of the fetch job.** `fetch-crl.sh` exits `1` when it refuses a list or cannot fetch, and `3` when the installed list has less than a quarter of its lifetime left, after a `304` as after a refusal. A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. The Live profile keeps `check_crl = yes` as a second check, so the fetch job stays in the Live profile too unless you decide the decision is enough.",
       },
 
       { type: "h", id: "segments", text: "Live: network segments" },
@@ -1421,7 +1421,7 @@ export const OPERATE_PAGES: DocPage[] = [
           "Per NAS: firmware with the Blast-RADIUS fix, a strong per-NAS secret, RadSec where it is offered.",
           "FreeRADIUS's own certificate for the Live profile: issue it short-lived, renew and restart before it ends, revoke it in AXIAM if the host is compromised. Its key is a file readable by the `freerad` user alone, and the helper's `/var/run/axiam-live` must be a `tmpfs`.",
           "AXIAM's availability, in the Live profile: run it as the service the network depends on.",
-          "The fetch job and its age alert, and atomic changes to `ca.pem` followed by a restart.",
+          "The fetch job and its exit-status alert, and atomic changes to `ca.pem` followed by a restart.",
           "Sessions: `Session-Timeout` is the only bound on a session already admitted. Configure CoA on FreeRADIUS and the NAS if you need one ended rather than waited out.",
           "FreeRADIUS's logs (`-X` prints every body, fingerprints included): treat them as personal data. Run production with `freeradius -f -l stdout`.",
           "Moving the pinned FreeRADIUS image digest is a decision: re-run both end-to-end tests.",

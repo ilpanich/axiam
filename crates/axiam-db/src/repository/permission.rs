@@ -335,7 +335,7 @@ impl<C: Connection> SurrealPermissionRepository<C> {
     ///
     /// # Errors
     ///
-    /// As the trait method, plus `Conflict` ("the role changed since it was
+    /// As the trait method, plus `NetworkConflict::StaleRole` ("the role changed since it was
     /// read") when the claim no longer holds.
     pub async fn revoke_from_role_claimed(
         &self,

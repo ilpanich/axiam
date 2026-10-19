@@ -9,7 +9,7 @@
 //! tenant. On startup, if the hash matches the stored value the UPSERT loop is
 //! skipped entirely, eliminating the O(n×95) boot storm on unchanged systems.
 
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, NetworkConflict};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::network::{SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, is_network_action};
 use axiam_core::models::role::CreateRole;
@@ -877,11 +877,11 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                     .await
                 {
                     Ok(()) => outcome.granted += 1,
-                    Err(AxiamError::Conflict { reason }) => {
+                    Err(AxiamError::Network(NetworkConflict::StaleRole { what_landed })) => {
                         tracing::warn!(
                             %tenant_id,
                             action = %perm.action,
-                            %reason,
+                            reason = %what_landed,
                             "network permission withheld from super-admin: a group holds the \
                              role, and a role carrying a network: permission is never group-held \
                              (design note §4.2 rule 2); unassign the role from the group to let \

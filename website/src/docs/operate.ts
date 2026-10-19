@@ -1405,7 +1405,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**Expose AXIAM's native listener to the FreeRADIUS servers only.** AXIAM has one listener and it serves every route. Reached without an appending proxy in front, nothing appends to `X-Forwarded-For`, so every per-address limiter — `/auth/login`'s, `/auth/device`'s, `/oauth2/token`'s — keys on whatever a caller writes there. Let a firewall or network policy admit only the FreeRADIUS servers to it, and keep the HTTP ingress, with its appending proxy, for every other client. A setting that names the proxies whose header is honoured is planned for `1.1.x` ([#711](https://github.com/ilpanich/axiam/issues/711)).",
+        text: "**Expose AXIAM's native listener to the FreeRADIUS servers only.** AXIAM has one listener and it serves every route. Reached without an appending proxy in front, nothing appends to `X-Forwarded-For`, so every per-address limiter — `/auth/login`'s, `/auth/device`'s, `/oauth2/token`'s — keys on whatever a caller writes there. Let a firewall or network policy admit only the FreeRADIUS servers to it, and keep the HTTP ingress, with its appending proxy, for every other client. Since 1.1.1, `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` names the proxies whose header is honoured; every other peer is keyed on its own address ([#711](https://github.com/ilpanich/axiam/issues/711)).",
       },
 
       { type: "h", id: "radsec", text: "RadSec, where the NAS allows" },

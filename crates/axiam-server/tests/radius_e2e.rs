@@ -743,9 +743,8 @@ impl Api {
     }
 
     /// `GET /pki/v1/{org}/ca/{ca}/crl`, with no credential, as a relying party
-    /// calls it. Returns the DER list.
-    /// `GET /pki/v1/{org}/ca/{ca}/crl`, optionally conditional: the status, the
-    /// body and the `ETag` the route answered with.
+    /// calls it, optionally conditional: the status, the body and the `ETag`
+    /// the route answered with.
     async fn crl_tagged(&self, org: Uuid, ca: &str, if_none_match: Option<&str>) -> TaggedReply {
         let mut req = test::TestRequest::get()
             .uri(&format!("/pki/v1/{org}/ca/{ca}/crl"))
@@ -756,6 +755,8 @@ impl Api {
         (self.call_tagged)(req).await
     }
 
+    /// The same request, unconditional, asserted to answer `200`. Returns the
+    /// DER list.
     async fn crl(&self, org: Uuid, ca: &str) -> Vec<u8> {
         let (status, body, _) = self.crl_tagged(org, ca, None).await;
         assert_eq!(status, 200, "the CRL route answers a relying party");

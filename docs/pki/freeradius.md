@@ -328,10 +328,12 @@ certificate, named by the certificate's serial as FreeRADIUS spells
   octet, because FreeRADIUS 3.2.8 encodes tag `0` on a string exactly as it
   encodes no tag, and RFC 2868 §3.6 reads a first octet above `0x1F` (every digit
   is) as the start of the string. The test reads the octets from the Accept
-  (`00 00 00 0d`, `00 00 00 06`, `32 30`). A tag other than `0` puts another octet
-  in front of the VLAN, which a NAS reads as one tunnel of several; do not write
-  one. Use these and no other attributes
-  in a placement: the reply-profile design note
+  (`00 00 00 0d`, `00 00 00 06`, `32 30`). Keep the tag at `:0`: a non-zero tag is
+  not wrong on the wire when all three attributes carry it, but the encoding the
+  test pins is the one the closed set below uses. A non-compliant NAS that always
+  strips a first octet would misread a three-digit VLAN, so confirm the VLAN a NAS
+  applies from a test Accept before relying on the table. Use these and no other
+  attributes in a placement: the reply-profile design note
   ([`radius-reply-profile-design.md`](../../claude_dev/radius-reply-profile-design.md))
   keeps the set closed so that a hand-written table here is already an instance
   of the model a later AXIAM-side profile would serve. **Do not put the
@@ -680,8 +682,14 @@ rotates the header gets a fresh bucket per request. Per-account lockout, the
 decision route's own allowance (keyed on the authenticated service account) and
 the per-client limits are not affected. So let a firewall or a network policy
 admit only the FreeRADIUS servers to the native listener, and keep the HTTP
-ingress, with its appending proxy, for every other client. A setting that names
-the proxies whose header is honoured is planned for `1.1.x`
+ingress, with its appending proxy, for every other client. Since 1.1.1, also set
+`AXIAM__RATE_LIMIT__TRUSTED_PROXIES` to the addresses your appending proxies
+connect from (CIDR blocks, comma-separated): their requests are keyed as before,
+and every other peer — the FreeRADIUS servers of the **Live** profile included —
+is keyed on its own address, whatever it writes in `X-Forwarded-For`, so a caller
+that reaches the native listener chooses no bucket. Left empty, every peer's
+header is still read and a server with native TLS on logs one `WARN` at boot; the
+firewall rule above stays the first control either way
 ([#711](https://github.com/ilpanich/axiam/issues/711); T-212, T-486).
 
 **How FreeRADIUS gets its token.** It logs in as the service account the way a

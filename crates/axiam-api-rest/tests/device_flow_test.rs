@@ -674,6 +674,95 @@ macro_rules! post_form_with {
     }};
 }
 
+/// #683 — RFC 6749 §2.3.1: a `client_secret_basic` client names itself in the
+/// header, so the body carries no `client_id`; a body that disagrees with the
+/// header is still refused, and an unreadable body is a JSON error.
+#[actix_web::test]
+async fn a_basic_client_without_a_body_client_id_gets_a_user_code() {
+    use base64::Engine;
+    let f = setup().await;
+    let app = test_app!(f);
+    let (client_id, secret) = create_device_client(
+        &f.db,
+        f.tenant_id,
+        "basic-kiosk",
+        ClientAuthMethod::ClientSecretBasic,
+        |_| {},
+    )
+    .await;
+    let basic = |id: &str, secret: &str| {
+        let token = base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}"));
+        ("authorization", format!("Basic {token}"))
+    };
+
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        "scope=openid",
+        [basic(&client_id, &secret)]
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!body["user_code"].as_str().unwrap().is_empty());
+
+    // A wrong secret is still the one refusal.
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        "scope=openid",
+        [basic(&client_id, "wrong")]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client")),
+        "{body}"
+    );
+
+    // Two claims of identity are refused, not arbitrated.
+    let (status, body) = post_form_with!(
+        app,
+        "/oauth2/device_authorization",
+        f.tenant_id,
+        "client_id=someone-else",
+        [basic(&client_id, &secret)]
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_request")),
+        "{body}"
+    );
+}
+
+#[actix_web::test]
+async fn a_malformed_device_authorization_body_is_a_json_invalid_request() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/device_authorization?tenant_id={}",
+            f.tenant_id
+        ))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(vec![0xff, 0xfe, 0x3d, 0xff])
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        content_type.starts_with("application/json"),
+        "{content_type}"
+    );
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+}
+
 /// The stored grant behind a device code.
 async fn stored_grant(
     f: &Fixture,

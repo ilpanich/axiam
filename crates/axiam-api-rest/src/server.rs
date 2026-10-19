@@ -2330,6 +2330,12 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                         "oauth2_device_authorization",
                         rate_limit_cfg.device_authorization_per_min,
                     ))
+                    // #683 — a body `web::Form` cannot read is answered as the
+                    // token endpoint's errors are: a JSON object, not actix's
+                    // `text/plain`. See `handlers::oauth2::par_form_error`.
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
+                    ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
             )
             // G-7 / CIBA Core §7 — the backchannel authentication endpoint.

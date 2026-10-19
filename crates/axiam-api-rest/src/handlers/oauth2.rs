@@ -4369,7 +4369,7 @@ async fn device_authorization_inner<C: Connection + Clone>(
         ),
         Err(response) => return *response,
     };
-    let client_id = match axiam_oauth2::token::resolve_client_id(Some(&req.client_id), &ctx) {
+    let client_id = match axiam_oauth2::token::resolve_client_id(req.client_id.as_deref(), &ctx) {
         Ok(id) => id.to_owned(),
         Err(e) => return build_oauth2_error_response(&e),
     };

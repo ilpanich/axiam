@@ -4150,6 +4150,17 @@
                   "mitigation": "Tokens carry issuer, audience and tenant claims; SDK verifiers check iss and aud against configuration, and the discovery document publishes the expected issuer.",
                   "modelType": "STRIDE",
                   "number": 50
+                },
+                {
+                  "id": "31be9343-8374-4e52-bf94-f67d580f46d9",
+                  "title": "A UMA resource server reads, renames, retypes, re-scopes or deletes a resource it did not register",
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Elevation of privilege",
+                  "description": "The Protection API's read, update and delete routes (`/uma2/rreg/resource_set/{id}`) authenticate a resource server by its PAT and checked only that the resource was in the PAT's tenant. Any resource server of the tenant could therefore read, rename, retype, replace the scopes of, or delete a resource another resource server registered, or one a tenant administrator made through `/api/v1/resources` for RBAC. Replacing or dropping scopes changes what permission tickets may be requested, so this reaches the authorization decision's inputs. Pre-existing; found by the 1.1.0 W6 F4 review (R110W6-08, #705).",
+                  "mitigation": "Mitigated 2026-10-19 (release 1.1.1, W3.9, #705). `get`, `update` and `delete` load the resource through one helper, `registered_by_pat` (`crates/axiam-api-rest/src/handlers/uma.rs`), which refuses unless `uma_registered_by` equals the PAT's `client_id`. The refusal is `NotFound { entity: \"resource\", id }`, built the way the repository builds it for an unknown id, so another server's set, an ordinary resource and a nonexistent id are indistinguishable (same status, same body). The check runs before the network gate and before any write or scope sync. The list route already filtered on the same field. `uma_registered_by` is written only by the Protection API's register route and cannot be set through `/api/v1/resources` or resource metadata (`provenance_cannot_be_forged_through_the_ordinary_resource_api`). Test: `crates/axiam-api-rest/tests/uma_test.rs::a_resource_server_cannot_touch_a_resource_it_did_not_register` (resource server B gets `404` on A's set and on an ordinary resource for get, update and delete, the body equal to an unknown id's, nothing changed; A's own calls still succeed). Residual: resources registered before provenance existed carry no `uma_registered_by` and are no longer reachable through the Protection API at all; a tenant administrator manages them through `/api/v1/resources`.",
+                  "modelType": "STRIDE",
+                  "number": 488
                 }
               ]
             }
@@ -23345,6 +23356,6 @@
     ],
     "diagramTop": 10,
     "reviewer": "",
-    "threatTop": 487
+    "threatTop": 488
   }
 }

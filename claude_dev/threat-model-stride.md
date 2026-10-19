@@ -909,6 +909,7 @@ The 1.0.0 release wave (model 2.38.0) closes **T-447** for the device grant (#54
 | T-446 | sign-in request notification <br/>*Flow* | I | The approval mail goes to an address nobody proved, making AXIAM a phishing relay | Medium | Mitigated |
 | T-447 | /oauth2/authorize (+ consent) <br/>*Process* | E | A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name | Medium | Mitigated |
 | T-471 | /oauth2/token (code, refresh, client credentials) <br/>*Process* | S | A client names another party as the actor of a delegation it requests (RFC 8693 `actor_token`) | Medium | Mitigated |
+| T-488 | Resource server (protected API) <br/>*Actor* | E | A UMA resource server reads, renames, retypes, re-scopes or deletes a resource it did not register | Low | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1743,6 +1744,13 @@ The 1.0.1 release wave's W2 F4 review (2026-10-13, [`security-review-release-1.0
 
 <details>
 <summary>Threat detail and mitigations</summary>
+
+**T-488 — A UMA resource server reads, renames, retypes, re-scopes or deletes a resource it did not register**  
+`Resource server (protected API)` (Actor) · Elevation of privilege · Low · Mitigated
+
+The Protection API's read, update and delete routes (`/uma2/rreg/resource_set/{id}`) authenticate a resource server by its PAT and checked only that the resource was in the PAT's tenant. Any resource server of the tenant could therefore read, rename, retype, replace the scopes of, or delete a resource another resource server registered, or one a tenant administrator made through `/api/v1/resources` for RBAC. Replacing or dropping scopes changes what permission tickets may be requested, so this reaches the authorization decision's inputs. Pre-existing; found by the 1.1.0 W6 F4 review (R110W6-08, #705).
+
+> Mitigated 2026-10-19 (release 1.1.1, W3.9, #705). `get`, `update` and `delete` load the resource through one helper, `registered_by_pat` (`crates/axiam-api-rest/src/handlers/uma.rs`), which refuses unless `uma_registered_by` equals the PAT's `client_id`. The refusal is `NotFound { entity: "resource", id }`, built the way the repository builds it for an unknown id, so another server's set, an ordinary resource and a nonexistent id are indistinguishable (same status, same body). The check runs before the network gate and before any write or scope sync. The list route already filtered on the same field. `uma_registered_by` is written only by the Protection API's register route and cannot be set through `/api/v1/resources` or resource metadata (`provenance_cannot_be_forged_through_the_ordinary_resource_api`). Test: `crates/axiam-api-rest/tests/uma_test.rs::a_resource_server_cannot_touch_a_resource_it_did_not_register` (resource server B gets `404` on A's set and on an ordinary resource for get, update and delete, the body equal to an unknown id's, nothing changed; A's own calls still succeed). Residual: resources registered before provenance existed carry no `uma_registered_by` and are no longer reachable through the Protection API at all; a tenant administrator manages them through `/api/v1/resources`.
 
 **T-63 — IdP key substitution via a hijacked jwks_uri**  
 `External IdP (Entra, Okta, Keycloak…)` (Actor) · Spoofing · High · Mitigated

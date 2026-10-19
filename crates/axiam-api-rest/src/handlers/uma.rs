@@ -364,7 +364,7 @@ pub async fn read_resource_set<C: Connection + Clone>(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let id = path.into_inner();
-    let resource = state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    let resource = registered_by_pat(&state, &pat, id).await?;
     let scopes = declared_scope_names(&state, pat.tenant_id, id).await?;
 
     Ok(HttpResponse::Ok().json(ResourceSet {
@@ -402,8 +402,9 @@ pub async fn update_resource_set<C: Connection + Clone>(
     let id = path.into_inner();
     let body = body.into_inner();
 
-    // Read first so an unknown id answers 404 before anything is written.
-    state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    // Read first so an unknown id, or one this client did not register,
+    // answers 404 before anything is written.
+    registered_by_pat(&state, &pat, id).await?;
 
     // §4.1 of the network design note: no reserved node is renamed or retyped
     // here, and no resource takes a `network_*` type.
@@ -464,7 +465,7 @@ pub async fn delete_resource_set<C: Connection + Clone>(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let id = path.into_inner();
-    state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    registered_by_pat(&state, &pat, id).await?;
     // §4.1 of the network design note: a resource server cannot delete a node
     // of the reserved `/network` subtree (the quarantine branch, say).
     let _cleared = crate::network_gate::authorize_as(
@@ -518,6 +519,27 @@ pub async fn list_resource_sets<C: Connection + Clone>(
         .collect();
 
     Ok(HttpResponse::Ok().json(ids))
+}
+
+/// Load a resource only if **this client** registered it (T-488, #705).
+///
+/// A resource registered by another resource server, or made through the
+/// ordinary resource API (no `uma_registered_by`), answers the same `NotFound`
+/// as an id that does not exist — same entity, same id, so the body does not
+/// say which. The list route filters on the same field.
+async fn registered_by_pat<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    pat: &ProtectionApiToken,
+    id: Uuid,
+) -> Result<axiam_core::models::resource::Resource, AxiamApiError> {
+    let resource = state.resource_repo.get_by_id(pat.tenant_id, id).await?;
+    if resource.uma_registered_by.as_deref() != Some(pat.client_id.as_str()) {
+        return Err(AxiamApiError(AxiamError::NotFound {
+            entity: "resource".into(),
+            id: id.to_string(),
+        }));
+    }
+    Ok(resource)
 }
 
 /// Replace a resource's declared scopes with `wanted`, returning the result.

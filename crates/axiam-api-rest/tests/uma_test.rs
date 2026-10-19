@@ -1070,6 +1070,114 @@ async fn the_listing_shows_only_what_this_client_registered() {
     assert!(!other_ids.contains(&mine));
 }
 
+/// One request against a resource set with a PAT; status and raw body.
+async fn rreg_call(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    method: test::TestRequest,
+    id: Uuid,
+    token: String,
+    body: Option<Value>,
+) -> (u16, Vec<u8>) {
+    let mut req = method
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/uma2/rreg/resource_set/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")));
+    if let Some(b) = body {
+        req = req.set_json(b);
+    }
+    let resp = test::call_service(app, req.to_request()).await;
+    let status = resp.status().as_u16();
+    (status, test::read_body(resp).await.to_vec())
+}
+
+/// T-488 (#705): a resource server sees only what it registered. Another
+/// resource server's resource set, and a resource made through the ordinary
+/// resource API, answer exactly as an unknown id does — for get, update and
+/// delete — and the owner's own calls still work.
+#[actix_web::test]
+async fn a_resource_server_cannot_touch_a_resource_it_did_not_register() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "a-owns-this", "type": "document", "resource_scopes": ["view"] })
+    );
+    let a_set: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+    // The fixture's resource was made by hand, as `/api/v1/resources` makes one.
+    let plain = f.resource_id;
+    let unknown = Uuid::new_v4();
+    let b = || pat(&f, &f.other_client_id);
+    let update = || Some(json!({ "name": "hijacked", "type": "document", "resource_scopes": [] }));
+
+    for (label, id) in [
+        ("another server's set", a_set),
+        ("an ordinary resource", plain),
+    ] {
+        for (verb, make, body) in [
+            ("get", test::TestRequest::get as fn() -> _, None),
+            ("put", test::TestRequest::put as fn() -> _, update()),
+            ("delete", test::TestRequest::delete as fn() -> _, None),
+        ] {
+            let (status, refused) = rreg_call(&app, make(), id, b(), body.clone()).await;
+            let (u_status, absent) = rreg_call(&app, make(), unknown, b(), body).await;
+            assert_eq!((status, u_status), (404, 404), "{verb} on {label}");
+            // Same body modulo the id it echoes.
+            let norm = |bytes: &[u8], id: Uuid| {
+                String::from_utf8_lossy(bytes).replace(&id.to_string(), "<id>")
+            };
+            assert_eq!(
+                norm(&refused, id),
+                norm(&absent, unknown),
+                "{verb} on {label}"
+            );
+        }
+    }
+
+    // Nothing changed: A's set is intact and still readable by A.
+    let (status, bytes) = rreg_call(
+        &app,
+        test::TestRequest::get(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let read: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(read["name"], "a-owns-this");
+    assert_eq!(read["resource_scopes"], json!(["view"]));
+    SurrealResourceRepository::new(f.db.clone())
+        .get_by_id(f.tenant_id, plain)
+        .await
+        .expect("the ordinary resource is untouched");
+
+    // The owner's own update and delete work.
+    let (status, _) = rreg_call(
+        &app,
+        test::TestRequest::put(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        Some(json!({ "name": "renamed", "type": "document", "resource_scopes": ["view"] })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = rreg_call(
+        &app,
+        test::TestRequest::delete(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+}
+
 /// Provenance must be unforgeable through the ordinary resource API — the
 /// badge asserts that the Protection API registered the resource, so a marker
 /// any admin could write would be decoration that reads like evidence.

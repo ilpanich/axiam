@@ -349,3 +349,42 @@ async fn a_redirect_from_vault_is_refused_on_the_private_ca_client_too() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_redirect_refused(&vault, &elsewhere, err).await;
 }
+
+#[tokio::test]
+async fn a_vault_that_never_answers_fails_within_the_bound_naming_the_host_and_no_token() {
+    // A Vault that accepts the connection and answers after the bound: without
+    // a client timeout the fetch would wait the full delay (and, for a Vault
+    // that never answers, forever — #667).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+        .mount(&server)
+        .await;
+    let bound = Duration::from_millis(300);
+    let client = axiam_auth::secrets::bootstrap_client_with_timeout(bound).unwrap();
+
+    let started = std::time::Instant::now();
+    let err = VaultSecretProvider::fetch(&client, &config(&server), KEYS, SECRETS)
+        .await
+        .unwrap_err()
+        .to_string();
+    let took = started.elapsed();
+
+    assert!(
+        took < Duration::from_secs(5),
+        "the bound did not hold: {took:?}"
+    );
+    let host = reqwest::Url::parse(&server.uri()).unwrap();
+    assert!(err.contains(host.host_str().unwrap()), "{err}");
+    assert!(err.contains("timed out"), "{err}");
+    assert!(!err.contains("test-token"), "{err}");
+}
+
+#[test]
+fn the_production_bounds_match_the_documented_ones() {
+    assert_eq!(axiam_auth::secrets::VAULT_TIMEOUT, Duration::from_secs(10));
+    assert_eq!(
+        axiam_auth::secrets::VAULT_CONNECT_TIMEOUT,
+        Duration::from_secs(5)
+    );
+}

@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::secrets::SecretProvider;
@@ -251,14 +252,30 @@ impl std::fmt::Debug for VaultConfig {
     }
 }
 
+/// Upper bound on one request to Vault from the secret provider, end to end.
+///
+/// Matches the Vault KV client in `axiam-pki` (`ca_key_store`, 10 s): both read
+/// one small KV secret. The Vault PKI client keeps its own 60 s because signing
+/// is slow; nothing here signs. Without a bound, a Vault that accepts the
+/// connection and never answers stalls startup forever (#667).
+pub const VAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound on establishing the TCP/TLS connection to Vault. Shorter than
+/// [`VAULT_TIMEOUT`] so an unroutable address fails fast and says so.
+pub const VAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The builder every Vault-bound client in the secret provider starts from.
 ///
 /// It carries the Vault token, so it never follows a redirect: reqwest strips
 /// only the standard credential headers on a cross-host hop, and
-/// `X-Vault-Token` is not one of them (T-476). One definition, so the
+/// `X-Vault-Token` is not one of them (T-476). It also bounds every request
+/// ([`VAULT_TIMEOUT`], [`VAULT_CONNECT_TIMEOUT`]). One definition, so the
 /// bootstrap client and the private-CA client cannot drift apart.
-fn vault_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+fn vault_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .connect_timeout(VAULT_CONNECT_TIMEOUT.min(timeout))
 }
 
 /// The short-lived HTTP client the composition root hands to
@@ -273,7 +290,17 @@ fn vault_client_builder() -> reqwest::ClientBuilder {
 ///
 /// [`AxiamError::Internal`] if the TLS backend cannot be initialised.
 pub fn bootstrap_client() -> AxiamResult<reqwest::Client> {
-    vault_client_builder().build().map_err(|e| {
+    bootstrap_client_with_timeout(VAULT_TIMEOUT)
+}
+
+/// [`bootstrap_client`] with a caller-chosen request bound, for tests that must
+/// not wait [`VAULT_TIMEOUT`] to see it fire. Production uses `bootstrap_client`.
+///
+/// # Errors
+///
+/// [`AxiamError::Internal`] if the TLS backend cannot be initialised.
+pub fn bootstrap_client_with_timeout(timeout: Duration) -> AxiamResult<reqwest::Client> {
+    vault_client_builder(timeout).build().map_err(|e| {
         AxiamError::Internal(format!("failed to build the bootstrap HTTP client: {e}"))
     })
 }
@@ -306,7 +333,8 @@ impl VaultSecretProvider {
             .await
             .map_err(|e| {
                 // Deliberately does not include the token or the response body.
-                AxiamError::Internal(format!("vault: request to {url} failed: {e}"))
+                let why = if e.is_timeout() { " (timed out)" } else { "" };
+                AxiamError::Internal(format!("vault: request to {url} failed{why}: {e}"))
             })?;
 
         if response.status().is_redirection() {
@@ -504,7 +532,7 @@ impl SecretProviderKind {
                                 path.display()
                             )));
                         }
-                        let mut builder = vault_client_builder();
+                        let mut builder = vault_client_builder(VAULT_TIMEOUT);
                         for anchor in anchors {
                             builder = builder.add_root_certificate(anchor);
                         }

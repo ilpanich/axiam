@@ -1457,6 +1457,10 @@ oversight. When adding a new integration (e.g. a different SMTP relay or an
 external IdP on a new IP range), extend `server-egress.yml` narrowly rather
 than relaxing the default-deny baseline.
 
+Every client AXIAM aims at Vault is time-bounded (10 s request, 5 s connect for the
+startup secret read; 10 s for CA-key custody; 60 s for the Vault PKI engine); see
+[Timeouts](vault.md#58-timeouts).
+
 ## Securing the broker (AMQP over TLS)
 
 AXIAM's async plane — authorization requests, audit events, outbound mail,

@@ -638,8 +638,10 @@ struct Incoming<'q> {
 /// the Argon2id path uses (#654): both endpoints are unauthenticated, and an
 /// unbounded wait would queue ahead of every login and every CRL re-sign. A
 /// busy gate is [`PostVerifyFailure::Busy`], answered `503` ([`busy_page`]):
-/// the permit is taken before the document is evaluated, so the answer says
-/// nothing about the signature, and the SP can retry. A closed semaphore (it
+/// the permit is taken before the *signature* is evaluated, so the answer says
+/// nothing about it, and the SP can retry. The request was parsed and its
+/// `Issuer` looked up first, so the `503` does show that the `Issuer` is an
+/// enabled registered SP with a certificate (public data, R110W2-06). A closed semaphore (it
 /// never is) is the signature that did not verify.
 pub(crate) async fn verify_post_signature_off_worker<C: Connection + Clone>(
     state: &AppState<C>,

@@ -371,6 +371,11 @@ pub struct ServeOptions {
     /// and watch the bounded join cut it.
     #[doc(hidden)]
     pub cleanup_step_for_tests: Option<cleanup::CleanupStepForTests>,
+    /// **Test seam, never set in production** (#692). Holds the audit
+    /// middleware's appends until the value is `true`, so a test can see that
+    /// the audit drain, not the worker's ordinary write, put a row in the trail.
+    #[doc(hidden)]
+    pub audit_hold_for_tests: Option<crate::audit_hold::AuditHoldForTests>,
 }
 
 impl Default for ServeOptions {
@@ -381,6 +386,7 @@ impl Default for ServeOptions {
             lease_lost_backstop: profile::exit_on_lease_lost(),
             admit_private_networks_for_tests: false,
             cleanup_step_for_tests: None,
+            audit_hold_for_tests: None,
         }
     }
 }
@@ -2675,12 +2681,23 @@ where
              recovered; point it at a volume that outlives the container"
         );
     }
-    let audit_middleware = AuditMiddleware::spawn_configured(
-        audit_repo.clone(),
-        Some(notification_sink),
-        dead_letter,
-        axiam_audit::middleware::CHANNEL_CAPACITY,
-    );
+    let audit_middleware = match opts.audit_hold_for_tests.take() {
+        Some(released) => AuditMiddleware::spawn_configured(
+            crate::audit_hold::HeldAuditLog {
+                inner: audit_repo.clone(),
+                released,
+            },
+            Some(notification_sink),
+            dead_letter,
+            axiam_audit::middleware::CHANNEL_CAPACITY,
+        ),
+        None => AuditMiddleware::spawn_configured(
+            audit_repo.clone(),
+            Some(notification_sink),
+            dead_letter,
+            axiam_audit::middleware::CHANNEL_CAPACITY,
+        ),
+    };
     // A handle kept outside the App factory closure, which takes ownership of
     // the middleware. Cloning shares the shutdown flag — see
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable

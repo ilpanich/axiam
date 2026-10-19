@@ -1120,6 +1120,7 @@ dependencies = [
  "axiam-core",
  "axiam-db",
  "axiam-federation",
+ "axiam-oauth2",
  "base64 0.23.1",
  "chrono",
  "hex",

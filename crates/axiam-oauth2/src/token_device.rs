@@ -53,7 +53,6 @@
 //! not touched the grant: it is not spent, its poll is not recorded, and its
 //! state is not revealed.
 
-use axiam_auth::client_secret;
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::OAuth2Client;
 use axiam_core::models::tenant::Tenant;
@@ -65,20 +64,10 @@ use uuid::Uuid;
 
 use super::{
     CLIENT_AUTH_FAILED, TokenRequest, TokenRequestContext, TokenService, resolve_client_id,
+    spend_one_verify,
 };
 use crate::device_service::{DeviceClient, holds_device_grant};
 use crate::error::OAuth2Error;
-
-/// A well-formed current-scheme client-secret hash that no secret produces
-/// (it would take an HMAC-SHA256 tag of all zero bytes).
-///
-/// Verified against when the client a caller named does not exist, so that the
-/// refusal costs the HMAC a wrong secret costs. It is a `v2` hash on purpose:
-/// that is the branch of `ClientSecretHasher::verify` every client created or
-/// rotated since OBS-1 takes, and the one that also computes the previous
-/// pepper's candidate during a rotation.
-const UNKNOWN_CLIENT_SECRET_HASH: &str =
-    "v2.hs256$0000000000000000000000000000000000000000000000000000000000000000";
 
 impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
 where
@@ -196,14 +185,8 @@ where
             spend_one_verify(client_secret, ctx);
             return Err(refused());
         }
-        // `verify_client_credential` refuses a credential presented for a
-        // public client without verifying anything; the refusal must cost
-        // what a wrong secret costs, like every other.
-        if client.token_endpoint_auth_method.is_public()
-            && !ctx.carries_no_client_credential(client_secret)
-        {
-            spend_one_verify(client_secret, ctx);
-        }
+        // A credential presented for a public client is refused inside
+        // `authenticate_client_credential`, which spends the verify for it.
         let tenant = self
             .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
             .await?;
@@ -211,30 +194,10 @@ where
     }
 }
 
-/// Run the one client-secret verify a refusal that has no row to verify
-/// against must still cost (§10).
-///
-/// Against [`UNKNOWN_CLIENT_SECRET_HASH`], with whatever secret the request
-/// carried in either channel; nothing when it carried none, which is what a
-/// known client presenting no secret costs too. The verdict is discarded —
-/// it is always a mismatch — and kept opaque to the optimiser.
-fn spend_one_verify(client_secret: Option<&str>, ctx: &TokenRequestContext) {
-    let presented = client_secret.or_else(|| {
-        ctx.basic_credentials
-            .as_ref()
-            .map(crate::client_secret_basic::BasicCredentials::client_secret)
-    });
-    let Some(presented) = presented else {
-        return;
-    };
-    if let Ok(hasher) = client_secret::global() {
-        std::hint::black_box(hasher.verify(presented, UNKNOWN_CLIENT_SECRET_HASH));
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::token::UNKNOWN_CLIENT_SECRET_HASH;
+    use axiam_auth::client_secret;
 
     /// The equalising hash is a well-formed current-scheme hash, so the
     /// verify it is fed takes the same branch, and costs the same, as a

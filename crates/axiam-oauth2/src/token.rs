@@ -670,6 +670,78 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     scope_policy: crate::scope_ceiling::SharedScopePolicy,
 }
 
+/// A well-formed current-scheme client-secret hash that no secret produces
+/// (it would take an HMAC-SHA256 tag of all zero bytes).
+///
+/// Verified against when the client a caller named does not exist, so that the
+/// refusal costs the HMAC a wrong secret costs. It is a `v2` hash on purpose:
+/// that is the branch of `ClientSecretHasher::verify` every client created or
+/// rotated since OBS-1 takes, and the one that also computes the previous
+/// pepper's candidate during a rotation.
+pub(crate) const UNKNOWN_CLIENT_SECRET_HASH: &str =
+    "v2.hs256$0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Run the one client-secret verify a refusal that has no row to verify
+/// against must still cost (§10: every refusal of a credential check costs
+/// one verify, #679).
+///
+/// Against [`UNKNOWN_CLIENT_SECRET_HASH`], with whatever secret the request
+/// carried in either channel; nothing when it carried none, which is what a
+/// known client presenting no secret costs too. The verdict is discarded —
+/// it is always a mismatch — and kept opaque to the optimiser.
+pub(crate) fn spend_one_verify(client_secret: Option<&str>, ctx: &TokenRequestContext) {
+    let presented = client_secret.or_else(|| {
+        ctx.basic_credentials
+            .as_ref()
+            .map(crate::client_secret_basic::BasicCredentials::client_secret)
+    });
+    spend_verify_on(presented);
+}
+
+/// [`spend_one_verify`] for a caller that holds the secret itself and has no
+/// request context (the `sa_…` branch, which authenticates from the body alone).
+pub(crate) fn spend_verify_on(presented: Option<&str>) {
+    let Some(presented) = presented else {
+        return;
+    };
+    if let Ok(hasher) = client_secret::global() {
+        verify_probe::record();
+        std::hint::black_box(hasher.verify(presented, UNKNOWN_CLIENT_SECRET_HASH));
+    }
+}
+
+/// Counts the client-secret verifies one thread performs, so a test can assert
+/// that a refusal cost exactly one. Compiled for unit tests and, through the
+/// crate's own dev-dependency, for `tests/`; absent from every other build.
+#[cfg(any(test, feature = "verify-probe"))]
+#[doc(hidden)]
+pub mod verify_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static VERIFIES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn record() {
+        VERIFIES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Verifies this thread has performed since the last [`reset`].
+    pub fn count() -> u32 {
+        VERIFIES.with(Cell::get)
+    }
+
+    /// Zero this thread's count.
+    pub fn reset() {
+        VERIFIES.with(|c| c.set(0));
+    }
+}
+
+#[cfg(not(any(test, feature = "verify-probe")))]
+mod verify_probe {
+    pub(crate) fn record() {}
+}
+
 impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
 where
     OC: OAuth2ClientRepository,
@@ -1152,6 +1224,7 @@ where
         let hasher =
             client_secret::global().map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        verify_probe::record();
         match hasher.verify(presented, &client.client_secret_hash) {
             ClientSecretVerdict::Match => Ok(()),
             ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
@@ -1295,6 +1368,9 @@ where
                      authenticated, because a public registration names no credential to check \
                      it against (T21.2)"
                 );
+                // The refusal verifies nothing of its own; it must still cost
+                // what a wrong secret costs (#679).
+                spend_one_verify(presented_secret, ctx);
                 return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
             }
             return Ok(None);
@@ -1411,6 +1487,11 @@ where
             // Registered for Basic, presented no Basic header. The body secret
             // it may have sent instead is deliberately not consulted: that
             // would be the OR over two credentials SEC-093 exists to prevent.
+            //
+            // It does cost the verify a wrong secret costs (#679): without
+            // one, "registered for Basic" would be readable off the clock by
+            // anyone who sends a body secret and no header.
+            spend_one_verify(presented_secret, ctx);
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         };
 
@@ -1581,8 +1662,11 @@ where
                 // masquerade as bad credentials (error-oracle, QUAL-03/D-11).
                 // The description is CLIENT_AUTH_FAILED here too, so an
                 // unauthenticated caller cannot learn whether an `sa_…`
-                // client id exists (SEC-086).
+                // client id exists (SEC-086). Nor can it learn it from the
+                // clock: the refusal costs the verify a wrong secret costs
+                // (#679).
                 AxiamError::NotFound { .. } => {
+                    spend_verify_on(Some(client_secret));
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
@@ -1602,6 +1686,7 @@ where
         // presented client id is the caller's own input, so refusing early
         // leaks nothing it did not already know.
         if sa.tenant_id != tenant_id {
+            spend_verify_on(Some(client_secret));
             tracing::error!(
                 requested_tenant = %tenant_id,
                 account_tenant = %sa.tenant_id,
@@ -1713,6 +1798,7 @@ where
         let hasher =
             client_secret::global().map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        verify_probe::record();
         match hasher.verify(presented, &sa.client_secret_hash) {
             ClientSecretVerdict::Match => Ok(()),
             ClientSecretVerdict::MatchNeedsUpgrade { upgraded_hash } => {
@@ -1913,6 +1999,9 @@ where
                 // CLIENT_AUTH_FAILED either way, so it cannot be used to
                 // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
+                    // #679: a secret was presented, so the refusal costs the
+                    // verify a wrong one costs.
+                    spend_one_verify(client_secret, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
@@ -2403,6 +2492,9 @@ where
                 // CLIENT_AUTH_FAILED either way, so it cannot be used to
                 // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
+                    // #679: a secret was presented, so the refusal costs the
+                    // verify a wrong one costs.
+                    spend_one_verify(client_secret, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
@@ -2615,6 +2707,9 @@ where
                 // CLIENT_AUTH_FAILED either way, so it cannot be used to
                 // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
+                    // #679: a secret was presented, so the refusal costs the
+                    // verify a wrong one costs.
+                    spend_one_verify(client_secret_val, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
@@ -3323,6 +3418,9 @@ where
                 // CLIENT_AUTH_FAILED either way, so it cannot be used to
                 // probe which client ids exist (SEC-086).
                 AxiamError::NotFound { .. } => {
+                    // #679: a secret was presented, so the refusal costs the
+                    // verify a wrong one costs.
+                    spend_one_verify(client_secret, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
@@ -3334,6 +3432,7 @@ where
         // regression worth catching, since otherwise the cross-tenant
         // property lives entirely in a WHERE clause two crates away.
         if client.tenant_id != tenant_id {
+            spend_one_verify(client_secret, ctx);
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 

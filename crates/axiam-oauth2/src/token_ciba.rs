@@ -105,11 +105,15 @@ where
             .await
             .map_err(|e| match e {
                 AxiamError::NotFound { .. } => {
+                    // A credential was presented (the no-credential refusal is
+                    // above), so this costs the verify a wrong one does (#679).
+                    super::spend_one_verify(client_secret, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
         if client.tenant_id != tenant_id {
+            super::spend_one_verify(client_secret, ctx);
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
         let tenant = self

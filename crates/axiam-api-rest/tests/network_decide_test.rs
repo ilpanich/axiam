@@ -140,6 +140,11 @@ impl Device {
             "certificate": base64::engine::general_purpose::STANDARD.encode(&self.der),
         })
     }
+
+    /// The fingerprint form of [`Device::body`].
+    fn fingerprint_body(&self, site: &str) -> Value {
+        json!({ "site": site, "fingerprint": self.fingerprint() })
+    }
 }
 
 /// Two tenants of one organization, each with the registry, the default roles
@@ -1228,7 +1233,10 @@ impl AuthzChecker for Counting {
 /// Every kind of answer takes the same path: one `network:decide` batch for the
 /// caller, then exactly **one** `network:join` batch over every enabled segment
 /// of the site — for a placement, for "no candidate", for another tenant's
-/// certificate and for an unknown one alike. No early return skips the batch.
+/// certificate, for an unknown one and for an unknown fingerprint alike. No
+/// early return skips the batch. That each verifies exactly one certificate is
+/// the handler's unit test
+/// `every_path_verifies_one_certificate_and_every_refusal_the_callers` (#706).
 #[actix_rt::test]
 async fn every_answer_runs_one_join_batch_over_the_whole_site() {
     let w = World::new().await;
@@ -1258,14 +1266,15 @@ async fn every_answer_runs_one_join_batch_over_the_whole_site() {
     );
     let token = w.bound_token(&caller);
 
-    for (device, allow) in [
-        (&placed, true),
-        (&unplaced, false),
-        (&foreign, false),
-        (&unknown, false),
+    for (request, allow) in [
+        (placed.body("hq"), true),
+        (unplaced.body("hq"), false),
+        (foreign.body("hq"), false),
+        (unknown.body("hq"), false),
+        (unknown.fingerprint_body("hq"), false),
     ] {
         counting.batches.lock().unwrap().clear();
-        let (_, body) = srv.decide(&token, device.body("hq")).await;
+        let (_, body) = srv.decide(&token, request).await;
         assert_eq!(body["allow"], allow, "{body}");
         let batches = counting.batches.lock().unwrap().clone();
         assert_eq!(batches.len(), 2, "{batches:?}");
@@ -1284,10 +1293,11 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 
 /// The statistical half of T-457 (the precedent is the password-reset timing
 /// test in `axiam-auth`): interleaved samples of a placement, of "no
-/// candidate" and of another tenant's certificate, compared by their medians.
-/// Neither refusal may be measurably faster (or slower) than the placement:
+/// candidate", of another tenant's certificate and of a fingerprint no tenant
+/// holds (#706), compared by their medians.
+/// No refusal may be measurably faster (or slower) than the placement:
 /// the band is a factor of 1.5 either way. Interleaving puts every kind under
-/// the same load, so a shared runner moves all three medians together (they
+/// the same load, so a shared runner moves every median together (they
 /// sit within about 15 % of each other here); an early return that skips the
 /// site's reads, the batch and the row lands near 0.57 and outside it — which
 /// the structural test above also pins, exactly.
@@ -1318,17 +1328,20 @@ async fn allow_no_candidate_and_another_tenant_cost_the_same() {
     )
     .await;
     let foreign = w.device(w.other_tenant).await;
+    let mut unknown = placed.clone();
+    unknown.der[40] ^= 0xff;
     let srv = serve(&w, Some(&caller), RateLimitConfig::default(), w.engine());
     let token = w.bound_token(&caller);
 
     let kinds = [
-        ("allow", &placed),
-        ("no candidate", &unplaced),
-        ("other tenant", &foreign),
+        ("allow", placed.body("hq")),
+        ("no candidate", unplaced.body("hq")),
+        ("other tenant", foreign.body("hq")),
+        ("unknown fingerprint", unknown.fingerprint_body("hq")),
     ];
     // Warm the listener, the connection path and the datastore's plans.
-    for (_, d) in kinds {
-        srv.decide(&token, d.body("hq")).await;
+    for (_, body) in &kinds {
+        srv.decide(&token, body.clone()).await;
     }
     let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); kinds.len()];
     for round in 0..ROUNDS {
@@ -1336,7 +1349,7 @@ async fn allow_no_candidate_and_another_tenant_cost_the_same() {
         for k in 0..kinds.len() {
             let i = (k + round) % kinds.len();
             let started = Instant::now();
-            let (status, _) = srv.decide(&token, kinds[i].1.body("hq")).await;
+            let (status, _) = srv.decide(&token, kinds[i].1.clone()).await;
             samples[i].push(started.elapsed());
             assert_eq!(status, 200);
         }

@@ -1,7 +1,7 @@
 # crl-stub.py <ctl> <log> <port-file>
 # The stand-in for AXIAM's CRL route that fetch-crl-test.sh fetches from, on a
 # free loopback port (written to <port-file>). Each request is logged as
-# "<path><TAB><If-None-Match or ->". The ctl file, re-read per request, holds
+# "<path><TAB><If-None-Match or -><TAB><Cache-Control or ->". The ctl file, re-read per request, holds
 # lines "key<TAB>value":
 #   file      path of the DER list to serve with 200
 #   etag      ETag for the 200 ("" = none); sent verbatim
@@ -24,7 +24,8 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         c = ctl()
         inm = self.headers.get('If-None-Match')
-        open(LOG, 'a').write(f"{self.path}\t{inm if inm is not None else '-'}\n")
+        cc = self.headers.get('Cache-Control')
+        open(LOG, 'a').write(f"{self.path}\t{inm if inm is not None else '-'}\t{cc if cc is not None else '-'}\n")
         if c.get('delay'): time.sleep(float(c['delay']))
         if c.get('redirect'):
             self.send_response(302); self.send_header('Location', c['redirect']); self.send_header('Content-Length', '0'); self.end_headers(); return

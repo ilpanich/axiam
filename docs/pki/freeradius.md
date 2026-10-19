@@ -560,9 +560,12 @@ order:
 2. **Your job fetches the list.** At most the fetch interval, **provided it
    fetches AXIAM directly, or through a cache told `no-cache`**. The CRL route
    answers `Cache-Control: public, max-age=N`, with N running to the next
-   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. A
-   shared cache or CDN on the path may therefore serve the list from before the
-   revocation for that long. Leave one out, or have it revalidate every request;
+   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. The
+   script sends `Cache-Control: no-cache` with every request, so a shared cache
+   that honours request directives revalidates with AXIAM by itself; one that
+   ignores them (many CDNs and some forward proxies do, by configuration) may
+   still serve the list from before the revocation for that long. For such a
+   cache, leave it out of the fetch path, or have it revalidate every request;
    that is cheap, because [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) sends
    the `ETag` of the list it installed as `If-None-Match`, so a revalidation that
    finds nothing new costs a `304` and no list body.

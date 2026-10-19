@@ -318,5 +318,16 @@ newcap; ctl file "$T/bad.der" etag '"x"'; run
 t "07: nothing installed yet, and a refusal: exit 1 (no list to age)" '[ $rc -eq 1 ]'
 newcap; serve 20 '"t20"'; run; printf 'garbage\n' >"$(installed)"; ctl file "$T/bad.der" etag '"x"'; run
 t "07: an unreadable installed list does not turn a refusal into exit 3" '[ $rc -eq 1 ]'
+
+# ---- R110W5-08 -----------------------------------------------------------------
+echo "-- R110W5-08"
+ccs() { cut -f3 "$T/req.log" | sort -u | tr '\n' ' '; }
+newcap; serve 1 '"t1"'; run
+t "08: the first (unconditional) request carries Cache-Control: no-cache" '[ $rc -eq 0 ] && [ "$(reqs)" = 1 ] && [ "$(ccs)" = "no-cache " ]'
+run
+t "08: the revalidation (If-None-Match) carries it too" '[ $rc -eq 0 ] && [ "$(reqs)" = 1 ] && [ "$(lastinm)" = "\"t1\"" ] && [ "$(ccs)" = "no-cache " ]'
+newcap; serve 1 '"t1"' etag304 '"zz"'; run; run
+t "08: the unconditional re-request after a mismatched 304 carries it too" '[ "$(reqs)" = 2 ] && [ "$(ccs)" = "no-cache " ]'
+
 echo "== $passes passed, $fails failed"
 exit $fails

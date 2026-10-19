@@ -58,7 +58,11 @@
 # loopback port and sets it. Any other scheme (`file:`, `ftp:`, ...) is refused.
 # `--proto` pins curl to the scheme given, no `-L` and `--max-redirs 0` mean a
 # redirect is never followed (it is reported as the HTTP status it is), and
-# `--globoff` turns URL globbing off. `--max-filesize` stops an unsized (chunked)
+# `--globoff` turns URL globbing off. Every request carries `Cache-Control:
+# no-cache`, which makes a shared cache that honours request directives
+# revalidate with AXIAM instead of answering with a list from before a
+# revocation (R110W5-08); a cache that ignores them still needs its own setting
+# (the guide, section 4, "The revocation lag"). `--max-filesize` stops an unsized (chunked)
 # body only from curl 8.4; before that `--max-time` alone bounds it.
 #
 # Exit 0: installed, unchanged, or another run holds the lock. Exit 1: the list
@@ -298,7 +302,7 @@ response_etag() {
 request() {
 	rm -f "$work/crl.der" "$work/headers"
 	tag=$1
-	set -- -sS --proto "$proto" --max-redirs 0 --globoff --connect-timeout 10 --max-time 20 --max-filesize 16777216 -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
+	set -- -sS --proto "$proto" --max-redirs 0 --globoff --connect-timeout 10 --max-time 20 --max-filesize 16777216 -H 'Cache-Control: no-cache' -o "$work/crl.der" -D "$work/headers" -w '%{http_code}'
 	if [ -n "$tag" ]; then
 		set -- "$@" -H "If-None-Match: $tag"
 	fi

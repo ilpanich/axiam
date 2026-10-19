@@ -557,6 +557,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "account_deletion_purge_claim",
         sql: SCHEMA_V107,
     },
+    Migration {
+        version: 109,
+        name: "rate_limit_bucket_updated_at_index",
+        sql: SCHEMA_V109,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5150,6 +5155,20 @@ const SCHEMA_V107: &str = "\
 DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v109 — the rate-limit sweep selects on `updated_at` (#676)
+// -----------------------------------------------------------------------
+//
+// The `rate_limit_bucket` sweep (`axiam-server::cleanup`) selects and deletes
+// rows by `updated_at < time::now() - retention`, a pass every tick; without an
+// index each pass scanned the whole table, which gains a row per hint, per
+// client address and per endpoint. Additive: one index, nothing backfilled
+// (the engine builds it from the rows present). Version 108 belongs to the
+// 1.1.1 W1 branch and is not defined here.
+const SCHEMA_V109: &str = "\
+DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at ON TABLE rate_limit_bucket FIELDS updated_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5416,6 +5435,30 @@ mod tests {
             axiam_core::repository::ProofKind::WebauthnAssertion,
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
+        }
+    }
+
+    /// #676 — v109 is the sweep's `updated_at` index, defined idempotently,
+    /// and nothing else: no `UPDATE`, `REMOVE`, `DELETE`, `OVERWRITE` or
+    /// backfill.
+    #[test]
+    fn v109_adds_only_the_sweep_index() {
+        let statements: Vec<&str> = SCHEMA_V109
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at \
+                 ON TABLE rate_limit_bucket FIELDS updated_at"],
+            "v109 defines the index and nothing else"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V109.contains(forbidden),
+                "v109 must not contain {forbidden}: it is additive DDL only"
+            );
         }
     }
 
@@ -7004,11 +7047,13 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&107),
-            "v107 is the newest migration (the 1.1.0 atomicity audit's item 11 — \
+            Some(&109),
+            "v109 is the newest migration (#676 — the `rate_limit_bucket.updated_at` index the \
+             cleanup sweep selects on; v108 is the 1.1.1 W1 branch's and merges first); \
+             v107 was the 1.1.0 atomicity audit's item 11 — \
              `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
              destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \
-             never both win); v106 was the 1.1.0 atomicity audit's item 10 — \
+             never both win; v106 was the 1.1.0 atomicity audit's item 10 — \
              `tenant.opaque_directory_epoch`, which a directory save that leaves the directory \
              enabled and a settings write that makes opaque_mode `required` both compare and \
              move, so that each side's refusal and the other's write act as one transaction); \

@@ -909,6 +909,14 @@ enum HintName {
 /// so the server's `rate_limit_bucket` sweep deletes a row once it is more
 /// than twice [`HINT_CAP_WINDOW_SECS`] old (with a margin), which bounds the
 /// table by the hints named in that stretch instead of every hint ever named.
+///
+/// *Assumption (#676).* The sweep compares `updated_at` with the datastore's
+/// own clock (`time::now() - retention`, in the selection and in the
+/// `DELETE`), so the sweeping replica's clock is not an input. The "exactly"
+/// above still assumes that the replicas serving the cap agree with the
+/// datastore to within the sweep's margin (one minute): a reader whose clock
+/// runs further ahead may find the previous window's row already swept and read
+/// it as zero, and the stretch may then admit up to twice the allowance.
 #[derive(Clone)]
 pub struct CibaHintCap {
     store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,

@@ -291,15 +291,20 @@ pub const RATE_LIMIT_BUCKET_CLOCK_MARGIN: Duration = Duration::from_secs(60);
 /// passed, and `s <= u`.
 ///
 /// The sweep deletes a row only when `updated_at` (the datastore's clock at
-/// the last write, `u`) is more than `2L + margin` in the past, `L >= W`
-/// being the longest window in use. A reader at `t` (its own clock) after the
-/// sweep has `t >= u + 2L + margin - offset >= s + 2W` as long as the offset
-/// between the clocks is under the margin. No row a limiter still reads is
-/// ever deleted.
+/// the last write, `u`) is more than `2L + margin` in the past of the
+/// *datastore's* clock (`time::now()`, evaluated in the selection and in the
+/// `DELETE`, #676), `L >= W` being the longest window in use. The sweeping
+/// replica's own clock takes no part in the comparison, so its offset from the
+/// datastore is not an input. A reader at `t` (its own clock) after the sweep
+/// has `t >= u + 2L + margin - offset >= s + 2W` as long as the offset between
+/// the *reader's* clock and the datastore's is under the margin. No row a
+/// limiter still reads is ever deleted.
 ///
-/// If a clock were off by more than the margin, the cost is a count read as
-/// `0` for the rest of one window — the same thing a window boundary does —
-/// never a refusal that should not happen.
+/// If a reader's clock were off by more than the margin, the cost is a count
+/// read as `0` for the rest of one window — the same thing a window boundary
+/// does. For the hint cap that is a stretch that may admit up to twice the
+/// allowance, so its "exactly" holds under the assumption that readers and
+/// the datastore agree to within the margin (T-424).
 ///
 /// The table is bounded by what was written in the last `RETENTION`; the
 /// sweep makes the growth of a table that gained a row per hint, per client
@@ -317,8 +322,8 @@ pub const RATE_LIMIT_BUCKET_SWEEP_BATCH: u32 = 500;
 pub const RATE_LIMIT_BUCKET_SWEEP_MAX_BATCHES: u32 = 100;
 
 /// One pass of the `rate_limit_bucket` job (#638): delete the buckets whose
-/// last write is older than [`RATE_LIMIT_BUCKET_RETENTION`] at `now`, in
-/// batches; returns how many were removed.
+/// last write is older than [`RATE_LIMIT_BUCKET_RETENTION`] on the datastore's
+/// clock, in batches; returns how many were removed.
 ///
 /// Safe for any number of replicas sweeping at once: each delete re-checks
 /// `updated_at` on the row it removes, so a row is removed once, and a row a
@@ -326,15 +331,11 @@ pub const RATE_LIMIT_BUCKET_SWEEP_MAX_BATCHES: u32 = 100;
 /// [`run_erasure_pipeline`] is.
 pub async fn sweep_rate_limit_buckets<C: Connection + Send + Sync + 'static>(
     repo: &axiam_db::SurrealRateLimitBucketRepository<C>,
-    now: chrono::DateTime<Utc>,
 ) -> Result<u64, AxiamError> {
-    let retention = chrono::Duration::from_std(RATE_LIMIT_BUCKET_RETENTION)
-        .map_err(|e| AxiamError::Internal(e.to_string()))?;
-    let cutoff = now - retention;
     let mut removed = 0u64;
     for _ in 0..RATE_LIMIT_BUCKET_SWEEP_MAX_BATCHES {
         let n = repo
-            .delete_stale(cutoff, RATE_LIMIT_BUCKET_SWEEP_BATCH)
+            .delete_stale(RATE_LIMIT_BUCKET_RETENTION, RATE_LIMIT_BUCKET_SWEEP_BATCH)
             .await?;
         removed += n;
         if n < u64::from(RATE_LIMIT_BUCKET_SWEEP_BATCH) {
@@ -2832,7 +2833,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         let Some(repo) = &self.rate_limit_bucket_repo else {
             return Ok(0);
         };
-        sweep_rate_limit_buckets(repo, Utc::now()).await
+        sweep_rate_limit_buckets(repo).await
     }
 
     // -----------------------------------------------------------------------

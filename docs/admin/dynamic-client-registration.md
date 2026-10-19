@@ -338,6 +338,19 @@ expires. Putting the scope back on the list offers it again to new
 authorizations; a refresh token already narrowed stays narrowed. Clients an
 administrator created are not affected by the list.
 
+**The administrator API is bounded the same way** (#636, #680). `PUT
+/api/v1/oauth2-clients/{id}` on a client whose `managed_by` is `dcr` or `cimd`
+answers `422` when the request would *add* a scope outside `dcr_allowed_scopes`
+(`scope_exceeds_ceiling`) or a grant the registration endpoint would itself
+refuse (`grant_exceeds_registration_policy`): `client_credentials`, the device
+grant, token exchange, and CIBA unless the tenant's `dynamic_registration` is
+`initial_access_token` (never for a `cimd` client). The check calls the same
+function `POST /oauth2/register` uses, and the row is left unchanged. A scope or
+grant the row already holds is not counted, so an edit that sends the whole
+record back still saves. A client an administrator created (`managed_by: admin`)
+is not bounded; to give an application such a grant, register it through the
+admin API.
+
 **Rotation.** A successful `PUT` returns a new token and the old one stops
 working in the same database statement. Of two concurrent updates with one
 token, one succeeds and the other gets `401`. A refused update rotates nothing.

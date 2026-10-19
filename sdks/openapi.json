@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.0",
-    "x-axiam-spec-digest": "sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1"
+    "x-axiam-spec-digest": "sha256:2151602aa78939cc6d8472ca249550bcd75827b87d8de45e1ae64118c3fc4cec"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -6124,7 +6124,7 @@
             "description": "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."
           },
           "422": {
-            "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."
+            "description": "The client is managed_by dcr or cimd and the request adds either a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`) or a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope or grant the row already holds is not counted. An administrator-managed client is not bounded."
           }
         },
         "security": [

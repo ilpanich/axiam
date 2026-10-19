@@ -649,6 +649,55 @@ async fn scopes_outside_ceiling<C: Connection + Clone>(
     Ok(outside)
 }
 
+/// #680 (R110W3-07) — the grants `requested` would **newly** put on a
+/// `managed_by: dcr | cimd` client that a self-registration would refuse, each
+/// with the reason.
+///
+/// Asks [`axiam_oauth2::dcr::grant_refusal`], the predicate `dcr::validate`
+/// itself runs and the one `cimd::validate` shares its grant list with, so the
+/// admin `PUT` and the registration endpoints cannot disagree. Same
+/// held-grant exemption as [`scopes_outside_ceiling`]: a grant the stored row
+/// already holds is never counted, so a form posting the whole record back
+/// still saves; the exemption keeps a grant and never adds one. An
+/// administrator's own client is not bounded. A failed read of the tenant's
+/// policy is an error, never "no policy": fail closed.
+async fn grants_refused_by_registration_policy<C: Connection + Clone>(
+    state: &AppState<C>,
+    stored: &OAuth2Client,
+    requested: &[String],
+) -> Result<Vec<String>, AxiamApiError> {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    if !axiam_oauth2::scope_ceiling::applies_to(stored.managed_by) {
+        return Ok(Vec::new());
+    }
+    let mode = if stored.managed_by == ManagedBy::Dcr {
+        let tenant = axiam_core::repository::TenantRepository::get_by_id(
+            &state.tenant_repo,
+            stored.tenant_id,
+        )
+        .await?;
+        let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            stored.tenant_id,
+        )
+        .await?;
+        Some(settings.oidc.dynamic_registration)
+    } else {
+        None
+    };
+    let mut refused: Vec<String> = Vec::new();
+    for grant in requested {
+        if stored.grant_types.contains(grant) {
+            continue;
+        }
+        if let Some(reason) = axiam_oauth2::dcr::grant_refusal(grant, mode) {
+            refused.push(reason);
+        }
+    }
+    Ok(refused)
+}
+
 /// Grants a public client may never be registered for (T21.2).
 ///
 /// Both mint a token on the strength of the client's own credential, and a
@@ -896,7 +945,7 @@ pub async fn get<C: Connection + Clone>(
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
         (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
-        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."),
+        (status = 422, description = "The client is managed_by dcr or cimd and the request adds either a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`) or a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope or grant the row already holds is not counted. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
 )]
@@ -948,6 +997,27 @@ pub async fn update<C: Connection + Clone>(
         .oauth2_client_repo
         .get_by_id(user.tenant_id, id)
         .await?;
+
+    // #680 (R110W3-07) — a self-registered (`dcr`) or CIMD client holds no grant a
+    // registration would refuse. Asked first, before the structural rules below, so
+    // the answer is the policy's rather than a `400` about the grant's own shape.
+    // It composes with the #675 public-conversion rule: that rule needs a
+    // device-only stored row, which a `dcr`/`cimd` row can never be.
+    if let Some(ref requested) = req.grant_types {
+        let refused = grants_refused_by_registration_policy(&state, &stored, requested).await?;
+        if !refused.is_empty() {
+            return Ok(crate::error::unprocessable_entity(
+                "grant_exceeds_registration_policy",
+                format!(
+                    "this client is managed_by {} and the administrator API may not give it \
+                     a grant its registration would be refused: {}; register an \
+                     administrator-managed client for it instead",
+                    stored.managed_by,
+                    refused.join("; "),
+                ),
+            ));
+        }
+    }
 
     // T21.2 — `none` is a registration decision, and it stays one (I4).
     //

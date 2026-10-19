@@ -742,22 +742,19 @@ pub async fn bind<C: Connection + Clone>(
     // account's joins, the binding), so binding to an account that holds a
     // `network:join` allow needs `network:grant` at every such node; and no
     // service account binds a certificate to itself.
-    let _cleared = crate::network_gate::authorize(
-        &principal,
-        authz.get_ref().as_ref(),
-        &state,
-        axiam_authz::network_gate::NetworkWrite::CertificateBind {
-            certificate_id: cert.id,
-            service_account_id: sa_id,
-        },
-    )
-    .await?;
+    let write = axiam_authz::network_gate::NetworkWrite::CertificateBind {
+        certificate_id: cert.id,
+        service_account_id: sa_id,
+    };
+    let cleared =
+        crate::network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
 
     state
         .pki
         .cert_repo
         .bind_to_service_account(principal.tenant_id, cert.id, sa_id)
         .await?;
+    crate::network_gate::record_cleared(&principal, &state, write, &cleared).await;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "certificate_id": cert.id,

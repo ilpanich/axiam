@@ -262,7 +262,7 @@ client nas-line-1 {
   client whose first packet lacks the attribute). With it set to `yes`,
   `limit_proxy_state` is ignored, which is what you want behind a wireless
   controller that acts as a proxy and adds `Proxy-State`.
-- **The NAS must do its half.** The forgery is of the *response*, so FreeRADIUS
+- **The NAS must do its half (over UDP).** The forgery is of the *response*, so FreeRADIUS
   requiring and sending the attribute protects nothing on a NAS that does not
   check it. For each NAS, confirm that its firmware has the Blast-RADIUS fix
   (CVE-2024-3596): it sends `Message-Authenticator` in every Access-Request and
@@ -942,6 +942,7 @@ listen {
 		certificate_file = /etc/freeradius/axiam/radsec/server.pem
 		ca_file          = /etc/freeradius/axiam/radsec/nas-ca.pem
 		tls_min_version  = "1.3"
+		tls_max_version  = "1.3"
 		require_client_cert = yes
 	}
 }
@@ -956,9 +957,21 @@ clients radsec-nas {
 ```
 
 This is the shape of the image's own `sites-available/tls`, with TLS 1.3 asked
-for. `require_message_authenticator = yes` stands on this client as on every
-other, and the NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
-applies to it equally. Three cautions:
+for. Set `tls_max_version` as well as `tls_min_version`: in 3.2.8 a minimum
+without a maximum is refused at start (`tls_min_version '1.3' must be <=
+tls_max_version '(null)'`). Two points about the client:
+
+- **`require_message_authenticator = yes` is harmless here and inert.** 3.2.8
+  accepts it on a `proto = tls` client, but the TLS listener never consults it;
+  TLS carries the integrity of the exchange, and a packet with an `EAP-Message`
+  needs its `Message-Authenticator` regardless. Keep it for uniformity or leave it
+  out; nothing depends on it.
+- **The NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
+  is for UDP.** The Blast-RADIUS forgery needs an unprotected UDP response, so a
+  NAS reached over RadSec does not need the fixed firmware for it. That is why
+  RadSec is the remedy offered for a NAS whose vendor has none.
+
+Three cautions:
 
 - **Not exercised by the end-to-end test.** `eapol_test` speaks UDP only; the
   block above is a starting point to adapt, not a tested configuration.

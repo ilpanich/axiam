@@ -660,46 +660,38 @@ async fn audit_export_cutoff<C: Connection>(
     Ok(claimed.map(|through| through.min(receipt.timestamp)))
 }
 
-/// Whether `tenant_id` still owns a row the orphan scan counts — a row of a
-/// tenant-scoped table but the audit trail, other than revocation evidence the
-/// purge keeps ([`PurgeStep::purgeable`]) — so that the orphan purge records
-/// only a purge that had something to remove (R101W1-09 (a)): a replica whose
-/// scan predates another replica's purge of the same id finds nothing here.
+/// A SurrealQL condition, on `$id`, true while that tenant id still owns a row
+/// the orphan scan counts — a row of a tenant-scoped table but the audit trail,
+/// other than revocation evidence the purge keeps ([`PurgeStep::purgeable`]).
 ///
-/// One `LIMIT 1` read per table, stopping at the first row found.
-pub(crate) async fn has_purgeable_rows<C: Connection>(
-    db: &DbHandle<C>,
-    tenant_id: Uuid,
-) -> Result<bool, DbError> {
-    for step in TENANT_PURGE_ORDER {
-        if step.stage == AuditTrail {
-            continue;
-        }
-        let statement = match step.key {
+/// The orphan claim's `CREATE` is conditional on it, in the same statement
+/// ([`super::tenant::SurrealTenantRepository::claim_orphan_purge`], #714), so
+/// that a marker only ever stands for a purge that had something to remove
+/// (R101W1-09 (a)): a replica whose scan predates another replica's purge of
+/// the same id finds nothing here and writes no marker. One `LIMIT 1` read
+/// per table, all of them in the claim's statement.
+pub(crate) fn purgeable_rows_condition() -> String {
+    // One flat array of reads, not a chain of `OR`s: the chain nests one
+    // expression per table, deep enough to overflow the datastore's evaluator
+    // on a small stack.
+    let reads = TENANT_PURGE_ORDER
+        .iter()
+        .filter(|step| step.stage != AuditTrail)
+        .map(|step| match step.key {
             TenantKey::TenantId => format!(
-                "SELECT VALUE true FROM {} \
-                 WHERE tenant_id = $id AND ({}) LIMIT 1",
+                "(SELECT VALUE true FROM {} WHERE tenant_id = $id AND ({}) LIMIT 1)",
                 step.table,
                 step.purgeable()
             ),
             TenantKey::Scope => format!(
-                "SELECT VALUE true FROM {} \
-                 WHERE scope = 'tenant' AND scope_id = $id LIMIT 1",
+                "(SELECT VALUE true FROM {} \
+                 WHERE scope = 'tenant' AND scope_id = $id LIMIT 1)",
                 step.table
             ),
-        };
-        let mut result = db
-            .current()
-            .query(statement)
-            .bind(("id", tenant_id.to_string()))
-            .await?
-            .check()?;
-        let found: Vec<bool> = result.take(0)?;
-        if !found.is_empty() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("array::len(array::flatten([{reads}])) > 0")
 }
 
 /// Tenant ids that own rows in a tenant-scoped table (the audit trail aside,

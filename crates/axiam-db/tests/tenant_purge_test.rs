@@ -636,6 +636,19 @@ async fn one_replica_claims_an_orphans_purge_and_a_stale_scan_records_nothing() 
     assert!(tenants.purge_orphan(orphan).await.unwrap().is_none());
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
     assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
+    // #714: the claim itself is conditional on rows left, so a stale claim
+    // never writes a marker that a takeover could record a second time.
+    assert!(
+        !tenants
+            .claim_orphan_purge(orphan, Utc::now())
+            .await
+            .unwrap(),
+        "an id with nothing left to purge is not claimed"
+    );
+    assert!(
+        tenants.list_tombstoned().await.unwrap().is_empty(),
+        "and no marker is written"
+    );
 }
 
 /// The issue's test (R1W1-04, #602, D-5): the purge deletes the audit rows at
@@ -645,6 +658,40 @@ async fn one_replica_claims_an_orphans_purge_and_a_stale_scan_records_nothing() 
 /// entries only goes; one that also signs a kept entry stays. The kept rows do
 /// not make the tenant id an orphan, and the audit retention sweep removes them
 /// once they are past the window. Before the fix every row went.
+/// #664: `metadata` is caller-supplied, so a key in it cannot make a tenant an
+/// orphan's claim marker. A tenant whose metadata says `orphan_purge: true` is
+/// purged as the tombstoned tenant it is: its export receipt is honoured and
+/// its audit trail is deleted up to it.
+#[tokio::test]
+async fn a_tenant_with_the_old_marker_key_in_its_metadata_is_purged_as_tombstoned() {
+    let (db, org) = setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let doomed = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org,
+            kind: TenantKind::Standard,
+            name: "doomed".into(),
+            slug: "doomed".into(),
+            metadata: Some(serde_json::json!({ "orphan_purge": true })),
+        })
+        .await
+        .unwrap()
+        .id;
+    populate(&db, doomed).await;
+    let exported_through = after_a_tick().await;
+    let receipt = export_receipt(&db, doomed, exported_through).await;
+    record_deletion(&db, doomed, deletion_metadata(exported_through, receipt.id)).await;
+    tenants.delete(doomed).await.unwrap();
+
+    let report = tenants.purge_tombstoned(doomed).await.unwrap();
+
+    assert!(!report.orphan, "a metadata key is not the orphan marker");
+    assert_eq!(report.audit_exported_through, Some(exported_through));
+    assert_eq!(report.audit_rows_deleted, 1);
+    assert_eq!(audit_actions(&db, doomed).await, [AUDIT_EXPORT_ACTION]);
+    assert_eq!(rows(&db, "user", doomed).await, 0);
+}
+
 #[tokio::test]
 async fn a_row_written_after_the_export_survives_the_purge() {
     let (db, org) = setup().await;

@@ -557,6 +557,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "account_deletion_purge_claim",
         sql: SCHEMA_V107,
     },
+    Migration {
+        version: 108,
+        name: "pending_record_markers",
+        sql: SCHEMA_V108,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5150,6 +5155,49 @@ const SCHEMA_V107: &str = "\
 DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v108 — a unit cut past its point of no return is recorded by the
+// next start (#689, R110W4-03)
+// -----------------------------------------------------------------------
+//
+// An erasure's point of no return is the anonymization, a tenant purge's the
+// removal of its tenant row (or of an orphan's claim marker); after either, no
+// sweep found the work again, so a unit cut there by the teardown's bound
+// never wrote `gdpr.user_pseudonymized` or `tenants.purged`. Each now leaves a
+// marker in the same transaction as that write, and the unit clears it with
+// its record; the next sweep (any replica's) records what a marker still
+// stands for, once.
+//
+// **`user.erasure_audit_pending`** — set by the anonymization to its own time,
+// cleared by the erasure once its record is written (with the deletion
+// request's completion, in one transaction). The value is the claim's stamp:
+// the unit holds it, a sweep takes a marker over only when the stamp is older
+// than the lease or released (the Unix epoch), and every write is conditional
+// on the stamp read. A time and nothing else; erased with the row.
+//
+// **`tenant_purge_pending`**, keyed by the purged tenant's id (the record id,
+// no `tenant_id` field) — written by the `DELETE` of the tenant row, in its
+// transaction, with what `tenants.purged` says (`orphan`, the export time, the
+// audit counts) and `claimed_at`, the unit's claim; deleted by the unit once
+// it has recorded the purge. Not tenant-scoped on purpose, and so not in
+// `TENANT_PURGE_ORDER`: it is written after its tenant's rows are gone and
+// must outlive them until it is recorded, and a `tenant_id` field would make
+// the orphan scan take the marker for an orphan of its own and purge it.
+//
+// Additive: one optional field and its index, one new table; nothing
+// backfilled (a row written before the upgrade reads NONE — nothing owed).
+const SCHEMA_V108: &str = "\
+DEFINE FIELD IF NOT EXISTS erasure_audit_pending ON TABLE user TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_user_erasure_audit_pending ON TABLE user FIELDS erasure_audit_pending;
+DEFINE TABLE IF NOT EXISTS tenant_purge_pending SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS orphan ON TABLE tenant_purge_pending TYPE bool;
+DEFINE FIELD IF NOT EXISTS audit_exported_through ON TABLE tenant_purge_pending TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS audit_rows_deleted ON TABLE tenant_purge_pending TYPE int;
+DEFINE FIELD IF NOT EXISTS audit_rows_kept ON TABLE tenant_purge_pending TYPE int;
+DEFINE FIELD IF NOT EXISTS purged_at ON TABLE tenant_purge_pending TYPE datetime;
+DEFINE FIELD IF NOT EXISTS claimed_at ON TABLE tenant_purge_pending TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5416,6 +5464,54 @@ mod tests {
             axiam_core::repository::ProofKind::WebauthnAssertion,
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
+        }
+    }
+
+    /// #689 — v108 is the two pending-record markers, each defined
+    /// idempotently, and nothing else: no existing field redefined, no row
+    /// rewritten, and the new table keyed by id with no `tenant_id` field (it
+    /// must outlive its tenant's purge until it is recorded).
+    #[test]
+    fn v108_adds_only_the_pending_record_markers() {
+        let statements: Vec<&str> = SCHEMA_V108
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS erasure_audit_pending ON TABLE user \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_user_erasure_audit_pending ON TABLE user \
+                 FIELDS erasure_audit_pending",
+                "DEFINE TABLE IF NOT EXISTS tenant_purge_pending SCHEMAFULL",
+                "DEFINE FIELD IF NOT EXISTS orphan ON TABLE tenant_purge_pending TYPE bool",
+                "DEFINE FIELD IF NOT EXISTS audit_exported_through ON TABLE \
+                 tenant_purge_pending TYPE option<datetime>",
+                "DEFINE FIELD IF NOT EXISTS audit_rows_deleted ON TABLE tenant_purge_pending \
+                 TYPE int",
+                "DEFINE FIELD IF NOT EXISTS audit_rows_kept ON TABLE tenant_purge_pending \
+                 TYPE int",
+                "DEFINE FIELD IF NOT EXISTS purged_at ON TABLE tenant_purge_pending \
+                 TYPE datetime",
+                "DEFINE FIELD IF NOT EXISTS claimed_at ON TABLE tenant_purge_pending \
+                 TYPE option<datetime>",
+            ],
+            "v108 defines the two markers and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT",
+            "tenant_id",
+        ] {
+            assert!(
+                !SCHEMA_V108.contains(forbidden),
+                "v108 must not contain {forbidden}"
+            );
         }
     }
 
@@ -7004,8 +7100,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&107),
-            "v107 is the newest migration (the 1.1.0 atomicity audit's item 11 — \
+            Some(&108),
+            "v108 is the newest migration (#689 — `user.erasure_audit_pending` and \
+             `tenant_purge_pending`, the markers an erasure and a tenant purge leave at their \
+             point of no return and clear with their record, so that a unit cut there is \
+             recorded by the next start); v107 was the 1.1.0 atomicity audit's item 11 — \
              `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
              destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \
              never both win); v106 was the 1.1.0 atomicity audit's item 10 — \

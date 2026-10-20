@@ -294,6 +294,17 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                nothing beyond \"changed\" and says nothing about the subject; \
                neither path clears it and the export does not carry it.",
     },
+    UserColumn {
+        name: "erasure_audit_pending",
+        erasure: None,
+        export: None,
+        note: "#689: path-specific workflow state. The Art. 17 pipeline's \
+               anonymization sets it to its own time, and the erasure clears \
+               it once `gdpr.user_pseudonymized` is written; while it is set, \
+               the next GDPR sweep writes that record. A time and nothing \
+               else, about the erasure rather than the subject; the tombstone \
+               never sets it and the export does not carry it.",
+    },
 ];
 
 /// The `SET` clause fragment both erasure statements share, derived from

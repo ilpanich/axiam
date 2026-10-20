@@ -15,9 +15,31 @@ use crate::helpers::{
     CountRow, classify_write_error, paginate, retry_hot_row, take_first_or_not_found,
 };
 
-/// The `metadata` key of the tenant row an orphan purge's claim writes
-/// (R101W1-09 (a); [`SurrealTenantRepository::claim_orphan_purge`]).
-const ORPHAN_PURGE_MARKER: &str = "orphan_purge";
+/// The condition, on a `tenant` row selected by record id (`$id`, `$nil`),
+/// that makes it an orphan purge's claim marker
+/// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): the nil
+/// organization id and the `orphan-purge-<id>` slug. A tenant is created under
+/// a real organization, so no API writes the pair, whereas `metadata` is
+/// caller-supplied and no key in it can mark a row (#664).
+const ORPHAN_MARKER_CONDITION: &str =
+    "organization_id = $nil AND slug = string::concat('orphan-purge-', $id)";
+
+/// A `tenant_purge_pending` marker (#689, schema v108) that
+/// [`SurrealTenantRepository::claim_pending_purge_records`] claimed: a purge
+/// past its point of no return whose `tenants.purged` record its unit may not
+/// have written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingPurgeRecord {
+    /// The purged tenant's id.
+    pub tenant_id: Uuid,
+    /// What the record says, as the purge reported it.
+    pub report: super::tenant_purge::TenantPurgeReport,
+    /// When the tenant row was removed: a `tenants.purged` for the id written
+    /// since then is this purge's.
+    pub purged_at: DateTime<Utc>,
+    /// The claim this call holds on the marker.
+    pub claimed_at: DateTime<Utc>,
+}
 
 /// D-55: bumped whenever this process creates or deletes a tenant or an
 /// organization, **after** the write commits, so a tenant count cached at an
@@ -291,8 +313,8 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// the purge on `Ok` only, so it is recorded once.
     ///
     /// The row may be the claim marker of an orphan purge
-    /// ([`Self::claim_orphan_purge`]) whose replica died holding it: the id is
-    /// then purged as the orphan it is (its audit trail kept, as
+    /// ([`Self::claim_orphan_purge`]) whose replica died holding it, or gave it
+    /// up: the id is then purged as the orphan it is (its audit trail kept, as
     /// [`Self::purge_orphan`] keeps it) and the report says so
     /// (R101W1-09 (a)).
     ///
@@ -306,7 +328,10 @@ impl<C: Connection> SurrealTenantRepository<C> {
         id: Uuid,
     ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
         let report = self.purge_tombstoned_rows(id).await?;
-        self.remove_purged_tenant(id).await?;
+        let removed_at = Utc::now();
+        self.remove_purged_tenant(id, &report, removed_at).await?;
+        // The caller records the purge (#689: no marker is left for it).
+        self.settle_purge_record(id, removed_at).await?;
         Ok(report)
     }
 
@@ -346,16 +371,17 @@ impl<C: Connection> SurrealTenantRepository<C> {
     }
 
     /// `None` when `id` has no tombstoned tenant row; otherwise whether that
-    /// row is an orphan purge's claim marker ([`ORPHAN_PURGE_MARKER`]).
+    /// row is an orphan purge's claim marker ([`ORPHAN_MARKER_CONDITION`]).
     async fn tombstoned_row_is_orphan_marker(&self, id: Uuid) -> AxiamResult<Option<bool>> {
         let mut result = self
             .db
             .current()
             .query(format!(
-                "SELECT VALUE metadata.{ORPHAN_PURGE_MARKER} = true \
+                "SELECT VALUE ({ORPHAN_MARKER_CONDITION}) \
                  FROM type::record('tenant', $id) WHERE deleted_at != NONE"
             ))
             .bind(("id", id.to_string()))
+            .bind(("nil", Uuid::nil().to_string()))
             .await
             .map_err(DbError::from)?
             .check()
@@ -372,17 +398,71 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// [`Self::purge_orphan_rows`] (R101W1-09 (a)).
     ///
     /// This is the purge's **point of no return**: once the row is gone, no
-    /// later sweep finds the tenant, so whoever removed it is the only one that
-    /// can write `tenants.purged`. `Ok` means this call removed it.
+    /// later sweep finds the tenant. So the same transaction writes the
+    /// `tenant_purge_pending` marker (#689, schema v108), keyed by the id, with
+    /// what `tenants.purged` says — `report`'s export time and counts, and
+    /// `orphan` when the report says so or the removed row was an orphan's
+    /// claim marker ([`ORPHAN_MARKER_CONDITION`]) — and `claimed_at`, the
+    /// caller's claim on it. The caller records the purge and then clears the
+    /// marker ([`Self::settle_purge_record`]); a caller cut in between leaves
+    /// it for [`Self::claim_pending_purge_records`]. `Ok` means this call
+    /// removed the row and wrote the marker.
     ///
     /// # Errors
     ///
     /// `NotFound` when the row is not there or not tombstoned — an overlapping
-    /// purge removed it first (#610); a datastore failure otherwise.
-    pub async fn remove_purged_tenant(&self, id: Uuid) -> AxiamResult<()> {
+    /// purge removed it first (#610); a datastore failure otherwise, in which
+    /// case neither the removal nor the marker happened.
+    pub async fn remove_purged_tenant(
+        &self,
+        id: Uuid,
+        report: &super::tenant_purge::TenantPurgeReport,
+        claimed_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
         // Only while still tombstoned: the guard is in the statement too, so
         // nothing here can remove a live tenant's row.
-        if !self.delete_tombstoned_row(id).await? {
+        let statement = format!(
+            "BEGIN TRANSACTION; \
+             LET $gone = (DELETE type::record('tenant', $id) WHERE deleted_at != NONE \
+                 RETURN BEFORE); \
+             IF array::len($gone) > 0 {{ \
+                 CREATE type::record('tenant_purge_pending', $id) SET \
+                     orphan = $orphan OR array::len((SELECT VALUE id FROM $gone \
+                         WHERE {ORPHAN_MARKER_CONDITION})) > 0, \
+                     audit_exported_through = $exported_through, \
+                     audit_rows_deleted = $rows_deleted, \
+                     audit_rows_kept = $rows_kept, \
+                     purged_at = time::now(), \
+                     claimed_at = $claimed_at \
+                 RETURN NONE; \
+             }}; \
+             RETURN array::len($gone); \
+             COMMIT TRANSACTION;"
+        );
+        let mut result = self
+            .db
+            .current()
+            .query(statement)
+            .bind(("id", id.to_string()))
+            .bind(("nil", Uuid::nil().to_string()))
+            .bind(("orphan", report.orphan))
+            .bind(("exported_through", report.audit_exported_through))
+            .bind(("rows_deleted", report.audit_rows_deleted))
+            .bind(("rows_kept", report.audit_rows_kept))
+            .bind(("claimed_at", claimed_at))
+            .await
+            .map_err(DbError::from)?;
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(classify_write_error(combined, "tenant_purge_pending").into());
+        }
+        let removed: Option<i64> = result.take(3).map_err(DbError::from)?;
+        if removed.unwrap_or(0) == 0 {
             return Err(DbError::NotFound {
                 entity: "tombstoned tenant".into(),
                 id: id.to_string(),
@@ -392,24 +472,199 @@ impl<C: Connection> SurrealTenantRepository<C> {
         Ok(())
     }
 
-    /// Delete `id`'s tenant row if it is tombstoned: `true` when **this call**
-    /// removed it (`RETURN BEFORE`), `false` when it was already gone — the
-    /// one fact that keeps two overlapping purges from both recording.
-    async fn delete_tombstoned_row(&self, id: Uuid) -> AxiamResult<bool> {
+    /// Clear `id`'s `tenant_purge_pending` marker once its `tenants.purged`
+    /// record is written (#689): `true` when this call removed it. Conditional
+    /// on `claimed_at`, the claim the caller holds on it, so a marker another
+    /// replica has since taken over is left to that replica.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure; the marker stays, and the next sweep finds the
+    /// record already written and clears it.
+    pub async fn settle_purge_record(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "SELECT count() AS total FROM (DELETE type::record('tenant_purge_pending', $id) \
+                     WHERE claimed_at = $claimed_at RETURN BEFORE) GROUP ALL",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("claimed_at", claimed_at))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "tenant_purge_pending"))?;
+            let removed: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(removed.first().is_some_and(|r| r.total > 0))
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Give up the claim `claimed_at` on `id`'s `tenant_purge_pending` marker
+    /// without recording it (#689), so the next sweep takes it over at once
+    /// instead of after the lease. A claim another replica has since taken
+    /// over carries a different stamp and is left alone.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure; the marker then lapses with its lease.
+    pub async fn release_purge_record(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        retry_hot_row(|| async {
+            self.db
+                .current()
+                .query(
+                    "UPDATE type::record('tenant_purge_pending', $id) SET claimed_at = NONE \
+                     WHERE claimed_at = $claimed_at",
+                )
+                .bind(("id", id.to_string()))
+                .bind(("claimed_at", claimed_at))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "tenant_purge_pending"))?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Claim, at `now`, every `tenant_purge_pending` marker whose purge nobody
+    /// is recording (#689): unclaimed (released by a unit that was cut), or
+    /// claimed at or before `now - lease` (a unit, or a sweep, that died
+    /// holding it). Each claim is a write conditional on the claim this call
+    /// read, so of two sweeps that read one marker exactly one takes it; the
+    /// other's write matches nothing. What is returned is this call's to
+    /// record, under the claim `now`, then to clear
+    /// ([`Self::settle_purge_record`]) or give up
+    /// ([`Self::release_purge_record`]).
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn claim_pending_purge_records(
+        &self,
+        now: DateTime<Utc>,
+        lease: chrono::TimeDelta,
+    ) -> AxiamResult<Vec<PendingPurgeRecord>> {
+        #[derive(Debug, SurrealValue)]
+        struct MarkerRow {
+            record_id: String,
+            claimed_at: Option<DateTime<Utc>>,
+        }
+        #[derive(Debug, SurrealValue)]
+        struct ClaimedRow {
+            orphan: bool,
+            audit_exported_through: Option<DateTime<Utc>>,
+            audit_rows_deleted: i64,
+            audit_rows_kept: i64,
+            purged_at: DateTime<Utc>,
+        }
         let mut result = self
             .db
             .current()
             .query(
-                "SELECT count() AS total FROM (DELETE type::record('tenant', $id) \
-                 WHERE deleted_at != NONE RETURN BEFORE) GROUP ALL",
+                "SELECT meta::id(id) AS record_id, claimed_at FROM tenant_purge_pending \
+                 WHERE claimed_at = NONE OR claimed_at <= $cutoff",
             )
-            .bind(("id", id.to_string()))
+            .bind(("cutoff", now - lease))
             .await
             .map_err(DbError::from)?
             .check()
             .map_err(DbError::from)?;
-        let removed: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        Ok(removed.first().is_some_and(|r| r.total > 0))
+        let markers: Vec<MarkerRow> = result.take(0).map_err(DbError::from)?;
+        let mut claimed = Vec::new();
+        for marker in markers {
+            let Ok(tenant_id) = Uuid::parse_str(&marker.record_id) else {
+                continue;
+            };
+            // Conditional on the claim read: NONE, or the stale stamp.
+            let condition = if marker.claimed_at.is_some() {
+                "claimed_at = $read"
+            } else {
+                "claimed_at = NONE"
+            };
+            let statement = format!(
+                "UPDATE type::record('tenant_purge_pending', $id) SET claimed_at = $now \
+                 WHERE {condition} \
+                 RETURN orphan, audit_exported_through, audit_rows_deleted, audit_rows_kept, \
+                     purged_at"
+            );
+            let rows = retry_hot_row(|| async {
+                let mut result = self
+                    .db
+                    .current()
+                    .query(statement.as_str())
+                    .bind(("id", marker.record_id.clone()))
+                    .bind(("now", now))
+                    .bind(("read", marker.claimed_at))
+                    .await
+                    .map_err(DbError::from)?
+                    .check()
+                    .map_err(|e| classify_write_error(e, "tenant_purge_pending"))?;
+                let rows: Vec<ClaimedRow> = result.take(0).map_err(DbError::from)?;
+                Ok::<_, DbError>(rows)
+            })
+            .await?;
+            if let Some(row) = rows.into_iter().next() {
+                claimed.push(PendingPurgeRecord {
+                    tenant_id,
+                    report: super::tenant_purge::TenantPurgeReport {
+                        audit_exported_through: row.audit_exported_through,
+                        audit_rows_deleted: u64::try_from(row.audit_rows_deleted).unwrap_or(0),
+                        audit_rows_kept: u64::try_from(row.audit_rows_kept).unwrap_or(0),
+                        orphan: row.orphan,
+                    },
+                    purged_at: row.purged_at,
+                    claimed_at: now,
+                });
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Whether the system log holds a record `action` for the tenant id `id`
+    /// written at or after `since` — the check that keeps a pending marker
+    /// whose record was written, and whose clearing was cut, from being
+    /// recorded twice (#689).
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn purge_recorded_since(
+        &self,
+        id: Uuid,
+        action: &str,
+        since: DateTime<Utc>,
+    ) -> AxiamResult<bool> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM audit_log \
+                 WHERE tenant_id = $nil AND action = $action AND resource_id = $id \
+                   AND timestamp >= $since GROUP ALL",
+            )
+            .bind(("nil", Uuid::nil().to_string()))
+            .bind(("action", action.to_string()))
+            .bind(("id", id.to_string()))
+            .bind(("since", since))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().is_some_and(|r| r.total > 0))
     }
 
     /// Tenant ids that own rows but have no tenant row at all — the residue of
@@ -428,42 +683,58 @@ impl<C: Connection> SurrealTenantRepository<C> {
     }
 
     /// Claim an orphaned tenant id's purge for this replica (R101W1-09 (a)):
-    /// `true` when this call created the id's claim marker, `false` when the id
-    /// already has a tenant row — another replica's marker, or a tenant of its
-    /// own.
+    /// `true` when this call created the id's claim marker, `false` when it
+    /// did not — the id already has a tenant row (another replica's marker, or
+    /// a tenant of its own; [`Self::orphan_claim_refusal`] tells which), or it
+    /// owns no row left to purge.
     ///
     /// An orphan has no tenant row for [`Self::claim_purge`] to stamp, so the
     /// claim **is** a row: a tombstoned tenant row under the orphan's own id,
-    /// with `metadata.orphan_purge = true` and `purge_claimed_at = now`. A
-    /// record id is unique, so of replicas whose orphan scans coincide exactly
-    /// one `CREATE` succeeds (the `bootstrap_lock` and `organization_scope`
-    /// pattern); the others fail on the existing id, or lose the optimistic
-    /// write, retry, and then fail on it. While the marker exists the id is no
-    /// orphan to any scan (the scan reads the tenant table), it is out of every
-    /// tenant read (each filters `deleted_at`), and the tombstoned-tenant sweep
-    /// leaves it alone for [`Self::claim_purge`]'s lease — then takes it over,
-    /// as an orphan, if the claimant died. No `has_tenant` edge is written and
-    /// the organization id is the nil id, so no organization's listing reaches
-    /// it.
+    /// with the nil organization id, the slug `orphan-purge-<id>` and
+    /// `purge_claimed_at = now`. A record id is unique, so of replicas whose
+    /// orphan scans coincide exactly one `CREATE` succeeds (the
+    /// `bootstrap_lock` and `organization_scope` pattern); the others fail on
+    /// the existing id, or lose the optimistic write, retry, and then fail on
+    /// it. While the marker exists the id is no orphan to any scan (the scan
+    /// reads the tenant table), it is out of every tenant read (each filters
+    /// `deleted_at`), and the tombstoned-tenant sweep leaves it alone for
+    /// [`Self::claim_purge`]'s lease — then takes it over, as an orphan, if the
+    /// claimant died or released it. No `has_tenant` edge is written and the
+    /// organization id is the nil id, so no organization's listing reaches it.
+    ///
+    /// The `CREATE` is conditional, in the same statement, on the id still
+    /// owning a row the orphan scan counts (#714): a scan that predates
+    /// another replica's finished purge writes no marker at all. A marker
+    /// therefore always stands for a purge nobody has recorded yet, so whoever
+    /// removes it — the claimant, or the tombstoned-tenant sweep taking it over
+    /// — records the purge, and it is recorded once. There is no window in
+    /// which the marker exists unchecked: the cleanup task's unit arms its
+    /// claim guard before this call, keyed by `now`, so a marker this call
+    /// writes is guarded from the instant it exists.
     ///
     /// # Errors
     ///
-    /// A datastore failure.
+    /// A datastore failure; the marker may then exist or not, and releasing
+    /// the claim ([`Self::release_purge_claim`] with `now`) is right either way.
     pub async fn claim_orphan_purge(&self, id: Uuid, now: DateTime<Utc>) -> AxiamResult<bool> {
+        let statement = format!(
+            "IF {} {{ \
+               CREATE type::record('tenant', $id) SET \
+                 organization_id = $nil, \
+                 name = 'orphaned tenant id', \
+                 slug = $slug, \
+                 metadata = {{}}, \
+                 deleted_at = $now, \
+                 purge_claimed_at = $now \
+               RETURN VALUE meta::id(id) \
+             }} ELSE {{ [] }}",
+            super::tenant_purge::purgeable_rows_condition()
+        );
         let created = retry_hot_row(|| async {
             let mut result = self
                 .db
                 .current()
-                .query(format!(
-                    "CREATE type::record('tenant', $id) SET \
-                       organization_id = $nil, \
-                       name = 'orphaned tenant id', \
-                       slug = $slug, \
-                       metadata = {{ {ORPHAN_PURGE_MARKER}: true }}, \
-                       deleted_at = $now, \
-                       purge_claimed_at = $now \
-                     RETURN VALUE meta::id(id)"
-                ))
+                .query(statement.as_str())
                 .bind(("id", id.to_string()))
                 .bind(("nil", Uuid::nil().to_string()))
                 .bind(("slug", format!("orphan-purge-{id}")))
@@ -483,29 +754,35 @@ impl<C: Connection> SurrealTenantRepository<C> {
         }
     }
 
-    /// Remove the claim marker [`Self::claim_orphan_purge`] wrote at
-    /// `claimed_at`: the orphan purge found nothing to remove, or failed and
-    /// leaves the id to the next scan. A marker another replica has since
-    /// taken over carries a different stamp and is left alone.
-    async fn drop_orphan_claim(&self, id: Uuid, claimed_at: DateTime<Utc>) -> AxiamResult<()> {
-        retry_hot_row(|| async {
-            self.db
-                .current()
-                .query(format!(
-                    "DELETE type::record('tenant', $id) \
-                     WHERE metadata.{ORPHAN_PURGE_MARKER} = true \
-                       AND purge_claimed_at = $claimed_at"
-                ))
-                .bind(("id", id.to_string()))
-                .bind(("claimed_at", claimed_at))
-                .await
-                .map_err(DbError::from)?
-                .check()
-                .map_err(|e| classify_write_error(e, "tenant"))?;
-            Ok::<_, DbError>(())
-        })
-        .await
-        .map_err(Into::into)
+    /// Why [`Self::claim_orphan_purge`] answered `false`: `Conflict` when the
+    /// id has a tenant row of its own (live, or tombstoned by a deletion), so
+    /// it is no orphan; `Ok` when the row is another replica's marker, or when
+    /// there is no row and nothing was left to purge.
+    ///
+    /// # Errors
+    ///
+    /// `Conflict` as above; a datastore failure.
+    pub async fn orphan_claim_refusal(&self, id: Uuid) -> AxiamResult<()> {
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT VALUE ({ORPHAN_MARKER_CONDITION}) \
+                 FROM type::record('tenant', $id)"
+            ))
+            .bind(("id", id.to_string()))
+            .bind(("nil", Uuid::nil().to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let marker: Vec<bool> = result.take(0).map_err(DbError::from)?;
+        if marker.first() == Some(&false) {
+            return Err(axiam_core::error::AxiamError::Conflict {
+                reason: "a tenant row exists for this id; it is not an orphan".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Remove an orphaned tenant id's rows, as [`Self::purge_tombstoned`] does
@@ -518,131 +795,93 @@ impl<C: Connection> SurrealTenantRepository<C> {
     /// (R101W1-09 (a)). Every replica scans for orphans, so two scans may name
     /// one id. The purge is claimed first ([`Self::claim_orphan_purge`]): while
     /// one replica holds the id, another's call answers `None` without
-    /// touching a row. A scan that predates a finished purge of the id claims
-    /// it afresh, finds no row left to remove, drops its marker and answers
-    /// `None`. The purge's last step deletes the marker, and only the call
-    /// whose `DELETE` removed it answers `Some` — should a purge outlive the
-    /// claim's lease and the tombstoned-tenant sweep take the marker over, only
-    /// one of the two records the purge.
+    /// touching a row, and a scan that predates a finished purge finds nothing
+    /// left, writes no marker and answers `None`. The purge's last step deletes
+    /// the marker, and only the call whose `DELETE` removed it answers `Some` —
+    /// should a purge outlive the claim's lease and the tombstoned-tenant sweep
+    /// take the marker over, only one of the two records the purge.
     ///
-    /// The composition of [`Self::begin_orphan_purge`],
+    /// The composition of [`Self::claim_orphan_purge`],
     /// [`Self::purge_orphan_rows`] and [`Self::remove_purged_tenant`] (the
-    /// point of no return), which the cleanup task runs step by step so that
-    /// a stop gives the purge up before that point (#655).
+    /// point of no return), which the cleanup task runs step by step, under
+    /// its claim guard, so that a stop gives the purge up before that point
+    /// (#655, #714).
     ///
     /// # Errors
     ///
     /// `Conflict` when a tenant row of its own exists for this id (live, or
     /// tombstoned by a deletion); a datastore failure otherwise, after which
-    /// the marker is dropped so that the next scan finds the id again.
+    /// the claim is released, so that the tombstoned-tenant sweep resumes the
+    /// purge at once.
     pub async fn purge_orphan(
         &self,
         id: Uuid,
     ) -> AxiamResult<Option<super::tenant_purge::TenantPurgeReport>> {
-        let Some(claimed_at) = self.begin_orphan_purge(id).await? else {
-            return Ok(None);
-        };
-        let report = self.purge_orphan_rows(id, claimed_at).await?;
-        match self.remove_purged_tenant(id).await {
-            Ok(()) => Ok(Some(report)),
-            Err(axiam_core::error::AxiamError::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// The first part of [`Self::purge_orphan`]: claim the orphaned id
-    /// ([`Self::claim_orphan_purge`]) and check, under the claim, that it
-    /// still owns a row to purge (R101W1-09 (a)).
-    ///
-    /// `Ok(Some(claimed_at))` when this call holds the claim of an id with
-    /// rows to purge: the caller goes on with [`Self::purge_orphan_rows`], or,
-    /// giving the purge up, releases the claim
-    /// ([`Self::release_purge_claim`] with `claimed_at`), which leaves the
-    /// marker to the tombstoned-tenant sweep to purge as the orphan it is.
-    /// `Ok(None)` when another replica holds the id, or when a scan that
-    /// predates a finished purge finds nothing left (its marker is dropped):
-    /// nothing for this call to record.
-    ///
-    /// # Errors
-    ///
-    /// `Conflict` when a tenant row of its own exists for this id; a datastore
-    /// failure otherwise, after which the marker is dropped.
-    pub async fn begin_orphan_purge(&self, id: Uuid) -> AxiamResult<Option<DateTime<Utc>>> {
         let claimed_at = Utc::now();
-        if !self.claim_orphan_purge(id, claimed_at).await? {
-            let mut result = self
-                .db
-                .current()
-                .query(format!(
-                    "SELECT VALUE metadata.{ORPHAN_PURGE_MARKER} = true \
-                     FROM type::record('tenant', $id)"
-                ))
-                .bind(("id", id.to_string()))
-                .await
-                .map_err(DbError::from)?
-                .check()
-                .map_err(DbError::from)?;
-            let marker: Vec<bool> = result.take(0).map_err(DbError::from)?;
-            if marker.first() == Some(&false) {
-                return Err(axiam_core::error::AxiamError::Conflict {
-                    reason: "a tenant row exists for this id; it is not an orphan".into(),
-                });
-            }
-            // Another replica's claim (or one dropped again since): not ours.
-            return Ok(None);
-        }
-
-        match super::tenant_purge::has_purgeable_rows(&self.db, id).await {
-            Ok(true) => Ok(Some(claimed_at)),
+        match self.claim_orphan_purge(id, claimed_at).await {
+            Ok(true) => {}
             Ok(false) => {
-                self.drop_orphan_claim(id, claimed_at).await?;
-                Ok(None)
+                self.orphan_claim_refusal(id).await?;
+                return Ok(None);
             }
             Err(e) => {
-                self.drop_orphan_claim_or_warn(id, claimed_at).await;
-                Err(e.into())
+                self.release_orphan_claim_or_warn(id, claimed_at).await;
+                return Err(e);
+            }
+        }
+        let report = match self.purge_orphan_rows(id).await {
+            Ok(report) => report,
+            Err(e) => {
+                self.release_orphan_claim_or_warn(id, claimed_at).await;
+                return Err(e);
+            }
+        };
+        match self.remove_purged_tenant(id, &report, claimed_at).await {
+            Ok(()) => {
+                // The caller records the purge (#689: no marker is left for it).
+                self.settle_purge_record(id, claimed_at).await?;
+                Ok(Some(report))
+            }
+            Err(axiam_core::error::AxiamError::NotFound { .. }) => Ok(None),
+            Err(e) => {
+                self.release_orphan_claim_or_warn(id, claimed_at).await;
+                Err(e)
             }
         }
     }
 
     /// The second part of [`Self::purge_orphan`]: the orphaned id's rows, with
     /// [`super::tenant_purge::PurgeScope::Orphan`], under the claim
-    /// [`Self::begin_orphan_purge`] stamped at `claimed_at` (#655).
+    /// [`Self::claim_orphan_purge`] wrote (#655).
     ///
     /// Every step is an idempotent `DELETE` and the marker stays, so nothing
-    /// here is a point of no return: a purge stopped in here is resumed by
-    /// whoever purges the marker next. The point of no return is
-    /// [`Self::remove_purged_tenant`], and only the call that removed the
-    /// marker records the purge.
+    /// here is a point of no return: a purge stopped in here, or failed, is
+    /// resumed by whoever purges the marker next once its claim is released.
+    /// The point of no return is [`Self::remove_purged_tenant`], and only the
+    /// call that removed the marker records the purge.
     ///
     /// # Errors
     ///
-    /// A datastore failure, after which the marker is dropped so that the next
-    /// scan finds the id again.
+    /// A datastore failure; the marker stays, and the caller releases its
+    /// claim.
     pub async fn purge_orphan_rows(
         &self,
         id: Uuid,
-        claimed_at: DateTime<Utc>,
     ) -> AxiamResult<super::tenant_purge::TenantPurgeReport> {
-        match super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Orphan)
-            .await
-        {
-            Ok(report) => Ok(report),
-            Err(e) => {
-                self.drop_orphan_claim_or_warn(id, claimed_at).await;
-                Err(e.into())
-            }
-        }
+        Ok(
+            super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Orphan)
+                .await?,
+        )
     }
 
-    /// [`Self::drop_orphan_claim`] after a failed purge: a drop that fails too
-    /// is logged, and the marker lapses with its lease.
-    async fn drop_orphan_claim_or_warn(&self, id: Uuid, claimed_at: DateTime<Utc>) {
-        if let Err(release) = self.drop_orphan_claim(id, claimed_at).await {
+    /// [`Self::release_purge_claim`] after a failed orphan purge: a release
+    /// that fails too is logged, and the marker lapses with its lease.
+    async fn release_orphan_claim_or_warn(&self, id: Uuid, claimed_at: DateTime<Utc>) {
+        if let Err(release) = self.release_purge_claim(id, claimed_at).await {
             tracing::warn!(
                 error = %release,
                 tenant_id = %id,
-                "could not drop the orphan purge's claim; it lapses with its lease"
+                "could not release the orphan purge's claim; it lapses with its lease"
             );
         }
     }

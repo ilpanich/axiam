@@ -1457,6 +1457,10 @@ oversight. When adding a new integration (e.g. a different SMTP relay or an
 external IdP on a new IP range), extend `server-egress.yml` narrowly rather
 than relaxing the default-deny baseline.
 
+Every client AXIAM aims at Vault is time-bounded (10 s request, 5 s connect for the
+startup secret read; 10 s for CA-key custody; 60 s for the Vault PKI engine); see
+[Timeouts](vault.md#58-timeouts).
+
 ## Securing the broker (AMQP over TLS)
 
 AXIAM's async plane — authorization requests, audit events, outbound mail,
@@ -1874,7 +1878,9 @@ out-of-memory kill does none of that and loses what is queued.
 
 The cleanup task is told to stop **before** the lease is given up: once it is,
 a successor may start, and this instance must not start work beside it. After a
-lost lease it is told at the loss itself, not once the requests in flight have
+lost lease it is told at the loss as the renewal detects it — up to `renew_every`
+(10 s) after a successor took over the expired lease, and in that gap this
+instance's cleanup task runs beside it — not once the requests in flight have
 been drained or cut. (Corrected 2026-10-15, #628: before 1.1.0 the cleanup task
 was told only after the lease release — and after a lost lease, after the REST
 cut and the gRPC stop, up to 7 s in, so the old instance could still start an
@@ -1912,25 +1918,65 @@ finished rather than wait for it:
   row — after which no later sweep finds the work again. Before it, the work
   gives itself up as soon as the stop begins: the account stays due, the tenant
   stays deleted and its purge claim is released, so the next start does the
-  work at once; it never crosses that point once the stop has begun. So a stop
+  work at once; once the stop has begun it starts no new crossing (a crossing
+  already being sent completes). So a stop
   can leave unfinished only:
   - an erasure or a tenant purge that crossed its point of no return **before**
     the stop began and still had not written its audit row when the bound ran
     out — `gdpr.user_pseudonymized` (and the completion of the deletion request)
     for an erasure, `tenants.purged` (the export time the purge used and how many
-    audit entries it deleted and kept) for a tenant purge. The erasure and its
-    proof, or the purge, stand; the row is never written. It takes a datastore
+    audit entries it deleted and kept) for a tenant purge. It takes a datastore
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`;
+    not reach its audit row in time`. The erasure, or the purge,
+    stands (an erasure's proof too, unless it was cut before the proof: see
+    the list below), and **the next start writes the row** (#689, schema v108): the point
+    of no return leaves a marker in its own transaction —
+    `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
+    row keyed by the tenant id — which the work clears with its row, and the
+    first GDPR purge sweep and tenant purge sweep of the next start, on any
+    replica, write what a marker still stands for, once. For a tenant purge
+    that is the row the cut purge would have written (the marker keeps its
+    export time and counts); for an erasure it carries the pseudonym, `recovered:
+    true` and `certificates_revoked: null` (the count was the cut purge's alone),
+    and the deletion request is completed in the same transaction as the marker
+    is cleared. A row the cut work had already written is found and not written
+    again. The log says `recorded an erasure whose unit was cut before its
+    record` or `recorded a tenant purge whose unit was cut before its record`.
+    The marker is the next start's at once when the cut work's drop guard
+    released it; when the release was not written — a `SIGKILL`, or a unit cut
+    at the teardown's bound, whose guard releases the marker from a spawned task
+    that the process exit may cancel — it is left to the one-hour lease, after
+    which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
+    is not in the datastore, so the sweep writes it there too: replay the
+    dead-letter file with that in mind;
+  - an erasure cut between its anonymization and its erasure proof: the
+    recovery writes the record and completes the request, but it writes no
+    proof and does not repeat the second certificate revocation of #668, and
+    the unit's marker guard is armed only after the proof, so a cut before it
+    leaves the marker to the one-hour lease and not to the next start. The
+    erasure is complete as far as the account is concerned; what can be
+    missing is the proof and, for a certificate bound to the account in that
+    window, one revocation (an administrator revokes it by id). Open as
+    #737, for 1.1.2;
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 
   A tenant purge cut or failing anywhere else releases its claim (from a drop
   guard, for a cut or a panic), so the next start's sweep no longer skips the
-  tenant for the claim's one-hour lease; only a process that ends before the
-  release is written (a `SIGKILL`) still leaves the tenant to the lease.
+  tenant for the claim's one-hour lease. Only a release that is not written
+  still leaves the tenant to the lease: a `SIGKILL`, and a unit **cut at the
+  stop's bound** (typically a datastore too slow to answer the awaited release),
+  which releases its claim from a spawned task that the process exit may cancel
+  (the stop does not wait for it). (Corrected 2026-10-19, #687: this text named
+  only the `SIGKILL`.) The
+  purge of an orphaned tenant id holds its claim the same way from the moment
+  its claim marker is written, and writes the marker only while the id still has
+  rows to purge, so the next start's sweep takes a cut one over at once and
+  records it once. (Corrected 2026-10-19, #714: before 1.1.1 a cut while the
+  orphan purge read whether rows were left held the id for the lease, and could
+  record an id another replica had already purged a second time.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for

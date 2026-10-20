@@ -371,6 +371,11 @@ pub struct ServeOptions {
     /// and watch the bounded join cut it.
     #[doc(hidden)]
     pub cleanup_step_for_tests: Option<cleanup::CleanupStepForTests>,
+    /// **Test seam, never set in production** (#692). Holds the audit
+    /// middleware's appends until the value is `true`, so a test can see that
+    /// the audit drain, not the worker's ordinary write, put a row in the trail.
+    #[doc(hidden)]
+    pub audit_hold_for_tests: Option<crate::audit_hold::AuditHoldForTests>,
 }
 
 impl Default for ServeOptions {
@@ -381,6 +386,7 @@ impl Default for ServeOptions {
             lease_lost_backstop: profile::exit_on_lease_lost(),
             admit_private_networks_for_tests: false,
             cleanup_step_for_tests: None,
+            audit_hold_for_tests: None,
         }
     }
 }
@@ -2675,12 +2681,23 @@ where
              recovered; point it at a volume that outlives the container"
         );
     }
-    let audit_middleware = AuditMiddleware::spawn_configured(
-        audit_repo.clone(),
-        Some(notification_sink),
-        dead_letter,
-        axiam_audit::middleware::CHANNEL_CAPACITY,
-    );
+    let audit_middleware = match opts.audit_hold_for_tests.take() {
+        Some(released) => AuditMiddleware::spawn_configured(
+            crate::audit_hold::HeldAuditLog {
+                inner: audit_repo.clone(),
+                released,
+            },
+            Some(notification_sink),
+            dead_letter,
+            axiam_audit::middleware::CHANNEL_CAPACITY,
+        ),
+        None => AuditMiddleware::spawn_configured(
+            audit_repo.clone(),
+            Some(notification_sink),
+            dead_letter,
+            axiam_audit::middleware::CHANNEL_CAPACITY,
+        ),
+    };
     // A handle kept outside the App factory closure, which takes ownership of
     // the middleware. Cloning shares the shutdown flag — see
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
@@ -2734,7 +2751,7 @@ where
     // Spawn the periodic cleanup task (D-09, D-24).
     // Shutdown channel: the teardown sends `true` once the REST listener has
     // returned, before the gRPC stop and the lease release; after a lost lease
-    // the lease-loss stop sends it at the loss (#628).
+    // the lease-loss stop sends it at the loss as the renewal detects it (#628).
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
     // Mail publisher for export-ready notifications from the cleanup task.
     let cleanup_mail_publisher: Arc<MailTransportPublisher> = Arc::new(match &amqp {
@@ -3215,10 +3232,11 @@ where
     // bound with (#598): the cut below ends them, so the teardown — the audit
     // drain above all — runs before the lease's backstop instead of with it.
     //
-    // The cleanup task is told to stop at the loss itself, not once the REST
-    // drain, the cut and the gRPC stop are over (#628): from the loss on a
-    // successor may hold the lease, and this instance starts no further sweep,
-    // erasure, export or tenant purge beside it. A unit already past its point
+    // The cleanup task is told to stop at the loss as the renewal detects it
+    // (up to `renew_every` after a successor took the expired lease), not once
+    // the REST drain, the cut and the gRPC stop are over (#628): from then on
+    // this instance starts no further sweep, erasure, export or tenant purge
+    // beside the successor. A unit already past its point
     // of no return runs on to its audit row within the stop's budget
     // (`join_cleanup`).
     let (rest_cut_tx, rest_cut) = tokio::sync::oneshot::channel::<()>();
@@ -3301,7 +3319,7 @@ where
     // of its own, to its audit row (#655, #624). It comes before the lease
     // release (#628): once the lease is given up a successor may start, and
     // this instance must not start work beside it. (After a lost lease the
-    // lease-loss stop sent it at the loss; sending it again is a no-op.)
+    // lease-loss stop sent it at the loss as detected; sending it again is a no-op.)
     cleanup_shutdown_tx.send_replace(true);
 
     // The REST listener has stopped: stop gRPC after it, and wait for it before
@@ -3423,7 +3441,7 @@ pub struct ShutdownBudget {
     pub audit: Duration,
     /// How long the teardown waits for the cleanup task once the audit queue is
     /// drained (#598). The task was told to stop before the gRPC stop and the
-    /// lease release — after a lost lease, at the loss (#628) — and starts no
+    /// lease release — after a lost lease, at the loss as the renewal detects it (#628) — and starts no
     /// sweep (nor erasure, nor export, nor tenant purge) after that;
     /// a sweep still running at this bound is cut where it is. The same bound
     /// covers the erasure or tenant purge the task leaves in flight, a task of
@@ -3486,7 +3504,8 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
 /// deadline, for the unit of audited work it left in flight (an erasure, a
 /// tenant purge: `cleanup::AuditedWork`, #655, #624), which the abort does not
 /// reach; past the deadline, abort that too, so a replica that lost its lease
-/// writes nothing after its budget.
+/// writes nothing of its own code after its budget (a statement already sent may
+/// still commit).
 ///
 /// What a cut leaves behind is for the next start to resume: every sweep's
 /// writes are idempotent or a compare-and-set, and every sweep is re-run by the
@@ -3497,9 +3516,10 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
 /// leave, listed in T-444: an erasure or tenant purge that crossed its point of
 /// no return before the stop and still had not written its audit row
 /// (`gdpr.user_pseudonymized`; `tenants.purged`) when the bound ran out — the
-/// whole teardown window after the stop, for its last statements — and an
-/// export cut after it was marked ready and before its mail was queued (a
-/// download nobody was told about, which expires).
+/// whole teardown window after the stop, for its last statements — whose row
+/// the next start writes from the marker the point of no return left (#689);
+/// and an export cut after it was marked ready and before its mail was queued
+/// (a download nobody was told about, which expires).
 async fn join_cleanup<T>(
     mut handle: tokio::task::JoinHandle<T>,
     units: &cleanup::AuditedWork,
@@ -3526,7 +3546,7 @@ async fn join_cleanup<T>(
             deadline_secs = bound.as_secs_f64(),
             "an erasure or tenant purge that had passed its point of no return did not reach \
              its audit row in time — it is cut where it is, and its `gdpr.user_pseudonymized` \
-             or `tenants.purged` row may be missing (see T-444)"
+             or `tenants.purged` row is written by the next start's sweep (see T-444)"
         );
     }
 }

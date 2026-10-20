@@ -595,6 +595,21 @@ The startup log names the provider that answered. That line exists because the
 commonest OPAQUE misconfiguration is believing a key came from somewhere it did
 not.
 
+### 5.8 Timeouts
+
+Every HTTP client AXIAM aims at Vault is bounded, so a Vault that accepts a
+connection and never answers fails the call instead of hanging it.
+
+| Client | Request bound | Connect bound | Where |
+|---|---|---|---|
+| Startup secret read (bootstrap client and the private-CA client) | 10 s | 5 s | `axiam-auth` `secrets.rs` (`VAULT_TIMEOUT`, `VAULT_CONNECT_TIMEOUT`) |
+| CA signing-key custody (KV) | 10 s | — | `axiam-pki` `ca_key_store.rs` |
+| Vault PKI engine (signing) | 60 s | — | `axiam-pki` `vault_pki.rs` |
+
+The bounds are compiled in, not configurable. A stalled Vault at startup now
+stops the server after ~10 s with `vault: request to <url> failed (timed out)`,
+naming the host and never the token, rather than blocking boot indefinitely.
+
 ---
 
 ## 6. Rotation

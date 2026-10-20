@@ -232,9 +232,21 @@ pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 
 /// hour. A purge that does not finish releases its claim — one that fails, one
 /// given up because the process is stopping, and (#655) one aborted or
 /// panicking, from a drop guard — so the next tick, or the next start, resumes
-/// it at once; only a process that ends before the release is written (a
-/// `SIGKILL`, or a stop that runs out of time) leaves the tenant to the lease.
+/// it at once; only a process that ends before the release is written leaves
+/// the tenant to the lease: a `SIGKILL`, or a unit cut at the stop's bound,
+/// whose guard releases the claim from a spawned task that the process exit may
+/// cancel (#687).
 pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
+
+/// How long a unit's claim on its pending-record marker (#689) keeps a sweep
+/// from recording the work itself: the tenant purge's lease, for the same
+/// reasons. A unit holds the claim for the handful of statements between its
+/// point of no return and its record, which the teardown bounds at seconds; a
+/// unit that is cut releases it from a drop guard, so the next start records
+/// the work at once, and only a process that ends before the release is
+/// written — a `SIGKILL`, or a unit cut at the stop's bound, whose spawned
+/// release the process exit may cancel (#687) — leaves the marker to this lease.
+pub const PENDING_RECORD_LEASE: Duration = TENANT_PURGE_LEASE;
 
 // ---------------------------------------------------------------------------
 // Shared rate-limit table (#638, R101W3-05)
@@ -379,8 +391,8 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// id is claimed the same way, by a marker row
 /// ([`SurrealTenantRepository::claim_orphan_purge`], R101W1-09 (a)): replicas
 /// whose daily scans coincide purge and record it once, and a scan that
-/// predates another replica's finished purge finds nothing left and records
-/// nothing.
+/// predates another replica's finished purge finds nothing left, writes no
+/// marker and records nothing (#714).
 ///
 /// Each tenant's purge, from its claim to its record, is one unit of
 /// [`AuditedWork`] (#655): a task of its own, which aborting the cleanup task
@@ -388,6 +400,12 @@ pub const CERTIFICATE_RETENTION_MAX_BATCHES: u32 = 20;
 /// (checked between tenants); a purge under way gives itself up at the stop as
 /// long as its tenant row is still there, releasing its claim, and once the row
 /// is removed it runs on to its record.
+///
+/// The removal leaves a `tenant_purge_pending` marker in its own transaction,
+/// which the unit clears once it has recorded the purge (#689). A unit cut in
+/// between leaves the marker, and every pass starts by recording what the
+/// markers left standing ([`record_pending_purges`]), so the next start writes
+/// the `tenants.purged` the cut unit did not, once.
 ///
 /// * `Ok(n)` is the number of tenants (and orphaned ids) this call purged.
 /// * One tenant's failure does not stop the others; any failure makes the sweep
@@ -412,6 +430,16 @@ where
     C: Connection,
     S: AuditWriteSink + 'static,
 {
+    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE)
+        .map_err(|e| AxiamError::Internal(format!("tenant purge lease: {e}")))?;
+    // #689: first, the purges a unit removed and was cut before recording. A
+    // failure here does not hold back the purges; it is reported after them.
+    let record_lease = chrono::TimeDelta::from_std(PENDING_RECORD_LEASE)
+        .map_err(|e| AxiamError::Internal(format!("pending record lease: {e}")))?;
+    let pending_error = record_pending_purges(tenant_repo, audit.as_ref(), record_lease, work)
+        .await
+        .err();
+
     let mut due: Vec<(Uuid, bool)> = tenant_repo
         .list_tombstoned()
         .await?
@@ -428,8 +456,6 @@ where
         }
     }
 
-    let lease = chrono::TimeDelta::from_std(TENANT_PURGE_LEASE)
-        .map_err(|e| AxiamError::Internal(format!("tenant purge lease: {e}")))?;
     let (mut purged, mut failed) = (0u64, 0u64);
     let due_count = due.len();
     for (started, (tenant_id, orphan)) in due.into_iter().enumerate() {
@@ -487,7 +513,7 @@ where
             failed + purged
         )));
     }
-    if let Some(e) = scan_error {
+    if let Some(e) = scan_error.or(pending_error) {
         return Err(e);
     }
     Ok(purged)
@@ -566,39 +592,180 @@ where
             return Ok(PurgeOutcome::Abandoned);
         }
     };
-    // The point of no return is never crossed once the process is stopping.
+    // Once the process is stopping, no new crossing of the point of no return
+    // starts (a crossing already being sent completes).
     if work.stopping() {
         claim.release().await;
         return Ok(PurgeOutcome::Abandoned);
     }
-    match tenants.remove_purged_tenant(tenant_id).await {
-        Ok(()) => claim.settle(),
+    let Some(record) = cross_point_of_no_return(&tenants, tenant_id, &report, claim).await? else {
+        return Ok(PurgeOutcome::Skipped);
+    };
+    work.step(UnitStep::TenantRowRemoved(tenant_id)).await;
+    record_tenant_purged(audit.as_ref(), tenant_id, false, &report).await;
+    work.step(UnitStep::Recorded(tenant_id)).await;
+    record.settle().await;
+    Ok(PurgeOutcome::Purged)
+}
+
+/// A purge unit's point of no return (#655): remove the tenant row (or the
+/// orphan's marker) and, in the same transaction, write its
+/// `tenant_purge_pending` marker (#689), then settle the purge claim and hold
+/// the marker's in its place. `Ok(None)` when an overlapping purge removed the
+/// row first (it records the purge).
+///
+/// The marker carries a stamp of its own, taken here, rather than the purge
+/// claim's: the claim may be as old as the purge, and a stale stamp would let
+/// another replica's sweep take the marker while this unit records it.
+async fn cross_point_of_no_return<C: Connection>(
+    tenants: &Arc<SurrealTenantRepository<C>>,
+    tenant_id: Uuid,
+    report: &axiam_db::repository::tenant_purge::TenantPurgeReport,
+    claim: PurgeClaim<C>,
+) -> Result<Option<RecordClaim<C>>, AxiamError> {
+    let stamp = Utc::now();
+    match tenants.remove_purged_tenant(tenant_id, report, stamp).await {
+        Ok(()) => {
+            claim.settle();
+            Ok(Some(RecordClaim {
+                marker: PendingMarker::TenantPurge {
+                    tenants: Arc::clone(tenants),
+                    tenant_id,
+                },
+                stamp,
+                held: true,
+            }))
+        }
         Err(AxiamError::NotFound { .. }) => {
             claim.settle();
-            return Ok(PurgeOutcome::Skipped);
+            Ok(None)
         }
         Err(e) => {
+            // The transaction may have committed before the error reached us:
+            // release a marker stamped with ours, if there is one, so the next
+            // sweep records the purge at once. Nothing matches otherwise.
+            if let Err(release) = tenants.release_purge_record(tenant_id, stamp).await {
+                tracing::warn!(
+                    error = %release,
+                    %tenant_id,
+                    "could not release a tenant purge's pending record; it lapses with its lease"
+                );
+            }
             claim.release().await;
-            return Err(e);
+            Err(e)
         }
     }
-    record_tenant_purged(audit.as_ref(), tenant_id, false, &report).await;
-    Ok(PurgeOutcome::Purged)
+}
+
+/// Record the tenant purges whose `tenant_purge_pending` marker (#689) still
+/// stands — a unit cut between the removal of the tenant row and the clearing
+/// of its marker — and clear each marker. The first step of every
+/// [`sweep_tenant_purge`] pass; none starts once the process is stopping.
+///
+/// Each marker is claimed first
+/// ([`SurrealTenantRepository::claim_pending_purge_records`]): only one released
+/// or older than `lease`, and conditionally on the claim read, so a unit still
+/// recording and another replica's sweep are never both its owner. The record
+/// is written unless the system log already holds a `tenants.purged` for the
+/// id written since the removal (a unit cut after its record and before the
+/// clearing), with what the removal stored: the record is the one the unit
+/// would have written. The claim is held by the same guard a unit holds, so a
+/// pass cut here releases it.
+///
+/// `Ok(n)` is the number of records this call wrote.
+///
+/// # Errors
+///
+/// The datastore error that kept the markers from being read or claimed, or
+/// [`AxiamError::Internal`] naming how many could not be checked (each of
+/// those is released for the next pass).
+pub async fn record_pending_purges<C, S>(
+    tenants: &Arc<SurrealTenantRepository<C>>,
+    audit: &S,
+    lease: chrono::TimeDelta,
+    work: &AuditedWork,
+) -> Result<u64, AxiamError>
+where
+    C: Connection,
+    S: AuditWriteSink,
+{
+    if work.stopping() {
+        return Ok(0);
+    }
+    let pending = tenants
+        .claim_pending_purge_records(Utc::now(), lease)
+        .await?;
+    let (mut recorded, mut failed) = (0u64, 0u64);
+    for marker in pending {
+        let claim = RecordClaim {
+            marker: PendingMarker::TenantPurge {
+                tenants: Arc::clone(tenants),
+                tenant_id: marker.tenant_id,
+            },
+            stamp: marker.claimed_at,
+            held: true,
+        };
+        if work.stopping() {
+            claim.release().await;
+            continue;
+        }
+        match tenants
+            .purge_recorded_since(
+                marker.tenant_id,
+                axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION,
+                marker.purged_at,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                record_tenant_purged(audit, marker.tenant_id, false, &marker.report).await;
+                recorded += 1;
+                tracing::warn!(
+                    tenant_id = %marker.tenant_id,
+                    "recorded a tenant purge whose unit was cut before its record (#689)"
+                );
+                work.step(UnitStep::Recorded(marker.tenant_id)).await;
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    error = %e,
+                    tenant_id = %marker.tenant_id,
+                    "could not check a pending tenant purge record; the next pass retries it"
+                );
+                claim.release().await;
+                continue;
+            }
+        }
+        claim.settle().await;
+    }
+    if failed > 0 {
+        return Err(AxiamError::Internal(format!(
+            "{failed} pending tenant purge record(s) could not be checked"
+        )));
+    }
+    Ok(recorded)
 }
 
 /// One orphaned tenant id's purge and its `tenants.purged` record: one unit of
 /// [`AuditedWork`] (#655), claimed by a marker row (R101W1-09 (a)).
 ///
-/// [`SurrealTenantRepository::begin_orphan_purge`] claims the id by writing
-/// its marker, a tombstoned tenant row, and finds whether it still has rows:
-/// another replica's claim, or a scan that predates a finished purge, is
-/// skipped and records nothing. Then the unit runs as
-/// [`purge_tombstoned_unit`] does: the rows
+/// The unit arms its [`PurgeClaim`] **before**
+/// [`SurrealTenantRepository::claim_orphan_purge`] writes the marker, keyed by
+/// the stamp the marker will carry, so the marker is guarded from the instant
+/// it exists (#714): a cut anywhere from the `CREATE` on releases the claim,
+/// and the release is conditional on the stamp, so it changes nothing when the
+/// `CREATE` did not land. The claim writes the marker only while the id still
+/// owns a row to purge: another replica's claim, or a scan that predates a
+/// finished purge, is skipped, writes nothing and records nothing. Then the
+/// unit runs as [`purge_tombstoned_unit`] does: the rows
 /// ([`SurrealTenantRepository::purge_orphan_rows`]), then the removal of the
 /// marker ([`SurrealTenantRepository::remove_purged_tenant`]) as the point of
 /// no return, and the record only when this unit removed it. Given up at the
-/// stop, or cut, the marker stays tombstoned with its claim released, and the
-/// tombstoned-tenant sweep purges it as the orphan it is.
+/// stop, failed, or cut, the marker stays tombstoned with its claim released,
+/// and the tombstoned-tenant sweep purges it at once as the orphan it is, and
+/// records it — a marker always stands for a purge nobody has recorded.
 async fn purge_orphan_unit<C, S>(
     tenants: Arc<SurrealTenantRepository<C>>,
     audit: Arc<S>,
@@ -609,26 +776,38 @@ where
     C: Connection,
     S: AuditWriteSink,
 {
-    let Some(claimed_at) = tenants.begin_orphan_purge(tenant_id).await? else {
-        return Ok(PurgeOutcome::Skipped);
-    };
-    // As in `purge_tombstoned_unit`: every exit but a removed marker releases
-    // the claim, so the marker is the tombstoned-tenant sweep's at once.
+    let claimed_at = Utc::now();
+    // Armed before the marker exists (#714): every exit from here but a
+    // removed marker — or a claim that wrote none — releases the claim, so the
+    // marker is the tombstoned-tenant sweep's at once.
     let claim = PurgeClaim {
         tenants: Arc::clone(&tenants),
         tenant_id,
         claimed_at,
         held: true,
     };
+    match tenants.claim_orphan_purge(tenant_id, claimed_at).await {
+        Ok(true) => {}
+        // No marker of ours: another replica's, nothing left, or no orphan.
+        Ok(false) => {
+            claim.settle();
+            tenants.orphan_claim_refusal(tenant_id).await?;
+            return Ok(PurgeOutcome::Skipped);
+        }
+        // The marker may have landed: release it, by its stamp.
+        Err(e) => {
+            claim.release().await;
+            return Err(e);
+        }
+    }
+    work.step(UnitStep::OrphanClaimed(tenant_id)).await;
     let report = match work
-        .until_stopped(tenants.purge_orphan_rows(tenant_id, claimed_at))
+        .until_stopped(tenants.purge_orphan_rows(tenant_id))
         .await
     {
         Some(Ok(report)) => report,
-        // The failed purge dropped its marker (R101W1-09 (a)): the next scan
-        // finds the id again.
         Some(Err(e)) => {
-            claim.settle();
+            claim.release().await;
             return Err(e);
         }
         None => {
@@ -636,25 +815,21 @@ where
             return Ok(PurgeOutcome::Abandoned);
         }
     };
-    // The point of no return is never crossed once the process is stopping.
+    // Once the process is stopping, no new crossing of the point of no return
+    // starts (a crossing already being sent completes).
     if work.stopping() {
         claim.release().await;
         return Ok(PurgeOutcome::Abandoned);
     }
-    match tenants.remove_purged_tenant(tenant_id).await {
-        Ok(()) => claim.settle(),
-        // The marker was taken over and removed by another purge, which
-        // records it.
-        Err(AxiamError::NotFound { .. }) => {
-            claim.settle();
-            return Ok(PurgeOutcome::Skipped);
-        }
-        Err(e) => {
-            claim.release().await;
-            return Err(e);
-        }
-    }
+    // `None`: the marker was taken over and removed by another purge, which
+    // records it.
+    let Some(record) = cross_point_of_no_return(&tenants, tenant_id, &report, claim).await? else {
+        return Ok(PurgeOutcome::Skipped);
+    };
+    work.step(UnitStep::TenantRowRemoved(tenant_id)).await;
     record_tenant_purged(audit.as_ref(), tenant_id, true, &report).await;
+    work.step(UnitStep::Recorded(tenant_id)).await;
+    record.settle().await;
     Ok(PurgeOutcome::Purged)
 }
 
@@ -696,15 +871,22 @@ async fn record_tenant_purged<S: AuditWriteSink>(
 }
 
 /// A replica's claim on a tombstoned tenant's purge (#610), released on every
-/// exit but a removed tenant row (#655).
+/// exit but a removed tenant row (#655). An orphan purge arms it before its
+/// claim marker is written, so the marker is guarded from the instant it
+/// exists (#714).
 ///
 /// The purge releases it itself, awaited, where it can — a failure, or giving
 /// up at the stop. Every other exit — the unit aborted at the teardown's bound,
 /// a panic, a release that was itself cut — drops the guard still holding the
 /// claim, and the drop spawns the release on the runtime. Without that, the
 /// next start's sweep found a claim younger than [`TENANT_PURGE_LEASE`] and
-/// skipped the tenant for up to an hour. A drop during the runtime's own
-/// shutdown cannot write anything; the claim then lapses with its lease.
+/// skipped the tenant for up to an hour. That release is a spawned task, and
+/// nothing waits for it: a unit cut at the teardown's bound (the one exit where
+/// the guard is the only release, typically a datastore too slow to answer the
+/// awaited one) is dropped inside [`AuditedWork::join`], and the process exit
+/// that follows drops the runtime, which cancels the task unless it has already
+/// landed. The tenant then waits out [`TENANT_PURGE_LEASE`] (#687; awaiting the
+/// release at the bound was declined, since it needs a budget line of its own).
 struct PurgeClaim<C: Connection> {
     tenants: Arc<SurrealTenantRepository<C>>,
     tenant_id: Uuid,
@@ -765,6 +947,160 @@ impl<C: Connection> Drop for PurgeClaim<C> {
     }
 }
 
+/// A pending-record marker (#689, schema v108): the record a unit past its
+/// point of no return still owes.
+enum PendingMarker<C: Connection> {
+    /// `tenant_purge_pending`, keyed by the purged tenant's id.
+    TenantPurge {
+        tenants: Arc<SurrealTenantRepository<C>>,
+        tenant_id: Uuid,
+    },
+    /// `user.erasure_audit_pending` on the erased account.
+    Erasure {
+        deletions: SurrealAccountDeletionRepository<C>,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    },
+}
+
+impl<C: Connection> Clone for PendingMarker<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::TenantPurge { tenants, tenant_id } => Self::TenantPurge {
+                tenants: Arc::clone(tenants),
+                tenant_id: *tenant_id,
+            },
+            Self::Erasure {
+                deletions,
+                tenant_id,
+                user_id,
+            } => Self::Erasure {
+                deletions: deletions.clone(),
+                tenant_id: *tenant_id,
+                user_id: *user_id,
+            },
+        }
+    }
+}
+
+impl<C: Connection> PendingMarker<C> {
+    fn id(&self) -> Uuid {
+        match self {
+            Self::TenantPurge { tenant_id, .. } => *tenant_id,
+            Self::Erasure { user_id, .. } => *user_id,
+        }
+    }
+
+    async fn settle(&self, stamp: chrono::DateTime<Utc>) -> Result<bool, AxiamError> {
+        match self {
+            Self::TenantPurge { tenants, tenant_id } => {
+                tenants.settle_purge_record(*tenant_id, stamp).await
+            }
+            Self::Erasure {
+                deletions,
+                tenant_id,
+                user_id,
+            } => {
+                deletions
+                    .settle_erasure_record(*tenant_id, *user_id, stamp)
+                    .await
+            }
+        }
+    }
+
+    async fn release(&self, stamp: chrono::DateTime<Utc>) -> Result<(), AxiamError> {
+        match self {
+            Self::TenantPurge { tenants, tenant_id } => {
+                tenants.release_purge_record(*tenant_id, stamp).await
+            }
+            Self::Erasure {
+                deletions,
+                tenant_id,
+                user_id,
+            } => {
+                deletions
+                    .release_erasure_record(*tenant_id, *user_id, stamp)
+                    .await
+            }
+        }
+    }
+}
+
+/// A claim on a pending-record marker (#689), held from the point of no return
+/// (or a sweep's claim) to the record: settled — the marker cleared, for an
+/// erasure with its deletion request's completion — once the record is
+/// written, and released on every other exit, so the next sweep records the
+/// work at once rather than after [`PENDING_RECORD_LEASE`].
+///
+/// Like [`PurgeClaim`], an exit that cannot await — the unit aborted at the
+/// teardown's bound, a panic — drops the guard still holding the claim, and the
+/// drop spawns the release on the runtime. A unit cut at the teardown's bound
+/// drops it just before the process exit drops the runtime, which cancels a
+/// release that has not landed (see [`PurgeClaim`]); the marker then lapses with
+/// the lease (#687).
+/// Every write is conditional on `stamp`, so a marker another replica has
+/// taken over is left to it.
+struct RecordClaim<C: Connection> {
+    marker: PendingMarker<C>,
+    stamp: chrono::DateTime<Utc>,
+    held: bool,
+}
+
+impl<C: Connection> RecordClaim<C> {
+    /// The record is written: clear the marker. A failed clearing leaves it for
+    /// the next sweep, which finds the record already written and clears it.
+    async fn settle(mut self) {
+        if let Err(e) = self.marker.settle(self.stamp).await {
+            tracing::warn!(
+                error = %e,
+                id = %self.marker.id(),
+                "could not clear a pending-record marker; the next sweep finds the record \
+                 written and clears it"
+            );
+        }
+        self.held = false;
+    }
+
+    /// Give the claim up, awaited, without recording.
+    async fn release(mut self) {
+        if let Err(e) = self.marker.release(self.stamp).await {
+            tracing::warn!(
+                error = %e,
+                id = %self.marker.id(),
+                "could not release a pending-record marker; it lapses with its lease"
+            );
+        }
+        self.held = false;
+    }
+}
+
+impl<C: Connection> Drop for RecordClaim<C> {
+    fn drop(&mut self) {
+        if !self.held {
+            return;
+        }
+        let (marker, stamp) = (self.marker.clone(), self.stamp);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(e) = marker.release(stamp).await {
+                        tracing::warn!(
+                            error = %e,
+                            id = %marker.id(),
+                            "could not release the pending-record marker of a unit that was cut; \
+                             it lapses with its lease"
+                        );
+                    }
+                });
+            }
+            Err(_) => tracing::warn!(
+                id = %self.marker.id(),
+                "the pending-record marker of a unit cut outside a runtime lapses with its lease"
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Units of work that end in an audit row (#655, #624)
 // ---------------------------------------------------------------------------
@@ -781,6 +1117,22 @@ pub enum UnitStep {
     /// not yet completed its `account_deletion` row or written
     /// `gdpr.user_pseudonymized`: past the erasure's point of no return.
     ErasureAnonymized(Uuid),
+    /// An erasure has finished steps (a)…(b4) and not yet started the erasure
+    /// pipeline: the window in which a certificate bound to the account can
+    /// still be issued after (b4) revoked.
+    ErasurePrepared(Uuid),
+    /// An orphan purge has written its claim marker and not yet started on the
+    /// rows: where a cut used to find the marker with no guard to release it
+    /// (#714).
+    OrphanClaimed(Uuid),
+    /// A tenant purge (tombstoned or orphan) has removed its tenant row — its
+    /// point of no return — and written its pending-record marker, and has not
+    /// yet written `tenants.purged` (#689).
+    TenantRowRemoved(Uuid),
+    /// A unit, or a sweep recording for a cut one, has written its record
+    /// (`tenants.purged` for the tenant id, `gdpr.user_pseudonymized` for the
+    /// user id) and not yet cleared the pending-record marker (#689).
+    Recorded(Uuid),
 }
 
 /// A step [`AuditedWork::with_step_for_tests`] runs at each [`UnitStep`].
@@ -801,20 +1153,23 @@ pub type UnitStepForTests = Arc<
 /// its own ([`Self::run`]), so aborting the cleanup task — the composition
 /// root's bounded join — does not cut one. The root then waits for the unit in
 /// flight with [`Self::join`], within the same bound, and aborts it past that,
-/// so a replica that lost its lease writes nothing after its stop's budget.
+/// so a replica that lost its lease writes nothing of its own code after its
+/// stop's budget (a statement already sent may still commit).
 ///
 /// Each unit has a **point of no return** — the write after which no later
 /// sweep finds the work again: the removal of the tenant row; the anonymization
 /// of the account. Before it, the unit gives itself up as soon as the process
 /// is stopping (the tenant stays tombstoned, its claim released; the account
-/// stays due), and it never crosses it once the stop is requested. So the only
-/// unit a stop can find past its point of no return crossed it before the stop
-/// was requested, and it has the whole of the teardown's window for its last
+/// stays due), and it starts no new crossing once the stop is requested (a
+/// crossing already being sent completes). So the only unit a stop can find
+/// past its point of no return began crossing it before the stop was requested, and it has the whole of the teardown's window for its last
 /// statements — from the stop signal through the gRPC stop, the lease release
 /// and the outbound and audit drains to the end of the cleanup bound: 5 to 18 s
 /// for `SIGTERM`, 2 to 13 s after a lost lease, whose stop signal comes at the
-/// loss (#628). One that outlasts even that is cut, and its record is lost
-/// (T-444).
+/// loss (#628). One that outlasts even that is cut; the marker its point of
+/// no return left in the same transaction (#689) makes the next start's sweep
+/// write the record it owed, once ([`record_owed_erasures`],
+/// [`record_pending_purges`]; T-444).
 #[derive(Clone)]
 pub struct AuditedWork {
     stop: watch::Receiver<bool>,
@@ -1764,16 +2119,20 @@ pub struct ErasureSubject<'a> {
 
 /// An erasure through its point of no return to its record (#624): the erasure
 /// pipeline ([`run_erasure_pipeline_reporting`]: audit scrub, anonymization,
-/// proof), then the `account_deletion` row marked completed, then the
-/// `gdpr.user_pseudonymized` audit row. Run inside a unit of [`AuditedWork`],
-/// so a cut of the cleanup task does not reach it.
+/// proof), then the `gdpr.user_pseudonymized` audit row, then the
+/// `account_deletion` row marked completed (#689 (i): the record first). Run
+/// inside a unit of [`AuditedWork`], so a cut of the cleanup task does not
+/// reach it.
 ///
 /// The anonymization is the point of no return: it clears `deletion_pending`,
-/// so no later sweep selects the account again, and nothing but this call
-/// writes the completion and the audit row. Until then — the audit scrub —
-/// the call gives up once `work` is stopping and answers `Ok(false)`: the
-/// account stays due. Past it, it runs on to the audit row whatever the stop
-/// says, and answers `Ok(true)`. A free function, and public, for the reason
+/// so no later sweep selects the account again, and in the same transaction
+/// sets the account's record marker (#689), which this call holds from there
+/// (released by a guard if it is cut) and clears with the completion once the
+/// audit row is written; a marker left set is recorded by the next sweep
+/// ([`record_owed_erasures`]). Until then — the audit scrub — the call gives
+/// up once `work` is stopping and answers `Ok(false)`: the account stays due.
+/// Past it, it runs on to the audit row whatever the stop says, and answers
+/// `Ok(true)`. A free function, and public, for the reason
 /// [`run_erasure_pipeline`] is one.
 ///
 /// # Errors
@@ -1781,10 +2140,11 @@ pub struct ErasureSubject<'a> {
 /// Those of [`run_erasure_pipeline_reporting`], before anything is recorded.
 /// The completion and the audit row are not fallible here: a failed completion
 /// is logged, and a failed audit write is dead-lettered (SECHRD-12).
-pub async fn erase_and_record<A, EP, U, C>(
+pub async fn erase_and_record<A, EP, U, CR, C>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
     user_repo: &U,
+    cert_repo: &CR,
     account_deletion_repo: &SurrealAccountDeletionRepository<C>,
     sink: Option<&dyn SsfSystemAccountSink>,
     subject: ErasureSubject<'_>,
@@ -1794,6 +2154,7 @@ where
     A: AuditLogRepository + AuditWriteSink,
     EP: ErasureProofRepository,
     U: UserRepository,
+    CR: axiam_core::repository::CertificateRepository,
     C: Connection,
 {
     let ErasureSubject {
@@ -1803,6 +2164,7 @@ where
         email_hash,
         certificates_revoked,
     } = subject;
+    work.step(UnitStep::ErasurePrepared(user_id)).await;
     // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
     // (now FATAL, was swallowed) -> anonymize the user row -> write the
     // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
@@ -1826,12 +2188,125 @@ where
     {
         return Ok(false);
     }
+    // #689: the anonymization stamped the account's erasure-record marker in
+    // its own transaction. Hold it from here: cleared with the record below,
+    // released by the guard if this unit is cut before, so the next sweep
+    // writes the record at once.
+    let record = match account_deletion_repo
+        .erasure_record_stamp(tenant_id, user_id)
+        .await
+    {
+        Ok(Some(stamp)) => Some(RecordClaim {
+            marker: PendingMarker::Erasure {
+                deletions: account_deletion_repo.clone(),
+                tenant_id,
+                user_id,
+            },
+            stamp,
+            held: true,
+        }),
+        // Taken over already, which only a unit held past the lease sees.
+        Ok(None) => None,
+        // The marker stays set: a sweep past the lease finds the record
+        // written and clears it.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                %tenant_id,
+                %user_id,
+                "cleanup: could not read the erasure's record marker; a later sweep clears it"
+            );
+            None
+        }
+    };
     work.step(UnitStep::ErasureAnonymized(user_id)).await;
 
-    // (f) Mark the account_deletion row as completed (lookup by user_id).
-    // Run AFTER the erasure pipeline succeeds — if the pipeline failed
-    // above, this is never reached and the deletion row stays pending
-    // for the next retry too.
+    // (#668) A second revocation, by binding only, outside the pinned pipeline
+    // order: a certificate issued for the account between (b4) and the
+    // anonymization is still active. The account's names are gone by now, so
+    // empty names leave only the `user_id` binding (and `metadata.user_id`) to
+    // match. Best effort and idempotent: past the point of no return a failure
+    // is logged and never un-records the erasure.
+    match cert_repo
+        .revoke_user_certificates(tenant_id, user_id, "", "", Utc::now())
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            %tenant_id,
+            %user_id,
+            revoked = n,
+            "cleanup: revoked certificates issued for the erased account after its first revocation"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            %tenant_id,
+            %user_id,
+            "cleanup: second certificate revocation after anonymization failed"
+        ),
+    }
+
+    // (h) Emit gdpr.user_pseudonymized audit event. actor_id is the
+    // erased subject's own (now-anonymized) row id — a real, resolvable
+    // identifier rather than a fabricated nil UUID (Task 1 fix); the row
+    // still exists (anonymize-in-place preserves referential integrity),
+    // so this is a legitimate audit-trail reference, not PII leakage.
+    // A DB-write failure here is dead-lettered to BOTH an append-only
+    // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
+    // this legally-significant record must never be silently lost.
+    //
+    // #689 (i): written BEFORE the request's completion. The completion
+    // used to come first, so a cut between the two left a completed request
+    // and no record; now a cut leaves the request pending with the account
+    // anonymized, which the next sweep completes and records.
+    write_audit_with_dead_letter(
+        audit_repo,
+        CreateAuditLogEntry {
+            tenant_id,
+            actor_id: user_id,
+            actor_type: ActorType::System,
+            action: USER_PSEUDONYMIZED_ACTION.into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "pseudonym": pseudonym,
+                // #533: the account's certificates this purge revoked; a
+                // count, as directory linking records its own.
+                "certificates_revoked": certificates_revoked,
+            })),
+        },
+    )
+    .await;
+    work.step(UnitStep::Recorded(user_id)).await;
+
+    // (f) Complete the account_deletion row, and clear the record marker,
+    // in one transaction (#689). Without the marker in hand — its read
+    // failed above — the request is completed on its own and the marker is
+    // left for a later sweep, which finds the record written.
+    match record {
+        Some(record) => record.settle().await,
+        None => complete_deletion_request(account_deletion_repo, tenant_id, user_id).await,
+    }
+
+    tracing::info!(
+        pseudonym = %pseudonym,
+        tenant_id = %tenant_id,
+        "user purged and pseudonymized"
+    );
+    Ok(true)
+}
+
+/// The audit action that records an erasure.
+const USER_PSEUDONYMIZED_ACTION: &str = "gdpr.user_pseudonymized";
+
+/// Mark `user_id`'s pending deletion request completed, if it has one: the
+/// completion without the record marker (#689), logged and never fatal.
+async fn complete_deletion_request<C: Connection>(
+    account_deletion_repo: &SurrealAccountDeletionRepository<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) {
     match account_deletion_repo
         .find_pending_by_user_id(tenant_id, user_id)
         .await
@@ -1856,41 +2331,117 @@ where
             tracing::warn!(error = ?e, user_id = %user_id, "failed to find account_deletion row");
         }
     }
+}
 
-    // (h) Emit gdpr.user_pseudonymized audit event. actor_id is the
-    // erased subject's own (now-anonymized) row id — a real, resolvable
-    // identifier rather than a fabricated nil UUID (Task 1 fix); the row
-    // still exists (anonymize-in-place preserves referential integrity),
-    // so this is a legitimate audit-trail reference, not PII leakage.
-    // A DB-write failure here is dead-lettered to BOTH an append-only
-    // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
-    // this legally-significant record must never be silently lost.
-    write_audit_with_dead_letter(
-        audit_repo,
-        CreateAuditLogEntry {
-            tenant_id,
-            actor_id: user_id,
-            actor_type: ActorType::System,
-            action: "gdpr.user_pseudonymized".into(),
-            resource_id: None,
-            outcome: AuditOutcome::Success,
-            ip_address: None,
-            metadata: Some(serde_json::json!({
-                "pseudonym": pseudonym,
-                // #533: the account's certificates this purge revoked; a
-                // count, as directory linking records its own.
-                "certificates_revoked": certificates_revoked,
-            })),
-        },
-    )
-    .await;
-
-    tracing::info!(
-        pseudonym = %pseudonym,
-        tenant_id = %tenant_id,
-        "user purged and pseudonymized"
-    );
-    Ok(true)
+/// Record the erasures whose record is still owed — a unit cut between the
+/// anonymization and the clearing of its marker (#689) — and settle each: the
+/// first step of every GDPR purge sweep; none starts once the process is
+/// stopping.
+///
+/// [`SurrealAccountDeletionRepository::claim_owed_erasure_records`] claims
+/// each owed erasure, conditionally on the marker read: a marker released by a
+/// cut unit or older than `lease`, and (#689 (i)) an anonymized account whose
+/// deletion request is still pending with no marker at all — an erasure cut
+/// before schema v108 between its anonymization and its completion. The
+/// `gdpr.user_pseudonymized` row is written unless the tenant's trail already
+/// holds one for the account (a unit cut after its record and before the
+/// clearing): an account is erased once, so that row is this erasure's. The
+/// row carries the pseudonym the anonymization wrote, `certificates_revoked`
+/// as `null` — the count lived only in the cut unit — and `recovered: true`.
+/// Then the marker is cleared and the request completed, in one transaction.
+/// The claim is held by the same guard the unit holds.
+///
+/// `Ok(n)` is the number of records this call wrote.
+///
+/// # Errors
+///
+/// The datastore error that kept the owed erasures from being read or
+/// claimed, or [`AxiamError::Internal`] naming how many could not be checked
+/// (each of those is released for the next sweep).
+pub async fn record_owed_erasures<A, C>(
+    audit_repo: &A,
+    account_deletion_repo: &SurrealAccountDeletionRepository<C>,
+    lease: chrono::TimeDelta,
+    work: &AuditedWork,
+) -> Result<u64, AxiamError>
+where
+    A: AuditWriteSink,
+    C: Connection,
+{
+    if work.stopping() {
+        return Ok(0);
+    }
+    let owed = account_deletion_repo
+        .claim_owed_erasure_records(Utc::now(), lease)
+        .await?;
+    let (mut recorded, mut failed) = (0u64, 0u64);
+    for erasure in owed {
+        let (tenant_id, user_id) = (erasure.tenant_id, erasure.user_id);
+        let claim = RecordClaim {
+            marker: PendingMarker::Erasure {
+                deletions: account_deletion_repo.clone(),
+                tenant_id,
+                user_id,
+            },
+            stamp: erasure.claimed_at,
+            held: true,
+        };
+        if work.stopping() {
+            claim.release().await;
+            continue;
+        }
+        match account_deletion_repo
+            .erasure_recorded(tenant_id, user_id, USER_PSEUDONYMIZED_ACTION)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                write_audit_with_dead_letter(
+                    audit_repo,
+                    CreateAuditLogEntry {
+                        tenant_id,
+                        actor_id: user_id,
+                        actor_type: ActorType::System,
+                        action: USER_PSEUDONYMIZED_ACTION.into(),
+                        resource_id: None,
+                        outcome: AuditOutcome::Success,
+                        ip_address: None,
+                        metadata: Some(serde_json::json!({
+                            "pseudonym": erasure.pseudonym,
+                            "certificates_revoked": null,
+                            "recovered": true,
+                        })),
+                    },
+                )
+                .await;
+                recorded += 1;
+                tracing::warn!(
+                    %tenant_id,
+                    %user_id,
+                    "recorded an erasure whose unit was cut before its record (#689)"
+                );
+                work.step(UnitStep::Recorded(user_id)).await;
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    %user_id,
+                    "could not check an owed erasure record; the next sweep retries it"
+                );
+                claim.release().await;
+                continue;
+            }
+        }
+        claim.settle().await;
+    }
+    if failed > 0 {
+        return Err(AxiamError::Internal(format!(
+            "{failed} owed erasure record(s) could not be checked"
+        )));
+    }
+    Ok(recorded)
 }
 
 /// What one account's purge needs, owned, so that it runs as a unit of
@@ -1969,6 +2520,7 @@ impl<C: Connection> ErasureUnit<C> {
             self.audit_repo.as_ref(),
             self.erasure_proof_repo.as_ref(),
             self.user_repo.as_ref(),
+            self.cert_repo.as_ref(),
             self.account_deletion_repo.as_ref(),
             self.ssf_sink.as_deref(),
             ErasureSubject {
@@ -2939,18 +3491,36 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     ///     entries for this user (now FATAL, D-01/D-03/D-04) -> anonymize the
     ///     user row in-place (D-05) -> insert a PII-free erasure-proof
     ///     record STRICTLY LAST (D-06, D-03a/D-03b — SECHRD-06).
-    /// (f) Mark the account_deletion row as completed.
     /// (h) Emit `gdpr.user_pseudonymized` audit event (actor = System).
+    /// (f) Mark the account_deletion row as completed, and clear the
+    ///     record marker the anonymization set, in one transaction (#689).
+    ///
+    /// Before the due accounts, the sweep records the erasures a cut unit
+    /// left owed ([`record_owed_erasures`], #689).
     ///
     /// Returns the count of users purged.
     async fn sweep_pending_purges(&self) -> Result<u64, AxiamError> {
+        // #689: first, the erasures a unit anonymized and was cut before
+        // recording. Needs no pepper: the pseudonym is on the row. A failure
+        // here does not hold back the due erasures; it is reported after them.
+        let lease = chrono::TimeDelta::from_std(PENDING_RECORD_LEASE)
+            .map_err(|e| AxiamError::Internal(format!("pending record lease: {e}")))?;
+        let owed_error = record_owed_erasures(
+            self.audit_repo.as_ref(),
+            self.account_deletion_repo.as_ref(),
+            lease,
+            &self.audited,
+        )
+        .await
+        .err();
+
         let pepper = match self.gdpr_pepper {
             Some(p) => p,
             None => {
                 tracing::warn!(
                     "GDPR purge sweep skipped — AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER not set"
                 );
-                return Ok(0);
+                return owed_error.map_or(Ok(0), Err);
             }
         };
 
@@ -2991,6 +3561,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             }
         }
 
+        if let Some(e) = owed_error {
+            return Err(e);
+        }
         Ok(purged)
     }
 

@@ -2,6 +2,7 @@
 //! repository carried NO tests at all (0% coverage) before this file.
 //! Uses the in-memory SurrealDB engine — no external services required.
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{CertificateStatus, KeyAlgorithm, StoreCaCertificate};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::repository::{CaCertificateRepository, OrganizationRepository, Pagination};
@@ -630,4 +631,33 @@ async fn a_ca_failure_recorded_on_a_lapsed_claim_writes_nothing() {
     );
     let row = repo.list_due_vault_forwards(Utc::now(), 10).await.unwrap();
     assert_eq!(row[0].attempts, 1);
+}
+
+/// #669 — two intermediates under one parent that share a serial: the second
+/// is a typed conflict (`409`), not `Migration`.
+#[tokio::test]
+async fn a_repeated_serial_under_one_parent_is_a_conflict_not_a_migration_error() {
+    fn pem(cn: &str) -> String {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(&[0x44u8; 20]));
+        params.self_signed(&key).unwrap().pem()
+    }
+    let (db, org) = setup().await;
+    let repo = SurrealCaCertificateRepository::new(db);
+    let root = repo.create(sample_ca(org)).await.unwrap();
+    let child = |cn: &str, fp: &str| StoreCaCertificate {
+        parent_ca_id: Some(root.id),
+        public_cert_pem: pem(cn),
+        fingerprint: fp.into(),
+        ..sample_ca(org)
+    };
+    repo.create(child("a", "fp-a")).await.unwrap();
+    match repo.create(child("b", "fp-b")).await {
+        Err(AxiamError::AlreadyExists { entity }) => assert_eq!(entity, "ca_certificate"),
+        other => panic!("expected AlreadyExists, got {other:?}"),
+    }
 }

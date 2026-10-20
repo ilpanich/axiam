@@ -185,7 +185,21 @@ client the request would produce hold the device grant
 * **One audit row** names the conversion: action
   `oauth2.client_converted_to_public`, the administrator as actor, the client's
   row id as resource, and metadata with the `client_id`, the method it had
-  (`from`), `none` (`to`), its `grant_types` and `client_secret_cleared: true`.
+  (`from`), `none` (`to`), its `grant_types`, `client_secret_cleared: true`,
+  and what was revoked (`refresh_tokens_revoked`, `device_grants_deleted`,
+  `revocation_complete`; see below).
+* **What the client was issued while confidential is revoked** (since 1.1.1,
+  #749). Its refresh tokens could be redeemed only with the secret; on a public
+  client the same tokens would redeem on `client_id` alone, for whoever holds
+  one. The conversion therefore revokes every refresh token of the client and
+  deletes its device grants, pending or approved, so **each device runs the
+  device flow once** after the conversion — which a device that holds no secret
+  had to do anyway, since its refresh tokens were unusable without one. The
+  revocation runs before the write: if it fails, the request fails and nothing
+  is converted, so retry the same request. It runs once more after the write,
+  for a refresh that read the client while it was still confidential; if that
+  second pass fails, the conversion stands, the server logs an error and the
+  audit row says `revocation_complete: false`.
 * **The rest of the registration still applies.** The merged client is held
   to the same rules a public registration is: no `fapi2` profile, and no mTLS
   binding, `jwks` or `jwks_uri` beside `none` — clear those in the same
@@ -196,8 +210,9 @@ client the request would produce hold the device grant
   [Refresh tokens of a DPoP-bound public client](#refresh-tokens-of-a-dpop-bound-public-client)),
   and the refresh tokens issued while it was confidential are bound to none,
   so each is refused `invalid_grant` at its next refresh and the device runs
-  the device flow again. A client not registered for DPoP keeps its refresh
-  tokens.
+  the device flow again. Since #749 the conversion revokes them in any case
+  (above), so the binding is what keeps the tokens issued **after** the
+  conversion bound to the device's key.
 
 **Every other conversion stays refused** with `400`, and writes nothing:
 

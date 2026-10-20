@@ -2500,11 +2500,15 @@ pub trait RefreshTokenRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Option<RefreshToken>>> + Send;
 
     /// Revoke all refresh tokens for a given client within a tenant.
+    /// Idempotent — already-revoked tokens are skipped and do not count
+    /// toward the returned total.
+    ///
+    /// Returns the number of tokens newly revoked.
     fn revoke_all_for_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Revoke all refresh tokens for a user within a tenant (e.g., on
     /// password change or reset). Idempotent — already-revoked tokens are

@@ -10,7 +10,8 @@ use axiam_core::models::oauth2_client::{
     OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{
-    AuditLogRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
+    AuditLogRepository, DeviceGrantRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
+    RefreshTokenRepository,
 };
 use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::{DateTime, Utc};
@@ -1222,14 +1223,83 @@ pub async fn update<C: Connection + Clone>(
         reject_sensitive_scopes_when_disabled(&state, user.tenant_id, &merged.scopes).await?;
     }
 
+    // #749 (R111W3-01) — a conversion revokes what the client was issued while
+    // confidential. Its refresh tokens and device grants could be redeemed only
+    // with the secret; once the client is public the same ones redeem on
+    // `client_id` alone. First pass before the write, and its failure refuses
+    // the request: nothing is converted, and the retry is the whole request.
+    // The other order could not be retried, because the repeat `PUT` finds the
+    // client already public and is no conversion.
+    let mut revoked = if converted_from.is_some() {
+        revoke_confidential_era_grants(&state, user.tenant_id, &stored.client_id).await?
+    } else {
+        RevokedGrants::default()
+    };
+
     let client = state
         .oauth2_client_repo
         .update_if_unchanged(user.tenant_id, id, update, stored.updated_at)
         .await?;
     if let Some(from) = converted_from {
-        audit_conversion_to_public(&state, &http, &user, &client, from).await;
+        // Second pass: a refresh or a device request that read the
+        // confidential row before the write may have issued a grant since the
+        // first. Logged and recorded rather than returned, as `delete` does:
+        // the conversion is durable, and a `5xx` for it would be retried as a
+        // no-op that answers `200`.
+        let complete = match revoke_confidential_era_grants(
+            &state,
+            user.tenant_id,
+            &client.client_id,
+        )
+        .await
+        {
+            Ok(again) => {
+                revoked.refresh_tokens += again.refresh_tokens;
+                revoked.device_grants += again.device_grants;
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    tenant_id = %user.tenant_id,
+                    client_id = %client.client_id,
+                    "a client converted to public could not have its grants revoked a second time"
+                );
+                false
+            }
+        };
+        audit_conversion_to_public(&state, &http, &user, &client, from, revoked, complete).await;
     }
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
+}
+
+/// What [`revoke_confidential_era_grants`] revoked (#749).
+#[derive(Debug, Default, Clone, Copy)]
+struct RevokedGrants {
+    refresh_tokens: u64,
+    device_grants: u64,
+}
+
+/// #749 (R111W3-01) — revoke the refresh tokens and delete the device grants
+/// of a client made public. A device-only client holds no other grant (no code,
+/// pushed request or CIBA request), so [`revoke_client_grants`]'s other stores
+/// are not visited. Idempotent, so it runs before and again after the write.
+async fn revoke_confidential_era_grants<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    client_id: &str,
+) -> Result<RevokedGrants, axiam_core::error::AxiamError> {
+    let refresh_tokens = state
+        .refresh_token_repo
+        .revoke_all_for_client(tenant_id, client_id)
+        .await?;
+    let device_grants = axiam_db::SurrealDeviceGrantRepository::new(state.db.clone())
+        .delete_all_for_client(tenant_id, client_id)
+        .await?;
+    Ok(RevokedGrants {
+        refresh_tokens,
+        device_grants,
+    })
 }
 
 /// #675 (D-4) — the grants a confidential client may hold and still be made
@@ -1254,15 +1324,18 @@ fn holds_only_device_grants(grant_types: &[String]) -> bool {
 /// The audit action of a confidential device client made public (#675).
 pub const CLIENT_CONVERTED_TO_PUBLIC_ACTION: &str = "oauth2.client_converted_to_public";
 
-/// The one audit row of a conversion to public (#675, D-4). Awaited, not
-/// detached; the conversion is already durable, so a failed append is logged
-/// rather than undoing it.
+/// The one audit row of a conversion to public (#675, D-4), with what the
+/// conversion revoked (#749) and whether the second revocation pass completed.
+/// Awaited, not detached; the conversion is already durable, so a failed append
+/// is logged rather than undoing it.
 async fn audit_conversion_to_public<C: Connection + Clone>(
     state: &AppState<C>,
     http: &HttpRequest,
     user: &AuthenticatedUser,
     client: &OAuth2Client,
     from: ClientAuthMethod,
+    revoked: RevokedGrants,
+    revocation_complete: bool,
 ) {
     let entry = CreateAuditLogEntry {
         tenant_id: client.tenant_id,
@@ -1278,6 +1351,9 @@ async fn audit_conversion_to_public<C: Connection + Clone>(
             "to": client.token_endpoint_auth_method.as_str(),
             "grant_types": client.grant_types,
             "client_secret_cleared": true,
+            "refresh_tokens_revoked": revoked.refresh_tokens,
+            "device_grants_deleted": revoked.device_grants,
+            "revocation_complete": revocation_complete,
         })),
     };
     if let Err(e) = state.audit_repo.append(entry).await {

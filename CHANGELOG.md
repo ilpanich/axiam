@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.1] - 2026-10-20
 
-1.1.1 follows 1.1.0 and closes the fifty-two issues its reviews filed (#664 …
-#699, #702 … #715, #717 and #718) with eight waves: PKI, Vault and the cleanup
+1.1.1 follows 1.1.0 and closes the fifty-three issues its reviews filed (#664 …
+#699, #702 … #715, #717, #718 and #749) with eight waves: PKI, Vault and the cleanup
 path (W1); rate limiting, audit attribution and SAML (W2); OAuth2, CIBA, the
 device grant and UMA (W3); network policy and the schema runner (W4); the
 FreeRADIUS recipe (W5); CI and tooling (W6); SDK contract 1.63 (W7); release
@@ -59,11 +59,11 @@ has one entry below, ending in its number.
   alone, clears the stored secret in the same write and writes one
   `oauth2.client_converted_to_public` audit row; the devices keep their
   `client_id`. Any other change between public and confidential is still refused
-  with `400`, and the console still refuses it, so use the API. **After
-  converting, revoke the client's existing refresh tokens or enable DPoP binding:**
-  a non-DPoP converted client's confidential-era refresh tokens and pending
-  device grants are still redeemable on `client_id` alone (#749, open for
-  1.1.2). The boot warning stops counting a converted client (#675).
+  with `400`, and the console still refuses it, so use the API. **The
+  conversion revokes the client's refresh tokens and deletes its device grants,**
+  so after converting **each device runs the device flow once** (its old
+  refresh token is `invalid_grant`); the audit row counts what was revoked
+  (#749). The boot warning stops counting a converted client (#675).
 - **Public clients with `dpop_bound_access_tokens` lose their outstanding
   refresh tokens at the upgrade.** Their refresh tokens are now bound to the
   DPoP key; a token issued before 1.1.1, or while the client was confidential,
@@ -115,6 +115,13 @@ has one entry below, ending in its number.
   (#670). **Authenticated waiters on the shared crypto semaphore give up after
   `hash_acquire_timeout_secs`:** PKI routes answer `503`, the SLO hop is
   partial, assertion signing answers a `503` retry page (#671).
+- **Converting a device client to public revokes what it was issued while
+  confidential:** its refresh tokens, which redeemed only with the secret, would
+  otherwise have redeemed on `client_id` alone, and its device grants are
+  deleted. The revocation runs before the conversion's write, whose failure
+  refuses the request with nothing converted, and once more after it; the
+  `oauth2.client_converted_to_public` row carries `refresh_tokens_revoked`,
+  `device_grants_deleted` and `revocation_complete` (#749).
 - **Every client-credential refusal costs one secret verify;** the residual is an
   assertion presented for an unknown client (T-289) (#679). **The admin `PUT` on
   a dynamically registered or CIMD client refuses a grant that self-registration
@@ -216,9 +223,8 @@ has one entry below, ending in its number.
 
 Each item is an open issue on `ilpanich/axiam`, filed by the release's reviews
 (none is a Critical, High or Medium finding): #720 … #730 (W5 and W4), #731 …
-#741 (W1 and W2), #745 … #747 and #749 (W3), #750 (the SDK conformance review)
-and #751 … #758 (the combined review). Among them: #749, the conversion leaves
-confidential-era refresh tokens redeemable (upgrade note above); #745,
+#741 (W1 and W2), #745 … #747 (W3), #750 (the SDK conformance review)
+and #751 … #758 (the combined review). Among them: #745,
 `/uma2/perm` mints tickets for another resource server's sets; #755, the
 migration lock is not checked. **#719** (drop the `zip` 8.6.0 audit ignores) is
 still open: `utoipa-swagger-ui` 10.0.1 pins `zip ^8.6`. **Open past the tag, the

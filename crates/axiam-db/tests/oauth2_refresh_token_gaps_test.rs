@@ -197,12 +197,22 @@ async fn revoke_all_for_client_revokes_only_that_clients_tokens() {
     )
     .await;
 
-    repo.revoke_all_for_client(tenant_id, "client-a")
-        .await
-        .unwrap();
+    assert_eq!(
+        repo.revoke_all_for_client(tenant_id, "client-a")
+            .await
+            .unwrap(),
+        1
+    );
 
     assert!(repo.get_by_token_hash(tenant_id, &hash_a).await.is_err());
     assert!(repo.get_by_token_hash(tenant_id, &hash_b).await.is_ok());
+    assert_eq!(
+        repo.revoke_all_for_client(tenant_id, "client-a")
+            .await
+            .unwrap(),
+        0,
+        "an already-revoked token is not counted again"
+    );
 }
 
 // ---------------------------------------------------------------------------

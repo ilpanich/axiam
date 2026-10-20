@@ -525,28 +525,24 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
-    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {
-        let client_id_owned = client_id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
-        let result = self
+    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        let mut result = self
             .db
             .current()
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
-                   AND client_id = $client_id",
+                   AND client_id = $client_id \
+                   AND revoked = false \
+                 RETURN AFTER",
             )
-            .bind(("tenant_id", tenant_id_str))
-            .bind(("client_id", client_id_owned))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
-        result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        Ok(())
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {

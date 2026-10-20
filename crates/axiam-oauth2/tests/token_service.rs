@@ -629,7 +629,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
     async fn find_rotated(&self, _t: Uuid, _h: &str) -> AxiamResult<Option<RefreshToken>> {
         Ok(self.rotated.clone())
     }
-    async fn revoke_all_for_client(&self, _t: Uuid, _c: &str) -> AxiamResult<()> {
+    async fn revoke_all_for_client(&self, _t: Uuid, _c: &str) -> AxiamResult<u64> {
         unimplemented!()
     }
     async fn revoke_all_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {

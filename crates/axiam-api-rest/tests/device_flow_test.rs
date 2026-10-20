@@ -2224,6 +2224,12 @@ async fn conversion_rows(f: &Fixture, client_id: &str) -> Vec<Value> {
 /// writes one audit row naming the conversion, and the device flow then runs
 /// end to end on `client_id` alone; the old secret is refused like any other
 /// credential a public client presents.
+///
+/// #749 (R111W3-01) — what the client was issued while confidential does not
+/// survive the conversion: a refresh token minted with the secret is
+/// `invalid_grant` afterwards (it would otherwise redeem on `client_id`
+/// alone), a pending device grant is gone, and the audit row counts both. A
+/// device flow run after the conversion refreshes.
 #[actix_web::test]
 async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only_its_client_id() {
     let f = setup().await;
@@ -2238,6 +2244,28 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
     .await;
     let before = stored_client(&f, &client_id).await;
     assert!(!before.client_secret_hash.is_empty());
+
+    // While confidential: a flow run with the secret yields a refresh token
+    // that redeems only with the secret, and another device's start is pending.
+    let secret_param = format!("&client_secret={}", urlencoding(&secret));
+    let (approved, _) = seed_grant_for(&f, &client_id, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        poll_body(&client_id, &approved) + &secret_param
+    );
+    assert_eq!(status, 200, "{body}");
+    let confidential_era = body["refresh_token"].as_str().unwrap().to_owned();
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        refresh_body(&client_id, &confidential_era, "")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid_client"))
+    );
+    let (pending, _) = seed_grant_for(&f, &client_id, DeviceGrantStatus::Pending, 600, 0).await;
 
     // Before: the device's own request is refused.
     let (status, body) = post_form_with!(
@@ -2280,6 +2308,32 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
     );
     assert_eq!(rows[0]["metadata"]["from"], "client_secret_post");
     assert_eq!(rows[0]["metadata"]["to"], "none");
+    assert_eq!(rows[0]["metadata"]["refresh_tokens_revoked"], 1);
+    assert_eq!(
+        rows[0]["metadata"]["device_grants_deleted"], 2,
+        "the redeemed grant and the pending one"
+    );
+    assert_eq!(rows[0]["metadata"]["revocation_complete"], true);
+
+    // The confidential-era grants are gone: the refresh token is refused like
+    // an unknown one, and the pending device code no longer exists.
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        refresh_body(&client_id, &confidential_era, "")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "{body}"
+    );
+    assert!(
+        SurrealDeviceGrantRepository::new(f.db.clone())
+            .get_by_device_code_hash(f.tenant_id, &hash_device_code(&pending))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // After: the start and the poll on `client_id` alone.
     let (status, body) = post_form_with!(
@@ -2313,6 +2367,15 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body["access_token"].as_str().unwrap().is_empty());
+
+    // A refresh token issued after the conversion refreshes on `client_id`.
+    let (status, body) = post_token!(
+        app,
+        f.tenant_id,
+        refresh_body(&client_id, body["refresh_token"].as_str().unwrap(), "")
+    );
     assert_eq!(status, 200, "{body}");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
 }

@@ -275,3 +275,164 @@ impl std::fmt::Display for NetworkConflict {
         }
     }
 }
+
+#[cfg(test)]
+mod network_conflict_tests {
+    use super::*;
+
+    fn every_conflict() -> Vec<NetworkConflict> {
+        vec![
+            NetworkConflict::StaleSegment,
+            NetworkConflict::StaleProfile,
+            NetworkConflict::StalePolicy,
+            NetworkConflict::PlacementRaced,
+            NetworkConflict::StaleRole {
+                what_landed: "a revoke".into(),
+            },
+            NetworkConflict::StrandsProfile {
+                segment_id: None,
+                filter_id: None,
+            },
+            NetworkConflict::HasChildren,
+            NetworkConflict::SiteGone,
+            NetworkConflict::DuplicateVlan,
+            NetworkConflict::DuplicateRank,
+            NetworkConflict::DuplicateName,
+            NetworkConflict::ProfileExists,
+        ]
+    }
+
+    /// `AxiamError::Network` shows the conflict's own sentence, which is what
+    /// the `409` body carries.
+    #[test]
+    fn the_error_displays_the_conflicts_own_sentence() {
+        for conflict in every_conflict() {
+            assert_eq!(
+                AxiamError::Network(conflict.clone()).to_string(),
+                conflict.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_write_asks_the_caller_to_read_again_and_retry() {
+        for (conflict, subject) in [
+            (NetworkConflict::StaleSegment, "the network segment"),
+            (NetworkConflict::StaleProfile, "the reply profile"),
+            (NetworkConflict::StalePolicy, "the network policy"),
+        ] {
+            let sentence = conflict.to_string();
+            assert!(sentence.starts_with(subject), "{sentence}");
+            assert!(sentence.ends_with("read it again and retry"), "{sentence}");
+        }
+        assert_eq!(
+            NetworkConflict::PlacementRaced.to_string(),
+            "the network segment changed since it was read (a reply profile was written on it); \
+             read it again and retry"
+        );
+        assert_eq!(
+            NetworkConflict::StaleRole {
+                what_landed: "the role was revoked".into()
+            }
+            .to_string(),
+            "the role changed since it was read (the role was revoked); read it again and retry"
+        );
+    }
+
+    /// The sentence names as much of the stranded profile as the caller knew.
+    #[test]
+    fn a_stranded_profile_is_named_as_far_as_it_is_known() {
+        let segment_id = uuid::Uuid::nil();
+        let full = NetworkConflict::StrandsProfile {
+            segment_id: Some(segment_id),
+            filter_id: Some("f-1".into()),
+        };
+        assert_eq!(
+            full.to_string(),
+            format!(
+                "the segment's reply profile {segment_id} uses filter_id 'f-1', which the new \
+                 filter_ids remove; change or delete the profile first"
+            )
+        );
+        let without_filter = NetworkConflict::StrandsProfile {
+            segment_id: Some(segment_id),
+            filter_id: None,
+        };
+        assert_eq!(
+            without_filter.to_string(),
+            format!(
+                "the new filter_ids would leave the segment's reply profile {segment_id} outside \
+                 its envelope; change or delete the profile first"
+            )
+        );
+        let unnamed = NetworkConflict::StrandsProfile {
+            segment_id: None,
+            filter_id: Some("f-1".into()),
+        };
+        assert_eq!(
+            unnamed.to_string(),
+            "the new filter_ids would leave the segment's reply profile outside its envelope; \
+             change or delete the profile first"
+        );
+    }
+
+    #[test]
+    fn the_structural_refusals_carry_their_sentences() {
+        assert_eq!(
+            NetworkConflict::HasChildren.to_string(),
+            "the network segment has child resources"
+        );
+        assert_eq!(
+            NetworkConflict::SiteGone.to_string(),
+            "the network site was removed while the segment was being written; retry"
+        );
+    }
+
+    #[test]
+    fn the_uniqueness_clashes_say_the_entity_already_exists() {
+        assert_eq!(
+            NetworkConflict::DuplicateVlan.to_string(),
+            "Entity already exists: network_segment: the site already has a segment with this vlan_id"
+        );
+        assert_eq!(
+            NetworkConflict::DuplicateRank.to_string(),
+            "Entity already exists: network_segment: the site already has a segment with this rank"
+        );
+        assert_eq!(
+            NetworkConflict::DuplicateName.to_string(),
+            "Entity already exists: network_segment: the site already has a segment of this name"
+        );
+        assert_eq!(
+            NetworkConflict::ProfileExists.to_string(),
+            "Entity already exists: reply_profile"
+        );
+    }
+
+    /// The two predicates partition the variants the REST layer maps: a
+    /// uniqueness clash is never stale, and neither predicate holds for the
+    /// structural refusals.
+    #[test]
+    fn uniqueness_and_staleness_classify_every_conflict() {
+        let classified: Vec<(bool, bool)> = every_conflict()
+            .iter()
+            .map(|c| (c.is_uniqueness(), c.is_stale()))
+            .collect();
+        assert_eq!(
+            classified,
+            vec![
+                (false, true),  // StaleSegment
+                (false, true),  // StaleProfile
+                (false, true),  // StalePolicy
+                (false, true),  // PlacementRaced
+                (false, true),  // StaleRole
+                (false, false), // StrandsProfile
+                (false, false), // HasChildren
+                (false, false), // SiteGone
+                (true, false),  // DuplicateVlan
+                (true, false),  // DuplicateRank
+                (true, false),  // DuplicateName
+                (true, false),  // ProfileExists
+            ]
+        );
+    }
+}

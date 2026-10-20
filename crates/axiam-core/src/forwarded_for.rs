@@ -195,4 +195,26 @@ mod tests {
         assert!(listed.boot_warning(true).is_none());
         assert!(listed.boot_warning(false).is_none());
     }
+
+    /// The variable is unset in the test environment, which reads as the empty
+    /// list (every peer's header is honoured); the process-wide list agrees and
+    /// is parsed once, so two reads are the same list.
+    #[test]
+    fn an_unset_variable_reads_as_the_empty_list_and_the_configured_list_agrees() {
+        if std::env::var_os(TRUSTED_PROXIES_VAR).is_some() {
+            return; // the environment names a list; the cases above cover parsing
+        }
+        assert!(
+            TrustedProxies::from_env()
+                .expect("unset is not an error")
+                .is_empty()
+        );
+        let configured = TrustedProxies::configured();
+        assert!(configured.is_empty());
+        assert_eq!(configured, TrustedProxies::configured());
+        assert!(
+            configured.honours_forwarded_for(None),
+            "no list: every request is honoured"
+        );
+    }
 }

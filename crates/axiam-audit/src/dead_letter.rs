@@ -393,10 +393,12 @@ impl DeadLetterTarget {
 /// task that panicked or was cancelled is reported as an I/O error, the same as
 /// a write that failed. Needs a Tokio runtime.
 ///
-/// A failure is logged here, inside the blocking task, so the line does not
+/// An I/O failure is logged here, inside the blocking task, so the line does not
 /// depend on the caller still being there to read the result (#690): it names the
 /// path and the I/O error and nothing of the record. The caller therefore does
-/// not log it again.
+/// not log it again. The other failure, a write task that panicked, is only
+/// seen by the awaiter below, so it is logged only if the caller is still there;
+/// when the caller was cut, the panic hook alone reports it.
 pub async fn append_off_thread(
     target: DeadLetterTarget,
     record: DeadLetterRecord,

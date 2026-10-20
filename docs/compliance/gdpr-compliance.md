@@ -204,7 +204,7 @@ itself. An unbound certificate of the account outside the bounds stays active
 and is an administrator's to revoke by id. It runs first
 because that convention reads the names the anonymization overwrites; it is
 fail-closed, so a failure leaves the account due and the next sweep retries.
-A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure.
+A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure. The recovery of an erasure cut past its point of no return (the next start's sweep) writes `gdpr.user_pseudonymized` and completes the request but writes no erasure proof and does not repeat this pass; that gap is open as #737, for 1.1.2.
 The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
 its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
 from the `vault_revocation` sweep — under the same security retention the tenant deletion below records

@@ -592,7 +592,8 @@ where
             return Ok(PurgeOutcome::Abandoned);
         }
     };
-    // The point of no return is never crossed once the process is stopping.
+    // Once the process is stopping, no new crossing of the point of no return
+    // starts (a crossing already being sent completes).
     if work.stopping() {
         claim.release().await;
         return Ok(PurgeOutcome::Abandoned);
@@ -814,7 +815,8 @@ where
             return Ok(PurgeOutcome::Abandoned);
         }
     };
-    // The point of no return is never crossed once the process is stopping.
+    // Once the process is stopping, no new crossing of the point of no return
+    // starts (a crossing already being sent completes).
     if work.stopping() {
         claim.release().await;
         return Ok(PurgeOutcome::Abandoned);
@@ -1151,15 +1153,16 @@ pub type UnitStepForTests = Arc<
 /// its own ([`Self::run`]), so aborting the cleanup task — the composition
 /// root's bounded join — does not cut one. The root then waits for the unit in
 /// flight with [`Self::join`], within the same bound, and aborts it past that,
-/// so a replica that lost its lease writes nothing after its stop's budget.
+/// so a replica that lost its lease writes nothing of its own code after its
+/// stop's budget (a statement already sent may still commit).
 ///
 /// Each unit has a **point of no return** — the write after which no later
 /// sweep finds the work again: the removal of the tenant row; the anonymization
 /// of the account. Before it, the unit gives itself up as soon as the process
 /// is stopping (the tenant stays tombstoned, its claim released; the account
-/// stays due), and it never crosses it once the stop is requested. So the only
-/// unit a stop can find past its point of no return crossed it before the stop
-/// was requested, and it has the whole of the teardown's window for its last
+/// stays due), and it starts no new crossing once the stop is requested (a
+/// crossing already being sent completes). So the only unit a stop can find
+/// past its point of no return began crossing it before the stop was requested, and it has the whole of the teardown's window for its last
 /// statements — from the stop signal through the gRPC stop, the lease release
 /// and the outbound and audit drains to the end of the cleanup bound: 5 to 18 s
 /// for `SIGTERM`, 2 to 13 s after a lost lease, whose stop signal comes at the

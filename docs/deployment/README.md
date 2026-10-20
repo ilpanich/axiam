@@ -1929,8 +1929,9 @@ finished rather than wait for it:
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`. The erasure and its proof, or the purge,
-    stand, and **the next start writes the row** (#689, schema v108): the point
+    not reach its audit row in time`. The erasure, or the purge,
+    stands (an erasure's proof too, unless it was cut before the proof: see
+    the list below), and **the next start writes the row** (#689, schema v108): the point
     of no return leaves a marker in its own transaction —
     `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
     row keyed by the tenant id — which the work clears with its row, and the
@@ -1950,6 +1951,15 @@ finished rather than wait for it:
     which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
     is not in the datastore, so the sweep writes it there too: replay the
     dead-letter file with that in mind;
+  - an erasure cut between its anonymization and its erasure proof: the
+    recovery writes the record and completes the request, but it writes no
+    proof and does not repeat the second certificate revocation of #668, and
+    the unit's marker guard is armed only after the proof, so a cut before it
+    leaves the marker to the one-hour lease and not to the next start. The
+    erasure is complete as far as the account is concerned; what can be
+    missing is the proof and, for a certificate bound to the account in that
+    window, one revocation (an administrator revokes it by id). Open as
+    #737, for 1.1.2;
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 

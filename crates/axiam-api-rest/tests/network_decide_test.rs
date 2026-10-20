@@ -1,4 +1,4 @@
-//! `POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS D4,
+//! `POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS Live profile,
 //! W6.4; `claude_dev/radius-reply-profile-design.md` §3.4, §4.3, §4.4, §6.3, §7,
 //! §8; threat T-468).
 //!

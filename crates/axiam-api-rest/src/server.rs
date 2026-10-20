@@ -46,7 +46,7 @@ const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 /// scales a different knob and the two are tuned apart.
 const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
 
-/// RADIUS D4 (W6.4): how many times the per-caller allowance of the decision
+/// RADIUS Live profile (W6.4): how many times the per-caller allowance of the decision
 /// route (`network_decide_per_min`) its per-address backstop admits. Sized so
 /// that several FreeRADIUS servers behind one address never meet it, while a
 /// burst of calls with a token that does not authenticate does.
@@ -1842,7 +1842,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     ),
             )
-            // --- Network segments and RADIUS reply profiles (RADIUS D4, W6.3;
+            // --- Network segments and RADIUS reply profiles (RADIUS Live profile, W6.3;
             // `claude_dev/radius-reply-profile-design.md` §5.1). The tenant is
             // the token's. Reads are unlimited; each of the six writes has a
             // bucket of its own under `network_admin_per_min`, named
@@ -1943,7 +1943,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     ),
             )
-            // --- The RADIUS placement decision (RADIUS D4, W6.4; design note
+            // --- The RADIUS placement decision (RADIUS Live profile, W6.4; design note
             // §6.3, T-468). The caller is FreeRADIUS's service account with a
             // certificate-bound token, so its bucket is the caller's `sub`
             // (`network_decide_per_min`, D-6), spent by the handler once the

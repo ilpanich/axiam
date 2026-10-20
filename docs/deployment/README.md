@@ -967,7 +967,10 @@ A server with native TLS on and the list empty therefore logs one `WARN` at
 boot naming the variable. Even with the list set, do not expose the listener to
 the internet without the appending proxy: a client that reaches it directly is
 limited per address, not per proxy-reported client, and every route is served
-there. *(Corrected 2026-10-16: the row said the header was absent on a direct
+there. Where a client must reach it directly — the FreeRADIUS recipe's Live
+profile, whose mutual TLS has to end at AXIAM
+([`docs/pki/freeradius.md`](../pki/freeradius.md#the-connection-mutual-tls-that-ends-at-axiam))
+— admit only that client to it with a firewall or a network policy. *(Corrected 2026-10-16: the row said the header was absent on a direct
 connection, R110-05. Amended 2026-10-19: `TRUSTED_PROXIES` added, #711; the row
 now says what a direct server sees when the caller writes the header, #715 (b).)*
 

@@ -1,5 +1,5 @@
 //! 802.1X with an AXIAM-issued `Device` certificate, against a real FreeRADIUS
-//! and a real `eapol_test` (W6.2, D3 of the RADIUS spike).
+//! and a real `eapol_test` (W6.2, the Static profile of the RADIUS spike).
 //!
 //! The recipe in `docs/pki/freeradius.md` makes claims about a configuration
 //! AXIAM does not run and cannot unit-test. This file is the oracle for them:
@@ -55,11 +55,11 @@
 //! EAP-MD5 is refused, and an Access-Request without a `Message-Authenticator`
 //! is discarded.
 //!
-//! # D4: the decision per authentication
+//! # Live: the decision per authentication
 //!
 //! A second test, [`a_decision_per_authentication_places_revokes_and_quarantines`],
-//! runs the same FreeRADIUS with the D4 profile
-//! (`docker/docker-compose.radius-d4.yml`, `docker/radius/raddb/d4/`): no placement
+//! runs the same FreeRADIUS with the Live profile
+//! (`docker/docker-compose.radius-live.yml`, `docker/radius/raddb/live/`): no placement
 //! table, but `rlm_rest` calling `POST /api/v1/auth/device` and
 //! `POST /api/v1/network/decide` on an AXIAM that this process runs behind a REAL
 //! TLS listener, the production one (`axiam_server::tls`: TLS 1.3, client
@@ -164,10 +164,10 @@ const CRL_PEER: &str = "203.0.113.30:4000";
 const MGMT_PEER: &str = "203.0.113.31:4000";
 /// The VLAN the placement table puts every device on.
 const VLAN: &str = "20";
-/// The name AXIAM's TLS certificate carries and the D4 override maps, inside the
-/// container, to the host (docker/docker-compose.radius-d4.yml).
+/// The name AXIAM's TLS certificate carries and the Live override maps, inside the
+/// container, to the host (docker/docker-compose.radius-live.yml).
 const AXIAM_HOST: &str = "axiam.radius.test";
-/// The AXIAM site key of the D4 cases: the `shortname` of FreeRADIUS's client.
+/// The AXIAM site key of the Live cases: the `shortname` of FreeRADIUS's client.
 const SITE: &str = "hq";
 
 /// One stack at a time: the two tests share a work directory, a container name
@@ -302,7 +302,7 @@ fn unix_now() -> u64 {
 
 struct Stack {
     /// The compose files, in the order `docker compose -f` reads them: the base
-    /// file, and for the D4 profile its override.
+    /// file, and for the Live profile its override.
     files: Vec<PathBuf>,
     env_file: PathBuf,
 }
@@ -315,12 +315,12 @@ impl Stack {
         }
     }
 
-    /// The D4 profile: the base file with the override beside it.
-    fn d4(work: &Path) -> Self {
+    /// The Live profile: the base file with the override beside it.
+    fn live(work: &Path) -> Self {
         let mut stack = Self::new(work);
         stack
             .files
-            .push(repo_root().join("docker/docker-compose.radius-d4.yml"));
+            .push(repo_root().join("docker/docker-compose.radius-live.yml"));
         stack
     }
 
@@ -353,7 +353,7 @@ impl Stack {
     }
 
     /// Replace the environment file and re-create the container from it: the
-    /// D4 cases that change what FreeRADIUS is configured with (the site key, the
+    /// Live cases that change what FreeRADIUS is configured with (the site key, the
     /// address of AXIAM) do it through the variables the override reads.
     fn recreate_with(&self, env: &str) {
         std::fs::write(&self.env_file, env).expect("the env file can be written");
@@ -530,10 +530,10 @@ impl Radius<'_> {
         self.run_eapol(&conf)
     }
 
-    /// [`Self::eap_tls`] for the D4 cases, which must not block the thread:
+    /// [`Self::eap_tls`] for the Live cases, which must not block the thread:
     /// FreeRADIUS calls AXIAM while `eapol_test` runs, and AXIAM — the database
     /// engine and the test application with it — runs on this thread's runtime.
-    async fn eap_tls_d4(&self, name: &str, cert: &str, key: &str) -> Attempt {
+    async fn eap_tls_live(&self, name: &str, cert: &str, key: &str) -> Attempt {
         let conf = self.supplicant_conf(name, cert, key, true);
         // FreeRADIUS logs with one-second resolution: start each attempt in a
         // second of its own so a reason read from the log is this attempt's.
@@ -743,9 +743,8 @@ impl Api {
     }
 
     /// `GET /pki/v1/{org}/ca/{ca}/crl`, with no credential, as a relying party
-    /// calls it. Returns the DER list.
-    /// `GET /pki/v1/{org}/ca/{ca}/crl`, optionally conditional: the status, the
-    /// body and the `ETag` the route answered with.
+    /// calls it, optionally conditional: the status, the body and the `ETag`
+    /// the route answered with.
     async fn crl_tagged(&self, org: Uuid, ca: &str, if_none_match: Option<&str>) -> TaggedReply {
         let mut req = test::TestRequest::get()
             .uri(&format!("/pki/v1/{org}/ca/{ca}/crl"))
@@ -756,6 +755,8 @@ impl Api {
         (self.call_tagged)(req).await
     }
 
+    /// The same request, unconditional, asserted to answer `200`. Returns the
+    /// DER list.
     async fn crl(&self, org: Uuid, ca: &str) -> Vec<u8> {
         let (status, body, _) = self.crl_tagged(org, ca, None).await;
         assert_eq!(status, 200, "the CRL route answers a relying party");
@@ -1613,7 +1614,7 @@ fn say(step: &str, what: &str) {
 
 /// What every run starts from: its directory, the secret, FreeRADIUS's address and
 /// the CA that signs the TLS certificates the SUPPLICANT is shown (FreeRADIUS's
-/// own, and in D4 AXIAM's).
+/// own, and in the Live profile AXIAM's).
 struct Run {
     work: PathBuf,
     trust: PathBuf,
@@ -2297,7 +2298,7 @@ async fn eap_tls_with_an_axiam_issued_device_certificate() {
 }
 
 // ===========================================================================
-// D4: a decision per authentication
+// Live: a decision per authentication
 // ===========================================================================
 
 fn page() -> Pagination {
@@ -2308,7 +2309,7 @@ fn page() -> Pagination {
     }
 }
 
-/// The SHA-256 of a certificate's DER in lowercase hex: what the D4 hook leaves
+/// The SHA-256 of a certificate's DER in lowercase hex: what the Live hook leaves
 /// for the decision, what the route is posted, and what the audit row records.
 fn certificate_fingerprint(pem: &str) -> String {
     hex::encode(Sha256::digest(openssl_in(
@@ -2323,8 +2324,8 @@ fn gateway_of(ip: &str) -> String {
     format!("{network}.1")
 }
 
-/// The environment file of the D4 override (docker/docker-compose.radius-d4.yml).
-fn d4_env(secret: &str, url: &str, site: &str, host_ip: &str) -> String {
+/// The environment file of the Live override (docker/docker-compose.radius-live.yml).
+fn live_env(secret: &str, url: &str, site: &str, host_ip: &str) -> String {
     format!(
         "RADIUS_E2E_SHARED_SECRET={secret}\nRADIUS_E2E_AXIAM_URL={url}\n\
          RADIUS_E2E_SITE={site}\nRADIUS_E2E_AXIAM_HOST_IP={host_ip}\n"
@@ -2532,7 +2533,7 @@ fn uuid_of(value: &Value) -> Uuid {
         .expect("an id")
 }
 
-/// AXIAM behind its real TLS listener (D4): the production route table, the
+/// AXIAM behind its real TLS listener (Live profile): the production route table, the
 /// production `on_connect` hook, rustls verifying client certificates.
 struct Axiam {
     handle: ServerHandle,
@@ -2545,8 +2546,31 @@ fn serve_axiam(
     authz: Arc<dyn AuthzChecker>,
     tls: rustls::ServerConfig,
 ) -> Axiam {
+    serve_axiam_on(0, state, auth, authz, tls)
+}
+
+/// [`serve_axiam`] on `port` (`0`: any). A port just released by a stopped listener
+/// can take a moment to be free again, so a bind that fails is tried again for a few
+/// seconds.
+fn serve_axiam_on(
+    port: u16,
+    state: AppState<TestDb>,
+    auth: AuthConfig,
+    authz: Arc<dyn AuthzChecker>,
+    tls: rustls::ServerConfig,
+) -> Axiam {
     // All interfaces: the container reaches the host at its network's gateway.
-    let listener = TcpListener::bind("0.0.0.0:0").expect("a port for AXIAM");
+    let mut tries = 0;
+    let listener = loop {
+        match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(listener) => break listener,
+            Err(_) if port != 0 && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("a port for AXIAM: {error}"),
+        }
+    };
     let port = listener.local_addr().expect("its address").port();
     let server = HttpServer::new(move || {
         App::new()
@@ -2682,17 +2706,17 @@ fn assert_refused_by_the_decision(attempt: &Attempt, what: &str) {
     );
 }
 
-/// The D4 case is one long `async fn`; in a debug build its state is far larger
+/// The Live case is one long `async fn`; in a debug build its state is far larger
 /// than the 2 MiB a test thread gets, so it runs on a thread of its own with room
 /// for it, on the same kind of runtime `#[actix_web::test]` would have made.
 // `test` is `actix_web::test` in this file, so the attribute is spelt in full.
 #[::core::prelude::v1::test]
 fn a_decision_per_authentication_places_revokes_and_quarantines() {
     let thread = std::thread::Builder::new()
-        .name("radius-e2e-d4".into())
+        .name("radius-e2e-live".into())
         .stack_size(256 * 1024 * 1024)
         .spawn(|| actix_web::rt::System::new().block_on(decision_per_authentication()))
-        .expect("a thread for the D4 case");
+        .expect("a thread for the Live case");
     if let Err(panic) = thread.join() {
         std::panic::resume_unwind(panic);
     }
@@ -2735,8 +2759,8 @@ async fn decision_per_authentication() {
     axiam_db::run_migrations(&db).await.expect("migrations");
     let auth = auth_config();
     let state = AppState::for_test(db.clone(), auth.clone());
-    // The PKI calls need no roles (as in the D3 case); the network routes and the
-    // decision are authorized by the real engine, which is what D4 is about.
+    // The PKI calls need no roles (as in the Static case); the network routes and the
+    // decision are authorized by the real engine, which is what the Live profile is about.
     let api = Api::new(
         state.clone(),
         auth.clone(),
@@ -2847,23 +2871,24 @@ async fn decision_per_authentication() {
     // ---- AXIAM's listener, and the stack -----------------------------------
     let client_ca = work.join("client-ca.pem");
     std::fs::write(&client_ca, &root.pem).expect("the client CA bundle can be written");
-    let tls = axiam_server::tls::build_rustls_server_config(&TlsConfig {
+    let tls_config = TlsConfig {
         enabled: true,
         cert_path: Some(work.join("axiam.pem")),
         key_path: Some(work.join("axiam.key")),
         client_auth: ClientAuth::Optional,
         client_ca_path: Some(client_ca),
         ..TlsConfig::default()
-    })
-    .expect("AXIAM's TLS configuration");
-    let axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
+    };
+    let tls = axiam_server::tls::build_rustls_server_config(&tls_config)
+        .expect("AXIAM's TLS configuration");
+    let mut axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
     let host_ip = gateway_of(&ip);
     let axiam_url = format!("https://{AXIAM_HOST}:{}", axiam.port);
 
-    // The trust FreeRADIUS needs for EAP-TLS, as in D3, but no placement table.
+    // The trust FreeRADIUS needs for EAP-TLS, as in the Static profile, but no placement table.
     std::fs::write(trust.join("ca.pem"), &line1.pem).expect("the CA can be written");
     set_readable(&trust.join("ca.pem"));
-    // The list reaches `ca_path` through the fetch script, as in D3.
+    // The list reaches `ca_path` through the fetch script, as in the Static profile.
     let mirror = Mirror::start();
     refresh_crl(
         &api,
@@ -2882,11 +2907,11 @@ async fn decision_per_authentication() {
 
     std::fs::write(
         work.join("env"),
-        d4_env(&secret, &axiam_url, SITE, &host_ip),
+        live_env(&secret, &axiam_url, SITE, &host_ip),
     )
     .expect("the env file can be written");
     // The override names no image: it is the base file's, pinned once.
-    let stack = Stack::d4(&work);
+    let stack = Stack::live(&work);
     stack.up();
     let radius = Radius {
         stack: &stack,
@@ -2897,14 +2922,14 @@ async fn decision_per_authentication() {
     say(
         "stack",
         &format!(
-            "FreeRADIUS 3.2.8 with the D4 profile up; AXIAM on {axiam_url}, mutual TLS, no table"
+            "FreeRADIUS 3.2.8 with the Live profile up; AXIAM on {axiam_url}, mutual TLS, no table"
         ),
     );
 
     // ---- placement from a profile -------------------------------------------
     let fp07 = certificate_fingerprint(&press07.pem);
     let first = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert!(
         first.accepted,
@@ -2913,7 +2938,7 @@ async fn decision_per_authentication() {
     );
     assert_tunnel(&first, "20", "placement");
     // Everything below came from AXIAM's profile of the segment, not from a table
-    // (the D3 table says 3600, no Idle-Timeout and no Filter-Id).
+    // (the Static table says 3600, no Idle-Timeout and no Filter-Id).
     assert_eq!(first.accept_value(27).as_deref(), Some("1800"));
     assert_eq!(first.accept_value(29).as_deref(), Some("1"));
     assert_eq!(first.accept_value(28).as_deref(), Some("600"));
@@ -2944,7 +2969,7 @@ async fn decision_per_authentication() {
 
     // The token is cached: the next authentication does not log in again.
     let second = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert!(
         second.accepted,
@@ -2968,7 +2993,7 @@ async fn decision_per_authentication() {
 
     // ---- an unbound certificate ----------------------------------------------
     let unbound = radius
-        .eap_tls_d4("press-10", path_str(&press10.cert), path_str(&press10.key))
+        .eap_tls_live("press-10", path_str(&press10.cert), path_str(&press10.key))
         .await;
     assert_refused_by_the_decision(&unbound, "unbound");
     let rows = net
@@ -2984,7 +3009,7 @@ async fn decision_per_authentication() {
 
     // ---- revocation at the next authentication ---------------------------------
     let before = radius
-        .eap_tls_d4("press-09", path_str(&press09.cert), path_str(&press09.key))
+        .eap_tls_live("press-09", path_str(&press09.cert), path_str(&press09.key))
         .await;
     assert!(
         before.accepted,
@@ -3000,10 +3025,10 @@ async fn decision_per_authentication() {
         .await;
     assert_eq!(status, 200, "revoked: AXIAM revokes press-09");
     let revoked_at = Instant::now();
-    // FreeRADIUS has not been given a new list (the D3 case waits for one):
+    // FreeRADIUS has not been given a new list (the Static case waits for one):
     // EAP-TLS still trusts the certificate, and the decision refuses it.
     let after = radius
-        .eap_tls_d4("press-09", path_str(&press09.cert), path_str(&press09.key))
+        .eap_tls_live("press-09", path_str(&press09.cert), path_str(&press09.key))
         .await;
     assert_refused_by_the_decision(&after, "revoked");
     assert!(
@@ -3025,7 +3050,7 @@ async fn decision_per_authentication() {
         "revoked: refused at the very next authentication, not after a CRL interval ({lag:?})"
     );
     let other = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert!(
         other.accepted,
@@ -3042,7 +3067,7 @@ async fn decision_per_authentication() {
 
     // ---- quarantine ------------------------------------------------------------
     let free = radius
-        .eap_tls_d4("press-08", path_str(&press08.cert), path_str(&press08.key))
+        .eap_tls_live("press-08", path_str(&press08.cert), path_str(&press08.key))
         .await;
     assert!(
         free.accepted,
@@ -3055,7 +3080,7 @@ async fn decision_per_authentication() {
     // segment is untouched.
     net.grant(account08, &[(NETWORK_JOIN, deny)], zones).await;
     let quarantined = radius
-        .eap_tls_d4("press-08", path_str(&press08.cert), path_str(&press08.key))
+        .eap_tls_live("press-08", path_str(&press08.cert), path_str(&press08.key))
         .await;
     assert!(
         quarantined.accepted,
@@ -3074,7 +3099,7 @@ async fn decision_per_authentication() {
     // No baseline, a deny: no candidate, no default VLAN.
     net.grant(account11, &[(NETWORK_JOIN, deny)], zones).await;
     let nowhere = radius
-        .eap_tls_d4("press-11", path_str(&press11.cert), path_str(&press11.key))
+        .eap_tls_live("press-11", path_str(&press11.cert), path_str(&press11.key))
         .await;
     assert_refused_by_the_decision(&nowhere, "denied, no baseline");
     let rows = net
@@ -3087,13 +3112,109 @@ async fn decision_per_authentication() {
          baseline) refused",
     );
 
+    // ---- a 401 from the decision drops the cached token (#707) ----------------------
+    // The cache holds a token bound to FreeRADIUS's certificate. The account's binding is
+    // rotated under it: a new Service certificate is issued, bound to a new account that
+    // decides for the site, the old certificate is revoked, FreeRADIUS is given the new
+    // one, and AXIAM's listener is restarted on its port so that FreeRADIUS's next
+    // connection presents it. FreeRADIUS is NOT restarted, so the cache still holds the
+    // old token: the decision answers 401 to it (its `cnf` is the old certificate), and
+    // the recipe must log in again and ask once more, with no wait for the entry to age.
+    let warm = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        warm.accepted && warm.log.contains("Found entry for \"axiam-decide-caller\""),
+        "rotation: a cached token before the rotation:\n{}",
+        warm.report()
+    );
+    let (status, leaf) = try_issue(&api, &plant, 0, &line1, "freeradius-hq-2", "Service").await;
+    assert_eq!(status, 201, "rotation: FreeRADIUS's new certificate");
+    let rotated = write_device(&leaf, "freeradius-hq-2", &work);
+    let rotated_account: Uuid = bind(&api, &plant, 0, &rotated)
+        .await
+        .parse()
+        .expect("the service account id");
+    for kind in [NetworkSegmentKind::Access, NetworkSegmentKind::Quarantine] {
+        net.grant(
+            rotated_account,
+            &[(NETWORK_DECIDE, PermissionEffect::Allow)],
+            site_node_id(tenant, kind, SITE),
+        )
+        .await;
+    }
+    let (status, _) = api
+        .post(
+            &format!("/api/v1/certificates/{}/revoke", caller.id),
+            &plant.tenants[0].1,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "rotation: the old certificate is revoked");
+    let chain = write_chain(&work, "freeradius-hq-2-chain", &[&rotated.pem, &line1.pem]);
+    std::fs::copy(&chain, trust.join("rest-chain.pem")).expect("the chain can be copied");
+    std::fs::copy(&rotated.key, trust.join("rest.key")).expect("the key can be copied");
+    set_readable(&trust.join("rest-chain.pem"));
+    set_readable(&trust.join("rest.key"));
+    axiam.handle.stop(false).await;
+    // A configuration of its own, so that no session ticket of the old one resumes
+    // a connection as the old certificate.
+    axiam = serve_axiam_on(
+        axiam.port,
+        state.clone(),
+        auth.clone(),
+        Arc::clone(&engine),
+        axiam_server::tls::build_rustls_server_config(&tls_config)
+            .expect("AXIAM's TLS configuration, again"),
+    );
+    let healed = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        healed.accepted,
+        "rotation: the authentication after the 401 is admitted, with no wait for the entry:\n{}",
+        healed.report()
+    );
+    assert_tunnel(&healed, "20", "rotation");
+    assert!(
+        healed
+            .log
+            .contains("Found entry for \"axiam-decide-caller\"")
+            && healed.log.contains("401")
+            && healed.log.contains("/api/v1/auth/device"),
+        "rotation: the cached token was tried, answered 401, and a new one was fetched:\n{}",
+        healed.log
+    );
+    assert!(
+        healed.log.matches("/api/v1/network/decide").count() >= 2,
+        "rotation: the decision was asked twice, once with each token:\n{}",
+        healed.log
+    );
+    let again = radius
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .await;
+    assert!(
+        again.accepted
+            && again
+                .log
+                .contains("Found entry for \"axiam-decide-caller\"")
+            && !again.log.contains("/api/v1/auth/device"),
+        "rotation: the new token is the one cached now:\n{}",
+        again.report()
+    );
+    say(
+        "rotation",
+        "the binding rotated under the cached token: the 401 dropped it, a new login and one \
+         more decision admitted press-07 at once; the next authentication used the new token",
+    );
+
     // ---- a wrong site key ------------------------------------------------------
     // The key is FreeRADIUS's own configuration (the client's `shortname`), and
     // the caller's grant is for hq alone: another site is a 403 and a refusal.
     let decisions_before = net.decisions_for(&fp07).await.len();
-    stack.recreate_with(&d4_env(&secret, &axiam_url, "elsewhere", &host_ip));
+    stack.recreate_with(&live_env(&secret, &axiam_url, "elsewhere", &host_ip));
     let wrong = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert_refused_by_the_decision(&wrong, "wrong site key");
     assert!(
@@ -3115,10 +3236,10 @@ async fn decision_per_authentication() {
     );
 
     // ---- AXIAM unreachable -----------------------------------------------------
-    stack.recreate_with(&d4_env(&secret, &axiam_url, SITE, &host_ip));
+    stack.recreate_with(&live_env(&secret, &axiam_url, SITE, &host_ip));
     axiam.handle.stop(false).await;
     let down = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert_refused_by_the_decision(&down, "AXIAM unreachable");
     say(
@@ -3129,7 +3250,7 @@ async fn decision_per_authentication() {
     // ---- no free attribute copy ------------------------------------------------
     let stub = serve_stub(&work.join("axiam.pem"), &work.join("axiam.key"));
     let stub_url = format!("https://{AXIAM_HOST}:{}", stub.port);
-    stack.recreate_with(&d4_env(&secret, &stub_url, SITE, &host_ip));
+    stack.recreate_with(&live_env(&secret, &stub_url, SITE, &host_ip));
     // The bodies are written out by hand, members in the order AXIAM serializes
     // them (`name`, `number`, `value`, `tag`): the mapping reads that order, and
     // `serde_json::json!` would sort the keys.
@@ -3167,7 +3288,7 @@ async fn decision_per_authentication() {
     let (status, body) = allow_with(hostile);
     stub.answers(status, body);
     let copied = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert!(
         copied.accepted,
@@ -3203,7 +3324,7 @@ async fn decision_per_authentication() {
     let (status, body) = allow_with(tunnel("30", "900"));
     stub.answers(status, body.replace(',', ", ").replace(':', " : "));
     let spaced = radius
-        .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
         .await;
     assert!(
         spaced.accepted,
@@ -3258,12 +3379,16 @@ async fn decision_per_authentication() {
             (403, r#"{"error":"authorization_denied"}"#.to_string()),
         ),
         ("a 500", (500, r#"{"error":"boom"}"#.to_string())),
+        (
+            "a 401 that the new token gets too",
+            (401, r#"{"error":"unauthorized"}"#.to_string()),
+        ),
     ];
     let count = refusals.len();
     for (what, (status, body)) in refusals {
         stub.answers(status, body);
         let attempt = radius
-            .eap_tls_d4("press-07", path_str(&press07.cert), path_str(&press07.key))
+            .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
             .await;
         assert_refused_by_the_decision(&attempt, what);
     }
@@ -3277,6 +3402,6 @@ async fn decision_per_authentication() {
     stub.handle.stop(false).await;
     say(
         "done",
-        &format!("D4 cases passed in {}s", started.elapsed().as_secs()),
+        &format!("Live cases passed in {}s", started.elapsed().as_secs()),
     );
 }

@@ -4491,7 +4491,7 @@ pub trait ScimTargetStateRepository: Send + Sync {
 
 // ---------------------------------------------------------------------------
 // Network segments, reply profiles and the tenant's session cap (tenant-scoped)
-// (RADIUS D4, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
+// (RADIUS Live profile, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
 // ---------------------------------------------------------------------------
 
 /// Storage for network segments: nodes of the reserved `/network` subtree of

@@ -16,6 +16,8 @@ are Mitigated, T-478 … T-487 entered with it, and T-458, T-460 and T-465 stay
 correction in place (in §2, §3, §4, §5 and §6). The phrases "when built", and
 §6.1's "nothing consumes it", are as written on 2026-10-13.
 
+*(2026-10-19, release 1.1.1:)* From 1.1.1 the recipe calls D3 the Static profile and D4 the Live profile; this record keeps the spike's names.
+
 *As first written (2026-10-13):* **Status: DESIGN NOTE — nothing is built.** No
 crate, schema, route, permission, contract section or setting accompanies this
 document, and **no threat entry changes status in W6.1**: T-448 … T-468 stay

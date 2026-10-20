@@ -1527,7 +1527,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/network/decide",
-    "summary": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS authentication (RADIUS D4)."
+    "summary": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS authentication (RADIUS Live profile)."
    },
    {
     "method": "GET",

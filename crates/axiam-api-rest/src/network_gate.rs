@@ -1,4 +1,4 @@
-//! The REST side of the network write gate (RADIUS D4, W6.2).
+//! The REST side of the network write gate (RADIUS Live profile, W6.2).
 //!
 //! Every handler that can create a reply profile, a segment, a
 //! network-sensitive grant or assignment, or a certificate binding — and every

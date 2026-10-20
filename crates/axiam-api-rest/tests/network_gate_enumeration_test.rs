@@ -1,6 +1,6 @@
 //! Every write that can create a reply profile, a segment, a network-sensitive
 //! grant or assignment, or a certificate binding goes through the network
-//! gate first (RADIUS D4, W6.2; `claude_dev/radius-reply-profile-design.md`
+//! gate first (RADIUS Live profile, W6.2; `claude_dev/radius-reply-profile-design.md`
 //! §5.1 — the T-429 lesson applied to a write surface).
 //!
 //! # Two halves

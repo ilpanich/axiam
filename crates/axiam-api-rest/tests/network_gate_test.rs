@@ -1,5 +1,5 @@
 //! The network write gate on the real routes, against the real authorization
-//! engine (RADIUS D4, W6.2; `claude_dev/radius-reply-profile-design.md` §4.2,
+//! engine (RADIUS Live profile, W6.2; `claude_dev/radius-reply-profile-design.md` §4.2,
 //! §4.4, §5.3, §5.4).
 //!
 //! What only the routes and the engine together can show: that the handlers

@@ -2986,7 +2986,7 @@ where
         shared_rate_limit: shared_rate_limit_counter.clone(),
         // R101W3-04: one per process; sized from `rate_limit_cfg` on first use.
         ciba_list_limiter: Arc::new(Default::default()),
-        // RADIUS D4 (W6.4): one per process, like the limiter above.
+        // RADIUS Live profile (W6.4): one per process, like the limiter above.
         network_decide: Arc::new(Default::default()),
         pki: bundles::PkiState {
             ca_service: ca_service.clone(),

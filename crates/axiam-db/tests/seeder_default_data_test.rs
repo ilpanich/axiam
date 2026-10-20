@@ -637,7 +637,7 @@ async fn reconcile_leaves_the_organization_scopes_grants_alone() {
 }
 
 // ---------------------------------------------------------------------------
-// The reserved `network:` namespace (RADIUS D4, W6.2)
+// The reserved `network:` namespace (RADIUS Live profile, W6.2)
 // ---------------------------------------------------------------------------
 
 /// The nine `network:*` permissions, as the registry carries them.

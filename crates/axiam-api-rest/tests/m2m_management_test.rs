@@ -524,7 +524,7 @@ async fn the_route_map_admits_a_service_account_exactly_on_the_d5_families() {
     );
 }
 
-/// RADIUS D4 (W6.4): the `network` family stays human-only, and its one
+/// RADIUS Live profile (W6.4): the `network` family stays human-only, and its one
 /// machine caller is admitted by name. `POST /api/v1/network/decide` is the
 /// only entry of `CERTIFICATE_BOUND_MACHINE_ROUTES`, is in the route map under
 /// `network:decide`, lists the service-account scheme in the spec, refuses a

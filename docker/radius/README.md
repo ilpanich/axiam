@@ -1,7 +1,7 @@
 # FreeRADIUS e2e: 802.1X with an AXIAM-issued Device certificate
 
-This is the stack behind `crates/axiam-server/tests/radius_e2e.rs` (W6.2, D3 of
-the RADIUS spike; and, as an override of it, the D4 profile of W6.5, below). The guide it proves is
+This is the stack behind `crates/axiam-server/tests/radius_e2e.rs` (W6.2, the Static profile of
+the RADIUS spike; and, as an override of it, the Live profile of W6.5, below). The guide it proves is
 [`docs/pki/freeradius.md`](../../docs/pki/freeradius.md); read that for what the
 configuration means and why. This page is how to run it.
 
@@ -46,28 +46,28 @@ which FreeRADIUS does at `ca_path_reload_interval`, 300 seconds at the smallest
 | `AXIAM_E2E_RADIUS_DIR` | A working directory other than `docker/.secrets/radius`. It must end in `radius`: the test deletes and recreates it. |
 | `RADIUS_E2E_IP`, `RADIUS_E2E_SUBNET` | The container's address and its network (default `172.28.78.10` in `172.28.78.0/24`), for a host where that range is taken. `clients.conf` lists the default subnet, so change that file as well. |
 
-## The D4 profile: AXIAM decides, per authentication
+## The Live profile: AXIAM decides, per authentication
 
-`docker/docker-compose.radius-d4.yml` is an **override** of the compose file above
-(`docker compose -f docker-compose.radius.yml -f docker-compose.radius-d4.yml …`):
+`docker/docker-compose.radius-live.yml` is an **override** of the compose file above
+(`docker compose -f docker-compose.radius.yml -f docker-compose.radius-live.yml …`):
 the same container, the same pinned image (the override names none), but the
 placement table is gone and `sites-enabled/check-eap-tls` asks AXIAM,
 over mutual TLS with `rlm_rest`, where the device goes
-([guide, section 5](../../docs/pki/freeradius.md#5-the-decision-per-authentication-d4)).
+([guide, section 5](../../docs/pki/freeradius.md#5-the-decision-per-authentication-live-profile)).
 The second test of `radius_e2e.rs` brings it up itself, with AXIAM in the test
 process behind a real TLS listener, and the same command above runs both tests,
-one after the other. The D4 test takes about a minute and a half: nothing in it waits for a CRL.
+one after the other. The Live test takes about a minute and a half: nothing in it waits for a CRL.
 
 | Path | What |
 |---|---|
-| `docker/docker-compose.radius-d4.yml` | the override: the D4 mounts, a `tmpfs` for the hook, `axiam.radius.test` mapped to the host, the AXIAM address and site key from the environment |
-| `docker/radius/raddb/d4/clients.conf` | the clients, each `shortname` the AXIAM site key |
-| `docker/radius/raddb/d4/check-eap-tls` | the decision and the mapping of the answer into the Access-Accept |
-| `docker/radius/raddb/d4/axiam_d4` | the `rest` modules (token, decision), the token cache and the `exec` module |
-| `docker/radius/raddb/d4/verify.conf` | the `verify` hook, included by `eap` when this file is mounted |
-| `docker/radius/raddb/d4/axiam-d4.sh` | what carries the certificate's fingerprint from the hook to the decision |
+| `docker/docker-compose.radius-live.yml` | the override: the Live mounts, a `tmpfs` for the hook, `axiam.radius.test` mapped to the host, the AXIAM address and site key from the environment |
+| `docker/radius/raddb/live/clients.conf` | the clients, each `shortname` the AXIAM site key |
+| `docker/radius/raddb/live/check-eap-tls` | the decision and the mapping of the answer into the Access-Accept |
+| `docker/radius/raddb/live/axiam_live` | the `rest` modules (token, decision), the token cache and the `exec` module |
+| `docker/radius/raddb/live/verify.conf` | the `verify` hook, included by `eap` when this file is mounted |
+| `docker/radius/raddb/live/axiam-live.sh` | what carries the certificate's fingerprint from the hook to the decision |
 
-It needs one thing more of the host than D3: AXIAM listens on all interfaces on a
+It needs one thing more of the host than the Static profile: AXIAM listens on all interfaces on a
 port the OS picks, and the container reaches it at its network's gateway
 (`172.28.78.1`, or the `.1` of `RADIUS_E2E_SUBNET`), so a host firewall that drops
 traffic from the Docker bridge to the host breaks it. The test writes the extra
@@ -81,9 +81,9 @@ container when a case changes one (a wrong site key, AXIAM stopped).
 |---|---|
 | `docker/docker-compose.radius.yml` | the pinned upstream image, the mounts, a network of its own with a fixed address |
 | `docker/radius/raddb/clients.conf` | the NAS clients; `require_message_authenticator = yes`; the secret from the environment |
-| `docker/radius/raddb/eap` | EAP-TLS only, TLS 1.3 only, the tenant signing CA, `check_crl`, `ca_path_reload_interval`; `$-INCLUDE` of the D4 hook when it is mounted |
+| `docker/radius/raddb/eap` | EAP-TLS only, TLS 1.3 only, the tenant signing CA, `check_crl`, `ca_path_reload_interval`; `$-INCLUDE` of the Live hook when it is mounted |
 | `docker/radius/raddb/default` | the one virtual server: EAP, and nothing else |
-| `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified, keyed on the certificate serial (D3; the D4 profile mounts its own) |
+| `docker/radius/raddb/check-eap-tls` | the placement decision, after the certificate is verified, keyed on the certificate serial (the Static profile; the Live profile mounts its own) |
 | `docker/radius/raddb/axiam_placement` | the `files` module that reads the placement table |
 | `docker/radius/fetch-crl.sh` | the revocation-list fetch job the guide's section 4 describes; the test runs it on the host, against a local stand-in for the CRL route (needs `curl` and `openssl`; it sets `FETCH_CRL_ALLOW_HTTP=1`, because the stand-in is plain HTTP and the script refuses that otherwise) |
 | `docker/radius/tests/` | `fetch-crl-test.sh <shell>`: the fetch script's own cases (tags, lock, curl options) against a stand-in for the route and a throwaway CA, no docker and no AXIAM; `radius-e2e.yml` runs it under `dash` and `bash` |

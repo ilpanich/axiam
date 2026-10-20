@@ -1,11 +1,11 @@
 # 802.1X with an AXIAM-issued Device certificate
 
-**Milestone:** `1.0.1`; [section 5, the decision per authentication](#5-the-decision-per-authentication-d4),
+**Milestone:** `1.0.1`; [section 5, the decision per authentication](#5-the-decision-per-authentication-live-profile),
 `1.1.0`
 **Last verified:** 2026-10-15 (sections 1 to 5), against
 FreeRADIUS 3.2.8 and `eapol_test` from `wpa_supplicant` 2.10 (see [What the
-end-to-end test proves](#what-the-end-to-end-test-proves) and [What the D4 test
-proves](#what-the-d4-test-proves))
+end-to-end test proves](#what-the-end-to-end-test-proves) and [What the Live test
+proves](#what-the-live-test-proves))
 
 A recipe for admitting devices to a switch port, an access point or a VPN
 gateway with a certificate that AXIAM issued, where FreeRADIUS terminates RADIUS
@@ -17,10 +17,13 @@ adopter who needs it. This page is that route's guide; the files it describes
 are in [`docker/radius/`](../../docker/radius/README.md) and
 [`docker/docker-compose.radius.yml`](../../docker/docker-compose.radius.yml), and
 `crates/axiam-server/tests/radius_e2e.rs` runs it against a real FreeRADIUS on
-every change to them. It has two profiles: **D3**, sections 1 to 4, where
-FreeRADIUS keeps a placement table and a revocation list you refresh; and **D4**,
-section 5, where FreeRADIUS asks AXIAM about every authentication and the table
-and the lag go away.
+every change to them. It has two profiles: the **Static** profile (the design note's **D3**),
+sections 1 to 4, where FreeRADIUS keeps a placement table and a revocation list
+you refresh; and the **Live** profile (the design note's **D4**), section 5, where
+FreeRADIUS asks AXIAM about every authentication and the table and the lag go
+away. Releases up to `1.1.0` and the files they shipped call them D3 and D4; from
+`1.1.1` the compose override, the `raddb/live/` directory and the `AXIAM_LIVE_*`
+variables carry the new name.
 
 See also: [PKI guide](README.md) (issuing, binding, revoking and the
 [revocation lists](README.md#certificate-revocation-lists) this recipe consumes),
@@ -32,7 +35,7 @@ See also: [PKI guide](README.md) (issuing, binding, revoking and the
 |---|---|
 | **Is** | EAP-TLS only, TLS 1.3 only, for devices that hold a certificate the tenant's signing CA issued. A device is admitted only if its certificate chains to that CA, is not on the CA's revocation list, **and** is in a placement table you keep. |
 | **Is not** | A password service. There is no PAP, CHAP, MS-CHAP or EAP-MD5 path in this configuration, and AXIAM's password store (Argon2id) could not serve the last three. |
-| **Is not** | A real-time check, in the D3 profile (sections 1 to 4). FreeRADIUS does not call AXIAM when a device authenticates. A revocation reaches it as a certificate revocation list, on the schedule you set — [the lag is stated below](#the-revocation-lag). [Section 5](#5-the-decision-per-authentication-d4) is the profile that does call AXIAM, once per authentication. |
+| **Is not** | A real-time check, in the Static profile (sections 1 to 4). FreeRADIUS does not call AXIAM when a device authenticates. A revocation reaches it as a certificate revocation list, on the schedule you set — [the lag is stated below](#the-revocation-lag). [Section 5](#5-the-decision-per-authentication-live-profile) is the profile that does call AXIAM, once per authentication. |
 | **Is not** | Accounting, dynamic authorization (CoA, Disconnect-Request) or a RADIUS proxy. |
 | **Is not** | Shipped FreeRADIUS. The compose file *references* the upstream image by digest; this repository contains configuration files and nothing of FreeRADIUS (GPLv2). |
 
@@ -259,7 +262,7 @@ client nas-line-1 {
   client whose first packet lacks the attribute). With it set to `yes`,
   `limit_proxy_state` is ignored, which is what you want behind a wireless
   controller that acts as a proxy and adds `Proxy-State`.
-- **The NAS must do its half.** The forgery is of the *response*, so FreeRADIUS
+- **The NAS must do its half (over UDP).** The forgery is of the *response*, so FreeRADIUS
   requiring and sending the attribute protects nothing on a NAS that does not
   check it. For each NAS, confirm that its firmware has the Blast-RADIUS fix
   (CVE-2024-3596): it sends `Message-Authenticator` in every Access-Request and
@@ -325,10 +328,12 @@ certificate, named by the certificate's serial as FreeRADIUS spells
   octet, because FreeRADIUS 3.2.8 encodes tag `0` on a string exactly as it
   encodes no tag, and RFC 2868 §3.6 reads a first octet above `0x1F` (every digit
   is) as the start of the string. The test reads the octets from the Accept
-  (`00 00 00 0d`, `00 00 00 06`, `32 30`). A tag other than `0` puts another octet
-  in front of the VLAN, which a NAS reads as one tunnel of several; do not write
-  one. Use these and no other attributes
-  in a placement: the reply-profile design note
+  (`00 00 00 0d`, `00 00 00 06`, `32 30`). Keep the tag at `:0`: a non-zero tag is
+  not wrong on the wire when all three attributes carry it, but the encoding the
+  test pins is the one the closed set below uses. A non-compliant NAS that always
+  strips a first octet would misread a three-digit VLAN, so confirm the VLAN a NAS
+  applies from a test Accept before relying on the table. Use these and no other
+  attributes in a placement: the reply-profile design note
   ([`radius-reply-profile-design.md`](../../claude_dev/radius-reply-profile-design.md))
   keeps the set closed so that a hand-written table here is already an instance
   of the model a later AXIAM-side profile would serve. **Do not put the
@@ -451,8 +456,8 @@ fetch-crl.sh "https://axiam.example.com/pki/v1/$ORG/ca/$SIGNING_CA/crl" \
     /etc/freeradius/axiam/ca.pem /etc/freeradius/axiam/capath
 ```
 
-It installs a list only if all of these hold, and otherwise exits 1, says why on
-stderr and leaves the installed list alone:
+It installs a list only if all of these hold, and otherwise exits 1 (or 3, below),
+says why on stderr and leaves the installed list alone:
 
 - **The CA you trust signed it.** The check is the *text* `openssl crl -verify`
   prints, which must be exactly `verify OK`, not its exit status: OpenSSL 3.0
@@ -508,7 +513,7 @@ or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. With
 the lock, two runs that fetch different lists can leave the older one in place
 under the newer one's tag, and a revocation then waits until AXIAM's list next
 changes, up to half its lifetime, with a file fresh enough to silence the
-age alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
+exit-status alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
 looks it up.
 
 Use HTTPS, and the script holds you to it: the URL must start with `https://`,
@@ -531,8 +536,16 @@ reported as the status it is and the installed list stays). Before curl 8.4,
 `--max-filesize` does not stop a chunked body without a declared size; only
 `--max-time` (20 seconds) does (R110W5-03).
 
-The alert on a list that is older than half its lifetime
-([below](#the-revocation-lag)) is what catches a fetch that no longer moves.
+**Alert on any non-zero exit status.** Exit `1` is a list refused or a fetch that
+failed (the reason is on stderr). Exit `3` means the list installed in `ca_path`
+for this CA has less than a quarter of its lifetime (`nextUpdate` minus
+`lastUpdate`) left, or has expired: the script reads that off the list, after a
+`200`, a `304` and a refusal alike, and exit `3` replaces the `0` or `1` the run
+would have had (a refusal's reason is still on stderr). AXIAM re-signs at half the
+lifetime, so a healthy list never gets there; a fetch that no longer moves, or a
+server that keeps answering `304` to an old list, does, with at least a quarter of
+the lifetime still to act in ([below](#the-revocation-lag)). A run that finds the
+lock held exits `0` and checks nothing (R110W5-07).
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request
@@ -549,9 +562,12 @@ order:
 2. **Your job fetches the list.** At most the fetch interval, **provided it
    fetches AXIAM directly, or through a cache told `no-cache`**. The CRL route
    answers `Cache-Control: public, max-age=N`, with N running to the next
-   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. A
-   shared cache or CDN on the path may therefore serve the list from before the
-   revocation for that long. Leave one out, or have it revalidate every request;
+   scheduled re-sign: at most half of `nextUpdate`, twelve hours by default. The
+   script sends `Cache-Control: no-cache` with every request, so a shared cache
+   that honours request directives revalidates with AXIAM by itself; one that
+   ignores them (many CDNs and some forward proxies do, by configuration) may
+   still serve the list from before the revocation for that long. For such a
+   cache, leave it out of the fetch path, or have it revalidate every request;
    that is cheap, because [`fetch-crl.sh`](../../docker/radius/fetch-crl.sh) sends
    the `ETag` of the list it installed as `If-None-Match`, so a revalidation that
    finds nothing new costs a `304` and no list body.
@@ -584,16 +600,17 @@ Two ways this goes wrong:
 - **The fetch stops.** Once a list is past its `nextUpdate`, OpenSSL treats it as
   an error and FreeRADIUS refuses **every** device of the tenant, because
   `allow_expired_crl` is left at its default, `no`. That is fail-closed, and a
-  full outage a day later. Alert when the file in `capath` is older than half
-  the list's lifetime.
+  full outage a day later. Alert on a non-zero exit status of the fetch job:
+  `fetch-crl.sh` exits `3` when the installed list has less than a quarter of its
+  lifetime left ([above](#4-keep-the-revocation-list-fresh)), and `1` when the fetch itself fails.
 - **`ca.pem` is replaced non-atomically, or deleted without a restart.** The
   reload re-reads it as well as the lists; a reload that cannot read it logs `Error
   replacing X509 store` and leaves the old trust in force
   ([above](#replacing-or-removing-capem)).
 
-## 5. The decision per authentication (D4)
+## 5. The decision per authentication (Live profile)
 
-**Milestone `1.1.0`** (RADIUS D4, [#563](https://github.com/ilpanich/axiam/issues/563)).
+**Milestone `1.1.0`** (RADIUS Live profile, [#563](https://github.com/ilpanich/axiam/issues/563)).
 The profile in which AXIAM, and not a file, decides where a device goes. For
 every authentication FreeRADIUS asks `POST /api/v1/network/decide` whether the
 certificate it has just verified belongs to a device that is placed on this
@@ -602,7 +619,7 @@ section 3 does not exist in this profile; the revocation list stays (below).
 The design is the [reply-profile note](../../claude_dev/radius-reply-profile-design.md)
 (the segments and profiles in section 3, the decision in 4.3, this caller in 6.3).
 
-| | D3 (sections 1 to 4) | D4 (this section) |
+| | Static (sections 1 to 4) | Live (this section) |
 |---|---|---|
 | Who owns VLAN policy | whoever writes the placement table on FreeRADIUS | AXIAM: segments, reply profiles and `network:join` grants, with its audit trail |
 | A revoked certificate stops | when the list reaches FreeRADIUS ([the lag](#the-revocation-lag)), then at `Session-Timeout` | at the **next authentication**; a device already connected keeps its port until `Session-Timeout` |
@@ -612,7 +629,7 @@ The design is the [reply-profile note](../../claude_dev/radius-reply-profile-des
 
 ### What you set up in AXIAM
 
-The [PKI guide](README.md) has each step; this is the order D4 needs.
+The [PKI guide](README.md) has each step; this is the order the Live profile needs.
 
 1. **The tenant's segments and profiles** (`/api/v1/network/segments`,
    `/api/v1/network/profiles`): an `access` segment per VLAN with its `rank`, the
@@ -665,8 +682,14 @@ rotates the header gets a fresh bucket per request. Per-account lockout, the
 decision route's own allowance (keyed on the authenticated service account) and
 the per-client limits are not affected. So let a firewall or a network policy
 admit only the FreeRADIUS servers to the native listener, and keep the HTTP
-ingress, with its appending proxy, for every other client. A setting that names
-the proxies whose header is honoured is planned for `1.1.x`
+ingress, with its appending proxy, for every other client. Since 1.1.1, also set
+`AXIAM__RATE_LIMIT__TRUSTED_PROXIES` to the addresses your appending proxies
+connect from (CIDR blocks, comma-separated): their requests are keyed as before,
+and every other peer — the FreeRADIUS servers of the **Live** profile included —
+is keyed on its own address, whatever it writes in `X-Forwarded-For`, so a caller
+that reaches the native listener chooses no bucket. Left empty, every peer's
+header is still read and a server with native TLS on logs one `WARN` at boot; the
+firewall rule above stays the first control either way
 ([#711](https://github.com/ilpanich/axiam/issues/711); T-212, T-486).
 
 **How FreeRADIUS gets its token.** It logs in as the service account the way a
@@ -681,22 +704,31 @@ clears it), so a login is one in many authentications, not one in each; the
 device-login limiter (`AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, per address) is
 therefore not what a storm spends.
 
+**When AXIAM refuses the cached token.** A `401` from the decision means the token
+no longer serves: FreeRADIUS's certificate was revoked and re-issued, the account's
+binding was rotated, or AXIAM's signing key changed. The recipe drops the cache
+entry at once and, when the token came from the cache, logs in again and asks the
+decision **once** more; a token fetched in that same authentication is not retried.
+A second `401`, a `403` and every other failure are an Access-Reject as before, so
+a rotation costs one extra login rather than up to half a token's life
+(7.5 minutes by default) of refused authentications ([#707](https://github.com/ilpanich/axiam/issues/707); T-486).
+
 ### The FreeRADIUS configuration
 
-The D4 profile changes the D3 files as little as it can: the base compose file
+The Live profile changes the Static profile's files as little as it can: the base compose file
 and the files of section 3 stay, and
-[`docker-compose.radius-d4.yml`](../../docker/docker-compose.radius-d4.yml)
+[`docker-compose.radius-live.yml`](../../docker/docker-compose.radius-live.yml)
 **overrides** the one service (`docker compose -f docker-compose.radius.yml -f
-docker-compose.radius-d4.yml up`). It names no image: the digest is pinned once, in
+docker-compose.radius-live.yml up`). It names no image: the digest is pinned once, in
 the base file.
 
-| File ([`docker/radius/raddb/d4/`](../../docker/radius/raddb/d4/)) | What it does |
+| File ([`docker/radius/raddb/live/`](../../docker/radius/raddb/live/)) | What it does |
 |---|---|
-| `clients.conf` | the D3 clients, each with `shortname` set to the **AXIAM site key** |
+| `clients.conf` | the Static profile's clients, each with `shortname` set to the **AXIAM site key** |
 | `check-eap-tls` | the decision: the call, and the mapping into the Access-Accept |
-| `axiam_d4` | the modules: two `rest` instances (the token, the decision), the token cache, the `exec` the fingerprint comes through |
-| `verify.conf` | the `verify` hook of the `eap` module (`eap` includes it with `$-INCLUDE`, which D3, with no such file, ignores) |
-| `axiam-d4.sh` | what the hook and the decision run to carry the certificate's fingerprint from one to the other |
+| `axiam_live` | the modules: two `rest` instances (the token, the decision), the token cache, the `exec` the fingerprint comes through |
+| `verify.conf` | the `verify` hook of the `eap` module (`eap` includes it with `$-INCLUDE`, which the Static profile, with no such file, ignores) |
+| `axiam-live.sh` | what the hook and the decision run to carry the certificate's fingerprint from one to the other |
 
 **The site key is the client's `shortname`.** `clients.conf` is the one place a
 site key comes from: `sites-enabled/check-eap-tls` posts `%{client:shortname}`,
@@ -717,9 +749,9 @@ FreeRADIUS 3.2.8 does not offer the configuration the client certificate, or its
 fingerprint, in any attribute. It writes the certificate to a PEM file for the
 `verify { client = … }` hook and deletes the file when the hook returns, and it
 does not show the file's name to the virtual server that makes the decision. The
-shipped `verify.conf` runs `axiam-d4.sh stash` there: it computes the SHA-256 of
+shipped `verify.conf` runs `axiam-live.sh stash` there: it computes the SHA-256 of
 the DER and leaves it under the certificate's **serial**; `check-eap-tls` reads it
-back with `axiam-d4.sh take <serial>` a moment later. The serial is what both
+back with `axiam-live.sh take <serial>` a moment later. The serial is what both
 sides can see, and it is a sound key for the reason section 3 already gives
 ([the key is the serial](#the-key-is-the-serial)): serials are unique per issuer
 (AXIAM's `idx_certificate_issuer_serial` refuses a second certificate under one
@@ -734,7 +766,7 @@ makes the helper unnecessary; check before you rely on this one.
 ```
 update control {
 	Tmp-String-1 := "%{client:shortname}"
-	Tmp-String-0 := "%{axiam_take:/bin/sh /etc/freeradius/axiam-d4/axiam-d4.sh take %{TLS-Client-Cert-Serial}}"
+	Tmp-String-0 := "%{axiam_take:/bin/sh /etc/freeradius/axiam-live/axiam-live.sh take %{TLS-Client-Cert-Serial}}"
 }
 ```
 
@@ -749,7 +781,7 @@ as its TLS client certificate:
 
 ```
 rest axiam_decide {
-	connect_uri = "$ENV{AXIAM_D4_URL}"
+	connect_uri = "$ENV{AXIAM_LIVE_URL}"
 	tls {
 		ca_info_file     = /etc/freeradius/axiam/axiam-ca.pem   # the CA of AXIAM's own certificate
 		certificate_file = /etc/freeradius/axiam/rest-chain.pem  # FreeRADIUS's Service certificate, then its signing CA
@@ -829,7 +861,7 @@ slow (a 4-second timeout), a certificate AXIAM does not accept, a status other t
 that is not exactly the allow described above, a fingerprint the hook did not
 leave. There is no fallback placement and no cached decision.
 
-### Latency: what D4 changes, and what it does not
+### Latency: what the Live profile changes, and what it does not
 
 Design note 6.3's last column, as measured by the test:
 
@@ -850,9 +882,9 @@ Design note 6.3's last column, as measured by the test:
   RADIUS-Request` and meets the decision. **Nothing ends a session**: that is
   dynamic authorization (RFC 5176, CoA and Disconnect-Request), which FreeRADIUS
   and your NAS own and this recipe does not configure. A short `Session-Timeout`
-  costs authentications, which D4 meters; it is the lever.
-- **The price is availability.** In D3 AXIAM could be away for a day and every
-  placed device was admitted from the table. In D4 a new authentication, and a
+  costs authentications, which the Live profile meters; it is the lever.
+- **The price is availability.** In the Static profile AXIAM could be away for a day and every
+  placed device was admitted from the table. In the Live profile a new authentication, and a
   re-authentication at `Session-Timeout`, is refused while AXIAM is. The pool
   starts empty (`start = 0`) so FreeRADIUS itself starts without AXIAM, and
   refuses every device until it is back; run AXIAM as the service the network
@@ -870,7 +902,7 @@ authenticate. Size it from your largest site
 ([rate-limit sizing](../deployment/rate-limit-sizing.md)); a server per site, each with
 its own service account, keeps one site's storm out of another's bucket.
 
-### What the D4 test proves
+### What the Live test proves
 
 The second test of `radius_e2e.rs` runs this profile. AXIAM is the real thing in
 the test process behind its real TLS listener (TLS 1.3, client certificates
@@ -892,7 +924,7 @@ is the supplicant.
 Not covered: a proxy in front of AXIAM (the guide says it does not work; it is not
 exercised), more than one site, a NAS that retransmits, and anything about speed.
 
-### What D4 leaves to you
+### What the Live profile leaves to you
 
 - **mTLS to AXIAM with nothing in between that ends it**, and AXIAM's availability.
 - **Who else reaches that listener**: the FreeRADIUS servers only
@@ -904,7 +936,7 @@ exercised), more than one site, a NAS that retransmits, and anything about speed
   readable by `freerad` and by no one else.
 - **The site key in every `client`'s `shortname`**, and one service account per
   FreeRADIUS server with `network:decide` on its sites only.
-- **The helper and its `tmpfs`**: `/var/run/axiam-d4` must be a `tmpfs` of the
+- **The helper and its `tmpfs`**: `/var/run/axiam-live` must be a `tmpfs` of the
   `freerad` user's; fingerprints and the hook's PEM files live there, and a
   persistent directory would keep personal data you did not mean to keep.
 - **The mapping**, when AXIAM's dictionary or the shape of its answer changes:
@@ -939,6 +971,7 @@ listen {
 		certificate_file = /etc/freeradius/axiam/radsec/server.pem
 		ca_file          = /etc/freeradius/axiam/radsec/nas-ca.pem
 		tls_min_version  = "1.3"
+		tls_max_version  = "1.3"
 		require_client_cert = yes
 	}
 }
@@ -953,9 +986,21 @@ clients radsec-nas {
 ```
 
 This is the shape of the image's own `sites-available/tls`, with TLS 1.3 asked
-for. `require_message_authenticator = yes` stands on this client as on every
-other, and the NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
-applies to it equally. Three cautions:
+for. Set `tls_max_version` as well as `tls_min_version`: in 3.2.8 a minimum
+without a maximum is refused at start (`tls_min_version '1.3' must be <=
+tls_max_version '(null)'`). Two points about the client:
+
+- **`require_message_authenticator = yes` is harmless here and inert.** 3.2.8
+  accepts it on a `proto = tls` client, but the TLS listener never consults it;
+  TLS carries the integrity of the exchange, and a packet with an `EAP-Message`
+  needs its `Message-Authenticator` regardless. Keep it for uniformity or leave it
+  out; nothing depends on it.
+- **The NAS-firmware point under [`clients.conf`](#clientsconf--who-may-send-requests-and-what-they-must-send)
+  is for UDP.** The Blast-RADIUS forgery needs an unprotected UDP response, so a
+  NAS reached over RadSec does not need the fixed firmware for it. That is why
+  RadSec is the remedy offered for a NAS whose vendor has none.
+
+Three cautions:
 
 - **Not exercised by the end-to-end test.** `eapol_test` speaks UDP only; the
   block above is a starting point to adapt, not a tested configuration.
@@ -1002,7 +1047,7 @@ the mechanism above, not measured.
 
 The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md),
 model 2.42.0) holds the RADIUS entries the declined native front end was written
-for, and since 1.1.0 the entries of the D4 profile. For the **D3 profile**, four
+for, and since 1.1.0 the entries of the Live profile. For the **Static profile**, four
 are mitigated by this recipe: **T-449** (`Message-Authenticator` required),
 **T-456** (EAP-TLS only, TLS 1.3 only) and **T-459** (one tenant's signing CA as
 the only anchor), each with the end-to-end test above as its test, and **T-454**
@@ -1015,16 +1060,16 @@ EAP-TLS keys travel under MD5 obfuscation; use
 [revocation lag](#the-revocation-lag) above, and no way to end a session already
 admitted).
 
-The **D4 profile** ([section 5](#5-the-decision-per-authentication-d4)) adds a
+The **Live profile** ([section 5](#5-the-decision-per-authentication-live-profile)) adds a
 route, a caller and a write surface to AXIAM, and the model states them (1.1.0):
 **T-468** (the decision route answers only a certificate-bound FreeRADIUS
 service account), **T-457** (one negative answer, whatever the cause), **T-461**
 (the bounded reply-profile model), **T-463** (one audit row per decision) and
 **T-464** (no MAC address or user name reaches AXIAM) are mitigated for the
 route; **T-459** gains the route's own tenant check; **T-487** (only the
-dictionary's attributes reach the Accept) is mitigated for this recipe by the D4
+dictionary's attributes reach the Accept) is mitigated for this recipe by the Live
 test; the segment and profile write surface is **T-478** … **T-480**, **T-482**
-and **T-485**. Open for D4: **T-462** keeps its D4 column (refused at the next
+and **T-485**. Open for the Live profile: **T-462** keeps its Live column (refused at the next
 authentication; a connected session lasts until `Session-Timeout`), **T-486**
 (AXIAM unavailable, or reached through a proxy that ends TLS, refuses every
 device — the operator's to carry, with the listener exposed to the FreeRADIUS
@@ -1032,9 +1077,9 @@ servers only, [above](#the-connection-mutual-tls-that-ends-at-axiam)), and three
 Low residuals of the write gate (**T-481**, **T-483**, **T-484**). The remaining
 ten entries stay *not applicable*, each saying why: they are about the native
 listener, EAP state machine and NAS registry AXIAM would have to write, or about
-a decision surface D4 does not build. *(Corrected 2026-10-16: this paragraph
+a decision surface the Live profile does not build. *(Corrected 2026-10-16: this paragraph
 said all four mitigated entries had the end-to-end as their test, true of three
-since 2026-10-15, and that the guide claimed no D4 mitigation the model did not
+since 2026-10-15, and that the guide claimed no Live-profile mitigation the model did not
 yet state — the model states them since W6.6.)*
 
 ## Operating notes
@@ -1050,17 +1095,17 @@ yet state — the model states them since W6.6.)*
   redistributed from this repository.
 - **Upgrades.** The digest in
   [`docker-compose.radius.yml`](../../docker/docker-compose.radius.yml) is the
-  3.2.8 tag's manifest, for both profiles (the D4 override names no image).
+  3.2.8 tag's manifest, for both profiles (the Live override names no image).
   Moving it is a decision: re-run both tests.
 
 ## What this does not do, and what would
 
-The D3 profile (sections 1 to 4) has no real-time check, and that is a decision,
-not an omission; [section 5](#5-the-decision-per-authentication-d4) is the profile
+The Static profile (sections 1 to 4) has no real-time check, and that is a decision,
+not an omission; [section 5](#5-the-decision-per-authentication-live-profile) is the profile
 that has one. It is the second piece of option B that the
 [spike](../../claude_dev/radius-eap-tls-spike-2026-10-06.md) recorded: an authorize
 endpoint for FreeRADIUS's `rlm_rest`, taking a certificate's fingerprint and the
-NAS's site and returning `{allow, reply attributes}`. It closes what the D3
+NAS's site and returning `{allow, reply attributes}`. It closes what the Static
 profile leaves: the revocation lag becomes the `Session-Timeout`, and VLAN policy
 moves from the FreeRADIUS administrator to AXIAM's RBAC.
 

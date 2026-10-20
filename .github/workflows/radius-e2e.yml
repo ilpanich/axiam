@@ -1,6 +1,6 @@
 name: RADIUS E2E
 
-# W6.2 / D3 of the RADIUS spike: 802.1X with an AXIAM-issued Device certificate,
+# W6.2, the Static profile, of the RADIUS spike: 802.1X with an AXIAM-issued Device certificate,
 # against a REAL FreeRADIUS and a REAL `eapol_test`. Every claim in
 # docs/pki/freeradius.md is a line of the configuration this job runs, so this job
 # is the oracle for the guide: AXIAM's own routes issue the tenant signing CA and
@@ -9,7 +9,7 @@ name: RADIUS E2E
 # `eapol_test` authenticates (accept), is refused by a wrong CA, and is refused
 # once a revoked certificate's list has reached FreeRADIUS (revoked-after-refresh).
 #
-# The same file also runs the D4 profile (W6.5): a second test in which FreeRADIUS
+# The same file also runs the Live profile (W6.5): a second test in which FreeRADIUS
 # asks AXIAM, over mutual TLS that ends at AXIAM, where each device goes
 # (docs/pki/freeradius.md, section 5). It adds no container: AXIAM runs in the
 # test process and FreeRADIUS is the same pinned image.
@@ -29,7 +29,8 @@ name: RADIUS E2E
 # PR; see surreal-race-probe.yml) does not apply: this check is not marked
 # required, so a PR that does not touch the recipe simply does not run it. If it
 # is ever made required, replace the filter with a `detect` job as that workflow
-# does.
+# does. `Cargo.lock` is deliberately not in the filter: the weekly `schedule:` covers
+# dependency bumps at a fraction of the cost.
 #
 # Local equivalent: docker/radius/README.md.
 
@@ -47,18 +48,38 @@ on:
       - "crates/axiam-api-rest/src/handlers/crl.rs"
       - "crates/axiam-api-rest/src/handlers/certificates.rs"
       - "crates/axiam-api-rest/src/handlers/ca_certificates.rs"
-      # D4 (the decision per authentication): the route, the gate it reads, the
+      # What fills the revocation list, signs it, and issues the Device certificate (#697).
+      - "crates/axiam-db/src/repository/certificate.rs"
+      - "crates/axiam-db/src/repository/ca_certificate.rs"
+      - "crates/axiam-pki/src/ca_key_store.rs"
+      - "crates/axiam-pki/src/config.rs"
+      - "crates/axiam-pki/src/lib.rs"
+      - "crates/axiam-api-rest/src/handlers/service_accounts.rs"
+      # The Live profile (the decision per authentication): the route, the gate it reads, the
       # models it renders, and the override that turns it on.
       - "crates/axiam-api-rest/src/handlers/network_decide.rs"
       - "crates/axiam-authz/src/network_gate*"
       - "crates/axiam-core/src/models/network.rs"
       - "crates/axiam-core/src/models/radius_reply.rs"
+      # On the path of every Live decision (#713): the caller's and the device's certificate
+      # (`authenticate_der`), the device login, the site's segments and profiles, and
+      # deny-override, which is what quarantine is.
+      - "crates/axiam-pki/src/mtls.rs"
+      - "crates/axiam-api-rest/src/extractors/cert_auth.rs"
+      - "crates/axiam-api-rest/src/handlers/auth.rs"
+      - "crates/axiam-db/src/repository/network.rs"
+      - "crates/axiam-api-rest/src/handlers/network.rs"
+      - "crates/axiam-authz/src/engine.rs"
       - "docker/radius/**"
       - "docker/docker-compose.radius.yml"
       - "scripts/check-radius-vendors-nothing.py"
-      - "docker/docker-compose.radius-d4.yml"
+      - "docker/docker-compose.radius-live.yml"
       - "docs/pki/freeradius.md"
       - ".github/workflows/radius-e2e.yml"
+  # A dependency bump (the X.509 and Ed25519 crates) changes `Cargo.lock`, which would run
+  # this job on every bump; a weekly run (Monday, 03:17 UTC) catches it instead (#697).
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:

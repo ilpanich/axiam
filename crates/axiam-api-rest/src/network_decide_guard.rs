@@ -1,4 +1,4 @@
-//! The decision route's two pieces of per-process state (RADIUS D4, W6.4;
+//! The decision route's two pieces of per-process state (RADIUS Live profile, W6.4;
 //! `claude_dev/radius-reply-profile-design.md` §3.4, §6.3).
 //!
 //! # The caller's bucket

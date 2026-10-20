@@ -1,4 +1,4 @@
-//! The authorization function of the network write surface (RADIUS D4, W6.2;
+//! The authorization function of the network write surface (RADIUS Live profile, W6.2;
 //! `claude_dev/radius-reply-profile-design.md` §5.1–§5.3).
 //!
 //! # What it decides

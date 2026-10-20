@@ -12,6 +12,8 @@ its entry). It is G-11 of
 in §1.4 is met, the work starts from argued decisions and a written security
 baseline instead of from a protocol reading.
 
+*(2026-10-19, release 1.1.1:)* From 1.1.1 the recipe calls D3 the Static profile and D4 the Live profile; this record keeps the spike's names.
+
 Written 2026-10-06 against `1.0.0-beta17` plus the Phase 23 W5 merge (`406a155`).
 Every claim about AXIAM names the file it was read from. Every claim about a
 specification, a product or a library says in §9 whether it was **verified in

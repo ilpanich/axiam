@@ -1,4 +1,4 @@
-//! `POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS D4,
+//! `POST /api/v1/network/decide` — the RADIUS placement decision (RADIUS Live profile,
 //! W6.4; `claude_dev/radius-reply-profile-design.md` §4.3, §6.3, §7, §8; threat
 //! T-468).
 //!
@@ -577,7 +577,7 @@ async fn audit_defect<C: Connection + Clone>(
 /// `POST /api/v1/network/decide`
 ///
 /// The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS
-/// authentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's
+/// authentication (RADIUS Live profile). Not SDK surface: its caller is FreeRADIUS's
 /// service account, over mTLS with a token bound to its own certificate.
 #[utoipa::path(
     post,

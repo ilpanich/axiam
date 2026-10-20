@@ -2,10 +2,10 @@
 # The two halves of getting a certificate's fingerprint to the decision
 # (docs/pki/freeradius.md, "The decision per authentication").
 #
-#   axiam-d4.sh stash <pem-file>   run by the `verify { client = ... }` hook of
+#   axiam-live.sh stash <pem-file>   run by the `verify { client = ... }` hook of
 #                                  the eap module, while FreeRADIUS holds the
 #                                  client certificate in <pem-file>
-#   axiam-d4.sh take <serial>      run by sites-enabled/check-eap-tls a moment
+#   axiam-live.sh take <serial>      run by sites-enabled/check-eap-tls a moment
 #                                  later in the same conversation; prints the
 #                                  SHA-256 of the certificate's DER, 64 hex digits
 #
@@ -22,7 +22,7 @@
 # lives on a tmpfs that is gone with the container.
 set -eu
 umask 077
-DIR=/var/run/axiam-d4
+DIR=/var/run/axiam-live
 
 hex_only() {
 	case "$1" in '' | *[!0-9a-f]*) return 1 ;; esac

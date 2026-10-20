@@ -1016,7 +1016,7 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             label: "802.1X with an AXIAM-issued Device certificate",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/pki/freeradius.md",
-            note: "A FreeRADIUS recipe, not a native RADIUS front end: EAP-TLS over TLS 1.3 against the tenant signing CA, its revocation list (fetched by a checked script) and the lag it implies, RadSec where the NAS allows, and an eapol_test end-to-end. Since 1.1.0 its D4 profile asks AXIAM's decision route once per authentication, placing the device from its segment's reply profile and refusing a revoked or quarantined one at its next authentication.",
+            note: "A FreeRADIUS recipe, not a native RADIUS front end: EAP-TLS over TLS 1.3 against the tenant signing CA, its revocation list (fetched by a checked script) and the lag it implies, RadSec where the NAS allows, and an eapol_test end-to-end. Since 1.1.0 its Live profile (called D4 in that release) asks AXIAM's decision route once per authentication, placing the device from its segment's reply profile and refusing a revoked or quarantined one at its next authentication.",
           },
           {
             label: "Vault deployment guide",
@@ -1072,7 +1072,7 @@ export const OPERATE_PAGES: DocPage[] = [
         rows: [
           [
             "Is",
-            "EAP-TLS only, TLS 1.3 only, for devices that hold a certificate the tenant's signing CA issued and that is bound to a service account. A device is admitted only if its certificate chains to that CA, is not revoked, **and** is placed — by a table on FreeRADIUS (D3) or by AXIAM's decision (D4).",
+            "EAP-TLS only, TLS 1.3 only, for devices that hold a certificate the tenant's signing CA issued and that is bound to a service account. A device is admitted only if its certificate chains to that CA, is not revoked, **and** is placed — by a table on FreeRADIUS (the Static profile) or by AXIAM's decision (the Live profile).",
           ],
           [
             "Is not",
@@ -1091,18 +1091,18 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "The shape",
-        code: " device ──EAP-TLS──▶ NAS (switch, AP, VPN) ──RADIUS / RadSec──▶ FreeRADIUS\n   │ leaf, issued by AXIAM\n   ▼\n organization CA ──signs──▶ tenant signing CA ──signs──▶ Device certificate\n\n FreeRADIUS  trusts  the tenant signing CA (ca_file), and only that\n             reads   its CRL, fetched from AXIAM by your job\n             D3      keeps the placement table\n             D4      asks POST /api/v1/network/decide, over mutual TLS",
+        code: " device ──EAP-TLS──▶ NAS (switch, AP, VPN) ──RADIUS / RadSec──▶ FreeRADIUS\n   │ leaf, issued by AXIAM\n   ▼\n organization CA ──signs──▶ tenant signing CA ──signs──▶ Device certificate\n\n FreeRADIUS  trusts  the tenant signing CA (ca_file), and only that\n             reads   its CRL, fetched from AXIAM by your job\n             Static  keeps the placement table\n             Live    asks POST /api/v1/network/decide, over mutual TLS",
       },
 
-      { type: "h", id: "profiles", text: "Two profiles: D3 and D4" },
+      { type: "h", id: "profiles", text: "Two profiles: Static and Live" },
       {
         type: "p",
-        text: "The recipe has two profiles that share the PKI half and differ in who decides placement. **D3** (`1.0.1`) is self-contained on FreeRADIUS: a placement table you generate and a revocation list you fetch. **D4** (`1.1.0`) replaces the table with a call to AXIAM once per authentication, so VLAN policy, quarantine and revocation are AXIAM's — at the price of making AXIAM a service the network depends on.",
+        text: "The recipe has two profiles that share the PKI half and differ in who decides placement. **Static** (`1.0.1`) is self-contained on FreeRADIUS: a placement table you generate and a revocation list you fetch. **Live** (`1.1.0`) replaces the table with a call to AXIAM once per authentication, so VLAN policy, quarantine and revocation are AXIAM's — at the price of making AXIAM a service the network depends on.",
       },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["", "D3 — placement table", "D4 — decision per authentication"],
+        headers: ["", "Static — placement table", "Live — decision per authentication"],
         rows: [
           [
             "Who owns VLAN policy",
@@ -1152,7 +1152,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Bind it to the service account that is the device",
-            body: "FreeRADIUS never reads the binding. AXIAM does: it is what the D3 table is generated from, what the D4 decision resolves the device to, and what lets a revocation end the device's AXIAM-side sign-in at once.",
+            body: "FreeRADIUS never reads the binding. AXIAM does: it is what the Static profile's table is generated from, what the Live decision resolves the device to, and what lets a revocation end the device's AXIAM-side sign-in at once.",
             code: "curl -X POST https://axiam.example.com/api/v1/service-accounts/$SA/bind-certificate \\\n  -H \"Authorization: Bearer $TENANT_ADMIN_TOKEN\" -H 'Content-Type: application/json' \\\n  -d '{\"certificate_id\":\"'$CERT'\"}'",
           },
           {
@@ -1194,10 +1194,10 @@ export const OPERATE_PAGES: DocPage[] = [
         ],
       },
 
-      { type: "h", id: "placement-table", text: "D3: the placement table" },
+      { type: "h", id: "placement-table", text: "Static: the placement table" },
       {
         type: "p",
-        text: "In D3 a valid certificate is not enough: the device must also be in a placement table on FreeRADIUS, which is where its VLAN comes from. **An unplaced device is rejected**, not dropped onto the NAS's default VLAN. Generate the table from AXIAM's own list — the tenant's `Active` `Device` certificates whose `bound_service_account_id` is set (`GET /api/v1/certificates`) — after every issue, bind, unbind, revoke or re-issue, or on a timer; write it atomically and `HUP` FreeRADIUS. The generator script is in the guide.",
+        text: "In the Static profile a valid certificate is not enough: the device must also be in a placement table on FreeRADIUS, which is where its VLAN comes from. **An unplaced device is rejected**, not dropped onto the NAS's default VLAN. Generate the table from AXIAM's own list — the tenant's `Active` `Device` certificates whose `bound_service_account_id` is set (`GET /api/v1/certificates`) — after every issue, bind, unbind, revoke or re-issue, or on a timer; write it atomically and `HUP` FreeRADIUS. The generator script is in the guide.",
       },
       {
         type: "warn",
@@ -1215,17 +1215,17 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "In D3 a revoked device keeps being admitted until AXIAM publishes the revocation (at once), your job fetches the list (the fetch interval — plus any shared cache's `max-age` on the path, up to half of `nextUpdate`, so fetch directly or through a cache told `no-cache`), FreeRADIUS reads it (`ca_path_reload_interval`, which FreeRADIUS raises to at least 300 seconds), and the device's current session ends (`Session-Timeout`). With the figures above and no cache, roughly an hour and ten minutes in the worst case. The levers are the three numbers, a shorter device `validity_days`, and D4.",
+        text: "In the Static profile a revoked device keeps being admitted until AXIAM publishes the revocation (at once), your job fetches the list (the fetch interval — plus any shared cache's `max-age` on the path, up to half of `nextUpdate`, so fetch directly or through a cache told `no-cache`), FreeRADIUS reads it (`ca_path_reload_interval`, which FreeRADIUS raises to at least 300 seconds), and the device's current session ends (`Session-Timeout`). With the figures above and no cache, roughly an hour and ten minutes in the worst case. The levers are the three numbers, a shorter device `validity_days`, and the Live profile.",
       },
       {
         type: "warn",
-        text: "**Alert when the list file is older than half its lifetime.** A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. D4 keeps `check_crl = yes` as a second check, so the fetch job stays in D4 too unless you decide the decision is enough.",
+        text: "**Alert on a non-zero exit status of the fetch job.** `fetch-crl.sh` exits `1` when it refuses a list or cannot fetch, and `3` when the installed list has less than a quarter of its lifetime left, after a `304` as after a refusal. A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. The Live profile keeps `check_crl = yes` as a second check, so the fetch job stays in the Live profile too unless you decide the decision is enough.",
       },
 
-      { type: "h", id: "segments", text: "D4: network segments" },
+      { type: "h", id: "segments", text: "Live: network segments" },
       {
         type: "p",
-        text: "In D4 a tenant administrator describes the network in AXIAM. A **segment** is a node of a reserved `/network` subtree of the resource tree, with a VLAN, a placement rank and an envelope; because segments are resources, ordinary RBAC, the hierarchy cascade and [deny-override](#/docs/deny) apply to them unchanged. The tree has a fixed two-branch shape:",
+        text: "In the Live profile a tenant administrator describes the network in AXIAM. A **segment** is a node of a reserved `/network` subtree of the resource tree, with a VLAN, a placement rank and an envelope; because segments are resources, ordinary RBAC, the hierarchy cascade and [deny-override](#/docs/deny) apply to them unchanged. The tree has a fixed two-branch shape:",
       },
       {
         type: "code",
@@ -1241,7 +1241,7 @@ export const OPERATE_PAGES: DocPage[] = [
         ],
       },
 
-      { type: "h", id: "profiles-dictionary", text: "D4: reply profiles and the closed dictionary" },
+      { type: "h", id: "profiles-dictionary", text: "Live: reply profiles and the closed dictionary" },
       {
         type: "p",
         text: "A segment has at most one **reply profile**: the attributes an Access-Accept carries for a device placed there. It is a **typed record, not an attribute list** — there is no field in which a writer names an attribute type — validated against a named, versioned dictionary, `axiam-radius-reply/1`. **The VLAN is not a profile field**: the three tunnel attributes are derived from the segment's `vlan_id`, so the only ways to put a device on VLAN 99 are to write the profile of the segment that owns VLAN 99, or to give a profiled segment VLAN 99, and both need `network:grant` on that segment.",
@@ -1269,7 +1269,7 @@ export const OPERATE_PAGES: DocPage[] = [
         text: "**The tenant cap.** `network.session_timeout_max_secs` (`GET`/`PUT /api/v1/network/policy`; default 3600, settable 300 to 86 400) bounds every profile's `Session-Timeout`, and with `Termination-Action = RADIUS-Request` it is the bound on how long a quarantine or a revocation waits for a connected device. Lowering it never rewrites a profile: every read, and every decision, returns the effective value `min(stored, cap)` with `session_timeout_clamped: true`. Raising it is allowed and audited. A stored profile that no longer validates — edited behind the API, say — makes its segment no candidate and is audited once per window; it is never rendered.",
       },
 
-      { type: "h", id: "placement", text: "D4: how a device is placed, and quarantined" },
+      { type: "h", id: "placement", text: "Live: how a device is placed, and quarantined" },
       {
         type: "p",
         text: "A device's service account holds `network:join` on the segments it may be placed on. For each authentication AXIAM resolves the certificate to its bound, `Active` service account in the caller's tenant, then:",
@@ -1312,7 +1312,7 @@ export const OPERATE_PAGES: DocPage[] = [
         ],
       },
 
-      { type: "h", id: "write-gate", text: "D4: who may change network policy" },
+      { type: "h", id: "write-gate", text: "Live: who may change network policy" },
       {
         type: "p",
         text: "Placement is conferred by a pair — the account's joins and its certificate binding — so a write to either edge, or to what a segment gives, is a grant. Every such write passes one server-side gate, evaluated at write time, uncached, with deny-override and the writer's own subject scope. The permissions live in the reserved `network:` namespace:",
@@ -1374,7 +1374,7 @@ export const OPERATE_PAGES: DocPage[] = [
         ],
       },
 
-      { type: "h", id: "decide", text: "D4: the decision route" },
+      { type: "h", id: "decide", text: "Live: the decision route" },
       {
         type: "p",
         text: "For every EAP-TLS authentication FreeRADIUS's `rlm_rest` posts `POST /api/v1/network/decide` and copies the answer into the Access-Accept. What AXIAM needs from the caller is deliberately narrow:",
@@ -1405,7 +1405,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**Expose AXIAM's native listener to the FreeRADIUS servers only.** AXIAM has one listener and it serves every route. Reached without an appending proxy in front, nothing appends to `X-Forwarded-For`, so every per-address limiter — `/auth/login`'s, `/auth/device`'s, `/oauth2/token`'s — keys on whatever a caller writes there. Let a firewall or network policy admit only the FreeRADIUS servers to it, and keep the HTTP ingress, with its appending proxy, for every other client. A setting that names the proxies whose header is honoured is planned for `1.1.x` ([#711](https://github.com/ilpanich/axiam/issues/711)).",
+        text: "**Expose AXIAM's native listener to the FreeRADIUS servers only.** AXIAM has one listener and it serves every route. Reached without an appending proxy in front, nothing appends to `X-Forwarded-For`, so every per-address limiter — `/auth/login`'s, `/auth/device`'s, `/oauth2/token`'s — keys on whatever a caller writes there. Let a firewall or network policy admit only the FreeRADIUS servers to it, and keep the HTTP ingress, with its appending proxy, for every other client. Since 1.1.1, `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` names the proxies whose header is honoured; every other peer is keyed on its own address ([#711](https://github.com/ilpanich/axiam/issues/711)).",
       },
 
       { type: "h", id: "radsec", text: "RadSec, where the NAS allows" },
@@ -1419,9 +1419,9 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "Per NAS: firmware with the Blast-RADIUS fix, a strong per-NAS secret, RadSec where it is offered.",
-          "FreeRADIUS's own certificate for D4: issue it short-lived, renew and restart before it ends, revoke it in AXIAM if the host is compromised. Its key is a file readable by the `freerad` user alone, and the helper's `/var/run/axiam-d4` must be a `tmpfs`.",
-          "AXIAM's availability, in D4: run it as the service the network depends on.",
-          "The fetch job and its age alert, and atomic changes to `ca.pem` followed by a restart.",
+          "FreeRADIUS's own certificate for the Live profile: issue it short-lived, renew and restart before it ends, revoke it in AXIAM if the host is compromised. Its key is a file readable by the `freerad` user alone, and the helper's `/var/run/axiam-live` must be a `tmpfs`.",
+          "AXIAM's availability, in the Live profile: run it as the service the network depends on.",
+          "The fetch job and its exit-status alert, and atomic changes to `ca.pem` followed by a restart.",
           "Sessions: `Session-Timeout` is the only bound on a session already admitted. Configure CoA on FreeRADIUS and the NAS if you need one ended rather than waited out.",
           "FreeRADIUS's logs (`-X` prints every body, fingerprints included): treat them as personal data. Run production with `freeradius -f -l stdout`.",
           "Moving the pinned FreeRADIUS image digest is a decision: re-run both end-to-end tests.",
@@ -1431,7 +1431,7 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "tested", text: "What the end-to-end tests prove" },
       {
         type: "p",
-        text: "`crates/axiam-server/tests/radius_e2e.rs` (CI job `radius-e2e.yml`) drives AXIAM's real routes and the pinned FreeRADIUS image with `eapol_test`. The D3 test admits a bound device with the expected VLAN octets on the wire; refuses another tenant's and another organization's device however much of its chain it presents; shows a revoked device still admitted while FreeRADIUS holds the old list, then refused once the new one is read; refuses forged and older lists through `fetch-crl.sh` itself; refuses an unbound device although the table holds a certificate named `DEFAULT`; and refuses TLS 1.2, EAP-MD5 and a request without `Message-Authenticator`. The D4 test places a device from its segment's profile, caches the token, refuses an unbound certificate, refuses a revoked device at the next authentication while FreeRADIUS still holds the old list, moves a quarantined device from VLAN 20 to VLAN 999, refuses a wrong site key with a `403` and AXIAM unreachable, and copies no attribute outside the dictionary. Not covered: RadSec, supplicants other than `eapol_test`, a NAS that proxies or retransmits, more than one site, and performance.",
+        text: "`crates/axiam-server/tests/radius_e2e.rs` (CI job `radius-e2e.yml`) drives AXIAM's real routes and the pinned FreeRADIUS image with `eapol_test`. The Static test admits a bound device with the expected VLAN octets on the wire; refuses another tenant's and another organization's device however much of its chain it presents; shows a revoked device still admitted while FreeRADIUS holds the old list, then refused once the new one is read; refuses forged and older lists through `fetch-crl.sh` itself; refuses an unbound device although the table holds a certificate named `DEFAULT`; and refuses TLS 1.2, EAP-MD5 and a request without `Message-Authenticator`. The Live test places a device from its segment's profile, caches the token, refuses an unbound certificate, refuses a revoked device at the next authentication while FreeRADIUS still holds the old list, moves a quarantined device from VLAN 20 to VLAN 999, refuses a wrong site key with a `403` and AXIAM unreachable, and copies no attribute outside the dictionary. Not covered: RadSec, supplicants other than `eapol_test`, a NAS that proxies or retransmits, more than one site, and performance.",
       },
 
       { type: "h", id: "threats", text: "In the threat model" },
@@ -1445,7 +1445,7 @@ export const OPERATE_PAGES: DocPage[] = [
           {
             label: "802.1X with an AXIAM-issued Device certificate — the normative guide",
             href: `${GH_BLOB}/docs/pki/freeradius.md`,
-            note: "Every file of both profiles, the placement-table generator, the CRL fetch script's checks, the D4 `rlm_rest` mapping and its helper, RadSec, and the test matrices.",
+            note: "Every file of both profiles, the placement-table generator, the CRL fetch script's checks, the Live `rlm_rest` mapping and its helper, RadSec, and the test matrices.",
           },
           {
             label: "docker/radius/",

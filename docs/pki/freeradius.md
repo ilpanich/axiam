@@ -1046,7 +1046,7 @@ the mechanism above, not measured.
 ## Which threat-model entries this covers
 
 The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md),
-model 2.42.0) holds the RADIUS entries the declined native front end was written
+model 2.43.0) holds the RADIUS entries the declined native front end was written
 for, and since 1.1.0 the entries of the Live profile. For the **Static profile**, four
 are mitigated by this recipe: **T-449** (`Message-Authenticator` required),
 **T-456** (EAP-TLS only, TLS 1.3 only) and **T-459** (one tenant's signing CA as
@@ -1069,12 +1069,14 @@ service account), **T-457** (one negative answer, whatever the cause), **T-461**
 route; **T-459** gains the route's own tenant check; **T-487** (only the
 dictionary's attributes reach the Accept) is mitigated for this recipe by the Live
 test; the segment and profile write surface is **T-478** … **T-480**, **T-482**
-and **T-485**. Open for the Live profile: **T-462** keeps its Live column (refused at the next
+and **T-485**; since 1.1.1 also **T-483** (the organization scope's super-admin no
+longer carries the `network:` permissions into every tenant) and **T-484** (a cleared
+network-sensitive write leaves its own audit row). Open for the Live profile: **T-462** keeps its Live column (refused at the next
 authentication; a connected session lasts until `Session-Timeout`), **T-486**
 (AXIAM unavailable, or reached through a proxy that ends TLS, refuses every
 device — the operator's to carry, with the listener exposed to the FreeRADIUS
-servers only, [above](#the-connection-mutual-tls-that-ends-at-axiam)), and three
-Low residuals of the write gate (**T-481**, **T-483**, **T-484**). The remaining
+servers only, [above](#the-connection-mutual-tls-that-ends-at-axiam)), and one
+Low residual of the write gate (**T-481**). The remaining
 ten entries stay *not applicable*, each saying why: they are about the native
 listener, EAP state machine and NAS registry AXIAM would have to write, or about
 a decision surface the Live profile does not build. *(Corrected 2026-10-16: this paragraph

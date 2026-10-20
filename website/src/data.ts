@@ -498,7 +498,7 @@ export const POSTS: Post[] = [
     author: "The AXIAM team",
     title: "AXIAM 1.1.0",
     excerpt:
-      "AXIAM 1.1.0 adds the RADIUS decision route (D4) for 802.1X with AXIAM-issued device certificates, closes the forty-two Low and Informational findings of the 1.0.1 reviews, and carries SDK contract 1.62 in all eleven SDKs. No independent third-party audit has been performed.",
+      "AXIAM 1.1.0 adds the RADIUS decision route (the Live profile, formerly D4) for 802.1X with AXIAM-issued device certificates, closes the forty-two Low and Informational findings of the 1.0.1 reviews, and carries SDK contract 1.62 in all eleven SDKs. No independent third-party audit has been performed.",
     body: [
       {
         type: "quote",

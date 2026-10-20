@@ -648,23 +648,28 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             .db
             .current()
             .query(
-                "SELECT meta::id(id) AS record_id, tenant_id, username, \
+                // The pending requests are read once into `$pending` and their
+                // users fetched by record id: the cost follows the requests,
+                // not the users (R111W1-01 — a subquery in the `WHERE` of a
+                // scan of `user` is evaluated again for every row).
+                "LET $pending = (SELECT VALUE user_id FROM account_deletion \
+                     WHERE status = 'pending'); \
+                 SELECT meta::id(id) AS record_id, tenant_id, username, \
                      erasure_audit_pending AS stamp \
                  FROM user WHERE erasure_audit_pending != NONE \
                    AND erasure_audit_pending <= $cutoff AND status = 'Anonymized'; \
                  SELECT meta::id(id) AS record_id, tenant_id, username, \
                      erasure_audit_pending AS stamp \
-                 FROM user WHERE meta::id(id) IN \
-                     (SELECT VALUE user_id FROM account_deletion WHERE status = 'pending') \
-                   AND status = 'Anonymized' AND erasure_audit_pending = NONE;",
+                 FROM array::map($pending, |$u| type::record('user', $u)) \
+                 WHERE status = 'Anonymized' AND erasure_audit_pending = NONE;",
             )
             .bind(("cutoff", now - lease))
             .await
             .map_err(DbError::from)?
             .check()
             .map_err(DbError::from)?;
-        let mut owed: Vec<OwedRow> = result.take(0).map_err(DbError::from)?;
-        let unmarked: Vec<OwedRow> = result.take(1).map_err(DbError::from)?;
+        let mut owed: Vec<OwedRow> = result.take(1).map_err(DbError::from)?;
+        let unmarked: Vec<OwedRow> = result.take(2).map_err(DbError::from)?;
         owed.extend(unmarked);
 
         let mut claimed = Vec::new();

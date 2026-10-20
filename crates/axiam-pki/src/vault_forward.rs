@@ -138,6 +138,15 @@ fn is_legacy_body_char(c: char) -> bool {
 mod tests {
     use super::*;
 
+    /// `prefix` and a low-entropy body of `12 * parts` token characters, built
+    /// at run time: a literal looks like a credential to secret scanners.
+    fn fake_token(prefix: &str, parts: usize) -> String {
+        format!(
+            "{prefix}{}",
+            ["fake", "body", "0123"].concat().repeat(parts)
+        )
+    }
+
     #[test]
     fn backoff_doubles_from_a_minute_to_the_cap() {
         let minutes: Vec<u64> = (1..=11).map(|n| backoff(n).as_secs() / 60).collect();
@@ -152,10 +161,11 @@ mod tests {
 
     #[test]
     fn a_reason_is_one_bounded_line_without_a_token() {
-        let reason = sanitise_reason(
+        let reason = sanitise_reason(&format!(
             "vault pki: http://v:8200/v1/pki/revoke answered 403 Forbidden:\n\tpermission denied \
-             for hvs.CAESIAbcdefghijklmnop012345",
-        );
+             for {}",
+            fake_token("hvs.", 3)
+        ));
         assert!(!reason.contains('\n') && !reason.contains('\t'));
         assert!(reason.contains("403 Forbidden") && reason.contains("permission denied"));
         assert!(!reason.contains("hvs."), "{reason}");
@@ -176,7 +186,8 @@ mod tests {
     /// prefix is left alone.
     #[test]
     fn a_token_is_masked_at_any_boundary_and_the_text_around_it_stays() {
-        let tok = "hvs.CAESIAbcdefghijklmnop012345";
+        let tok = fake_token("hvs.", 3);
+        let tok = tok.as_str();
         assert_eq!(sanitise_reason(&format!("token={tok}")), "token=[redacted]");
         assert_eq!(
             sanitise_reason(&format!("{{\"token\":\"{tok}\"}}")),
@@ -186,7 +197,7 @@ mod tests {
         assert_eq!(sanitise_reason(&format!("'{tok}'.")), "'[redacted]'.");
         assert_eq!(sanitise_reason(&format!("x:{tok}.")), "x:[redacted].");
         assert_eq!(
-            sanitise_reason("token=b.AAAAAQJ0aGlzX2Ff,"),
+            sanitise_reason(&format!("token={},", fake_token("b.", 1))),
             "token=[redacted],"
         );
         // Preceded by a token character it is part of a longer word.
@@ -205,9 +216,9 @@ mod tests {
     /// R101W1-06: a legacy batch token (`b.` and a body) is masked as `s.` is.
     #[test]
     fn a_legacy_batch_token_is_masked() {
-        let reason =
-            sanitise_reason("denied for b.AAAAAQJ0aGlzX2lzX2Ff and \"b.AAAAAQJ0aGlzX2Ff\"");
-        assert!(!reason.contains("b.AAAA"), "{reason}");
+        let (long, short) = (fake_token("b.", 2), fake_token("b.", 1));
+        let reason = sanitise_reason(&format!("denied for {long} and \"{short}\""));
+        assert!(!reason.contains(&short), "{reason}");
         assert_eq!(reason.matches("[redacted]").count(), 2, "{reason}");
         assert!(reason.starts_with("denied for "));
     }
@@ -216,11 +227,12 @@ mod tests {
     /// the sweep or the handler already sanitised: a second pass changes nothing.
     #[test]
     fn sanitising_is_idempotent() {
-        for raw in [
-            "denied for hvs.CAESIAbcdefghijklmnop012345 b.AAAAAQJ0aGlzX2Ff",
-            &"y ".repeat(5_000),
-            &"é".repeat(1_000),
-        ] {
+        let tokens = format!(
+            "denied for {} {}",
+            fake_token("hvs.", 3),
+            fake_token("b.", 1)
+        );
+        for raw in [&tokens, &"y ".repeat(5_000), &"é".repeat(1_000)] {
             let once = sanitise_reason(raw);
             assert_eq!(sanitise_reason(&once), once);
         }

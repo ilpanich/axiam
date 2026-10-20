@@ -619,3 +619,68 @@ async fn an_action_outside_printable_ascii_is_refused_and_not_persisted() {
         .unwrap();
     assert_eq!(listed.items.len(), 2);
 }
+
+/// R110W3-09 (#682): the refusal's log line names the action's length and never
+/// the action, which is the producer's text. Needs a subscriber installed: the
+/// field is evaluated only when the event is enabled.
+#[tokio::test]
+async fn the_refusal_of_a_lookalike_action_logs_its_length_and_never_the_action() {
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    let captured = Captured::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    );
+
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let now = Utc::now();
+    let action = "t\u{435}nants.audit_exported";
+    let raw = signed_event(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        "User",
+        "Success",
+        action,
+        CURRENT_KEY_VERSION,
+        now,
+        Uuid::new_v4(),
+    );
+    let outcome = process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+    assert!(matches!(outcome, AuditIngestOutcome::NackDrop));
+
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains(&format!("action_len={}", action.len())),
+        "the length is logged: {log}"
+    );
+    assert!(
+        !log.contains("audit_exported") && !log.contains('\u{435}'),
+        "the action is not: {log}"
+    );
+}

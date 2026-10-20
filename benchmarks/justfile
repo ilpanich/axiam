@@ -1313,6 +1313,12 @@ bench-quick:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Absolute BEFORE the profile is sourced (#699): p3-mtls.env derives
+    # BENCH_CLIENT_CERT/KEY/CA_CERT from ${BENCH_CERTS_DIR:-profiles/certs}, and k6
+    # runs with CWD=scenarios/, so the relative default made open() fail at k6 init.
+    # Same anchor as run-benchmark.sh and sdk-bench.
+    export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$PWD/profiles/certs}"
+
     OUT="${BENCH_RESULTS_DIR:-$PWD/results}/quick"
     mkdir -p "$OUT"
     TARGET=axiam
@@ -1440,6 +1446,31 @@ bench-quick:
     fi
 
     # ---------------------------------------------------------------------
+    # Provenance — results/quick/meta.json
+    # ---------------------------------------------------------------------
+    #
+    # The other recipes record image + digest + build_ref per cell
+    # (run-benchmark.sh); a quick run must be as attributable as a matrix cell.
+    # Same sources: `.Config.Image`, the image's RepoDigests[0] falling back to the
+    # image ID for a locally-built image, and `git rev-parse HEAD` as build_ref.
+    # The runbook asks the reader to state which image was measured; this is where
+    # that is read from.
+    SRV=bench-axiam-server
+    IMG="$(docker inspect --format '{{{{.Config.Image}}' "$SRV" 2>/dev/null || echo unknown)"
+    IMG_ID="$(docker inspect --format '{{{{.Image}}' "$SRV" 2>/dev/null || echo unknown)"
+    IMG_DIGEST="$(docker image inspect --format '{{{{index .RepoDigests 0}}' "$IMG_ID" 2>/dev/null || echo '')"
+    IMG_DIGEST="${IMG_DIGEST#*@}"
+    case "$IMG_DIGEST" in ""|"<no value>") IMG_DIGEST="$IMG_ID" ;; esac
+    BUILD_REF="$(git -C .. rev-parse HEAD 2>/dev/null || echo unknown)"
+    jq -n --arg image "$IMG" --arg digest "$IMG_DIGEST" --arg image_id "$IMG_ID" \
+          --arg build_ref "$BUILD_REF" --arg profile "$PROFILE" --arg target "$TARGET" \
+          --arg window "{{quickdur}}" --argjson vus "{{quickvus}}" \
+          --arg hook "$HOOK_STATE" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{target:$target, profile:$profile, image:$image, image_digest:$digest, image_id:$image_id,
+        build_ref:$build_ref, window:$window, vus:$vus, reactor_hook:$hook, finished_at:$at}' \
+      > "$OUT/meta.json"
+
+    # ---------------------------------------------------------------------
     # Report
     # ---------------------------------------------------------------------
     python3 - "$OUT" "$HOOK_STATE" "{{quickdur}}" "{{quickvus}}" <<'PY'
@@ -1523,7 +1554,8 @@ bench-quick:
     lines.append("  rests on this figure, the claim must say it rests on an indicative")
     lines.append("  single-window measurement, or `bench-matrix` must be run.")
     lines.append("")
-    lines.append("Artifacts: `results/quick/binding-*.k6.json`, `results/quick/binding-*.log`.")
+    lines.append("Artifacts: `results/quick/binding-*.k6.json`, `results/quick/binding-*.log`,")
+    lines.append("`results/quick/meta.json` (image, digest, build_ref).")
     lines.append("These are NOT collected by `bench-report` or `bench-pack` — they are not")
     lines.append("matrix cells and must not be aggregated as though they were.")
 

@@ -137,5 +137,24 @@ err="$(env -u CONFORMANCE_MODULE_TIMEOUT -u CONFORMANCE_SUITE_WAIT \
        bash "$SCRIPTS/run-plan.sh" "$WORK/plan.json" some-plan-name "$WORK/out" 2>&1 >/dev/null)"; rc=$?
 [ "$rc" -eq 1 ] && ok || fail "run_plan with the knob unset: exit status $rc, want 1"
 
+# --- the workflow's own patterns (R110W4-05) ----------------------------------
+# The dispatch step carries its own copies of the two patterns; grep the YAML so
+# they cannot drift from the helper's, and check that a refused input stops the
+# steps that need the workspace (otherwise they run on an empty one and the gate
+# step goes red beside the refusal).
+WF="$(cd "$CONF_DIR/.." && pwd)/.github/workflows/fapi-conformance.yml"
+if [ -f "$WF" ]; then
+  grep -qxF "          plan_re='^[a-z0-9-]{1,128}\$'" "$WF" && ok || fail "workflow plan_re is not ^[a-z0-9-]{1,128}\$"
+  grep -qxF "          timeout_re='^[0-9]{1,5}\$'" "$WF" && ok || fail "workflow timeout_re is not ^[0-9]{1,5}\$"
+  grep -qF "local re='^[0-9]{1,5}\$'" "$SCRIPTS/lib-env.sh" && ok || fail "lib-env.sh no longer uses ^[0-9]{1,5}\$ (workflow copy would drift)"
+  grep -qxF "        id: inputs" "$WF" && ok || fail "the validation step has no 'id: inputs'"
+  guarded="$(grep -cF "steps.inputs.outcome == 'success'" "$WF")"
+  [ "$guarded" -eq 5 ] && ok || fail "want 5 steps guarded by steps.inputs.outcome == 'success', found $guarded"
+  bare="$(grep -cx '        if: always()' "$WF")"
+  [ "$bare" -eq 0 ] && ok || fail "$bare step(s) still use a bare 'if: always()'"
+else
+  fail "workflow file not found: $WF"
+fi
+
 printf '%d checks, %d failed\n' "$((checks + fails))" "$fails"
 [ "$fails" -eq 0 ]

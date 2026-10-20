@@ -69,3 +69,78 @@ impl AmqpError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lapin_error() -> lapin::Error {
+        lapin::ErrorKind::InvalidChannel(7).into()
+    }
+
+    #[test]
+    fn each_variant_displays_its_own_sentence() {
+        let wrapped = lapin_error().to_string();
+        assert_eq!(
+            AmqpError::Connection(lapin_error()).to_string(),
+            format!("AMQP connection failed: {wrapped}")
+        );
+        assert_eq!(
+            AmqpError::Channel(lapin_error()).to_string(),
+            format!("AMQP channel creation failed: {wrapped}")
+        );
+        assert_eq!(
+            AmqpError::Declaration(lapin_error()).to_string(),
+            format!("AMQP queue/exchange declaration failed: {wrapped}")
+        );
+        assert_eq!(
+            AmqpError::Publish("nack".into()).to_string(),
+            "AMQP publish failed: nack"
+        );
+        assert_eq!(
+            AmqpError::MaxRetriesExhausted(lapin_error()).to_string(),
+            format!("AMQP connection failed after exhausting all retries: {wrapped}")
+        );
+        assert_eq!(
+            AmqpError::Config("bad scheme".into()).to_string(),
+            "AMQP configuration is unusable: bad scheme"
+        );
+        let timeout = AmqpError::ConnectTimeout {
+            url: "amqps://broker:5671".into(),
+            timeout_ms: 250,
+        }
+        .to_string();
+        assert!(
+            timeout.starts_with(
+                "AMQP connection attempt to amqps://broker:5671 timed out after 250ms."
+            ),
+            "{timeout}"
+        );
+    }
+
+    #[test]
+    fn the_lapin_variants_give_their_error_back_and_the_others_do_not_have_one() {
+        for error in [
+            AmqpError::Connection(lapin_error()),
+            AmqpError::Channel(lapin_error()),
+            AmqpError::Declaration(lapin_error()),
+        ] {
+            assert_eq!(
+                error.into_lapin_error().to_string(),
+                lapin_error().to_string()
+            );
+        }
+        let exhausted = AmqpError::MaxRetriesExhausted(lapin_error());
+        let source = std::error::Error::source(&exhausted);
+        assert!(
+            source.is_some(),
+            "the exhausted-retries error keeps its cause"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-lapin variant")]
+    fn a_variant_without_a_lapin_error_cannot_be_unwrapped_into_one() {
+        let _ = AmqpError::Config("x".into()).into_lapin_error();
+    }
+}

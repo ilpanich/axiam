@@ -153,4 +153,21 @@ mod tests {
         assert_eq!(backoff_ttl_ms(1_000, &cfg), 500);
         assert_eq!(backoff_ttl_ms(0, &cfg), 100, "attempt 0 is defensive");
     }
+
+    /// `from_env_for` reads the process environment; a kind whose variables are
+    /// unset resolves to the defaults.
+    #[test]
+    fn from_env_for_reads_the_process_environment() {
+        let kind = OutboundKind::Webhook;
+        if ["MAX_ATTEMPTS", "BACKOFF_BASE_MS", "BACKOFF_CEILING_MS"]
+            .iter()
+            .any(|suffix| std::env::var_os(env_var_name(kind, suffix)).is_some())
+        {
+            return; // the environment overrides it; from_lookup's cases cover that
+        }
+        assert_eq!(
+            OutboundRetryConfig::from_env_for(kind),
+            OutboundRetryConfig::default()
+        );
+    }
 }

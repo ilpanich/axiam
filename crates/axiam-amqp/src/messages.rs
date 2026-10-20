@@ -703,4 +703,71 @@ mod tests {
             "malformed signature hex must not verify"
         );
     }
+
+    /// A v1 message lacks the replay-protection fields. They deserialize to
+    /// the current key version, the nil nonce and the Unix epoch (far outside
+    /// any freshness window, so the freshness gate rejects it), on every signed
+    /// message type.
+    #[test]
+    fn a_v1_message_deserializes_to_values_the_gates_reject() {
+        let id = Uuid::nil();
+        let authz: AuthzRequest = serde_json::from_value(serde_json::json!({
+            "correlation_id": id, "tenant_id": id, "subject_id": id,
+            "action": "read", "resource_id": id,
+        }))
+        .unwrap();
+        let audit: AuditEventMessage = serde_json::from_value(serde_json::json!({
+            "tenant_id": id, "actor_id": id, "actor_type": "User",
+            "action": "login", "outcome": "Success",
+        }))
+        .unwrap();
+        let invalidation: CacheInvalidationMessage = serde_json::from_value(serde_json::json!({
+            "origin_id": id, "tenant_id": id,
+        }))
+        .unwrap();
+
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        for (key_version, nonce, issued_at) in [
+            (authz.key_version, authz.nonce, authz.issued_at),
+            (audit.key_version, audit.nonce, audit.issued_at),
+            (
+                invalidation.key_version,
+                invalidation.nonce,
+                invalidation.issued_at,
+            ),
+        ] {
+            assert_eq!(key_version, CURRENT_KEY_VERSION);
+            assert_eq!(nonce, Uuid::nil());
+            assert_eq!(issued_at, epoch);
+            assert!(
+                !is_fresh(
+                    issued_at,
+                    Utc::now(),
+                    chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS)
+                ),
+                "the epoch is outside the freshness window"
+            );
+        }
+        assert!(!invalidation.heartbeat, "an absent heartbeat is false");
+    }
+
+    /// `heartbeat: false` is omitted so an ordinary invalidation stays
+    /// byte-identical to what a pre-heartbeat replica signs; `true` is emitted.
+    #[test]
+    fn only_a_true_heartbeat_is_serialized() {
+        let message = |heartbeat| CacheInvalidationMessage {
+            origin_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            subject_id: None,
+            key_version: CURRENT_KEY_VERSION,
+            nonce: Uuid::nil(),
+            issued_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            heartbeat,
+            hmac_signature: None,
+        };
+        let plain = serde_json::to_value(message(false)).unwrap();
+        assert!(plain.get("heartbeat").is_none(), "{plain}");
+        let beat = serde_json::to_value(message(true)).unwrap();
+        assert_eq!(beat["heartbeat"], true);
+    }
 }

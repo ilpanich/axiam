@@ -316,6 +316,7 @@ pub async fn grant_to_role<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: an ALLOW grant widens access (safe direction) for every subject
     // holding the role (set unknown here) — flush the tenant so the new grant
     // is visible immediately.
@@ -511,6 +512,7 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): revoking a grant removes access for
     // every subject holding this role. The subject set isn't known here without
     // a query, so flush the whole tenant — this must never leave a stale allow.

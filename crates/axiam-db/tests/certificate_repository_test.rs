@@ -950,9 +950,10 @@ async fn ca_serials_are_unique_under_a_parent_and_free_among_roots() {
 /// serial (the pre-fix same-key twins) and has no `serial` column. Migration v99
 /// must apply over them — `NONE` is not a collision — and afterwards enforce
 /// the index on what is written next. v99 is un-applied by hand (its DDL
-/// removed, its `_migration` record and every later one deleted, because the
-/// runner applies only what lies above the highest recorded version) so the
-/// real runner re-applies it, and the later migrations again, idempotently.
+/// removed, its `_migration` record and every later one deleted) so the real
+/// runner re-applies it, and the later migrations again, idempotently. (Since
+/// #704 the runner would re-apply v99 with the later records kept; deleting
+/// them as well also proves the later migrations re-apply over this state.)
 #[tokio::test]
 async fn v99_applies_over_rows_that_already_share_a_serial() {
     let (db, _org, tenant_id) = setup().await;

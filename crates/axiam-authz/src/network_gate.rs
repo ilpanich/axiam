@@ -116,6 +116,16 @@ pub const AUDIT_RESOURCE_WRITE_REFUSED: &str = "network_resource.write_refused";
 pub const AUDIT_BINDING_REFUSED: &str = "certificate_binding.refused";
 /// A write of the tenant's network policy (the `Session-Timeout` cap) refused.
 pub const AUDIT_POLICY_WRITE_REFUSED: &str = "network_policy.write_refused";
+/// A network-sensitive role assigned (the write cleared and landed; T-484).
+pub const AUDIT_ROLE_ASSIGNED: &str = "network_role.assigned";
+/// A network-sensitive role unassigned (cleared and landed).
+pub const AUDIT_ROLE_UNASSIGNED: &str = "network_role.unassigned";
+/// A `network:` permission granted to a role (cleared and landed).
+pub const AUDIT_ROLE_GRANTED: &str = "network_role.granted";
+/// A `network:` permission revoked from a role (cleared and landed).
+pub const AUDIT_ROLE_REVOKED: &str = "network_role.revoked";
+/// A certificate bound to a service account (cleared and landed).
+pub const AUDIT_BINDING_BOUND: &str = "certificate_binding.bound";
 
 // ---------------------------------------------------------------------------
 // What the function reads
@@ -674,6 +684,13 @@ impl GateClearance {
     #[must_use]
     pub fn is_network_sensitive(&self) -> bool {
         self.network_sensitive
+    }
+
+    /// For a revoke, the effect of the grant the decision read: `Some(None)`
+    /// when it found none, `None` for every other write.
+    #[must_use]
+    pub fn revoked_effect(&self) -> Option<Option<PermissionEffect>> {
+        self.revoked_effect
     }
 
     /// The clearance a segment or profile repository write demands; `None`

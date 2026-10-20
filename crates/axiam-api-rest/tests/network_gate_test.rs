@@ -1398,6 +1398,7 @@ async fn serialising_world() -> (Arc<World>, tempfile::TempDir) {
 async fn gate(
     w: &World,
     writer: Uuid,
+    subject_scope: SubjectScope,
     write: axiam_authz::network_gate::NetworkWrite<'_>,
 ) -> axiam_authz::network_gate::GateVerdict {
     use axiam_authz::network_gate::{GateWriter, RepositoryGateStore, authorize_network_write};
@@ -1422,7 +1423,7 @@ async fn gate(
     let writer = GateWriter {
         tenant_id: w.tenant,
         subject_id: writer,
-        subject_scope: SubjectScope::Tenant,
+        subject_scope,
     };
     authorize_network_write(&engine, &store, writer, write)
         .await
@@ -1475,7 +1476,7 @@ async fn send(
             is_global: Some(true),
         },
     };
-    let claim = match gate(&w, writer, write).await {
+    let claim = match gate(&w, writer, SubjectScope::Tenant, write).await {
         Ok(cleared) => cleared.role_claim(),
         Err(refusal) => panic!("{request:?}: the gate refused on its own read: {refusal:?}"),
     };
@@ -1603,8 +1604,12 @@ where
         );
         for refused in [&ra, &rb].into_iter().filter(|r| r.is_err()) {
             assert!(
-                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
-                    if reason.contains("the role changed since it was read")),
+                matches!(
+                    refused,
+                    Err(axiam_core::error::AxiamError::Network(
+                        axiam_core::error::NetworkConflict::StaleRole { .. }
+                    ))
+                ),
                 "round {round}: the loser is the 409, got {refused:?}"
             );
         }
@@ -1807,8 +1812,12 @@ async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
         );
         for refused in [&denied, &revoked].into_iter().filter(|r| r.is_err()) {
             assert!(
-                matches!(refused, Err(axiam_core::error::AxiamError::Conflict { reason })
-                    if reason.contains("the role changed since it was read")),
+                matches!(
+                    refused,
+                    Err(axiam_core::error::AxiamError::Network(
+                        axiam_core::error::NetworkConflict::StaleRole { .. }
+                    ))
+                ),
                 "round {round}: {refused:?}"
             );
         }
@@ -1828,4 +1837,263 @@ async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
         }
     }
     println!("quarantine won {quarantined}, revoke won {released} of {ROUNDS}");
+}
+
+/// #702 (R110W6-05, T-483): an organization-level administrator is not a network
+/// administrator in a child tenant. The organization scope's seeded super-admin
+/// is global, so it reaches every tenant of the organization; it holds no
+/// `network:` permission, and the gate refuses it `network:grant` at the child
+/// tenant's `/network` while clearing the child tenant's own super-admin.
+#[actix_rt::test]
+async fn an_organization_level_writer_is_refused_network_grant_in_a_child_tenant() {
+    let w = World::new().await;
+    w.segment("/network/zones/hq/iot", 20, Some(20)).await;
+    let org_tenant = SurrealTenantRepository::new(w.db.clone())
+        .create(CreateTenant {
+            organization_id: w.org,
+            kind: TenantKind::Organization,
+            name: "Org scope".into(),
+            slug: "org-scope".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    seed_permissions(&w.db, org_tenant, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&w.db, org_tenant, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let org_admin = SurrealUserRepository::new(w.db.clone())
+        .create(CreateUser {
+            tenant_id: org_tenant,
+            username: "org-admin".into(),
+            email: "org-admin@example.com".into(),
+            password: axiam_test_support::test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    w.roles()
+        .assign_to_user(
+            org_tenant,
+            org_admin,
+            roles.super_admin_role_id,
+            AssignmentScope::from(None),
+        )
+        .await
+        .unwrap();
+
+    // A role carrying `network:join`, assigned to a user: a write that needs
+    // `network:grant` at `/network` of the child tenant (§5.3).
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let target = w.user(&[]).await;
+    let assign = || axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::User(target),
+        resource_id: None,
+        inherit: true,
+    };
+
+    let org_scope = SubjectScope::Organization {
+        tenant_id: org_tenant,
+    };
+    assert!(
+        gate(&w, org_admin, org_scope, assign()).await.is_err(),
+        "the organization scope's super-admin holds no network:grant in the child tenant"
+    );
+
+    // The control: the child tenant's own super-admin clears the same write.
+    let local = w.user(&[(w.role_named("super-admin").await, None)]).await;
+    assert!(
+        gate(&w, local, SubjectScope::Tenant, assign())
+            .await
+            .is_ok(),
+        "the child tenant's own super-admin still holds network:grant"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R110W6-06 (#703, T-484): a cleared network-sensitive write has a row
+// ---------------------------------------------------------------------------
+
+/// Every cleared network-sensitive assignment, unassignment, grant, revoke and
+/// binding leaves exactly one success row with the role, the grantee, the node
+/// and the `network:` permissions conferred; a write that touches no `network:`
+/// permission leaves none, and neither does a refused one (it has its own).
+#[actix_rt::test]
+async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_members() {
+    let w = World::new().await;
+    let root = network_root_id(w.tenant);
+    let admin = network_admin(&w).await;
+    let t = w.user_token(admin);
+    let app = app!(w);
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let plain = w.role("plain", &[]).await;
+    let user = w.user(&[]).await;
+    let device = w.service_account(&[]).await;
+    let grant_perm = w.permission_id(NETWORK_GRANT).await;
+
+    // A role carrying a network permission, assigned and unassigned.
+    let (status, err) = call(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/roles/{fleet}/users"),
+        Some(json!({ "user_id": user })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let rows = w.audit("network_role.assigned").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.outcome, AuditOutcome::Success);
+    assert_eq!(row.actor_id, admin);
+    assert_eq!(row.metadata["role_id"], fleet.to_string());
+    assert_eq!(row.metadata["role"], "fleet");
+    assert_eq!(row.metadata["grantee"]["kind"], "user");
+    assert_eq!(row.metadata["grantee"]["id"], user.to_string());
+    assert_eq!(row.metadata["node"], "none", "assigned at the tenant");
+    assert_eq!(row.metadata["permissions"][0]["action"], NETWORK_JOIN);
+    assert_eq!(row.metadata["permissions"][0]["effect"], "allow");
+
+    let (status, err) = call(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/roles/{fleet}/service-accounts"),
+        Some(json!({ "service_account_id": device, "resource_id": root })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let rows = w.audit("network_role.assigned").await;
+    assert_eq!(rows.len(), 2, "one row per assignment: {rows:?}");
+    let row = rows
+        .iter()
+        .find(|r| r.metadata["grantee"]["kind"] == "service_account")
+        .expect("the service-account row");
+    assert_eq!(row.metadata["grantee"]["id"], device.to_string());
+    assert_eq!(row.metadata["node"], root.to_string());
+    assert_eq!(row.resource_id, Some(root));
+
+    let (status, err) = call(
+        &app,
+        &t,
+        "DELETE",
+        &format!("/api/v1/roles/{fleet}/users/{user}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let rows = w.audit("network_role.unassigned").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].metadata["role_id"], fleet.to_string());
+    assert_eq!(rows[0].metadata["grantee"]["id"], user.to_string());
+    assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_JOIN);
+
+    // A grant and a revoke of a network permission on a role.
+    let (status, err) = call(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/roles/{plain}/permissions"),
+        Some(json!({ "permission_id": grant_perm, "effect": "deny" })),
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let rows = w.audit("network_role.granted").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].metadata["role_id"], plain.to_string());
+    assert_eq!(rows[0].metadata["role"], "plain");
+    assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_GRANT);
+    assert_eq!(rows[0].metadata["permissions"][0]["effect"], "deny");
+
+    let (status, err) = call(
+        &app,
+        &t,
+        "DELETE",
+        &format!("/api/v1/roles/{plain}/permissions/{grant_perm}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204, "{err}");
+    let rows = w.audit("network_role.revoked").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_GRANT);
+    assert_eq!(rows[0].metadata["permissions"][0]["effect"], "deny");
+
+    // A binding.
+    let cert = w.certificate().await;
+    let (status, err) = call(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/service-accounts/{device}/bind-certificate"),
+        Some(json!({ "certificate_id": cert })),
+    )
+    .await;
+    assert_eq!(status, 200, "{err}");
+    let rows = w.audit("certificate_binding.bound").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].outcome, AuditOutcome::Success);
+    assert_eq!(rows[0].metadata["certificate_id"], cert.to_string());
+    assert_eq!(rows[0].metadata["grantee"]["id"], device.to_string());
+    let text = rows[0].metadata.to_string();
+    assert!(!text.contains("BEGIN"), "no certificate in the row: {text}");
+
+    // Nothing else was written: the five actions hold exactly these rows.
+    let total = w.audit("network_role.assigned").await.len()
+        + w.audit("network_role.unassigned").await.len()
+        + w.audit("network_role.granted").await.len()
+        + w.audit("network_role.revoked").await.len()
+        + w.audit("certificate_binding.bound").await.len();
+    assert_eq!(total, 6);
+}
+
+/// A write that touches no `network:` permission leaves none of the five rows.
+#[actix_rt::test]
+async fn r110w6_06_a_non_network_write_leaves_no_row() {
+    let w = World::new().await;
+    let t = w.user_token(network_admin(&w).await);
+    let app = app!(w);
+    let plain = w.role("plain", &[]).await;
+    let user = w.user(&[]).await;
+    let read = w.permission_id("roles:get").await;
+
+    for (method, uri, body) in [
+        (
+            "POST",
+            format!("/api/v1/roles/{plain}/users"),
+            Some(json!({ "user_id": user })),
+        ),
+        (
+            "POST",
+            format!("/api/v1/roles/{plain}/permissions"),
+            Some(json!({ "permission_id": read })),
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/roles/{plain}/permissions/{read}"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/roles/{plain}/users/{user}"),
+            None,
+        ),
+    ] {
+        let (status, err) = call(&app, &t, method, &uri, body).await;
+        assert_eq!(status, 204, "{method} {uri}: {err}");
+    }
+    for action in [
+        "network_role.assigned",
+        "network_role.unassigned",
+        "network_role.granted",
+        "network_role.revoked",
+        "certificate_binding.bound",
+    ] {
+        assert!(w.audit(action).await.is_empty(), "{action}");
+    }
 }

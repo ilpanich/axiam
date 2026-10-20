@@ -38,9 +38,10 @@
 //! Every request that gets past the caller's checks runs the same steps, in the
 //! same order, whatever the certificate turns out to be:
 //!
-//! 1. the certificate row by fingerprint (global), then `authenticate_der`;
-//!    **another tenant's certificate is refused** (§7), with the reject every
-//!    other failure gets;
+//! 1. the certificate row by fingerprint (global), then `authenticate_der` —
+//!    over the caller's own certificate, as a decoy whose result is discarded,
+//!    when no row of this tenant resolved (#706); **another tenant's
+//!    certificate is refused** (§7), with the reject every other failure gets;
 //! 2. the subject's account (the device's service account, or — when no
 //!    certificate of this tenant resolved — the caller's own, as a decoy of the
 //!    same shape) — `Active` or no placement;
@@ -54,11 +55,13 @@
 //! 5. the lowest-ranked `access` candidate, else a `quarantine` one, else none;
 //! 6. one audit row (T-463, §8), and the answer.
 //!
-//! "No candidate", "another tenant's certificate", "an inactive account" and a
-//! placement therefore cost the same reads and the same batch; only the answer
-//! differs. What `authenticate_der` itself does differs by its own early
-//! refusals (an unknown or revoked certificate stops before the chain is
-//! verified) — a residual recorded for the threat model, not hidden.
+//! "No candidate", "another tenant's certificate", "an unknown certificate or
+//! fingerprint", "an inactive account" and a placement therefore cost the same
+//! reads, one full verification and the same batch; only the answer differs.
+//! What remains is recorded for the threat model (T-457), not hidden:
+//! `authenticate_der`'s own early refusals for a row of **this** tenant (a
+//! revoked, expired or server certificate stops before the chain is verified),
+//! and the engine's answer for a subject with no role assignment.
 //!
 //! # What is never on the wire, and never in the row
 //!
@@ -390,16 +393,54 @@ enum Resolved {
     },
 }
 
+/// The one certificate a decision verifies.
+#[derive(Debug, PartialEq, Eq)]
+enum VerificationTarget<'a> {
+    /// A certificate of the caller's tenant: the DER presented, or — for the
+    /// fingerprint form — the row's own.
+    Presented(std::borrow::Cow<'a, [u8]>),
+    /// No row of the caller's tenant — unknown anywhere, or another tenant's:
+    /// the caller's own certificate, verified as a decoy and the result
+    /// discarded, so the refusal pays the full verification a certificate of
+    /// this tenant pays (T-457, #706).
+    Decoy(&'a [u8]),
+    /// A row of the caller's tenant whose stored PEM does not parse.
+    Nothing,
+}
+
+/// Which certificate `resolve_certificate` verifies. Every path but a stored
+/// PEM that does not parse verifies exactly one, and which one depends on the
+/// caller's own tenant alone: whether a fingerprint is registered in another
+/// tenant, and in what state, never decides whether a verification runs.
+fn verification_target<'a>(
+    presented: &'a Presented,
+    row: Option<&Certificate>,
+    tenant_id: Uuid,
+    caller_der: &'a [u8],
+) -> VerificationTarget<'a> {
+    match (presented, row.filter(|r| r.tenant_id == tenant_id)) {
+        (_, None) => VerificationTarget::Decoy(caller_der),
+        (Presented::Certificate(der), Some(_)) => VerificationTarget::Presented(der.into()),
+        (Presented::Fingerprint, Some(row)) => match pem_to_der(&row.public_cert_pem) {
+            Some(der) => VerificationTarget::Presented(der.into()),
+            None => VerificationTarget::Nothing,
+        },
+    }
+}
+
 /// Resolve the presented certificate through `authenticate_der`, refusing one
 /// of another tenant (§7). The row is read first, by fingerprint, for two
 /// reasons: the fingerprint form has no DER without it, and a refusal of this
 /// tenant's certificate can then be named from the row (revoked, expired)
-/// rather than from the wording of an error message.
+/// rather than from the wording of an error message. When no row of this
+/// tenant resolves, the caller's own certificate is verified instead and the
+/// result discarded ([`VerificationTarget::Decoy`]).
 async fn resolve_certificate<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
     presented: &Presented,
     fingerprint: &str,
+    caller_der: &[u8],
 ) -> Result<Resolved, AxiamApiError> {
     let row: Option<Certificate> = match state
         .pki
@@ -411,18 +452,21 @@ async fn resolve_certificate<C: Connection + Clone>(
         Err(AxiamError::NotFound { .. }) => None,
         Err(e) => return Err(e.into()),
     };
-    let der = match (presented, &row) {
-        (Presented::Certificate(der), _) => Some(der.clone()),
-        (Presented::Fingerprint, Some(row)) => pem_to_der(&row.public_cert_pem),
-        (Presented::Fingerprint, None) => None,
-    };
-    let authenticated = match der {
-        Some(der) => match state.pki.device_auth_service.authenticate_der(&der).await {
+    let device_auth = &state.pki.device_auth_service;
+    let authenticated = match verification_target(presented, row.as_ref(), tenant_id, caller_der) {
+        VerificationTarget::Presented(der) => match device_auth.authenticate_der(&der).await {
             Ok(identity) => Some(identity),
             Err(AxiamError::Certificate(_) | AxiamError::NotFound { .. }) => None,
             Err(e) => return Err(e.into()),
         },
-        None => None,
+        VerificationTarget::Decoy(der) => {
+            // Discarded whole, an error included: the decoy never changes the
+            // answer, the row or the status (the precedent is
+            // `equalising_dummy_verify`).
+            let _ = device_auth.authenticate_der(der).await;
+            None
+        }
+        VerificationTarget::Nothing => None,
     };
 
     let Some(row) = row.filter(|r| r.tenant_id == tenant_id) else {
@@ -648,7 +692,8 @@ pub async fn decide<C: Connection + Clone>(
     // subject: an account that exists and holds role assignments, so the reads
     // and the batch below cost what a real device's do. Its answers are
     // discarded.
-    let resolved = resolve_certificate(&state, tenant_id, &presented, &fingerprint).await?;
+    let resolved =
+        resolve_certificate(&state, tenant_id, &presented, &fingerprint, &caller.der).await?;
     let (subject, device) = match &resolved {
         Resolved::Device {
             service_account_id, ..
@@ -823,4 +868,99 @@ pub async fn decide<C: Connection + Clone>(
         }
     };
     Ok(HttpResponse::Ok().json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiam_core::models::certificate::{CertificateType, KeyAlgorithm};
+
+    const CALLER: &[u8] = b"the caller's own certificate";
+    const PRESENTED: &[u8] = b"the device's certificate";
+    // The envelope alone: `pem_to_der` reads the base64, not the X.509 inside.
+    const ROW_PEM: &str = "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
+
+    fn row(tenant_id: Uuid, pem: &str) -> Certificate {
+        Certificate {
+            id: Uuid::new_v4(),
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "device-001".into(),
+            public_cert_pem: pem.into(),
+            fingerprint: "00".repeat(32),
+            cert_type: CertificateType::Device,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now(),
+            not_after: Utc::now(),
+            status: CertificateStatus::Active,
+            metadata: Value::Null,
+            user_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// The structural half of T-457 for the verification (#706): every path
+    /// verifies exactly one certificate, and every refusal before a row of this
+    /// tenant — an unknown certificate or fingerprint, another tenant's —
+    /// verifies the caller's own, whatever the other tenant holds.
+    #[test]
+    fn every_path_verifies_one_certificate_and_every_refusal_the_callers() {
+        let tenant = Uuid::new_v4();
+        let mine = row(tenant, ROW_PEM);
+        let theirs = row(Uuid::new_v4(), ROW_PEM);
+        let unparsable = row(tenant, "not a PEM");
+        let by_der = Presented::Certificate(PRESENTED.to_vec());
+        let by_fingerprint = Presented::Fingerprint;
+        let cases: [(&str, &Presented, Option<&Certificate>, VerificationTarget); 7] = [
+            (
+                "unknown certificate",
+                &by_der,
+                None,
+                VerificationTarget::Decoy(CALLER),
+            ),
+            (
+                "another tenant's certificate",
+                &by_der,
+                Some(&theirs),
+                VerificationTarget::Decoy(CALLER),
+            ),
+            (
+                "this tenant's certificate",
+                &by_der,
+                Some(&mine),
+                VerificationTarget::Presented(PRESENTED.into()),
+            ),
+            (
+                "unknown fingerprint",
+                &by_fingerprint,
+                None,
+                VerificationTarget::Decoy(CALLER),
+            ),
+            (
+                "another tenant's fingerprint",
+                &by_fingerprint,
+                Some(&theirs),
+                VerificationTarget::Decoy(CALLER),
+            ),
+            (
+                "this tenant's fingerprint",
+                &by_fingerprint,
+                Some(&mine),
+                VerificationTarget::Presented(vec![1, 2, 3].into()),
+            ),
+            (
+                "this tenant's row, PEM unparsable",
+                &by_fingerprint,
+                Some(&unparsable),
+                VerificationTarget::Nothing,
+            ),
+        ];
+        for (name, presented, row, expected) in cases {
+            assert_eq!(
+                verification_target(presented, row, tenant, CALLER),
+                expected,
+                "{name}"
+            );
+        }
+    }
 }

@@ -792,7 +792,12 @@ pub const NETWORK_ADMIN_CLASS_ACTIONS: &[&str] = &[NETWORK_ADMIN, NETWORK_GRANT_
 ///   assigner must hold every one of them at `/network`;
 /// * it is made only by the seeder (`seed_default_roles`, and
 ///   `reconcile_default_role_grants` on boot). The API refuses a `network:`
-///   grant to any global role, this one included.
+///   grant to any global role, this one included;
+/// * it is made in an **ordinary tenant only**. The organization's own scope
+///   tenant has a seeded super-admin too, and that role is global, so an
+///   organization-level principal would carry these permissions into every
+///   tenant of the organization (#702, T-483). The seeder withholds them there
+///   and the boot reconcile revokes them from a deployment seeded before.
 ///
 /// The seeded `admin` and `viewer` roles hold no `network:` permission.
 pub const SEEDED_SUPER_ADMIN_NETWORK_ACTIONS: &[&str] = &[

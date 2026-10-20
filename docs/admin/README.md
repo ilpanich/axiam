@@ -553,6 +553,28 @@ assignment specifically, not every assignment of that role.
 In the admin UI: **Roles → (a role) → Assignments → Service accounts**, and
 **Groups → (a group) → Service Accounts**.
 
+## Audit actions of the network write gate
+
+A write that touches the reserved `network:` permissions is decided by the
+network write gate, and both outcomes are audited under the actions below. A
+refusal is a `denied` row written by the gate (`network_role.assign_refused`,
+`network_role.unassign_refused`, `network_role.grant_refused`,
+`network_role.write_refused`, `certificate_binding.refused`, …). A write the
+gate cleared and that landed is a `success` row, written once, after the write:
+
+| Action | Written when | Members of the row |
+|---|---|---|
+| `network_role.assigned` | a role carrying a `network:` permission is assigned to a user, service account or group | role id and name, grantee (kind, id), node (`none` for the tenant), `inherit`, the role's `network:` permissions (action, effect, scopes) |
+| `network_role.unassigned` | such a role is unassigned | role id and name, grantee, node, the role's `network:` permissions |
+| `network_role.granted` | a `network:` permission is granted to a role | role id and name, the permission (action, id, effect, scopes) |
+| `network_role.revoked` | a `network:` permission is revoked from a role | role id and name, the permission (action, id, the effect that was removed) |
+| `certificate_binding.bound` | a certificate is bound to a service account | certificate id, service account id — never the certificate itself |
+
+The row's `actor_id` is the writer. A write that touches no `network:`
+permission, and a role update or delete, leaves none of these rows (the request
+row of the route still records them). If the row cannot be appended, the error
+is logged and the write stands.
+
 ## Authorization decision cache (optional, D7)
 
 AXIAM can cache effective-permission decisions per tenant to cut the 3–4

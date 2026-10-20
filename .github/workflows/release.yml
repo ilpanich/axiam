@@ -205,7 +205,7 @@ jobs:
       # D-07: upload SARIF to GitHub Security tab. The category must be unique
       # per image AND per arch, or the second upload overwrites the first.
       - name: Upload image scan SARIF
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4
         if: always()
         with:
           sarif_file: trivy-image-${{ matrix.image }}-${{ matrix.arch }}.sarif

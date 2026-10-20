@@ -79,8 +79,12 @@ device code is looked at**: an unknown client or a failed credential is
 `401 invalid_client`, as is a client that no longer holds the grant — so an
 approved grant is refused once the grant type is removed from its client — and
 a `client_id` that is not the grant's is answered `invalid_grant`, exactly as an
-unknown code. None of these spends the code or records a poll against it, so a
-leaked device code is worth nothing to anyone but its client. A client
+unknown code. None of these spends the code or records a poll against it, so for a
+confidential client a leaked device code is worth nothing without the client's
+credential. A public client's device code remains the grant's only secret
+(RFC 8628 §5.2, §5.6): anyone can name its `client_id`, so keep the code on the
+device and out of logs; a DPoP-bound public client's tokens are bound to the
+key of whoever redeems it. A client
 registered for sender-constrained tokens gets one here too: a DPoP proof binds
 the token (`cnf.jkt`, `token_type: DPoP`), a client certificate binds it
 (`cnf.x5t#S256`), and a poll without the proof or certificate the registration
@@ -134,12 +138,16 @@ They are **authenticated and CSRF-protected**, which is why they live under
   §5.4 warns about, seen from the other side.
 - **Only a console sign-in may call them.** An access token AXIAM minted for
   an OAuth2 client — through the code, refresh, CIBA or device grant — names
-  the user too, but it is answered `403` on both endpoints, before the code is
-  looked up:
+  the user too, but it is answered `403` on both endpoints, before its session
+  is checked and before the code is looked up:
 
   ```json
-  {"error": "authorization_denied", "message": "A console sign-in is required to approve a device."}
+  {"error": "authorization_denied", "message": "Authorization denied: a console sign-in is required; this token was minted for an OAuth2 client"}
   ```
+
+  The refusal reads the token's `client_id` claim, and since 1.1.1 the device
+  grant's own token carries one too (see [§4](#4-what-the-device-receives)); it
+  used to be answered `401` here only because it names no session.
 
   Without this rule a relying party holding one of its user's tokens could
   start a device authorization for a device client it controls — so it knows
@@ -157,6 +165,36 @@ are the same code.
 an oracle for which codes are live, and the code space is small by
 construction — 8 characters from a 20-letter alphabet, because a human has to
 read them off a screen.
+
+## 4. What the device receives
+
+The access token is a user token (`sub` is the approving user, `aud` is
+`axiam:user` or the `resource` the device named) and, since 1.1.1, it names
+the client it was granted to in RFC 9068 §2.2's `client_id` claim, as the
+CIBA grant's does (#681). It carries **no `sid`**: the approval happened in
+another browser, and the device has no AXIAM session for the claim to name.
+
+What that means at AXIAM's own routes:
+
+- Every route that checks the caller's session — `/api/v1/*` and UserInfo —
+  answers it `401`, as it always has. It is a token for the resource servers
+  the device was granted, not a console sign-in.
+- The two approval endpoints above answer it `403 authorization_denied`, for
+  what it is (a client's token), before the session is checked.
+- Introspection and revocation do not read the claim: introspection answers
+  as it did (its response does not echo an access token's `client_id`), and
+  revocation acts on the refresh token, which its client revokes as before.
+
+The poll also returns a refresh token, which a client holding the
+`refresh_token` grant redeems with `grant_type=refresh_token` and its
+authentication. For a **public**
+client registered for DPoP-bound tokens it is, since 1.1.1, bound to the key
+the poll's DPoP proof named (RFC 9449 §5, #681). Each refresh must carry a
+proof by that key: another key, or a refresh token bound to none (one issued
+before 1.1.1, or while the client was confidential), is `400 invalid_grant`,
+and the device runs the flow again. A confidential client's refresh tokens
+are unchanged. See
+[Refresh tokens of a DPoP-bound public client](../admin/public-clients.md#refresh-tokens-of-a-dpop-bound-public-client).
 
 ## Rate limits
 
@@ -218,8 +256,14 @@ grant, it logs one `WARN` with their number and the number of tenants they
 belong to (`N confidential OAuth2 client(s) in M tenant(s) hold the device-code
 grant …`; counts only, no client id or name). Each of them answers
 `401 invalid_client` at `/oauth2/device_authorization` and at the poll unless
-its device sends the credential. A client cannot be changed between public and
-confidential, so a device that holds no secret needs a new public client.
+its device sends the credential. Since 1.1.1 an administrator can make such a
+client public in place — `PUT /api/v1/oauth2-clients/{id}` with
+`"token_endpoint_auth_method": "none"`, admitted only when its grants are the
+device grant and `refresh_token` alone — which clears its secret in the same
+write and writes one `oauth2.client_converted_to_public` audit row; its
+devices keep their `client_id`. Every other change between public and
+confidential is still refused. See
+[Converting a confidential device client to public](../admin/public-clients.md#converting-a-confidential-device-client-to-public).
 
 ## Not implemented
 

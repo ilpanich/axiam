@@ -1179,6 +1179,7 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(90),
         })
         .await
@@ -3042,10 +3043,7 @@ mod rate_limit_bucket {
         age(&db, "ciba_hint_cap:t:edge:0", 2 * hint_window + second).await;
         age(&db, "authz_check:203.0.113.2", retention - 5 * second).await;
 
-        assert_eq!(
-            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
-            2
-        );
+        assert_eq!(sweep_rate_limit_buckets(&repo).await.unwrap(), 2);
         assert_eq!(
             keys(&db).await,
             [
@@ -3055,10 +3053,7 @@ mod rate_limit_bucket {
                 "ciba_hint_cap:t:previous:1",
             ]
         );
-        assert_eq!(
-            sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap(),
-            0
-        );
+        assert_eq!(sweep_rate_limit_buckets(&repo).await.unwrap(), 0);
         // A kept bucket still counts where it was.
         assert_eq!(
             repo.peek_count("ciba_hint_cap:t:current:0", w)
@@ -3066,6 +3061,28 @@ mod rate_limit_bucket {
                 .unwrap(),
             1
         );
+    }
+
+    /// #676 — the cutoff is the datastore's. A hint-cap row from the previous
+    /// window, aged 20 minutes (inside the 21-minute retention), is kept. The
+    /// sweep takes no application clock; before the fix it took one, and a
+    /// sweeper five minutes ahead of the datastore computed a 16-minute cutoff
+    /// and removed this row while the cap still reads it.
+    #[tokio::test]
+    async fn the_sweep_ignores_the_application_clock() {
+        let db = setup_db().await;
+        let repo = SurrealRateLimitBucketRepository::new(db.clone());
+        repo.increment_by("ciba_hint_cap:t:previous:1", Utc::now(), 1)
+            .await
+            .unwrap();
+        age(
+            &db,
+            "ciba_hint_cap:t:previous:1",
+            Duration::from_secs(20 * 60),
+        )
+        .await;
+        assert_eq!(sweep_rate_limit_buckets(&repo).await.unwrap(), 0);
+        assert_eq!(keys(&db).await, ["ciba_hint_cap:t:previous:1"]);
     }
 
     /// More stale rows than a batch are all removed, by two replicas sweeping
@@ -3089,12 +3106,12 @@ mod rate_limit_bucket {
         repo.increment_by("fresh", Utc::now(), 1).await.unwrap();
 
         let (a, b) = tokio::join!(
-            sweep_rate_limit_buckets(&repo, Utc::now()),
-            sweep_rate_limit_buckets(&repo, Utc::now())
+            sweep_rate_limit_buckets(&repo),
+            sweep_rate_limit_buckets(&repo)
         );
         // A sweeper that loses a contended commit leaves the rows to the
         // winner or to the next pass; no row is removed twice, none is missed.
-        let rest = sweep_rate_limit_buckets(&repo, Utc::now()).await.unwrap();
+        let rest = sweep_rate_limit_buckets(&repo).await.unwrap();
         assert_eq!(a.unwrap() + b.unwrap() + rest, stale as u64);
         assert_eq!(keys(&db).await, ["fresh"]);
     }

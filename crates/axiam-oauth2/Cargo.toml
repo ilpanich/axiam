@@ -47,7 +47,14 @@ reqwest = { workspace = true }
 # `Zeroizing` on its way to the sealed column. Already in the workspace graph.
 zeroize = { workspace = true }
 
+[features]
+# #679 — a per-thread count of client-secret verifies, read by `tests/` to prove
+# that every refusal of a credential check costs one. Switched on for this
+# crate's own tests by the dev-dependency below; no other build carries it.
+verify-probe = []
+
 [dev-dependencies]
+axiam-oauth2 = { path = ".", features = ["verify-probe"] }
 # T21.5 — the CIMD tests serve client metadata documents from a loopback mock
 # server, the same way `axiam-federation`'s OIDC tests serve a JWKS. Same
 # version as every other crate in the workspace that uses it.

@@ -905,6 +905,7 @@ async fn give_bob_everything(h: &Harness) -> Held {
             auth_time: None,
             acr: None,
             amr: vec![Amr::Pwd],
+            dpop_jkt: None,
             expires_at: Utc::now() + ChronoDuration::hours(1),
         })
         .await

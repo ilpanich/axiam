@@ -91,6 +91,7 @@ async fn insert_token(
         scopes: vec![],
         session_id: None,
         requested_userinfo_claims: Vec::new(),
+        dpop_jkt: None,
         expires_at: Utc::now() + Duration::days(30),
         resource: None,
         auth_time: None,

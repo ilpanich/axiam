@@ -1,6 +1,7 @@
 //! OAuth2 client management endpoints (tenant-scoped via JWT).
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::ciba::{
     CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode, CibaRequestSigningAlg,
 };
@@ -8,7 +9,9 @@ use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
     OAuth2Client, UpdateOAuth2Client,
 };
-use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
+use axiam_core::repository::{
+    AuditLogRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
+};
 use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::client_info::client_ip;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -645,6 +649,55 @@ async fn scopes_outside_ceiling<C: Connection + Clone>(
     Ok(outside)
 }
 
+/// #680 (R110W3-07) — the grants `requested` would **newly** put on a
+/// `managed_by: dcr | cimd` client that a self-registration would refuse, each
+/// with the reason.
+///
+/// Asks [`axiam_oauth2::dcr::grant_refusal`], the predicate `dcr::validate`
+/// itself runs and the one `cimd::validate` shares its grant list with, so the
+/// admin `PUT` and the registration endpoints cannot disagree. Same
+/// held-grant exemption as [`scopes_outside_ceiling`]: a grant the stored row
+/// already holds is never counted, so a form posting the whole record back
+/// still saves; the exemption keeps a grant and never adds one. An
+/// administrator's own client is not bounded. A failed read of the tenant's
+/// policy is an error, never "no policy": fail closed.
+async fn grants_refused_by_registration_policy<C: Connection + Clone>(
+    state: &AppState<C>,
+    stored: &OAuth2Client,
+    requested: &[String],
+) -> Result<Vec<String>, AxiamApiError> {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    if !axiam_oauth2::scope_ceiling::applies_to(stored.managed_by) {
+        return Ok(Vec::new());
+    }
+    let mode = if stored.managed_by == ManagedBy::Dcr {
+        let tenant = axiam_core::repository::TenantRepository::get_by_id(
+            &state.tenant_repo,
+            stored.tenant_id,
+        )
+        .await?;
+        let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            stored.tenant_id,
+        )
+        .await?;
+        Some(settings.oidc.dynamic_registration)
+    } else {
+        None
+    };
+    let mut refused: Vec<String> = Vec::new();
+    for grant in requested {
+        if stored.grant_types.contains(grant) {
+            continue;
+        }
+        if let Some(reason) = axiam_oauth2::dcr::grant_refusal(grant, mode) {
+            refused.push(reason);
+        }
+    }
+    Ok(refused)
+}
+
 /// Grants a public client may never be registered for (T21.2).
 ///
 /// Both mint a token on the strength of the client's own credential, and a
@@ -892,11 +945,12 @@ pub async fn get<C: Connection + Clone>(
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
         (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
-        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."),
+        (status = 422, description = "The client is managed_by dcr or cimd and the request adds either a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`) or a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope or grant the row already holds is not counted. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
 )]
 pub async fn update<C: Connection + Clone>(
+    http: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
@@ -944,34 +998,76 @@ pub async fn update<C: Connection + Clone>(
         .get_by_id(user.tenant_id, id)
         .await?;
 
+    // #680 (R110W3-07) — a self-registered (`dcr`) or CIMD client holds no grant a
+    // registration would refuse. Asked first, before the structural rules below, so
+    // the answer is the policy's rather than a `400` about the grant's own shape.
+    // It composes with the #675 public-conversion rule: that rule needs a
+    // device-only stored row, which a `dcr`/`cimd` row can never be.
+    if let Some(ref requested) = req.grant_types {
+        let refused = grants_refused_by_registration_policy(&state, &stored, requested).await?;
+        if !refused.is_empty() {
+            return Ok(crate::error::unprocessable_entity(
+                "grant_exceeds_registration_policy",
+                format!(
+                    "this client is managed_by {} and the administrator API may not give it \
+                     a grant its registration would be refused: {}; register an \
+                     administrator-managed client for it instead",
+                    stored.managed_by,
+                    refused.join("; "),
+                ),
+            ));
+        }
+    }
+
     // T21.2 — `none` is a registration decision, and it stays one (I4).
     //
-    // A PATCH may not move a client across the public/confidential line in
-    // either direction, because the secret cannot follow it. Going public
-    // would leave a live secret hash on a row whose token-endpoint arm never
-    // reads it — a credential an operator believes they revoked by changing
-    // the method, and SEC-093's exact shape. Going confidential would leave a
-    // row with no hash at all, so every authentication attempt fails on a
-    // secret that was never minted and cannot be minted by this endpoint,
-    // which only ever shows one at creation.
+    // A PATCH may not move a client across the public/confidential line,
+    // because the secret cannot follow it. Going public would leave a live
+    // secret hash on a row whose token-endpoint arm never reads it — a
+    // credential an operator believes they revoked by changing the method, and
+    // SEC-093's exact shape. Going confidential would leave a row with no hash
+    // at all, so every authentication attempt fails on a secret that was never
+    // minted and cannot be minted by this endpoint, which only ever shows one
+    // at creation.
     //
-    // Both directions are refused with a message that names the remedy:
-    // register the client the operator actually wants. The refusal is cheap to
-    // relax later — a rotate-secret endpoint would make the second direction
-    // meaningful — and impossible to take back once a deployment has rows that
-    // relied on it.
+    // One exception (#675, D-4): a confidential client whose grants are only
+    // the device grant and `refresh_token` may become public. Since #635 both
+    // device endpoints authenticate the client by its registered method, so a
+    // 1.0.x device client registered with the default `client_secret_post`
+    // is refused at the upgrade while its devices — built to CONTRACT §14.1 —
+    // send `client_id` alone. The conversion lets those devices keep their
+    // `client_id`, and the objection above does not apply to it: the
+    // repository clears `client_secret_hash` in the same write that sets
+    // `none`, so no stale secret survives. Both the stored and the patched
+    // grants must be device-only, so the conversion never lands on a client
+    // that holds `client_credentials`, token exchange or CIBA, and the
+    // operator cannot strip such a grant and go public in one request.
+    // Every other conversion, and every conversion to confidential, is still
+    // refused with a message that names the remedy: register the client the
+    // operator actually wants.
+    let mut converted_from = None;
     if let Some(requested_method) = req.token_endpoint_auth_method {
         let existing_method = stored.token_endpoint_auth_method;
         if requested_method.is_public() != existing_method.is_public() {
-            return Err(validation_err(format!(
-                "token_endpoint_auth_method cannot be changed from {} to {}: whether a client \
-                 is public is decided at registration, because the client secret cannot follow \
-                 the change — this endpoint mints one only at creation, and a stale one on a \
-                 public row would be a credential AXIAM never checks. Register a new client \
-                 with the method you want",
-                existing_method.as_str(),
-                requested_method.as_str(),
-            )));
+            let patched_grants = req.grant_types.as_deref().unwrap_or(&stored.grant_types);
+            if requested_method.is_public()
+                && holds_only_device_grants(&stored.grant_types)
+                && holds_only_device_grants(patched_grants)
+            {
+                converted_from = Some(existing_method);
+            } else {
+                return Err(validation_err(format!(
+                    "token_endpoint_auth_method cannot be changed from {} to {}: whether a \
+                     client is public is decided at registration, because the client secret \
+                     cannot follow the change — this endpoint mints one only at creation, and a \
+                     stale one on a public row would be a credential AXIAM never checks. The one \
+                     exception is a confidential client whose grant_types are only the device \
+                     grant and refresh_token, which may be made public (its secret is cleared). \
+                     Register a new client with the method you want",
+                    existing_method.as_str(),
+                    requested_method.as_str(),
+                )));
+            }
         }
     }
     if let Some(ref uris) = req.redirect_uris {
@@ -1130,7 +1226,67 @@ pub async fn update<C: Connection + Clone>(
         .oauth2_client_repo
         .update_if_unchanged(user.tenant_id, id, update, stored.updated_at)
         .await?;
+    if let Some(from) = converted_from {
+        audit_conversion_to_public(&state, &http, &user, &client, from).await;
+    }
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
+}
+
+/// #675 (D-4) — the grants a confidential client may hold and still be made
+/// public by `PUT`: the device grant, in either spelling, and `refresh_token`.
+const GRANTS_CONVERTIBLE_TO_PUBLIC: &[&str] = &[
+    axiam_oauth2::device_service::DEVICE_CODE_GRANT_SPELLINGS[0],
+    axiam_oauth2::device_service::DEVICE_CODE_GRANT_SPELLINGS[1],
+    "refresh_token",
+];
+
+/// Whether `grant_types` holds the device grant and nothing but
+/// [`GRANTS_CONVERTIBLE_TO_PUBLIC`].
+fn holds_only_device_grants(grant_types: &[String]) -> bool {
+    grant_types
+        .iter()
+        .any(|g| axiam_oauth2::device_service::DEVICE_CODE_GRANT_SPELLINGS.contains(&g.as_str()))
+        && grant_types
+            .iter()
+            .all(|g| GRANTS_CONVERTIBLE_TO_PUBLIC.contains(&g.as_str()))
+}
+
+/// The audit action of a confidential device client made public (#675).
+pub const CLIENT_CONVERTED_TO_PUBLIC_ACTION: &str = "oauth2.client_converted_to_public";
+
+/// The one audit row of a conversion to public (#675, D-4). Awaited, not
+/// detached; the conversion is already durable, so a failed append is logged
+/// rather than undoing it.
+async fn audit_conversion_to_public<C: Connection + Clone>(
+    state: &AppState<C>,
+    http: &HttpRequest,
+    user: &AuthenticatedUser,
+    client: &OAuth2Client,
+    from: ClientAuthMethod,
+) {
+    let entry = CreateAuditLogEntry {
+        tenant_id: client.tenant_id,
+        actor_id: user.user_id,
+        actor_type: ActorType::User,
+        action: CLIENT_CONVERTED_TO_PUBLIC_ACTION.into(),
+        resource_id: Some(client.id),
+        outcome: AuditOutcome::Success,
+        ip_address: client_ip(http),
+        metadata: Some(serde_json::json!({
+            "client_id": client.client_id,
+            "from": from.as_str(),
+            "to": client.token_endpoint_auth_method.as_str(),
+            "grant_types": client.grant_types,
+            "client_secret_cleared": true,
+        })),
+    };
+    if let Err(e) = state.audit_repo.append(entry).await {
+        tracing::error!(
+            error = %e,
+            client_id = %client.client_id,
+            "failed to write the audit row of a client converted to public"
+        );
+    }
 }
 
 /// `DELETE /api/v1/oauth2-clients/{id}`

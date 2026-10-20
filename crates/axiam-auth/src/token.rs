@@ -691,10 +691,10 @@ impl AccessTokenSpec {
     /// Name the relying party this token was issued to (RFC 9068 §2.2, W7).
     ///
     /// `None` reproduces the token every caller received before this method
-    /// existed, byte for byte, which is why the two OAuth2 issuance sites are
-    /// the only ones that call it: the claim is a fact about a grant, and a
-    /// token minted by a login, a device flow or an exchange has no relying
-    /// party to name.
+    /// existed, byte for byte, which is why only the OAuth2 grants call it
+    /// with `Some` — the code, refresh, CIBA and device grants (#681): the
+    /// claim is a fact about a grant, and a token minted by a login, an mTLS
+    /// device sign-in or an exchange has no relying party to name.
     #[must_use]
     pub fn client_id(mut self, client_id: Option<&str>) -> Self {
         self.client_id = client_id.map(str::to_owned);
@@ -952,10 +952,11 @@ pub fn issue_access_token_enriched(
 /// delegation rather than a copy — the same relationship, and for the same
 /// reason, that `cnf` and `ext` already have to the ones above them.
 ///
-/// Only the OAuth2 authorization-code and refresh paths pass `Some`. Every
-/// other issuance site — login, WebAuthn, federation, device flow, token
-/// exchange — mints a token that no relying party was granted, and naming one
-/// would be asserting something untrue about it.
+/// Only the OAuth2 authorization-code and refresh paths pass `Some` here; the
+/// CIBA and device grants name their client through [`AccessTokenSpec`]
+/// directly (#681). Every other issuance site — login, WebAuthn, federation,
+/// token exchange — mints a token that no relying party was granted, and
+/// naming one would be asserting something untrue about it.
 ///
 /// `requested_userinfo_claims` is the OIDC Core §5.5 list the grant asked for
 /// by name (T-241). An **empty slice produces a byte-identical token** to one

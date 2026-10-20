@@ -571,6 +571,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 auth_time: i.auth_time,
                 acr: i.acr,
                 amr: i.amr,
+                dpop_jkt: i.dpop_jkt,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -846,6 +847,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         auth_time: None,
         acr: None,
         amr: Vec::new(),
+        dpop_jkt: None,
     }
 }
 
@@ -5436,4 +5438,478 @@ async fn d17_a_standard_row_with_a_shared_secret_method_is_unaffected() {
             method.as_str()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #679 — every refusal of a credential check costs one verify
+//
+// A caller who presented a secret must pay one client-secret verify whether the
+// client it named is unknown, is another tenant's, is registered for another
+// method, or holds a different secret — otherwise the cheap refusals are an
+// existence oracle by timing (SEC-086, R110W3-06). `verify_probe` counts the
+// verifies the calling thread performed; every test here runs on its own
+// current-thread runtime, so the count is its own.
+// ---------------------------------------------------------------------------
+
+use axiam_oauth2::token::verify_probe;
+
+async fn verifies_of<
+    F: std::future::Future<Output = Result<T, OAuth2Error>>,
+    T: std::fmt::Debug,
+>(
+    call: F,
+) -> (u32, OAuth2Error) {
+    verify_probe::reset();
+    let err = call.await.expect_err("the request must be refused");
+    (verify_probe::count(), err)
+}
+
+fn basic_registered(grants: &[&str]) -> Box<OAuth2Client> {
+    let mut client = make_client(grants, &[]);
+    client.token_endpoint_auth_method =
+        axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretBasic;
+    client
+}
+
+fn public_registered(grants: &[&str]) -> Box<OAuth2Client> {
+    let mut client = make_client(grants, &[]);
+    client.token_endpoint_auth_method = axiam_core::models::oauth2_client::ClientAuthMethod::None;
+    client
+}
+
+fn svc_for(client: ClientOutcome) -> Svc {
+    build(
+        client,
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    )
+}
+
+fn grant_request(grant: &str) -> TokenRequest {
+    match grant {
+        "authorization_code" => auth_code_req(None),
+        "refresh_token" => {
+            let mut r = base_req("refresh_token");
+            r.refresh_token = Some("some-refresh-token".into());
+            r
+        }
+        other => base_req(other),
+    }
+}
+
+/// The three grants that look the client up and answer `invalid_client` for a
+/// miss: each is run through the same five scenarios.
+const CLIENT_GRANTS: [&str; 3] = ["authorization_code", "client_credentials", "refresh_token"];
+
+#[tokio::test]
+async fn an_unknown_client_with_a_secret_costs_one_verify_on_every_grant() {
+    for grant in CLIENT_GRANTS {
+        let svc = svc_for(ClientOutcome::NotFound);
+        let (n, err) =
+            verifies_of(svc.exchange(client_tenant(), grant_request(grant), &no_cert())).await;
+        assert_eq!(err.error_code(), "invalid_client", "{grant}");
+        assert_eq!(n, 1, "{grant}: unknown client, secret presented");
+    }
+}
+
+#[tokio::test]
+async fn a_wrong_secret_costs_one_verify_on_every_grant() {
+    for grant in CLIENT_GRANTS {
+        let svc = svc_for(ClientOutcome::Found(make_client(&[grant], &[])));
+        let mut req = grant_request(grant);
+        req.client_secret = Some("not-the-secret".into());
+        let (n, err) = verifies_of(svc.exchange(client_tenant(), req, &no_cert())).await;
+        assert_eq!(err.error_code(), "invalid_client", "{grant}");
+        assert_eq!(n, 1, "{grant}: wrong secret");
+    }
+}
+
+#[tokio::test]
+async fn a_basic_client_given_a_body_secret_and_no_header_costs_one_verify_on_every_grant() {
+    for grant in CLIENT_GRANTS {
+        let svc = svc_for(ClientOutcome::Found(basic_registered(&[grant])));
+        let (n, err) =
+            verifies_of(svc.exchange(client_tenant(), grant_request(grant), &no_cert())).await;
+        assert_eq!(err.error_code(), "invalid_client", "{grant}");
+        assert_eq!(n, 1, "{grant}: Basic-registered, body secret, no header");
+    }
+}
+
+#[tokio::test]
+async fn a_public_client_given_a_secret_costs_one_verify_on_every_grant() {
+    for grant in ["authorization_code", "refresh_token"] {
+        let svc = svc_for(ClientOutcome::Found(public_registered(&[grant])));
+        let (n, err) =
+            verifies_of(svc.exchange(client_tenant(), grant_request(grant), &no_cert())).await;
+        assert_eq!(err.error_code(), "invalid_client", "{grant}");
+        assert_eq!(n, 1, "{grant}: public client, secret presented");
+    }
+}
+
+#[tokio::test]
+async fn the_right_secret_costs_exactly_one_verify() {
+    for grant in ["authorization_code", "client_credentials"] {
+        let svc = svc_for(ClientOutcome::Found(make_client(&[grant], &["api"])));
+        verify_probe::reset();
+        let _ = svc
+            .exchange(client_tenant(), grant_request(grant), &no_cert())
+            .await;
+        assert_eq!(
+            verify_probe::count(),
+            1,
+            "{grant}: the real verify is the only one"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_client_with_no_secret_costs_no_verify() {
+    // Refused before the lookup on client_credentials; refused with the same
+    // answer after it on the others. Nothing was presented, nothing is hashed.
+    for grant in CLIENT_GRANTS {
+        let svc = svc_for(ClientOutcome::NotFound);
+        let mut req = grant_request(grant);
+        req.client_secret = None;
+        let (n, _) = verifies_of(svc.exchange(client_tenant(), req, &no_cert())).await;
+        assert_eq!(n, 0, "{grant}: no secret presented");
+    }
+}
+
+const SA_ID: &str = "sa_deadbeefdeadbeefdeadbeefdeadbeef";
+
+#[tokio::test]
+async fn a_service_account_refusal_costs_one_verify_whichever_arm_refuses() {
+    let tenant = Uuid::new_v4();
+
+    // unknown `sa_…` id
+    let (svc, _) = build_sa(SaOutcome::NotFound);
+    let (n, err) = verifies_of(svc.exchange(tenant, sa_req(SA_ID, "anything"), &no_cert())).await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "unknown service account");
+
+    // a row from another tenant — never compared against its own hash
+    let other = make_service_account(
+        Uuid::new_v4(),
+        hash_client_secret("right"),
+        UserStatus::Active,
+    );
+    let (svc, _) = build_sa(SaOutcome::Found(Box::new(other)));
+    let (n, err) = verifies_of(svc.exchange(tenant, sa_req(SA_ID, "right"), &no_cert())).await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "cross-tenant row");
+
+    // the wrong secret
+    let sa = make_service_account(tenant, hash_client_secret("right"), UserStatus::Active);
+    let (svc, _) = build_sa(SaOutcome::Found(Box::new(sa)));
+    let (n, err) = verifies_of(svc.exchange(tenant, sa_req(SA_ID, "wrong"), &no_cert())).await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "wrong secret");
+}
+
+#[tokio::test]
+async fn authenticate_client_costs_one_verify_whichever_arm_refuses() {
+    // unknown client
+    let svc = svc_for(ClientOutcome::NotFound);
+    let (n, err) =
+        verifies_of(svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert()))
+            .await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "unknown client");
+
+    // a row from another tenant
+    let svc = svc_for(ClientOutcome::Found(make_client(
+        &["client_credentials"],
+        &[],
+    )));
+    let (n, err) =
+        verifies_of(svc.authenticate_client(Uuid::new_v4(), "client-1", Some(SECRET), &no_cert()))
+            .await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "cross-tenant row");
+
+    // Basic-registered, body secret, no header
+    let svc = svc_for(ClientOutcome::Found(basic_registered(&[
+        "client_credentials",
+    ])));
+    let (n, err) =
+        verifies_of(svc.authenticate_client(client_tenant(), "client-1", Some(SECRET), &no_cert()))
+            .await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "Basic-registered, body secret, no header");
+
+    // the secret rode in the header, wrong
+    let (client, _) = d17_tampered_fapi2_client(
+        axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretBasic,
+    );
+    let blob = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode("client-1:wrong")
+    };
+    let creds = axiam_oauth2::client_secret_basic::decode_credentials(&blob).unwrap();
+    let svc = svc_for(ClientOutcome::Found(client));
+    let ctx = no_cert().with_basic_credentials(Some(creds));
+    let (n, _) =
+        verifies_of(svc.authenticate_client(client_tenant(), "client-1", None, &ctx)).await;
+    assert_eq!(n, 1, "wrong secret in the Basic header");
+
+    // an unknown client, nothing presented
+    let svc = svc_for(ClientOutcome::NotFound);
+    let (n, _) =
+        verifies_of(svc.authenticate_client(client_tenant(), "client-1", None, &no_cert())).await;
+    assert_eq!(n, 0, "nothing presented, nothing hashed");
+}
+
+// --- CIBA's token path ----------------------------------------------------
+
+/// `exchange_ciba` reaches its request store only after the client has
+/// authenticated, so every method is a tripwire: a refusal that got that far
+/// would panic.
+struct NeverReached;
+
+impl axiam_core::repository::CibaRequestRepository for NeverReached {
+    async fn create(
+        &self,
+        _: axiam_core::models::ciba::CreateCibaRequest,
+    ) -> AxiamResult<axiam_core::models::ciba::CibaRequest> {
+        unreachable!()
+    }
+    async fn get_by_hash(
+        &self,
+        _: Uuid,
+        _: &str,
+    ) -> AxiamResult<Option<axiam_core::models::ciba::CibaRequest>> {
+        unreachable!()
+    }
+    async fn get_by_id(
+        &self,
+        _: Uuid,
+        _: Uuid,
+    ) -> AxiamResult<Option<axiam_core::models::ciba::CibaRequest>> {
+        unreachable!()
+    }
+    async fn list_pending_for_user(
+        &self,
+        _: Uuid,
+        _: Uuid,
+        _: u32,
+    ) -> AxiamResult<Vec<axiam_core::models::ciba::CibaRequest>> {
+        unreachable!()
+    }
+    async fn count_pending_for_user(&self, _: Uuid, _: Uuid, _: Option<&str>) -> AxiamResult<u64> {
+        unreachable!()
+    }
+    async fn approve(
+        &self,
+        _: Uuid,
+        _: Uuid,
+        _: u64,
+        _: Uuid,
+        _: axiam_core::models::ciba::CibaApprovalEvidence,
+    ) -> AxiamResult<bool> {
+        unreachable!()
+    }
+    async fn deny(&self, _: Uuid, _: Uuid, _: u64, _: Uuid) -> AxiamResult<bool> {
+        unreachable!()
+    }
+    async fn mark_expired(&self, _: Uuid, _: Uuid, _: u64) -> AxiamResult<bool> {
+        unreachable!()
+    }
+    async fn record_poll(
+        &self,
+        _: Uuid,
+        _: Uuid,
+        _: Option<chrono::DateTime<Utc>>,
+        _: chrono::DateTime<Utc>,
+        _: u64,
+    ) -> AxiamResult<bool> {
+        unreachable!()
+    }
+    async fn redeem(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> AxiamResult<Option<axiam_core::models::ciba::CibaRequest>> {
+        unreachable!()
+    }
+    async fn ping_credentials(
+        &self,
+        _: Uuid,
+        _: Uuid,
+    ) -> AxiamResult<Option<axiam_core::models::ciba::CibaPingCredentials>> {
+        unreachable!()
+    }
+    async fn sweep_expired(
+        &self,
+        _: chrono::DateTime<Utc>,
+        _: chrono::Duration,
+    ) -> AxiamResult<u64> {
+        unreachable!()
+    }
+    async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn the_ciba_token_path_costs_one_verify_whichever_arm_refuses() {
+    let ciba_req = || {
+        let mut r = base_req(axiam_core::models::ciba::CIBA_GRANT_TYPE);
+        r.auth_req_id = Some("an-auth-req-id".into());
+        r
+    };
+
+    // unknown client
+    let svc = svc_for(ClientOutcome::NotFound);
+    let (n, err) =
+        verifies_of(svc.exchange_ciba(client_tenant(), ciba_req(), &no_cert(), &NeverReached))
+            .await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "unknown client");
+
+    // a row from another tenant
+    let svc = svc_for(ClientOutcome::Found(make_client(
+        &[axiam_core::models::ciba::CIBA_GRANT_TYPE],
+        &[],
+    )));
+    let (n, err) =
+        verifies_of(svc.exchange_ciba(Uuid::new_v4(), ciba_req(), &no_cert(), &NeverReached)).await;
+    assert_eq!(err.error_code(), "invalid_client");
+    assert_eq!(n, 1, "cross-tenant row");
+
+    // a wrong secret
+    let svc = svc_for(ClientOutcome::Found(make_client(
+        &[axiam_core::models::ciba::CIBA_GRANT_TYPE],
+        &[],
+    )));
+    let mut req = ciba_req();
+    req.client_secret = Some("wrong".into());
+    let (n, _) =
+        verifies_of(svc.exchange_ciba(client_tenant(), req, &no_cert(), &NeverReached)).await;
+    assert_eq!(n, 1, "wrong secret");
+}
+
+// ---------------------------------------------------------------------------
+// #681 (ii), RFC 9449 §5 — a public DPoP-bound client's refresh tokens are
+// bound to its key
+// ---------------------------------------------------------------------------
+
+fn public_dpop_client(grants: &[&str]) -> Box<OAuth2Client> {
+    let mut client = public_registered(grants);
+    client.scopes = vec!["openid".into()];
+    client.client_secret_hash = String::new();
+    client.dpop_bound_access_tokens = true;
+    client
+}
+
+fn bound_refresh(jkt: Option<&str>) -> RefreshToken {
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    stored.dpop_jkt = jkt.map(str::to_owned);
+    stored
+}
+
+fn public_refresh_req() -> TokenRequest {
+    let mut req = refresh_req("tok");
+    req.client_secret = None;
+    req
+}
+
+/// The code grant binds a public DPoP-bound client's refresh token to the key
+/// its token request proved; a confidential DPoP-bound client's stays unbound.
+#[tokio::test]
+async fn r681_the_code_grant_binds_only_a_public_dpop_clients_refresh_token() {
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(public_dpop_client(&["authorization_code", "refresh_token"])),
+        MockCodeRepo::ok(make_auth_code(&["openid"], Some(PKCE_CHALLENGE))),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let mut req = auth_code_req(Some(PKCE_VERIFIER));
+    req.client_secret = None;
+    svc.exchange(Uuid::new_v4(), req, &proof_for(KEY_A))
+        .await
+        .expect("the public client's code redeems");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt.as_deref(), Some(KEY_A));
+
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let mut confidential = make_client(&["authorization_code", "refresh_token"], &["openid"]);
+    confidential.dpop_bound_access_tokens = true;
+    let svc = build(
+        ClientOutcome::Found(confidential),
+        MockCodeRepo::ok(make_auth_code(&["openid"], Some(PKCE_CHALLENGE))),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(
+        Uuid::new_v4(),
+        auth_code_req(Some(PKCE_VERIFIER)),
+        &proof_for(KEY_A),
+    )
+    .await
+    .expect("the confidential client's code redeems");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
+}
+
+/// A public DPoP-bound client's refresh: another key, or a token bound to no
+/// key, is `invalid_grant` and writes no successor; the bound key is admitted
+/// and the successor is bound to it.
+#[tokio::test]
+async fn r681_a_public_dpop_clients_refresh_needs_the_bound_key() {
+    for (bound, proof) in [(Some(KEY_A), KEY_B), (None, KEY_A)] {
+        let refresh = MockRefreshRepo::new().with_get(bound_refresh(bound));
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), public_refresh_req(), &proof_for(proof))
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), "invalid_grant", "bound {bound:?}");
+        assert!(created.lock().unwrap().is_empty(), "a refusal rotated");
+    }
+
+    let refresh = MockRefreshRepo::new().with_get(bound_refresh(Some(KEY_A)));
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), public_refresh_req(), &proof_for(KEY_A))
+        .await
+        .expect("the bound key refreshes");
+    assert_eq!(resp.token_type, "DPoP");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt.as_deref(), Some(KEY_A));
+}
+
+/// A confidential DPoP-bound client's refresh is unchanged: an unbound token
+/// refreshes under whatever key the request proves, and stays unbound.
+#[tokio::test]
+async fn r681_a_confidential_clients_refresh_is_unchanged() {
+    let refresh = MockRefreshRepo::new().with_get(bound_refresh(None));
+    let created = refresh.created.clone();
+    let mut client = make_client(&["refresh_token"], &["openid"]);
+    client.dpop_bound_access_tokens = true;
+    let svc = build(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &proof_for(KEY_B))
+        .await
+        .expect("a confidential client's refresh needs no bound key");
+    assert_eq!(resp.token_type, "DPoP");
+    assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
 }

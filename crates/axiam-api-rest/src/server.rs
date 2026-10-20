@@ -2354,14 +2354,20 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // from a deliberately small, human-typable space). Sharing the
             // token bucket would let ordinary token traffic pay for — or mask
             // — an attempt to exhaust that space. Per-IP, never client-keyed:
-            // RFC 8628 clients are public, so `client_id` is caller-supplied
-            // and worthless as a bucket key here.
+            // Callers are unauthenticated until the handler, so `client_id`
+            // is caller-supplied and worthless as a bucket key here.
             .service(
                 web::resource("/device_authorization")
                     .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))
                     .wrap(RateLimitShared::<C>::new(
                         "oauth2_device_authorization",
                         rate_limit_cfg.device_authorization_per_min,
+                    ))
+                    // #683 — a body `web::Form` cannot read is answered as the
+                    // token endpoint's errors are: a JSON object, not actix's
+                    // `text/plain`. See `handlers::oauth2::par_form_error`.
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
                     ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
             )

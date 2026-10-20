@@ -79,7 +79,10 @@ Authentication** to **Public client (no secret)**. The dashboard then:
   method on the wrong side of that line for the client being edited is
   refused with the same "register a new client with the method you want"
   the API gives, because the secret cannot follow either direction of that
-  change (see "What a public registration is refused" below).
+  change (see "What a public registration is refused" below). The one
+  conversion the API admits — a confidential **device** client made public,
+  see [Converting a confidential device client](#converting-a-confidential-device-client-to-public)
+  — is made through the API; the dashboard still refuses it.
 
 Two of the refusals below — a public client presenting the UMA-ticket grant,
 and a public client at the introspection endpoint — have no corresponding
@@ -145,7 +148,70 @@ registered for `client_secret_post` that sends no secret is still
 `invalid_client`, with the same answer an unknown `client_id` gets. The
 `token_endpoint_auth_method` also cannot be changed across that line by an
 update: the secret cannot follow the change in either direction, so AXIAM
-refuses the patch and asks you to register the client you actually want.
+refuses the patch with `400` and asks you to register the client you actually
+want. There is one exception, described next.
+
+---
+
+## Converting a confidential device client to public
+
+Since 1.1.0 both device-flow endpoints (`/oauth2/device_authorization` and the
+poll) authenticate the client by its registered method (#635). A device client
+registered without `token_endpoint_auth_method` is confidential
+(`client_secret_post`, the default), and the 1.0.x B2 quickstart registered
+device clients exactly that way. Their devices send `client_id` alone — as
+every SDK does, CONTRACT §14.1 — so after the upgrade they are refused
+`401 invalid_client` at both endpoints. The server's startup `WARN` counts
+such clients.
+
+From 1.1.1 an administrator can make such a client public **in place**, so its
+devices keep the `client_id` they were provisioned with (#675):
+
+```bash
+curl -X PUT "https://id.example.com/api/v1/oauth2-clients/$ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"token_endpoint_auth_method": "none"}'
+```
+
+The conversion is admitted only when **both** the stored client and the
+client the request would produce hold the device grant
+(`urn:ietf:params:oauth:grant-type:device_code`, or its short spelling
+`device_code`) and nothing else but `refresh_token`. What happens:
+
+* **The secret is gone.** The write that sets `none` also clears the stored
+  `client_secret_hash`, in the same statement, so no stale credential survives
+  on a public row. A device that still sends the old secret is refused
+  `invalid_client`, as any public client presenting a credential is.
+* **One audit row** names the conversion: action
+  `oauth2.client_converted_to_public`, the administrator as actor, the client's
+  row id as resource, and metadata with the `client_id`, the method it had
+  (`from`), `none` (`to`), its `grant_types` and `client_secret_cleared: true`.
+* **The rest of the registration still applies.** The merged client is held
+  to the same rules a public registration is: no `fapi2` profile, and no mTLS
+  binding, `jwks` or `jwks_uri` beside `none` — clear those in the same
+  request if the client carries them.
+* **A DPoP-bound client's devices sign in again, once** (since 1.1.1, #681).
+  A public client registered with `dpop_bound_access_tokens` has its refresh
+  tokens bound to its device's DPoP key (see
+  [Refresh tokens of a DPoP-bound public client](#refresh-tokens-of-a-dpop-bound-public-client)),
+  and the refresh tokens issued while it was confidential are bound to none,
+  so each is refused `invalid_grant` at its next refresh and the device runs
+  the device flow again. A client not registered for DPoP keeps its refresh
+  tokens.
+
+**Every other conversion stays refused** with `400`, and writes nothing:
+
+| Request | Answer |
+| --- | --- |
+| `none` on a client that also holds `client_credentials`, token exchange or CIBA | `400` — those grants rest on the client's own credential |
+| `none` together with `grant_types` that drop such a grant in the same request | `400` — remove the grant first, in its own update, then convert |
+| `none` on a client without the device grant (an `authorization_code` client, a `refresh_token`-only one) | `400` — register a new public client |
+| a confidential method on a public client (the converse) | `400` — this API mints a secret only at creation |
+
+Converting is a statement that the client's devices **cannot** keep a secret,
+the same statement a public registration makes (RFC 8628 §5.6). Leave a
+device client confidential when its devices hold a credential, and have them
+send it at both endpoints.
 
 ---
 
@@ -304,6 +370,30 @@ curl -X POST "https://id.example.com/oauth2/token?tenant_id=$TENANT_ID" \
 Refreshing takes the same shape — `grant_type=refresh_token`,
 `refresh_token=…`, `client_id=…`, and no secret.
 
+### Refresh tokens of a DPoP-bound public client
+
+A public client has no credential, so a refresh token is all a thief needs to
+keep a grant alive. RFC 9449 §5 therefore binds the refresh tokens of a
+**public** client that uses DPoP to the client's key, and since 1.1.1 AXIAM
+does so (#681) for every public client registered with
+`dpop_bound_access_tokens: true`, whatever the grant (authorization code or
+device):
+
+* The refresh token is bound to the key of the DPoP proof sent with the
+  request that obtained it.
+* A refresh must carry a proof by **that** key. A proof by another key is
+  refused `400 invalid_grant`, and the token is not spent: the client that
+  holds the key can still refresh it. The successor is bound to the same key.
+* A refresh token bound to no key is refused `invalid_grant`. That covers a
+  token issued before the upgrade to 1.1.1, one issued while the client was
+  confidential or not yet registered for DPoP. The client signs in again once
+  and gets a bound one. The server does not bind such a token to the first key
+  that presents it, because that key may be a thief's.
+
+A client that rotates its DPoP key must therefore obtain a new grant; keep the
+key for as long as the refresh token. A confidential client's refresh tokens,
+and a public client's that does not use DPoP, are unchanged.
+
 ---
 
 ## See also
@@ -313,4 +403,7 @@ Refreshing takes the same shape — `grant_type=refresh_token`,
 * [API documentation](../api/README.md) — the OpenAPI document, which carries
   `none` in the `token_endpoint_auth_method` enum.
 * `crates/axiam-api-rest/tests/public_client_test.rs` — every rule on this
-  page, asserted.
+  page, asserted; the device-client conversion in
+  `crates/axiam-api-rest/tests/device_flow_test.rs`
+  (`a_confidential_device_client_converts_to_public_and_its_flow_needs_only_its_client_id`,
+  `every_other_change_across_the_public_line_is_still_refused`).

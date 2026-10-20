@@ -637,7 +637,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "The client is checked before the device code is looked at: a `client_id` that is not the grant's is answered like an unknown code, and nothing is spent, so a leaked device code is worth nothing to anyone but its client. A client registered for DPoP- or certificate-bound tokens gets a bound token from this grant too. See [`docs/api/device-flow.md`](https://github.com/ilpanich/axiam/blob/main/docs/api/device-flow.md).",
+        text: "The client is checked before the device code is looked at: a `client_id` that is not the grant's is answered like an unknown code, and nothing is spent, so for a confidential client a leaked device code is worth nothing without the client's credential. A public client's device code remains the grant's only secret (RFC 8628 §5.2, §5.6): keep it on the device and out of logs. A client registered for DPoP- or certificate-bound tokens gets a bound token from this grant too. See [`docs/api/device-flow.md`](https://github.com/ilpanich/axiam/blob/main/docs/api/device-flow.md).",
       },
       {
         type: "warn",

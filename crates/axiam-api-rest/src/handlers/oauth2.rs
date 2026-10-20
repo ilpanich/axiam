@@ -4236,8 +4236,6 @@ fn build_error_redirect(
         .finish()
 }
 
-/// Build an OAuth2 JSON error response with the appropriate HTTP status.
-///
 /// `POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).
 ///
 /// Issues a `device_code` (the secret the device polls with), a short
@@ -4318,7 +4316,7 @@ async fn device_authorization_inner<C: Connection + Clone>(
         ),
         Err(response) => return *response,
     };
-    let client_id = match axiam_oauth2::token::resolve_client_id(Some(&req.client_id), &ctx) {
+    let client_id = match axiam_oauth2::token::resolve_client_id(req.client_id.as_deref(), &ctx) {
         Ok(id) => id.to_owned(),
         Err(e) => return build_oauth2_error_response(&e),
     };

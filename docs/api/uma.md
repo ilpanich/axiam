@@ -80,6 +80,13 @@ deregister. `GET /uma2/rreg/resource_set` lists the ids **this client**
 registered — not the tenant's whole resource tree, which a protection scope
 does not entitle a caller to enumerate.
 
+**A resource server sees only what it registered.** The same holds for `GET`,
+`PUT` and `DELETE` by id: a resource set another resource server registered, or
+a resource created through `/api/v1/resources` (which carries no
+`uma_registered_by`), answers `404` — the same body as an id that does not
+exist, so the answer does not reveal which of the two it was. Nothing is
+written on that path (threat T-488).
+
 **`PUT` replaces the scope list; it does not merge.** Removing a scope narrows
 what tickets may be requested, so a merge would keep an authority the resource
 server was trying to drop. A scope that survives an update keeps its id, because

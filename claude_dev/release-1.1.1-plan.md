@@ -557,6 +557,39 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.3 W3
 
+- **Head:** `f3503d098` on `claude/release-1.1.1-w3` (13 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W3.1 `159565de5` (#675; Opus 5.5), W3.2 `502ee243c` (#712), W3.3 `430c4021a` (#676, **v109**: the sweep index), W3.4 `bb3a741ff` (#678), W3.5 `306b4a92e` (#679), W3.6 `1ffc71385` (#680, spec), W3.7 `e0b4bf0bb` and `7a9b002ca` (#681, Opus 5.5; v109 also gains `oauth2_refresh_token.dpop_jkt`), W3.8 `74b56fdda` (#683, spec), W3.9 `0e6ab8d31` (#705, new **T-488**), W3.10 `f5bc5bc6d` (#677), W3.11 `71c4ee193` (#684, spec), W3.12 `f3503d098` (F4 review, `claude_dev/security-review-release-1.1.1-w3-2026-10-19.md`).
+- **Where the tree overruled the plan:**
+  - W3.7's 403 at `/api/v1/device/*` needed an ordering change, not only the claim. A new `ConsoleSignIn` extractor refuses a token carrying `client_id` after the DPoP replay record and before the session check.
+  - Its refresh binding fails closed. A public DPoP-bound client's refresh token bound to no key is `invalid_grant`, whether it was issued before 1.1.1 or while the client was still confidential, because binding on first use would bind a stolen token to its thief.
+  - W3.7 extended v109 instead of claiming v110, and both scope tests pin it.
+  - W3.5 gates its probe behind a `verify-probe` feature, reached through a self dev-dependency declared in `TEST_ONLY_INVERSIONS`. The F4 confirms the feature is absent from release builds.
+  - W3.9 found no UMA element in STRIDE §5, so T-488 hangs on the §5.3 resource-server actor. The list route already filtered by registrant.
+  - W3.11's (f) phrase was in T-424's #676 amendment, not in `cleanup.rs`.
+  - Every row's line numbers were stale.
+- **F4 (W3.12):** no Critical, High or Medium. Filed on `1.1.x` for 1.1.2:
+  - Low #749 (R111W3-01): the #675 conversion leaves the client's confidential-era refresh tokens and pending device grants live, and they refresh on `client_id` alone once the client is public.
+  - Low #745 (R111W3-02, pre-existing): `/uma2/perm` mints tickets for another resource server's sets and for ordinary resources.
+  - Informational #746 and #747.
+- **Spec:** the F4 rebuilt it; `--dump-openapi` is byte-identical to `sdks/openapi.json`. The binaries W3.11 could not finish (`device_flow_test`, `ciba_test`, `ciba_approval_test`, `oauth2_flow_test`, `cleanup_task`) all pass.
+- **Executors:** each task at its row's model (W3.1, W3.7 and W3.12 Opus 5.5; the rest Sonnet 5.5); none stopped short; no re-size.
+- **Open for the maintainer (not answered by §11):**
+  - #745: should resources created through `/api/v1/resources` stay UMA-ticketable? The issue sets out three options; `uma_test` relies on tickets for admin-made resources.
+  - #749: should the conversion revoke the confidential-era tokens? Filed as Low under the wave rule, so 1.1.1's upgrade note tells operators to revoke them by hand.
+- **For W7.1 (§14, §27, §33, UMA):**
+  - A device-grant access token carries `client_id` and no `sid`: it gets `403 authorization_denied` at `/api/v1/device/verify` and `/decide` and `401` elsewhere.
+  - A public DPoP-bound client's refresh token is bound to its key: another key or an unbound token is `invalid_grant`, which the SDK treats as terminal.
+  - `/device_authorization` takes `client_id` from the body, the Basic header or the assertion; a mismatch is `invalid_request`, as is an unreadable body.
+  - `oauth2_clients.update` converts a device-only confidential client to `none`, and refuses a grant that registration would refuse with `422 grant_exceeds_registration_policy`.
+  - CIBA hint-cap contention answers `429 slow_down`.
+  - A resource server's get, update and delete of another's set answer `404`.
+- **For W8.3:** T-488 enters the counts; T-289, T-424 and T-447 are amended. **For W8.4:**
+  - Public DPoP clients' pre-1.1.1 refresh tokens are refused once.
+  - The conversion, and #749's manual revocation.
+  - `/api/v1/resources` resources leave `/uma2/rreg`.
+  - Device tokens carry `client_id`.
+  - v109 (index, plus `dpop_jkt`) is additive.
+
 ### 12.4 W4
 
 - **Head:** `178568391` on `claude/release-1.1.1-w4` (9 commits on `main`, every one carrying a `gpgsig`).

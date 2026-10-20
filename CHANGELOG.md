@@ -210,8 +210,10 @@ has one entry below, ending in its number.
 ### Documentation
 
 - **Threat model 2.43.0:** T-488 enters (a UMA resource server and a set it did
-  not register); T-483 and T-484 are Mitigated; T-289, T-424, T-447, T-457,
-  T-462 and T-486 are amended. **The RADIUS e2e workflow triggers on twelve input
+  not register), and its 2026-10-20 amendment extends it to the permission
+  endpoint (#745); T-483 and T-484 are Mitigated; T-289, T-424, T-447, T-457,
+  T-462 and T-486 are amended, T-289 once more on 2026-10-20 (the conversion to
+  public revokes the confidential-era grants, #749). **The RADIUS e2e workflow triggers on twelve input
   paths and weekly** (#697, #713).
 - **The FreeRADIUS guide names `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`** and its VLAN
   tag paragraph is corrected (#698). **Corrections to claims the code

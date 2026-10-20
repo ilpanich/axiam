@@ -4029,3 +4029,432 @@ mod personal_data_export_tests {
         assert!(!object.contains_key("mfa_secret"));
     }
 }
+
+/// The failure and early-exit arms of the W1 units (#689, #714, #668): a
+/// datastore that cannot be reached, and a process that is stopping. The
+/// integration tests in `tests/cleanup_task.rs` drive the happy paths against a
+/// migrated in-memory datastore; these reach the arms that only a failing one
+/// or a stop opens, through the private helpers themselves.
+#[cfg(test)]
+mod w1_failure_arm_tests {
+    use std::io::Write;
+
+    use axiam_core::models::gdpr::CreateAccountDeletion;
+    use axiam_core::repository::AccountDeletionRepository;
+    use axiam_db::run_migrations;
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::{Db, Mem};
+
+    use super::*;
+
+    /// A datastore with no namespace selected: every query on it fails.
+    async fn unreachable_db() -> Surreal<Db> {
+        Surreal::new::<Mem>(()).await.expect("in-memory DB")
+    }
+
+    async fn migrated_db() -> Surreal<Db> {
+        let db = unreachable_db().await;
+        db.use_ns("test").use_db("test").await.expect("use ns/db");
+        run_migrations(&db).await.expect("migrations");
+        db
+    }
+
+    fn stopped() -> (watch::Sender<bool>, AuditedWork) {
+        let (tx, rx) = watch::channel(true);
+        (tx, AuditedWork::new(rx))
+    }
+
+    fn running() -> (watch::Sender<bool>, AuditedWork) {
+        let (tx, rx) = watch::channel(false);
+        (tx, AuditedWork::new(rx))
+    }
+
+    /// Captures what the code under test logs, on this thread.
+    #[derive(Clone, Default)]
+    struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Log {
+        type Writer = Log;
+
+        fn make_writer(&'a self) -> Log {
+            self.clone()
+        }
+    }
+
+    impl Log {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    fn capture() -> (Log, tracing::subscriber::DefaultGuard) {
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        (log, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn erasure_marker(db: &Surreal<Db>) -> (PendingMarker<Db>, Uuid) {
+        let user_id = Uuid::new_v4();
+        (
+            PendingMarker::Erasure {
+                deletions: SurrealAccountDeletionRepository::new(db.clone()),
+                tenant_id: Uuid::new_v4(),
+                user_id,
+            },
+            user_id,
+        )
+    }
+
+    fn purge_marker(db: &Surreal<Db>) -> (PendingMarker<Db>, Uuid) {
+        let tenant_id = Uuid::new_v4();
+        (
+            PendingMarker::TenantPurge {
+                tenants: Arc::new(SurrealTenantRepository::new(db.clone())),
+                tenant_id,
+            },
+            tenant_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pending_marker_names_the_record_its_unit_owes_and_reports_a_failed_write() {
+        let db = unreachable_db().await;
+        let (erasure, user_id) = erasure_marker(&db);
+        let (purge, tenant_id) = purge_marker(&db);
+        assert_eq!(
+            erasure.id(),
+            user_id,
+            "an erasure marker is keyed by the user"
+        );
+        assert_eq!(
+            purge.id(),
+            tenant_id,
+            "a purge marker is keyed by the tenant"
+        );
+        let stamp = Utc::now();
+        for marker in [&erasure, &purge] {
+            assert!(
+                marker.settle(stamp).await.is_err(),
+                "settle reports the failure"
+            );
+            assert!(
+                marker.release(stamp).await.is_err(),
+                "release reports the failure"
+            );
+        }
+    }
+
+    /// A marker that cannot be cleared or released is logged and never fatal:
+    /// the next sweep finds the record written, or the lease lapses.
+    #[tokio::test]
+    async fn a_record_claim_that_cannot_reach_the_datastore_logs_and_lets_go() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        let (marker, _) = erasure_marker(&db);
+        RecordClaim {
+            marker,
+            stamp: Utc::now(),
+            held: true,
+        }
+        .settle()
+        .await;
+        let (marker, _) = purge_marker(&db);
+        RecordClaim {
+            marker,
+            stamp: Utc::now(),
+            held: true,
+        }
+        .release()
+        .await;
+        let text = log.text();
+        assert!(
+            text.contains("could not clear a pending-record marker"),
+            "{text}"
+        );
+        assert!(
+            text.contains("could not release a pending-record marker"),
+            "{text}"
+        );
+    }
+
+    /// An exit that cannot await — the unit aborted at the bound — drops the
+    /// guard still holding the claim, and the drop spawns the release.
+    #[tokio::test]
+    async fn dropping_a_held_claim_inside_a_runtime_spawns_its_release() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        let (marker, _) = erasure_marker(&db);
+        drop(RecordClaim {
+            marker,
+            stamp: Utc::now(),
+            held: true,
+        });
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        drop(PurgeClaim {
+            tenants,
+            tenant_id: Uuid::new_v4(),
+            claimed_at: Utc::now(),
+            held: true,
+        });
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        let text = log.text();
+        assert!(
+            text.contains("could not release the pending-record marker of a unit that was cut"),
+            "{text}"
+        );
+        assert!(
+            text.contains("could not release the claim of a tenant purge that was cut"),
+            "{text}"
+        );
+    }
+
+    /// A claim settled before the drop releases nothing.
+    #[tokio::test]
+    async fn dropping_a_settled_claim_releases_nothing() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        let (marker, _) = purge_marker(&db);
+        drop(RecordClaim {
+            marker,
+            stamp: Utc::now(),
+            held: false,
+        });
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        PurgeClaim {
+            tenants,
+            tenant_id: Uuid::new_v4(),
+            claimed_at: Utc::now(),
+            held: true,
+        }
+        .settle();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(log.text(), "", "nothing was logged");
+    }
+
+    /// A guard dropped with no runtime to spawn on can only say so.
+    #[test]
+    fn dropping_a_held_claim_outside_a_runtime_logs_that_it_lapses_with_its_lease() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let db = runtime.block_on(unreachable_db());
+        let (log, _guard) = capture();
+        let (marker, _) = erasure_marker(&db);
+        drop(RecordClaim {
+            marker,
+            stamp: Utc::now(),
+            held: true,
+        });
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        drop(PurgeClaim {
+            tenants,
+            tenant_id: Uuid::new_v4(),
+            claimed_at: Utc::now(),
+            held: true,
+        });
+        let text = log.text();
+        assert!(
+            text.contains("unit cut outside a runtime lapses with its lease"),
+            "{text}"
+        );
+        assert!(
+            text.contains("cut outside a runtime lapses with its lease"),
+            "{text}"
+        );
+    }
+
+    fn a_deletion(tenant_id: Uuid, user_id: Uuid) -> CreateAccountDeletion {
+        CreateAccountDeletion {
+            tenant_id,
+            user_id,
+            cancel_token_hash: format!("{:064x}", 9),
+            scheduled_purge_at: Utc::now() - chrono::Duration::seconds(1),
+        }
+    }
+
+    /// The completion without the record marker (#689, the branch an erasure
+    /// takes when it holds no marker): a pending request is completed.
+    #[tokio::test]
+    async fn complete_deletion_request_completes_the_pending_request() {
+        let db = migrated_db().await;
+        let deletions = SurrealAccountDeletionRepository::new(db.clone());
+        let (tenant_id, user_id) = (Uuid::new_v4(), Uuid::new_v4());
+        deletions
+            .create(a_deletion(tenant_id, user_id))
+            .await
+            .unwrap();
+        assert!(
+            deletions
+                .find_pending_by_user_id(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        complete_deletion_request(&deletions, tenant_id, user_id).await;
+
+        assert!(
+            deletions
+                .find_pending_by_user_id(tenant_id, user_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the request is no longer pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_deletion_request_without_a_request_changes_nothing_and_says_so() {
+        let db = migrated_db().await;
+        let deletions = SurrealAccountDeletionRepository::new(db.clone());
+        let (log, _guard) = capture();
+        complete_deletion_request(&deletions, Uuid::new_v4(), Uuid::new_v4()).await;
+        let text = log.text();
+        assert!(
+            text.contains("no pending account_deletion row found at purge time"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_deletion_request_is_never_fatal_when_the_lookup_fails() {
+        let db = unreachable_db().await;
+        let deletions = SurrealAccountDeletionRepository::new(db.clone());
+        let (log, _guard) = capture();
+        complete_deletion_request(&deletions, Uuid::new_v4(), Uuid::new_v4()).await;
+        let text = log.text();
+        assert!(
+            text.contains("failed to find account_deletion row"),
+            "{text}"
+        );
+    }
+
+    /// Once the process is stopping, no sweep starts recording.
+    #[tokio::test]
+    async fn the_record_sweeps_start_nothing_once_the_process_is_stopping() {
+        let db = migrated_db().await;
+        let (_tx, work) = stopped();
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        let audit = SurrealAuditLogRepository::new(db.clone());
+        let deletions = SurrealAccountDeletionRepository::new(db.clone());
+        let lease = chrono::TimeDelta::seconds(60);
+        assert_eq!(
+            record_pending_purges(&tenants, &audit, lease, &work)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            record_owed_erasures(&audit, &deletions, lease, &work)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    /// A sweep that cannot read its markers fails; it does not claim to have
+    /// recorded nothing.
+    #[tokio::test]
+    async fn the_record_sweeps_fail_when_the_datastore_cannot_be_read() {
+        let db = unreachable_db().await;
+        let (_tx, work) = running();
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        let audit = SurrealAuditLogRepository::new(db.clone());
+        let deletions = SurrealAccountDeletionRepository::new(db.clone());
+        let lease = chrono::TimeDelta::seconds(60);
+        assert!(
+            record_pending_purges(&tenants, &audit, lease, &work)
+                .await
+                .is_err()
+        );
+        assert!(
+            record_owed_erasures(&audit, &deletions, lease, &work)
+                .await
+                .is_err()
+        );
+    }
+
+    /// #714: an orphan unit whose claim write fails releases the claim it armed
+    /// before the write, by its stamp, and returns the error.
+    #[tokio::test]
+    async fn an_orphan_unit_whose_claim_fails_releases_what_it_armed_and_fails() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        let (_tx, work) = running();
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        let audit = Arc::new(SurrealAuditLogRepository::new(db.clone()));
+        let outcome = purge_orphan_unit(tenants, audit, Uuid::new_v4(), work).await;
+        assert!(outcome.is_err());
+        assert!(
+            log.text()
+                .contains("could not release the tenant purge claim"),
+            "{}",
+            log.text()
+        );
+    }
+
+    /// #689: past the point of no return a failed removal releases the pending
+    /// marker the transaction may have written, and the claim, and fails.
+    #[tokio::test]
+    async fn crossing_the_point_of_no_return_fails_cleanly_when_the_removal_fails() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        let tenant_id = Uuid::new_v4();
+        let claim = PurgeClaim {
+            tenants: Arc::clone(&tenants),
+            tenant_id,
+            claimed_at: Utc::now(),
+            held: true,
+        };
+        let crossed =
+            cross_point_of_no_return(&tenants, tenant_id, &Default::default(), claim).await;
+        assert!(crossed.is_err());
+        let text = log.text();
+        assert!(
+            text.contains("could not release a tenant purge's pending record"),
+            "{text}"
+        );
+        assert!(
+            text.contains("could not release the tenant purge claim"),
+            "{text}"
+        );
+    }
+
+    /// An overlapping purge removed the row first: nothing to record here.
+    #[tokio::test]
+    async fn crossing_the_point_of_no_return_yields_nothing_when_the_row_is_already_gone() {
+        let db = migrated_db().await;
+        let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
+        let tenant_id = Uuid::new_v4();
+        let claim = PurgeClaim {
+            tenants: Arc::clone(&tenants),
+            tenant_id,
+            claimed_at: Utc::now(),
+            held: true,
+        };
+        let crossed =
+            cross_point_of_no_return(&tenants, tenant_id, &Default::default(), claim).await;
+        assert!(
+            matches!(crossed, Ok(None)),
+            "an absent row is another purge's"
+        );
+    }
+}

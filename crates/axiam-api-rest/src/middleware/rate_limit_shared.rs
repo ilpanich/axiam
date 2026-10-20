@@ -77,15 +77,6 @@ use crate::state::AppState;
 /// it fails open by design (RESEARCH.md "Don't Hand-Roll").
 const WINDOW_SECS: i64 = 60;
 
-/// Reads the SAME `AXIAM__RATE_LIMIT__TRUSTED_HOPS` env var
-/// `server.rs::build_governor` uses, so the shared-store bucket key and the
-/// in-memory governor's key are derived from the identical client IP
-/// (D-01d parity — a rotating XFF must not yield a fresh bucket in either
-/// layer).
-fn trusted_hops() -> usize {
-    crate::extractors::rate_limit::configured_trusted_hops()
-}
-
 /// Truncates `now` down to the start of the current fixed
 /// [`WINDOW_SECS`]-second window.
 ///
@@ -191,6 +182,22 @@ impl<C: Connection + Clone> RateLimitShared<C> {
         Self {
             human: true,
             ..Self::new(endpoint, rate_limit_cfg.end_session_per_min)
+        }
+    }
+
+    /// The **administrative preset**: `limit` (one of the 30-a-minute
+    /// `*_admin_per_min` families) per IP, for an administrator's console
+    /// writes.
+    ///
+    /// Like [`Self::browser_preset`] it skips the counter's cold-entry seed:
+    /// at 30 a minute the seed left an administrator whose first write to a
+    /// family landed in a minute's last seconds only three to five writes in
+    /// it (#718). What bounds these routes is the small absolute number; the
+    /// sliding-window carry still applies.
+    pub fn admin_preset(endpoint: &'static str, limit: u32) -> Self {
+        Self {
+            human: true,
+            ..Self::new(endpoint, limit)
         }
     }
 
@@ -329,8 +336,11 @@ where
         let inner = Rc::clone(&self.inner);
 
         // Reuse the EXACT fixed IP-key extraction logic (D-01d) so the
-        // shared bucket key and the in-memory governor's key agree.
-        let extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
+        // shared bucket key and the in-memory governor's key agree: the same
+        // `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and `..._TRUSTED_PROXIES`
+        // `server.rs::build_governor` reads (a rotating XFF must not yield a
+        // fresh bucket in either layer).
+        let extractor = XForwardedForKeyExtractor::configured();
         let ip = extractor.extract(&req).ok();
 
         // The process-wide write-behind counter is read from
@@ -492,6 +502,15 @@ mod window_contract_tests {
 
         assert_eq!(start.timestamp() % WINDOW_SECS, 0, "aligned to the window");
         assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
+    }
+
+    /// The administrative preset marks its bucket human-facing too (#718).
+    #[test]
+    fn the_admin_preset_is_human_facing() {
+        let admin =
+            RateLimitShared::<surrealdb::engine::local::Db>::admin_preset("network_admin", 30);
+        assert!(admin.human);
+        assert_eq!(admin.limit, 30);
     }
 
     /// The browser-endpoint preset takes its number from

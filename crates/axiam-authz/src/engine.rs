@@ -158,6 +158,12 @@ fn applicable_role_ids(
 /// organization"; its resource-scoped ones mean "this resource, in the
 /// organization tenant", and there is no coherent way to carry that meaning
 /// into a different tenant's resource tree.
+///
+/// What a global role of the organization scope carries is therefore what the
+/// organization's principals hold in every tenant. The seeded super-admin of
+/// that scope holds no `network:` permission for that reason (#702, T-483):
+/// the network meta permissions are an ordinary tenant's, and are not carried
+/// across tenants.
 fn global_role_ids(assignments: &[RoleAssignment]) -> Vec<Uuid> {
     let mut seen = HashSet::new();
     assignments

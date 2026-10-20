@@ -15,7 +15,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
-use axiam_core::repository::ScopeRepository;
+use axiam_core::error::AxiamError;
+use axiam_core::repository::{ResourceRepository, ScopeRepository};
 use axiam_oauth2::uma::{PairOutcome, PermissionEvaluator, ScopeCatalog};
 use uuid::Uuid;
 
@@ -91,7 +92,8 @@ impl PermissionEvaluator for EngineEvaluator {
 }
 
 /// Answers "which scope names has this resource declared", from the ordinary
-/// AXIAM scope rows on that resource.
+/// AXIAM scope rows on that resource, to the resource server that registered
+/// it and to no other (#745).
 ///
 /// UMA's `_id` **is** the AXIAM resource id — there is no parallel resource
 /// store to translate through — so a resource's declared scopes are just its
@@ -99,26 +101,44 @@ impl PermissionEvaluator for EngineEvaluator {
 /// for, not an input to any decision: an undeclared scope is refused when the
 /// ticket is minted, so the resource server learns it named something that does
 /// not exist rather than being told the requesting party was denied.
-pub struct ResourceScopeCatalog<R> {
-    scopes: R,
+pub struct ResourceScopeCatalog<S, R> {
+    scopes: S,
+    resources: R,
 }
 
-impl<R> ResourceScopeCatalog<R> {
-    pub fn new(scopes: R) -> Self {
-        Self { scopes }
+impl<S, R> ResourceScopeCatalog<S, R> {
+    pub fn new(scopes: S, resources: R) -> Self {
+        Self { scopes, resources }
     }
 }
 
-impl<R> ScopeCatalog for ResourceScopeCatalog<R>
+impl<S, R> ScopeCatalog for ResourceScopeCatalog<S, R>
 where
-    R: ScopeRepository + Send + Sync,
+    S: ScopeRepository + Send + Sync,
+    R: ResourceRepository + Send + Sync,
 {
+    /// #745 (R111W3-02) — the declared scopes of a resource `client_id`
+    /// registered through `/uma2/rreg`; for any other resource (another
+    /// resource server's set, one made through `/api/v1/resources`, which
+    /// carries no `uma_registered_by`) none, which is what an id that does not
+    /// exist answers. Every scope asked of it is then undeclared, so the
+    /// permission endpoint's refusal is the same status and body in all three
+    /// cases: it echoes only the id and scope the caller sent.
     fn declared_scopes<'a>(
         &'a self,
         tenant_id: Uuid,
+        client_id: &'a str,
         resource_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>> {
         Box::pin(async move {
+            let resource = match self.resources.get_by_id(tenant_id, resource_id).await {
+                Ok(resource) => resource,
+                Err(AxiamError::NotFound { .. }) => return Ok(Vec::new()),
+                Err(e) => return Err(e.to_string()),
+            };
+            if resource.uma_registered_by.as_deref() != Some(client_id) {
+                return Ok(Vec::new());
+            }
             let scopes = self
                 .scopes
                 .list_by_resource(tenant_id, resource_id)

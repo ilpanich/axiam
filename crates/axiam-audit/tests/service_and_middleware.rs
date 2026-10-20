@@ -676,6 +676,50 @@ async fn a_cached_service_account_identity_is_audited_as_a_service_account() {
     assert_eq!(repo.snapshot()[0].actor_type, ActorType::ServiceAccount);
 }
 
+/// #670: a `DPoP`-scheme request (any case) is attributed to its user and
+/// tenant, as a `Bearer` one is, and the cached identity keeps the token so the
+/// extractor can enforce the sender constraint against the request's own proof.
+#[actix_web::test]
+async fn middleware_authenticates_via_dpop_scheme() {
+    for scheme in ["DPoP", "dpop", "DPOP"] {
+        let cfg = test_auth_config();
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let token = mint_token(user_id, tenant_id, org_id, &cfg);
+
+        let repo = RecordingRepo::new();
+        let mw = AuditMiddleware::spawn(repo.clone());
+        let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+            "/api/secure",
+            web::get().to(move |req: actix_web::HttpRequest| async move {
+                let cached = req.extensions().get::<Arc<CachedUserIdentity>>().cloned();
+                match cached {
+                    Some(c) if c.user_id == user_id => HttpResponse::Ok().body(c.token.clone()),
+                    _ => HttpResponse::InternalServerError().finish(),
+                }
+            }),
+        ))
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/api/secure")
+            .insert_header(("Authorization", format!("{scheme} {token}")))
+            .insert_header(("DPoP", "proof-is-the-extractors-business"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success(), "{scheme}");
+        assert_eq!(test::read_body(resp).await, token.as_bytes());
+
+        wait_for_entries(&repo, 1).await;
+        let e = &repo.snapshot()[0];
+        assert_eq!(e.actor_type, ActorType::User, "{scheme}");
+        assert_eq!(e.actor_id, user_id, "{scheme}");
+        assert_eq!(e.tenant_id, tenant_id, "{scheme}");
+        assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+    }
+}
+
 #[actix_web::test]
 async fn middleware_non_bearer_scheme_is_unauthenticated() {
     let cfg = test_auth_config();

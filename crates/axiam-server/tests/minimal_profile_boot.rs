@@ -41,6 +41,7 @@ use axiam_db::{
     SurrealSettingsRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
     SurrealUserRepository, SurrealWebhookRepository, seed_default_roles, seed_permissions,
 };
+use axiam_server::audit_hold::AuditHoldForTests;
 use axiam_server::boot::{AppConfig, LEASE_LOSS_STOP, ServeOptions, serve};
 use axiam_server::cleanup::CleanupStepForTests;
 use axiam_server::profile::LeaseTiming;
@@ -981,10 +982,12 @@ async fn a_cleanup_tick_that_sleeps_past_the_bound_does_not_delay_the_exit_past_
 // ---------------------------------------------------------------------------
 
 /// Boot the minimal profile on an ephemeral port with `step` as the cleanup
-/// task's first step; the backstop only records that it ran.
+/// task's first step; the backstop only records that it ran. `audit_hold`, when
+/// given, holds the audit middleware's appends until it reads `true` (#692).
 fn boot_for_the_cut(
     db: &Surreal<Db>,
     step: CleanupStepForTests,
+    audit_hold: Option<AuditHoldForTests>,
 ) -> (
     u16,
     Arc<std::sync::atomic::AtomicBool>,
@@ -1011,6 +1014,7 @@ fn boot_for_the_cut(
             flag.store(true, std::sync::atomic::Ordering::SeqCst)
         }),
         cleanup_step_for_tests: Some(step),
+        audit_hold_for_tests: audit_hold,
         ..ServeOptions::default()
     };
     (
@@ -1097,6 +1101,51 @@ async fn until_closed(conn: &mut tokio::net::TcpStream) -> Vec<u8> {
     }
 }
 
+/// The error lines of every server this test binary boots, for the one test
+/// that asserts on what the teardown logged. The server runs on a thread of its
+/// own, so a thread-local subscriber would not see it; a global one is set once
+/// and keeps ERROR only.
+fn captured_errors() -> Arc<std::sync::Mutex<Vec<String>>> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct Errors(Arc<std::sync::Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Errors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::ERROR {
+                return;
+            }
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+    }
+
+    static LINES: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<String>>>> =
+        std::sync::OnceLock::new();
+    Arc::clone(LINES.get_or_init(|| {
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Errors(Arc::clone(&lines)));
+        let _ = tracing::subscriber::set_global_default(subscriber);
+        lines
+    }))
+}
+
 /// How many audit rows name `action`, in any trail.
 async fn audit_rows_named(db: &Surreal<Db>, action: &str) -> usize {
     let mut found = db
@@ -1125,6 +1174,10 @@ async fn audit_rows_named(db: &Surreal<Db>, action: &str) -> usize {
 /// order is observable). A request that finished inside the 5 s has its audit
 /// row; the cut one has none (T-444, residual (a)). The instance then stops in
 /// order and exits non-zero, with the backstop never run.
+///
+/// The drain is observable (#692): the audit sink holds every append until the
+/// test releases it after the cut, so the served request's row is absent at the
+/// cut and present at the exit — written by the drain, which waits for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_lease_closes_a_request_still_running_at_the_cut_and_the_audit_drain_runs_after_it()
 {
@@ -1137,7 +1190,12 @@ async fn a_lost_lease_closes_a_request_still_running_at_the_cut_and_the_audit_dr
             tokio::time::sleep(Duration::from_secs(3_600)).await;
         })
     });
-    let (rest_port, backstop_ran, mut stopped) = boot_for_the_cut(&db, step);
+    // The audit sink holds every append until the test releases it, after the
+    // cut: the served request's row is queued but cannot be written by the
+    // worker's ordinary pass, so only the teardown's drain can put it there.
+    let (release_audit, audit_hold) = tokio::sync::watch::channel(false);
+    let errors = captured_errors();
+    let (rest_port, backstop_ran, mut stopped) = boot_for_the_cut(&db, step, Some(audit_hold));
     tokio::time::timeout(Duration::from_secs(30), entered.wait_for(|on| *on))
         .await
         .expect("the cleanup task starts its first tick")
@@ -1183,6 +1241,18 @@ async fn a_lost_lease_closes_a_request_still_running_at_the_cut_and_the_audit_dr
         ),
         "the teardown — the audit drain among it — still runs after the cut"
     );
+    // The row of the request served at 1.5 s is queued — its response is out —
+    // yet not in the trail: the drain has not run, and the worker's own pass is
+    // held. (Before #692 the worker wrote it within milliseconds of the
+    // response, so finding it at the exit did not show the drain wrote it.)
+    assert_eq!(
+        audit_rows_named(&db, "POST /api/v1/auth/login").await,
+        0,
+        "the served request's audit row is still unwritten at the cut"
+    );
+    // Release the writes after the cut. The drain, which runs next, is what
+    // waits for the held row.
+    release_audit.send_replace(true);
 
     let grace = short_lease().lost_stop_deadline;
     let result = tokio::time::timeout(grace, stopped)
@@ -1207,8 +1277,21 @@ async fn a_lost_lease_closes_a_request_still_running_at_the_cut_and_the_audit_dr
         "the orderly stop finished — the cut included — before the backstop was needed"
     );
 
-    // The audit drain ran: the row of the request served inside the 5 s is
-    // in the trail. The cut request has none (it would make two).
+    // The drain reached its barrier inside its bound. Moved before the cut it
+    // would start at the loss, find the append held, and give up after
+    // `LEASE_LOSS_STOP.audit` — the worker would still write the row on release,
+    // so the row alone would not tell.
+    assert!(
+        !errors
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("audit entries still queued at shutdown")),
+        "the audit drain gave up before the held row was released"
+    );
+    // The audit drain ran after the cut and waited for the held row: the row of
+    // the request served inside the 5 s is in the trail. The cut request has
+    // none (it would make two).
     assert_eq!(audit_rows_named(&db, "POST /api/v1/auth/login").await, 1);
 }
 
@@ -1259,7 +1342,7 @@ async fn a_lost_lease_tells_the_cleanup_task_to_stop_at_the_loss_not_after_the_c
             let _ = go.wait_for(|go| *go).await;
         })
     });
-    let (rest_port, backstop_ran, stopped) = boot_for_the_cut(&db, step);
+    let (rest_port, backstop_ran, stopped) = boot_for_the_cut(&db, step, None);
     tokio::time::timeout(Duration::from_secs(30), entered.wait_for(|on| *on))
         .await
         .expect("the cleanup task starts its first tick")

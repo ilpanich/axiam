@@ -1,5 +1,5 @@
 //! SurrealDB implementations of [`NetworkSegmentRepository`],
-//! [`ReplyProfileRepository`] and [`NetworkPolicyRepository`] (RADIUS D4, W6.1,
+//! [`ReplyProfileRepository`] and [`NetworkPolicyRepository`] (RADIUS Live profile, W6.1,
 //! schema v100; `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
 //!
 //! # Segments are resources
@@ -52,7 +52,7 @@
 
 use std::collections::HashMap;
 
-use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::error::{AxiamError, AxiamResult, NetworkConflict};
 use axiam_core::id::new_id;
 use axiam_core::models::network::{
     NETWORK_ROOT_NAME, NetworkPolicy, NetworkSegment, NetworkSegmentKind, NetworkSegmentPath,
@@ -85,22 +85,62 @@ const SEGMENT_ENTITY: &str = "network_segment";
 const PROFILE_ENTITY: &str = "reply_profile";
 const POLICY_ENTITY: &str = "network_policy";
 
-// The messages the write transactions `THROW`. Matched on the way out, so the
-// caller sees `Conflict` rather than an opaque database error.
+// The messages the write transactions `THROW`. `refusal_of` turns each into its
+// typed `NetworkConflict` on the way out, so the caller sees a typed refusal
+// rather than an opaque database error.
 const STALE_SEGMENT: &str = "axiam:network_segment_version_stale";
 const STALE_PROFILE: &str = "axiam:reply_profile_version_stale";
 const STRANDS_PROFILE: &str = "axiam:segment_update_strands_profile";
-const PLACEMENT_RACED: &str = "axiam:segment_update_moves_a_profiled_placement";
+// The gate cleared the replace or delete on a read that found no profile (or no
+// placement change); the row the write replaces or deletes says otherwise. A
+// read again goes back through the gate, which now asks `network:grant`. The
+// `axiam:` prefix keeps the marker from colliding with any text a user can put
+// in a field the transaction echoes.
+const PLACEMENT_RACED: &str = "axiam:profiled_placement_raced";
 const HAS_CHILDREN: &str = "axiam:network_segment_has_children";
 const SITE_GONE: &str = "axiam:network_site_gone";
+
+// The uniqueness indexes a clash names.
+const IDX_VLAN: &str = "idx_network_segment_site_vlan";
+const IDX_RANK: &str = "idx_network_segment_site_rank";
+const IDX_NAME: &str = "idx_network_segment_site_name";
 
 // ---------------------------------------------------------------------------
 // Errors out of a write transaction
 // ---------------------------------------------------------------------------
 
-fn conflict(reason: &str) -> TxFail {
-    TxFail::Refused(AxiamError::Conflict {
-        reason: reason.into(),
+fn conflict(reason: NetworkConflict) -> TxFail {
+    TxFail::Refused(AxiamError::Network(reason))
+}
+
+/// The typed refusal a transaction's error text carries, if any: the one place
+/// the `THROW` markers (and the uniqueness indexes) written by this module are
+/// read back.
+fn refusal_of(combined: &str) -> Option<NetworkConflict> {
+    let hit = |marker: &str| combined.contains(marker);
+    Some(if hit(STALE_SEGMENT) {
+        NetworkConflict::StaleSegment
+    } else if hit(STALE_PROFILE) {
+        NetworkConflict::StaleProfile
+    } else if hit(PLACEMENT_RACED) {
+        NetworkConflict::PlacementRaced
+    } else if hit(STRANDS_PROFILE) {
+        NetworkConflict::StrandsProfile {
+            segment_id: None,
+            filter_id: None,
+        }
+    } else if hit(HAS_CHILDREN) {
+        NetworkConflict::HasChildren
+    } else if hit(SITE_GONE) {
+        NetworkConflict::SiteGone
+    } else if hit(IDX_VLAN) {
+        NetworkConflict::DuplicateVlan
+    } else if hit(IDX_RANK) {
+        NetworkConflict::DuplicateRank
+    } else if hit(IDX_NAME) {
+        NetworkConflict::DuplicateName
+    } else {
+        return None;
     })
 }
 
@@ -118,56 +158,23 @@ fn tx_outcome(errors: HashMap<usize, surrealdb::Error>, entity: &str) -> Result<
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join("; ");
-    if combined.contains(STALE_SEGMENT) {
-        return Err(conflict(
-            "the network segment changed since it was read; read it again and retry",
-        ));
-    }
-    if combined.contains(STALE_PROFILE) {
-        return Err(conflict(
-            "the reply profile changed since it was read; read it again and retry",
-        ));
-    }
-    if combined.contains(PLACEMENT_RACED) {
-        // The gate cleared the replace or delete on a read that found no
-        // profile (or no placement change); the row the write replaces or
-        // deletes says otherwise. A read again goes back through the gate,
-        // which now asks `network:grant`.
-        return Err(conflict(
-            "the network segment changed since it was read (a reply profile was written on \
-             it); read it again and retry",
-        ));
-    }
-    if combined.contains(STRANDS_PROFILE) {
-        return Err(conflict(
-            "the new filter_ids would leave the segment's reply profile outside its envelope; \
-             change or delete the profile first",
-        ));
-    }
-    if combined.contains(HAS_CHILDREN) {
-        return Err(conflict("the network segment has child resources"));
-    }
-    if combined.contains(SITE_GONE) {
-        return Err(conflict(
-            "the network site was removed while the segment was being written; retry",
-        ));
+    // A uniqueness index is named only by an error `classify_write_error`
+    // reads as `AlreadyExists`; a `THROW` marker wins over it, as before.
+    match refusal_of(&combined) {
+        Some(reason) if !reason.is_uniqueness() => return Err(conflict(reason)),
+        Some(reason) => match classify_write_error(&combined, entity) {
+            DbError::AlreadyExists { .. } => return Err(conflict(reason)),
+            other => return Err(TxFail::Db(other)),
+        },
+        None => {}
     }
     match classify_write_error(&combined, entity) {
-        DbError::AlreadyExists { .. } => {
-            // Which uniqueness was broken, by the index that says so.
-            let what = if combined.contains("idx_network_segment_site_vlan") {
-                "network_segment: the site already has a segment with this vlan_id"
-            } else if combined.contains("idx_network_segment_site_rank") {
-                "network_segment: the site already has a segment with this rank"
-            } else if combined.contains("idx_network_segment_site_name") {
-                "network_segment: the site already has a segment of this name"
-            } else {
-                entity
-            };
-            Err(TxFail::Refused(AxiamError::AlreadyExists {
-                entity: what.into(),
-            }))
+        DbError::AlreadyExists { .. } if entity == PROFILE_ENTITY => {
+            Err(conflict(NetworkConflict::ProfileExists))
         }
+        DbError::AlreadyExists { .. } => Err(TxFail::Refused(AxiamError::AlreadyExists {
+            entity: entity.into(),
+        })),
         other => Err(TxFail::Db(other)),
     }
 }
@@ -720,12 +727,9 @@ impl<C: Connection> SurrealNetworkPolicyRepository<C> {
         };
         match tx_outcome(result.take_errors(), POLICY_ENTITY) {
             // A first write that finds the record there is a stale read.
-            Err(TxFail::Refused(AxiamError::AlreadyExists { .. })) => Err(conflict(
-                "the network policy changed since it was read; read it again and retry",
-            )),
-            Err(TxFail::Refused(AxiamError::Conflict { .. })) => Err(conflict(
-                "the network policy changed since it was read; read it again and retry",
-            )),
+            Err(TxFail::Refused(AxiamError::AlreadyExists { .. } | AxiamError::Network(_))) => {
+                Err(conflict(NetworkConflict::StalePolicy))
+            }
             other => other,
         }
     }
@@ -872,10 +876,7 @@ impl<C: Connection> SurrealReplyProfileRepository<C> {
     ) -> AxiamResult<()> {
         let segment = self.segments.fetch(tenant_id, segment_id).await?;
         if segment.version != expected_segment_version {
-            return Err(AxiamError::Conflict {
-                reason: "the network segment changed since it was read; read it again and retry"
-                    .into(),
-            });
+            return Err(AxiamError::Network(NetworkConflict::StaleSegment));
         }
         let cap = self.policy.get(tenant_id).await?.session_timeout_max_secs;
         profile.validate(&segment.filter_ids, cap)
@@ -1175,5 +1176,35 @@ impl<C: Connection> ReplyProfileRepository for SurrealReplyProfileRepository<C> 
         })
         .await
         .map_err(AxiamError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_throw_marker_reads_back_as_its_typed_refusal() {
+        for (marker, want) in [
+            (STALE_SEGMENT, NetworkConflict::StaleSegment),
+            (STALE_PROFILE, NetworkConflict::StaleProfile),
+            (PLACEMENT_RACED, NetworkConflict::PlacementRaced),
+            (
+                STRANDS_PROFILE,
+                NetworkConflict::StrandsProfile {
+                    segment_id: None,
+                    filter_id: None,
+                },
+            ),
+            (HAS_CHILDREN, NetworkConflict::HasChildren),
+            (SITE_GONE, NetworkConflict::SiteGone),
+            (IDX_VLAN, NetworkConflict::DuplicateVlan),
+            (IDX_RANK, NetworkConflict::DuplicateRank),
+            (IDX_NAME, NetworkConflict::DuplicateName),
+        ] {
+            let text = format!("An error occurred: {marker}; the rest of the transaction");
+            assert_eq!(refusal_of(&text), Some(want), "{marker}");
+        }
+        assert_eq!(refusal_of("something the engine said"), None);
     }
 }

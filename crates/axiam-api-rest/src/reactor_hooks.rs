@@ -1,4 +1,4 @@
-//! The five REST-side reactor hooks (X1 / R2.2, and RADIUS D4's two).
+//! The five REST-side reactor hooks (X1 / R2.2, and the Live profile's two).
 //!
 //! `login.post_auth` lives in `axiam-auth` and `token.pre_issue` in
 //! `axiam-oauth2`, because those are the crates that own the operation. The

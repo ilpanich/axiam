@@ -216,11 +216,11 @@ pub async fn write_audit_with_dead_letter<S: AuditWriteSink>(sink: &S, entry: Cr
 /// ticker and two request handlers, and the first is *meant* to be cut — its
 /// bounded stop-join (#598) is what keeps a stop from waiting on a tenant purge
 /// or an erasure. A detached `dead_letter_audit` would escape that join: no one
-/// awaits it at shutdown, and a task still suspended on the blocking write when
-/// the runtime is dropped is dropped with it, losing the one thing spawning would
-/// add — the file-failure log. The event is what operators alert on and it needs
-/// no task to survive; a write that fails after its awaiter was cut is the
-/// residual, recorded in the threat model beside the rest of T-108.
+/// awaits it at shutdown. The event is what operators alert on and it needs no
+/// task to survive. The file's own failure is logged inside the blocking task
+/// (#690), so a write that fails after its awaiter was cut is still logged, with
+/// the path and the I/O error; only the entry's metadata, which is in the file
+/// alone, is then lost — recorded in the threat model beside the rest of T-108.
 async fn dead_letter_audit(
     entry: CreateAuditLogEntry,
     occurred_at: DateTime<Utc>,
@@ -250,10 +250,9 @@ async fn dead_letter_audit(
     // failed the boot already.
     match axiam_audit::dead_letter::DeadLetterTarget::from_env() {
         Some(target) => {
-            let path = target.path.display().to_string();
-            // A join error (the write task panicked) is an I/O error like any
-            // other: logged on its own event, the structured event above having
-            // fired already.
+            // A failed append is logged by the write itself (#690), inside the
+            // blocking task, so the line survives a cut awaiter; the structured
+            // event above has fired already.
             // The reason is the datastore refusing the write; its error text is
             // logged above and on the event, never written to the file.
             let record = axiam_audit::dead_letter::DeadLetterRecord::new(
@@ -261,13 +260,7 @@ async fn dead_letter_audit(
                 occurred_at,
                 axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
             );
-            if let Err(e) = axiam_audit::dead_letter::append_off_thread(target, record).await {
-                tracing::error!(
-                    error = %e,
-                    path = %path,
-                    "gdpr: failed to append audit dead-letter file"
-                );
-            }
+            let _ = axiam_audit::dead_letter::append_off_thread(target, record).await;
         }
         None => {
             tracing::warn!(

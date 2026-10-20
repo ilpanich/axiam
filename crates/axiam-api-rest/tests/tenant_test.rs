@@ -215,6 +215,55 @@ async fn create_tenant_returns_201() {
     assert_eq!(body["organization_id"], org_id.to_string());
 }
 
+/// #664: `orphan_purge` has no meaning in a tenant's `metadata`; create and
+/// update refuse it with a `422` and write nothing.
+#[actix_rt::test]
+async fn the_reserved_orphan_purge_metadata_key_is_refused_on_create_and_update() {
+    let (db, org_id, tenant_id, user_id, org_tenant) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
+    let app = test_app!(db, auth);
+
+    let create = test::TestRequest::post()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Marked",
+            "slug": "marked",
+            "metadata": { "orphan_purge": true }
+        }))
+        .to_request();
+    let resp = test::call_service(&app, create).await;
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "reserved_metadata_key");
+
+    let update = test::TestRequest::put()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "metadata": { "orphan_purge": false } }))
+        .to_request();
+    let resp = test::call_service(&app, update).await;
+    assert_eq!(resp.status().as_u16(), 422);
+
+    let ok = test::TestRequest::put()
+        .uri(&format!(
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "metadata": { "team": "payments" } }))
+        .to_request();
+    assert_eq!(test::call_service(&app, ok).await.status().as_u16(), 200);
+}
+
 #[actix_rt::test]
 async fn list_tenants_returns_200() {
     let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
@@ -1470,6 +1519,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) -> (String, Stri
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                dpop_jkt: None,
                 expires_at: Utc::now() + Duration::days(30),
             })
             .await

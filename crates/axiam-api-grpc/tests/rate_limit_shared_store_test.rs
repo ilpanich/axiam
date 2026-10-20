@@ -32,6 +32,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axiam_api_grpc::middleware::rate_limit::GrpcSharedRateLimitLayer;
+use axiam_core::forwarded_for::TrustedProxies;
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use http::{HeaderValue, Request, Response};
@@ -357,5 +358,36 @@ async fn rate_limit_shared_store_fails_open_on_db_error() {
     assert!(
         !is_rejected(&resp),
         "a fresh bucket must still be admitted after a flush failure"
+    );
+}
+
+/// #711 (R110-01), the gRPC twin of `rate_limit_keying_test.rs`: with
+/// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` naming the proxies, a peer outside
+/// them is keyed on itself — at `trusted_hops = 0`, the shipped value, where a
+/// rotating single-hop header would otherwise be read — so its rotations all
+/// count against one shared bucket.
+#[tokio::test]
+async fn rate_limit_shared_store_unlisted_peer_rotating_xff_shares_a_bucket() {
+    let db = setup_db().await;
+    let mut svc = GrpcSharedRateLimitLayer::new(db, "grpc_authz_unlisted_peer", LIMIT, 0)
+        .with_trusted_proxies(TrustedProxies::parse("10.0.0.0/8").unwrap())
+        .layer(ok_service());
+    let peer: SocketAddr = "198.51.100.7:9000".parse().unwrap();
+
+    // The invariant, not an exact count — see the rotating-XFF test above for
+    // why the cold-entry seed makes the first admissions clock-dependent.
+    let attempts = (LIMIT * 4) as usize;
+    let mut admitted = 0usize;
+    for i in 0..attempts {
+        let xff = format!("192.0.2.{i}");
+        if !is_rejected(&call(&mut svc, request_with_peer_and_xff(peer, &xff)).await) {
+            admitted += 1;
+        }
+    }
+    assert!(admitted >= 1);
+    assert!(
+        admitted <= LIMIT as usize,
+        "{admitted} of {attempts} admitted against {LIMIT}: an unlisted peer's \
+         X-Forwarded-For is being read as the bucket key"
     );
 }

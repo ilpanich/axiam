@@ -212,7 +212,13 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
     }
 
     /// Deletes, at most `limit` at a time, the buckets whose `updated_at` is
-    /// before `cutoff`; returns how many were removed.
+    /// more than `retention` before the datastore's own clock; returns how
+    /// many were removed.
+    ///
+    /// The cutoff (`time::now() - retention`) is evaluated by the datastore, in
+    /// the selection and in the `DELETE`, because `updated_at` is stamped by
+    /// the datastore (`time::now()`): both sides of the comparison are then on
+    /// one clock, and a sweeping replica's clock does not matter (#676).
     ///
     /// The `WHERE` is evaluated again by the `DELETE` itself, per record, so a
     /// bucket a limiter wrote between the selection and the deletion is kept,
@@ -221,10 +227,14 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
     /// count is of rows this call removed (`RETURN BEFORE`), not of rows it
     /// selected. When two sweepers contend for the same rows the datastore
     /// aborts the loser's transaction: that is retried, and if it keeps
-    /// losing it reports `0` (the winner removed the rows). Which `cutoff` is safe to pass is the caller's to establish;
+    /// losing it reports `0` (the winner removed the rows). Which `retention` is safe to pass is the caller's to establish;
     /// the server's sweep derives it from the windows in use.
-    pub async fn delete_stale(&self, cutoff: DateTime<Utc>, limit: u32) -> Result<u64, DbError> {
-        match retry_on_write_conflict(|| self.delete_stale_once(cutoff, limit)).await {
+    pub async fn delete_stale(
+        &self,
+        retention: std::time::Duration,
+        limit: u32,
+    ) -> Result<u64, DbError> {
+        match retry_on_write_conflict(|| self.delete_stale_once(retention, limit)).await {
             // Two sweepers selected the same rows and this one lost the
             // commit: the winner removed them, which is what was wanted. Not
             // an error; whatever is left is the next pass's.
@@ -233,18 +243,24 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
         }
     }
 
-    async fn delete_stale_once(&self, cutoff: DateTime<Utc>, limit: u32) -> Result<u64, DbError> {
+    async fn delete_stale_once(
+        &self,
+        retention: std::time::Duration,
+        limit: u32,
+    ) -> Result<u64, DbError> {
         let entity = "rate_limit_bucket";
         let mut result = self
             .db
             .current()
             .query(
                 "LET $ids = (SELECT VALUE id FROM rate_limit_bucket \
-                     WHERE updated_at < $cutoff LIMIT $limit); \
-                 LET $removed = (DELETE $ids WHERE updated_at < $cutoff RETURN BEFORE); \
+                     WHERE updated_at < time::now() - duration::from_secs($retention) \
+                     LIMIT $limit); \
+                 LET $removed = (DELETE $ids WHERE updated_at < time::now() - duration::from_secs($retention) \
+                     RETURN BEFORE); \
                  SELECT meta::id(id) AS record_id FROM $removed",
             )
-            .bind(("cutoff", cutoff))
+            .bind(("retention", i64::try_from(retention.as_secs()).unwrap_or(i64::MAX)))
             .bind(("limit", i64::from(limit)))
             .await
             .map_err(|e| classify_write_error(e, entity))?
@@ -420,8 +436,8 @@ mod tests {
         assert_eq!(rows(&db).await, 1);
     }
 
-    /// `delete_stale` removes rows whose `updated_at` is before the cutoff,
-    /// keeps the others, and honours its batch size.
+    /// `delete_stale` removes rows whose `updated_at` is older than the
+    /// retention, keeps the others, and honours its batch size.
     #[tokio::test]
     async fn delete_stale_removes_old_rows_in_batches_and_keeps_current_ones() {
         let (repo, db) = repo().await;
@@ -434,12 +450,16 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
-        let cutoff = w - Duration::hours(1);
+        let retention = std::time::Duration::from_secs(3600);
 
-        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 2, "one batch");
+        assert_eq!(
+            repo.delete_stale(retention, 2).await.unwrap(),
+            2,
+            "one batch"
+        );
         assert_eq!(rows(&db).await, 2);
-        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 1);
-        assert_eq!(repo.delete_stale(cutoff, 2).await.unwrap(), 0);
+        assert_eq!(repo.delete_stale(retention, 2).await.unwrap(), 1);
+        assert_eq!(repo.delete_stale(retention, 2).await.unwrap(), 0);
         assert_eq!(rows(&db).await, 1);
         assert_eq!(repo.peek_count("fresh", w).await.unwrap(), 1);
     }

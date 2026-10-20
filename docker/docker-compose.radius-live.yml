@@ -1,15 +1,15 @@
-# The D4 profile of the 802.1X / EAP-TLS e2e stack (W6.5, #563): the same
+# The Live profile of the 802.1X / EAP-TLS e2e stack (W6.5, #563): the same
 # FreeRADIUS, but AXIAM decides the placement per authentication, through
 # rlm_rest and POST /api/v1/network/decide, instead of a placement table.
 #
 # An OVERRIDE, not a stack of its own: it is read together with the base file,
 #
-#   docker compose -f docker-compose.radius.yml -f docker-compose.radius-d4.yml ...
+#   docker compose -f docker-compose.radius.yml -f docker-compose.radius-live.yml ...
 #
 # and changes the one service `freeradius` of it. The image is therefore pinned
 # once, by digest, in docker-compose.radius.yml, and this file names none (it
 # builds nothing either). docs/pki/freeradius.md, "The decision per
-# authentication", is the guide; the test is the D4 case of
+# authentication", is the guide; the test is the Live case of
 # crates/axiam-server/tests/radius_e2e.rs, which brings this stack up itself:
 #
 #   AXIAM_E2E_RADIUS=1 cargo test -p axiam-server --no-default-features \
@@ -22,7 +22,7 @@
 #    path as the base file's, so the table is not loaded at all);
 #  * the `eap` module's `$-INCLUDE` finds verify.conf, so EAP-TLS runs the hook
 #    that leaves the certificate's fingerprint for the decision;
-#  * clients.conf takes each client's `shortname` from AXIAM_D4_SITE: the AXIAM
+#  * clients.conf takes each client's `shortname` from AXIAM_LIVE_SITE: the AXIAM
 #    site key, from the server's own configuration;
 #  * the container reaches AXIAM, which the test runs on the host, at
 #    axiam.radius.test: the name AXIAM's TLS certificate carries, mapped to the
@@ -38,18 +38,18 @@
 services:
   freeradius:
     environment:
-      AXIAM_D4_URL: "${RADIUS_E2E_AXIAM_URL:?the test writes docker/.secrets/radius/env; pass --env-file}"
-      AXIAM_D4_SITE: "${RADIUS_E2E_SITE:?the test writes docker/.secrets/radius/env; pass --env-file}"
+      AXIAM_LIVE_URL: "${RADIUS_E2E_AXIAM_URL:?the test writes docker/.secrets/radius/env; pass --env-file}"
+      AXIAM_LIVE_SITE: "${RADIUS_E2E_SITE:?the test writes docker/.secrets/radius/env; pass --env-file}"
     extra_hosts:
       - "axiam.radius.test:${RADIUS_E2E_AXIAM_HOST_IP:-172.28.78.1}"
     # The hook's scratch space and the fingerprints it leaves: memory only,
     # owned by the freerad user (uid 101 in the image) alone.
     tmpfs:
-      - /var/run/axiam-d4:uid=101,gid=101,mode=0700
+      - /var/run/axiam-live:uid=101,gid=101,mode=0700
     volumes:
-      - ./radius/raddb/d4/clients.conf:/etc/freeradius/clients.conf:ro
-      - ./radius/raddb/d4/check-eap-tls:/etc/freeradius/sites-enabled/check-eap-tls:ro
-      # Over the base file's axiam_placement: the D4 profile has no table.
-      - ./radius/raddb/d4/axiam_d4:/etc/freeradius/mods-enabled/axiam_placement:ro
-      - ./radius/raddb/d4/verify.conf:/etc/freeradius/axiam-d4/verify.conf:ro
-      - ./radius/raddb/d4/axiam-d4.sh:/etc/freeradius/axiam-d4/axiam-d4.sh:ro
+      - ./radius/raddb/live/clients.conf:/etc/freeradius/clients.conf:ro
+      - ./radius/raddb/live/check-eap-tls:/etc/freeradius/sites-enabled/check-eap-tls:ro
+      # Over the base file's axiam_placement: the Live profile has no table.
+      - ./radius/raddb/live/axiam_live:/etc/freeradius/mods-enabled/axiam_placement:ro
+      - ./radius/raddb/live/verify.conf:/etc/freeradius/axiam-live/verify.conf:ro
+      - ./radius/raddb/live/axiam-live.sh:/etc/freeradius/axiam-live/axiam-live.sh:ro

@@ -79,6 +79,41 @@ use uuid::Uuid;
 /// browser cannot run a registration request either.
 pub const DCR_GRANT_TYPES: [&str; 2] = ["authorization_code", "refresh_token"];
 
+/// Why a self-registered client may not hold `grant`, or `None` when it may.
+///
+/// The one predicate behind `validate` and the administrator `PUT` on a
+/// `managed_by: dcr | cimd` row (#680), so the two cannot disagree about which
+/// grants a self-registered client holds. `mode` is the tenant's
+/// `dynamic_registration` for a `dcr` row; `None` is a `cimd` row, whose
+/// document is a file a stranger publishes and which may never hold the CIBA
+/// grant (see [`crate::cimd::validate`]).
+pub fn grant_refusal(grant: &str, mode: Option<DynamicRegistrationMode>) -> Option<String> {
+    let g = grant.trim();
+    // G-7 / D-62 — the CIBA grant is the one grant beyond the code flow a
+    // registration may name, and only one an administrator authorised: it lets
+    // the client push a sign-in request at any user of the tenant, which a
+    // stranger must not be able to do.
+    if g == CIBA_GRANT_TYPE {
+        return if mode == Some(DynamicRegistrationMode::InitialAccessToken) {
+            None
+        } else {
+            Some(format!(
+                "the {CIBA_GRANT_TYPE} grant may be registered only with an \
+                 initial access token: it lets a client send sign-in requests to \
+                 this tenant's users"
+            ))
+        };
+    }
+    if DCR_GRANT_TYPES.contains(&g) {
+        None
+    } else {
+        Some(format!(
+            "grant_type {g:?} is not one this endpoint issues (allowed: {})",
+            DCR_GRANT_TYPES.join(", ")
+        ))
+    }
+}
+
 /// The client-authentication methods a registration may name.
 ///
 /// The four RFC 7591 §2 lists that AXIAM implements and that make sense for a
@@ -423,26 +458,8 @@ pub fn validate(
                 ));
             }
             for g in requested {
-                let g = g.trim();
-                // G-7 / D-62 — the CIBA grant is the one grant beyond the code
-                // flow a registration may name, and only one an administrator
-                // authorised: it lets the client push a sign-in request at any
-                // user of the tenant, which a stranger must not be able to do.
-                if g == CIBA_GRANT_TYPE {
-                    if policy.dynamic_registration != DynamicRegistrationMode::InitialAccessToken {
-                        return Err(DcrError::InvalidClientMetadata(format!(
-                            "the {CIBA_GRANT_TYPE} grant may be registered only with an \
-                             initial access token: it lets a client send sign-in requests to \
-                             this tenant's users"
-                        )));
-                    }
-                    continue;
-                }
-                if !DCR_GRANT_TYPES.contains(&g) {
-                    return Err(DcrError::InvalidClientMetadata(format!(
-                        "grant_type {g:?} is not one this endpoint issues (allowed: {})",
-                        DCR_GRANT_TYPES.join(", ")
-                    )));
+                if let Some(message) = grant_refusal(g, Some(policy.dynamic_registration)) {
+                    return Err(DcrError::InvalidClientMetadata(message));
                 }
             }
             // `refresh_token` alone is a client that can refresh a token it can

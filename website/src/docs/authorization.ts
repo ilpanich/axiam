@@ -870,7 +870,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
           },
           {
             title: "A caller arrives without authority",
-            body: "The resource server does not guess and does not decide. It asks AXIAM for a permission ticket naming the resource and the scopes this request would need.",
+            body: "The resource server does not guess and does not decide. It asks AXIAM for a permission ticket naming the resource and the scopes this request would need. Only a resource it registered itself is ticketable: any other id is refused as if it did not exist.",
             code: "POST /uma2/perm\n{ \"resource_id\": \"<id>\", \"resource_scopes\": [\"view\"] }",
           },
           {

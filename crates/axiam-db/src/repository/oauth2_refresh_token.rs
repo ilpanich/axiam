@@ -70,6 +70,10 @@ struct RefreshTokenRow {
     /// list: no methods, the strict reading.
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// #681 — see [`RefreshToken::dpop_jkt`]. Absent on every row written
+    /// before schema v109: such a token is bound to no key.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -109,6 +113,10 @@ struct RefreshTokenRowWithId {
     /// list: no methods, the strict reading.
     #[surreal(default)]
     amr: Option<Vec<String>>,
+    /// #681 — see [`RefreshToken::dpop_jkt`]. Absent on every row written
+    /// before schema v109: such a token is bound to no key.
+    #[surreal(default)]
+    dpop_jkt: Option<String>,
 }
 
 impl RefreshTokenRowWithId {
@@ -145,6 +153,7 @@ impl RefreshTokenRowWithId {
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: self.dpop_jkt,
         })
     }
 }
@@ -221,6 +230,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  auth_time = $auth_time, \
                  acr = $acr, \
                  amr = $amr, \
+                 dpop_jkt = $dpop_jkt, \
                  expires_at = $expires_at, \
                  revoked = false",
             )
@@ -236,6 +246,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .bind(("auth_time", input.auth_time))
             .bind(("acr", input.acr))
             .bind(("amr", Amr::encode_list(&input.amr)))
+            .bind(("dpop_jkt", input.dpop_jkt))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -277,6 +288,7 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                 .amr
                 .map(|raw| Amr::decode_list(&raw))
                 .unwrap_or_default(),
+            dpop_jkt: row.dpop_jkt,
         })
     }
 
@@ -513,28 +525,24 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
-    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<()> {
-        let client_id_owned = client_id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
-        let result = self
+    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        let mut result = self
             .db
             .current()
             .query(
                 "UPDATE oauth2_refresh_token SET revoked = true \
                  WHERE tenant_id = $tenant_id \
-                   AND client_id = $client_id",
+                   AND client_id = $client_id \
+                   AND revoked = false \
+                 RETURN AFTER",
             )
-            .bind(("tenant_id", tenant_id_str))
-            .bind(("client_id", client_id_owned))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
-        result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        Ok(())
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
     }
 
     async fn delete_expired(&self) -> AxiamResult<u64> {
@@ -591,6 +599,7 @@ mod tests {
             scopes: vec!["openid".into()],
             session_id: Some(Uuid::new_v4()),
             requested_userinfo_claims: Vec::new(),
+            dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
             resource: None,
             auth_time: None,
@@ -623,6 +632,7 @@ mod tests {
                 scopes: vec!["openid".into()],
                 session_id: None,
                 requested_userinfo_claims: vec!["email".into(), "name".into()],
+                dpop_jkt: None,
                 expires_at: Utc::now() + chrono::Duration::days(30),
                 resource: None,
                 auth_time: None,
@@ -669,6 +679,7 @@ mod tests {
             scopes: vec!["openid".into()],
             session_id: None,
             requested_userinfo_claims: vec!["email".into()],
+            dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
             resource: None,
             auth_time: None,
@@ -722,6 +733,7 @@ mod tests {
                 scopes: vec!["openid".into()],
                 session_id: Some(Uuid::new_v4()),
                 requested_userinfo_claims: Vec::new(),
+                dpop_jkt: None,
                 expires_at: Utc::now() + chrono::Duration::days(30),
                 resource: None,
                 auth_time: Some(authenticated_at),
@@ -770,6 +782,7 @@ mod tests {
             scopes: vec!["openid".into()],
             session_id: Some(Uuid::new_v4()),
             requested_userinfo_claims: Vec::new(),
+            dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
             resource: None,
             auth_time: Some(Utc::now()),
@@ -799,6 +812,49 @@ mod tests {
             read.amr.is_empty(),
             "an absent amr is evidence of nothing, never evidence of a password"
         );
+    }
+
+    /// #681 — the DPoP key a public client's refresh token is bound to
+    /// survives the row (schema v109), and a row written before v109 — which
+    /// has no such column — decodes to no binding rather than failing.
+    #[tokio::test]
+    async fn the_dpop_binding_round_trips_and_a_pre_v109_row_has_none() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+        let mut input = CreateRefreshToken {
+            tenant_id,
+            token_hash: "bound".into(),
+            client_id: "oa_test".into(),
+            user_id: Some(Uuid::new_v4()),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: Vec::new(),
+            dpop_jkt: Some("jkt-of-the-device-key".into()),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+        };
+        let created = repo.create(input.clone()).await.unwrap();
+        assert_eq!(created.dpop_jkt.as_deref(), Some("jkt-of-the-device-key"));
+        let read = repo.get_by_token_hash(tenant_id, "bound").await.unwrap();
+        assert_eq!(read.dpop_jkt.as_deref(), Some("jkt-of-the-device-key"));
+
+        input.token_hash = "pre-v109".into();
+        repo.create(input).await.unwrap();
+        db.query("UPDATE oauth2_refresh_token UNSET dpop_jkt WHERE token_hash = $h")
+            .bind(("h", "pre-v109"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let read = repo
+            .get_by_token_hash(tenant_id, "pre-v109")
+            .await
+            .expect("a pre-v109 row must still decode, not error");
+        assert!(read.dpop_jkt.is_none());
     }
 
     // -----------------------------------------------------------------

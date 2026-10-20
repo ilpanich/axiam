@@ -1,4 +1,4 @@
-//! The authorization function of the network write surface (RADIUS D4, W6.2;
+//! The authorization function of the network write surface (RADIUS Live profile, W6.2;
 //! `claude_dev/radius-reply-profile-design.md` §5.1–§5.3).
 //!
 //! # What it decides
@@ -53,6 +53,32 @@
 //! `axiam-api-rest` pins every call site of them to a function that calls this
 //! one first, or to a named exemption with its reason.
 //!
+//! # The one exemption from "you delegate only what you hold"
+//!
+//! [`EXEMPTION_ORGANIZATION_BOOTSTRAP`]: an **organization-level** writer may
+//! assign a tenant's **own seeded `super-admin`** role, tenant-wide, to a user
+//! of that tenant, although it does not itself hold the role's `network:`
+//! permissions. Since #702 the organization scope's super-admin holds none, so
+//! without this nobody could give a new tenant its first administrator — the
+//! documented bootstrap (`docs/admin/organization-scope.md`), and the intent of
+//! the review that asked for #702 ("each tenant's own super-admin keeps the
+//! bootstrap", R110W6-05, T-483). The bound, all of it checked here:
+//!
+//! * the writer's [`SubjectScope`] is `Organization` (the REST extractor
+//!   already confines the target tenant to that organization);
+//! * the role is the one the seeder makes: named
+//!   [`SEEDED_SUPER_ADMIN_ROLE`], global, and carrying no `network:` grant but
+//!   allows of [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`] — a shape only the
+//!   seeder can produce, since §4.2 rule 1 refuses a `network:` grant to any
+//!   global role through the API;
+//! * the grantee is a user, the assignment names no resource, and the grantee
+//!   is not the writer (H6's reading: no self-configuration);
+//! * nothing else widens: a custom role carrying `network:` grants, a
+//!   `network:` permission grant, a resource-scoped assignment and every other
+//!   write stay under the §5.3 bound, and the organization scope's own role
+//!   still holds no `network:` permission. The cleared write is
+//!   network-sensitive and leaves its success row, which names the exemption.
+//!
 //! # What it is not
 //!
 //! It is a **namespace-limited** delegation bound. Outside `network:`,
@@ -73,8 +99,9 @@ use axiam_core::models::network::{
     CapChange, NETWORK_ADMIN, NETWORK_ADMIN_CLASS_ACTIONS, NETWORK_GRANT, NETWORK_GRANT_ADMIN,
     NETWORK_JOIN, NETWORK_META_ACTIONS, NETWORK_PROFILES_WRITE, NETWORK_SEGMENTS_WRITE,
     NetworkSegment, NetworkSegmentKind, NetworkSegmentPath, NetworkSegmentUpdate,
-    NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment, ReplyProfile, branch_node_id,
-    is_network_action, is_reserved_resource_type, network_root_id, site_node_id,
+    NetworkWriteClearance, NetworkWriteTarget, NewNetworkSegment, ReplyProfile,
+    SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, SEEDED_SUPER_ADMIN_ROLE, branch_node_id, is_network_action,
+    is_reserved_resource_type, network_root_id, site_node_id,
 };
 use axiam_core::models::permission::{Permission, PermissionEffect, PermissionGrant};
 use axiam_core::models::radius_reply::ReplyProfileInput;
@@ -116,6 +143,20 @@ pub const AUDIT_RESOURCE_WRITE_REFUSED: &str = "network_resource.write_refused";
 pub const AUDIT_BINDING_REFUSED: &str = "certificate_binding.refused";
 /// A write of the tenant's network policy (the `Session-Timeout` cap) refused.
 pub const AUDIT_POLICY_WRITE_REFUSED: &str = "network_policy.write_refused";
+/// A network-sensitive role assigned (the write cleared and landed; T-484).
+pub const AUDIT_ROLE_ASSIGNED: &str = "network_role.assigned";
+/// A network-sensitive role unassigned (cleared and landed).
+pub const AUDIT_ROLE_UNASSIGNED: &str = "network_role.unassigned";
+/// A `network:` permission granted to a role (cleared and landed).
+pub const AUDIT_ROLE_GRANTED: &str = "network_role.granted";
+/// A `network:` permission revoked from a role (cleared and landed).
+pub const AUDIT_ROLE_REVOKED: &str = "network_role.revoked";
+/// A certificate bound to a service account (cleared and landed).
+pub const AUDIT_BINDING_BOUND: &str = "certificate_binding.bound";
+
+/// The named exemption an organization-level writer's assignment of a tenant's
+/// own seeded `super-admin` clears under (see the module documentation).
+pub const EXEMPTION_ORGANIZATION_BOOTSTRAP: &str = "organization-bootstrap";
 
 // ---------------------------------------------------------------------------
 // What the function reads
@@ -616,6 +657,7 @@ pub struct GateClearance {
     token: Option<NetworkWriteClearance>,
     role_claim: Option<RoleClaim>,
     revoked_effect: Option<Option<PermissionEffect>>,
+    exemption: Option<&'static str>,
 }
 
 impl GateClearance {
@@ -625,6 +667,7 @@ impl GateClearance {
             token: None,
             role_claim: None,
             revoked_effect: None,
+            exemption: None,
         }
     }
 
@@ -634,7 +677,14 @@ impl GateClearance {
             token: Some(token),
             role_claim: None,
             revoked_effect: None,
+            exemption: None,
         }
+    }
+
+    /// Mark the clearance as given under a named exemption.
+    fn exempt(mut self, exemption: &'static str) -> Self {
+        self.exemption = Some(exemption);
+        self
     }
 
     /// Record, for a revoke, the effect of the grant the decision read
@@ -674,6 +724,20 @@ impl GateClearance {
     #[must_use]
     pub fn is_network_sensitive(&self) -> bool {
         self.network_sensitive
+    }
+
+    /// The named exemption the write cleared under, if any
+    /// ([`EXEMPTION_ORGANIZATION_BOOTSTRAP`]); the success row records it.
+    #[must_use]
+    pub fn exemption(&self) -> Option<&'static str> {
+        self.exemption
+    }
+
+    /// For a revoke, the effect of the grant the decision read: `Some(None)`
+    /// when it found none, `None` for every other write.
+    #[must_use]
+    pub fn revoked_effect(&self) -> Option<Option<PermissionEffect>> {
+        self.revoked_effect
     }
 
     /// The clearance a segment or profile repository write demands; `None`
@@ -1198,6 +1262,40 @@ where
             .any(|a| a.role.id == role_id && a.reaches_tenant(self.tenant())))
     }
 
+    /// Whether a role assignment is the organization bootstrap
+    /// ([`EXEMPTION_ORGANIZATION_BOOTSTRAP`]): an organization-level writer
+    /// giving a user of the tenant, other than itself, the tenant's own seeded
+    /// `super-admin`, tenant-wide.
+    ///
+    /// The role is recognised by the shape only the seeder makes, not by its
+    /// name alone: global, and no `network:` grant but an allow of
+    /// [`SEEDED_SUPER_ADMIN_NETWORK_ACTIONS`] (§4.2 rule 1 refuses a `network:`
+    /// grant to a global role through the API).
+    fn is_organization_bootstrap(
+        &self,
+        role: &Role,
+        role_grants: &[PermissionGrant],
+        grantee: Grantee,
+        resource_id: Option<Uuid>,
+    ) -> bool {
+        let Grantee::User(user) = grantee else {
+            return false;
+        };
+        matches!(self.writer.subject_scope, SubjectScope::Organization { .. })
+            && !self.is_writer(user)
+            && resource_id.is_none()
+            && role.is_global
+            && role.name == SEEDED_SUPER_ADMIN_ROLE
+            && role_grants
+                .iter()
+                .filter(|g| is_network_action(&g.permission.action))
+                .all(|g| {
+                    g.effect == PermissionEffect::Allow
+                        && SEEDED_SUPER_ADMIN_NETWORK_ACTIONS
+                            .contains(&g.permission.action.as_str())
+                })
+    }
+
     fn clearance(&self, target: NetworkWriteTarget) -> GateClearance {
         GateClearance::with_token(NetworkWriteClearance::issued_by_the_network_gate(
             self.tenant(),
@@ -1598,7 +1696,8 @@ where
         let Some(role) = self.found(self.store.role(self.tenant(), role_id).await)? else {
             return Ok(Ok(GateClearance::plain(false)));
         };
-        let grants = NetworkGrants::of(&self.store.role_grants(self.tenant(), role_id).await?);
+        let role_grants = self.store.role_grants(self.tenant(), role_id).await?;
+        let grants = NetworkGrants::of(&role_grants);
         if !grants.any {
             return Ok(Ok(GateClearance::plain(false)));
         }
@@ -1654,6 +1753,14 @@ where
                 audit,
                 "a subject cannot assign itself a role carrying network:join",
             ))));
+        }
+
+        // The organization bootstrap (module documentation): the one write
+        // cleared without the writer holding what the role confers.
+        if self.is_organization_bootstrap(&role, &role_grants, grantee, resource_id) {
+            return Ok(Ok(
+                GateClearance::plain(true).exempt(EXEMPTION_ORGANIZATION_BOOTSTRAP)
+            ));
         }
 
         // §5.3: joining (allow or deny) needs network:grant at N; every meta

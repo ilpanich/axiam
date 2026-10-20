@@ -841,6 +841,7 @@ mod single_use_serialisation {
             scopes: vec!["openid".into()],
             session_id: None,
             requested_userinfo_claims: Vec::new(),
+            dpop_jkt: None,
             expires_at: Utc::now() + Duration::seconds(3600),
             resource: None,
             auth_time: None,

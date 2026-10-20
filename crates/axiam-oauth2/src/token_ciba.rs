@@ -105,11 +105,15 @@ where
             .await
             .map_err(|e| match e {
                 AxiamError::NotFound { .. } => {
+                    // A credential was presented (the no-credential refusal is
+                    // above), so this costs the verify a wrong one does (#679).
+                    super::spend_one_verify(client_secret, ctx);
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
             })?;
         if client.tenant_id != tenant_id {
+            super::spend_one_verify(client_secret, ctx);
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
         let tenant = self
@@ -229,6 +233,7 @@ where
         // `tenant` is the one client authentication read (R1W1-03).
         let cnf = self.certificate_binding_for(&client, ctx)?;
         let token_type = crate::dpop::token_type_for(cnf.as_ref());
+        let refresh_jkt = crate::dpop::refresh_token_binding(&client, cnf.as_ref());
         let ext = self
             .pre_issue_ext_claims(
                 tenant_id,
@@ -275,6 +280,10 @@ where
                     auth_time: Some(approval.auth_time),
                     acr: Some(approval.acr.clone()),
                     amr: approval.amr.clone(),
+                    // #681 — `None`: registration refuses a public CIBA
+                    // client (`CibaRegistrationError::PublicClient`). Asked rather than
+                    // assumed, so the rule has one implementation.
+                    dpop_jkt: refresh_jkt.clone(),
                     expires_at: Utc::now()
                         + chrono::Duration::seconds(self.refresh_token_lifetime_secs),
                 })
@@ -289,8 +298,8 @@ where
         // `openid`, which `bc-authorize` requires of every request. It reports
         // the approval: what was achieved, in the class the request asked for
         // when the achievement satisfies it. The scope ceiling above can remove
-        // `openid` from an externally registered client's row (an administrator
-        // edited it after registration, #642 (c)); an ID token then would be an
+        // `openid` from an externally registered client's row (when the
+        // tenant's `dcr_allowed_scopes` drops it, #642 (c)); an ID token then would be an
         // identity assertion the client holds no scope for, as the refresh
         // grant already withholds it, so none is minted and the access token stands.
         let id_token = if redeemed.scopes.iter().any(|s| s == "openid") {

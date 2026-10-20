@@ -1,4 +1,4 @@
-//! The network-segment and RADIUS reply-profile management routes (RADIUS D4,
+//! The network-segment and RADIUS reply-profile management routes (RADIUS Live profile,
 //! W6.3; `claude_dev/radius-reply-profile-design.md` §4, §5).
 //!
 //! Ten operations under `/api/v1/network`, in the `network` OpenAPI tag and the
@@ -109,7 +109,7 @@ use axiam_authz::network_gate::{
     AUDIT_POLICY_WRITE_REFUSED, AUDIT_PROFILE_WRITE_REFUSED, AUDIT_SEGMENT_WRITE_REFUSED,
     NetworkWrite,
 };
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, NetworkConflict};
 use axiam_core::models::audit::{AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::network::{
     CapChange, NETWORK_READ, NetworkPolicy, NetworkSegment, NetworkSegmentKind,
@@ -404,6 +404,25 @@ pub enum NetworkConflictReason {
     Other,
 }
 
+impl From<&NetworkConflict> for NetworkConflictReason {
+    fn from(conflict: &NetworkConflict) -> Self {
+        match conflict {
+            NetworkConflict::StaleSegment
+            | NetworkConflict::StaleProfile
+            | NetworkConflict::StalePolicy
+            | NetworkConflict::PlacementRaced
+            | NetworkConflict::StaleRole { .. } => Self::StaleVersion,
+            NetworkConflict::StrandsProfile { .. } => Self::StrandsProfile,
+            NetworkConflict::HasChildren => Self::HasChildren,
+            NetworkConflict::SiteGone => Self::SiteGone,
+            NetworkConflict::DuplicateVlan => Self::DuplicateVlan,
+            NetworkConflict::DuplicateRank => Self::DuplicateRank,
+            NetworkConflict::DuplicateName => Self::DuplicateName,
+            NetworkConflict::ProfileExists => Self::ProfileExists,
+        }
+    }
+}
+
 impl NetworkConflictReason {
     /// The wire value.
     #[must_use]
@@ -423,37 +442,16 @@ impl NetworkConflictReason {
 
     /// The reason of a `409`; `None` for every other error.
     ///
-    /// Read off the fixed sentences the network repositories and
-    /// [`name_the_stranded_profile`] write — the server's own words, matched
-    /// in one place on the server, so no client has to. Every value is pinned
-    /// end to end by `network_routes_test::every_network_409_carries_its_reason_code`.
+    /// The one place a typed [`NetworkConflict`] becomes a wire value; every
+    /// value is pinned end to end by
+    /// `network_routes_test::every_network_409_carries_its_reason_code`.
     #[must_use]
     pub fn of(error: &AxiamError) -> Option<Self> {
         match error {
-            AxiamError::Conflict { reason } => {
-                Some(if reason.contains("changed since it was read") {
-                    Self::StaleVersion
-                } else if reason.contains("change or delete the profile first") {
-                    Self::StrandsProfile
-                } else if reason.contains("child resources") {
-                    Self::HasChildren
-                } else if reason.contains("network site was removed") {
-                    Self::SiteGone
-                } else {
-                    Self::Other
-                })
-            }
-            AxiamError::AlreadyExists { entity } => Some(if entity.contains("this vlan_id") {
-                Self::DuplicateVlan
-            } else if entity.contains("this rank") {
-                Self::DuplicateRank
-            } else if entity.contains("of this name") {
-                Self::DuplicateName
-            } else if entity.contains("reply_profile") {
-                Self::ProfileExists
-            } else {
-                Self::Other
-            }),
+            AxiamError::Network(conflict) => Some(Self::from(conflict)),
+            // A `409` no network refusal names; nothing raises one today.
+            AxiamError::Conflict { .. } => Some(Self::Other),
+            AxiamError::AlreadyExists { .. } => Some(Self::Other),
             _ => None,
         }
     }
@@ -718,6 +716,11 @@ async fn refused<C: Connection + Clone>(
             conflict.map_or("conflict", NetworkConflictReason::audit_rule),
             409,
             reason.clone(),
+        ),
+        AxiamError::Network(refusal) => (
+            conflict.map_or("conflict", NetworkConflictReason::audit_rule),
+            409,
+            refusal.to_string(),
         ),
         AxiamError::Validation { message } => ("validation", 400, message.clone()),
         AxiamError::AuthorizationDenied { reason, .. } => {
@@ -1137,37 +1140,29 @@ pub async fn replace_segment<C: Connection + Clone>(
 }
 
 /// The repository refuses an envelope that would strand the segment's profile
-/// with a generic `Conflict` (it cannot name what the segment's id already
-/// does): add the profile's id (it is the segment's) and the `filter_id` it uses.
+/// with an unnamed [`NetworkConflict::StrandsProfile`] (it cannot name what the
+/// segment's id already does): add the profile's id (it is the segment's) and the `filter_id` it uses.
 async fn name_the_stranded_profile<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
     segment_id: Uuid,
     error: AxiamError,
 ) -> AxiamError {
-    let AxiamError::Conflict { reason } = &error else {
-        return error;
-    };
-    if !reason.contains("outside its envelope") {
+    if !matches!(
+        error,
+        AxiamError::Network(NetworkConflict::StrandsProfile { .. })
+    ) {
         return error;
     }
-    let used = profiles(state)
+    let filter_id = profiles(state)
         .get_by_segment(tenant_id, segment_id)
         .await
         .ok()
         .and_then(|p| p.filter_id);
-    AxiamError::Conflict {
-        reason: match used {
-            Some(filter_id) => format!(
-                "the segment's reply profile {segment_id} uses filter_id '{filter_id}', which \
-                 the new filter_ids remove; change or delete the profile first"
-            ),
-            None => format!(
-                "the new filter_ids would leave the segment's reply profile {segment_id} \
-                 outside its envelope; change or delete the profile first"
-            ),
-        },
-    }
+    AxiamError::Network(NetworkConflict::StrandsProfile {
+        segment_id: Some(segment_id),
+        filter_id,
+    })
 }
 
 /// `DELETE /api/v1/network/segments/{id}?version=`
@@ -1877,90 +1872,90 @@ pub async fn replace_policy<C: Connection + Clone>(
 mod tests {
     use super::*;
 
-    fn conflict(reason: &str) -> AxiamError {
-        AxiamError::Conflict {
-            reason: reason.into(),
-        }
+    fn typed(conflict: NetworkConflict) -> AxiamError {
+        AxiamError::Network(conflict)
     }
 
-    fn exists(entity: &str) -> AxiamError {
-        AxiamError::AlreadyExists {
-            entity: entity.into(),
-        }
-    }
-
-    /// The sentences the network repositories and this module write, each to
-    /// its value; the route test pins the paths that reach them end to end,
-    /// and this pins the two a route test cannot provoke on demand (a site
-    /// removed mid-create, a profile written between the gate and the write).
+    /// Every typed refusal to its value; the route test pins the paths that
+    /// reach them end to end, and this pins the two a route test cannot
+    /// provoke on demand (a site removed mid-create, a profile written between
+    /// the gate and the write).
     #[test]
-    fn each_409_sentence_has_its_reason_code() {
+    fn each_typed_refusal_has_its_reason_code() {
+        use NetworkConflict as C;
         use NetworkConflictReason as R;
-        for (error, want) in [
-            (
-                conflict("the network segment changed since it was read; read it again and retry"),
-                R::StaleVersion,
-            ),
-            (
-                conflict(
-                    "the network segment changed since it was read (a reply profile was \
-                     written on it); read it again and retry",
-                ),
-                R::StaleVersion,
-            ),
-            (
-                conflict("the reply profile changed since it was read; read it again and retry"),
-                R::StaleVersion,
-            ),
-            (
-                conflict("the network policy changed since it was read; read it again and retry"),
-                R::StaleVersion,
-            ),
-            (
-                conflict(
-                    "the segment's reply profile 1 uses filter_id 'a', which the new \
-                     filter_ids remove; change or delete the profile first",
-                ),
-                R::StrandsProfile,
-            ),
-            (
-                conflict(
-                    "the new filter_ids would leave the segment's reply profile outside its \
-                     envelope; change or delete the profile first",
-                ),
-                R::StrandsProfile,
-            ),
-            (
-                conflict("the network segment has child resources"),
-                R::HasChildren,
-            ),
-            (
-                conflict("the network site was removed while the segment was being written; retry"),
-                R::SiteGone,
-            ),
-            (conflict("something new"), R::Other),
-            (
-                exists("network_segment: the site already has a segment with this vlan_id"),
-                R::DuplicateVlan,
-            ),
-            (
-                exists("network_segment: the site already has a segment with this rank"),
-                R::DuplicateRank,
-            ),
-            (
-                exists("network_segment: the site already has a segment of this name"),
-                R::DuplicateName,
-            ),
-            (exists("reply_profile"), R::ProfileExists),
-            (exists("network_segment"), R::Other),
+        let stale_role = C::StaleRole {
+            what_landed: "a group was assigned it".into(),
+        };
+        let named = C::StrandsProfile {
+            segment_id: Some(Uuid::nil()),
+            filter_id: Some("a".into()),
+        };
+        let unnamed = C::StrandsProfile {
+            segment_id: None,
+            filter_id: None,
+        };
+        for (conflict, want) in [
+            (C::StaleSegment, R::StaleVersion),
+            (C::StaleProfile, R::StaleVersion),
+            (C::StalePolicy, R::StaleVersion),
+            (C::PlacementRaced, R::StaleVersion),
+            (stale_role, R::StaleVersion),
+            (named, R::StrandsProfile),
+            (unnamed, R::StrandsProfile),
+            (C::HasChildren, R::HasChildren),
+            (C::SiteGone, R::SiteGone),
+            (C::DuplicateVlan, R::DuplicateVlan),
+            (C::DuplicateRank, R::DuplicateRank),
+            (C::DuplicateName, R::DuplicateName),
+            (C::ProfileExists, R::ProfileExists),
         ] {
+            let error = typed(conflict);
             assert_eq!(NetworkConflictReason::of(&error), Some(want), "{error}");
+        }
+        for other in [
+            AxiamError::Conflict {
+                reason: "something new".into(),
+            },
+            AxiamError::AlreadyExists {
+                entity: "network_segment".into(),
+            },
+        ] {
+            assert_eq!(NetworkConflictReason::of(&other), Some(R::Other));
         }
         assert_eq!(
             NetworkConflictReason::of(&AxiamError::Validation {
                 message: "x".into()
             }),
             None
+        );
+    }
+
+    /// The sentences are the wire `message`, which no client may see change.
+    #[test]
+    fn the_typed_refusals_keep_their_sentences() {
+        use NetworkConflict as C;
+        assert_eq!(
+            typed(C::PlacementRaced).to_string(),
+            "the network segment changed since it was read (a reply profile was written on \
+             it); read it again and retry"
+        );
+        assert_eq!(
+            typed(C::StrandsProfile {
+                segment_id: Some(Uuid::nil()),
+                filter_id: Some("a".into())
+            })
+            .to_string(),
+            format!(
+                "the segment's reply profile {} uses filter_id 'a', which the new filter_ids \
+                 remove; change or delete the profile first",
+                Uuid::nil()
+            )
+        );
+        assert_eq!(
+            typed(C::DuplicateVlan).to_string(),
+            "Entity already exists: network_segment: the site already has a segment with this \
+             vlan_id"
         );
     }
 

@@ -1,6 +1,6 @@
 //! The twelve network management routes (the ten of W6.3 and the two of the
 //! tenant's `Session-Timeout` cap, W6.3b) against the real authorization engine and
-//! the real write gate (RADIUS D4, W6.3;
+//! the real write gate (RADIUS Live profile, W6.3;
 //! `claude_dev/radius-reply-profile-design.md` §4.2, §5.1, §5.2, §5.4).
 //!
 //! What the routes add to the gate's own tests (`network_gate_test.rs`, and the

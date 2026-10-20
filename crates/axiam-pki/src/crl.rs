@@ -414,7 +414,11 @@ impl CaSlot {
             .unwrap_or_else(PoisonError::into_inner);
         published
             .as_ref()
-            .filter(|cached| cached.entries_digest == *digest && now < cached.refresh_at)
+            .filter(|cached| {
+                cached.entries_digest == *digest
+                    && cached.crl.this_update <= now
+                    && now < cached.refresh_at
+            })
             .map(|cached| cached.crl.clone())
     }
 
@@ -527,7 +531,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         CA: Clone + 'static,
         CR: Clone + 'static,
     {
-        self.current_at(organization_id, ca_id, Utc::now()).await
+        self.current_from(organization_id, ca_id, Utc::now(), true)
+            .await
     }
 
     /// [`Self::current`], as of `now`.
@@ -537,11 +542,34 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
     /// services in a test — asked at instants in the same epoch about the same
     /// store answer with the same bytes. Exposed so a test can name the instant
     /// rather than wait for an epoch to pass.
+    ///
+    /// The named instant is kept, in the past as in the future (#666): a list
+    /// asked for as of an earlier instant is signed with that instant's epoch
+    /// and validity window, not at the wall clock. Only [`Self::current`],
+    /// which asks as of the clock, lets a request that waited across an epoch
+    /// boundary move on to the new epoch.
     pub async fn current_at(
         &self,
         organization_id: Uuid,
         ca_id: Uuid,
         now: DateTime<Utc>,
+    ) -> AxiamResult<PublishedCrl>
+    where
+        CA: Clone + 'static,
+        CR: Clone + 'static,
+    {
+        self.current_from(organization_id, ca_id, now, false).await
+    }
+
+    /// The body of [`Self::current`] and [`Self::current_at`]; `follow_clock`
+    /// says whether `now` is the wall clock, and so may be advanced while the
+    /// request waits.
+    async fn current_from(
+        &self,
+        organization_id: Uuid,
+        ca_id: Uuid,
+        now: DateTime<Utc>,
+        follow_clock: bool,
     ) -> AxiamResult<PublishedCrl>
     where
         CA: Clone + 'static,
@@ -598,7 +626,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         if let Some(crl) = slot.fresh(&digest, now) {
             return Ok(crl);
         }
-        self.resign(slot, ca, digest, now).await
+        self.resign(slot, ca, digest, now, follow_clock).await
     }
 
     /// The list of `ca` as of a state whose entries digest is `digest`, which
@@ -627,6 +655,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         ca: CaCertificate,
         digest: [u8; 32],
         now: DateTime<Utc>,
+        follow_clock: bool,
     ) -> AxiamResult<PublishedCrl>
     where
         CA: Clone + 'static,
@@ -634,10 +663,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
     {
         let deadline = tokio::time::Instant::now() + self.permit_wait;
         loop {
-            // Never earlier than the clock: a request that waited across an
-            // epoch boundary takes, or signs, the new epoch's list, not one
-            // older than the list a flight ahead of it may just have cached.
-            let now = now.max(Utc::now());
+            // A request asking as of the clock is never earlier than it: one
+            // that waited across an epoch boundary takes, or signs, the new
+            // epoch's list, not one older than the list a flight ahead of it
+            // may just have cached. A named instant (`current_at`) is kept.
+            let now = if follow_clock {
+                now.max(Utc::now())
+            } else {
+                now
+            };
             match slot.join_or_lead() {
                 Turn::Lead(landing) => {
                     // A flight that landed between this request's look at the
@@ -678,7 +712,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                     if let Some(Err(failed)) = landed {
                         return Err(failed);
                     }
-                    if let Some(crl) = slot.fresh(&digest, now.max(Utc::now())) {
+                    if let Some(crl) = slot.fresh(
+                        &digest,
+                        if follow_clock {
+                            now.max(Utc::now())
+                        } else {
+                            now
+                        },
+                    ) {
                         return Ok(crl);
                     }
                     // Signed over another state than this request read: the

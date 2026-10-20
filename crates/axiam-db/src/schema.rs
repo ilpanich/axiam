@@ -4,9 +4,11 @@
 //! UUIDs are stored as strings. Enums are stored as strings with
 //! ASSERT constraints for validation.
 
+use std::collections::HashSet;
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
-use tracing::info;
+
+use tracing::{info, warn};
 
 use crate::error::DbError;
 
@@ -27,13 +29,6 @@ DEFINE TABLE IF NOT EXISTS _migration_lock SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS locked_at ON TABLE _migration_lock TYPE datetime \
     DEFAULT time::now();
 ";
-
-#[derive(Debug, SurrealValue)]
-struct MigrationRecord {
-    version: u32,
-    #[allow(dead_code)]
-    name: String,
-}
 
 struct Migration {
     version: u32,
@@ -556,6 +551,16 @@ static MIGRATIONS: &[Migration] = &[
         version: 107,
         name: "account_deletion_purge_claim",
         sql: SCHEMA_V107,
+    },
+    Migration {
+        version: 108,
+        name: "pending_record_markers",
+        sql: SCHEMA_V108,
+    },
+    Migration {
+        version: 109,
+        name: "rate_limit_bucket_updated_at_index",
+        sql: SCHEMA_V109,
     },
 ];
 
@@ -2489,7 +2494,13 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 /// Run all pending migrations against the given SurrealDB client.
 ///
 /// Creates `_migration` and `_migration_lock` tracking tables on first run,
-/// then applies each pending migration atomically: the schema DDL and the
+/// then applies, in ascending version order, **every listed migration whose
+/// version is not recorded** — not merely those above the highest recorded
+/// one (#704, R110W6-07). A datastore that recorded v100 without v99 (one that
+/// ran a build carrying v100 but not v99) therefore applies v99 on its next
+/// start instead of skipping it for ever; such an out-of-order application is
+/// logged at `warn`. Every migration is idempotent DDL, so applying one late is
+/// safe. Each pending migration is applied atomically: the schema DDL and the
 /// version-record INSERT are wrapped in a single `BEGIN TRANSACTION …
 /// COMMIT TRANSACTION` so that a mid-step failure leaves the row
 /// re-selectable (CQ-B06 / REQ-14 AC-5).
@@ -2516,20 +2527,28 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
     .check()
     .map_err(|e| DbError::Migration(format!("failed to acquire _migration_lock: {e}")))?;
 
-    // Determine current schema version.
-    let mut result = db
-        .query("SELECT * FROM _migration ORDER BY version DESC LIMIT 1")
-        .await?;
-    let records: Vec<MigrationRecord> = result.take(0)?;
-    let current_version = records.first().map(|m| m.version).unwrap_or(0);
+    // Every recorded version, not just the highest: a gap below the highest
+    // (v100 recorded, v99 not) is a migration still to apply (#704).
+    let mut result = db.query("SELECT VALUE version FROM _migration").await?;
+    let recorded: HashSet<u32> = result.take::<Vec<u32>>(0)?.into_iter().collect();
+    let highest_recorded = recorded.iter().copied().max().unwrap_or(0);
 
     for migration in MIGRATIONS {
-        if migration.version > current_version {
-            info!(
-                version = migration.version,
-                name = migration.name,
-                "Applying migration"
-            );
+        if !recorded.contains(&migration.version) {
+            if migration.version < highest_recorded {
+                warn!(
+                    version = migration.version,
+                    name = migration.name,
+                    highest_recorded,
+                    "Applying migration out of order: a later version is already recorded"
+                );
+            } else {
+                info!(
+                    version = migration.version,
+                    name = migration.name,
+                    "Applying migration"
+                );
+            }
 
             // Wrap the schema DDL and the version-record INSERT in a single
             // transaction (CQ-B06).  If the DDL succeeds but the INSERT
@@ -5150,6 +5169,74 @@ const SCHEMA_V107: &str = "\
 DEFINE FIELD IF NOT EXISTS purge_claimed_at ON TABLE account_deletion TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v108 — a unit cut past its point of no return is recorded by the
+// next start (#689, R110W4-03)
+// -----------------------------------------------------------------------
+//
+// An erasure's point of no return is the anonymization, a tenant purge's the
+// removal of its tenant row (or of an orphan's claim marker); after either, no
+// sweep found the work again, so a unit cut there by the teardown's bound
+// never wrote `gdpr.user_pseudonymized` or `tenants.purged`. Each now leaves a
+// marker in the same transaction as that write, and the unit clears it with
+// its record; the next sweep (any replica's) records what a marker still
+// stands for, once.
+//
+// **`user.erasure_audit_pending`** — set by the anonymization to its own time,
+// cleared by the erasure once its record is written (with the deletion
+// request's completion, in one transaction). The value is the claim's stamp:
+// the unit holds it, a sweep takes a marker over only when the stamp is older
+// than the lease or released (the Unix epoch), and every write is conditional
+// on the stamp read. A time and nothing else; erased with the row.
+//
+// **`tenant_purge_pending`**, keyed by the purged tenant's id (the record id,
+// no `tenant_id` field) — written by the `DELETE` of the tenant row, in its
+// transaction, with what `tenants.purged` says (`orphan`, the export time, the
+// audit counts) and `claimed_at`, the unit's claim; deleted by the unit once
+// it has recorded the purge. Not tenant-scoped on purpose, and so not in
+// `TENANT_PURGE_ORDER`: it is written after its tenant's rows are gone and
+// must outlive them until it is recorded, and a `tenant_id` field would make
+// the orphan scan take the marker for an orphan of its own and purge it.
+//
+// Additive: one optional field and its index, one new table; nothing
+// backfilled (a row written before the upgrade reads NONE — nothing owed).
+const SCHEMA_V108: &str = "\
+DEFINE FIELD IF NOT EXISTS erasure_audit_pending ON TABLE user TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_user_erasure_audit_pending ON TABLE user FIELDS erasure_audit_pending;
+DEFINE TABLE IF NOT EXISTS tenant_purge_pending SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS orphan ON TABLE tenant_purge_pending TYPE bool;
+DEFINE FIELD IF NOT EXISTS audit_exported_through ON TABLE tenant_purge_pending TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS audit_rows_deleted ON TABLE tenant_purge_pending TYPE int;
+DEFINE FIELD IF NOT EXISTS audit_rows_kept ON TABLE tenant_purge_pending TYPE int;
+DEFINE FIELD IF NOT EXISTS purged_at ON TABLE tenant_purge_pending TYPE datetime;
+DEFINE FIELD IF NOT EXISTS claimed_at ON TABLE tenant_purge_pending TYPE option<datetime>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v109 — the rate-limit sweep selects on `updated_at` (#676)
+// -----------------------------------------------------------------------
+//
+// The `rate_limit_bucket` sweep (`axiam-server::cleanup`) selects and deletes
+// rows by `updated_at < time::now() - retention`, a pass every tick; without an
+// index each pass scanned the whole table, which gains a row per hint, per
+// client address and per endpoint. Additive: one index, nothing backfilled
+// (the engine builds it from the rows present). Version 108 is the 1.1.1
+// W1 branch's pending-record markers (#689).
+//
+// **`oauth2_refresh_token.dpop_jkt` (#681, RFC 9449 §5).** The thumbprint of
+// the DPoP key a public DPoP-bound client's refresh token is bound to; the
+// refresh grant requires a proof by that key and copies it to the successor.
+// Added to this unreleased migration rather than as a v110 (plan §10: one
+// migration per wave). `option<string>`, no index (the row is found by
+// `token_hash`), and **no backfill**: nothing recorded which key a pre-v109
+// token was used with, and inventing one would bind it to whoever presents it
+// next. Such a row reads `NONE`, which a public DPoP-bound client's refresh
+// refuses and every other client's ignores.
+const SCHEMA_V109: &str = "\
+DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at ON TABLE rate_limit_bucket FIELDS updated_at;
+DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5337,7 +5424,7 @@ mod tests {
         }
     }
 
-    /// #563 (D4), W6.1 — v100 defines the three network tables, their fields
+    /// #563 (the Live profile), W6.1 — v100 defines the three network tables, their fields
     /// and their indexes, every one idempotently, touches no existing table,
     /// and rewrites no row.
     #[test]
@@ -5417,6 +5504,102 @@ mod tests {
         ] {
             assert!(SCHEMA_V102.contains(&format!("'{}'", kind.as_str())));
         }
+    }
+
+    /// #689 — v108 is the two pending-record markers, each defined
+    /// idempotently, and nothing else: no existing field redefined, no row
+    /// rewritten, and the new table keyed by id with no `tenant_id` field (it
+    /// must outlive its tenant's purge until it is recorded).
+    #[test]
+    fn v108_adds_only_the_pending_record_markers() {
+        let statements: Vec<&str> = SCHEMA_V108
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS erasure_audit_pending ON TABLE user \
+                 TYPE option<datetime>",
+                "DEFINE INDEX IF NOT EXISTS idx_user_erasure_audit_pending ON TABLE user \
+                 FIELDS erasure_audit_pending",
+                "DEFINE TABLE IF NOT EXISTS tenant_purge_pending SCHEMAFULL",
+                "DEFINE FIELD IF NOT EXISTS orphan ON TABLE tenant_purge_pending TYPE bool",
+                "DEFINE FIELD IF NOT EXISTS audit_exported_through ON TABLE \
+                 tenant_purge_pending TYPE option<datetime>",
+                "DEFINE FIELD IF NOT EXISTS audit_rows_deleted ON TABLE tenant_purge_pending \
+                 TYPE int",
+                "DEFINE FIELD IF NOT EXISTS audit_rows_kept ON TABLE tenant_purge_pending \
+                 TYPE int",
+                "DEFINE FIELD IF NOT EXISTS purged_at ON TABLE tenant_purge_pending \
+                 TYPE datetime",
+                "DEFINE FIELD IF NOT EXISTS claimed_at ON TABLE tenant_purge_pending \
+                 TYPE option<datetime>",
+            ],
+            "v108 defines the two markers and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT",
+            "tenant_id",
+        ] {
+            assert!(
+                !SCHEMA_V108.contains(forbidden),
+                "v108 must not contain {forbidden}"
+            );
+        }
+    }
+
+    fn v109_statements() -> Vec<&'static str> {
+        SCHEMA_V109
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// #676 — on `rate_limit_bucket`, v109 is the sweep's `updated_at` index,
+    /// defined idempotently, and nothing else; and the whole migration is
+    /// additive: no `UPDATE`, `REMOVE`, `DELETE`, `OVERWRITE` or backfill.
+    #[test]
+    fn v109_adds_only_the_sweep_index() {
+        let on_buckets: Vec<&str> = v109_statements()
+            .into_iter()
+            .filter(|s| s.contains("rate_limit_bucket"))
+            .collect();
+        assert_eq!(
+            on_buckets,
+            ["DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at \
+                 ON TABLE rate_limit_bucket FIELDS updated_at"],
+            "v109 defines the index on the buckets and nothing else"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V109.contains(forbidden),
+                "v109 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #681 — v109 also gives the refresh token its optional `dpop_jkt`,
+    /// defined idempotently and backfilled by nothing, and those two
+    /// statements are the whole migration.
+    #[test]
+    fn v109_adds_the_refresh_tokens_optional_dpop_jkt_and_nothing_else() {
+        assert_eq!(
+            v109_statements(),
+            [
+                "DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at \
+                 ON TABLE rate_limit_bucket FIELDS updated_at",
+                "DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token \
+                 TYPE option<string>",
+            ],
+            "v109 defines the index and the field and nothing else"
+        );
     }
 
     /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
@@ -7004,11 +7187,16 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&107),
-            "v107 is the newest migration (the 1.1.0 atomicity audit's item 11 — \
+            Some(&109),
+            "v109 is the newest migration (#676 — the `rate_limit_bucket.updated_at` index the \
+             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`); v108 was \
+             #689 — `user.erasure_audit_pending` and `tenant_purge_pending`, the markers an \
+             erasure and a tenant purge leave at their point of no return and clear with their \
+             record, so that a unit cut there is recorded by the next start; \
+             v107 was the 1.1.0 atomicity audit's item 11 — \
              `account_deletion.purge_claimed_at`, which the purge sweep writes before the first \
              destructive step of an erasure and a cancel refuses, so that a cancel and the sweep \
-             never both win); v106 was the 1.1.0 atomicity audit's item 10 — \
+             never both win; v106 was the 1.1.0 atomicity audit's item 10 — \
              `tenant.opaque_directory_epoch`, which a directory save that leaves the directory \
              enabled and a settings write that makes opaque_mode `required` both compare and \
              move, so that each side's refusal and the other's write act as one transaction); \
@@ -7288,6 +7476,30 @@ mod tests {
                 "Migrations must be in ascending version order"
             );
         }
+    }
+
+    /// Versions that were never claimed and never will be: the 1.0.0 release
+    /// waves split the numbers (W2 taking 85 … 89, W1 90 onwards) and W2 used
+    /// only 85. Released datastores have recorded 90 and later, so the hole is
+    /// permanent; it is named here so that it is the only one.
+    const UNCLAIMED_VERSIONS: std::ops::RangeInclusive<u32> = 86..=89;
+
+    /// #704 (R110W6-07) — the list is exactly versions 1 … N, in order, with no
+    /// gap and no repeat, whatever N is, except the one historical hole
+    /// [`UNCLAIMED_VERSIONS`]. The runner applies every listed version that is
+    /// not recorded, so a version missing from the list would be a migration no
+    /// datastore ever receives, and nothing else would notice.
+    #[test]
+    fn migrations_are_contiguous() {
+        let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let newest = *versions.last().expect("at least one migration");
+        let expected: Vec<u32> = (1..=newest)
+            .filter(|v| !UNCLAIMED_VERSIONS.contains(v))
+            .collect();
+        assert_eq!(
+            versions, expected,
+            "migration versions must be exactly 1 … N in order (86 … 89 excepted)"
+        );
     }
 
     /// T23.7.1 (continued) / D-61 — v81 stores the signing algorithm, admits

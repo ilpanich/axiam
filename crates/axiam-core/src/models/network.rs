@@ -1,5 +1,5 @@
 //! Network segments, their reply profiles and the tenant's session cap (RADIUS
-//! D4, `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
+//! Live profile, `claude_dev/radius-reply-profile-design.md` §3.5 and §4).
 //!
 //! # Segments are resources
 //!
@@ -789,12 +789,24 @@ pub const NETWORK_ADMIN_CLASS_ACTIONS: &[&str] = &[NETWORK_ADMIN, NETWORK_GRANT_
 ///   not grantable under option B;
 /// * it does **not** bypass §5.3: assigning the super-admin role is a
 ///   tenant-wide assignment of a role carrying meta permissions, so the
-///   assigner must hold every one of them at `/network`;
+///   assigner must hold every one of them at `/network` — save for one named
+///   exemption, an organization principal bootstrapping the tenant's first
+///   administrator (see the last paragraph);
 /// * it is made only by the seeder (`seed_default_roles`, and
 ///   `reconcile_default_role_grants` on boot). The API refuses a `network:`
-///   grant to any global role, this one included.
+///   grant to any global role, this one included;
+/// * it is made in an **ordinary tenant only**. The organization's own scope
+///   tenant has a seeded super-admin too, and that role is global, so an
+///   organization-level principal would carry these permissions into every
+///   tenant of the organization (#702, T-483). The seeder withholds them there
+///   and the boot reconcile revokes them from a deployment seeded before.
 ///
 /// The seeded `admin` and `viewer` roles hold no `network:` permission.
+///
+/// An organization-level principal may still **assign** the role, tenant-wide,
+/// to a user of a tenant of its organization although it holds none of these
+/// (the bootstrap of a tenant's first administrator; the named exemption
+/// `organization-bootstrap` of `axiam-authz`'s `network_gate`).
 pub const SEEDED_SUPER_ADMIN_NETWORK_ACTIONS: &[&str] = &[
     NETWORK_READ,
     NETWORK_SEGMENTS_WRITE,
@@ -803,6 +815,9 @@ pub const SEEDED_SUPER_ADMIN_NETWORK_ACTIONS: &[&str] = &[
     NETWORK_DECIDE,
     NETWORK_EXPORT,
 ];
+
+/// The name the seeder gives every tenant's `super-admin` role (and finds it by).
+pub const SEEDED_SUPER_ADMIN_ROLE: &str = "super-admin";
 
 /// Whether `action` is in the reserved `network:` namespace.
 ///

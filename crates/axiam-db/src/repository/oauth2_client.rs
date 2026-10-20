@@ -811,8 +811,16 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
         if input.profile.is_some() {
             sets.push("profile = $profile");
         }
-        if input.token_endpoint_auth_method.is_some() {
+        if let Some(method) = input.token_endpoint_auth_method {
             sets.push("token_endpoint_auth_method = $token_endpoint_auth_method");
+            // #675 (D-4) — a public row holds no secret, as `create_row` writes
+            // it. Cleared in the same statement that sets `none`, so no reader
+            // ever sees a public method beside a live hash; on a row that is
+            // already public the hash is already empty and this writes nothing
+            // new.
+            if method.is_public() {
+                sets.push("client_secret_hash = ''");
+            }
         }
         if input.tls_client_auth_subject_dn.is_some() {
             sets.push("tls_client_auth_subject_dn = $tls_client_auth_subject_dn");
@@ -1396,20 +1404,23 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
     /// Absent `token_endpoint_auth_method` is confidential (it decodes to the
     /// default, `client_secret_post`), so the filter says `NONE OR != 'none'`
     /// rather than leaning on how the datastore orders `NONE` against a string.
-    /// The live-tenant subquery reads the `tenant` table once, not once per
-    /// client row.
+    /// The live tenants are read once into `$live` and both statements test
+    /// membership in it: an inline `IN (SELECT …)` is evaluated again for
+    /// every client row that reaches it (R110-02, #712). `LET` takes the first
+    /// result slot, so the two counts are slots 1 and 2.
     async fn count_confidential_with_grant(
         &self,
         grant_types: &[&str],
     ) -> AxiamResult<ConfidentialGrantCount> {
         const WHERE: &str = "grant_types CONTAINSANY $grants \
              AND (token_endpoint_auth_method = NONE OR token_endpoint_auth_method != 'none') \
-             AND tenant_id IN (SELECT VALUE meta::id(id) FROM tenant WHERE deleted_at = NONE)";
+             AND tenant_id IN $live";
         let mut result = self
             .db
             .current()
             .query(format!(
-                "SELECT count() AS total FROM oauth2_client WHERE {WHERE} GROUP ALL; \
+                "LET $live = (SELECT VALUE meta::id(id) FROM tenant WHERE deleted_at = NONE); \
+                 SELECT count() AS total FROM oauth2_client WHERE {WHERE} GROUP ALL; \
                  SELECT count() AS total FROM \
                    (SELECT tenant_id FROM oauth2_client WHERE {WHERE} GROUP BY tenant_id) \
                  GROUP ALL;"
@@ -1425,8 +1436,8 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(DbError::from)?
             .check()
             .map_err(DbError::from)?;
-        let clients: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        let tenants: Vec<CountRow> = result.take(1).map_err(DbError::from)?;
+        let clients: Vec<CountRow> = result.take(1).map_err(DbError::from)?;
+        let tenants: Vec<CountRow> = result.take(2).map_err(DbError::from)?;
         // `GROUP ALL` over an empty set returns no row: zero, not a missing answer.
         Ok(ConfidentialGrantCount {
             clients: clients.first().map_or(0, |r| r.total),

@@ -491,6 +491,52 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-1-1",
+    date: "2026-10-20",
+    dateShort: "Oct 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.1.1",
+    excerpt:
+      "AXIAM 1.1.1 closes the fifty-two Low and Informational findings of the 1.1.0 reviews, renames the FreeRADIUS recipe's profiles Static and Live, and carries SDK contract 1.63 in all eleven SDKs. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "Fifty-two issues closed, the threat model at 2.43.0, contract 1.63 in all eleven SDKs. Some upgrades need an operator first. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.1.1 is" },
+      {
+        type: "p",
+        text: "1.1.1 is a patch release of the 1.1 line. It closes the findings the 1.1.0 reviews filed ([#664](https://github.com/ilpanich/axiam/issues/664) … [#718](https://github.com/ilpanich/axiam/issues/718)): PKI, Vault and the cleanup path, rate limiting, the device grant and UMA, the network write gate, the FreeRADIUS recipe and CI. Each wave ended in a security review of its own diff and the whole branch in a last one. Two Medium findings were found in the release's own diff and fixed in their wave; the combined review found none.",
+      },
+      { type: "h", text: "Contract 1.63 and the SDKs" },
+      {
+        type: "p",
+        text: "Contract 1.63 keeps cookies and `X-CSRF-Token` off `/oauth2/*`, takes SCIM `expected_updated_at` from the response's string and states which helper may refuse the reserved audit actions. All eleven SDKs port it; Java, Kotlin and C++ move to 1.2.0. Check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "The threat model" },
+      {
+        type: "p",
+        text: "Model 2.43.0 holds **488 threats: 457 mitigated, 21 open, 10 not applicable**. T-488 enters (a UMA resource server and a set it did not register); T-483 and T-484, the network write gate's residuals, are mitigated.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.1.1]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v107 to v109, additively; roll replicas one at a time. Set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` if a proxy sits in front of AXIAM or native TLS is on. The organization scope's `super-admin` loses the network permissions at the first boot. Public DPoP-bound clients sign in again once. The FreeRADIUS recipe's profiles are now Static and Live, with renamed files, and `fetch-crl.sh` exits 3 on a list near expiry.",
+      },
+      { type: "h", text: "What is not in 1.1.1" },
+      {
+        type: "p",
+        text: "The OpenID Foundation submissions ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open: AXIAM is not certified, and every conformance figure on this site is a self-run. Benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) is not done. The Low and Informational findings of the 1.1.1 reviews are filed for 1.1.2.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.1.1 is a patch release of the first stable line. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "axiam-1-1-0",
     date: "2026-10-16",
     dateShort: "Oct 2026",
@@ -498,7 +544,7 @@ export const POSTS: Post[] = [
     author: "The AXIAM team",
     title: "AXIAM 1.1.0",
     excerpt:
-      "AXIAM 1.1.0 adds the RADIUS decision route (D4) for 802.1X with AXIAM-issued device certificates, closes the forty-two Low and Informational findings of the 1.0.1 reviews, and carries SDK contract 1.62 in all eleven SDKs. No independent third-party audit has been performed.",
+      "AXIAM 1.1.0 adds the RADIUS decision route (the Live profile, formerly D4) for 802.1X with AXIAM-issued device certificates, closes the forty-two Low and Informational findings of the 1.0.1 reviews, and carries SDK contract 1.62 in all eleven SDKs. No independent third-party audit has been performed.",
     body: [
       {
         type: "quote",

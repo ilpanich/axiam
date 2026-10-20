@@ -2,18 +2,22 @@
 
 use actix_cors::Cors;
 use actix_governor::Governor;
+use actix_governor::GovernorConfig;
 use actix_governor::GovernorConfigBuilder;
+use actix_governor::KeyExtractor;
+use actix_governor::governor::clock::QuantaInstant;
 use actix_governor::governor::middleware::NoOpMiddleware;
+use actix_governor::governor::middleware::RateLimitingMiddleware;
 use actix_web::http::header;
 use actix_web::web;
+use axiam_core::limiter_sweep::{self, SweepOutcome};
 use axiam_db::DbClient;
+use std::sync::Arc;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::RateLimitConfig;
 use crate::config::rate_limit::RateLimitKeyMode;
-use crate::extractors::rate_limit::{
-    ClientAwareKeyExtractor, XForwardedForKeyExtractor, configured_trusted_hops,
-};
+use crate::extractors::rate_limit::{ClientAwareKeyExtractor, XForwardedForKeyExtractor};
 use crate::handlers;
 use crate::middleware::authz::AuthzMiddleware;
 use crate::middleware::csrf::CsrfMiddleware;
@@ -42,11 +46,39 @@ const CIBA_LIST_BACKSTOP_FACTOR: u32 = 10;
 /// scales a different knob and the two are tuned apart.
 const FEDERATION_FLOW_BACKSTOP_FACTOR: u32 = 10;
 
-/// RADIUS D4 (W6.4): how many times the per-caller allowance of the decision
+/// RADIUS Live profile (W6.4): how many times the per-caller allowance of the decision
 /// route (`network_decide_per_min`) its per-address backstop admits. Sized so
 /// that several FreeRADIUS servers behind one address never meet it, while a
 /// burst of calls with a token that does not authenticate does.
 pub const NETWORK_DECIDE_BACKSTOP_FACTOR: u32 = 10;
+
+/// #673 (R110W2-05): wrap `config` in its middleware and register its map with
+/// the sweeper (`axiam_core::limiter_sweep`).
+///
+/// `actix-governor` evicts nothing, so a map grows by one cell per key it has
+/// seen — an address an IPv6 sender rotates at will, or a principal. Every
+/// in-process governor of this crate is finished here, so every one is swept by
+/// the one interval task the composition root spawns. The registry holds the
+/// limiter weakly: it never outlives the app that built it.
+fn governor_swept<K, M>(config: GovernorConfig<K, M>) -> Governor<K, M>
+where
+    K: KeyExtractor,
+    K::Key: Send + Sync + 'static,
+    M: RateLimitingMiddleware<QuantaInstant> + Send + Sync + 'static,
+{
+    let weak = Arc::downgrade(&config.limiter());
+    limiter_sweep::register(move || match weak.upgrade() {
+        Some(limiter) => {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+            SweepOutcome::Swept {
+                remaining: limiter.len(),
+            }
+        }
+        None => SweepOutcome::Dropped,
+    });
+    Governor::new(&config)
+}
 
 /// Build a per-endpoint Governor middleware instance from a requests-per-minute
 /// limit.
@@ -74,14 +106,16 @@ pub fn build_governor(
     // client on the internet to that proxy's address. The rule is
     // `trusted_hops = proxies - 1`; the derivation and the table live on
     // `extractors::rate_limit`.
-    let trusted_hops = configured_trusted_hops();
+    //
+    // #711: and only from a peer `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` names,
+    // when it names any; every other peer is keyed on itself.
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
-        .key_extractor(XForwardedForKeyExtractor::with_trusted_hops(trusted_hops))
+        .key_extractor(XForwardedForKeyExtractor::configured())
         .finish()
         .expect("valid governor config");
-    Governor::new(&config)
+    governor_swept(config)
 }
 
 /// D8: build a per-endpoint Governor middleware instance for the three
@@ -104,17 +138,16 @@ fn build_client_aware_governor(
     requests_per_min: u32,
     key_mode: RateLimitKeyMode,
 ) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
-    let trusted_hops = configured_trusted_hops();
     let config = GovernorConfigBuilder::default()
         .requests_per_minute(requests_per_min as u64)
         .burst_size(requests_per_min)
         .key_extractor(ClientAwareKeyExtractor::new(
-            XForwardedForKeyExtractor::with_trusted_hops(trusted_hops),
+            XForwardedForKeyExtractor::configured(),
             key_mode,
         ))
         .finish()
         .expect("valid governor config");
-    Governor::new(&config)
+    governor_swept(config)
 }
 
 /// #633: the in-process governor for a route keyed on its **verified**
@@ -1581,7 +1614,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::directory::set_directory::<C>)
                             .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "directory_config",
                                 rate_limit_cfg.directory_admin_per_min,
                             )),
@@ -1592,7 +1625,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::patch()
                             .to(handlers::directory::update_directory::<C>)
                             .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "directory_config",
                                 rate_limit_cfg.directory_admin_per_min,
                             )),
@@ -1603,7 +1636,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::directory::delete_directory::<C>)
                             .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "directory_config",
                                 rate_limit_cfg.directory_admin_per_min,
                             )),
@@ -1613,7 +1646,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/tenants/{tenant_id}/directory/links")
                     .app_data(handlers::directory::directory_json_config())
                     .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::admin_preset(
                         "directory_link",
                         rate_limit_cfg.directory_admin_per_min,
                     ))
@@ -1643,7 +1676,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::saml_admin::create_service_provider::<C>)
                             .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "saml_sp_create",
                                 rate_limit_cfg.saml_admin_per_min,
                             )),
@@ -1657,7 +1690,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::saml_admin::update_service_provider::<C>)
                             .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "saml_sp_update",
                                 rate_limit_cfg.saml_admin_per_min,
                             )),
@@ -1666,7 +1699,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::saml_admin::delete_service_provider::<C>)
                             .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "saml_sp_delete",
                                 rate_limit_cfg.saml_admin_per_min,
                             )),
@@ -1676,7 +1709,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/tenants/{tenant_id}/saml/parse-sp-metadata")
                     .app_data(handlers::saml_admin::parse_json_config())
                     .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::admin_preset(
                         "saml_sp_parse",
                         rate_limit_cfg.saml_admin_per_min,
                     ))
@@ -1690,7 +1723,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::saml_admin::issue_idp_credential::<C>)
                             .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "saml_idp_credential_issue",
                                 rate_limit_cfg.saml_admin_per_min,
                             )),
@@ -1699,7 +1732,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote")
                     .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::admin_preset(
                         "saml_idp_credential_promote",
                         rate_limit_cfg.saml_admin_per_min,
                     ))
@@ -1708,7 +1741,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire")
                     .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::admin_preset(
                         "saml_idp_credential_retire",
                         rate_limit_cfg.saml_admin_per_min,
                     ))
@@ -1726,7 +1759,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::ssf_admin::create_stream::<C>)
                             .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "ssf_stream_create",
                                 rate_limit_cfg.ssf_admin_per_min,
                             )),
@@ -1740,7 +1773,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::ssf_admin::update_stream::<C>)
                             .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "ssf_stream_update",
                                 rate_limit_cfg.ssf_admin_per_min,
                             )),
@@ -1749,7 +1782,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::ssf_admin::delete_stream::<C>)
                             .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "ssf_stream_delete",
                                 rate_limit_cfg.ssf_admin_per_min,
                             )),
@@ -1768,7 +1801,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::scim_targets::create_target::<C>)
                             .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "scim_target_create",
                                 rate_limit_cfg.scim_target_admin_per_min,
                             )),
@@ -1782,7 +1815,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::scim_targets::update_target::<C>)
                             .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "scim_target_update",
                                 rate_limit_cfg.scim_target_admin_per_min,
                             )),
@@ -1791,7 +1824,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::scim_targets::delete_target::<C>)
                             .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "scim_target_delete",
                                 rate_limit_cfg.scim_target_admin_per_min,
                             )),
@@ -1803,13 +1836,13 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::scim_targets::reconcile_target::<C>)
                             .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "scim_target_reconcile",
                                 rate_limit_cfg.scim_target_admin_per_min,
                             )),
                     ),
             )
-            // --- Network segments and RADIUS reply profiles (RADIUS D4, W6.3;
+            // --- Network segments and RADIUS reply profiles (RADIUS Live profile, W6.3;
             // `claude_dev/radius-reply-profile-design.md` §5.1). The tenant is
             // the token's. Reads are unlimited; each of the six writes has a
             // bucket of its own under `network_admin_per_min`, named
@@ -1824,7 +1857,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::network::create_segment::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_segment_create",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1839,7 +1872,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::network::replace_segment::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_segment_replace",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1848,7 +1881,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::network::delete_segment::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_segment_delete",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1863,7 +1896,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::post()
                             .to(handlers::network::create_profile::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_profile_create",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1878,7 +1911,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::network::replace_profile::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_profile_replace",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1887,7 +1920,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::delete()
                             .to(handlers::network::delete_profile::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_profile_delete",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
@@ -1904,13 +1937,13 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         web::put()
                             .to(handlers::network::replace_policy::<C>)
                             .wrap(build_governor(rate_limit_cfg.network_admin_per_min))
-                            .wrap(RateLimitShared::<C>::new(
+                            .wrap(RateLimitShared::<C>::admin_preset(
                                 "network_policy_replace",
                                 rate_limit_cfg.network_admin_per_min,
                             )),
                     ),
             )
-            // --- The RADIUS placement decision (RADIUS D4, W6.4; design note
+            // --- The RADIUS placement decision (RADIUS Live profile, W6.4; design note
             // §6.3, T-468). The caller is FreeRADIUS's service account with a
             // certificate-bound token, so its bucket is the caller's `sub`
             // (`network_decide_per_min`, D-6), spent by the handler once the
@@ -2321,14 +2354,20 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // from a deliberately small, human-typable space). Sharing the
             // token bucket would let ordinary token traffic pay for — or mask
             // — an attempt to exhaust that space. Per-IP, never client-keyed:
-            // RFC 8628 clients are public, so `client_id` is caller-supplied
-            // and worthless as a bucket key here.
+            // Callers are unauthenticated until the handler, so `client_id`
+            // is caller-supplied and worthless as a bucket key here.
             .service(
                 web::resource("/device_authorization")
                     .wrap(build_governor(rate_limit_cfg.device_authorization_per_min))
                     .wrap(RateLimitShared::<C>::new(
                         "oauth2_device_authorization",
                         rate_limit_cfg.device_authorization_per_min,
+                    ))
+                    // #683 — a body `web::Form` cannot read is answered as the
+                    // token endpoint's errors are: a JSON object, not actix's
+                    // `text/plain`. See `handlers::oauth2::par_form_error`.
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
                     ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
             )

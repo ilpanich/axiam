@@ -84,7 +84,9 @@ impl actix_web::ResponseError for AxiamApiError {
     fn status_code(&self) -> StatusCode {
         match &self.0 {
             AxiamError::NotFound { .. } => StatusCode::NOT_FOUND,
-            AxiamError::AlreadyExists { .. } | AxiamError::Conflict { .. } => StatusCode::CONFLICT,
+            AxiamError::AlreadyExists { .. }
+            | AxiamError::Conflict { .. }
+            | AxiamError::Network(_) => StatusCode::CONFLICT,
             AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
                 StatusCode::UNAUTHORIZED
             }
@@ -121,6 +123,8 @@ impl AxiamApiError {
             AxiamError::NotFound { .. } => "not_found",
             AxiamError::AlreadyExists { .. } => "already_exists",
             AxiamError::Conflict { .. } => "conflict",
+            AxiamError::Network(c) if c.is_uniqueness() => "already_exists",
+            AxiamError::Network(_) => "conflict",
             AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
                 "authentication_failed"
             }
@@ -158,6 +162,7 @@ impl AxiamApiError {
             AxiamError::NotFound { .. }
             | AxiamError::AlreadyExists { .. }
             | AxiamError::Conflict { .. }
+            | AxiamError::Network(_)
             | AxiamError::AuthenticationFailed { .. }
             | AxiamError::ReplayDetected
             | AxiamError::AuthorizationDenied { .. }

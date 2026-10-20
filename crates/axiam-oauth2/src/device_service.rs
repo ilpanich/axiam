@@ -40,10 +40,13 @@
 //! unknown device code, before it records the poll or looks at the grant's
 //! state: a caller holding a leaked device code learns nothing about it, and
 //! cannot spend it, slow it down or redeem it under a client it can
-//! authenticate as.
+//! authenticate as. For a confidential client that makes a leaked code worth
+//! nothing without the client's credential; a public client's device code
+//! remains the grant's only secret (RFC 8628 §5.2, §5.6), since anyone can
+//! name its `client_id`.
 
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_USER, CnfClaim, issue_access_token_bound};
+use axiam_auth::token::{AUD_USER, AccessTokenSpec, CnfClaim};
 use axiam_core::error::AxiamError;
 use axiam_core::models::oauth2_client::{
     CreateDeviceGrant, CreateRefreshToken, DeviceGrantStatus, OAuth2Client,
@@ -110,11 +113,15 @@ impl DeviceClient {
 }
 
 /// `POST /oauth2/device_authorization` request (RFC 8628 §3.1).
-///
-/// `Debug` is written by hand so that the credentials never reach a log line.
+// `Debug` is written by hand so that the credentials never reach a log line.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeviceAuthorizationRequest {
-    pub client_id: String,
+    /// Optional (#683): a `client_secret_basic` client names itself in the
+    /// `Authorization` header and a `private_key_jwt` client in its
+    /// assertion (RFC 6749 §2.3.1, RFC 7521 §4.2). The handler resolves it
+    /// with `resolve_client_id`, as the token endpoint does.
+    #[serde(default)]
+    pub client_id: Option<String>,
     /// The client's secret, for a client registered for `client_secret_post`
     /// (#635, RFC 8628 §3.1 → RFC 6749 §2.3). A public client
     /// (`token_endpoint_auth_method: none`) sends none, and is refused if it
@@ -485,6 +492,10 @@ where
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                // #681 / RFC 9449 §5 — a public DPoP-bound device's refresh
+                // token is bound to the key its poll proved; `None` for every
+                // other client.
+                dpop_jkt: crate::dpop::refresh_token_binding(&client.client, client.cnf.as_ref()),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await
@@ -502,16 +513,24 @@ where
         // token this grant always minted. Read before `cnf` is moved: RFC 9449
         // §5 announces a DPoP-bound token as such.
         let token_type = crate::dpop::token_type_for(client.cnf.as_ref());
-        let access_token = issue_access_token_bound(
+        // #681 (R110W3-08) — RFC 9068 §2.2's `client_id`, as the CIBA grant
+        // names its client: the device the user approved is the party this
+        // token was granted to. It is what the approval surfaces read to
+        // refuse a client's token (T-447, `minted_for_client`), so a device
+        // token is refused there for what it is, not for the session it
+        // lacks. And no `sid`: the approval happened in another browser, and
+        // there is no session of the device's for the claim to name.
+        let access_token = AccessTokenSpec::user(
             user.id,
             tenant_id,
             client.organization_id,
-            &redeemed.scopes,
-            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
-            audience,
-            client.cnf.clone(),
         )
+        .aud(audience)
+        .scopes(&redeemed.scopes)
+        .cnf(client.cnf.clone())
+        .client_id(Some(client.client_id()))
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         let scope = if redeemed.scopes.is_empty() {

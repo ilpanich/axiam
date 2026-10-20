@@ -210,6 +210,7 @@ async fn give_live_credentials(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: U
             scopes: vec!["openid".into()],
             session_id: None,
             requested_userinfo_claims: Vec::new(),
+            dpop_jkt: None,
             expires_at: chrono::Utc::now() + chrono::Duration::days(7),
             resource: None,
             auth_time: None,

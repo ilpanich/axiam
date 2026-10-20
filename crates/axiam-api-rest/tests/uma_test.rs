@@ -83,7 +83,11 @@ struct Fixture {
     /// The requesting party — granted `view` on `resource_id`, denied
     /// `redact` by an explicit deny rule.
     user_id: Uuid,
+    /// A resource set the resource server (`rs_client_id`) registered.
     resource_id: Uuid,
+    /// A resource made as `/api/v1/resources` makes one (no
+    /// `uma_registered_by`), declaring the same scopes.
+    plain_resource_id: Uuid,
     /// The resource server. The Protection API binds a ticket to whichever
     /// client minted it, so the binding tests need a second registered client
     /// to present the same ticket as somebody else.
@@ -103,8 +107,9 @@ fn make_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
     ))
 }
 
-/// Seeds one resource declaring three scopes, and a user holding a role that
-/// **allows** `view`, **denies** `redact`, and says nothing about `export`.
+/// Seeds one resource set the resource server registered and one ordinary
+/// resource, each declaring three scopes, and a user holding a role on the set
+/// that **allows** `view`, **denies** `redact`, and says nothing about `export`.
 ///
 /// Those three cases are the whole point of the fixture: allow, explicit deny,
 /// and default-deny are three different outcomes and the grant must tell them
@@ -152,87 +157,6 @@ async fn setup() -> Fixture {
                 status: Some(UserStatus::Active),
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
-
-    let resource = SurrealResourceRepository::new(db.clone())
-        .create(CreateResource {
-            tenant_id: tenant.id,
-            name: "patient-record-42".into(),
-            resource_type: "document".into(),
-            parent_id: None,
-            metadata: None,
-        })
-        .await
-        .unwrap();
-
-    // The declared scope set: the allow-list of names a resource server may
-    // ask for. `export` is declared but never granted, which is what makes
-    // "declared but denied" distinguishable from "never declared".
-    let scope_repo = SurrealScopeRepository::new(db.clone());
-    for name in ["view", "redact", "export"] {
-        scope_repo
-            .create(CreateScope {
-                tenant_id: tenant.id,
-                resource_id: resource.id,
-                name: name.into(),
-                description: String::new(),
-            })
-            .await
-            .unwrap();
-    }
-
-    let role_repo = SurrealRoleRepository::new(db.clone());
-    let perm_repo = SurrealPermissionRepository::new(db.clone());
-    let role = role_repo
-        .create(CreateRole {
-            tenant_id: tenant.id,
-            name: "record-reader".into(),
-            description: String::new(),
-            is_global: false,
-        })
-        .await
-        .unwrap();
-
-    let view = perm_repo
-        .create(CreatePermission {
-            tenant_id: tenant.id,
-            action: "view".into(),
-            description: String::new(),
-        })
-        .await
-        .unwrap();
-    let redact = perm_repo
-        .create(CreatePermission {
-            tenant_id: tenant.id,
-            action: "redact".into(),
-            description: String::new(),
-        })
-        .await
-        .unwrap();
-
-    perm_repo
-        .grant_to_role_with_effect(tenant.id, role.id, view.id, vec![], PermissionEffect::Allow)
-        .await
-        .unwrap();
-    perm_repo
-        .grant_to_role_with_effect(
-            tenant.id,
-            role.id,
-            redact.id,
-            vec![],
-            PermissionEffect::Deny,
-        )
-        .await
-        .unwrap();
-
-    role_repo
-        .assign_to_user(
-            tenant.id,
-            user.id,
-            role.id,
-            AssignmentScope::resource(resource.id),
         )
         .await
         .unwrap();
@@ -299,6 +223,108 @@ async fn setup() -> Fixture {
         .await
         .unwrap();
 
+    // #745 — the resource server asks for tickets only on what it registered,
+    // so the fixture's resource is registered by it, through the same
+    // repository call `/uma2/rreg` makes. `plain` is made as
+    // `/api/v1/resources` makes one, declares the same scopes, and is refused
+    // at the permission endpoint.
+    let resource_repo = SurrealResourceRepository::new(db.clone());
+    let resource = resource_repo
+        .create_uma_registered(
+            CreateResource {
+                tenant_id: tenant.id,
+                name: "patient-record-42".into(),
+                resource_type: "document".into(),
+                parent_id: None,
+                metadata: None,
+            },
+            &rs.client_id,
+        )
+        .await
+        .unwrap();
+    let plain = resource_repo
+        .create(CreateResource {
+            tenant_id: tenant.id,
+            name: "patient-record-43".into(),
+            resource_type: "document".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // The declared scope set: the allow-list of names a resource server may
+    // ask for. `export` is declared but never granted, which is what makes
+    // "declared but denied" distinguishable from "never declared".
+    let scope_repo = SurrealScopeRepository::new(db.clone());
+    for resource_id in [resource.id, plain.id] {
+        for name in ["view", "redact", "export"] {
+            scope_repo
+                .create(CreateScope {
+                    tenant_id: tenant.id,
+                    resource_id,
+                    name: name.into(),
+                    description: String::new(),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id: tenant.id,
+            name: "record-reader".into(),
+            description: String::new(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+
+    let view = perm_repo
+        .create(CreatePermission {
+            tenant_id: tenant.id,
+            action: "view".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    let redact = perm_repo
+        .create(CreatePermission {
+            tenant_id: tenant.id,
+            action: "redact".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+
+    perm_repo
+        .grant_to_role_with_effect(tenant.id, role.id, view.id, vec![], PermissionEffect::Allow)
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role_with_effect(
+            tenant.id,
+            role.id,
+            redact.id,
+            vec![],
+            PermissionEffect::Deny,
+        )
+        .await
+        .unwrap();
+
+    role_repo
+        .assign_to_user(
+            tenant.id,
+            user.id,
+            role.id,
+            AssignmentScope::resource(resource.id),
+        )
+        .await
+        .unwrap();
+
     Fixture {
         db,
         auth: test_auth_config(),
@@ -306,6 +332,7 @@ async fn setup() -> Fixture {
         org_id: org.id,
         user_id: user.id,
         resource_id: resource.id,
+        plain_resource_id: plain.id,
         rs_client_id: rs.client_id,
         rs_client_secret: rs_secret,
         other_client_id: other.client_id,
@@ -1051,7 +1078,7 @@ async fn the_listing_shows_only_what_this_client_registered() {
 
     assert!(ids.contains(&mine));
     assert!(
-        !ids.contains(&f.resource_id),
+        !ids.contains(&f.plain_resource_id),
         "the fixture's hand-made resource was not registered through UMA and \
          must not appear"
     );
@@ -1068,6 +1095,191 @@ async fn the_listing_shows_only_what_this_client_registered() {
     let resp = test::call_service(&app, req).await;
     let other_ids: Vec<Uuid> = test::read_body_json(resp).await;
     assert!(!other_ids.contains(&mine));
+}
+
+/// One request against a resource set with a PAT; status and raw body.
+async fn rreg_call(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    method: test::TestRequest,
+    id: Uuid,
+    token: String,
+    body: Option<Value>,
+) -> (u16, Vec<u8>) {
+    let mut req = method
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/uma2/rreg/resource_set/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")));
+    if let Some(b) = body {
+        req = req.set_json(b);
+    }
+    let resp = test::call_service(app, req.to_request()).await;
+    let status = resp.status().as_u16();
+    (status, test::read_body(resp).await.to_vec())
+}
+
+/// T-488 (#705): a resource server sees only what it registered. Another
+/// resource server's resource set, and a resource made through the ordinary
+/// resource API, answer exactly as an unknown id does — for get, update and
+/// delete — and the owner's own calls still work.
+#[actix_web::test]
+async fn a_resource_server_cannot_touch_a_resource_it_did_not_register() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "a-owns-this", "type": "document", "resource_scopes": ["view"] })
+    );
+    let a_set: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+    // The fixture's plain resource was made by hand, as `/api/v1/resources` makes one.
+    let plain = f.plain_resource_id;
+    let unknown = Uuid::new_v4();
+    let b = || pat(&f, &f.other_client_id);
+    let update = || Some(json!({ "name": "hijacked", "type": "document", "resource_scopes": [] }));
+
+    for (label, id) in [
+        ("another server's set", a_set),
+        ("an ordinary resource", plain),
+    ] {
+        for (verb, make, body) in [
+            ("get", test::TestRequest::get as fn() -> _, None),
+            ("put", test::TestRequest::put as fn() -> _, update()),
+            ("delete", test::TestRequest::delete as fn() -> _, None),
+        ] {
+            let (status, refused) = rreg_call(&app, make(), id, b(), body.clone()).await;
+            let (u_status, absent) = rreg_call(&app, make(), unknown, b(), body).await;
+            assert_eq!((status, u_status), (404, 404), "{verb} on {label}");
+            // Same body modulo the id it echoes.
+            let norm = |bytes: &[u8], id: Uuid| {
+                String::from_utf8_lossy(bytes).replace(&id.to_string(), "<id>")
+            };
+            assert_eq!(
+                norm(&refused, id),
+                norm(&absent, unknown),
+                "{verb} on {label}"
+            );
+        }
+    }
+
+    // Nothing changed: A's set is intact and still readable by A.
+    let (status, bytes) = rreg_call(
+        &app,
+        test::TestRequest::get(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let read: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(read["name"], "a-owns-this");
+    assert_eq!(read["resource_scopes"], json!(["view"]));
+    SurrealResourceRepository::new(f.db.clone())
+        .get_by_id(f.tenant_id, plain)
+        .await
+        .expect("the ordinary resource is untouched");
+
+    // The owner's own update and delete work.
+    let (status, _) = rreg_call(
+        &app,
+        test::TestRequest::put(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        Some(json!({ "name": "renamed", "type": "document", "resource_scopes": ["view"] })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = rreg_call(
+        &app,
+        test::TestRequest::delete(),
+        a_set,
+        pat(&f, &f.rs_client_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+}
+
+/// T-488 / #745 (R111W3-02): a resource server requests permission tickets
+/// only on the resource sets it registered (UMA 2.0 Federated Authorization
+/// §4.1). Another resource server's set and a resource made through the
+/// ordinary resource API answer exactly as an id that does not exist — same
+/// status, same body — for a scope they declare and for one they do not, so
+/// the permission endpoint tells neither ownership nor existence. The owner's
+/// own request is still served.
+#[actix_web::test]
+async fn the_permission_endpoint_mints_only_for_a_set_the_resource_server_registered() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (_, body) = rreg_create!(
+        app,
+        f,
+        json!({ "name": "a-registered-this", "type": "document", "resource_scopes": ["view"] })
+    );
+    let a_set: Uuid = serde_json::from_value(body["_id"].clone()).unwrap();
+    let a = || pat(&f, &f.rs_client_id);
+    let b = || pat(&f, &f.other_client_id);
+    let unknown = Uuid::new_v4();
+    let norm = |body: &Value, id: Uuid| body.to_string().replace(&id.to_string(), "<id>");
+
+    for (label, token, id) in [
+        ("B on A's registered set", b(), a_set),
+        ("B on the fixture's set A registered", b(), f.resource_id),
+        (
+            "A on an administrator-made resource",
+            a(),
+            f.plain_resource_id,
+        ),
+        (
+            "B on an administrator-made resource",
+            b(),
+            f.plain_resource_id,
+        ),
+    ] {
+        for scope in ["view", "shred"] {
+            let (status, refused) = perm!(
+                app,
+                f,
+                token.clone(),
+                json!([{ "resource_id": id, "resource_scopes": [scope] }])
+            );
+            let (u_status, absent) = perm!(
+                app,
+                f,
+                token.clone(),
+                json!([{ "resource_id": unknown, "resource_scopes": [scope] }])
+            );
+            assert_eq!(
+                (status, u_status),
+                (400, 400),
+                "{label}, {scope}: {refused}"
+            );
+            assert!(refused.get("ticket").is_none(), "{label}: {refused}");
+            assert_eq!(
+                norm(&refused, id),
+                norm(&absent, unknown),
+                "{label}, {scope}"
+            );
+        }
+    }
+
+    // A's own set, and the fixture's set A registered, are still ticketable.
+    for id in [a_set, f.resource_id] {
+        let (status, body) = perm!(
+            app,
+            f,
+            a(),
+            json!([{ "resource_id": id, "resource_scopes": ["view"] }])
+        );
+        assert_eq!(status, 201, "{body}");
+        assert!(!body["ticket"].as_str().unwrap().is_empty());
+    }
 }
 
 /// Provenance must be unforgeable through the ordinary resource API — the

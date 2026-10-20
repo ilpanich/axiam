@@ -493,6 +493,7 @@ impl Harness {
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                dpop_jkt: None,
                 expires_at: Utc::now() + Age::days(30),
             })
             .await

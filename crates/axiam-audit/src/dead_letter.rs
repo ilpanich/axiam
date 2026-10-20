@@ -392,13 +392,42 @@ impl DeadLetterTarget {
 /// The write runs to completion even if the caller is dropped meanwhile, and a
 /// task that panicked or was cancelled is reported as an I/O error, the same as
 /// a write that failed. Needs a Tokio runtime.
+///
+/// An I/O failure is logged here, inside the blocking task, so the line does not
+/// depend on the caller still being there to read the result (#690): it names the
+/// path and the I/O error and nothing of the record. The caller therefore does
+/// not log it again. The other failure, a write task that panicked, is only
+/// seen by the awaiter below, so it is logged only if the caller is still there;
+/// when the caller was cut, the panic hook alone reports it.
 pub async fn append_off_thread(
     target: DeadLetterTarget,
     record: DeadLetterRecord,
 ) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || append_blocking(&target.path, &record, target.max_bytes))
-        .await
-        .map_err(|e| std::io::Error::other(format!("dead-letter write task failed: {e}")))?
+    // The blocking pool's threads do not inherit this task's thread-local
+    // subscriber, so the task carries the dispatcher it was called under.
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            let result = append_blocking(&target.path, &record, target.max_bytes);
+            if let Err(e) = &result {
+                tracing::error!(
+                    error = %e,
+                    path = %target.path.display(),
+                    "gdpr: failed to append audit dead-letter file"
+                );
+            }
+            result
+        })
+    })
+    .await
+    .map_err(|e| {
+        // The closure did not return: nothing logged the failure there.
+        tracing::error!(
+            error = %e,
+            "gdpr: failed to append audit dead-letter file"
+        );
+        std::io::Error::other(format!("dead-letter write task failed: {e}"))
+    })?
 }
 
 /// Append `record` to the file at `path` and return when it has been written and

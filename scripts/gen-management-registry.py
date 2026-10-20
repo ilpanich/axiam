@@ -110,7 +110,7 @@ EXCLUDED_OPERATIONS: dict[tuple[str, str], str] = {
         "were. Operators scrape it from inside the network"
     ),
     ("POST", "/api/v1/network/decide"): (
-        "RADIUS D4 (W6.4) -- the placement decision a FreeRADIUS server asks for once "
+        "RADIUS Live profile (W6.4) -- the placement decision a FreeRADIUS server asks for once "
         "per EAP-TLS authentication through rlm_rest, not administration. Its caller "
         "is that server's service account with a token bound to its own certificate, "
         "over mTLS; an SDK client is neither, and a generated method could only ever "
@@ -488,7 +488,7 @@ NAMESPACES: dict[str, dict[str, Any]] = {
     },
     "network": {
         "doc": "A tenant's network segments and the RADIUS reply profile each owns "
-               "(RADIUS D4): a segment is a node of the reserved /network subtree "
+               "(RADIUS Live profile): a segment is a node of the reserved /network subtree "
                "of the resource tree (kind, VLAN, Filter-Id envelope, placement "
                "rank), and its profile is the typed `axiam-radius-reply/1` record a "
                "decision renders. Every write is conditional on the `version` the "

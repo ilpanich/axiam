@@ -302,7 +302,7 @@ export const navSections: NavSection[] = [
         requiredPermission: "reactors:list",
       },
       {
-        // RADIUS D4: network segments, their reply profiles and the tenant's
+        // RADIUS Live profile: network segments, their reply profiles and the tenant's
         // Session-Timeout cap. Acts on the caller's own tenant only, like the
         // pages beside it. `network:read` is the family's read permission
         // (checked at the /network root for the list).

@@ -638,8 +638,10 @@ struct Incoming<'q> {
 /// the Argon2id path uses (#654): both endpoints are unauthenticated, and an
 /// unbounded wait would queue ahead of every login and every CRL re-sign. A
 /// busy gate is [`PostVerifyFailure::Busy`], answered `503` ([`busy_page`]):
-/// the permit is taken before the document is evaluated, so the answer says
-/// nothing about the signature, and the SP can retry. A closed semaphore (it
+/// the permit is taken before the *signature* is evaluated, so the answer says
+/// nothing about it, and the SP can retry. The request was parsed and its
+/// `Issuer` looked up first, so the `503` does show that the `Issuer` is an
+/// enabled registered SP with a certificate (public data, R110W2-06). A closed semaphore (it
 /// never is) is the signature that did not verify.
 pub(crate) async fn verify_post_signature_off_worker<C: Connection + Clone>(
     state: &AppState<C>,
@@ -675,7 +677,7 @@ pub(crate) enum PostVerifyFailure {
 
 /// The deployment's crypto semaphore with the wait every bounded waiter on it
 /// gives (`hash_acquire_timeout_secs`, #654).
-fn crypto_gate<C: Connection + Clone>(state: &AppState<C>) -> CryptoGate {
+pub(crate) fn crypto_gate<C: Connection + Clone>(state: &AppState<C>) -> CryptoGate {
     CryptoGate::new(
         std::sync::Arc::clone(&state.crypto_semaphore),
         std::time::Duration::from_secs(state.auth_config.hash_acquire_timeout_secs),
@@ -1302,8 +1304,16 @@ async fn issue<C: Connection + Clone>(
     };
 
     // RSA-4096 signing and the self-check, off the async workers, under the
-    // same gate that bounds the other CPU-heavy work.
-    let permit = state.crypto_semaphore.clone().acquire_owned().await;
+    // same gate that bounds the other CPU-heavy work, and with the same bound
+    // (#671). A busy gate cannot be answered with a signed `Responder` status —
+    // that needs the permit it could not get — so the answer is the retry page:
+    // `503` with `Retry-After`, no cookie cleared and nothing written. The SP
+    // asks again with a new request (this one's pending row is already spent).
+    let permit = match crypto_gate(state).acquire("saml_idp_sso_sign").await {
+        Ok(permit) => permit,
+        Err(GateRefusal::Busy) => return busy_page(tenant_id),
+        Err(GateRefusal::Closed) => return fail(SamlStatus::Responder).await,
+    };
     let issuer = std::sync::Arc::clone(&state.saml_idp.issuer);
     let sp_owned = sp.clone();
     let user_owned = user.clone();

@@ -271,7 +271,7 @@ ENDPOINTS = {
         None,
         "POST, PUT, DELETE /api/v1/network/{segments,profiles}[/{id}] and PUT /api/v1/network/policy (network segment, reply profile and Session-Timeout cap writes; one bucket per route)",
     ),
-    # RADIUS D4 / W6.4 (D-6). Unmeasured: the caller is a FreeRADIUS service
+    # RADIUS Live profile / W6.4 (D-6). Unmeasured: the caller is a FreeRADIUS service
     # account whose token is bound to its own certificate, so a cell needs the
     # p3-mtls handshake and a device certificate per decision; and the bucket is
     # keyed on that caller's `sub`, not on the address a k6 cell varies.

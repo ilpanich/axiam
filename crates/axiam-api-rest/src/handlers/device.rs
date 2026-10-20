@@ -28,8 +28,11 @@
 //!   holding one of its user's tokens could otherwise start a device
 //!   authorization for a device client it controls — so it knows the user
 //!   code — and approve it in the user's name, without the user ever seeing
-//!   this page. Both endpoints answer such a token `403` before reading the
-//!   code (T-447, the rule the CIBA approval routes apply).
+//!   this page. Both endpoints take a [`ConsoleSignIn`], which answers such a
+//!   token `403 authorization_denied` before the session is checked and long
+//!   before the code is read (T-447, the rule the CIBA approval routes apply).
+//!   A device-grant token is one of them since it names its client (#681):
+//!   it used to be refused `401` only because it names no session.
 //!
 //! # Why both endpoints answer the same way for three different failures
 //!
@@ -48,7 +51,7 @@ use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
 
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::ConsoleSignIn;
 use crate::state::AppState;
 
 /// `GET /api/v1/device/verify?user_code=…` — what is this code asking for?
@@ -88,13 +91,6 @@ pub struct DecideResponse {
     pub ok: bool,
 }
 
-fn console_sign_in_required() -> HttpResponse {
-    HttpResponse::Forbidden().json(serde_json::json!({
-        "error": "authorization_denied",
-        "message": "A console sign-in is required to approve a device.",
-    }))
-}
-
 /// Look up a pending grant by the code the user typed.
 #[utoipa::path(
     get,
@@ -109,13 +105,10 @@ fn console_sign_in_required() -> HttpResponse {
     security(("session" = [])),
 )]
 pub async fn verify<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     query: web::Query<VerifyQuery>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
-    if user.minted_for_client() {
-        return console_sign_in_required();
-    }
     match state
         .oauth2
         .device_authorization_service
@@ -153,13 +146,10 @@ pub async fn verify<C: Connection + Clone>(
     security(("session" = [])),
 )]
 pub async fn decide<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     body: web::Json<DecideRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
-    if user.minted_for_client() {
-        return console_sign_in_required();
-    }
     let body = body.into_inner();
     match state
         .oauth2

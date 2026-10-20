@@ -163,6 +163,12 @@ LAYER_NAMES = {
 # (crate, dependency) -> why it is acceptable. An inverting test edge that is
 # NOT listed here is a finding: write the reason down, or do not add the edge.
 TEST_ONLY_INVERSIONS: dict[tuple[str, str], str] = {
+    ("axiam-oauth2", "axiam-oauth2"): (
+        "a self dev-dependency that switches on the `verify-probe` feature for "
+        "tests/token_service.rs, so the integration tests can read the count of "
+        "client-secret verifies the library performed (#679); no other build "
+        "carries the counter"
+    ),
     ("axiam-auth", "axiam-db"): (
         "AuthService's unit tests exercise login, lockout and refresh rotation "
         "against real repositories rather than doubles, because the behaviour "

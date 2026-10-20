@@ -126,6 +126,7 @@ jobs:
       # reasoning. `axiam_image` is validated in that step, which also owns the
       # claim the report makes about it.
       - name: Validate dispatch inputs
+        id: inputs
         env:
           INPUT_PLAN_NAME: ${{ inputs.plan_name }}
           INPUT_MODULE_TIMEOUT: ${{ inputs.module_timeout }}
@@ -394,7 +395,7 @@ jobs:
         run: just conformance-run
 
       - name: Render the report
-        if: always()
+        if: always() && steps.inputs.outcome == 'success'
         run: |
           set -uo pipefail
           # No `${{ inputs.axiam_image }}` here, neither interpolated nor via
@@ -438,7 +439,7 @@ jobs:
       # reason is only ever in the server log. The front door's and the suite's
       # logs say whether a request reached AXIAM at all.
       - name: Collect server and rig logs on failure
-        if: failure() || steps.run.outcome == 'failure'
+        if: (failure() || steps.run.outcome == 'failure') && steps.inputs.outcome == 'success'
         run: |
           set +e
           # `bench-logs` resolves the compose file's required variables itself;
@@ -459,7 +460,7 @@ jobs:
           exit 0
 
       - name: Upload conformance artifacts
-        if: always()
+        if: always() && steps.inputs.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: fapi-conformance-${{ github.run_id }}
@@ -476,7 +477,7 @@ jobs:
           retention-days: 90
 
       - name: Tear down
-        if: always()
+        if: always() && steps.inputs.outcome == 'success'
         run: |
           just conformance-down || true
           cd benchmarks && just target=axiam bench-down || true
@@ -493,7 +494,7 @@ jobs:
       # SKIPPED and a listed WAITING are tolerated and named. An unreadable
       # baseline of either kind fails the step. See the runbook's "The CI gate".
       - name: Gate on the plan result
-        if: always()
+        if: always() && steps.inputs.outcome == 'success'
         env:
           RUN_OUTCOME: ${{ steps.run.outcome }}
         run: |

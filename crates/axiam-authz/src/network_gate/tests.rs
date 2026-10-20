@@ -2204,3 +2204,165 @@ async fn r110w6_04_a_revoke_claims_the_effect_it_read() {
         Some(Some(Some(ALLOW)))
     );
 }
+
+// ---------------------------------------------------------------------------
+// The organization bootstrap (#702, T-483 amended 2026-10-20)
+// ---------------------------------------------------------------------------
+
+/// An organization-level writer gives a tenant user the tenant's own seeded
+/// `super-admin`, tenant-wide, without holding a `network:` permission; every
+/// write outside that bound stays under §5.3.
+#[tokio::test]
+async fn the_organization_bootstrap_clears_only_the_seeded_super_admin_tenant_wide() {
+    let mut w = World::new();
+    let seeded: Vec<_> = SEEDED_SUPER_ADMIN_NETWORK_ACTIONS
+        .iter()
+        .map(|a| (*a, ALLOW))
+        .collect();
+    let super_admin = w.role(true, &seeded);
+    w.store.roles.get_mut(&super_admin).unwrap().name = SEEDED_SUPER_ADMIN_ROLE.into();
+    let org = GateWriter {
+        subject_scope: SubjectScope::Organization {
+            tenant_id: Uuid::new_v4(),
+        },
+        ..w.gate_writer()
+    };
+    let user = Uuid::new_v4();
+    let assign = |role_id, grantee, resource_id| NetworkWrite::RoleAssign {
+        role_id,
+        grantee,
+        resource_id,
+        inherit: true,
+    };
+    let none = Oracle::default();
+
+    let c = cleared(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(super_admin, Grantee::User(user), None),
+        )
+        .await,
+    );
+    assert!(c.is_network_sensitive(), "the success row is still written");
+    assert_eq!(c.exemption(), Some(EXEMPTION_ORGANIZATION_BOOTSTRAP));
+    assert!(none.asked.lock().unwrap().is_empty());
+
+    // A tenant-scoped writer is not the organization.
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            w.gate_writer(),
+            assign(super_admin, Grantee::User(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    // Not at a resource, not to a service account, not to the writer itself.
+    let n = Uuid::new_v4();
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(super_admin, Grantee::User(user), Some(n)),
+        )
+        .await,
+        "5.3:assign",
+    );
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(super_admin, Grantee::ServiceAccount(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(super_admin, Grantee::User(w.writer), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(super_admin, Grantee::Group(user), None),
+        )
+        .await,
+        "4.2:rule-2",
+    );
+
+    // Not a role of another shape: a custom one, a non-global one named
+    // super-admin, or a global one carrying more than the seeder gives.
+    let custom = w.role(false, &[(NETWORK_GRANT, ALLOW)]);
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(custom, Grantee::User(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    let local = w.role(false, &seeded);
+    w.store.roles.get_mut(&local).unwrap().name = SEEDED_SUPER_ADMIN_ROLE.into();
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(local, Grantee::User(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    let mut wider = seeded.clone();
+    wider.push((NETWORK_GRANT_ADMIN, ALLOW));
+    let widened = w.role(true, &wider);
+    w.store.roles.get_mut(&widened).unwrap().name = SEEDED_SUPER_ADMIN_ROLE.into();
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(widened, Grantee::User(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+    let fleet = w.role(true, &[(NETWORK_JOIN, ALLOW)]);
+    w.store.roles.get_mut(&fleet).unwrap().name = SEEDED_SUPER_ADMIN_ROLE.into();
+    refused(
+        decide_as(
+            &none,
+            &w.store,
+            org,
+            assign(fleet, Grantee::User(user), None),
+        )
+        .await,
+        "5.3:assign",
+    );
+}
+
+async fn decide_as(
+    oracle: &Oracle,
+    store: &Store,
+    writer: GateWriter,
+    write: NetworkWrite<'_>,
+) -> GateVerdict {
+    authorize_network_write(oracle, store, writer, write)
+        .await
+        .expect("no infrastructure error")
+}

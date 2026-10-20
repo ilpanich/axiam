@@ -410,7 +410,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
 
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "certificate"))?;
         let row: Option<CertificateRow> = result.take(0).map_err(DbError::from)?;
         let row = row.ok_or_else(|| DbError::NotFound {
             entity: "certificate".into(),

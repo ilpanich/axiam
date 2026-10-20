@@ -61,15 +61,23 @@ pub trait PermissionEvaluator: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<PairOutcome, String>> + Send + 'a>>;
 }
 
-/// Answers "which scope names has this resource declared".
+/// Answers "which scope names has this resource declared to this resource
+/// server".
 ///
 /// Separate from the evaluator because it answers a different question:
 /// *could* this scope be asked for, not *may* this subject have it. Conflating
 /// them would make an undeclared scope indistinguishable from a denied one.
+///
+/// #745 (R111W3-02) — a resource server requests permissions only on the
+/// resource sets it registered (UMA 2.0 Federated Authorization §4.1). An
+/// implementation answers an empty set for a resource `client_id` did not
+/// register, exactly as for an id that does not exist, so the permission
+/// endpoint's answer tells neither ownership nor existence apart.
 pub trait ScopeCatalog: Send + Sync {
     fn declared_scopes<'a>(
         &'a self,
         tenant_id: Uuid,
+        client_id: &'a str,
         resource_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>>;
 }
@@ -180,8 +188,9 @@ where
 
     /// `POST /uma2/perm` — mint a ticket for what the resource server requires.
     ///
-    /// The scope names are validated against each resource's declared set
-    /// *before* the ticket exists. A ticket naming a scope no resource
+    /// The scope names are validated against each resource's declared set,
+    /// as the catalog shows it to `client_id` (#745: nothing on a resource
+    /// another server or an administrator made), *before* the ticket exists. A ticket naming a scope no resource
     /// declares could never be redeemed, so minting one would hand the caller
     /// a credential guaranteed to fail sixty seconds later instead of an error
     /// it can act on now.
@@ -200,7 +209,7 @@ where
             }
             let scopes = self
                 .catalog
-                .declared_scopes(tenant_id, perm.resource_id)
+                .declared_scopes(tenant_id, client_id, perm.resource_id)
                 .await
                 .map_err(UmaError::Server)?;
             declared.push((perm.resource_id, scopes));
@@ -411,6 +420,7 @@ mod tests {
         fn declared_scopes<'a>(
             &'a self,
             _tenant_id: Uuid,
+            _client_id: &'a str,
             _resource_id: Uuid,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>> {
             let scopes = self.0.clone();
@@ -437,7 +447,69 @@ mod tests {
             .collect()
     }
 
+    /// A catalog that declares `view` only to the resource server that
+    /// registered the resource, as the production adapter does (#745).
+    struct OwnedCatalog {
+        owner: &'static str,
+    }
+
+    impl ScopeCatalog for OwnedCatalog {
+        fn declared_scopes<'a>(
+            &'a self,
+            _tenant_id: Uuid,
+            client_id: &'a str,
+            _resource_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>> {
+            let scopes = if client_id == self.owner {
+                vec!["view".to_string()]
+            } else {
+                Vec::new()
+            };
+            Box::pin(async move { Ok(scopes) })
+        }
+    }
+
     // -- ticket minting -----------------------------------------------------
+
+    /// #745 — the catalog is asked as the requesting resource server: another
+    /// server's request for the same resource is refused with the error an
+    /// undeclared scope gets, and the owner's is served.
+    #[tokio::test]
+    async fn the_catalog_is_asked_as_the_requesting_resource_server() {
+        let resource = Uuid::new_v4();
+        let svc = UmaService::new(
+            FakeTickets::default(),
+            FakeEvaluator::new(HashMap::new()),
+            OwnedCatalog { owner: "rs-a" },
+            3600,
+        );
+        let request = || {
+            vec![RequestedPermission {
+                resource_id: resource,
+                resource_scopes: vec!["view".into()],
+            }]
+        };
+
+        let err = svc
+            .request_ticket(Uuid::new_v4(), "rs-b", request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            UmaError::InvalidRequest(
+                PermissionRequestError::UndeclaredScope {
+                    resource_id: resource,
+                    scope: "view".into(),
+                }
+                .to_string()
+            )
+        );
+        assert!(
+            svc.request_ticket(Uuid::new_v4(), "rs-a", request())
+                .await
+                .is_ok()
+        );
+    }
 
     #[tokio::test]
     async fn a_declared_scope_mints_a_ticket() {

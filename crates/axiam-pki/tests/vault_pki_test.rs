@@ -198,6 +198,40 @@ async fn generating_a_ca_walks_the_root_then_intermediate_sequence() {
     assert_eq!(chain.trim(), root.1.trim());
 }
 
+/// #666 — the default intermediate subject (the subject plus " Intermediate
+/// Authority") is the one name AXIAM composes itself; a subject that passes the
+/// 64-character bound alone but not with the suffix is refused as a `400`
+/// before the custodian is asked for anything.
+#[tokio::test]
+async fn a_subject_too_long_for_the_default_intermediate_name_never_reaches_vault() {
+    let server = MockServer::start().await;
+    // A mock that fails the test if it is ever called, whatever the path.
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let subject = "A".repeat(57);
+    assert!(
+        subject.chars().count() <= 64,
+        "the subject alone is in bounds"
+    );
+    let err = ca_service(setup_db().await, &server)
+        .generate(create_ca(&subject, Uuid::new_v4()))
+        .await
+        .expect_err("the derived intermediate name would be 80 characters");
+
+    let AxiamError::Validation { message } = &err else {
+        panic!("expected a validation refusal, got {err:?}");
+    };
+    assert!(message.contains("intermediate_subject"), "{message}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "no request may reach Vault"
+    );
+}
+
 #[tokio::test]
 async fn the_locator_addresses_both_tiers_by_the_ids_vault_minted() {
     let server = MockServer::start().await;

@@ -14,6 +14,7 @@
 //! `main.rs` depends on this crate automatically (a package's binary target
 //! always links its own library target when both are present).
 
+pub mod audit_hold;
 pub mod boot;
 pub mod cleanup;
 pub mod cli;
@@ -22,6 +23,7 @@ pub mod fatal_stop;
 pub mod healthcheck;
 pub mod job_health;
 pub mod legacy_env;
+pub mod limiter_sweep;
 pub mod mds_job;
 pub mod messaging;
 pub mod mtls_anchors;

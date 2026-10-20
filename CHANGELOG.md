@@ -7,6 +7,240 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-20
+
+1.1.1 follows 1.1.0 and closes the fifty-four issues its reviews filed (#664 …
+#699, #702 … #715, #717, #718, #745 and #749) with eight waves: PKI, Vault and the cleanup
+path (W1); rate limiting, audit attribution and SAML (W2); OAuth2, CIBA, the
+device grant and UMA (W3); network policy and the schema runner (W4); the
+FreeRADIUS recipe (W5); CI and tooling (W6); SDK contract 1.63 (W7); release
+readiness (W8). Each wave ended in a security review of its own diff and the
+whole branch in a last one: no Critical, High or Medium finding is open (two
+Medium findings, R111W1-01 and R111W4-01, were found in the release's own diff
+and fixed in their wave). It carries SDK contract 1.63 and threat model 2.43.0
+(488 threats: 457 Mitigated, 21 Open, 10 Not applicable). Every closed issue
+has one entry below, ending in its number.
+
+#### Upgrading to 1.1.1 — read before you upgrade
+
+- **The schema moves from v107 to v109.** Both migrations are additive and
+  neither backfills. **v108** adds `user.erasure_audit_pending` (with its index)
+  and the table `tenant_purge_pending` (#689); **v109** adds the
+  `rate_limit_bucket` sweep index (#676) and `oauth2_refresh_token.dpop_jkt`
+  (#681). **Roll replicas one at a time:** the migration lock is not checked, so
+  two simultaneous first boots may fail one of them, which recovers on restart
+  (#755). The runner now applies every listed migration that is not recorded, in
+  order: a datastore that recorded a higher version without a lower one has the
+  lower one applied, with a `WARN` (#704).
+- **Set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`** (a comma-separated CIDR list) on
+  every deployment that has a proxy in front of AXIAM, and on every deployment
+  with native TLS. `X-Forwarded-For` is now read only from a peer on the list,
+  by the REST and the gRPC limiters alike. An empty list keeps the 1.1.0
+  behaviour, with one boot `WARN` when native TLS is on; a value that does not
+  parse stops the boot. Kubernetes: the ingress pod CIDR; Compose: the Caddy
+  network (#686, #711).
+- **The public-client `/oauth2/token` bucket is gone.** A flood that sends no
+  credentials now meets `429 rate_limit_exceeded` with `Retry-After`, no longer
+  `429 slow_down` (the device grant's `400` keeps `slow_down`). A client that
+  keyed its back-off on `slow_down` should key it on the status (#685).
+- **The organization scope's `super-admin` loses the six network permissions at
+  the first boot of 1.1.1**, one `network_role.permission_revoked_by_reconcile`
+  audit row each. Network administration belongs to an ordinary tenant's
+  `super-admin` (T-483 is Mitigated). A deployment that relied on the
+  organization scope's role for it assigns the role in a tenant first (#702);
+  an organization principal still can, for a user of that tenant — the
+  bootstrap of its first administrator stays open (see below).
+- **A device-only client registered without `token_endpoint_auth_method`** (the
+  1.0.x quickstart's shape) is refused `401 invalid_client` at both device
+  endpoints since 1.1.0 unless its device sends the secret. If its devices hold
+  none, `PUT /api/v1/oauth2-clients/{id}` with
+  `{"token_endpoint_auth_method": "none"}` now makes it public. It is admitted
+  only when the client's `grant_types` are the device grant and `refresh_token`
+  alone, clears the stored secret in the same write and writes one
+  `oauth2.client_converted_to_public` audit row; the devices keep their
+  `client_id`. Any other change between public and confidential is still refused
+  with `400`, and the console still refuses it, so use the API. **The
+  conversion revokes the client's refresh tokens and deletes its device grants,**
+  so after converting **each device runs the device flow once** (its old
+  refresh token is `invalid_grant`); the audit row counts what was revoked
+  (#749). The boot warning stops counting a converted client (#675).
+- **Public clients with `dpop_bound_access_tokens` lose their outstanding
+  refresh tokens at the upgrade.** Their refresh tokens are now bound to the
+  DPoP key; a token issued before 1.1.1, or while the client was confidential,
+  is `invalid_grant` once and the device signs in again (binding on first use
+  would bind a stolen token to its thief). Device-grant tokens now carry
+  `client_id` and get `403 authorization_denied` at `/api/v1/device/verify` and
+  `/decide`; the message of that body changed, the error did not (#681).
+- **Resources created through `/api/v1/resources`, or before UMA provenance, are
+  no longer reachable through `/uma2/rreg`:** a resource server reads, updates
+  and deletes only the sets it registered, and answers `404` for the rest (#705).
+- **A resource server can request permission tickets only for resource sets it
+  registered through `/uma2/rreg`.** Resources created through
+  `/api/v1/resources` (and sets registered before UMA provenance) are no longer
+  ticketable: `/uma2/perm` answers them `400` exactly as an unknown id.
+  Register them through the Protection API (#745).
+- **A stalled Vault now fails the boot after about ten seconds** (ten-second
+  request, five-second connect timeout on the startup and private-CA clients)
+  (#667). **AMQP producers** whose audit `action` is outside printable ASCII with
+  at most one inner space have their messages dead-lettered, with no broker
+  error (#682). **A stored tenant `metadata.orphan_purge`** is kept and ignored;
+  writing the key is refused `422 reserved_metadata_key` (#664).
+- **FreeRADIUS recipe: the profiles are Static (was D3) and Live (was D4).**
+  `docker-compose.radius-d4.yml` → `docker-compose.radius-live.yml`,
+  `raddb/d4/` → `raddb/live/`, `axiam-d4.sh` → `axiam-live.sh`, the module
+  `axiam_d4` → `axiam_live`, `AXIAM_D4_URL` / `AXIAM_D4_SITE` →
+  `AXIAM_LIVE_URL` / `AXIAM_LIVE_SITE`, `/var/run/axiam-d4` →
+  `/var/run/axiam-live`. Mixing a 1.1.0 `raddb` set with 1.1.1 files, or keeping
+  `AXIAM_D4_URL`, rejects every device (it fails closed). Replace the whole set.
+- **`fetch-crl.sh` has a new exit status, 3:** the installed list has less than a
+  quarter of its lifetime left, or has expired. **Alert on any non-zero exit,**
+  not only on 1 or on the file's age (#695).
+
+### Security
+
+- **Public DPoP-bound clients' refresh tokens are bound to the DPoP key, and a
+  device-grant token cannot reach the console's device routes.** See the upgrade
+  note above (#681).
+- **`X-Forwarded-For` is honoured only from a trusted proxy,** in every
+  per-address limiter of the REST and the gRPC listener; without a proxy a
+  caller can no longer choose its own bucket (#711, #686, one change).
+- **The organization scope's `super-admin` no longer holds the network
+  permissions** — and an organization principal still gives a tenant's own
+  `super-admin`, tenant-wide, to a user of that tenant, the bootstrap of its
+  first administrator, under the network gate's one named exemption
+  (`organization-bootstrap`, recorded in the assignment's audit row) (#702); **cleared network-sensitive writes leave their own audit
+  rows** — `network_role.assigned`, `.unassigned`, `.granted`, `.revoked` and
+  `certificate_binding.bound` (a role delete has none) (#703); **a UMA resource
+  server cannot change a set it did not register** (#705), **nor request a
+  permission ticket for one, nor for a resource made through
+  `/api/v1/resources`;** the refusal is the body an unknown id gets, so the
+  permission endpoint no longer tells which ids exist or what they declare
+  (#745); **the RADIUS decision
+  route verifies the caller's own certificate as a decoy** when no row of the
+  caller's tenant resolves, so the cheaper paths no longer tell tenants apart
+  beyond those the code lists (#706).
+- **Requests under the DPoP scheme are attributed in the audit log** and, on the
+  five authenticated federation routes, rate-limited on (address, principal)
+  (#670). **Authenticated waiters on the shared crypto semaphore give up after
+  `hash_acquire_timeout_secs`:** PKI routes answer `503`, the SLO hop is
+  partial, assertion signing answers a `503` retry page (#671).
+- **Converting a device client to public revokes what it was issued while
+  confidential:** its refresh tokens, which redeemed only with the secret, would
+  otherwise have redeemed on `client_id` alone, and its device grants are
+  deleted. The revocation runs before the conversion's write, whose failure
+  refuses the request with nothing converted, and once more after it; the
+  `oauth2.client_converted_to_public` row carries `refresh_tokens_revoked`,
+  `device_grants_deleted` and `revocation_complete` (#749).
+- **Every client-credential refusal costs one secret verify;** the residual is an
+  assertion presented for an unknown client (T-289) (#679). **The admin `PUT` on
+  a dynamically registered or CIMD client refuses a grant that self-registration
+  would refuse** with `422 grant_exceeds_registration_policy` (#680).
+  **`/oauth2/device_authorization` takes `client_id` from the Basic header or the
+  assertion;** an unreadable body is a JSON `invalid_request` (#683).
+- **AMQP audit ingestion refuses an `action` outside printable ASCII with at most
+  one inner space,** which closes the lookalikes of the reserved actions (#682).
+- **The tenant metadata key `orphan_purge` is reserved,** and the orphan-purge
+  claim row is recognised by its nil organization id and its `orphan-purge-<id>`
+  slug, not by a key an administrator can write (#664). **The Vault-reason
+  sanitiser masks a token at any position in a word** (`token=hvs.…`,
+  JSON-quoted, quoted with a trailing `.`) and no longer masks host names that
+  start with `s.` or `b.` (#665).
+- **An Art. 17 purge revokes the bound certificates a second time, after the
+  anonymization** (T-336) (#668). **A repeated issuer and serial answers `409
+  already_exists`, not `500`** (#669).
+- **`CrlService::current_at` signs at a past instant it is given,** and a cached
+  list of a later epoch is not served for it; a `vault_pki` subject too long for
+  the default intermediate name is refused `400` before Vault is called (#666).
+  **The startup and private-CA Vault clients time out** (#667).
+- **A GDPR erasure or a tenant purge cut past its point of no return is recorded
+  by the next start, exactly once** (v108). A recovered
+  `gdpr.user_pseudonymized` row carries `recovered: true` and
+  `certificates_revoked: null`. The owed-erasure claim reads the pending requests
+  once per sweep, not once per user row (R111W1-01, Medium, found in the wave and
+  fixed there: 112.8 s at 20 000 users before) (#689).
+- **An orphaned tenant-id purge holds its claim from its marker and writes the
+  marker only while rows are left** (#714). **CIBA hint-cap contention answers
+  `429 slow_down`, not `server_error`** (#678).
+
+### Changed
+
+- **The five 30-per-minute administrative families no longer pro-rate a new key
+  late in a minute** (#718). **In-process rate-limit governors, REST and gRPC,
+  are swept once a minute** (#673). **The `rate_limit_bucket` sweep evaluates its
+  cutoff on the datastore clock** (v109 index) (#676).
+- **A cold public-client token flood answers `429 rate_limit_exceeded`,** see the
+  upgrade note (#685).
+- **The migration runner applies every unrecorded listed migration in order,**
+  a lower missing version with a `WARN` (#704).
+- **Network repositories return a typed `NetworkConflict`,** mapped to
+  `reason_code` in one place; the wire is unchanged. Together with it, the boot
+  reconcile matches the typed stale-role refusal (R111W4-01, Medium, found in the
+  wave: a deployment whose ordinary-tenant `super-admin` is held by a group did
+  not boot) (#708).
+- **The console's reply-profile editor needs `network:profiles_write` and
+  `network:grant`;** the race marker is renamed `axiam:profiled_placement_raced`
+  (#709). **The boot-time device-grant warning reads the live tenants once,** not
+  once per client (#712).
+- **The admin `PUT` can make a confidential device-only client public in place,**
+  see the upgrade note (#675).
+- **SDK contract 1.63** (#710): cookies and `X-CSRF-Token` are never sent on
+  `/oauth2/*`; SCIM `expected_updated_at` is taken from the response's string;
+  the reserved audit actions and which helper may refuse them are stated (§8,
+  §34.7). The eleven SDKs port it: 1.1.1 for TypeScript, Rust, Python, C, C#, Go,
+  PHP and Swift, **1.2.0 for Java, Kotlin and C++** (the C++ SOVERSION moves to
+  3).
+- **FreeRADIUS recipe: the profiles are named Static and Live,** with the file
+  renames of the upgrade note above (W5.1, no issue of its own, D-1).
+
+### Fixed
+
+- **The FreeRADIUS RadSec example starts on 3.2.8** (`tls_max_version`);
+  `require_message_authenticator` is inert on RadSec and the guide says so (#693).
+- **`fetch-crl.sh` exits 3 when the installed list is near expiry** (see the
+  upgrade note) (#695), **sends `Cache-Control: no-cache`** (#696), and a test
+  pins that a `HUP` or `TERM` leaves no temporary files; the trap was already
+  present (#694).
+- **The Live recipe drops a refused token:** a `401` removes the cached token
+  and, if it came from the cache, logs in and asks once more (T-486) (#707).
+- **`bench-quick` on `p3-mtls` no longer fails at k6 init** (absolute
+  `BENCH_CERTS_DIR`) and records `results/quick/meta.json` (#699).
+- **A failed dead-letter append is logged by the write itself,** also when its
+  awaiter was cut (#690).
+
+### Documentation
+
+- **Threat model 2.43.0:** T-488 enters (a UMA resource server and a set it did
+  not register), and its 2026-10-20 amendment extends it to the permission
+  endpoint (#745); T-483 and T-484 are Mitigated; T-289, T-424, T-447, T-457,
+  T-462 and T-486 are amended, T-289 once more on 2026-10-20 (the conversion to
+  public revokes the confidential-era grants, #749). **The RADIUS e2e workflow triggers on twelve input
+  paths and weekly** (#697, #713).
+- **The FreeRADIUS guide names `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`** and its VLAN
+  tag paragraph is corrected (#698). **Corrections to claims the code
+  contradicted:** the network gate's enumeration exemption is pinned to
+  `ErasureUnit::prepare` and T-481 restated (#715); the tenant-purge text that waited out the hour (#687); "a leaked device code is worth
+  nothing" is reworded (#677); text after W3 (#684); three absolutes in T-444 and
+  the guide (#688); text and tests after W1 and W2 (#666, #674).
+
+### Tests and CI
+
+- The bucket-name uniqueness test covers every writer of the shared rate-limit
+  counter (#672). The lease-loss shutdown test makes the audit drain observable
+  (#692). The `vault_ca_key_store_test` assertions no longer format Vault errors
+  (#717). The FAPI conformance workflow skips its report, log, upload, teardown
+  and gate steps after a refused dispatch input (#691).
+
+### Deferred to 1.1.2
+
+Each item is an open issue on `ilpanich/axiam`, filed by the release's reviews
+(none is a Critical, High or Medium finding): #720 … #730 (W5 and W4), #731 …
+#741 (W1 and W2), #746 and #747 (W3), #750 (the SDK conformance review)
+and #751 … #758 (the combined review). Among them: #755, the migration lock
+is not checked. **#719** (drop the `zip` 8.6.0 audit ignores) is
+still open: `utoipa-swagger-ui` 10.0.1 pins `zip ^8.6`. **Open past the tag, the
+maintainer's:** #513 (the OpenID certification submissions) and #561
+(benchmark run 6).
+
 ## [1.1.0] - 2026-10-16
 
 1.1.0 follows 1.0.0 directly: **1.0.1 was prepared and never tagged**, so this

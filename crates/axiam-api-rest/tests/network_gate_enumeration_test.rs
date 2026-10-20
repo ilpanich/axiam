@@ -1,6 +1,6 @@
 //! Every write that can create a reply profile, a segment, a network-sensitive
 //! grant or assignment, or a certificate binding goes through the network
-//! gate first (RADIUS D4, W6.2; `claude_dev/radius-reply-profile-design.md`
+//! gate first (RADIUS Live profile, W6.2; `claude_dev/radius-reply-profile-design.md`
 //! §5.1 — the T-429 lesson applied to a write surface).
 //!
 //! # Two halves
@@ -140,6 +140,18 @@ const EXEMPT: &[(&str, &str, &str)] = &[
          since #624); as for users::delete",
     ),
 ];
+
+/// Exemptions that name a function common enough to recur (`prepare`), pinned
+/// to the body they were granted for. `(path suffix, function, the start of
+/// the function's whitespace-free text)`. A second function of that name in
+/// the same file is a different function and is scanned (#715 (e)).
+const PINNED: &[(&str, &str, &str)] = &[(
+    "crates/axiam-server/src/cleanup.rs",
+    "prepare",
+    // `ErasureUnit::prepare`: its signature and first statement.
+    "asyncfnprepare(&self,user:&axiam_core::models::user::User)->Result<u64,AxiamError>{\
+     let(user_id,tenant_id)=(user.id,user.tenant_id);",
+)];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -296,11 +308,17 @@ struct Site {
     function: String,
     write: String,
     gated: bool,
+    /// The owning function's text, whitespace removed.
+    body: String,
 }
 
 fn sites() -> Vec<Site> {
+    sites_in(production_sources())
+}
+
+fn sites_in(sources: Vec<(String, String)>) -> Vec<Site> {
     let mut out = BTreeSet::new();
-    for (file, source) in production_sources() {
+    for (file, source) in sources {
         if IMPLEMENTATION_DIRS.iter().any(|d| file.starts_with(d)) {
             continue;
         }
@@ -323,6 +341,7 @@ fn sites() -> Vec<Site> {
                         function: "<outside any function>".into(),
                         write: (*write).into(),
                         gated: false,
+                        body: String::new(),
                     });
                     continue;
                 };
@@ -336,6 +355,7 @@ fn sites() -> Vec<Site> {
                     function: owner.name.clone(),
                     write: (*write).into(),
                     gated,
+                    body: owner.flat.clone(),
                 });
             }
         }
@@ -343,10 +363,21 @@ fn sites() -> Vec<Site> {
     out.into_iter().collect()
 }
 
+/// Whether the exemption `(file, function)` covers `site`: the same function
+/// name in the same file and, where the exemption is pinned, the same body.
+fn covers(file: &str, function: &str, site: &Site) -> bool {
+    site.file.ends_with(file)
+        && site.function == function
+        && PINNED
+            .iter()
+            .filter(|(f, n, _)| *f == file && *n == function)
+            .all(|(_, _, pin)| site.body.starts_with(pin))
+}
+
 fn exemption(site: &Site) -> Option<&'static str> {
     EXEMPT
         .iter()
-        .find(|(file, function, _)| site.file.ends_with(file) && site.function == *function)
+        .find(|(file, function, _)| covers(file, function, site))
         .map(|(_, _, reason)| *reason)
 }
 
@@ -376,8 +407,7 @@ fn every_exemption_still_names_a_real_ungated_site() {
     let all = sites();
     for (file, function, _) in EXEMPT {
         assert!(
-            all.iter()
-                .any(|s| s.file.ends_with(file) && s.function == *function && !s.gated),
+            all.iter().any(|s| covers(file, function, s) && !s.gated),
             "exemption {file}::{function} matches no ungated write; remove it"
         );
     }
@@ -462,5 +492,45 @@ fn only_the_gate_mints_a_clearance() {
             "crates/axiam-core/src/models/network.rs".to_owned(),
         ],
         "a NetworkWriteClearance is minted outside the gate"
+    );
+}
+
+/// #715 (e): the `cleanup.rs` exemption is `ErasureUnit::prepare`'s alone. A
+/// second `fn prepare` in the file, calling a guarded write, is scanned and
+/// flagged, where an exemption by name would have let it through.
+#[test]
+fn a_second_prepare_in_cleanup_is_not_exempt() {
+    let real = production_sources()
+        .into_iter()
+        .find(|(file, _)| file.ends_with("crates/axiam-server/src/cleanup.rs"))
+        .expect("cleanup.rs is a production source");
+    let synthetic = format!(
+        "{}\nfn prepare(repo: &R, id: Uuid) {{\n    // The scan's window reaches 80 characters back, so the body is padded.\n    let padding = \"a body at least eighty characters long, as a real function's is\";\n    repo.assign_to_user(id, padding);\n}}\n",
+        real.1
+    );
+    let found = sites_in(vec![(real.0.clone(), synthetic)]);
+    let prepares: Vec<&Site> = found
+        .iter()
+        .filter(|s| s.function == "prepare" && !s.gated)
+        .collect();
+    let (pinned, stray): (Vec<_>, Vec<_>) = prepares
+        .iter()
+        .partition(|s| s.body.starts_with(PINNED[0].2));
+    assert!(!pinned.is_empty(), "ErasureUnit::prepare is still found");
+    assert_eq!(
+        stray.len(),
+        1,
+        "the synthetic prepare is found: {prepares:?}"
+    );
+    // With the old exemption (file and name) the stray one passed unflagged.
+    let old = |s: &Site| s.file.ends_with("cleanup.rs") && s.function == "prepare";
+    assert!(old(stray[0]), "the old exemption would have covered it");
+    assert!(
+        exemption(stray[0]).is_none(),
+        "the pinned exemption does not"
+    );
+    assert!(
+        pinned.iter().all(|s| exemption(s).is_some()),
+        "ErasureUnit::prepare itself stays exempt"
     );
 }

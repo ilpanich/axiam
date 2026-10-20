@@ -622,7 +622,7 @@ Argon2id cost parameters themselves are never weakened to gain throughput.
 | Key | Purpose |
 |---|---|
 | `AXIAM__AUTH__MAX_CONCURRENT_HASHES` | Max concurrent Argon2id hash/verify operations. `0` (default) = auto → `min(CPU cores, 4)`. Raise only if the host has spare memory headroom (peak crypto RSS ≈ this value × 19 MiB); lower to harden a tightly memory-capped container. |
-| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. The same wait bounds the SAML signature verifications that share the permits (the SP's ACS, the IdP's SSO/SLO receiver, IdP metadata): past it the ACS answers as for an invalid signature, the IdP receiver answers `503` with `Retry-After`, and the timeout is logged at `warn`. |
+| `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. The same wait bounds the SAML signature verifications that share the permits (the SP's ACS, the IdP's SSO/SLO receiver, IdP metadata): past it the ACS answers as for an invalid signature, the IdP receiver answers `503` with `Retry-After`, and the timeout is logged at `warn`. It also bounds the authenticated acquires: the IdP's assertion signing (a `503` retry page with `Retry-After`) and SLO signing (a partial logout hop), and the CA, certificate and PGP routes' key generation and signing (`503`). The CRL re-sign keeps its own five-second wait.A busy ACS has already consumed the one-time login state, so the user must start the sign-in again; the operator's signal is the gate's `warn` log line with `site` `saml_acs`. |
 
 The 503 path preserves the SEC-026 username-enumeration defence: the login
 "user not found" branch and the branch that refuses an account serving a
@@ -860,7 +860,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 |---|---|
 | `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` | Max `/auth/login` requests per minute per key (default `10`). |
 | `AXIAM__RATE_LIMIT__REGISTER_PER_MIN` | Max register requests per minute per key (default `5`). |
-| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). Also the allowance of the second, narrower bucket a token request carrying **no client credential** is counted in, which is always keyed on `client_id` and the client's address together — the address the route limiters key on under `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, not the proxy's — see [Public clients](../admin/public-clients.md#rate-limiting). |
+| `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` | Max `/oauth2/token` requests per minute per key (default `120`). A token request carrying **no client credential** (a public client) is counted here like any other; a flood from one address meets `429` `rate_limit_exceeded` — see [Public clients](../admin/public-clients.md#rate-limiting). The 1.1.0 second bucket for such requests was removed in 1.1.1 (#685). |
 | `AXIAM__RATE_LIMIT__PASSWORD_RESET_PER_MIN` | Max password-reset requests per minute per key (default `3`). |
 | `AXIAM__RATE_LIMIT__MFA_PER_MIN` | Max MFA enroll/confirm/verify requests per minute per key (default `5`). |
 | `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN` | Max WebAuthn ceremony requests per minute per key (default `10`). Applies to each of the six `/auth/webauthn/*` routes independently, so it is the per-minute ceremony allowance — deliberately equal to `LOGIN_PER_MIN`. |
@@ -871,7 +871,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | Max CIBA backchannel authentication requests (`POST /oauth2/bc-authorize`) per minute (default `60`), in a bucket of its own keyed like `/oauth2/token` (`AXIAM__RATE_LIMIT__KEY` applies), plus a per-client bucket of the same size after authentication. Scaled by `AXIAM__RATE_LIMIT__PROFILE` (`gateway` 600, `mesh` 6000). Each user is sent at most three CIBA notifications a minute whatever this is set to. |
 | `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_HINT` | Max `POST /oauth2/bc-authorize` calls **admitted per client per hint** in any ten-minute stretch (default `3`; #599, #639) — not a per-minute rate. Ten minutes is the longest a CIBA request may live, so this is also the most open requests one client can hold for one person. A call past it is answered `429 slow_down` before the hint is looked up, whoever the hint names; a refused call is not counted. Counted in the shared rate-limit table, so it holds across replicas — give every replica the same value. Never moved by a profile. Raise it only for a conformance or SDK integration run ([`../conformance/README.md`](../conformance/README.md#the-ciba-hint-cap-and-a-ciba-run)); must be at least `1`, and `0` stops the server at startup. |
-| `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` | The browser-endpoint preset, per IP (default `30`): `/oauth2/end_session`, the `/oauth2/authorize/logout` hop, `GET /oauth2/authorize` on both the bare and the per-tenant mount (bucket `oauth2_authorize`, #532), the SAML identity provider's browser routes, and the five authenticated federation flow routes (`POST /api/v1/federation/saml/authn-request`, `POST .../saml/acs`, `GET .../saml/metadata`, `POST .../oidc/authorize`, `POST .../oidc/callback`; buckets `federation_saml_authn_request`, `federation_link_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`, `federation_link_oidc_callback`, #614; the two `link` names keep them apart from the unauthenticated first-time-SSO routes, which own `federation_saml_acs` and `federation_oidc_callback`, #632), each route in a bucket of its own and keyed on the caller's verified principal `(tenant, sub)` rather than its address (#633; a token that does not verify is keyed on its address). Never moved by a profile; raise it where many people start sign-ins from one address. A backend relaying many people's federated sign-ins to the five federation routes from one address does not need to: each person has their own bucket there, up to a per-address backstop at ten times this value (R110W2-01; 300 a minute at the default) that each of the five routes also carries outermost. It bounds one address holding many principals, applies with `AXIAM__RATE_LIMIT__SHARED` on or off, counts per replica and has no knob of its own. |
+| `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` | The browser-endpoint preset, per IP except on the five federation flow routes, which are per verified principal (default `30`): `/oauth2/end_session`, the `/oauth2/authorize/logout` hop, `GET /oauth2/authorize` on both the bare and the per-tenant mount (bucket `oauth2_authorize`, #532), the SAML identity provider's browser routes, and the five authenticated federation flow routes (`POST /api/v1/federation/saml/authn-request`, `POST .../saml/acs`, `GET .../saml/metadata`, `POST .../oidc/authorize`, `POST .../oidc/callback`; buckets `federation_saml_authn_request`, `federation_link_saml_acs`, `federation_saml_metadata`, `federation_oidc_authorize`, `federation_link_oidc_callback`, #614; the two `link` names keep them apart from the unauthenticated first-time-SSO routes, which own `federation_saml_acs` and `federation_oidc_callback`, #632), each route in a bucket of its own and keyed on the caller's verified principal `(tenant, sub)` rather than its address (#633; a token that does not verify is keyed on its address; a `DPoP`-scheme token counts as verified from 1.1.1, #670). Never moved by a profile; raise it where many people start sign-ins from one address. A backend relaying many people's federated sign-ins to the five federation routes from one address does not need to: each person has their own bucket there, up to a per-address backstop at ten times this value (R110W2-01; 300 a minute at the default) that each of the five routes also carries outermost. It bounds one address holding many principals, applies with `AXIAM__RATE_LIMIT__SHARED` on or off, counts per replica and has no knob of its own. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
 | `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
@@ -886,6 +886,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
+| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on logs one `WARN` at boot saying so. An entry that does not parse stops the boot. Both listeners (REST and gRPC) read it. See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, device login, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
@@ -932,7 +933,7 @@ the socket peer. Therefore:
 
 | Topology | Header the server sees | Value |
 |---|---|---|
-| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything; *(absent)* → `peer_addr()` | `0` — see below |
+| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; list the proxies in `TRUSTED_PROXIES` — see below |
 | `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
 | Compose/Pi — Caddy → server | `<client>` | **`0`** |
 | Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
@@ -944,21 +945,34 @@ the client sends a forged `X-Forwarded-For`** — the proxy appends the real pee
 to the right of the forgery and the extractor reads from the right. That
 property is why `0` is the shipped default rather than merely a convenient one.
 
-**With no appending proxy, the header is the caller's.** The first row of the
-table holds only for a caller that sends no `X-Forwarded-For`. Nothing appends
-to the header on a direct connection, or through a layer-4 pass-through, so the
-rightmost entry — the one `0` selects — is whatever the caller wrote, and a
-caller who rotates it gets a fresh bucket per request on every per-address
-limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS decision
-route's backstop) and one more entry in each limiter's in-process map. No value
-of `TRUSTED_HOPS` repairs that. Do not expose the listener to the internet
-without the appending proxy; where a client must reach it directly — the
-FreeRADIUS recipe's D4 profile, whose mutual TLS has to end at AXIAM
+**With no appending proxy, the header is the caller's.** Nothing appends to
+`X-Forwarded-For` on a direct connection, or through a layer-4 pass-through, so
+the rightmost entry — the one `0` selects — is whatever the caller wrote, at
+the default `TRUSTED_HOPS = 0` as at any other value. Unless the proxies are
+named, a caller who rotates it gets a fresh bucket per request on every
+per-address limiter (`/auth/login`, `/auth/device`, `/oauth2/token`, the RADIUS
+decision route's backstop) and one more entry in each limiter's in-process map.
+No value of `TRUSTED_HOPS` repairs that; `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`
+does. Set it to the addresses your appending proxies connect from (the ingress
+controller's pods, Caddy's container network): their requests are keyed under
+`TRUSTED_HOPS` exactly as before, and a request from any other peer is keyed on
+that peer, whatever it wrote — so the direct client chooses nothing.
+
+Left empty (the default), every peer's header is read, which is what the server
+did before the setting existed. It stays the default because the server cannot
+tell a re-encrypting proxy from a direct client without it: the shipped
+Kubernetes topology runs native TLS behind ingress-nginx, and keying every
+native-TLS peer on itself would collapse its clients into the ingress's bucket.
+A server with native TLS on and the list empty therefore logs one `WARN` at
+boot naming the variable. Even with the list set, do not expose the listener to
+the internet without the appending proxy: a client that reaches it directly is
+limited per address, not per proxy-reported client, and every route is served
+there. Where a client must reach it directly — the FreeRADIUS recipe's Live
+profile, whose mutual TLS has to end at AXIAM
 ([`docs/pki/freeradius.md`](../pki/freeradius.md#the-connection-mutual-tls-that-ends-at-axiam))
-— admit only that client to it with a firewall or a network policy. A setting
-that names the proxies whose header is honoured is planned for `1.1.x`
-([#711](https://github.com/ilpanich/axiam/issues/711); T-212). *(Corrected
-2026-10-16: the row said the header was absent on a direct connection, R110-05.)*
+— admit only that client to it with a firewall or a network policy. *(Corrected 2026-10-16: the row said the header was absent on a direct
+connection, R110-05. Amended 2026-10-19: `TRUSTED_PROXIES` added, #711; the row
+now says what a direct server sees when the caller writes the header, #715 (b).)*
 
 Setting the value to the proxy *count* instead makes
 `trusted_hops >= hops.len()`; the extractor then discards the header entirely
@@ -1457,6 +1471,10 @@ oversight. When adding a new integration (e.g. a different SMTP relay or an
 external IdP on a new IP range), extend `server-egress.yml` narrowly rather
 than relaxing the default-deny baseline.
 
+Every client AXIAM aims at Vault is time-bounded (10 s request, 5 s connect for the
+startup secret read; 10 s for CA-key custody; 60 s for the Vault PKI engine); see
+[Timeouts](vault.md#58-timeouts).
+
 ## Securing the broker (AMQP over TLS)
 
 AXIAM's async plane — authorization requests, audit events, outbound mail,
@@ -1874,7 +1892,9 @@ out-of-memory kill does none of that and loses what is queued.
 
 The cleanup task is told to stop **before** the lease is given up: once it is,
 a successor may start, and this instance must not start work beside it. After a
-lost lease it is told at the loss itself, not once the requests in flight have
+lost lease it is told at the loss as the renewal detects it — up to `renew_every`
+(10 s) after a successor took over the expired lease, and in that gap this
+instance's cleanup task runs beside it — not once the requests in flight have
 been drained or cut. (Corrected 2026-10-15, #628: before 1.1.0 the cleanup task
 was told only after the lease release — and after a lost lease, after the REST
 cut and the gRPC stop, up to 7 s in, so the old instance could still start an
@@ -1912,25 +1932,65 @@ finished rather than wait for it:
   row — after which no later sweep finds the work again. Before it, the work
   gives itself up as soon as the stop begins: the account stays due, the tenant
   stays deleted and its purge claim is released, so the next start does the
-  work at once; it never crosses that point once the stop has begun. So a stop
+  work at once; once the stop has begun it starts no new crossing (a crossing
+  already being sent completes). So a stop
   can leave unfinished only:
   - an erasure or a tenant purge that crossed its point of no return **before**
     the stop began and still had not written its audit row when the bound ran
     out — `gdpr.user_pseudonymized` (and the completion of the deletion request)
     for an erasure, `tenants.purged` (the export time the purge used and how many
-    audit entries it deleted and kept) for a tenant purge. The erasure and its
-    proof, or the purge, stand; the row is never written. It takes a datastore
+    audit entries it deleted and kept) for a tenant purge. It takes a datastore
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`;
+    not reach its audit row in time`. The erasure, or the purge,
+    stands (an erasure's proof too, unless it was cut before the proof: see
+    the list below), and **the next start writes the row** (#689, schema v108): the point
+    of no return leaves a marker in its own transaction —
+    `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
+    row keyed by the tenant id — which the work clears with its row, and the
+    first GDPR purge sweep and tenant purge sweep of the next start, on any
+    replica, write what a marker still stands for, once. For a tenant purge
+    that is the row the cut purge would have written (the marker keeps its
+    export time and counts); for an erasure it carries the pseudonym, `recovered:
+    true` and `certificates_revoked: null` (the count was the cut purge's alone),
+    and the deletion request is completed in the same transaction as the marker
+    is cleared. A row the cut work had already written is found and not written
+    again. The log says `recorded an erasure whose unit was cut before its
+    record` or `recorded a tenant purge whose unit was cut before its record`.
+    The marker is the next start's at once when the cut work's drop guard
+    released it; when the release was not written — a `SIGKILL`, or a unit cut
+    at the teardown's bound, whose guard releases the marker from a spawned task
+    that the process exit may cancel — it is left to the one-hour lease, after
+    which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
+    is not in the datastore, so the sweep writes it there too: replay the
+    dead-letter file with that in mind;
+  - an erasure cut between its anonymization and its erasure proof: the
+    recovery writes the record and completes the request, but it writes no
+    proof and does not repeat the second certificate revocation of #668, and
+    the unit's marker guard is armed only after the proof, so a cut before it
+    leaves the marker to the one-hour lease and not to the next start. The
+    erasure is complete as far as the account is concerned; what can be
+    missing is the proof and, for a certificate bound to the account in that
+    window, one revocation (an administrator revokes it by id). Open as
+    #737, for 1.1.2;
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 
   A tenant purge cut or failing anywhere else releases its claim (from a drop
   guard, for a cut or a panic), so the next start's sweep no longer skips the
-  tenant for the claim's one-hour lease; only a process that ends before the
-  release is written (a `SIGKILL`) still leaves the tenant to the lease.
+  tenant for the claim's one-hour lease. Only a release that is not written
+  still leaves the tenant to the lease: a `SIGKILL`, and a unit **cut at the
+  stop's bound** (typically a datastore too slow to answer the awaited release),
+  which releases its claim from a spawned task that the process exit may cancel
+  (the stop does not wait for it). (Corrected 2026-10-19, #687: this text named
+  only the `SIGKILL`.) The
+  purge of an orphaned tenant id holds its claim the same way from the moment
+  its claim marker is written, and writes the marker only while the id still has
+  rows to purge, so the next start's sweep takes a cut one over at once and
+  records it once. (Corrected 2026-10-19, #714: before 1.1.1 a cut while the
+  orphan purge read whether rows were left held the id for the lease, and could
+  record an id another replica had already purged a second time.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for

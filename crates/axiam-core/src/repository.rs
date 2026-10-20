@@ -2500,11 +2500,15 @@ pub trait RefreshTokenRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<Option<RefreshToken>>> + Send;
 
     /// Revoke all refresh tokens for a given client within a tenant.
+    /// Idempotent — already-revoked tokens are skipped and do not count
+    /// toward the returned total.
+    ///
+    /// Returns the number of tokens newly revoked.
     fn revoke_all_for_client(
         &self,
         tenant_id: Uuid,
         client_id: &str,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
     /// Revoke all refresh tokens for a user within a tenant (e.g., on
     /// password change or reset). Idempotent — already-revoked tokens are
@@ -4491,7 +4495,7 @@ pub trait ScimTargetStateRepository: Send + Sync {
 
 // ---------------------------------------------------------------------------
 // Network segments, reply profiles and the tenant's session cap (tenant-scoped)
-// (RADIUS D4, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
+// (RADIUS Live profile, W6.1; claude_dev/radius-reply-profile-design.md §3.5, §4)
 // ---------------------------------------------------------------------------
 
 /// Storage for network segments: nodes of the reserved `/network` subtree of

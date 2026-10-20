@@ -14,9 +14,10 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-10-16 (the `1.1.0` release branch, model
-> 2.42.0 — the 1.1.0 release's six waves, among them RADIUS D4, and the
-> reconciliation pass recorded below, on top of the 1.0.1 release's four waves
+> **Status: source current as of 2026-10-19 (the `1.1.1` release branch, model
+> 2.43.0 — the 1.1.1 release's waves and the reconciliation pass recorded below,
+> on top of the 1.1.0 release's six waves (model 2.42.0, 2026-10-16), among them
+> the Live profile of the RADIUS recipe (formerly D4), and the 1.0.1 release's four waves
 > and its RADIUS recipe (model 2.41.0, 2026-10-14), Phase 23, the competitor-gap
 > closure of `1.0.0-beta18`, the contract 1.58 SDK fan-out, and the 1.0.0
 > release wave's fixes, both halves).** The Phase 23 paragraphs below record the waves;
@@ -657,6 +658,29 @@
 > High or Critical are still eleven, none of them a defect awaiting a fix in
 > AXIAM's code; open in AXIAM's own request path are the three Low residuals of
 > the network write gate.
+>
+> **The 1.1.1 release, reconciliation (model 2.43.0, 2026-10-19).** The model is
+> **488 threats, 457 mitigated / 21 open / 10 not applicable** (Critical 43 with
+> 2 open; High 201, 9 open, 6 not applicable; Medium 204, 8 and 3; Low 40, 2 and
+> 1), derived once from `Axiam.json` and stated in the five copies. Two statuses
+> change: **T-483** (the organization scope's super-admin carries the network
+> permissions into every tenant; #702) and **T-484** (a cleared network-sensitive
+> write leaves no row of its own; #703) go from Open to Mitigated, each with the
+> residuals the W4 review named — a tenant the boot reconcile cannot resolve
+> (#728), a role delete and a cancelled write that leave no row (#727, #726) —
+> and **T-488** enters Mitigated (a UMA resource server reaching a resource set it
+> did not register; #705; it sits on the §5.3 resource-server actor, the model
+> having no UMA element). The recipe's profiles are named **Static** (formerly D3)
+> and **Live** (formerly D4) from 1.1.1; the entries use the names and the dated
+> passes keep their words. Corrections, dated in the entries' own text: **T-457**
+> gains residual (f), the global fingerprint read (#730); **T-462** now says the
+> fetch script sends `Cache-Control: no-cache` (#696) and exits 3 near the list's
+> `nextUpdate` (#695); **T-486** records the concurrent-`401` cache residual
+> (#720) and what its tests do not show (#722); **T-487** counts nineteen
+> refused stand-in answers; **T-212** and **T-428** no longer name the removed
+> public-client bucket (#685). Open at High or Critical are still eleven, none of
+> them a defect awaiting a fix in AXIAM's code; open in AXIAM's own request path
+> is the one Low residual of the network write gate (T-481).
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1987,7 +2011,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 487 threats** and a
+The system is verified against a **STRIDE threat model of 488 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -2010,8 +2034,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 487 |
-| Mitigated / Open | 454 / 23 |
+| Threats identified | 488 |
+| Mitigated / Open | 457 / 21 |
 | Not applicable (specified, not built) | 10 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -2049,7 +2073,7 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.42.0, all
+authorization, PKI — carry **four** open items at model 2.43.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -2148,15 +2172,16 @@ bounds stated in the guide (T-450, the EAP-TLS keys under MD5 obfuscation on
 plain UDP, where RadSec is the operator's choice; T-462, the revocation lag of a
 fetch interval plus 300 s plus `Session-Timeout`, with no way to end a session
 already admitted). Fifteen stayed not applicable at `1.0.1`, each saying why.
-Since `1.1.0` (RADIUS D4) AXIAM decides for the recipe once per authentication
+Since `1.1.0` (the Live profile, formerly D4) AXIAM decides for the recipe once per authentication
 and manages network segments and their reply profiles itself, and the entries
 of what it built are judged for that code: five more of the diagram's entries
 are mitigated for the decision route (T-457, T-461, T-463, T-464, T-468), and
-ten enter (T-478 … T-487) — six mitigated, and four open: three Low residuals
-of the network write gate (T-481, T-483, T-484) and the price of a check per
-authentication, AXIAM's availability being the network's (T-486). Ten stay not
+ten enter (T-478 … T-487) — at `1.1.0` six mitigated and four open: three Low
+residuals of the network write gate (T-481, T-483, T-484) and the price of a check
+per authentication, AXIAM's availability being the network's (T-486); `1.1.1`
+closed two of the residuals (T-483, T-484), so two stay open (T-481, T-486). Ten stay not
 applicable: the native listener, EAP state machine and NAS registry, and three
-decision entries D4 does not build. The same pass re-judged T-102 and reopened it: AXIAM publishes no
+decision entries the Live profile does not build. The same pass re-judged T-102 and reopened it: AXIAM publishes no
 certificate revocation list, so a relying party that validates AXIAM-issued
 certificates itself cannot learn of a revocation, and inside AXIAM only device
 authentication by certificate reads a certificate's status (not the TLS
@@ -3239,8 +3264,8 @@ against the pinned upstream image.
   placement. Network roles are never global and never assigned to a group, the
   generic resource routes cannot reach the reserved subtree, and every write is
   conditional on the version read and audited before and after (T-478 … T-480,
-  T-482, T-485). Three Low residuals of the gate are open and filed for `1.1.x`
-  (T-481, T-483, T-484).
+  T-482, T-485). One Low residual of the gate is open and filed for `1.1.x` (T-481);
+  `1.1.1` closed two more (T-483, T-484).
 - **The audit trail carries no personal data from the network.** One append-only
   row per decision, with the certificate's fingerprint, the site and the internal
   reason — never its subject — and the request body is closed, so a MAC address
@@ -3253,7 +3278,7 @@ against the pinned upstream image.
   Three residuals are the operator's and are in the register below: the
   EAP-TLS keys under MD5 obfuscation on plain UDP, for which RadSec is the answer
   (T-450); a session already admitted lasts until `Session-Timeout`, with no CoA
-  (T-462); and in D4 AXIAM's availability is the network's, with its listener
+  (T-462); and in the Live profile AXIAM's availability is the network's, with its listener
   exposed to the FreeRADIUS servers alone (T-486).
 
 ### Audit & accountability
@@ -3612,7 +3637,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 23 of 487. The 10
+Every threat the model records as open, most severe first — 21 of 488. The 10
 entries recorded *not applicable*, for the native RADIUS front end that is not
 built, are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -3643,12 +3668,10 @@ each.
 | T-486 — AXIAM unavailable, or reached through a proxy that ends TLS, refuses every device's authentication | Medium | authorize (rlm_rest) · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 | T-481 — The network gate clears a write on a state that changes before the write lands | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
-| T-483 — An organization-level administrator carries the network meta permissions into every tenant of its organization | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
-| T-484 — A cleared network-sensitive assignment, grant or binding leaves no row of its own, only the route's | Low | Network management API and write gate · *RADIUS front end — native listener not built; FreeRADIUS recipe (1.0.1); decision route (1.1.0)* |
 
-None of these is an unhandled defect in AXIAM's own request path, save three
-Low residuals of the network write gate that `1.1.0` entered and its W6 review
-kept open for `1.1.x` (T-481, T-483, T-484): they are accepted design
+None of these is an unhandled defect in AXIAM's own request path, save one
+Low residual of the network write gate that `1.1.0` entered and its W6 review
+kept open for `1.1.x` (T-481): they are accepted design
 trade-offs, responsibilities that land on whoever deploys AXIAM, and gaps on
 the SDK and distribution side. That holds for the eleven open at
 High or Critical severity — T-148 and T-306 (Critical), T-18, T-94, T-124,
@@ -3737,7 +3760,7 @@ by who does it.
   a connected device keeps its port until `Session-Timeout`; nothing in AXIAM or
   the recipe ends a session (T-462). The fetch interval, `Session-Timeout` and a
   shorter `validity_days` are the levers, and a fetch that stops refuses every
-  device of the tenant. In the recipe's D4 profile (`1.1.0`) a revoked device is
+  device of the tenant. In the recipe's Live profile (`1.1.0`) a revoked device is
   refused at its next authentication, and AXIAM's availability is the network's:
   every authentication asks it and fails closed (T-486). Its mutual TLS must end
   at AXIAM's own listener, which serves every route; expose that listener to the
@@ -3872,7 +3895,8 @@ by who does it.
 
 Everything in this document was last re-derived from source at the
 **`1.0.1`** release branch (model 2.41.0) on 2026-10-14, and reconciled with the
-**`1.1.0`** release branch's model (2.42.0) on 2026-10-16; the handoff block at
+**`1.1.0`** release branch's model (2.42.0) on 2026-10-16, and with the
+**`1.1.1`** release branch's model (2.43.0) on 2026-10-19; the handoff block at
 the top of this file says what each pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

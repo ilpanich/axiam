@@ -9,8 +9,8 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.1.0",
-    "x-axiam-spec-digest": "sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1"
+    "version": "1.1.1",
+    "x-axiam-spec-digest": "sha256:443c9d39bb7da2d55f72583d9a74b37a76e90bf30b9f9fff2a7f12c6395f8098"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4357,7 +4357,7 @@
           "network"
         ],
         "summary": "`POST /api/v1/network/decide`",
-        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS D4). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
+        "description": "The RADIUS placement decision FreeRADIUS asks for once per EAP-TLS\nauthentication (RADIUS Live profile). Not SDK surface: its caller is FreeRADIUS's\nservice account, over mTLS with a token bound to its own certificate.",
         "operationId": "network_decide",
         "requestBody": {
           "content": {
@@ -6124,7 +6124,7 @@
             "description": "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."
           },
           "422": {
-            "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes; the message names each scope, and the client is unchanged. An administrator-managed client is not bounded."
+            "description": "The client is managed_by dcr or cimd and the request adds either a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`) or a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope or grant the row already holds is not counted. An administrator-managed client is not bounded."
           }
         },
         "security": [
@@ -14905,8 +14905,8 @@
         "tags": [
           "oauth2"
         ],
-        "summary": "Build an OAuth2 JSON error response with the appropriate HTTP status.",
-        "description": "`POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).\n\nIssues a `device_code` (the secret the device polls with), a short\n`user_code` (the string a human reads off a screen and types elsewhere),\nand the `verification_uri` to send them to.\n\n**The client authenticates by its registered method (#635).** RFC 8628\nexists for input-constrained clients — a television, a CLI, an IoT sensor —\nwhich are usually public: a client registered with\n`token_endpoint_auth_method: none` presents nothing, as before, and is\nrefused if it presents a credential. A confidential client presents its\ncredential here as at the token endpoint (RFC 8628 §3.1 → RFC 6749\n§3.2.1): its secret, a client assertion, or its certificate. Either way\n`client_id` must name a client of a live tenant that holds this grant;\nwithout that any string could mint pending grants and exhaust the\nuser-code space, which is a denial of service against every legitimate\ndevice at once. A failed client authentication is `401 invalid_client`\nwith the RFC 6749 §5.2 challenge, and is audited as at the token endpoint.\n\nThe endpoint carries its own rate-limit bucket (see `server.rs`) rather\nthan sharing the generic token bucket: it is reachable without a\ncredential and it allocates state, which is a different abuse profile from\nthe token endpoint's.",
+        "summary": "`POST /oauth2/device_authorization` — RFC 8628 §3.1–3.2 (B2).",
+        "description": "Issues a `device_code` (the secret the device polls with), a short\n`user_code` (the string a human reads off a screen and types elsewhere),\nand the `verification_uri` to send them to.\n\n**The client authenticates by its registered method (#635).** RFC 8628\nexists for input-constrained clients — a television, a CLI, an IoT sensor —\nwhich are usually public: a client registered with\n`token_endpoint_auth_method: none` presents nothing, as before, and is\nrefused if it presents a credential. A confidential client presents its\ncredential here as at the token endpoint (RFC 8628 §3.1 → RFC 6749\n§3.2.1): its secret, a client assertion, or its certificate. Either way\n`client_id` must name a client of a live tenant that holds this grant;\nwithout that any string could mint pending grants and exhaust the\nuser-code space, which is a denial of service against every legitimate\ndevice at once. A failed client authentication is `401 invalid_client`\nwith the RFC 6749 §5.2 challenge, and is audited as at the token endpoint.\n\nThe endpoint carries its own rate-limit bucket (see `server.rs`) rather\nthan sharing the generic token bucket: it is reachable without a\ncredential and it allocates state, which is a different abuse profile from\nthe token endpoint's.",
         "operationId": "device_authorization",
         "parameters": [
           {
@@ -19337,10 +19337,7 @@
       },
       "DeviceAuthorizationRequest": {
         "type": "object",
-        "description": "`POST /oauth2/device_authorization` request (RFC 8628 §3.1).\n\n`Debug` is written by hand so that the credentials never reach a log line.",
-        "required": [
-          "client_id"
-        ],
+        "description": "`POST /oauth2/device_authorization` request (RFC 8628 §3.1).",
         "properties": {
           "client_assertion": {
             "type": [
@@ -19357,7 +19354,11 @@
             "description": "RFC 7521 §4.2 assertion type; must accompany `client_assertion`."
           },
           "client_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional (#683): a `client_secret_basic` client names itself in the\n`Authorization` header and a `private_key_jwt` client in its\nassertion (RFC 6749 §2.3.1, RFC 7521 §4.2). The handler resolves it\nwith `resolve_client_id`, as the token endpoint does."
           },
           "client_secret": {
             "type": [
@@ -30206,7 +30207,7 @@
     },
     {
       "name": "network",
-      "description": "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS D4, claude_dev/radius-reply-profile-design.md)"
+      "description": "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS Live profile, claude_dev/radius-reply-profile-design.md)"
     },
     {
       "name": "ssf-receiver",

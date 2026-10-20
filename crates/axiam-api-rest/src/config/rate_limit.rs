@@ -213,7 +213,7 @@ pub struct MachineLimitPreset {
     /// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
     pub bc_authorize_per_min: u32,
     /// `POST /api/v1/network/decide` per minute per authenticated caller
-    /// (RADIUS D4, W6.4; maintainer decision D-6).
+    /// (RADIUS Live profile, W6.4; maintainer decision D-6).
     pub network_decide_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
@@ -257,9 +257,9 @@ pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
-/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS D4 / W6.4, preset (D-6).
+/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS Live profile / W6.4, preset (D-6).
 pub const ENV_NETWORK_DECIDE_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN";
-/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS D4 / W6.3, never preset.
+/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS Live profile / W6.3, never preset.
 pub const ENV_NETWORK_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
 pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
@@ -334,7 +334,7 @@ impl RateLimitProfile {
                 // of sign-in requests is the per-user notification bucket,
                 // which no preset moves.
                 bc_authorize_per_min: 600,
-                // RADIUS D4 (D-6): the shipped 6 000 in every profile. The
+                // RADIUS Live profile (D-6): the shipped 6 000 in every profile. The
                 // bucket is the authenticated caller's (one FreeRADIUS service
                 // account), so a NAT'd fleet is not what moves it; a site's
                 // power-restore storm is, and that is the same storm whatever
@@ -665,7 +665,7 @@ pub struct RateLimitConfig {
     /// Max writes per minute per IP to each of the network-segment management
     /// routes — create, replace and delete a segment, create, replace and
     /// delete a segment's reply profile, and replace the tenant's `Session-Timeout`
-    /// cap (default: 30 — RADIUS D4, W6.3,
+    /// cap (default: 30 — RADIUS Live profile, W6.3,
     /// `claude_dev/radius-reply-profile-design.md` §5.1). Reads are not in it.
     /// A segment write decides which VLAN a device is placed on and a profile
     /// write shapes what that placement gives, so each is a grant (§5.2); every
@@ -674,7 +674,7 @@ pub struct RateLimitConfig {
     /// bucket per route (seven, named `network_*`); per-IP; never preset.
     pub network_admin_per_min: u32,
     /// Max `POST /api/v1/network/decide` requests per minute **per
-    /// authenticated caller** (default: 6 000 — RADIUS D4, W6.4; maintainer
+    /// authenticated caller** (default: 6 000 — RADIUS Live profile, W6.4; maintainer
     /// decision D-6; `claude_dev/radius-reply-profile-design.md` §6.3).
     ///
     /// The decision route's caller is a FreeRADIUS server's service account,
@@ -912,10 +912,10 @@ impl Default for RateLimitConfig {
             ssf_admin_per_min: 30,
             // G-6 / T23.6.4 — see the field docs.
             scim_target_admin_per_min: 30,
-            // RADIUS D4 / W6.3 — see the field docs. Administrator writes that
+            // RADIUS Live profile / W6.3 — see the field docs. Administrator writes that
             // each place devices on a VLAN or shape what the placement gives.
             network_admin_per_min: 30,
-            // RADIUS D4 / W6.4 (D-6) — see the field docs. Per caller.
+            // RADIUS Live profile / W6.4 (D-6) — see the field docs. Per caller.
             network_decide_per_min: 6_000,
             // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
             ciba_approval_per_min: 30,

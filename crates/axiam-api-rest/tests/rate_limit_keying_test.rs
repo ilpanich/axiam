@@ -9,12 +9,14 @@
 
 use actix_governor::KeyExtractor;
 use actix_web::HttpMessage;
+use actix_web::http::StatusCode;
 use actix_web::test::TestRequest;
 use axiam_api_rest::config::rate_limit::RateLimitKeyMode;
 use axiam_api_rest::extractors::rate_limit::{
     ClientAwareKeyExtractor, RateLimitClientId, XForwardedForKeyExtractor,
 };
 use axiam_api_rest::extractors::xff_metrics;
+use axiam_core::forwarded_for::TrustedProxies;
 use std::net::{IpAddr, SocketAddr};
 
 /// Fixed loopback peer address representing the real (trusted) TCP peer —
@@ -482,4 +484,127 @@ async fn a_request_with_no_xff_is_not_counted() {
         before,
         "a client with no proxy is not a misconfiguration"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #711 / #686 (R110-01) — `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`
+// ---------------------------------------------------------------------------
+
+/// `/auth/login`'s limiter as `server.rs::build_governor` builds it (one
+/// request per minute, so the second request in one bucket is refused), keyed
+/// by `extractor`.
+async fn two_logins_from_one_peer(
+    extractor: XForwardedForKeyExtractor,
+) -> (StatusCode, StatusCode) {
+    use actix_governor::{Governor, GovernorConfigBuilder};
+    use actix_web::{App, HttpResponse, test, web};
+
+    let config = GovernorConfigBuilder::default()
+        .requests_per_minute(1)
+        .burst_size(1)
+        .key_extractor(extractor)
+        .finish()
+        .expect("valid governor config");
+    let app = test::init_service(
+        App::new().service(
+            web::resource("/api/v1/auth/login")
+                .wrap(Governor::new(&config))
+                .route(web::post().to(HttpResponse::Ok)),
+        ),
+    )
+    .await;
+    let login = |xff: &'static str| {
+        test::TestRequest::post()
+            .uri("/api/v1/auth/login")
+            .peer_addr(TEST_PEER.parse().unwrap())
+            .insert_header(("X-Forwarded-For", xff))
+            .to_request()
+    };
+    let first = test::call_service(&app, login("198.51.100.1"))
+        .await
+        .status();
+    let second = test::call_service(&app, login("198.51.100.2"))
+        .await
+        .status();
+    (first, second)
+}
+
+/// The defect: a peer that is not a proxy writes the header nothing appends
+/// to. Once the proxies are named, such a peer is keyed on itself — two
+/// logins whose `X-Forwarded-For` differ share its one bucket.
+#[actix_web::test]
+async fn a_peer_outside_trusted_proxies_shares_one_bucket_whatever_it_writes() {
+    let proxies = TrustedProxies::parse("10.0.0.0/8, fd00::/8").unwrap();
+    let (first, second) = two_logins_from_one_peer(
+        XForwardedForKeyExtractor::with_trusted_hops(0).with_trusted_proxies(proxies),
+    )
+    .await;
+    assert_eq!(first, StatusCode::OK);
+    assert_eq!(
+        second,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a peer outside AXIAM__RATE_LIMIT__TRUSTED_PROXIES chose a fresh bucket by \
+         rewriting X-Forwarded-For"
+    );
+}
+
+/// A listed peer is a proxy: the clients it names are keyed apart, as before.
+#[actix_web::test]
+async fn a_peer_inside_trusted_proxies_keys_the_clients_it_names_apart() {
+    let proxies = TrustedProxies::parse("203.0.113.0/24").unwrap();
+    let (first, second) = two_logins_from_one_peer(
+        XForwardedForKeyExtractor::with_trusted_hops(0).with_trusted_proxies(proxies),
+    )
+    .await;
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+}
+
+/// The empty list (the default) reads every peer's header, as before the list
+/// existed: the shipped `k8s/` topology runs native TLS behind ingress-nginx,
+/// so keying an unlisted native-TLS peer on itself would collapse every client
+/// into the ingress's bucket on upgrade. The boot `WARN` is that case's
+/// signal instead.
+#[actix_web::test]
+async fn with_the_list_empty_every_peers_header_is_read_as_before() {
+    let (first, second) =
+        two_logins_from_one_peer(XForwardedForKeyExtractor::with_trusted_hops(0)).await;
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+}
+
+/// An unlisted peer's header is not trusted at any hop count, and not counted
+/// as an R-4 discard either: `trusted_hops` is not what is wrong.
+#[actix_web::test]
+async fn an_unlisted_peer_is_keyed_on_itself_at_any_trusted_hops() {
+    let _guard = counter_lock();
+    let proxies = TrustedProxies::parse("10.0.0.0/8").unwrap();
+    for hops in [0, 1, 3] {
+        let extractor = XForwardedForKeyExtractor::with_trusted_hops(hops)
+            .with_trusted_proxies(proxies.clone());
+        let before = xff_metrics::xff_discarded();
+        let req = TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .insert_header((
+                "X-Forwarded-For",
+                "198.51.100.1, 198.51.100.2, 198.51.100.3",
+            ))
+            .to_srv_request();
+        assert_eq!(
+            extractor.extract(&req).unwrap(),
+            peer_ip(),
+            "trusted_hops {hops}"
+        );
+        assert_eq!(xff_metrics::xff_discarded(), before, "trusted_hops {hops}");
+    }
+}
+
+/// The boot `WARN`: once, for the empty list on a native TLS listener.
+#[test]
+fn the_boot_warning_names_the_empty_list_on_native_tls() {
+    let warning = TrustedProxies::default()
+        .boot_warning(true)
+        .expect("empty list + native TLS warns");
+    assert!(warning.contains("AXIAM__RATE_LIMIT__TRUSTED_PROXIES"));
+    assert_eq!(TrustedProxies::default().boot_warning(false), None);
+    let listed = TrustedProxies::parse("10.0.0.0/8").unwrap();
+    assert_eq!(listed.boot_warning(true), None);
 }

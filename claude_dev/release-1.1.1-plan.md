@@ -519,27 +519,193 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 | D-9 | **#719.** If `utoipa-swagger-ui` has no release on `zip ≥ 9` when W6.3 runs, the issue stays open on `1.1.x` and the PR does not name it. | **Stays open** |
 | D-10 | **The version.** 1.1.1, with the SDKs on their own patch (or minor where a change is source-breaking)? | **1.1.1** |
 
+**Answered after the fact (the maintainer, 2026-10-20, after PR #759 was opened).** The questions the waves raised beyond D-1 … D-10:
+
+| # | Question | Answer | Where |
+|---|---|---|---|
+| #749 | Should the confidential → public conversion revoke the confidential-era tokens itself? | **Yes** | in 1.1.1, `7d4da0a79` |
+| #745 | Should resources the resource server did not register stay UMA-ticketable through `/uma2/perm`? | **No**, option 1 | in 1.1.1, `ae8562ef4` |
+| Q1 | The recovered `gdpr.user_pseudonymized` row carries `certificates_revoked: null` | **Amend the contract** (null = unknown) | contract 1.64, #760 |
+| Q2 | A device poll on `429 rate_limit_exceeded` | **The CIBA rule** (wait out `Retry-After`; not terminal) | contract 1.64, #760 |
+| Q3 | "Naming the member and the value" | **Relax**: the member, and the value where the SDK keeps it | contract 1.64, #750 |
+
 ---
 
 ## 12. Wave results (written by the orchestrator as each wave lands)
 
 ### 12.0 Base commit
 
+- **Base:** `main` at `6b15aa36a` (the plan's own commit on top of `6b7b258`), 2026-10-19. `claude/release-1.1.1` and
+  `claude/release-1.1.1-w1` … `-w6` were cut from it on 2026-10-19 by the orchestrator.
+- **Decisions (§11):** no maintainer answer on any issue or on the plan when the waves started (issues read
+  2026-10-19 17:52 UTC); every default applies — D-1 Static/Live, D-2 option 1, D-3 remove, D-4 yes, D-5 all
+  three, D-6 yes, D-7 add the markers, D-8 texts only, D-9 stays open unless a release exists, D-10 1.1.1.
+- **Execution:** each task is one cloud session (Claude Code on the web) at the model its row names, started by
+  the orchestrator with the §13 kickoff of its wave and the task's row; tasks of one wave run one after another on
+  the wave branch, the six waves side by side.
+
 ### 12.1 W1
+
+- **Head:** `fc77c562f` on `claude/release-1.1.1-w1` (16 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W1.1 `bc7d9f4d2` (#664), W1.2 `83bec6fc0` (#665), W1.3 `18ca1cacf` (#667), W1.4 `b53d74bb0` (#669), W1.5 `035f51ede` (#668), W1.6 `6cb43c6c3` (#714; Opus 5.5), W1.7 `140911a21` (#689, **v108**; Opus 5.5), W1.8 `056bf289c` (#687), W1.9 `435952fb3` (#690), W1.10 `769d314be` (#692), W1.11 `42ade1e40` (#666), W1.12 `6dffb7060` (#688), W1.13 `189fa248f` (#717), W1.14 `13ec44d74` (F4 review, `claude_dev/security-review-release-1.1.1-w1-2026-10-19.md`), fixes `f4224d5ba` (R111W1-01) and `fc77c562f` (#739, #737 texts).
+- **Where the tree overruled the plan:** the W1.6 row joined #714's two alternatives with "and" where the issue offered them with "or"; the clause "a taken-over marker whose report removed nothing records nothing" would lose the record of a unit that removed its rows and gave itself up at the stop, so W1.6 guards the marker with a conditional `CREATE` instead (the F4 confirms: no path to a double or a lost `tenants.purged`). v108 adds `user.erasure_audit_pending` (with its index) and the table `tenant_purge_pending`, which is deliberately outside `TENANT_PURGE_ORDER`. W1.10 needed a test seam (`ServeOptions::audit_hold_for_tests`; not `Deserialize`, unreachable from configuration). W1.11's (b) test lives in `tests/crl_test.rs`, since the service needs the database fixture. W1.13 labelled a sixth message in the same assertion. The line numbers of W1.6, W1.7 and W1.12 were stale.
+- **F4 (W1.14):** one Medium, **R111W1-01**. W1.7's owed-erasure claim re-evaluated a subquery for every user row, at the start of every sweep on every replica: 112.8 s at 20 000 users and 2 000 requests. **Fixed in the wave** (`f4224d5ba`): the pending ids are read once (`LET`), and the test's data takes 19 ms against 95.5 s before. Low #736, #737; Informational #738, #739, #740, all on `1.1.x` for 1.1.2. #739's text items and #737's documentation part were taken in the wave (`fc77c562f`), so T-444, T-336, T-472, the deployment guide and the GDPR guide name #737 as the open residual; #737's code and #739 stay open.
+- **Re-size (§1.1):** one added Sonnet 5.5 session carried the R111W1-01 fix and the two text items.
+- **Executors:** each task at its row's model (W1.6, W1.7 and W1.14 Opus 5.5; the rest Sonnet 5.5).
+- **Open contract question (not answered by §11; not answered here):** a `gdpr.user_pseudonymized` row written by the next start's recovery carries `certificates_revoked: null` and `recovered: true`, while CONTRACT §-erasure (~l.9261) says the row "carries the count". The F4 judges the code's choice safe, since any number would be fabricated in an append-only row. It goes to the maintainer through the 1.63 conformance review §5.
+- **For W7.1:** the tenant metadata key `orphan_purge` is refused with `422 reserved_metadata_key`; a repeated issuer and serial answers `409 already_exists`. **For W8.2:** neither status is declared in the spec. **For W8:** read CodeQL on the PR, which is W1.13's oracle. **For W8.4:** v108 (additive, no backfill); a unit cut past its point of no return is recorded by the next start; a stored `metadata.orphan_purge` is kept and ignored; a stalled Vault fails the boot after ~10 s.
 
 ### 12.2 W2
 
+- **Head:** `37c3f1027` on `claude/release-1.1.1-w2` (11 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W2.1 `d1c97b6ee` (#711, #686; Opus 5.5), W2.2 `b846942f4` (#673), W2.3 `be74f6231` (#718), W2.4 `d3448c2f4` (#685), W2.5 `2b24f3787` (repair of W2.3, below) and `7f1f9cb9a` (#670), W2.6 `a8a65617b` (#671), W2.7 `6211b4286` (#672), W2.8 `5f17ff98c` (#682), W2.9 `ac3effd10` (#674), W2.10 `37c3f1027` (F4 review, `claude_dev/security-review-release-1.1.1-w2-2026-10-19.md`).
+- **Re-size (§1.1):** W2.3 left `rate_limit_bucket_names_test` red (its scan did not know `admin_preset`); W2.4 found it. The repair was folded into the W2.5 session as its first commit (`2b24f3787`), and every later prompt requires the full test binaries of each touched crate.
+- **Where the tree overruled the plan:** the keying rule lives in `axiam-core::forwarded_for`, not `config/rate_limit.rs`, and an empty `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` keeps today's behaviour with one boot `WARN` — the row and #711's Fix say so, only #711's Test sentence did not, and the shipped Kubernetes topology (TLS on behind an ingress that re-encrypts) decides; W2.7 reads seven handler prefixes, not eight, since W2.4 removed `oauth2_token_public`, and leaves `ciba_hint_cap` (written by `increment_by`) as T-474's residual; `asyncapi.yml` is `docs/api/asyncapi.yml`; W2.9's (d) and (g) had been made by #670 and #671.
+- **F4 (W2.10):** no Critical, High or Medium. Low #731 (the empty-list `WARN` looks at the REST listener's TLS only; the gRPC listener's native TLS reads the same list); Informational #732, #733, #734, #735 and #741 — the last the cross-wave question from §12.4: AMQP-ingested `network_role.*` / `certificate_binding.*` rows are not refused, rated Informational because the reserved set is by design the records the server reads back (R101W3-03, T-118, T-472), nothing reads these back, and every other server action is already open. All on `1.1.x` for 1.1.2. The W5.8 FreeRADIUS sentence matches W2.1's code.
+- **Executors:** each task at its row's model (W2.1 and W2.10 Opus 5.5, the rest Sonnet 5.5).
+- **For W7.1:** §8 "Actions the audit ingestion refuses" gains W2.8's grammar; §14/§27: a `429` on `/oauth2/token` carries `rate_limit_exceeded` and `Retry-After`, `slow_down` only as the device grant's `400`. **For W7.1/W8.2:** the crypto-gate `503` (PKI routes, login, SAML pages) is not annotated in the spec. **For W8.4:** the new key `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` (empty keeps the old behaviour, a bad value stops the boot); public clients see `429 rate_limit_exceeded` instead of `slow_down` on a flood; an AMQP action outside the grammar is dead-lettered.
+
 ### 12.3 W3
+
+- **Head:** `f3503d098` on `claude/release-1.1.1-w3` (13 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W3.1 `159565de5` (#675; Opus 5.5), W3.2 `502ee243c` (#712), W3.3 `430c4021a` (#676, **v109**: the sweep index), W3.4 `bb3a741ff` (#678), W3.5 `306b4a92e` (#679), W3.6 `1ffc71385` (#680, spec), W3.7 `e0b4bf0bb` and `7a9b002ca` (#681, Opus 5.5; v109 also gains `oauth2_refresh_token.dpop_jkt`), W3.8 `74b56fdda` (#683, spec), W3.9 `0e6ab8d31` (#705, new **T-488**), W3.10 `f5bc5bc6d` (#677), W3.11 `71c4ee193` (#684, spec), W3.12 `f3503d098` (F4 review, `claude_dev/security-review-release-1.1.1-w3-2026-10-19.md`).
+- **Where the tree overruled the plan:**
+  - W3.7's 403 at `/api/v1/device/*` needed an ordering change, not only the claim. A new `ConsoleSignIn` extractor refuses a token carrying `client_id` after the DPoP replay record and before the session check.
+  - Its refresh binding fails closed. A public DPoP-bound client's refresh token bound to no key is `invalid_grant`, whether it was issued before 1.1.1 or while the client was still confidential, because binding on first use would bind a stolen token to its thief.
+  - W3.7 extended v109 instead of claiming v110, and both scope tests pin it.
+  - W3.5 gates its probe behind a `verify-probe` feature, reached through a self dev-dependency declared in `TEST_ONLY_INVERSIONS`. The F4 confirms the feature is absent from release builds.
+  - W3.9 found no UMA element in STRIDE §5, so T-488 hangs on the §5.3 resource-server actor. The list route already filtered by registrant.
+  - W3.11's (f) phrase was in T-424's #676 amendment, not in `cleanup.rs`.
+  - Every row's line numbers were stale.
+- **F4 (W3.12):** no Critical, High or Medium. Filed on `1.1.x` for 1.1.2:
+  - Low #749 (R111W3-01): the #675 conversion leaves the client's confidential-era refresh tokens and pending device grants live, and they refresh on `client_id` alone once the client is public.
+  - Low #745 (R111W3-02, pre-existing): `/uma2/perm` mints tickets for another resource server's sets and for ordinary resources.
+  - Informational #746 and #747.
+- **Spec:** the F4 rebuilt it; `--dump-openapi` is byte-identical to `sdks/openapi.json`. The binaries W3.11 could not finish (`device_flow_test`, `ciba_test`, `ciba_approval_test`, `oauth2_flow_test`, `cleanup_task`) all pass.
+- **Executors:** each task at its row's model (W3.1, W3.7 and W3.12 Opus 5.5; the rest Sonnet 5.5); none stopped short; no re-size.
+- **Open for the maintainer (not answered by §11):**
+  - #745: should resources created through `/api/v1/resources` stay UMA-ticketable? The issue sets out three options; `uma_test` relies on tickets for admin-made resources.
+  - #749: should the conversion revoke the confidential-era tokens? Filed as Low under the wave rule, so 1.1.1's upgrade note tells operators to revoke them by hand.
+- **For W7.1 (§14, §27, §33, UMA):**
+  - A device-grant access token carries `client_id` and no `sid`: it gets `403 authorization_denied` at `/api/v1/device/verify` and `/decide` and `401` elsewhere.
+  - A public DPoP-bound client's refresh token is bound to its key: another key or an unbound token is `invalid_grant`, which the SDK treats as terminal.
+  - `/device_authorization` takes `client_id` from the body, the Basic header or the assertion; a mismatch is `invalid_request`, as is an unreadable body.
+  - `oauth2_clients.update` converts a device-only confidential client to `none`, and refuses a grant that registration would refuse with `422 grant_exceeds_registration_policy`.
+  - CIBA hint-cap contention answers `429 slow_down`.
+  - A resource server's get, update and delete of another's set answer `404`.
+- **For W8.3:** T-488 enters the counts; T-289, T-424 and T-447 are amended. **For W8.4:**
+  - Public DPoP clients' pre-1.1.1 refresh tokens are refused once.
+  - The conversion, and #749's manual revocation.
+  - `/api/v1/resources` resources leave `/uma2/rreg`.
+  - Device tokens carry `client_id`.
+  - v109 (index, plus `dpop_jkt`) is additive.
 
 ### 12.4 W4
 
+- **Head:** `178568391` on `claude/release-1.1.1-w4` (9 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W4.1 `9e1108a43` (#704), W4.2 `912742f84` (#702; T-483 Open → Mitigated), W4.3 `27aa45778` (#703; T-484 Open → Mitigated), W4.4 `bbf0a6483` (#706, Opus 5.5), W4.5 `bb670002f` (#708), W4.6 `d6a69bbe6` (#709; console line coverage 96.58 %), W4.7 `b8ce6ca58` (#715), W4.8 `dbc02db05` (F4 review, `claude_dev/security-review-release-1.1.1-w4-2026-10-19.md`), fix `178568391` (R111W4-01).
+- **Where the tree overruled the plan:** `MIGRATIONS` is 1 … 85, 90 … 107 — 86 … 89 were never claimed, so W4.1's contiguity test exempts them by name (`UNCLAIMED_VERSIONS`); W4.4 verifies the caller's own certificate as the decoy for every case that has no row of the caller's tenant, and lists the paths still cheaper (own-tenant revoked or expired rows, an unparsable stored PEM, the engine's no-assignment short-circuit, the global fingerprint read's hit or miss); W4.7 found (a) already answered `400` in the spec and pinned (d), (e).
+- **F4 (W4.8):** one Medium, **R111W4-01** — W4.5 retyped the §4.2 rule-2 refusal to `AxiamError::Network(NetworkConflict::StaleRole)` while the boot reconcile still matched `AxiamError::Conflict`, so a deployment whose ordinary-tenant super-admin is held by a group no longer booted (`seeder_default_data_test` red on `b8ce6ca58`). **Fixed in the wave** (`178568391`): the arm matches the typed variant; the oracle test and all 86 `axiam-db` test binaries pass. Low #726, #727; Informational #728, #729, #730, all on `1.1.x` for 1.1.2.
+- **Re-size (§1.1):** W4.5's executor ran only the binaries it touched and missed a crate-wide consequence of changing an error type; the fix went to one added Sonnet 5.5 session. Every later F4 and executor prompt requires the full test binaries of each touched crate, and of every crate whose error type a commit changes.
+- **Executors:** each task at its row's model (W4.4 and W4.8 Opus 5.5, the rest Sonnet 5.5); the fix session as above.
+- **Cross-wave (for the merge and W8.2):** `RESERVED_ACTION_NAMESPACES` is `tenants.`, `gdpr.` only, so an HMAC-authenticated AMQP producer could have W4's `network_role.*` / `certificate_binding.*` rows persisted; put to W2's F4 (W2.10) to rate, since the reserved set is W2.8's code. **For W8.3:** T-457 residual (f), T-483 on an unresolved tenant (#728), T-484 on a role delete (#727) and a cancelled write (#726). **For W8.4:** the organization scope's super-admin loses the six network permissions at the first boot (one `network_role.permission_revoked_by_reconcile` row each); the runner applies an unrecorded lower migration with a `WARN`; R111W4-01's fix belongs in #708's entry.
+
 ### 12.5 W5
+
+- **Head:** `fd9992b4f` on `claude/release-1.1.1-w5` (10 commits on `main`, every one carrying a `gpgsig`; merge into the plan branch follows W1 … W4, in order).
+- **Commits:** W5.1 `b930db3` (the rename, D-1 default Static/Live), W5.2 `2dab9f6` (#693), W5.3 `b915783` (#694), W5.4 `64cf8ce` (#695), W5.5 `7424392` (#696), W5.6 `c90c8c1` (#697, #713), W5.7 `4cd4a10c9` (#707), W5.8 `8450bc2` (#698, #711's sentence), W5.9 `fd9992b4f` (F4 review, `claude_dev/security-review-release-1.1.1-w5-2026-10-19.md`).
+- **Executors:** every task ran at its row's model (Sonnet 5.5; W5.9 Opus 5.5); none stopped short; no re-size.
+- **Where the tree overruled the plan:** W5.1 also renamed ~30 "RADIUS D4" comments the §6.1 table did not list (other crates, scripts, the console e2e matrix) and found `docs/pki/README.md` carries no D3/D4; W5.3's trap already existed in `fetch-crl.sh`, so the commit adds the test (TERM, HUP; INT is ignored by a backgrounded shell) and the header text only; W5.6 added twelve paths, the two issues' full lists, not eleven; W5.7's retry needs `axiam_decide { invalid = 1 }`, since `rlm_rest` returns `invalid` for a `401` and the review's form never reached the retry; W5.8 found §5's exposure paragraph already present and replaced only its "planned" sentence.
+- **Oracles:** `freeradius -XC` (pinned 3.2.8) passes on both profiles and on the guide's RadSec block, and refuses the block without `tls_max_version` (orchestrator, W5.7, W5.9); the local RADIUS e2e passes on both profiles (W5.9); `radius-e2e.yml` dispatched by the orchestrator: run 39302612696 on `c90c8c1` and run 39306303259 on `8450bc2`, both **success**; `fetch-crl-test.sh` 85/85 under `dash` and `bash`.
+- **F4 (W5.9):** no Critical, High or Medium. Low #720 (concurrent `401`s can put the refused token back in the cache; fail-closed), Informational #721 … #725, all on `1.1.x` for 1.1.2.
+- **For W7.1:** contract §36's "RADIUS D4" (two places) → "the Live profile", "(formerly RADIUS D4)" once. **For W8.3:** T-462 (exit 3, `no-cache`), T-486's concurrency caveat (#720, #722), T-487's "eighteen" stand-in answers (now nineteen), `docs/compliance/FINDINGS.md:64`, `website/src/data.ts:501`. **For W8.4:** the moved file names and variables, and that a 1.1.0 `raddb` set mixed with 1.1.1 files, or a kept `AXIAM_D4_URL`, rejects every device (fail closed); `fetch-crl.sh`'s new exit status 3.
 
 ### 12.6 W6
 
+- **Head:** `45ffae3` on `claude/release-1.1.1-w6` (2 commits on `main`, both carrying a `gpgsig`).
+- **Commits:** W6.1 `a9cb5a9` (#699: `bench-quick` anchors `BENCH_CERTS_DIR` and writes `results/quick/meta.json`), W6.2 `45ffae3` (#691: the five cleanup steps guarded by `steps.inputs.outcome == 'success'`).
+- **W6.3 (#719):** the sparse index read once on 2026-10-19 at ~18:03 UTC: `utoipa-swagger-ui` newest non-yanked **10.0.1 → `zip ^8.6`** (10.0.0 → `^8.6`). No release on `zip ≥ 9`: no commit; **#719 stays open on `1.1.x` and the PR does not name it (D-9).**
+- **Where the tree overruled the plan:** the `justfile` is `benchmarks/justfile` and the runner `benchmarks/runner/run-benchmark.sh`; `bench-quick` wrote no `meta.json` before; the fifth guarded step ("Collect … logs") was `failure() || …`, not `always()`, and carries the guard ANDed.
+- **Workflow dispatch (W6.2's oracle):** the orchestrator dispatched `fapi-conformance.yml` on the branch with `plan_name=Bad_Name` (run 39299314310): exactly one red step, "Validate dispatch inputs"; the five guarded steps skipped.
+- **Executors:** Sonnet 5.5 for all three, as the rows name; no re-size. No F4 of its own (W8.2 reads it).
+
 ### 12.7 W7 — the contract, the eleven SDKs and the conformance review
 
+- **Merges (orchestrator):** W1 `9373afab8`, W2 `73955c4ec`, W3 `45abe6561`, W4 `c4f3275fe`, W5 `4ba5b7c1b`, W6 `6bae7dd38`, every merge commit signed.
+  - W3's merge resolved two conflicts. `crates/axiam-db/src/schema.rs`: the migration list keeps v108 and v109, both scope tests are kept, and the newest-version assertion is 109. `Axiam.json`: T-289's mitigation text was merged three-way.
+  - W5's merge resolved `docs/deployment/README.md`, taking W2's `TRUSTED_PROXIES` text plus W5's sentence on the Live profile, and regenerated the spec and registry.
+  - Checked on the merged tree: `cargo check --workspace --tests --no-default-features` exit 0, no warnings; the schema tests (88), `rate_limit_bucket_names_test` (19), `audit_wraps_routes` and `seeder_default_data_test` (19) pass.
+- **W7.1** `a6cd10eba`: contract 1.63, record §34.7 (a … q).
+  - Plan vs tree: the device-grant token gets `403` only at `/api/v1/device/verify` and `/decide`, and `401` elsewhere. Item (c)'s rule lives in §8, not §33. Two "RADIUS D4" mentions, not three. The spec needed no regeneration.
+- **W8.4a, moved forward** `750be9f0a`: version 1.1.1, as 1.1.0 did with `89e488e3e`, so that the SDKs re-vendor the final spec once. `openapi.json` sha256 `15dace9c…`, spec digest `sha256:443c9d39…`; `management-registry.json` sha256 `b0d5e749…`.
+- **W7.2 … W7.12**: eleven Sonnet 5.5 sessions, one draft PR each on `claude/contract-1.63`. The final heads below vendor `d919ba0cc` byte for byte (`CONTRACT.md` sha256 `e267261b…`), and CI is green on every one:
+
+  | SDK | PR | final head | version | closes |
+  |---|---|---|---|---|
+  | TypeScript | ilpanich/axiam-typescript-sdk#147 | `30778f0c` | 1.1.1 | #142 |
+  | Rust | ilpanich/axiam-rust-sdk#136 | `168698b4` | 1.1.1 | #132 |
+  | Python | ilpanich/axiam-python-sdk#101 | `b42bbf47` | 1.1.1 | #99, #100 |
+  | C | ilpanich/axiam-c-sdk#75 | `3db38bdb` | 1.1.1 | #74 |
+  | C++ | ilpanich/axiam-cplusplus-sdk#77 | `12d8a354` | 1.2.0 (SOVERSION 3) | #76 |
+  | C# | ilpanich/axiam-csharp-sdk#109 | `6284a76a` | 1.1.1 | #107 |
+  | Go | ilpanich/axiam-go-sdk#101 | `f5fc7da2` | 1.1.1 | #99 |
+  | Java | ilpanich/axiam-java-sdk#119 | `dcae1850` | 1.2.0 | #115 |
+  | Kotlin | ilpanich/axiam-kotlin-sdk#78 | `e200a45e` | 1.2.0 | #77 |
+  | PHP | ilpanich/axiam-php-sdk#85 | `f260110a` | 1.1.1 | #84 |
+  | Swift | ilpanich/axiam-swift-sdk#76 | `e8492615` | 1.1.1 | #75 |
+
+- **Where the tree overruled the plan:** none of the seven "AMQP SDKs" ships an audit-event publisher. Rust guards `AuditEventMessage::sign`; the other six have nothing to refuse, so (c) became contract text.
+  - The C SDK found and fixed a manifest bug: a stated `termination_action` or `service_type` was always refused.
+  - Rust untracked the 438 build files under `vendor/axiam-opaque/target/`.
+- **W7.13** `1f6134bdc` (Opus 5.5), `claude_dev/sdk-contract-1.63-conformance-review.md`: six Medium, all fixed before W8:
+  - C163-01, TypeScript: the `/oauth2/` match also caught the federation callback, breaking Node SSO over OAuth2.
+  - C163-02, Swift: C162-07 was not met; the refusal now happens at `plan` and names the member and the value.
+  - C163-03, C, and C163-04, C++: the UMA ticket grant carried the session cookie. C++ also gets C163-15, `kVersion`.
+  - C163-05, Kotlin: version not bumped.
+  - C163-06, contract text: fixed in **W7.1b** `d919ba0cc` together with C163-11.
+  - Low and Informational: ilpanich/axiam#750, typescript#148, python#102, c#76, filed by the reviewer; rust#137, cplusplus#78, csharp#110, go#102, java#120, kotlin#79, php#86, swift#77, filed by the orchestrator because the reviewer could not reach those repositories.
+- **Re-size (§1.1):** W8.4a was moved forward, and W7.1b added for the contract-text Medium. The W7.13 session sat about an hour on an `add_repo` permission prompt nobody could answer. It was interrupted and continued with plain `git` on the public repositories.
+- **Open for the maintainer (the review's §5, not answered by §11):**
+  - Q1: the recovered `gdpr.user_pseudonymized` row with `certificates_revoked: null` against §27.11 rule 5 (W1.7's question).
+  - Q2: what a device poll does on `429 rate_limit_exceeded`; the review recommends the CIBA rule, in contract 1.64.
+  - Q3: keep "naming the member and the value" strict, or relax it. **C163-10 was not applied**, so the contract stays strict; seven SDKs name the member only and carry it as Informational.
+
 ### 12.8 W8 — release readiness
+
+- **W8.1 (gate)**, Sonnet 5.5, on `750be9f0a`, with the later docs/website commits re-checked on `5298f2980`. **No failure, no fix commit.**
+  - `cargo fmt` passes; clippy `-D warnings` passes with SAML on and off.
+  - 7523 Rust tests passed, 0 failed, 40 ignored, over 359 test-binary runs. `federation_test` passes with SAML on (87). `axiam-api-grpc --features client` passes (147).
+  - Every `scripts/check-*` passes, with its self-test.
+  - Frontend: lint, `tsc`, a11y, build and vitest all pass; 2386 tests, lines 96.58 %. Website: lint, build and `npm audit` pass.
+  - `cargo deny` and `cargo audit` (CI's ignores) pass.
+  - RADIUS e2e locally, Docker with the pinned 3.2.8 image: **Static** and **Live** both pass. `fetch-crl-test.sh` passes 85/85 under dash and bash.
+  - Not runnable here: the SDK drift checks (no SDK clones or token), the external link check (proxy 403), Playwright, Trivy, llvm-cov.
+- **W8.2 (combined F4)**, Opus 5.5, `d288c0bd9`, `claude_dev/security-review-release-1.1.1-2026-10-20.md`: **no Critical, High or Medium.**
+  - Every merge checked against both parents: the W1/W2/W4/W6 remerge diffs are empty, and the W3/W5 hand resolutions keep both sides.
+  - Low #751 … #755, plus #741 re-rated to Low; Informational #756 … #758.
+  - #749 stays Low, with an upgrade note. A new upgrade note for #755: roll replicas one at a time.
+- **W8.3 (threat model)**, Sonnet 5.5, `8e90728f8`: 2.43.0, 488 threats (457 Mitigated, 21 Open, 10 N/A). T-483 and T-484 are Mitigated, T-488 is new. Static/Live (formerly D3/D4) on first use in §5.10. The website copies are regenerated.
+- **W8.4a (version)** `750be9f0a`, moved forward (§12.7). **W8.4** `7ab871fad`, Sonnet 5.5:
+  - `CHANGELOG.md` `[1.1.1] - 2026-10-20`: one entry per closed issue (52), and every upgrade note of §9 plus #749 and #755.
+  - `website/src/version.ts` `SECURITY_VERIFIED_RELEASE` 1.1.1 / 2026-10-19; the 1.1.1 news post and `postSlug`; the roadmap's "Release 1.1.1" row.
+  - `frontend/` and `website/` `package.json` stay `0.0.0`, as in 1.1.0.
+- **PR #759 CI fixes** (opened from `95af805be`):
+  - **GitGuardian** flagged the fake Vault token in a `vault_forward.rs` test, from W1.2 `83bec6fc0`. `b927d7e09` (Sonnet 5.5) builds the tokens at run time, after the precedent `eb723bc17`. History was not rewritten, and the maintainer resolved incident 38424066 in the dashboard.
+  - **Examples smoke and E2E** both failed in `scripts/e2e-bootstrap.sh` with 403 `network:decide`. W4.2's #702 fix (`912742f84`) withheld the network permissions from the organization scope's super-admin, and that also took away the documented bootstrap: an organization principal giving a tenant its first super-admin. `21347976c` (Opus 5.5) adds one named gate exemption, `organization-bootstrap`. It applies only when the writer has organization scope, the role is the tenant's own seeded `super-admin`, the grantee is a user other than the writer, and the assignment is tenant-wide. The audit row names the exemption. T-483 is amended in both copies, and `docs/admin/organization-scope.md` and the two #702 lines of `CHANGELOG.md` are updated. The exemption is not limited by holder count, so an organization can re-provision a tenant whose admin left (§8, assumption 7). Plan vs tree: the W8.1 gate missed this because the examples smoke needs Docker, which the gate session did not have.
+  - **CodeQL** raised 3 high cleartext-logging alerts in test messages; `e1f06663e` fixes them (#757).
+  - `bbb2ad05d` regenerates the website threat-model data for the T-483 amendment. It also repairs that amendment, which the rebase had put into `modelType`.
+- **W8.5 (coverage)**, Sonnet 5.5, tests only.
+  - Commits: `7e48381e7`, `2502e2c98`, `3b45af680`, `ea8fb9835`, `a53e7c83e`, `64ca82b3b`, `ca1ed364a`, `d93910704`.
+  - The first per-crate check, on `b927d7e09` against main `6b15aa36a`, found five crates below main: `axiam-server` 84.68 → 83.88 % (`audit_hold.rs` 39/45 lines missed; new `cleanup.rs` arms), `axiam-api-grpc` 94.99 → 94.71, `axiam-audit` 91.84 → 91.64, `axiam-core` 94.94 → 94.93, `axiam-amqp` 81.458 → 81.457.
+  - CI `cargo-llvm-cov` on `d93910704` (job 118590043008), all lines: **91.82 %**, against main's 91.69 %. Per crate, every one is level or up. The five that had fallen now read: server 85.87, api-grpc 95.12, audit 92.25, core 95.04, amqp 81.86. Also: api-rest 90.10, db 93.60, pki 90.78, oauth2 92.62, authz 98.35.
+  - One line, `audit_consumer.rs:140` (a `tracing` field), is still reported unexecuted after a test that asserts it. Its crate is up regardless, so it was not chased further.
+  - Frontend: lines 96.58 % (7770 / 8045); `thresholds.lines` raised from 96.1 to 96.48.
+- **Folded in after the maintainer's answers (§11, 2026-10-20)**, Opus 5.5:
+  - `7d4da0a79`, **#749**. The conversion to public revokes the client's refresh tokens and deletes its device grants. A first pass runs before the conditional write; if it fails, the request is refused and nothing is converted, so the retry is the whole request. A second pass runs after the write; if it fails, it is logged and recorded as `revocation_complete: false`. `revoke_all_for_client` now returns the count. T-289 is amended, `website/src/threatModel.ts` regenerated, and the upgrade note replaced (each device runs the device flow once).
+  - `ae8562ef4`, **#745**. The scope catalog is asked as the requesting resource server. A set that server did not register, including an administrator-made resource, declares no scope, so `/uma2/perm` answers exactly as for an unknown id (`400`). The wire format is unchanged: no `invalid_resource_id` is introduced, and `sdks/openapi.json` and its digest stay the same. `uma_test` moved to registered sets. T-488 and `docs/api/uma.md` are amended, with an upgrade note. The sentence for contract 1.64 is on #760.
+  - `9a8326703`: the CHANGELOG's threat-model line names both amendments.
+  - CI on `190b492e8` passes every check. `cargo-llvm-cov` (job 118693623671) reads **91.81 %** lines against main's 91.69 %, and no crate is below main: api-rest 90.07, oauth2 92.64, db 93.58, core 95.04, server 85.86, audit 91.92, amqp 81.86, api-grpc 95.12.
+- **Closes:** #664 … #699, #702 … #715 (#710 among them), #717, #718, plus #745 and #749 — 54 issues. **Not closed:** #719 (W6.3), #513, #561.
 
 ---
 

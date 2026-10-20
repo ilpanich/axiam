@@ -1,4 +1,4 @@
-# The 802.1X / EAP-TLS e2e stack (W6.2, D3): a real FreeRADIUS trusting the tenant
+# The 802.1X / EAP-TLS e2e stack (W6.2, the Static profile): a real FreeRADIUS trusting the tenant
 # signing CA that a real AXIAM issued, driven by a real `eapol_test`.
 #
 # What this file is, and is not

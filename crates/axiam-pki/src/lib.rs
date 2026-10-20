@@ -15,6 +15,7 @@ pub mod crl;
 mod crypto;
 pub mod mds;
 pub mod mtls;
+mod permit;
 pub mod pgp;
 pub mod saml_signing;
 pub mod serial;

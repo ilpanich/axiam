@@ -91,11 +91,12 @@ function EffectiveValues({ profile, cap }: { profile: NetworkReplyProfile; cap: 
 export function ReplyProfileDialog({ segment, cap, nodeName, onClose }: ReplyProfileDialogProps) {
   const queryClient = useQueryClient();
   const { can } = usePermissions();
-  const canWrite = can("network:profiles_write");
-  // Deleting the profile removes every device placed on the segment (no
-  // profile, no candidate), so the server asks the placing right too
-  // (network:grant, 2026-10-16). Cosmetic: the server decides, per node.
-  const canDelete = canWrite && can("network:grant");
+  // Every write of the profile (create, replace, delete) asks the placing right
+  // beside the write right: a profile is what makes the segment a placement
+  // candidate, and a delete removes every device placed on it (network:grant,
+  // 2026-10-16; #709 for create and replace). Cosmetic: the server decides, per node.
+  const canWrite = can("network:profiles_write") && can("network:grant");
+  const canDelete = canWrite;
   const segmentId = segment?.id;
 
   const profile = useQuery({

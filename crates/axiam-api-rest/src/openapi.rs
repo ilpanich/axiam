@@ -335,7 +335,7 @@ use crate::handlers;
         handlers::scim_targets::update_target,
         handlers::scim_targets::delete_target,
         handlers::scim_targets::reconcile_target,
-        // Network segments and RADIUS reply profiles (RADIUS D4, W6.3).
+        // Network segments and RADIUS reply profiles (RADIUS Live profile, W6.3).
         handlers::network::list_segments,
         handlers::network::create_segment,
         handlers::network::get_segment,
@@ -832,7 +832,7 @@ use crate::handlers;
         (name = "saml", description = "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"),
         (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"),
         (name = "scim-targets", description = "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"),
-        (name = "network", description = "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS D4, claude_dev/radius-reply-profile-design.md)"),
+        (name = "network", description = "Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS Live profile, claude_dev/radius-reply-profile-design.md)"),
         (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"),
         (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),

@@ -34,9 +34,9 @@ issue closed — every finding in this register is now Fixed.
 **No open deferred finding of any severity. 1.0.0 ships with no known High security holes in this register (D-04).**
 
 **Re-verified 2026-10-10 against threat model 2.40.0, after the 1.0.0 waves,
-2026-10-14 against 2.41.0, after the 1.0.1 waves, and 2026-10-16 against 2.42.0,
-after the 1.1.0 waves**
-(`ThreatDragonModels/Axiam/Axiam.json`, 487 threats, 454 mitigated / 23 open /
+2026-10-14 against 2.41.0, after the 1.0.1 waves, 2026-10-16 against 2.42.0,
+after the 1.1.0 waves, and 2026-10-19 against 2.43.0, after the 1.1.1 waves**
+(`ThreatDragonModels/Axiam/Axiam.json`, 488 threats, 457 mitigated / 21 open /
 10 not applicable; the Security section of the website
 publishes the same list). This register records findings: defects with a fix
 owed, and there are none open. The threat model is the wider list, and it is
@@ -61,7 +61,7 @@ are Mitigated. The 2.41.0 count differs from the 2.40.0 one (475 threats, 437 /
 the recipe moved from Not applicable to Mitigated (T-449, T-454, T-456, T-459),
 and by two more (T-450, T-462), which are Open for the recipe: the 1.0.1 review
 history is in `claude_dev/security-review-release-1.0.1-2026-10-14.md`. The
-2.42.0 count differs from the 2.41.0 one by RADIUS D4 (1.1.0, #563): five
+2.42.0 count differs from the 2.41.0 one by the Live profile of the RADIUS recipe (formerly D4; 1.1.0, #563): five
 entries of the RADIUS diagram moved from Not applicable to Mitigated for
 AXIAM's decision route (T-457, T-461, T-463, T-464, T-468), and ten entered
 (T-478 … T-487) — six Mitigated, and four Open: AXIAM's availability as the
@@ -70,7 +70,13 @@ the network write gate (T-481, T-483, T-484), confirmed and kept open by the W6
 review and filed for 1.1.x (#701 … #703). Those three are in AXIAM's own request
 path, and none is High or Critical, so the eleven above are unchanged; the 1.1.0
 review history is in `claude_dev/security-review-release-1.1.0-2026-10-16.md`
-and the per-wave reviews it links.
+and the per-wave reviews it links. The 2.43.0 count differs from the 2.42.0 one
+by T-488 (a UMA resource server reaching a resource set it did not register;
+Mitigated, #705) and by two of those three residuals, T-483 (#702) and T-484
+(#703), which release 1.1.1 moved from Open to Mitigated: 488 threats, 457 / 21 /
+10. T-481 stays open (Low, #701) with T-486, and the eleven High and Critical
+entries are unchanged; the 1.1.1 review history is in the
+`claude_dev/security-review-release-1.1.1-w*-2026-10-19.md` files.
 
 ---
 

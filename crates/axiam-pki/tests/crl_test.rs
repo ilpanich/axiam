@@ -1211,6 +1211,48 @@ async fn the_crl_number_grows_across_revocations_epochs_and_an_expiry() {
     assert_eq!(other.der, fourth.der);
 }
 
+/// #666 — `current_at` keeps a named instant that lies in the past: the list
+/// is signed with that instant's epoch, not at the wall clock.
+#[tokio::test]
+async fn current_at_signs_a_past_instant_at_that_instant() {
+    const SECS: u64 = 60;
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let crls = f.crl_service(SECS);
+
+    // The CA is valid from its creation; move that back so the named instant
+    // lies inside its validity window.
+    let past = Utc::now() - Duration::seconds(10 * 60);
+    f.db.query("UPDATE type::record('ca_certificate', $id) SET not_before = $t")
+        .bind(("id", ca.certificate.id.to_string()))
+        .bind(("t", past - Duration::seconds(60)))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let named = crls
+        .current_at(f.org, ca.certificate.id, past)
+        .await
+        .unwrap();
+    assert!(
+        named.this_update <= past,
+        "thisUpdate is the named epoch's, not the wall clock's"
+    );
+    assert!(named.refresh_at > past && named.refresh_at <= past + Duration::seconds(60));
+
+    // Asked as of the clock, the same service answers with the current epoch's list.
+    let now = crls.current(f.org, ca.certificate.id).await.unwrap();
+    assert!(now.this_update > named.this_update);
+    assert_ne!(now.crl_number, named.crl_number);
+
+    // And the named instant is still answered as of itself afterwards.
+    let again = crls
+        .current_at(f.org, ca.certificate.id, past)
+        .await
+        .unwrap();
+    assert_eq!(again.this_update, named.this_update);
+}
+
 /// #615, the issue's test: a revocation dated past the end of the epoch — the
 /// datastore's clock ahead of the replica's — beside an entry that expires at
 /// the boundary. The list signed before the boundary states its epoch's last

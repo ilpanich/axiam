@@ -710,14 +710,29 @@ describe("NetworkAccessPage — reply profile", () => {
     );
   });
 
-  it("offers Delete profile only to a holder of network:grant as well", async () => {
-    // Deleting a profile removes every device placed on the segment, so the
-    // server asks network:grant beside network:profiles_write (2026-10-16).
+  it("hides the editor, create and replace alike, from a holder of network:profiles_write without network:grant", async () => {
+    // Create and replace take the placing right too, as the delete does: a
+    // profile on a segment is what makes it a placement candidate (#709).
     as("network:read", "network:profiles_write");
     const dialog = await openProfile("corp", { profiles: { "seg-corp": profile() } });
     await within(dialog).findByTestId("profile-effective-timeout");
-    expect(within(dialog).getByRole("button", { name: "Save profile" })).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Session-Timeout (seconds) *")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /save|create profile/i })).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Delete profile" })).not.toBeInTheDocument();
+  });
+
+  it("hides the create form on a segment without a profile when network:grant is missing", async () => {
+    as("network:read", "network:profiles_write");
+    const dialog = await openProfile("corp", { profiles: {} });
+    await within(dialog).findByText(/has no reply profile/);
+    expect(within(dialog).queryByRole("button", { name: /create profile/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the editor to a holder of network:profiles_write and network:grant", async () => {
+    as("network:read", "network:profiles_write", "network:grant");
+    const dialog = await openProfile("corp", { profiles: { "seg-corp": profile() } });
+    await within(dialog).findByTestId("profile-effective-timeout");
+    expect(within(dialog).getByRole("button", { name: "Save profile" })).toBeInTheDocument();
   });
 
   it("offers Delete profile to a holder of network:profiles_write and network:grant", async () => {

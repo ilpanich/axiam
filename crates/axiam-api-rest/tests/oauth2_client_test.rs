@@ -432,6 +432,7 @@ async fn deleting_a_client_revokes_its_refresh_tokens() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            dpop_jkt: None,
             expires_at: chrono::Utc::now() + chrono::Duration::days(30),
         })
         .await
@@ -2169,4 +2170,85 @@ async fn admin_create_cannot_claim_dcr_provenance() {
         .await
         .unwrap();
     assert_eq!(row.managed_by, ManagedBy::Admin);
+}
+
+async fn stored_grants(db: &Surreal<TestDb>, tenant_id: Uuid, id: &str) -> Vec<String> {
+    use axiam_core::repository::OAuth2ClientRepository;
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_id(tenant_id, id.parse().unwrap())
+        .await
+        .unwrap()
+        .grant_types
+}
+
+/// #680 (R110W3-07) — the oracle: a grant `dcr::validate` / `cimd::validate`
+/// would refuse is `422` on a `dcr` and a `cimd` row and writes nothing, while
+/// the same body on an `admin` row is accepted. A grant the row already holds
+/// is exempt, and an allowed one (`refresh_token`) is an ordinary edit.
+#[actix_rt::test]
+async fn admin_put_of_a_grant_registration_would_refuse_is_422_on_dcr_and_cimd_rows_only() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+        let id = seed_managed_client(&db, tenant_id, managed_by, &["openid"]).await;
+        for grant in [
+            "client_credentials",
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:openid:params:grant-type:ciba",
+        ] {
+            let (status, body) = put_client!(
+                app,
+                token,
+                id,
+                serde_json::json!({ "grant_types": ["authorization_code", grant] })
+            );
+            assert_eq!(status, 422, "{managed_by} {grant}: {body}");
+            assert_eq!(body["error"], "grant_exceeds_registration_policy", "{body}");
+            assert_eq!(
+                stored_grants(&db, tenant_id, &id).await,
+                vec!["authorization_code".to_owned()],
+                "{managed_by} {grant}: a refusal leaves the row unchanged"
+            );
+        }
+
+        // Held grant: re-sending what the row holds adds nothing.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "grant_types": ["authorization_code"] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+
+        // A grant a registration admits is an ordinary edit.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "grant_types": ["authorization_code", "refresh_token"] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+    }
+
+    // The control: the same body on an administrator's own client.
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "grant_types": ["authorization_code", "client_credentials"] })
+    );
+    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(
+        stored_grants(&db, tenant_id, &id).await,
+        vec![
+            "authorization_code".to_owned(),
+            "client_credentials".to_owned()
+        ]
+    );
 }

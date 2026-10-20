@@ -659,6 +659,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: only this subject's effective permissions change — targeted flush.
     // (Assignment widens access, the safe direction, but we invalidate anyway
     // so the new grant is visible immediately rather than after the TTL.)
@@ -717,6 +718,7 @@ pub async fn unassign_from_user<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): unassigning a role removes access
     // for exactly this subject. Invalidate immediately so a cached allow cannot
     // survive — a stale allow is the dangerous staleness direction, because a
@@ -837,6 +839,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: the machine's own effective permissions changed — targeted flush, on
     // the same terms as the user path. The engine caches by `(tenant, subject)`
     // and does not care which table the subject came from.
@@ -895,6 +898,7 @@ pub async fn unassign_from_service_account<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): a cached allow must not outlive the
     // grant. See `unassign_from_user` for why this direction of staleness is the
     // dangerous one.
@@ -1083,6 +1087,7 @@ pub async fn assign_to_group<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.
     authz
@@ -1141,6 +1146,7 @@ pub async fn unassign_from_group<C: Connection + Clone>(
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
+    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): unassigning a role from a group
     // revokes it from every member. The member set isn't known here without a
     // query, so flush the whole tenant — this must never leave a stale allow.

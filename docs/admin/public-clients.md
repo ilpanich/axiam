@@ -79,7 +79,10 @@ Authentication** to **Public client (no secret)**. The dashboard then:
   method on the wrong side of that line for the client being edited is
   refused with the same "register a new client with the method you want"
   the API gives, because the secret cannot follow either direction of that
-  change (see "What a public registration is refused" below).
+  change (see "What a public registration is refused" below). The one
+  conversion the API admits — a confidential **device** client made public,
+  see [Converting a confidential device client](#converting-a-confidential-device-client-to-public)
+  — is made through the API; the dashboard still refuses it.
 
 Two of the refusals below — a public client presenting the UMA-ticket grant,
 and a public client at the introspection endpoint — have no corresponding
@@ -145,7 +148,85 @@ registered for `client_secret_post` that sends no secret is still
 `invalid_client`, with the same answer an unknown `client_id` gets. The
 `token_endpoint_auth_method` also cannot be changed across that line by an
 update: the secret cannot follow the change in either direction, so AXIAM
-refuses the patch and asks you to register the client you actually want.
+refuses the patch with `400` and asks you to register the client you actually
+want. There is one exception, described next.
+
+---
+
+## Converting a confidential device client to public
+
+Since 1.1.0 both device-flow endpoints (`/oauth2/device_authorization` and the
+poll) authenticate the client by its registered method (#635). A device client
+registered without `token_endpoint_auth_method` is confidential
+(`client_secret_post`, the default), and the 1.0.x B2 quickstart registered
+device clients exactly that way. Their devices send `client_id` alone — as
+every SDK does, CONTRACT §14.1 — so after the upgrade they are refused
+`401 invalid_client` at both endpoints. The server's startup `WARN` counts
+such clients.
+
+From 1.1.1 an administrator can make such a client public **in place**, so its
+devices keep the `client_id` they were provisioned with (#675):
+
+```bash
+curl -X PUT "https://id.example.com/api/v1/oauth2-clients/$ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"token_endpoint_auth_method": "none"}'
+```
+
+The conversion is admitted only when **both** the stored client and the
+client the request would produce hold the device grant
+(`urn:ietf:params:oauth:grant-type:device_code`, or its short spelling
+`device_code`) and nothing else but `refresh_token`. What happens:
+
+* **The secret is gone.** The write that sets `none` also clears the stored
+  `client_secret_hash`, in the same statement, so no stale credential survives
+  on a public row. A device that still sends the old secret is refused
+  `invalid_client`, as any public client presenting a credential is.
+* **One audit row** names the conversion: action
+  `oauth2.client_converted_to_public`, the administrator as actor, the client's
+  row id as resource, and metadata with the `client_id`, the method it had
+  (`from`), `none` (`to`), its `grant_types`, `client_secret_cleared: true`,
+  and what was revoked (`refresh_tokens_revoked`, `device_grants_deleted`,
+  `revocation_complete`; see below).
+* **What the client was issued while confidential is revoked** (since 1.1.1,
+  #749). Its refresh tokens could be redeemed only with the secret; on a public
+  client the same tokens would redeem on `client_id` alone, for whoever holds
+  one. The conversion therefore revokes every refresh token of the client and
+  deletes its device grants, pending or approved, so **each device runs the
+  device flow once** after the conversion — which a device that holds no secret
+  had to do anyway, since its refresh tokens were unusable without one. The
+  revocation runs before the write: if it fails, the request fails and nothing
+  is converted, so retry the same request. It runs once more after the write,
+  for a refresh that read the client while it was still confidential; if that
+  second pass fails, the conversion stands, the server logs an error and the
+  audit row says `revocation_complete: false`.
+* **The rest of the registration still applies.** The merged client is held
+  to the same rules a public registration is: no `fapi2` profile, and no mTLS
+  binding, `jwks` or `jwks_uri` beside `none` — clear those in the same
+  request if the client carries them.
+* **A DPoP-bound client's devices sign in again, once** (since 1.1.1, #681).
+  A public client registered with `dpop_bound_access_tokens` has its refresh
+  tokens bound to its device's DPoP key (see
+  [Refresh tokens of a DPoP-bound public client](#refresh-tokens-of-a-dpop-bound-public-client)),
+  and the refresh tokens issued while it was confidential are bound to none,
+  so each is refused `invalid_grant` at its next refresh and the device runs
+  the device flow again. Since #749 the conversion revokes them in any case
+  (above), so the binding is what keeps the tokens issued **after** the
+  conversion bound to the device's key.
+
+**Every other conversion stays refused** with `400`, and writes nothing:
+
+| Request | Answer |
+| --- | --- |
+| `none` on a client that also holds `client_credentials`, token exchange or CIBA | `400` — those grants rest on the client's own credential |
+| `none` together with `grant_types` that drop such a grant in the same request | `400` — remove the grant first, in its own update, then convert |
+| `none` on a client without the device grant (an `authorization_code` client, a `refresh_token`-only one) | `400` — register a new public client |
+| a confidential method on a public client (the converse) | `400` — this API mints a secret only at creation |
+
+Converting is a statement that the client's devices **cannot** keep a secret,
+the same statement a public registration makes (RFC 8628 §5.6). Leave a
+device client confidential when its devices hold a credential, and have them
+send it at both endpoints.
 
 ---
 
@@ -231,31 +312,33 @@ accepted at `/oauth2/authorize`, and only one of them started this flow.
 
 ## Rate limiting
 
-A token request carrying no client credential is counted in its own bucket,
-keyed on **`client_id` and the client's address together**, with the
-`token_per_min` allowance (`AXIAM__RATE_LIMIT__TOKEN_PER_MIN`, default 120 —
-see the [deployment guide](../deployment/README.md)). It sits behind the
-endpoint's own rate limit rather than replacing it. The device-code grant's
-polls are counted in it too: a public device client presents no credential.
+A token request carrying no client credential has **no bucket of its own**:
+it is counted by the `/oauth2/token` route's rate limit like every other token
+request, keyed by `AXIAM__RATE_LIMIT__KEY` (`ip` by default) at
+`AXIAM__RATE_LIMIT__TOKEN_PER_MIN` (default 120 — see the
+[deployment guide](../deployment/README.md)). The device-code grant's polls
+are counted there too: a public device client presents no credential.
 
-The address is the one the endpoint's own rate limit keys on: the rightmost
-`X-Forwarded-For` entry your proxies did not add, under
-`AXIAM__RATE_LIMIT__TRUSTED_HOPS` (the number of proxies in front of the
-server minus one — see [Deriving `TRUSTED_HOPS`](../deployment/README.md#deriving-trusted_hops)),
-and the connection's peer address when there is no such entry. Before 1.1.0 it
-was always the peer address, which behind a reverse proxy is the proxy: every
-user of one public client then shared one allowance, and one address could
-spend it and have every other user's code exchange and refresh — and, once
-device polls were counted, every device's poll — answered `429 slow_down`. A `TRUSTED_HOPS` set one too high brings that back,
-for this bucket as for every other.
+A caller flooding the endpoint from one address against one public client
+therefore meets **`429` with `rate_limit_exceeded`** (and a `Retry-After`),
+the same answer every other client gets from the route. It never meets
+`slow_down` from that flood. `slow_down` is the device grant's own answer
+(RFC 8628 §3.5): a `400` returned to a device that polls faster than the
+interval its grant carries, and it means "raise your interval by 5 seconds".
+A client that handles `slow_down` as "wait longer" and `rate_limit_exceeded` as
+"back off for `Retry-After`" is correct for both.
 
-Neither half of that key works alone here. `client_id` on its own is a bucket
-an unauthenticated caller mints by rotating a value they choose; the address
-on its own puts every desktop client behind one NAT gateway — an
-office, a household — into a single allowance. Deployments that front many
-confidential clients from one egress IP should additionally set
-`AXIAM__RATE_LIMIT__KEY=ip_client_id`, which applies the same reasoning to the
-endpoint's main bucket.
+The address the route keys on is the rightmost `X-Forwarded-For` entry your
+proxies did not add, under `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and
+`AXIAM__RATE_LIMIT__TRUSTED_PROXIES` (see
+[Deriving `TRUSTED_HOPS`](../deployment/README.md#deriving-trusted_hops)), and
+the connection's peer address when there is no such entry. Before 1.1.1 a
+second, narrower bucket — keyed on `client_id` and the address together, at the
+same allowance — sat behind the route's limit and answered `429 slow_down`. It
+could only refuse a request the route had already admitted, so it is removed:
+the route limit is the single answer. Deployments that front many clients from
+one egress IP should set `AXIAM__RATE_LIMIT__KEY=ip_client_id`, which gives each
+client its own route bucket per address.
 
 ---
 
@@ -302,6 +385,30 @@ curl -X POST "https://id.example.com/oauth2/token?tenant_id=$TENANT_ID" \
 Refreshing takes the same shape — `grant_type=refresh_token`,
 `refresh_token=…`, `client_id=…`, and no secret.
 
+### Refresh tokens of a DPoP-bound public client
+
+A public client has no credential, so a refresh token is all a thief needs to
+keep a grant alive. RFC 9449 §5 therefore binds the refresh tokens of a
+**public** client that uses DPoP to the client's key, and since 1.1.1 AXIAM
+does so (#681) for every public client registered with
+`dpop_bound_access_tokens: true`, whatever the grant (authorization code or
+device):
+
+* The refresh token is bound to the key of the DPoP proof sent with the
+  request that obtained it.
+* A refresh must carry a proof by **that** key. A proof by another key is
+  refused `400 invalid_grant`, and the token is not spent: the client that
+  holds the key can still refresh it. The successor is bound to the same key.
+* A refresh token bound to no key is refused `invalid_grant`. That covers a
+  token issued before the upgrade to 1.1.1, one issued while the client was
+  confidential or not yet registered for DPoP. The client signs in again once
+  and gets a bound one. The server does not bind such a token to the first key
+  that presents it, because that key may be a thief's.
+
+A client that rotates its DPoP key must therefore obtain a new grant; keep the
+key for as long as the refresh token. A confidential client's refresh tokens,
+and a public client's that does not use DPoP, are unchanged.
+
 ---
 
 ## See also
@@ -311,4 +418,7 @@ Refreshing takes the same shape — `grant_type=refresh_token`,
 * [API documentation](../api/README.md) — the OpenAPI document, which carries
   `none` in the `token_endpoint_auth_method` enum.
 * `crates/axiam-api-rest/tests/public_client_test.rs` — every rule on this
-  page, asserted.
+  page, asserted; the device-client conversion in
+  `crates/axiam-api-rest/tests/device_flow_test.rs`
+  (`a_confidential_device_client_converts_to_public_and_its_flow_needs_only_its_client_id`,
+  `every_other_change_across_the_public_line_is_still_refused`).

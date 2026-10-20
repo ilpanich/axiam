@@ -27,7 +27,7 @@ export default defineConfig({
       // summary page — so once this branch has been through CI once, prefer
       // that printed number over this one for the next ratchet.
       thresholds: {
-        lines: 96.1,
+        lines: 96.48,
       },
     },
   },

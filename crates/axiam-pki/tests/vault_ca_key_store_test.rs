@@ -125,11 +125,8 @@ async fn a_refused_write_names_the_policy_rather_than_the_status_alone() {
         "{msg}"
     );
     assert!(msg.contains("just vault-policy"), "{msg}");
-    assert!(
-        !msg.contains(TOKEN),
-        "the token must never reach an error: {msg}"
-    );
-    assert!(!msg.contains(PEM), "nor the key: {msg}");
+    assert!(!msg.contains(TOKEN), "the token must never reach an error");
+    assert!(!msg.contains(PEM), "nor the key");
 }
 
 #[tokio::test]
@@ -341,7 +338,7 @@ async fn a_refused_delete_is_reported() {
         )),
         "{msg}"
     );
-    assert!(!msg.contains(TOKEN), "{msg}");
+    assert!(!msg.contains(TOKEN), "the 403 error leaked the token");
 }
 
 // ---------------------------------------------------------------------------
@@ -386,8 +383,8 @@ async fn an_unreachable_vault_names_the_operation_that_failed() {
             _ => "deleting the CA key",
         };
         assert!(msg.contains(expected), "{label}: {msg}");
-        assert!(!msg.contains(TOKEN), "{label} leaked the token: {msg}");
-        assert!(!msg.contains(PEM), "{label} leaked the key: {msg}");
+        assert!(!msg.contains(TOKEN), "{label} leaked the token");
+        assert!(!msg.contains(PEM), "{label} leaked the key");
     }
 }
 
@@ -435,7 +432,7 @@ async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
             err.contains("redirect") && err.contains(host),
             "the refusal names the host that redirected: {err}"
         );
-        assert!(!err.contains(TOKEN), "{err}");
+        assert!(!err.contains(TOKEN), "a redirect refusal leaked the token");
     }
     assert_eq!(vault.received_requests().await.unwrap().len(), 3);
     assert!(

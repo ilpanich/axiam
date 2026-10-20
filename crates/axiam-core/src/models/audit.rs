@@ -74,9 +74,54 @@ pub fn reserved_action_namespace(action: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `action` is within the grammar an external producer may write
+/// (R110W3-09, #682): printable ASCII (`0x21..=0x7e`) with at most one space,
+/// neither first nor last — the one space of the middleware's `METHOD /path`.
+///
+/// Anything else (a leading space, a Cyrillic or full-width lookalike, a
+/// zero-width joiner, a control character, the empty string) reads in the
+/// console like a reserved action while escaping [`reserved_action_namespace`],
+/// so the AMQP audit ingestion refuses it before that check.
+pub fn is_valid_audit_action(action: &str) -> bool {
+    !action.is_empty()
+        && action.bytes().filter(|b| *b == b' ').count() <= 1
+        && !action.starts_with(' ')
+        && !action.ends_with(' ')
+        && action
+            .bytes()
+            .all(|b| b == b' ' || (0x21..=0x7e).contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_action_grammar_is_printable_ascii_with_one_inner_space() {
+        for action in [
+            "user.login",
+            "tenants.audit_exported",
+            "GET /api/v1/users",
+            "~",
+        ] {
+            assert!(is_valid_audit_action(action), "{action}");
+        }
+        for action in [
+            "",
+            " tenants.audit_exported",
+            "tenants.audit_exported ",
+            "GET /a b",
+            "t\u{435}nants.audit_exported",
+            "tenants\u{ff0e}audit_exported",
+            "tenants.\u{200d}audit_exported",
+            "tenants.audit\u{0}_exported",
+            "tenants.audit\n_exported",
+            "tenants.audit\t_exported",
+            "\u{7f}",
+        ] {
+            assert!(!is_valid_audit_action(action), "{action:?}");
+        }
+    }
 
     #[test]
     fn the_control_namespaces_are_reserved_whatever_their_case() {

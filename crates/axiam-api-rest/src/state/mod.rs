@@ -391,7 +391,7 @@ pub struct AppState<C: Connection + Clone> {
     /// (`AXIAM__RATE_LIMIT__SHARED=off`), which admits everything. One per
     /// process, like the counter. See [`crate::ciba_list_limiter`].
     pub ciba_list_limiter: Arc<crate::ciba_list_limiter::CibaListLimiter>,
-    /// RADIUS D4 (W6.4): the decision route's per-caller limiter (spent when
+    /// RADIUS Live profile (W6.4): the decision route's per-caller limiter (spent when
     /// the shared counter is off) and its one-row-per-window record of
     /// defective reply profiles. One per process. See
     /// [`crate::network_decide_guard`].
@@ -519,12 +519,15 @@ impl<C: Connection + Clone> AppState<C> {
     ) -> axiam_oauth2::uma::UmaService<
         SurrealPermissionTicketRepository<C>,
         crate::uma::EngineEvaluator,
-        crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>>,
+        crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>, SurrealResourceRepository<C>>,
     > {
         axiam_oauth2::uma::UmaService::new(
             self.oauth2.permission_ticket_repo.clone(),
             crate::uma::EngineEvaluator::new(authz),
-            crate::uma::ResourceScopeCatalog::new(self.scope_repo.clone()),
+            crate::uma::ResourceScopeCatalog::new(
+                self.scope_repo.clone(),
+                self.resource_repo.clone(),
+            ),
             self.oauth2.rpt_max_lifetime_secs,
         )
     }
@@ -681,7 +684,10 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         )
-        .with_crl_distribution(crl_distribution.clone());
+        .with_crl_distribution(crl_distribution.clone())
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
@@ -714,7 +720,10 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         )
-        .with_crl_distribution(crl_distribution);
+        .with_crl_distribution(crl_distribution)
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let crl_service = axiam_pki::CrlService::new(
             ca_cert_repo.clone(),
             cert_repo.clone(),
@@ -726,7 +735,10 @@ impl<C: Connection + Clone> AppState<C> {
             pgp_repo.clone(),
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
-        );
+        )
+        .with_permit_wait(std::time::Duration::from_secs(
+            auth_config.hash_acquire_timeout_secs,
+        ));
         let device_auth_service = DeviceAuthService::new(cert_repo.clone(), ca_cert_repo.clone());
         let service_account_repo = SurrealServiceAccountRepository::new(db.clone());
         let webhook_delivery = WebhookDeliveryService::new(webhook_repo.clone(), None);

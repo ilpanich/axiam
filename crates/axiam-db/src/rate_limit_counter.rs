@@ -931,7 +931,7 @@ impl SharedRateLimitCounter {
     }
 
     /// [`Self::check_at`] for a bucket a **person** spends at human speed —
-    /// the REST browser-endpoint preset — whatever its limit: a newly seen key
+    /// the REST browser-endpoint preset and the administrative presets — whatever its limit: a newly seen key
     /// gets its whole budget, with no cold-entry seed.
     ///
     /// The seed exists to stop a flood arriving late in a window from being
@@ -2504,6 +2504,29 @@ mod window_mode_tests {
             machine < 30,
             "a machine bucket of the same limit keeps the pro-rata seed (admitted {machine})"
         );
+    }
+
+    /// The administrative presets (30 a minute) skip the seed as the browser
+    /// preset does (#718): an administrator first seen 3 s before the minute's
+    /// end still has the whole allowance. Before the change those buckets went
+    /// through `check_at` and kept only a handful of writes.
+    #[test]
+    fn an_admin_family_first_seen_three_seconds_before_the_minute_end_keeps_its_allowance() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let late = aligned_start() + chrono::Duration::seconds(57);
+
+        let seeded = (0..100)
+            .filter(|_| counter.check_at("network_admin:203.0.113.9", late, 30))
+            .count();
+        assert!(
+            seeded < 30,
+            "the machine path still seeds a late key (admitted {seeded})"
+        );
+
+        let admitted = (0..100)
+            .filter(|_| counter.check_at_human("network_admin:203.0.113.10", late, 30))
+            .count();
+        assert_eq!(admitted, 30, "an administrator keeps all thirty writes");
     }
 
     /// Skipping the seed is all `check_at_human` changes: the sliding-window

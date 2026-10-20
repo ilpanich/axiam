@@ -129,7 +129,7 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
     ("reactors:create", "Register a reactor"),
     ("reactors:update", "Update a reactor registration"),
     ("reactors:delete", "Delete a reactor registration"),
-    // Network segments and RADIUS reply profiles (RADIUS D4,
+    // Network segments and RADIUS reply profiles (RADIUS Live profile,
     // `claude_dev/radius-reply-profile-design.md` §4.2).
     //
     // The whole `network:` namespace is reserved: `permissions:create` must
@@ -446,7 +446,7 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "webauthn_policy",
     "scim",
     "scim_tokens",
-    // RADIUS D4 (W6.1): a segment's profile decides what VLAN and ACL a device
+    // RADIUS Live profile (W6.1): a segment's profile decides what VLAN and ACL a device
     // gets, and writing one is a grant (design note §5.2). A network
     // administrator is a human's role. The one machine caller, FreeRADIUS's
     // `network:decide` on the decision route, is placed by W6.4 as a named
@@ -459,7 +459,7 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
 /// name, each with the condition it adds — an exception to
 /// [`HUMAN_ONLY_FAMILIES`], never a widening of a family.
 ///
-/// Today one: `POST /api/v1/network/decide` (RADIUS D4, W6.4; design note §6.3,
+/// Today one: `POST /api/v1/network/decide` (RADIUS Live profile, W6.4; design note §6.3,
 /// T-468). Its caller is a FreeRADIUS server's service account, so a person's
 /// token is refused (`401`); and because it is an authenticated oracle on
 /// "is this certificate good here", a service account is admitted only with a
@@ -1381,7 +1381,7 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/scim-targets/{id}/reconcile",
         "scim_targets:write",
     ),
-    // Network segments and RADIUS reply profiles (RADIUS D4, W6.3). The route
+    // Network segments and RADIUS reply profiles (RADIUS Live profile, W6.3). The route
     // permission is the one the write gate asks for first (design note §5.2,
     // §4.2); a profile write also needs `network:grant` on the segment (H2).
     ("GET", "/api/v1/network/segments", "network:read"),
@@ -1420,7 +1420,7 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
     // itself (`NetworkWrite::PolicyWrite`).
     ("GET", "/api/v1/network/policy", "network:read"),
     ("PUT", "/api/v1/network/policy", "network:segments_write"),
-    // The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
+    // The RADIUS placement decision (RADIUS Live profile, W6.4): checked on every site
     // node the decision reads, inside the handler. Its caller is a machine, by
     // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.
     ("POST", "/api/v1/network/decide", "network:decide"),

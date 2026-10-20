@@ -748,3 +748,170 @@ async fn a_valid_tenant_scope_is_stored_deduplicated_and_ordered() {
     expected.sort();
     assert_eq!(scoped[0], expected, "deduplicated and in a stable order");
 }
+
+// ---------------------------------------------------------------------------
+// The bootstrap of a new tenant's first administrator (#702)
+// ---------------------------------------------------------------------------
+
+/// The documented bootstrap (`docs/admin/organization-scope.md`,
+/// `scripts/e2e-bootstrap.sh`) end to end through the routes and the **real**
+/// authorization engine: the organization administrator creates a tenant,
+/// creates and activates its first user, and gives it the tenant's own
+/// `super-admin` with `X-Axiam-Tenant`.
+///
+/// #702 withheld the `network:` permissions from the organization scope's
+/// super-admin, and the network gate then refused this assignment (`403`,
+/// `network:decide`), so no new tenant could get an administrator. The gate's
+/// named exemption `organization-bootstrap` clears exactly this write, and the
+/// write still leaves its `network_role.assigned` row naming the exemption.
+#[actix_rt::test]
+async fn an_organization_administrator_still_bootstraps_a_new_tenants_super_admin() {
+    use axiam_authz::AuthorizationEngine;
+    use axiam_core::models::audit::AuditLogEntry;
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository};
+    use axiam_db::repository::{
+        SurrealAuditLogRepository, SurrealGroupRepository, SurrealPermissionRepository,
+        SurrealResourceRepository, SurrealScopeRepository,
+    };
+
+    let f = fixture().await;
+    let auth = test_auth_config();
+    let admin = user_with_role(&f.db, f.org_tenant, "org-admin", "super-admin", None).await;
+    let engine = Arc::new(AuthorizationEngine::new(
+        SurrealRoleRepository::new(f.db.clone()),
+        SurrealPermissionRepository::new(f.db.clone()),
+        SurrealResourceRepository::new(f.db.clone()),
+        SurrealScopeRepository::new(f.db.clone()),
+        SurrealGroupRepository::new(f.db.clone()),
+    )) as Arc<dyn AuthzChecker>;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(
+                f.db.clone(),
+                auth.clone(),
+            )))
+            .app_data(web::Data::new(engine))
+            .app_data(web::Data::new(
+                Arc::new(SurrealTenantRepository::new(f.db.clone()))
+                    as Arc<dyn TenantScopeResolver>,
+            ))
+            .app_data(web::Data::new(
+                Arc::new(SurrealRoleRepository::new(f.db.clone()))
+                    as Arc<dyn PrincipalReachResolver>,
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+    let bearer = format!("Bearer {}", token(&auth, admin, f.org_tenant, f.org_id));
+    let call = async |method: test::TestRequest, uri: &str, tenant: Option<Uuid>, body| {
+        let mut req = method
+            .uri(uri)
+            .peer_addr("127.0.0.1:12345".parse().unwrap())
+            .insert_header((header::AUTHORIZATION, bearer.clone()))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN));
+        if let Some(t) = tenant {
+            req = req.insert_header(("X-Axiam-Tenant", t.to_string()));
+        }
+        if let Some(b) = body {
+            req = req.set_json(b);
+        }
+        let resp = test::call_service(&app, req.to_request()).await;
+        let status = resp.status();
+        let bytes = test::read_body(resp).await;
+        let json = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+        (status, json)
+    };
+
+    let (status, tenant) = call(
+        test::TestRequest::post(),
+        &format!("/api/v1/organizations/{}/tenants", f.org_id),
+        None,
+        Some(serde_json::json!({ "name": "Gamma", "slug": "gamma" })),
+    )
+    .await;
+    assert!(status.is_success(), "create tenant: {status} {tenant}");
+    let tenant: Uuid = tenant["id"].as_str().unwrap().parse().unwrap();
+
+    let (status, user) = call(
+        test::TestRequest::post(),
+        "/api/v1/users",
+        Some(tenant),
+        Some(serde_json::json!({
+            "username": "gamma-admin",
+            "email": "gamma-admin@acme.test",
+            "password": format!("Aa1-{}", Uuid::new_v4().simple()),
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "create the tenant's first user: {user}");
+    let user = user["id"].as_str().unwrap().to_owned();
+
+    let (status, body) = call(
+        test::TestRequest::put(),
+        &format!("/api/v1/users/{user}"),
+        Some(tenant),
+        Some(serde_json::json!({ "status": "Active" })),
+    )
+    .await;
+    assert_eq!(status, 200, "activate it: {body}");
+
+    let (status, roles) = call(
+        test::TestRequest::get(),
+        "/api/v1/roles",
+        Some(tenant),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "list the tenant's roles: {roles}");
+    let items = roles.get("items").unwrap_or(&roles).as_array().unwrap();
+    let super_admin = items
+        .iter()
+        .find(|r| r["name"] == "super-admin")
+        .expect("the new tenant is seeded with its super-admin")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, body) = call(
+        test::TestRequest::post(),
+        &format!("/api/v1/roles/{super_admin}/users"),
+        Some(tenant),
+        Some(serde_json::json!({ "user_id": user })),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "the organization administrator gives the new tenant its first \
+         super-admin: {status} {body}"
+    );
+
+    let rows: Vec<AuditLogEntry> = SurrealAuditLogRepository::new(f.db.clone())
+        .list(
+            tenant,
+            AuditLogFilter {
+                action: Some("network_role.assigned".into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(rows.len(), 1, "the cleared write leaves its own row");
+    assert_eq!(
+        rows[0]
+            .metadata
+            .to_string()
+            .matches("organization-bootstrap")
+            .count(),
+        1,
+        "and the row names the exemption: {}",
+        rows[0].metadata
+    );
+}

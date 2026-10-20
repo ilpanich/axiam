@@ -679,6 +679,17 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - `CHANGELOG.md` `[1.1.1] - 2026-10-20`: one entry per closed issue (52), and every upgrade note of §9 plus #749 and #755.
   - `website/src/version.ts` `SECURITY_VERIFIED_RELEASE` 1.1.1 / 2026-10-19; the 1.1.1 news post and `postSlug`; the roadmap's "Release 1.1.1" row.
   - `frontend/` and `website/` `package.json` stay `0.0.0`, as in 1.1.0.
+- **PR #759 CI fixes** (opened from `95af805be`):
+  - **GitGuardian** flagged the fake Vault token in a `vault_forward.rs` test, from W1.2 `83bec6fc0`. `b927d7e09` (Sonnet 5.5) builds the tokens at run time, after the precedent `eb723bc17`. History was not rewritten, and the maintainer resolved incident 38424066 in the dashboard.
+  - **Examples smoke and E2E** both failed in `scripts/e2e-bootstrap.sh` with 403 `network:decide`. W4.2's #702 fix (`912742f84`) withheld the network permissions from the organization scope's super-admin, and that also took away the documented bootstrap: an organization principal giving a tenant its first super-admin. `21347976c` (Opus 5.5) adds one named gate exemption, `organization-bootstrap`. It applies only when the writer has organization scope, the role is the tenant's own seeded `super-admin`, the grantee is a user other than the writer, and the assignment is tenant-wide. The audit row names the exemption. T-483 is amended in both copies, and `docs/admin/organization-scope.md` and the two #702 lines of `CHANGELOG.md` are updated. The exemption is not limited by holder count, so an organization can re-provision a tenant whose admin left (§8, assumption 7). Plan vs tree: the W8.1 gate missed this because the examples smoke needs Docker, which the gate session did not have.
+  - **CodeQL** raised 3 high cleartext-logging alerts in test messages; `e1f06663e` fixes them (#757).
+  - `bbb2ad05d` regenerates the website threat-model data for the T-483 amendment. It also repairs that amendment, which the rebase had put into `modelType`.
+- **W8.5 (coverage)**, Sonnet 5.5, tests only.
+  - Commits: `7e48381e7`, `2502e2c98`, `3b45af680`, `ea8fb9835`, `a53e7c83e`, `64ca82b3b`, `ca1ed364a`, `d93910704`.
+  - The first per-crate check, on `b927d7e09` against main `6b15aa36a`, found five crates below main: `axiam-server` 84.68 → 83.88 % (`audit_hold.rs` 39/45 lines missed; new `cleanup.rs` arms), `axiam-api-grpc` 94.99 → 94.71, `axiam-audit` 91.84 → 91.64, `axiam-core` 94.94 → 94.93, `axiam-amqp` 81.458 → 81.457.
+  - CI `cargo-llvm-cov` on `d93910704` (job 118590043008), all lines: **91.82 %**, against main's 91.69 %. Per crate, every one is level or up. The five that had fallen now read: server 85.87, api-grpc 95.12, audit 92.25, core 95.04, amqp 81.86. Also: api-rest 90.10, db 93.60, pki 90.78, oauth2 92.62, authz 98.35.
+  - One line, `audit_consumer.rs:140` (a `tracing` field), is still reported unexecuted after a test that asserts it. Its crate is up regardless, so it was not chased further.
+  - Frontend: lines 96.58 % (7770 / 8045); `thresholds.lines` raised from 96.1 to 96.48.
 - **Closes:** #664 … #699, #702 … #715 (#710 among them), #717, #718 — 52 issues. **Not closed:** #719 (W6.3), #513, #561.
 
 ---

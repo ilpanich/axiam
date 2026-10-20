@@ -1124,18 +1124,23 @@ recorded; nacked without requeue, so dead-lettered; a line logged that names the
 not the action; nothing persisted. The reason is that such a lookalike of a reserved action escapes
 the prefix test and reads as a control record in the console.
 
-**A producer MAY refuse them locally (contract 1.63; #710 item 3).** An SDK that ships an AMQP
-producer for `axiam.audit.events` (Rust, TypeScript, Python, Java, C#, PHP and Go) MAY refuse an
-action that begins with `tenants.` or `gdpr.`, ASCII case ignored, **before it publishes**,
-by raising the §2 `ValidationError` whose message names the reserved namespace and never the
-payload: a silent dead-letter, with no error from an acknowledging broker, is the costlier failure,
-and the check is one prefix comparison. **The seven SDKs do.** Refusing locally changes nothing the
-server accepts, and an SDK that does not refuse still conforms: the server's refusal is the
-authority, and a producer MUST NOT take the absence of its own check as leave to publish such an
-action. **The grammar is a MAY too, and an SDK need not port it**: the seven SDKs refuse the
-reserved prefixes (rule above) and MAY refuse an action outside the grammar with the same
-`ValidationError` at the same point, before publishing; none is required to. The SDK's own
-actions (`user.login` and the like, and `METHOD /path`) are inside it.
+**A producer MAY refuse them locally (contract 1.63; #710 item 3).** No SDK ships a publisher for
+`axiam.audit.events`: the seven AMQP SDKs (Rust, TypeScript, Python, Java, C#, PHP and Go)
+consume and verify §8's messages, and an application that publishes audit events builds, signs
+and publishes the `AuditEventMessage` itself. An SDK helper that builds or signs an
+`AuditEventMessage` MAY refuse, before it signs, an action that begins with `tenants.` or
+`gdpr.`, ASCII case ignored, by raising the §2 `ValidationError` whose message names the
+reserved namespace and never the payload: a silent dead-letter, with no error from an
+acknowledging broker, is the costlier failure, and the check is one prefix comparison. **The
+Rust SDK's `AuditEventMessage::sign` does**, and a refused message is never signed. The other six
+ship no such helper and have nothing to refuse. A generic HMAC over caller-supplied bytes (Rust's
+`sign_payload`, TypeScript's `signPayload`) is not such a helper. Refusing locally changes nothing
+the server accepts, and an SDK that does not refuse still conforms: the server's refusal is the
+authority, and a producer MUST NOT take the absence of a local check as leave to publish such an
+action. **The grammar is a MAY too, and an SDK need not port it**: a helper that refuses the
+reserved prefixes MAY refuse an action outside the grammar with the same `ValidationError` at the
+same point; none is required to. The SDK's own actions (`user.login` and the like, and
+`METHOD /path`) are inside it.
 
 ---
 
@@ -3182,8 +3187,8 @@ with a cookie login** so that the client's jar holds them and its CSRF forwardin
 `login_client_credentials`), and assert that **none of the three requests carries a `Cookie` header
 or an `X-CSRF-Token` header**. As the control, the same client's next state-changing management
 request carries the `Cookie` and the `X-CSRF-Token`, so the assertion cannot pass for want of them.
-An SDK that never sends cookies (Kotlin, Swift) runs the same test; it passes by construction and
-guards the regression.
+Kotlin and Swift already withheld both on `/oauth2/*` before 1.63;
+they run the same test, control included.
 
 **Contract 1.62, §14.1 and §14.2 rules 5 and 8**, against a mocked server: a client configured with
 a secret sends it (`client_secret`, in the body) at **both** `device_authorize` and every
@@ -4231,12 +4236,13 @@ No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this cont
 recorded here until one exists.
 
 - **2026-10-20 (1.1.1 release, contract 1.63)** — **no new operation; two rules every SDK ports and
-  a third that seven may; wire-additive, no wire break.** Recorded in **§34.7**, marked *contract
+  a third that an audit-message helper may; wire-additive, no wire break.** Recorded in **§34.7**, marked *contract
   1.63* inline where each rule lives. SDK work: no session cookie and no `X-CSRF-Token` on any
   `/oauth2/*` request, with a §14.6 test (§12.1 rule 3, §6.1 rule 11; all eleven, Kotlin and Swift
   test only); the SCIM `expected_updated_at` from the response's own `updated_at` string (§31.3
-  rule 4; Java, Kotlin, C); a producer's local refusal of the reserved `tenants.` and `gdpr.` audit
-  actions (§8; MAY, the seven AMQP SDKs do). Informative: the device-grant token's `client_id` and
+  rule 4; Java, Kotlin, C); a local refusal of the reserved `tenants.` and `gdpr.` audit
+  actions by an SDK helper that builds or signs an `AuditEventMessage` (§8; MAY; Rust's
+  `AuditEventMessage::sign` does, and no SDK ships a publisher). Informative: the device-grant token's `client_id` and
   its `403`, the public DPoP client's key-bound refresh token (§14, §21.7.4), `429
   rate_limit_exceeded` at the token endpoint (§14.2 rule 9), `client_id` optional at
   `device_authorize` (§14.1 rule 5), the audit action grammar (§8), `oauth2_clients.update`'s two
@@ -13614,6 +13620,8 @@ closes §34.6 (ae), and (p) is the maintainer's addition to #710 of 2026-10-17. 
 work (PKI, rate limiting, the network gate, the RADIUS recipe, CI) changes no SDK-visible rule that
 is not listed here.
 
+Corrected before release, 2026-10-20 (W7.13 C163-06, C163-11).
+
 - **(a) No session cookie and no CSRF header on `/oauth2/*` (D-5; normative; all eleven SDKs;
   #710 item 1).** [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3 (last paragraph)
   and [§6.1](#§61-client-certificate-authentication-mtls) rule 11 extend 1.62's "no session or
@@ -13624,7 +13632,7 @@ is not listed here.
   with a cookie login, run both device operations and a token request, assert no `Cookie` and no
   `X-CSRF-Token` on any of them, with the management request beside them as the control. The
   server ignores both there, so nothing fails today. Rust (the jar and `maybe_csrf_header`) and
-  Python (axiam-python-sdk#100) send them and change; Kotlin and Swift already withhold them and
+  Python (axiam-python-sdk#100) send them and change; Kotlin and Swift already withhold them on `/oauth2/*` and
   add the test only; the other six are checked by the test.
 - **(b) `expected_updated_at` is the response's own string for SCIM too (D-5; normative; Java,
   Kotlin and C change; #710 item 2).** [§31.3](#§313-server-rules-every-sdk-can-observe-normative)
@@ -13632,12 +13640,14 @@ is not listed here.
   `updated_at` string as read (an `updatedAtRaw` beside a typed date). Java and Kotlin re-render the
   typed value (C162-10; axiam-java-sdk#115, axiam-kotlin-sdk#77) and C sends none (C162-09;
   axiam-c-sdk#74). The 1.62 review found no other SDK to change.
-- **(c) A producer MAY refuse the reserved audit actions locally (D-5; MAY; the seven AMQP SDKs
-  do; #710 item 3).** [§8](#actions-the-audit-ingestion-refuses-contract-162-extended-in-163):
-  before publishing, an action that begins with `tenants.` or `gdpr.` (ASCII case ignored) is a
-  `ValidationError` naming the namespace and never the payload. The server's refusal is
-  unchanged and stays the authority. Rust, TypeScript, Python, Java, C#, PHP and Go add it; Kotlin,
-  Swift, C and C++ ship no AMQP producer. The producer-side refusal of the action **grammar** (item
+- **(c) An SDK helper MAY refuse the reserved audit actions locally (D-5; MAY; #710 item 3).**
+  [§8](#actions-the-audit-ingestion-refuses-contract-162-extended-in-163): a helper that builds or
+  signs an `AuditEventMessage` MAY refuse, before signing, an action that begins with `tenants.` or
+  `gdpr.` (ASCII case ignored) with a `ValidationError` naming the namespace and never the payload.
+  The server's refusal is unchanged and stays the authority. No SDK ships a publisher for
+  `axiam.audit.events`. Rust ships such a helper (`AuditEventMessage::sign`) and refuses there.
+  TypeScript, Python, Java, C#, PHP and Go consume and verify only and have nothing to refuse.
+  Kotlin, Swift, C and C++ ship no AMQP. The producer-side refusal of the action **grammar** (item
   m) is a MAY an SDK need not port. *Where the plan said "§33" for this item the rule lives in §8;
   §33 is CIBA.*
 - **(d) Device-grant tokens, and the refresh token of a public DPoP client (informative; no SDK
@@ -13689,8 +13699,8 @@ is not listed here.
 - **(m) The audit action grammar (informative; MAY for a producer; #682).**
   [§8](#actions-the-audit-ingestion-refuses-contract-162-extended-in-163): non-empty printable ASCII,
   at most one space, neither first nor last; refused like a reserved action, before the reserved
-  test and the nonce. **The seven AMQP SDKs MAY refuse it locally with the same `ValidationError`
-  and are not required to** (the reserved prefixes of (c) are the part the contract names).
+  test and the nonce. **A helper that refuses the reserved
+  prefixes of (c) MAY refuse it locally with the same `ValidationError` and is not required to** (the reserved prefixes of (c) are the part the contract names).
 - **(n) Two refusals the contract lists in one place (informative; no SDK).**
   [§27.4](#§274-semantics-normative-identical-in-all-sdks) rule 7: a tenant `metadata` key
   `orphan_purge` is `422 reserved_metadata_key`; a second certificate or CA with an issuer and serial

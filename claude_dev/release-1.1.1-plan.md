@@ -519,6 +519,16 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 | D-9 | **#719.** If `utoipa-swagger-ui` has no release on `zip ≥ 9` when W6.3 runs, the issue stays open on `1.1.x` and the PR does not name it. | **Stays open** |
 | D-10 | **The version.** 1.1.1, with the SDKs on their own patch (or minor where a change is source-breaking)? | **1.1.1** |
 
+**Answered after the fact (the maintainer, 2026-10-20, after PR #759 was opened).** The questions the waves raised beyond D-1 … D-10:
+
+| # | Question | Answer | Where |
+|---|---|---|---|
+| #749 | Should the confidential → public conversion revoke the confidential-era tokens itself? | **Yes** | in 1.1.1, `7d4da0a79` |
+| #745 | Should resources the resource server did not register stay UMA-ticketable through `/uma2/perm`? | **No**, option 1 | in 1.1.1, `ae8562ef4` |
+| Q1 | The recovered `gdpr.user_pseudonymized` row carries `certificates_revoked: null` | **Amend the contract** (null = unknown) | contract 1.64, #760 |
+| Q2 | A device poll on `429 rate_limit_exceeded` | **The CIBA rule** (wait out `Retry-After`; not terminal) | contract 1.64, #760 |
+| Q3 | "Naming the member and the value" | **Relax**: the member, and the value where the SDK keeps it | contract 1.64, #750 |
+
 ---
 
 ## 12. Wave results (written by the orchestrator as each wave lands)
@@ -690,7 +700,11 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - CI `cargo-llvm-cov` on `d93910704` (job 118590043008), all lines: **91.82 %**, against main's 91.69 %. Per crate, every one is level or up. The five that had fallen now read: server 85.87, api-grpc 95.12, audit 92.25, core 95.04, amqp 81.86. Also: api-rest 90.10, db 93.60, pki 90.78, oauth2 92.62, authz 98.35.
   - One line, `audit_consumer.rs:140` (a `tracing` field), is still reported unexecuted after a test that asserts it. Its crate is up regardless, so it was not chased further.
   - Frontend: lines 96.58 % (7770 / 8045); `thresholds.lines` raised from 96.1 to 96.48.
-- **Closes:** #664 … #699, #702 … #715 (#710 among them), #717, #718 — 52 issues. **Not closed:** #719 (W6.3), #513, #561.
+- **Folded in after the maintainer's answers (§11, 2026-10-20)**, Opus 5.5:
+  - `7d4da0a79`, **#749**. The conversion to public revokes the client's refresh tokens and deletes its device grants. A first pass runs before the conditional write; if it fails, the request is refused and nothing is converted, so the retry is the whole request. A second pass runs after the write; if it fails, it is logged and recorded as `revocation_complete: false`. `revoke_all_for_client` now returns the count. T-289 is amended, `website/src/threatModel.ts` regenerated, and the upgrade note replaced (each device runs the device flow once).
+  - `ae8562ef4`, **#745**. The scope catalog is asked as the requesting resource server. A set that server did not register, including an administrator-made resource, declares no scope, so `/uma2/perm` answers exactly as for an unknown id (`400`). The wire format is unchanged: no `invalid_resource_id` is introduced, and `sdks/openapi.json` and its digest stay the same. `uma_test` moved to registered sets. T-488 and `docs/api/uma.md` are amended, with an upgrade note. The sentence for contract 1.64 is on #760.
+  - `9a8326703`: the CHANGELOG's threat-model line names both amendments.
+- **Closes:** #664 … #699, #702 … #715 (#710 among them), #717, #718, plus #745 and #749 — 54 issues. **Not closed:** #719 (W6.3), #513, #561.
 
 ---
 

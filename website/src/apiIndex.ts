@@ -23,7 +23,7 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.1.0";
+export const API_VERSION = "1.1.1";
 export const API_OPERATION_COUNT = 291;
 export const API_PATH_COUNT = 197;
 
@@ -329,7 +329,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/oauth2/device_authorization",
-    "summary": "Build an OAuth2 JSON error response with the appropriate HTTP status.",
+    "summary": "Issues a `device_code` (the secret the device polls with), a short `user_code` (the string a human reads off a screen and types elsewhere), and the `verification_uri` to send them to.",
     "public": true
    },
    {

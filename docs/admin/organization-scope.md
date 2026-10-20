@@ -269,6 +269,22 @@ POST /api/v1/roles/{role}/users    X-Axiam-Tenant: <new tenant>   # role = super
 [`examples/b6-organization-scope`](../../examples/b6-organization-scope/README.md)
 walks the whole flow with assertions.
 
+The third call keeps working although, since 1.1.1, the organization scope's own
+`super-admin` holds no `network:` permission (#702: no network grant crosses
+tenants). A tenant's seeded `super-admin` carries `network:read` and the five
+network meta permissions, and the network write gate normally lets only a
+writer who holds those permissions assign a role that carries them ("you
+delegate only what you hold"). The gate therefore names one exemption,
+`organization-bootstrap`, and keeps it narrow: an **organization-level** caller
+may assign the tenant's **own seeded `super-admin`**, **tenant-wide** (no
+`resource_id`), to a **user** of that tenant other than itself. Every other
+network-sensitive write from organization scope is still refused — a custom role
+carrying `network:` grants, a `network:` permission grant, a resource-scoped
+assignment, or one to a service account or group. The assignment leaves its own
+`network_role.assigned` audit row, whose `exemption` field says
+`organization-bootstrap`. Network administration then belongs to the tenant's
+own administrators.
+
 The `X-Axiam-Tenant` header is only as good as the resolver behind it. The
 server registers one at startup (`axiam-server`'s composition root, alongside
 the session validator); without it the extractor refuses every switch, so an

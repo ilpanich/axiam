@@ -11,7 +11,9 @@
 
 use axiam_core::error::{AxiamError, NetworkConflict};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::network::{SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, is_network_action};
+use axiam_core::models::network::{
+    SEEDED_SUPER_ADMIN_NETWORK_ACTIONS, SEEDED_SUPER_ADMIN_ROLE, is_network_action,
+};
 use axiam_core::models::role::CreateRole;
 use axiam_core::permission_scope::is_organization_level_action;
 use axiam_core::repository::{
@@ -396,8 +398,8 @@ pub async fn seed_default_roles<C: Connection>(
     let super_admin_id = find_or_create_role(
         &role_repo,
         tenant_id,
-        find_role("super-admin"),
-        "super-admin",
+        find_role(SEEDED_SUPER_ADMIN_ROLE),
+        SEEDED_SUPER_ADMIN_ROLE,
         "Full system access — all permissions",
     )
     .await?;
@@ -796,7 +798,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 
     // Only reconcile tenants bootstrapped with the three default roles.
     let (Some(super_admin_id), Some(admin_id), Some(viewer_id)) = (
-        find_role("super-admin"),
+        find_role(SEEDED_SUPER_ADMIN_ROLE),
         find_role("admin"),
         find_role("viewer"),
     ) else {

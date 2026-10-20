@@ -1843,7 +1843,9 @@ async fn r110w6_04_a_revoke_racing_a_quarantine_never_deletes_the_deny() {
 /// administrator in a child tenant. The organization scope's seeded super-admin
 /// is global, so it reaches every tenant of the organization; it holds no
 /// `network:` permission, and the gate refuses it `network:grant` at the child
-/// tenant's `/network` while clearing the child tenant's own super-admin.
+/// tenant's `/network` while clearing the child tenant's own super-admin. The
+/// one write it still clears is the bootstrap: assigning the child tenant's
+/// own seeded super-admin, tenant-wide, to a child-tenant user.
 #[actix_rt::test]
 async fn an_organization_level_writer_is_refused_network_grant_in_a_child_tenant() {
     let w = World::new().await;
@@ -1905,8 +1907,56 @@ async fn an_organization_level_writer_is_refused_network_grant_in_a_child_tenant
         "the organization scope's super-admin holds no network:grant in the child tenant"
     );
 
+    // Nor a custom role carrying a meta permission: still the §5.3 bound.
+    let delegate = w.role("delegate", &[(NETWORK_GRANT, ALLOW)]).await;
+    assert!(
+        gate(
+            &w,
+            org_admin,
+            org_scope,
+            axiam_authz::network_gate::NetworkWrite::RoleAssign {
+                role_id: delegate,
+                grantee: axiam_authz::network_gate::Grantee::User(target),
+                resource_id: None,
+                inherit: true,
+            },
+        )
+        .await
+        .is_err(),
+        "the organization writer does not delegate network:grant it does not hold"
+    );
+
+    // The bootstrap (the named exemption `organization-bootstrap`): the child
+    // tenant's own seeded super-admin, tenant-wide, to a child-tenant user.
+    let child_super_admin = w.role_named("super-admin").await;
+    let bootstrap = |resource_id| axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: child_super_admin,
+        grantee: axiam_authz::network_gate::Grantee::User(target),
+        resource_id,
+        inherit: true,
+    };
+    let cleared = gate(&w, org_admin, org_scope, bootstrap(None))
+        .await
+        .expect("the organization writer still bootstraps the tenant's super-admin");
+    assert!(cleared.is_network_sensitive());
+    assert_eq!(
+        cleared.exemption(),
+        Some(axiam_authz::network_gate::EXEMPTION_ORGANIZATION_BOOTSTRAP)
+    );
+    assert!(
+        gate(
+            &w,
+            org_admin,
+            org_scope,
+            bootstrap(Some(network_root_id(w.tenant)))
+        )
+        .await
+        .is_err(),
+        "the exemption is tenant-wide only, even at /network itself"
+    );
+
     // The control: the child tenant's own super-admin clears the same write.
-    let local = w.user(&[(w.role_named("super-admin").await, None)]).await;
+    let local = w.user(&[(child_super_admin, None)]).await;
     assert!(
         gate(&w, local, SubjectScope::Tenant, assign())
             .await

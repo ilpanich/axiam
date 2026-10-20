@@ -265,7 +265,9 @@ pub async fn refused_after_clearance<C: Connection + Clone>(
 /// (R110W6-06, #703, T-484): one `network_role.assigned` / `.unassigned` /
 /// `.granted` / `.revoked` or `certificate_binding.bound` row, with the role,
 /// the grantee, the node and the `network:` permissions the write conferred
-/// (or removed). Without it a cleared write is visible only in the route's
+/// (or removed); an assignment's row also carries `exemption`, the named
+/// exemption it cleared under (`organization-bootstrap`) or `null`. Without it a
+/// cleared write is visible only in the route's
 /// generic request row, which says neither that it touched the network
 /// namespace nor where a join landed.
 ///
@@ -339,6 +341,7 @@ pub async fn record_cleared<C: Connection + Clone>(
                             "node": node(resource_id),
                             "inherit": inherit,
                             "permissions": network_permissions(role_id).await?,
+                            "exemption": cleared.exemption(),
                         }),
                     ))
                 }

@@ -47,7 +47,9 @@ has one entry below, ending in its number.
   the first boot of 1.1.1**, one `network_role.permission_revoked_by_reconcile`
   audit row each. Network administration belongs to an ordinary tenant's
   `super-admin` (T-483 is Mitigated). A deployment that relied on the
-  organization scope's role for it assigns the role in a tenant first (#702).
+  organization scope's role for it assigns the role in a tenant first (#702);
+  an organization principal still can, for a user of that tenant — the
+  bootstrap of its first administrator stays open (see below).
 - **A device-only client registered without `token_endpoint_auth_method`** (the
   1.0.x quickstart's shape) is refused `401 invalid_client` at both device
   endpoints since 1.1.0 unless its device sends the secret. If its devices hold
@@ -98,7 +100,10 @@ has one entry below, ending in its number.
   per-address limiter of the REST and the gRPC listener; without a proxy a
   caller can no longer choose its own bucket (#711, #686, one change).
 - **The organization scope's `super-admin` no longer holds the network
-  permissions** (#702); **cleared network-sensitive writes leave their own audit
+  permissions** — and an organization principal still gives a tenant's own
+  `super-admin`, tenant-wide, to a user of that tenant, the bootstrap of its
+  first administrator, under the network gate's one named exemption
+  (`organization-bootstrap`, recorded in the assignment's audit row) (#702); **cleared network-sensitive writes leave their own audit
   rows** — `network_role.assigned`, `.unassigned`, `.granted`, `.revoked` and
   `certificate_binding.bound` (a role delete has none) (#703); **a UMA resource
   server cannot change a set it did not register** (#705); **the RADIUS decision

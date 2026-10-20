@@ -181,6 +181,10 @@ pub async fn permission_request<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<PermissionRequestBody>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // #745 — the catalog behind the service declares a resource's scopes only
+    // to the resource server that registered it, so a ticket for another
+    // server's set or an administrator's resource is refused exactly as one
+    // for an id that does not exist.
     let minted = state
         .uma_service(authz.get_ref().clone())
         .request_ticket(pat.tenant_id, &pat.client_id, body.into_inner().0)

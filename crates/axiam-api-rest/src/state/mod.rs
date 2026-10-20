@@ -519,12 +519,15 @@ impl<C: Connection + Clone> AppState<C> {
     ) -> axiam_oauth2::uma::UmaService<
         SurrealPermissionTicketRepository<C>,
         crate::uma::EngineEvaluator,
-        crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>>,
+        crate::uma::ResourceScopeCatalog<SurrealScopeRepository<C>, SurrealResourceRepository<C>>,
     > {
         axiam_oauth2::uma::UmaService::new(
             self.oauth2.permission_ticket_repo.clone(),
             crate::uma::EngineEvaluator::new(authz),
-            crate::uma::ResourceScopeCatalog::new(self.scope_repo.clone()),
+            crate::uma::ResourceScopeCatalog::new(
+                self.scope_repo.clone(),
+                self.resource_repo.clone(),
+            ),
             self.oauth2.rpt_max_lifetime_secs,
         )
     }

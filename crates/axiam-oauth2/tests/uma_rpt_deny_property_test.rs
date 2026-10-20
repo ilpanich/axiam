@@ -219,6 +219,7 @@ impl ScopeCatalog for SeededEngine {
     fn declared_scopes<'a>(
         &'a self,
         _tenant_id: Uuid,
+        _client_id: &'a str,
         resource_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>> {
         let scopes = self

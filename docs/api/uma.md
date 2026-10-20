@@ -85,7 +85,9 @@ does not entitle a caller to enumerate.
 a resource created through `/api/v1/resources` (which carries no
 `uma_registered_by`), answers `404` — the same body as an id that does not
 exist, so the answer does not reveal which of the two it was. Nothing is
-written on that path (threat T-488).
+written on that path. It holds for the permission endpoint too (§3, since
+1.1.1): a ticket is minted only for a set the resource server registered
+(threat T-488).
 
 **`PUT` replaces the scope list; it does not merge.** Removing a scope narrows
 what tickets may be requested, so a merge would keep an authority the resource
@@ -107,6 +109,14 @@ Content-Type: application/json
 
 The ticket is opaque, 256-bit, **single-use**, and lives 60 seconds. Only its
 hash is stored.
+
+**Only for a resource set this resource server registered** (UMA 2.0
+Federated Authorization §4.1; since 1.1.1, #745). A resource id that another
+resource server registered, or that was created through `/api/v1/resources`,
+is refused exactly as an id that does not exist — the same `400` and the same
+body, whatever scope is asked — so the answer reveals neither who owns a
+resource nor whether it exists. A resource an administrator made for RBAC is
+not ticketable; register it through `/uma2/rreg` (§2) to make it so.
 
 Scope names are validated **here**, against the resource's declared set, rather
 than at exchange time. Asking for a scope the resource never declared is a
@@ -197,7 +207,7 @@ the 403 pointed at.
 |---|---|---|
 | Protection API | `401` | PAT missing, malformed, or expired |
 | Protection API | `403` | not a PAT — wrong subject kind, or no `uma_protection` scope |
-| `/uma2/perm` | `400` | a scope the resource has not declared |
+| `/uma2/perm` | `400` | a scope the resource has not declared, or a resource this resource server did not register (the same body as an unknown id) |
 | ticket grant | `invalid_request` | `ticket` or `claim_token` absent, or an unsupported `claim_token_format` |
 | ticket grant | `invalid_grant` | ticket unknown, expired, used, or presented by the wrong client; or `claim_token` invalid, expired, or cross-tenant |
 | ticket grant | `access_denied` (**403**) | the requesting party is not authorized for every requested pair |

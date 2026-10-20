@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.1] - 2026-10-20
 
-1.1.1 follows 1.1.0 and closes the fifty-three issues its reviews filed (#664 …
-#699, #702 … #715, #717, #718 and #749) with eight waves: PKI, Vault and the cleanup
+1.1.1 follows 1.1.0 and closes the fifty-four issues its reviews filed (#664 …
+#699, #702 … #715, #717, #718, #745 and #749) with eight waves: PKI, Vault and the cleanup
 path (W1); rate limiting, audit attribution and SAML (W2); OAuth2, CIBA, the
 device grant and UMA (W3); network policy and the schema runner (W4); the
 FreeRADIUS recipe (W5); CI and tooling (W6); SDK contract 1.63 (W7); release
@@ -74,6 +74,11 @@ has one entry below, ending in its number.
 - **Resources created through `/api/v1/resources`, or before UMA provenance, are
   no longer reachable through `/uma2/rreg`:** a resource server reads, updates
   and deletes only the sets it registered, and answers `404` for the rest (#705).
+- **A resource server can request permission tickets only for resource sets it
+  registered through `/uma2/rreg`.** Resources created through
+  `/api/v1/resources` (and sets registered before UMA provenance) are no longer
+  ticketable: `/uma2/perm` answers them `400` exactly as an unknown id.
+  Register them through the Protection API (#745).
 - **A stalled Vault now fails the boot after about ten seconds** (ten-second
   request, five-second connect timeout on the startup and private-CA clients)
   (#667). **AMQP producers** whose audit `action` is outside printable ASCII with
@@ -106,7 +111,11 @@ has one entry below, ending in its number.
   (`organization-bootstrap`, recorded in the assignment's audit row) (#702); **cleared network-sensitive writes leave their own audit
   rows** — `network_role.assigned`, `.unassigned`, `.granted`, `.revoked` and
   `certificate_binding.bound` (a role delete has none) (#703); **a UMA resource
-  server cannot change a set it did not register** (#705); **the RADIUS decision
+  server cannot change a set it did not register** (#705), **nor request a
+  permission ticket for one, nor for a resource made through
+  `/api/v1/resources`;** the refusal is the body an unknown id gets, so the
+  permission endpoint no longer tells which ids exist or what they declare
+  (#745); **the RADIUS decision
   route verifies the caller's own certificate as a decoy** when no row of the
   caller's tenant resolves, so the cheaper paths no longer tell tenants apart
   beyond those the code lists (#706).
@@ -223,10 +232,9 @@ has one entry below, ending in its number.
 
 Each item is an open issue on `ilpanich/axiam`, filed by the release's reviews
 (none is a Critical, High or Medium finding): #720 … #730 (W5 and W4), #731 …
-#741 (W1 and W2), #745 … #747 (W3), #750 (the SDK conformance review)
-and #751 … #758 (the combined review). Among them: #745,
-`/uma2/perm` mints tickets for another resource server's sets; #755, the
-migration lock is not checked. **#719** (drop the `zip` 8.6.0 audit ignores) is
+#741 (W1 and W2), #746 and #747 (W3), #750 (the SDK conformance review)
+and #751 … #758 (the combined review). Among them: #755, the migration lock
+is not checked. **#719** (drop the `zip` 8.6.0 audit ignores) is
 still open: `utoipa-swagger-ui` 10.0.1 pins `zip ^8.6`. **Open past the tag, the
 maintainer's:** #513 (the OpenID certification submissions) and #561
 (benchmark run 6).

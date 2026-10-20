@@ -2134,8 +2134,8 @@ async fn r110w6_06_a_non_network_write_leaves_no_row() {
             None,
         ),
     ] {
-        let (status, err) = call(&app, &t, method, &uri, body).await;
-        assert_eq!(status, 204, "{method} {uri}: {err}");
+        let (status, _) = call(&app, &t, method, &uri, body).await;
+        assert_eq!(status, 204, "{method} route answered {status}");
     }
     for action in [
         "network_role.assigned",

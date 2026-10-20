@@ -658,6 +658,7 @@ async fn a_repeated_serial_under_one_parent_is_a_conflict_not_a_migration_error(
     repo.create(child("a", "fp-a")).await.unwrap();
     match repo.create(child("b", "fp-b")).await {
         Err(AxiamError::AlreadyExists { entity }) => assert_eq!(entity, "ca_certificate"),
-        other => panic!("expected AlreadyExists, got {other:?}"),
+        Err(_) => panic!("expected AlreadyExists, got another error"),
+        Ok(_) => panic!("expected AlreadyExists, got a created row"),
     }
 }

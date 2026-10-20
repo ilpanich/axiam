@@ -1236,8 +1236,7 @@ async fn current_at_signs_a_past_instant_at_that_instant() {
         .unwrap();
     assert!(
         named.this_update <= past,
-        "thisUpdate {} is the named epoch's, not the wall clock's (named {past})",
-        named.this_update
+        "thisUpdate is the named epoch's, not the wall clock's"
     );
     assert!(named.refresh_at > past && named.refresh_at <= past + Duration::seconds(60));
 

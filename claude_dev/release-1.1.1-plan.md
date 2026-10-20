@@ -662,6 +662,25 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.8 W8 — release readiness
 
+- **W8.1 (gate)**, Sonnet 5.5, on `750be9f0a`, with the later docs/website commits re-checked on `5298f2980`. **No failure, no fix commit.**
+  - `cargo fmt` passes; clippy `-D warnings` passes with SAML on and off.
+  - 7523 Rust tests passed, 0 failed, 40 ignored, over 359 test-binary runs. `federation_test` passes with SAML on (87). `axiam-api-grpc --features client` passes (147).
+  - Every `scripts/check-*` passes, with its self-test.
+  - Frontend: lint, `tsc`, a11y, build and vitest all pass; 2386 tests, lines 96.58 %. Website: lint, build and `npm audit` pass.
+  - `cargo deny` and `cargo audit` (CI's ignores) pass.
+  - RADIUS e2e locally, Docker with the pinned 3.2.8 image: **Static** and **Live** both pass. `fetch-crl-test.sh` passes 85/85 under dash and bash.
+  - Not runnable here: the SDK drift checks (no SDK clones or token), the external link check (proxy 403), Playwright, Trivy, llvm-cov.
+- **W8.2 (combined F4)**, Opus 5.5, `d288c0bd9`, `claude_dev/security-review-release-1.1.1-2026-10-20.md`: **no Critical, High or Medium.**
+  - Every merge checked against both parents: the W1/W2/W4/W6 remerge diffs are empty, and the W3/W5 hand resolutions keep both sides.
+  - Low #751 … #755, plus #741 re-rated to Low; Informational #756 … #758.
+  - #749 stays Low, with an upgrade note. A new upgrade note for #755: roll replicas one at a time.
+- **W8.3 (threat model)**, Sonnet 5.5, `8e90728f8`: 2.43.0, 488 threats (457 Mitigated, 21 Open, 10 N/A). T-483 and T-484 are Mitigated, T-488 is new. Static/Live (formerly D3/D4) on first use in §5.10. The website copies are regenerated.
+- **W8.4a (version)** `750be9f0a`, moved forward (§12.7). **W8.4** `7ab871fad`, Sonnet 5.5:
+  - `CHANGELOG.md` `[1.1.1] - 2026-10-20`: one entry per closed issue (52), and every upgrade note of §9 plus #749 and #755.
+  - `website/src/version.ts` `SECURITY_VERIFIED_RELEASE` 1.1.1 / 2026-10-19; the 1.1.1 news post and `postSlug`; the roadmap's "Release 1.1.1" row.
+  - `frontend/` and `website/` `package.json` stay `0.0.0`, as in 1.1.0.
+- **Closes:** #664 … #699, #702 … #715 (#710 among them), #717, #718 — 52 issues. **Not closed:** #719 (W6.3), #513, #561.
+
 ---
 
 ## 13. Kickoff prompts

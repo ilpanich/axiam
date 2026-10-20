@@ -54,6 +54,8 @@ pub struct CaService<R> {
     config: PkiConfig,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
+    /// How long an acquire of that semaphore waits before `503` (#671).
+    permit_wait: std::time::Duration,
     /// Who holds the signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
     /// Where a parent CA's revocation list is published (#565). See
@@ -72,6 +74,7 @@ impl<R: CaCertificateRepository> CaService<R> {
             repo,
             config,
             crypto_semaphore,
+            permit_wait: crate::permit::DEFAULT_PERMIT_WAIT,
             custodians,
             crl_distribution: None,
         }
@@ -87,6 +90,14 @@ impl<R: CaCertificateRepository> CaService<R> {
     #[must_use]
     pub fn with_crl_distribution(mut self, distribution: Option<CrlDistribution>) -> Self {
         self.crl_distribution = distribution;
+        self
+    }
+
+    /// Replace the default wait for a crypto permit with the deployment's
+    /// `hash_acquire_timeout_secs` (#671).
+    #[must_use]
+    pub fn with_permit_wait(mut self, wait: std::time::Duration) -> Self {
+        self.permit_wait = wait;
         self
     }
 
@@ -150,11 +161,8 @@ impl<R: CaCertificateRepository> CaService<R> {
         }
 
         // CPU-bound: key generation + self-signing run in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         let now = Utc::now();
         let not_before = now;
@@ -488,11 +496,8 @@ impl<R: CaCertificateRepository> CaService<R> {
             .await?
             .to_string();
 
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         let parent_cert_pem = parent.public_cert_pem.clone();
         let subject = input.subject.clone();
@@ -659,11 +664,8 @@ impl<R: CaCertificateRepository> CaService<R> {
             .await?
             .to_string();
 
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         let parent_cert_pem = parent.public_cert_pem.clone();
         let csr_pem = input.csr_pem.clone();

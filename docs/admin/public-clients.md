@@ -231,31 +231,33 @@ accepted at `/oauth2/authorize`, and only one of them started this flow.
 
 ## Rate limiting
 
-A token request carrying no client credential is counted in its own bucket,
-keyed on **`client_id` and the client's address together**, with the
-`token_per_min` allowance (`AXIAM__RATE_LIMIT__TOKEN_PER_MIN`, default 120 —
-see the [deployment guide](../deployment/README.md)). It sits behind the
-endpoint's own rate limit rather than replacing it. The device-code grant's
-polls are counted in it too: a public device client presents no credential.
+A token request carrying no client credential has **no bucket of its own**:
+it is counted by the `/oauth2/token` route's rate limit like every other token
+request, keyed by `AXIAM__RATE_LIMIT__KEY` (`ip` by default) at
+`AXIAM__RATE_LIMIT__TOKEN_PER_MIN` (default 120 — see the
+[deployment guide](../deployment/README.md)). The device-code grant's polls
+are counted there too: a public device client presents no credential.
 
-The address is the one the endpoint's own rate limit keys on: the rightmost
-`X-Forwarded-For` entry your proxies did not add, under
-`AXIAM__RATE_LIMIT__TRUSTED_HOPS` (the number of proxies in front of the
-server minus one — see [Deriving `TRUSTED_HOPS`](../deployment/README.md#deriving-trusted_hops)),
-and the connection's peer address when there is no such entry. Before 1.1.0 it
-was always the peer address, which behind a reverse proxy is the proxy: every
-user of one public client then shared one allowance, and one address could
-spend it and have every other user's code exchange and refresh — and, once
-device polls were counted, every device's poll — answered `429 slow_down`. A `TRUSTED_HOPS` set one too high brings that back,
-for this bucket as for every other.
+A caller flooding the endpoint from one address against one public client
+therefore meets **`429` with `rate_limit_exceeded`** (and a `Retry-After`),
+the same answer every other client gets from the route. It never meets
+`slow_down` from that flood. `slow_down` is the device grant's own answer
+(RFC 8628 §3.5): a `400` returned to a device that polls faster than the
+interval its grant carries, and it means "raise your interval by 5 seconds".
+A client that handles `slow_down` as "wait longer" and `rate_limit_exceeded` as
+"back off for `Retry-After`" is correct for both.
 
-Neither half of that key works alone here. `client_id` on its own is a bucket
-an unauthenticated caller mints by rotating a value they choose; the address
-on its own puts every desktop client behind one NAT gateway — an
-office, a household — into a single allowance. Deployments that front many
-confidential clients from one egress IP should additionally set
-`AXIAM__RATE_LIMIT__KEY=ip_client_id`, which applies the same reasoning to the
-endpoint's main bucket.
+The address the route keys on is the rightmost `X-Forwarded-For` entry your
+proxies did not add, under `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and
+`AXIAM__RATE_LIMIT__TRUSTED_PROXIES` (see
+[Deriving `TRUSTED_HOPS`](../deployment/README.md#deriving-trusted_hops)), and
+the connection's peer address when there is no such entry. Before 1.1.1 a
+second, narrower bucket — keyed on `client_id` and the address together, at the
+same allowance — sat behind the route's limit and answered `429 slow_down`. It
+could only refuse a request the route had already admitted, so it is removed:
+the route limit is the single answer. Deployments that front many clients from
+one egress IP should set `AXIAM__RATE_LIMIT__KEY=ip_client_id`, which gives each
+client its own route bucket per address.
 
 ---
 

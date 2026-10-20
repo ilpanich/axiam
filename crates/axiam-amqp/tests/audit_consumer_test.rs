@@ -547,3 +547,75 @@ async fn a_reserved_control_action_is_refused_and_not_persisted() {
         "an ordinary action is still persisted"
     );
 }
+
+/// R110W3-09 (#682): a lookalike of a reserved action — a leading space, a
+/// Cyrillic `е`, a full-width dot, a zero-width joiner, a control character —
+/// is refused though validly signed, and nothing is persisted; the four
+/// reserved actions are still refused by namespace and `METHOD /path` passes.
+#[tokio::test]
+async fn an_action_outside_printable_ascii_is_refused_and_not_persisted() {
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+    let page = Pagination {
+        offset: 0,
+        limit: 100,
+        search: None,
+    };
+
+    for action in [
+        " tenants.audit_exported",
+        "tenants.audit_exported ",
+        "t\u{435}nants.audit_exported",
+        "tenants\u{ff0e}audit_exported",
+        "tenants.\u{200d}audit_exported",
+        "tenants.audit_exported\u{0}",
+        "gdpr.user\u{200b}_pseudonymized",
+        "",
+    ] {
+        let raw = signed_event(
+            tenant_id,
+            Uuid::new_v4(),
+            "User",
+            "Success",
+            action,
+            CURRENT_KEY_VERSION,
+            now,
+            Uuid::new_v4(),
+        );
+        let outcome =
+            process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+        assert!(
+            matches!(outcome, AuditIngestOutcome::NackDrop),
+            "{action:?} must be refused"
+        );
+    }
+    let listed = audit_repo
+        .list(tenant_id, AuditLogFilter::default(), page.clone())
+        .await
+        .unwrap();
+    assert!(listed.items.is_empty(), "no lookalike was persisted");
+
+    for action in ["POST /api/v1/users", "user.login"] {
+        let raw = signed_event(
+            tenant_id,
+            Uuid::new_v4(),
+            "User",
+            "Success",
+            action,
+            CURRENT_KEY_VERSION,
+            now,
+            Uuid::new_v4(),
+        );
+        let outcome =
+            process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+        assert!(matches!(outcome, AuditIngestOutcome::Ack), "{action}");
+    }
+    let listed = audit_repo
+        .list(tenant_id, AuditLogFilter::default(), page)
+        .await
+        .unwrap();
+    assert_eq!(listed.items.len(), 2);
+}

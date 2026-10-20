@@ -1055,15 +1055,19 @@ where
     }
 
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
+    // #671: the PKI routes wait for a crypto permit as long as Argon2id does.
+    let pki_permit_wait = std::time::Duration::from_secs(config.auth.hash_acquire_timeout_secs);
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
     )
-    .with_crl_distribution(crl_distribution.clone());
+    .with_crl_distribution(crl_distribution.clone())
+    .with_permit_wait(pki_permit_wait);
     let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo());
-    let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
+    let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore))
+        .with_permit_wait(pki_permit_wait);
     let cert_service = CertService::new(
         ca_cert_repo,
         cert_repo.clone(),
@@ -1074,7 +1078,8 @@ where
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
     )
-    .with_crl_distribution(crl_distribution);
+    .with_crl_distribution(crl_distribution)
+    .with_permit_wait(pki_permit_wait);
     let crl_service = axiam_pki::CrlService::new(
         SurrealCaCertificateRepository::new(pool.handle_for_repo()),
         cert_repo.clone(),
@@ -1581,6 +1586,35 @@ where
          watch axiam_rate_limit_xff_discarded_total.",
         trusted_hops + 1
     );
+
+    // #711 (R110-01, T-212): which peers may write `X-Forwarded-For` at all.
+    // Parsed here so a list that does not parse stops the boot instead of
+    // silently reading every peer's header; every extractor then reads the
+    // same list (`TrustedProxies::configured`). The empty list keeps the
+    // header read from every peer — the shipped `k8s/` topology re-encrypts
+    // from ingress-nginx to this native TLS listener — so on a native TLS
+    // listener it is said once, here: that is the listener a client with no
+    // proxy in front (the FreeRADIUS recipe's mutual TLS) reaches directly.
+    let trusted_proxies = axiam_core::forwarded_for::TrustedProxies::from_env()
+        .unwrap_or_else(|e| panic!("invalid rate-limit configuration: {e}"));
+    if let Some(warning) = trusted_proxies.boot_warning(config.server.tls.enabled) {
+        tracing::warn!(
+            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
+            "{warning}"
+        );
+    } else if !trusted_proxies.is_empty() {
+        let networks: Vec<String> = trusted_proxies
+            .networks()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::info!(
+            trusted_proxies = %networks.join(","),
+            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
+             peers; every other request is keyed on its own address. Both listeners \
+             read the same list."
+        );
+    }
 
     // §4 item 1 (security-analysis-2026-08-02): the bucket key for
     // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
@@ -2753,6 +2787,13 @@ where
     // returned, before the gRPC stop and the lease release; after a lost lease
     // the lease-loss stop sends it at the loss as the renewal detects it (#628).
     let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
+    // #673: the in-process rate-limiter maps (REST and gRPC) are swept once a
+    // minute. The task ends on the same signal as the cleanup task, so it stops
+    // with the server; it holds nothing a cut could leave half done.
+    let _limiter_sweep = crate::limiter_sweep::spawn(
+        cleanup_shutdown_rx.clone(),
+        crate::limiter_sweep::SWEEP_EVERY,
+    );
     // Mail publisher for export-ready notifications from the cleanup task.
     let cleanup_mail_publisher: Arc<MailTransportPublisher> = Arc::new(match &amqp {
         Some(amqp) => {

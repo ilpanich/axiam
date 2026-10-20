@@ -23,6 +23,7 @@ pub mod fatal_stop;
 pub mod healthcheck;
 pub mod job_health;
 pub mod legacy_env;
+pub mod limiter_sweep;
 pub mod mds_job;
 pub mod messaging;
 pub mod mtls_anchors;

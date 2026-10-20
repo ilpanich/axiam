@@ -14,7 +14,10 @@
 //!   `XForwardedForKeyExtractor` (plan 24-03): a configured `trusted_hops`
 //!   selects the rightmost trusted XFF hop, and when there are NOT enough
 //!   hops to trust, XFF is ignored entirely and the verified tonic connection
-//!   peer address is used instead (never `hops[0]` — SECHRD-03/D-01d).
+//!   peer address is used instead (never `hops[0]` — SECHRD-03/D-01d). It
+//!   reads the header at all only from a peer `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`
+//!   names, when it names any (#711) — the REST rule, from the same
+//!   [`axiam_core::forwarded_for::TrustedProxies`].
 //! - [`GrpcSharedRateLimitLayer`] — a pre-check `tower::Layer` over the
 //!   process-wide write-behind `axiam_db::SharedRateLimitCounter` (the SAME
 //!   counter type and env knobs — `AXIAM__RATE_LIMIT__SHARED`,
@@ -67,6 +70,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use axiam_core::forwarded_for::TrustedProxies;
 use axiam_db::SharedRateLimitCounter;
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
@@ -181,17 +185,40 @@ fn record_discarded_xff(hops_seen: usize, trusted_hops: usize) {
 /// XFF is ignored entirely — the key is derived from the verified peer
 /// address instead (a client cannot manufacture extra hops to force a
 /// fallback to an attacker-controlled `hops[0]` — SECHRD-03/D-01d).
+///
+/// #711: XFF is read at all only when `trusted_proxies` honours the peer —
+/// with a list, only from a peer inside it; every other request is keyed on
+/// its peer, whatever it wrote. Empty (the default): every peer's header.
 #[derive(Debug, Clone, Default)]
 pub struct GrpcTrustedHopsKeyExtractor {
     pub trusted_hops: usize,
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl GrpcTrustedHopsKeyExtractor {
     /// Create an extractor keyed by `trusted_hops` trusted reverse-proxy
     /// hops (0 = no trusted hops; XFF is only ever used when it has more
-    /// than 0 entries beyond what's trusted).
+    /// than 0 entries beyond what's trusted). The proxy list is empty: every
+    /// peer's header is read.
     pub fn new(trusted_hops: usize) -> Self {
-        Self { trusted_hops }
+        Self {
+            trusted_hops,
+            trusted_proxies: TrustedProxies::default(),
+        }
+    }
+
+    /// This extractor, reading the header only from a peer in `trusted_proxies`.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
+    }
+
+    /// The extractor the deployment configures — the variables the REST
+    /// limiters read: `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and
+    /// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`.
+    pub fn configured() -> Self {
+        Self::new(trusted_hops_from_env()).with_trusted_proxies(TrustedProxies::configured())
     }
 }
 
@@ -199,7 +226,11 @@ impl KeyExtractor for GrpcTrustedHopsKeyExtractor {
     type Key = IpAddr;
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        if let Some(forwarded_for) = req.headers().get("x-forwarded-for")
+        let peer = grpc_peer_addr(req).map(|addr| addr.ip());
+        // #711: a peer the list does not name is not a proxy; what it wrote is
+        // its own choice. Not an R-4 discard: `trusted_hops` is not wrong.
+        if self.trusted_proxies.honours_forwarded_for(peer)
+            && let Some(forwarded_for) = req.headers().get("x-forwarded-for")
             && let Ok(val) = forwarded_for.to_str()
         {
             let hops: Vec<&str> = val.split(',').map(str::trim).collect();
@@ -224,9 +255,7 @@ impl KeyExtractor for GrpcTrustedHopsKeyExtractor {
             }
         }
 
-        grpc_peer_addr(req)
-            .map(|addr| addr.ip())
-            .ok_or(GovernorError::UnableToExtractKey)
+        peer.ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -522,10 +551,24 @@ pub fn build_grpc_governor_layer(authz_per_sec: u32) -> GrpcGovernorLayer {
         GovernorConfigBuilder::default()
             .const_period(quota.replenish_interval())
             .const_burst_size(quota.burst_size().get())
-            .key_extractor(GrpcTrustedHopsKeyExtractor::new(trusted_hops_from_env()))
+            .key_extractor(GrpcTrustedHopsKeyExtractor::configured())
             .finish()
             .expect("valid GovernorConfig for gRPC rate limiter"),
     );
+
+    // #673: the map is swept with the REST ones (`axiam_core::limiter_sweep`).
+    // `tower_governor` evicts nothing, and the key is an address.
+    let weak = Arc::downgrade(config.limiter());
+    axiam_core::limiter_sweep::register(move || match weak.upgrade() {
+        Some(limiter) => {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+            axiam_core::limiter_sweep::SweepOutcome::Swept {
+                remaining: limiter.len(),
+            }
+        }
+        None => axiam_core::limiter_sweep::SweepOutcome::Dropped,
+    });
 
     GovernorLayer::new(config)
 }
@@ -766,6 +809,7 @@ pub struct GrpcSharedRateLimitLayer {
     counter: SharedRateLimitCounter,
     scope: SharedScope,
     trusted_hops: usize,
+    trusted_proxies: TrustedProxies,
 }
 
 /// How a [`GrpcSharedRateLimitLayer`] derives `(bucket endpoint, window
@@ -845,6 +889,7 @@ impl GrpcSharedRateLimitLayer {
             counter,
             scope: SharedScope::Uniform { endpoint, limit },
             trusted_hops,
+            trusted_proxies: TrustedProxies::configured(),
         }
     }
 
@@ -878,7 +923,18 @@ impl GrpcSharedRateLimitLayer {
             counter,
             scope: SharedScope::PerFamily(limits),
             trusted_hops,
+            trusted_proxies: TrustedProxies::configured(),
         }
+    }
+
+    /// This layer, reading `X-Forwarded-For` only from a peer in
+    /// `trusted_proxies` (#711). Every constructor starts from
+    /// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`, the list the in-memory governor
+    /// reads; this is for a test that needs another.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
     }
 
     /// The `(bucket endpoint, window limit)` this layer applies to `path`.
@@ -899,6 +955,7 @@ impl<S> Layer<S> for GrpcSharedRateLimitLayer {
             counter: self.counter.clone(),
             scope: self.scope,
             trusted_hops: self.trusted_hops,
+            trusted_proxies: self.trusted_proxies.clone(),
         }
     }
 }
@@ -914,6 +971,7 @@ pub struct GrpcSharedRateLimitService<S> {
     counter: SharedRateLimitCounter,
     scope: SharedScope,
     trusted_hops: usize,
+    trusted_proxies: TrustedProxies,
 }
 
 impl<S> Service<Request<tonic::body::Body>> for GrpcSharedRateLimitService<S>
@@ -948,7 +1006,8 @@ where
         // request belongs to. Every family resolves to a bucket — reflection
         // and health are counted too, against a generous one (residual 4).
         let (endpoint, limit) = self.scope.resolve(req.uri().path());
-        let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops);
+        let key_extractor = GrpcTrustedHopsKeyExtractor::new(self.trusted_hops)
+            .with_trusted_proxies(self.trusted_proxies.clone());
 
         // The rate-limit decision itself is now synchronous and taken BEFORE
         // the future is even created — no datastore round trip on the path of
@@ -1292,6 +1351,42 @@ mod tests {
     fn xff_metric_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// #711, the gRPC twin of `rate_limit_keying_test.rs`: once the proxies
+    /// are named, a peer outside them is keyed on itself whatever it writes,
+    /// at any `trusted_hops`, and that is not an R-4 discard; a listed peer's
+    /// header is read as before; the empty list reads every peer's.
+    #[test]
+    fn trusted_proxies_decide_whose_header_is_read() {
+        let _guard = xff_metric_lock();
+        let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
+        let key = |extractor: &GrpcTrustedHopsKeyExtractor, xff: &str| {
+            extractor
+                .extract(&req_with_xff_and_peer(Some(xff), peer))
+                .unwrap()
+        };
+
+        let unlisted = TrustedProxies::parse("10.0.0.0/8").unwrap();
+        for hops in [0, 1, 3] {
+            let extractor =
+                GrpcTrustedHopsKeyExtractor::new(hops).with_trusted_proxies(unlisted.clone());
+            let before = xff_discarded_total();
+            assert_eq!(key(&extractor, "198.51.100.1"), peer.ip(), "hops {hops}");
+            assert_eq!(key(&extractor, "198.51.100.2"), peer.ip(), "hops {hops}");
+            assert_eq!(xff_discarded_total(), before, "hops {hops}");
+        }
+
+        let listed = GrpcTrustedHopsKeyExtractor::new(0)
+            .with_trusted_proxies(TrustedProxies::parse("203.0.113.0/24").unwrap());
+        assert_ne!(key(&listed, "198.51.100.1"), key(&listed, "198.51.100.2"));
+        assert_eq!(
+            key(&listed, "198.51.100.1"),
+            "198.51.100.1".parse::<IpAddr>().unwrap()
+        );
+
+        let empty = GrpcTrustedHopsKeyExtractor::new(0);
+        assert_ne!(key(&empty, "198.51.100.1"), key(&empty, "198.51.100.2"));
     }
 
     /// The fallback stays; what R-4 adds is that it stops being silent.

@@ -200,6 +200,8 @@ pub struct CertService<CA, CR> {
     config: PkiConfig,
     /// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
     crypto_semaphore: Arc<Semaphore>,
+    /// How long an acquire of that semaphore waits before `503` (#671).
+    permit_wait: std::time::Duration,
     /// Who holds the CA signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
     /// Where the issuing CA's revocation list is published (#565). `None`
@@ -220,6 +222,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             cert_repo,
             config,
             crypto_semaphore,
+            permit_wait: crate::permit::DEFAULT_PERMIT_WAIT,
             custodians,
             crl_distribution: None,
         }
@@ -238,6 +241,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     #[must_use]
     pub fn with_crl_distribution(mut self, distribution: Option<CrlDistribution>) -> Self {
         self.crl_distribution = distribution;
+        self
+    }
+
+    /// Replace the default wait for a crypto permit with the deployment's
+    /// `hash_acquire_timeout_secs` (#671).
+    #[must_use]
+    pub fn with_permit_wait(mut self, wait: std::time::Duration) -> Self {
+        self.permit_wait = wait;
         self
     }
 
@@ -504,11 +515,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .to_string();
 
         // CPU-bound: key generation + certificate signing run in spawn_blocking behind semaphore (CQ-B02).
-        let _permit = self
-            .crypto_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+        let _permit =
+            crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
         let ca_cert_pem = ca_cert.public_cert_pem.clone();
         let ee_subject = input.subject.clone();
@@ -598,11 +606,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // would let one slow signer block every other issuance in the
         // deployment, which is the opposite of what the semaphore is for.
         let (private_key_pem, csr_pem) = {
-            let _permit = self
-                .crypto_semaphore
-                .acquire()
-                .await
-                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            let _permit =
+                crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
             let ee_subject = input.subject.clone();
             let key_algorithm = input.key_algorithm.clone();
@@ -857,11 +862,8 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 .await?
                 .to_string();
 
-            let _permit = self
-                .crypto_semaphore
-                .acquire()
-                .await
-                .map_err(|_| AxiamError::Internal("crypto semaphore closed".into()))?;
+            let _permit =
+                crate::permit::bounded_permit(&self.crypto_semaphore, self.permit_wait).await?;
 
             let ca_cert_pem = ca_cert.public_cert_pem.clone();
             let csr_pem = input.csr_pem.clone();

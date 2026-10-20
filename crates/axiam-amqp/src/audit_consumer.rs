@@ -2,7 +2,7 @@
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{
-    ActorType, AuditOutcome, CreateAuditLogEntry, reserved_action_namespace,
+    ActorType, AuditOutcome, CreateAuditLogEntry, is_valid_audit_action, reserved_action_namespace,
 };
 use axiam_core::repository::{AmqpNonceRepository, AuditLogRepository};
 use chrono::Utc;
@@ -125,6 +125,20 @@ where
             tenant_id = %tenant_id,
             issued_at = %msg.issued_at,
             "AuditEventMessage issued_at outside freshness window — rejecting (NEW-4)"
+        );
+        return AuditIngestOutcome::NackDrop;
+    }
+
+    // R110W3-09 (#682): an action is printable ASCII with at most one inner
+    // space. A lookalike of a reserved action (leading space, Cyrillic or
+    // full-width letters, a zero-width joiner) escapes the namespace test below
+    // yet reads as a control record in the console. Refused before the nonce is
+    // recorded; the log names the length, never the action.
+    if !is_valid_audit_action(&msg.action) {
+        warn!(
+            tenant_id = %tenant_id,
+            action_len = msg.action.len(),
+            "AuditEventMessage action outside printable ASCII — rejecting (R110W3-09)"
         );
         return AuditIngestOutcome::NackDrop;
     }

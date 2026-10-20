@@ -621,6 +621,45 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.7 W7 — the contract, the eleven SDKs and the conformance review
 
+- **Merges (orchestrator):** W1 `9373afab8`, W2 `73955c4ec`, W3 `45abe6561`, W4 `c4f3275fe`, W5 `4ba5b7c1b`, W6 `6bae7dd38`, every merge commit signed.
+  - W3's merge resolved two conflicts. `crates/axiam-db/src/schema.rs`: the migration list keeps v108 and v109, both scope tests are kept, and the newest-version assertion is 109. `Axiam.json`: T-289's mitigation text was merged three-way.
+  - W5's merge resolved `docs/deployment/README.md`, taking W2's `TRUSTED_PROXIES` text plus W5's sentence on the Live profile, and regenerated the spec and registry.
+  - Checked on the merged tree: `cargo check --workspace --tests --no-default-features` exit 0, no warnings; the schema tests (88), `rate_limit_bucket_names_test` (19), `audit_wraps_routes` and `seeder_default_data_test` (19) pass.
+- **W7.1** `a6cd10eba`: contract 1.63, record §34.7 (a … q).
+  - Plan vs tree: the device-grant token gets `403` only at `/api/v1/device/verify` and `/decide`, and `401` elsewhere. Item (c)'s rule lives in §8, not §33. Two "RADIUS D4" mentions, not three. The spec needed no regeneration.
+- **W8.4a, moved forward** `750be9f0a`: version 1.1.1, as 1.1.0 did with `89e488e3e`, so that the SDKs re-vendor the final spec once. `openapi.json` sha256 `15dace9c…`, spec digest `sha256:443c9d39…`; `management-registry.json` sha256 `b0d5e749…`.
+- **W7.2 … W7.12**: eleven Sonnet 5.5 sessions, one draft PR each on `claude/contract-1.63`. The final heads below vendor `d919ba0cc` byte for byte (`CONTRACT.md` sha256 `e267261b…`), and CI is green on every one:
+
+  | SDK | PR | final head | version | closes |
+  |---|---|---|---|---|
+  | TypeScript | ilpanich/axiam-typescript-sdk#147 | `30778f0c` | 1.1.1 | #142 |
+  | Rust | ilpanich/axiam-rust-sdk#136 | `168698b4` | 1.1.1 | #132 |
+  | Python | ilpanich/axiam-python-sdk#101 | `b42bbf47` | 1.1.1 | #99, #100 |
+  | C | ilpanich/axiam-c-sdk#75 | `3db38bdb` | 1.1.1 | #74 |
+  | C++ | ilpanich/axiam-cplusplus-sdk#77 | `12d8a354` | 1.2.0 (SOVERSION 3) | #76 |
+  | C# | ilpanich/axiam-csharp-sdk#109 | `6284a76a` | 1.1.1 | #107 |
+  | Go | ilpanich/axiam-go-sdk#101 | `f5fc7da2` | 1.1.1 | #99 |
+  | Java | ilpanich/axiam-java-sdk#119 | `dcae1850` | 1.2.0 | #115 |
+  | Kotlin | ilpanich/axiam-kotlin-sdk#78 | `e200a45e` | 1.2.0 | #77 |
+  | PHP | ilpanich/axiam-php-sdk#85 | `f260110a` | 1.1.1 | #84 |
+  | Swift | ilpanich/axiam-swift-sdk#76 | `e8492615` | 1.1.1 | #75 |
+
+- **Where the tree overruled the plan:** none of the seven "AMQP SDKs" ships an audit-event publisher. Rust guards `AuditEventMessage::sign`; the other six have nothing to refuse, so (c) became contract text.
+  - The C SDK found and fixed a manifest bug: a stated `termination_action` or `service_type` was always refused.
+  - Rust untracked the 438 build files under `vendor/axiam-opaque/target/`.
+- **W7.13** `1f6134bdc` (Opus 5.5), `claude_dev/sdk-contract-1.63-conformance-review.md`: six Medium, all fixed before W8:
+  - C163-01, TypeScript: the `/oauth2/` match also caught the federation callback, breaking Node SSO over OAuth2.
+  - C163-02, Swift: C162-07 was not met; the refusal now happens at `plan` and names the member and the value.
+  - C163-03, C, and C163-04, C++: the UMA ticket grant carried the session cookie. C++ also gets C163-15, `kVersion`.
+  - C163-05, Kotlin: version not bumped.
+  - C163-06, contract text: fixed in **W7.1b** `d919ba0cc` together with C163-11.
+  - Low and Informational: ilpanich/axiam#750, typescript#148, python#102, c#76, filed by the reviewer; rust#137, cplusplus#78, csharp#110, go#102, java#120, kotlin#79, php#86, swift#77, filed by the orchestrator because the reviewer could not reach those repositories.
+- **Re-size (§1.1):** W8.4a was moved forward, and W7.1b added for the contract-text Medium. The W7.13 session sat about an hour on an `add_repo` permission prompt nobody could answer. It was interrupted and continued with plain `git` on the public repositories.
+- **Open for the maintainer (the review's §5, not answered by §11):**
+  - Q1: the recovered `gdpr.user_pseudonymized` row with `certificates_revoked: null` against §27.11 rule 5 (W1.7's question).
+  - Q2: what a device poll does on `429 rate_limit_exceeded`; the review recommends the CIBA rule, in contract 1.64.
+  - Q3: keep "naming the member and the value" strict, or relax it. **C163-10 was not applied**, so the contract stays strict; seven SDKs name the member only and carry it as Informational.
+
 ### 12.8 W8 — release readiness
 
 ---

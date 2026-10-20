@@ -538,6 +538,14 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.2 W2
 
+- **Head:** `37c3f1027` on `claude/release-1.1.1-w2` (11 commits on `main`, every one carrying a `gpgsig`).
+- **Commits:** W2.1 `d1c97b6ee` (#711, #686; Opus 5.5), W2.2 `b846942f4` (#673), W2.3 `be74f6231` (#718), W2.4 `d3448c2f4` (#685), W2.5 `2b24f3787` (repair of W2.3, below) and `7f1f9cb9a` (#670), W2.6 `a8a65617b` (#671), W2.7 `6211b4286` (#672), W2.8 `5f17ff98c` (#682), W2.9 `ac3effd10` (#674), W2.10 `37c3f1027` (F4 review, `claude_dev/security-review-release-1.1.1-w2-2026-10-19.md`).
+- **Re-size (§1.1):** W2.3 left `rate_limit_bucket_names_test` red (its scan did not know `admin_preset`); W2.4 found it. The repair was folded into the W2.5 session as its first commit (`2b24f3787`), and every later prompt requires the full test binaries of each touched crate.
+- **Where the tree overruled the plan:** the keying rule lives in `axiam-core::forwarded_for`, not `config/rate_limit.rs`, and an empty `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` keeps today's behaviour with one boot `WARN` — the row and #711's Fix say so, only #711's Test sentence did not, and the shipped Kubernetes topology (TLS on behind an ingress that re-encrypts) decides; W2.7 reads seven handler prefixes, not eight, since W2.4 removed `oauth2_token_public`, and leaves `ciba_hint_cap` (written by `increment_by`) as T-474's residual; `asyncapi.yml` is `docs/api/asyncapi.yml`; W2.9's (d) and (g) had been made by #670 and #671.
+- **F4 (W2.10):** no Critical, High or Medium. Low #731 (the empty-list `WARN` looks at the REST listener's TLS only; the gRPC listener's native TLS reads the same list); Informational #732, #733, #734, #735 and #741 — the last the cross-wave question from §12.4: AMQP-ingested `network_role.*` / `certificate_binding.*` rows are not refused, rated Informational because the reserved set is by design the records the server reads back (R101W3-03, T-118, T-472), nothing reads these back, and every other server action is already open. All on `1.1.x` for 1.1.2. The W5.8 FreeRADIUS sentence matches W2.1's code.
+- **Executors:** each task at its row's model (W2.1 and W2.10 Opus 5.5, the rest Sonnet 5.5).
+- **For W7.1:** §8 "Actions the audit ingestion refuses" gains W2.8's grammar; §14/§27: a `429` on `/oauth2/token` carries `rate_limit_exceeded` and `Retry-After`, `slow_down` only as the device grant's `400`. **For W7.1/W8.2:** the crypto-gate `503` (PKI routes, login, SAML pages) is not annotated in the spec. **For W8.4:** the new key `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` (empty keeps the old behaviour, a bad value stops the boot); public clients see `429 rate_limit_exceeded` instead of `slow_down` on a flood; an AMQP action outside the grammar is dead-lettered.
+
 ### 12.3 W3
 
 ### 12.4 W4

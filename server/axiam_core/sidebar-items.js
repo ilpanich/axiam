@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["audit_minimisation","ca_keys","error","id","ip_class","models","outbound","permission_scope","personal_data","provisioning","repository","revocation_feed","secrets"]};
+window.SIDEBAR_ITEMS = {"mod":["audit_minimisation","ca_keys","error","forwarded_for","id","ip_class","limiter_sweep","models","outbound","permission_scope","personal_data","provisioning","repository","revocation_feed","secrets"]};

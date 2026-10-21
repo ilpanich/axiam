@@ -638,814 +638,824 @@
 <a href=#638 id=638 data-nosnippet>638</a>/// the Argon2id path uses (#654): both endpoints are unauthenticated, and an
 <a href=#639 id=639 data-nosnippet>639</a>/// unbounded wait would queue ahead of every login and every CRL re-sign. A
 <a href=#640 id=640 data-nosnippet>640</a>/// busy gate is [`PostVerifyFailure::Busy`], answered `503` ([`busy_page`]):
-<a href=#641 id=641 data-nosnippet>641</a>/// the permit is taken before the document is evaluated, so the answer says
-<a href=#642 id=642 data-nosnippet>642</a>/// nothing about the signature, and the SP can retry. A closed semaphore (it
-<a href=#643 id=643 data-nosnippet>643</a>/// never is) is the signature that did not verify.
-<a href=#644 id=644 data-nosnippet>644</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>verify_post_signature_off_worker&lt;C: Connection + Clone&gt;(
-<a href=#645 id=645 data-nosnippet>645</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#646 id=646 data-nosnippet>646</a>    document: <span class="kw-2">&amp;</span>str,
-<a href=#647 id=647 data-nosnippet>647</a>    sp_cert_der: <span class="kw-2">&amp;</span>[u8],
-<a href=#648 id=648 data-nosnippet>648</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), PostVerifyFailure&gt; {
-<a href=#649 id=649 data-nosnippet>649</a>    <span class="kw">let </span>permit = crypto_gate(state)
-<a href=#650 id=650 data-nosnippet>650</a>        .acquire(<span class="string">"saml_idp_receiver"</span>)
-<a href=#651 id=651 data-nosnippet>651</a>        .<span class="kw">await
-<a href=#652 id=652 data-nosnippet>652</a>        </span>.map_err(|refusal| <span class="kw">match </span>refusal {
-<a href=#653 id=653 data-nosnippet>653</a>            GateRefusal::Busy =&gt; PostVerifyFailure::Busy,
-<a href=#654 id=654 data-nosnippet>654</a>            GateRefusal::Closed =&gt; PostVerifyFailure::Request(RequestError::SignatureInvalid),
-<a href=#655 id=655 data-nosnippet>655</a>        })<span class="question-mark">?</span>;
-<a href=#656 id=656 data-nosnippet>656</a>    <span class="kw">let </span>document = document.to_owned();
-<a href=#657 id=657 data-nosnippet>657</a>    <span class="kw">let </span>sp_cert_der = sp_cert_der.to_vec();
-<a href=#658 id=658 data-nosnippet>658</a>    tokio::task::spawn_blocking(<span class="kw">move </span>|| {
-<a href=#659 id=659 data-nosnippet>659</a>        <span class="kw">let </span>_permit = permit;
-<a href=#660 id=660 data-nosnippet>660</a>        saml_request::verify_post_signature(<span class="kw-2">&amp;</span>document, <span class="kw-2">&amp;</span>sp_cert_der)
-<a href=#661 id=661 data-nosnippet>661</a>    })
-<a href=#662 id=662 data-nosnippet>662</a>    .<span class="kw">await
-<a href=#663 id=663 data-nosnippet>663</a>    </span>.unwrap_or(<span class="prelude-val">Err</span>(RequestError::SignatureInvalid))
-<a href=#664 id=664 data-nosnippet>664</a>    .map_err(PostVerifyFailure::Request)
-<a href=#665 id=665 data-nosnippet>665</a>}
-<a href=#666 id=666 data-nosnippet>666</a>
-<a href=#667 id=667 data-nosnippet>667</a><span class="doccomment">/// Why [`verify_post_signature_off_worker`] did not verify a signature.
-<a href=#668 id=668 data-nosnippet>668</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-<a href=#669 id=669 data-nosnippet>669</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>PostVerifyFailure {
-<a href=#670 id=670 data-nosnippet>670</a>    <span class="doccomment">/// The receiver's verdict on the message.
-<a href=#671 id=671 data-nosnippet>671</a>    </span>Request(RequestError),
-<a href=#672 id=672 data-nosnippet>672</a>    <span class="doccomment">/// No crypto permit came free within `hash_acquire_timeout_secs`.
-<a href=#673 id=673 data-nosnippet>673</a>    </span>Busy,
-<a href=#674 id=674 data-nosnippet>674</a>}
-<a href=#675 id=675 data-nosnippet>675</a>
-<a href=#676 id=676 data-nosnippet>676</a><span class="doccomment">/// The deployment's crypto semaphore with the wait every bounded waiter on it
-<a href=#677 id=677 data-nosnippet>677</a>/// gives (`hash_acquire_timeout_secs`, #654).
-<a href=#678 id=678 data-nosnippet>678</a></span><span class="kw">fn </span>crypto_gate&lt;C: Connection + Clone&gt;(state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;) -&gt; CryptoGate {
-<a href=#679 id=679 data-nosnippet>679</a>    CryptoGate::new(
-<a href=#680 id=680 data-nosnippet>680</a>        std::sync::Arc::clone(<span class="kw-2">&amp;</span>state.crypto_semaphore),
-<a href=#681 id=681 data-nosnippet>681</a>        std::time::Duration::from_secs(state.auth_config.hash_acquire_timeout_secs),
-<a href=#682 id=682 data-nosnippet>682</a>    )
-<a href=#683 id=683 data-nosnippet>683</a>}
-<a href=#684 id=684 data-nosnippet>684</a>
-<a href=#685 id=685 data-nosnippet>685</a><span class="doccomment">/// `503`, for a verification that found the crypto gate saturated (#654): not
-<a href=#686 id=686 data-nosnippet>686</a>/// a verdict on the request, so not one of [`RequestError`]'s `400`s. Asks the
-<a href=#687 id=687 data-nosnippet>687</a>/// SP to retry shortly.
-<a href=#688 id=688 data-nosnippet>688</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>busy_page(tenant_id: Uuid) -&gt; HttpResponse {
-<a href=#689 id=689 data-nosnippet>689</a>    <span class="kw">let </span><span class="kw-2">mut </span>response = refusal_page(StatusCode::SERVICE_UNAVAILABLE, <span class="string">"busy"</span>, tenant_id);
-<a href=#690 id=690 data-nosnippet>690</a>    response.headers_mut().insert(
-<a href=#691 id=691 data-nosnippet>691</a>        actix_web::http::header::RETRY_AFTER,
-<a href=#692 id=692 data-nosnippet>692</a>        actix_web::http::header::HeaderValue::from_static(<span class="string">"5"</span>),
-<a href=#693 id=693 data-nosnippet>693</a>    );
-<a href=#694 id=694 data-nosnippet>694</a>    response
-<a href=#695 id=695 data-nosnippet>695</a>}
-<a href=#696 id=696 data-nosnippet>696</a>
-<a href=#697 id=697 data-nosnippet>697</a><span class="doccomment">/// Everything the first leg decides, in the order the module docs give.
-<a href=#698 id=698 data-nosnippet>698</a></span><span class="kw">async fn </span>accept&lt;C: Connection + Clone&gt;(
-<a href=#699 id=699 data-nosnippet>699</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#700 id=700 data-nosnippet>700</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
-<a href=#701 id=701 data-nosnippet>701</a>    tenant_id: Uuid,
-<a href=#702 id=702 data-nosnippet>702</a>    incoming: Incoming&lt;<span class="lifetime">'_</span>&gt;,
-<a href=#703 id=703 data-nosnippet>703</a>) -&gt; HttpResponse {
-<a href=#704 id=704 data-nosnippet>704</a>    <span class="kw">let </span>now = Utc::now();
-<a href=#705 id=705 data-nosnippet>705</a>    <span class="kw">let </span>parsed = <span class="kw">match </span>saml_request::parse_authn_request(<span class="kw-2">&amp;</span>incoming.document, now) {
-<a href=#706 id=706 data-nosnippet>706</a>        <span class="prelude-val">Ok</span>(p) =&gt; p,
-<a href=#707 id=707 data-nosnippet>707</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span>request_refused(e, tenant_id),
-<a href=#708 id=708 data-nosnippet>708</a>    };
-<a href=#709 id=709 data-nosnippet>709</a>    <span class="comment">// A signature inside a Redirect-binding document is not that binding's
-<a href=#710 id=710 data-nosnippet>710</a>    // signature (Bindings §3.4.4.1); nothing checks it, so it is refused.
-<a href=#711 id=711 data-nosnippet>711</a>    </span><span class="kw">if </span>incoming.redirect.is_some() &amp;&amp; parsed.enveloped_signature {
-<a href=#712 id=712 data-nosnippet>712</a>        <span class="kw">return </span>request_refused(RequestError::SignaturePlacement, tenant_id);
-<a href=#713 id=713 data-nosnippet>713</a>    }
-<a href=#714 id=714 data-nosnippet>714</a>
-<a href=#715 id=715 data-nosnippet>715</a>    <span class="comment">// The SP, by issuer, within the path's tenant only.
-<a href=#716 id=716 data-nosnippet>716</a>    </span><span class="kw">let </span>sp = <span class="kw">match </span>state
-<a href=#717 id=717 data-nosnippet>717</a>        .saml_idp
-<a href=#718 id=718 data-nosnippet>718</a>        .sp_repo
-<a href=#719 id=719 data-nosnippet>719</a>        .get_by_entity_id(tenant_id, <span class="kw-2">&amp;</span>parsed.issuer)
-<a href=#720 id=720 data-nosnippet>720</a>        .<span class="kw">await
-<a href=#721 id=721 data-nosnippet>721</a>    </span>{
-<a href=#722 id=722 data-nosnippet>722</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(sp)) =&gt; sp,
-<a href=#723 id=723 data-nosnippet>723</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"unknown_sp"</span>, tenant_id),
-<a href=#724 id=724 data-nosnippet>724</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#725 id=725 data-nosnippet>725</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the SP registry"</span>);
-<a href=#726 id=726 data-nosnippet>726</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"registry"</span>, tenant_id);
-<a href=#727 id=727 data-nosnippet>727</a>        }
-<a href=#728 id=728 data-nosnippet>728</a>    };
-<a href=#729 id=729 data-nosnippet>729</a>
-<a href=#730 id=730 data-nosnippet>730</a>    <span class="comment">// The signature, before anything the request names is trusted.
-<a href=#731 id=731 data-nosnippet>731</a>    </span><span class="kw">let </span>signed = <span class="kw">match </span><span class="kw-2">&amp;</span>incoming.redirect {
-<a href=#732 id=732 data-nosnippet>732</a>        <span class="prelude-val">Some</span>(query) =&gt; query.is_signed(),
-<a href=#733 id=733 data-nosnippet>733</a>        <span class="prelude-val">None </span>=&gt; parsed.enveloped_signature,
-<a href=#734 id=734 data-nosnippet>734</a>    };
-<a href=#735 id=735 data-nosnippet>735</a>    <span class="kw">let </span>sp_cert = <span class="kw">match </span>sp.sp_signing_cert_pem.as_deref() {
-<a href=#736 id=736 data-nosnippet>736</a>        <span class="prelude-val">Some</span>(pem) =&gt; <span class="kw">match </span>axiam_federation::cert::pem_cert_to_der(pem) {
-<a href=#737 id=737 data-nosnippet>737</a>            <span class="prelude-val">Ok</span>(der) =&gt; <span class="prelude-val">Some</span>(der),
-<a href=#738 id=738 data-nosnippet>738</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-<a href=#739 id=739 data-nosnippet>739</a>                <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"sp_certificate"</span>, tenant_id);
-<a href=#740 id=740 data-nosnippet>740</a>            }
-<a href=#741 id=741 data-nosnippet>741</a>        },
-<a href=#742 id=742 data-nosnippet>742</a>        <span class="prelude-val">None </span>=&gt; <span class="prelude-val">None</span>,
-<a href=#743 id=743 data-nosnippet>743</a>    };
-<a href=#744 id=744 data-nosnippet>744</a>    <span class="kw">let </span>verified = <span class="kw">match </span>(<span class="kw-2">&amp;</span>sp_cert, signed) {
-<a href=#745 id=745 data-nosnippet>745</a>        (<span class="prelude-val">Some</span>(cert), <span class="bool-val">true</span>) =&gt; {
-<a href=#746 id=746 data-nosnippet>746</a>            <span class="kw">let </span>outcome = <span class="kw">match </span><span class="kw-2">&amp;</span>incoming.redirect {
-<a href=#747 id=747 data-nosnippet>747</a>                <span class="prelude-val">Some</span>(query) =&gt; query
-<a href=#748 id=748 data-nosnippet>748</a>                    .verify_signature(cert)
-<a href=#749 id=749 data-nosnippet>749</a>                    .map_err(PostVerifyFailure::Request),
-<a href=#750 id=750 data-nosnippet>750</a>                <span class="prelude-val">None </span>=&gt; verify_post_signature_off_worker(state, <span class="kw-2">&amp;</span>incoming.document, cert).<span class="kw">await</span>,
-<a href=#751 id=751 data-nosnippet>751</a>            };
-<a href=#752 id=752 data-nosnippet>752</a>            <span class="kw">match </span>outcome {
-<a href=#753 id=753 data-nosnippet>753</a>                <span class="prelude-val">Ok</span>(()) =&gt; {}
-<a href=#754 id=754 data-nosnippet>754</a>                <span class="prelude-val">Err</span>(PostVerifyFailure::Request(e)) =&gt; <span class="kw">return </span>request_refused(e, tenant_id),
-<a href=#755 id=755 data-nosnippet>755</a>                <span class="prelude-val">Err</span>(PostVerifyFailure::Busy) =&gt; <span class="kw">return </span>busy_page(tenant_id),
-<a href=#756 id=756 data-nosnippet>756</a>            }
-<a href=#757 id=757 data-nosnippet>757</a>            <span class="bool-val">true
-<a href=#758 id=758 data-nosnippet>758</a>        </span>}
-<a href=#759 id=759 data-nosnippet>759</a>        <span class="comment">// Signed, but the SP registered no certificate to check it with: the
-<a href=#760 id=760 data-nosnippet>760</a>        // signature cannot be evaluated, and is not relied on.
-<a href=#761 id=761 data-nosnippet>761</a>        </span>(<span class="prelude-val">None</span>, <span class="bool-val">true</span>) | (<span class="kw">_</span>, <span class="bool-val">false</span>) =&gt; <span class="bool-val">false</span>,
-<a href=#762 id=762 data-nosnippet>762</a>    };
-<a href=#763 id=763 data-nosnippet>763</a>    <span class="kw">if </span>sp.want_authn_requests_signed &amp;&amp; !verified {
-<a href=#764 id=764 data-nosnippet>764</a>        <span class="kw">return </span>request_refused(RequestError::SignatureMissing, tenant_id);
-<a href=#765 id=765 data-nosnippet>765</a>    }
-<a href=#766 id=766 data-nosnippet>766</a>
-<a href=#767 id=767 data-nosnippet>767</a>    <span class="comment">// `Destination`: when present it must be this tenant's SSO URL, and a
-<a href=#768 id=768 data-nosnippet>768</a>    // signed request must carry it (Bindings §3.4.5.2, §3.5.5.2).
-<a href=#769 id=769 data-nosnippet>769</a>    </span><span class="kw">let </span>sso_url = idp_sso_url(state.auth_config.root_issuer(), tenant_id);
-<a href=#770 id=770 data-nosnippet>770</a>    <span class="kw">match </span>parsed.destination.as_deref() {
-<a href=#771 id=771 data-nosnippet>771</a>        <span class="prelude-val">Some</span>(destination) <span class="kw">if </span>destination != sso_url =&gt; {
-<a href=#772 id=772 data-nosnippet>772</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"destination"</span>, tenant_id);
-<a href=#773 id=773 data-nosnippet>773</a>        }
-<a href=#774 id=774 data-nosnippet>774</a>        <span class="prelude-val">None </span><span class="kw">if </span>verified =&gt; {
-<a href=#775 id=775 data-nosnippet>775</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"destination_missing"</span>, tenant_id);
-<a href=#776 id=776 data-nosnippet>776</a>        }
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">_ </span>=&gt; {}
-<a href=#778 id=778 data-nosnippet>778</a>    }
-<a href=#779 id=779 data-nosnippet>779</a>
-<a href=#780 id=780 data-nosnippet>780</a>    <span class="comment">// The ACS URL, resolved against the registration only.
-<a href=#781 id=781 data-nosnippet>781</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(acs_url) = resolve_acs(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>parsed) <span class="kw">else </span>{
-<a href=#782 id=782 data-nosnippet>782</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
-<a href=#783 id=783 data-nosnippet>783</a>    };
-<a href=#784 id=784 data-nosnippet>784</a>    <span class="kw">if </span>check_acs_url(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>acs_url).is_err() {
-<a href=#785 id=785 data-nosnippet>785</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
-<a href=#786 id=786 data-nosnippet>786</a>    }
-<a href=#787 id=787 data-nosnippet>787</a>    <span class="kw">if </span>parsed
-<a href=#788 id=788 data-nosnippet>788</a>        .protocol_binding
-<a href=#789 id=789 data-nosnippet>789</a>        .as_deref()
-<a href=#790 id=790 data-nosnippet>790</a>        .is_some_and(|b| b != BINDING_HTTP_POST)
-<a href=#791 id=791 data-nosnippet>791</a>    {
-<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"protocol_binding"</span>, tenant_id);
-<a href=#793 id=793 data-nosnippet>793</a>    }
-<a href=#794 id=794 data-nosnippet>794</a>    <span class="kw">if </span>check_relay_state(incoming.relay_state.as_deref()).is_err() {
-<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"relay_state"</span>, tenant_id);
-<a href=#796 id=796 data-nosnippet>796</a>    }
-<a href=#797 id=797 data-nosnippet>797</a>
-<a href=#798 id=798 data-nosnippet>798</a>    <span class="comment">// From here the ACS URL is one the SP registered: policy refusals are
-<a href=#799 id=799 data-nosnippet>799</a>    // answered to it as SAML failures.
-<a href=#800 id=800 data-nosnippet>800</a>    </span><span class="kw">let </span>respond = |status| {
-<a href=#801 id=801 data-nosnippet>801</a>        post_failure(
-<a href=#802 id=802 data-nosnippet>802</a>            state,
-<a href=#803 id=803 data-nosnippet>803</a>            req,
-<a href=#804 id=804 data-nosnippet>804</a>            tenant_id,
-<a href=#805 id=805 data-nosnippet>805</a>            <span class="kw-2">&amp;</span>sp,
-<a href=#806 id=806 data-nosnippet>806</a>            <span class="kw-2">&amp;</span>acs_url,
-<a href=#807 id=807 data-nosnippet>807</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>parsed.id),
-<a href=#808 id=808 data-nosnippet>808</a>            incoming.relay_state.as_deref(),
-<a href=#809 id=809 data-nosnippet>809</a>            status,
-<a href=#810 id=810 data-nosnippet>810</a>            <span class="prelude-val">None</span>,
-<a href=#811 id=811 data-nosnippet>811</a>            <span class="prelude-val">None</span>,
-<a href=#812 id=812 data-nosnippet>812</a>        )
-<a href=#813 id=813 data-nosnippet>813</a>    };
-<a href=#814 id=814 data-nosnippet>814</a>    <span class="kw">if </span>!sp.enabled {
-<a href=#815 id=815 data-nosnippet>815</a>        <span class="kw">return </span>respond(SamlStatus::RequestDenied).<span class="kw">await</span>;
-<a href=#816 id=816 data-nosnippet>816</a>    }
-<a href=#817 id=817 data-nosnippet>817</a>    <span class="kw">if </span>sp.encrypt_assertions {
-<a href=#818 id=818 data-nosnippet>818</a>        <span class="kw">return </span>respond(SamlIdpError::EncryptionUnsupported.status()).<span class="kw">await</span>;
-<a href=#819 id=819 data-nosnippet>819</a>    }
-<a href=#820 id=820 data-nosnippet>820</a>    <span class="kw">if </span>!saml_request::name_id_format_compatible(parsed.name_id_format.as_deref(), sp.name_id_format)
-<a href=#821 id=821 data-nosnippet>821</a>    {
-<a href=#822 id=822 data-nosnippet>822</a>        <span class="kw">return </span>respond(SamlStatus::InvalidNameIdPolicy).<span class="kw">await</span>;
-<a href=#823 id=823 data-nosnippet>823</a>    }
-<a href=#824 id=824 data-nosnippet>824</a>
-<a href=#825 id=825 data-nosnippet>825</a>    hold(
-<a href=#826 id=826 data-nosnippet>826</a>        state,
-<a href=#827 id=827 data-nosnippet>827</a>        tenant_id,
-<a href=#828 id=828 data-nosnippet>828</a>        <span class="kw-2">&amp;</span>sp,
-<a href=#829 id=829 data-nosnippet>829</a>        <span class="prelude-val">Some</span>(parsed.id.clone()),
-<a href=#830 id=830 data-nosnippet>830</a>        acs_url.clone(),
-<a href=#831 id=831 data-nosnippet>831</a>        incoming.relay_state.clone(),
-<a href=#832 id=832 data-nosnippet>832</a>        parsed.force_authn,
-<a href=#833 id=833 data-nosnippet>833</a>        parsed.is_passive,
-<a href=#834 id=834 data-nosnippet>834</a>    )
-<a href=#835 id=835 data-nosnippet>835</a>    .<span class="kw">await
-<a href=#836 id=836 data-nosnippet>836</a></span>}
-<a href=#837 id=837 data-nosnippet>837</a>
-<a href=#838 id=838 data-nosnippet>838</a><span class="doccomment">/// The registered ACS URL a request names: by URL (exact), by index, or the
-<a href=#839 id=839 data-nosnippet>839</a>/// SP's default. A request naming both is malformed (SAML Core §3.4.1).
-<a href=#840 id=840 data-nosnippet>840</a></span><span class="kw">fn </span>resolve_acs(sp: <span class="kw-2">&amp;</span>SamlServiceProvider, parsed: <span class="kw-2">&amp;</span>ParsedAuthnRequest) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
-<a href=#841 id=841 data-nosnippet>841</a>    <span class="kw">let </span>endpoint = <span class="kw">match </span>(parsed.acs_url.as_deref(), parsed.acs_index) {
-<a href=#842 id=842 data-nosnippet>842</a>        (<span class="prelude-val">Some</span>(<span class="kw">_</span>), <span class="prelude-val">Some</span>(<span class="kw">_</span>)) =&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
-<a href=#843 id=843 data-nosnippet>843</a>        (<span class="prelude-val">Some</span>(url), <span class="prelude-val">None</span>) =&gt; sp.acs_by_url(url),
-<a href=#844 id=844 data-nosnippet>844</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(index)) =&gt; sp.acs_by_index(index),
-<a href=#845 id=845 data-nosnippet>845</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>) =&gt; sp.default_acs(),
-<a href=#846 id=846 data-nosnippet>846</a>    }<span class="question-mark">?</span>;
-<a href=#847 id=847 data-nosnippet>847</a>    <span class="prelude-val">Some</span>(endpoint.url.clone())
-<a href=#848 id=848 data-nosnippet>848</a>}
-<a href=#849 id=849 data-nosnippet>849</a>
-<a href=#850 id=850 data-nosnippet>850</a><span class="doccomment">/// Store the pending request and send the browser to the second leg, bound to
-<a href=#851 id=851 data-nosnippet>851</a>/// it by a cookie.
-<a href=#852 id=852 data-nosnippet>852</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
-<a href=#853 id=853 data-nosnippet>853</a></span><span class="kw">async fn </span>hold&lt;C: Connection + Clone&gt;(
-<a href=#854 id=854 data-nosnippet>854</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#855 id=855 data-nosnippet>855</a>    tenant_id: Uuid,
-<a href=#856 id=856 data-nosnippet>856</a>    sp: <span class="kw-2">&amp;</span>SamlServiceProvider,
-<a href=#857 id=857 data-nosnippet>857</a>    request_id: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#858 id=858 data-nosnippet>858</a>    acs_url: String,
-<a href=#859 id=859 data-nosnippet>859</a>    relay_state: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#860 id=860 data-nosnippet>860</a>    force_authn: bool,
-<a href=#861 id=861 data-nosnippet>861</a>    is_passive: bool,
-<a href=#862 id=862 data-nosnippet>862</a>) -&gt; HttpResponse {
-<a href=#863 id=863 data-nosnippet>863</a>    <span class="kw">let </span>handle = random_token();
-<a href=#864 id=864 data-nosnippet>864</a>    <span class="kw">let </span>binding = random_token();
-<a href=#865 id=865 data-nosnippet>865</a>    <span class="kw">let </span>handle_hash = sha256_hex(<span class="kw-2">&amp;</span>handle);
-<a href=#866 id=866 data-nosnippet>866</a>    <span class="kw">let </span>created_at = Utc::now();
-<a href=#867 id=867 data-nosnippet>867</a>    <span class="kw">let </span>row = NewPendingSamlRequest {
-<a href=#868 id=868 data-nosnippet>868</a>        tenant_id,
-<a href=#869 id=869 data-nosnippet>869</a>        sp_id: sp.id,
-<a href=#870 id=870 data-nosnippet>870</a>        request_id,
-<a href=#871 id=871 data-nosnippet>871</a>        acs_url,
-<a href=#872 id=872 data-nosnippet>872</a>        relay_state,
-<a href=#873 id=873 data-nosnippet>873</a>        force_authn,
-<a href=#874 id=874 data-nosnippet>874</a>        is_passive,
-<a href=#875 id=875 data-nosnippet>875</a>        handle_hash: handle_hash.clone(),
-<a href=#876 id=876 data-nosnippet>876</a>        binding_hash: sha256_hex(<span class="kw-2">&amp;</span>binding),
-<a href=#877 id=877 data-nosnippet>877</a>        created_at,
-<a href=#878 id=878 data-nosnippet>878</a>        expires_at: created_at + Duration::seconds(PENDING_SAML_REQUEST_TTL_SECS),
-<a href=#879 id=879 data-nosnippet>879</a>    };
-<a href=#880 id=880 data-nosnippet>880</a>    <span class="kw">match </span>state.saml_idp.pending_repo.create(row).<span class="kw">await </span>{
-<a href=#881 id=881 data-nosnippet>881</a>        <span class="prelude-val">Ok</span>(()) =&gt; {}
-<a href=#882 id=882 data-nosnippet>882</a>        <span class="prelude-val">Err</span>(axiam_core::error::AxiamError::ReplayDetected) =&gt; {
-<a href=#883 id=883 data-nosnippet>883</a>            <span class="macro">tracing::warn!</span>(%tenant_id, sp_id = %sp.id, <span class="string">"SAML SSO: a request ID was replayed"</span>);
-<a href=#884 id=884 data-nosnippet>884</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"replayed_request_id"</span>, tenant_id);
-<a href=#885 id=885 data-nosnippet>885</a>        }
-<a href=#886 id=886 data-nosnippet>886</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#887 id=887 data-nosnippet>887</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not store the request"</span>);
-<a href=#888 id=888 data-nosnippet>888</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
-<a href=#889 id=889 data-nosnippet>889</a>        }
-<a href=#890 id=890 data-nosnippet>890</a>    }
-<a href=#891 id=891 data-nosnippet>891</a>    <span class="kw">let </span>location = <span class="macro">format!</span>(
-<a href=#892 id=892 data-nosnippet>892</a>        <span class="string">"{}?handle={handle}"</span>,
-<a href=#893 id=893 data-nosnippet>893</a>        axiam_oauth2::login_hop::saml_sso_continue_path(tenant_id)
-<a href=#894 id=894 data-nosnippet>894</a>    );
-<a href=#895 id=895 data-nosnippet>895</a>    HttpResponse::SeeOther()
-<a href=#896 id=896 data-nosnippet>896</a>        .insert_header((actix_web::http::header::LOCATION, location))
-<a href=#897 id=897 data-nosnippet>897</a>        .insert_header((<span class="string">"Cache-Control"</span>, <span class="string">"no-store"</span>))
-<a href=#898 id=898 data-nosnippet>898</a>        .insert_header((<span class="string">"Referrer-Policy"</span>, <span class="string">"no-referrer"</span>))
-<a href=#899 id=899 data-nosnippet>899</a>        .cookie(binding_cookie(
-<a href=#900 id=900 data-nosnippet>900</a>            tenant_id,
-<a href=#901 id=901 data-nosnippet>901</a>            binding_cookie_name(<span class="kw-2">&amp;</span>handle_hash),
-<a href=#902 id=902 data-nosnippet>902</a>            binding,
-<a href=#903 id=903 data-nosnippet>903</a>            PENDING_SAML_REQUEST_TTL_SECS,
-<a href=#904 id=904 data-nosnippet>904</a>        ))
-<a href=#905 id=905 data-nosnippet>905</a>        .finish()
-<a href=#906 id=906 data-nosnippet>906</a>}
-<a href=#907 id=907 data-nosnippet>907</a>
-<a href=#908 id=908 data-nosnippet>908</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#909 id=909 data-nosnippet>909</a>// First leg: IdP-initiated (D-3)
-<a href=#910 id=910 data-nosnippet>910</a>// ---------------------------------------------------------------------------
-<a href=#911 id=911 data-nosnippet>911</a>
-<a href=#912 id=912 data-nosnippet>912</a></span><span class="doccomment">/// `GET /saml/v2/{tenant_id}/sso/idp-initiated?sp=&lt;entity id&gt;[&amp;RelayState=…]`.
-<a href=#913 id=913 data-nosnippet>913</a>///
-<a href=#914 id=914 data-nosnippet>914</a>/// For an SP that opted in (`allow_idp_initiated`), and refused before the hop
-<a href=#915 id=915 data-nosnippet>915</a>/// for any other. A cross-site trigger is refused (`Sec-Fetch-Site:
-<a href=#916 id=916 data-nosnippet>916</a>/// cross-site`): the link is meant for AXIAM's own pages and bookmarks, and a
-<a href=#917 id=917 data-nosnippet>917</a>/// third-party page that could start it could sign a visitor in to an SP with a
-<a href=#918 id=918 data-nosnippet>918</a>/// `RelayState` of its choosing. Every refusal is an error page: an unsolicited
-<a href=#919 id=919 data-nosnippet>919</a>/// failure response is no use to an SP.
-<a href=#920 id=920 data-nosnippet>920</a></span><span class="kw">pub async fn </span>sso_idp_initiated&lt;C: Connection + Clone&gt;(
-<a href=#921 id=921 data-nosnippet>921</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#922 id=922 data-nosnippet>922</a>    req: HttpRequest,
-<a href=#923 id=923 data-nosnippet>923</a>    path: web::Path&lt;String&gt;,
-<a href=#924 id=924 data-nosnippet>924</a>) -&gt; HttpResponse {
-<a href=#925 id=925 data-nosnippet>925</a>    <span class="kw">let </span><span class="prelude-val">Some</span>((tenant_id, _org)) = tenant_serving_saml(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>path).<span class="kw">await else </span>{
-<a href=#926 id=926 data-nosnippet>926</a>        <span class="kw">return </span>not_found().<span class="kw">await</span>;
-<a href=#927 id=927 data-nosnippet>927</a>    };
-<a href=#928 id=928 data-nosnippet>928</a>    <span class="kw">if </span>req
-<a href=#929 id=929 data-nosnippet>929</a>        .headers()
-<a href=#930 id=930 data-nosnippet>930</a>        .get(<span class="string">"sec-fetch-site"</span>)
-<a href=#931 id=931 data-nosnippet>931</a>        .and_then(|v| v.to_str().ok())
-<a href=#932 id=932 data-nosnippet>932</a>        .is_some_and(|v| v.eq_ignore_ascii_case(<span class="string">"cross-site"</span>))
-<a href=#933 id=933 data-nosnippet>933</a>    {
-<a href=#934 id=934 data-nosnippet>934</a>        <span class="kw">return </span>refusal_page(StatusCode::FORBIDDEN, <span class="string">"idp_initiated_cross_site"</span>, tenant_id);
-<a href=#935 id=935 data-nosnippet>935</a>    }
-<a href=#936 id=936 data-nosnippet>936</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>entity, <span class="kw-2">mut </span>relay) = (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
-<a href=#937 id=937 data-nosnippet>937</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span>url::form_urlencoded::parse(req.query_string().as_bytes()) {
-<a href=#938 id=938 data-nosnippet>938</a>        <span class="kw">let </span>slot = <span class="kw">match </span>name.as_ref() {
-<a href=#939 id=939 data-nosnippet>939</a>            <span class="string">"sp" </span>=&gt; <span class="kw-2">&amp;mut </span>entity,
-<a href=#940 id=940 data-nosnippet>940</a>            <span class="string">"RelayState" </span>=&gt; <span class="kw-2">&amp;mut </span>relay,
-<a href=#941 id=941 data-nosnippet>941</a>            <span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
-<a href=#942 id=942 data-nosnippet>942</a>        };
-<a href=#943 id=943 data-nosnippet>943</a>        <span class="kw">if </span>slot.replace(value.into_owned()).is_some() {
-<a href=#944 id=944 data-nosnippet>944</a>            <span class="kw">return </span>request_refused(RequestError::DuplicateParameter, tenant_id);
-<a href=#945 id=945 data-nosnippet>945</a>        }
-<a href=#946 id=946 data-nosnippet>946</a>    }
-<a href=#947 id=947 data-nosnippet>947</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(entity) = entity.filter(|e| !e.is_empty()) <span class="kw">else </span>{
-<a href=#948 id=948 data-nosnippet>948</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"idp_initiated_no_sp"</span>, tenant_id);
-<a href=#949 id=949 data-nosnippet>949</a>    };
-<a href=#950 id=950 data-nosnippet>950</a>    <span class="kw">let </span>sp = <span class="kw">match </span>state
-<a href=#951 id=951 data-nosnippet>951</a>        .saml_idp
-<a href=#952 id=952 data-nosnippet>952</a>        .sp_repo
-<a href=#953 id=953 data-nosnippet>953</a>        .get_by_entity_id(tenant_id, <span class="kw-2">&amp;</span>entity)
-<a href=#954 id=954 data-nosnippet>954</a>        .<span class="kw">await
-<a href=#955 id=955 data-nosnippet>955</a>    </span>{
-<a href=#956 id=956 data-nosnippet>956</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(sp)) =&gt; sp,
-<a href=#957 id=957 data-nosnippet>957</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"unknown_sp"</span>, tenant_id),
-<a href=#958 id=958 data-nosnippet>958</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#959 id=959 data-nosnippet>959</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the SP registry"</span>);
-<a href=#960 id=960 data-nosnippet>960</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"registry"</span>, tenant_id);
-<a href=#961 id=961 data-nosnippet>961</a>        }
-<a href=#962 id=962 data-nosnippet>962</a>    };
-<a href=#963 id=963 data-nosnippet>963</a>    <span class="kw">if </span>!sp.allow_idp_initiated {
-<a href=#964 id=964 data-nosnippet>964</a>        <span class="kw">return </span>refusal_page(
-<a href=#965 id=965 data-nosnippet>965</a>            StatusCode::FORBIDDEN,
-<a href=#966 id=966 data-nosnippet>966</a>            <span class="string">"idp_initiated_not_allowed"</span>,
-<a href=#967 id=967 data-nosnippet>967</a>            tenant_id,
-<a href=#968 id=968 data-nosnippet>968</a>        );
-<a href=#969 id=969 data-nosnippet>969</a>    }
-<a href=#970 id=970 data-nosnippet>970</a>    <span class="kw">if </span>!sp.enabled {
-<a href=#971 id=971 data-nosnippet>971</a>        <span class="kw">return </span>refusal_page(StatusCode::FORBIDDEN, <span class="string">"sp_disabled"</span>, tenant_id);
-<a href=#972 id=972 data-nosnippet>972</a>    }
-<a href=#973 id=973 data-nosnippet>973</a>    <span class="kw">if </span>sp.encrypt_assertions {
-<a href=#974 id=974 data-nosnippet>974</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"encryption_unsupported"</span>, tenant_id);
-<a href=#975 id=975 data-nosnippet>975</a>    }
-<a href=#976 id=976 data-nosnippet>976</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(acs_url) = sp.default_acs().map(|e| e.url.clone()) <span class="kw">else </span>{
-<a href=#977 id=977 data-nosnippet>977</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
-<a href=#978 id=978 data-nosnippet>978</a>    };
-<a href=#979 id=979 data-nosnippet>979</a>    <span class="kw">if </span>check_acs_url(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>acs_url).is_err() {
-<a href=#980 id=980 data-nosnippet>980</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
-<a href=#981 id=981 data-nosnippet>981</a>    }
-<a href=#982 id=982 data-nosnippet>982</a>    <span class="kw">if </span>check_relay_state(relay.as_deref()).is_err() {
-<a href=#983 id=983 data-nosnippet>983</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"relay_state"</span>, tenant_id);
-<a href=#984 id=984 data-nosnippet>984</a>    }
-<a href=#985 id=985 data-nosnippet>985</a>    hold(<span class="kw-2">&amp;</span>state, tenant_id, <span class="kw-2">&amp;</span>sp, <span class="prelude-val">None</span>, acs_url, relay, <span class="bool-val">false</span>, <span class="bool-val">false</span>).<span class="kw">await
-<a href=#986 id=986 data-nosnippet>986</a></span>}
-<a href=#987 id=987 data-nosnippet>987</a>
-<a href=#988 id=988 data-nosnippet>988</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#989 id=989 data-nosnippet>989</a>// Second leg
-<a href=#990 id=990 data-nosnippet>990</a>// ---------------------------------------------------------------------------
-<a href=#991 id=991 data-nosnippet>991</a>
-<a href=#992 id=992 data-nosnippet>992</a></span><span class="doccomment">/// `GET /saml/v2/{tenant_id}/sso/continue?handle=…[&amp;axiam_login_hop=1]`.
-<a href=#993 id=993 data-nosnippet>993</a></span><span class="kw">pub async fn </span>sso_continue&lt;C: Connection + Clone&gt;(
-<a href=#994 id=994 data-nosnippet>994</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#995 id=995 data-nosnippet>995</a>    req: HttpRequest,
-<a href=#996 id=996 data-nosnippet>996</a>    path: web::Path&lt;String&gt;,
-<a href=#997 id=997 data-nosnippet>997</a>) -&gt; HttpResponse {
-<a href=#998 id=998 data-nosnippet>998</a>    <span class="kw">let </span><span class="prelude-val">Some</span>((tenant_id, org_id)) = tenant_serving_saml(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>path).<span class="kw">await else </span>{
-<a href=#999 id=999 data-nosnippet>999</a>        <span class="kw">return </span>not_found().<span class="kw">await</span>;
-<a href=#1000 id=1000 data-nosnippet>1000</a>    };
-<a href=#1001 id=1001 data-nosnippet>1001</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>handle, <span class="kw-2">mut </span>marker) = (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
-<a href=#1002 id=1002 data-nosnippet>1002</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span>url::form_urlencoded::parse(req.query_string().as_bytes()) {
-<a href=#1003 id=1003 data-nosnippet>1003</a>        <span class="kw">let </span>slot = <span class="kw">match </span>name.as_ref() {
-<a href=#1004 id=1004 data-nosnippet>1004</a>            <span class="string">"handle" </span>=&gt; <span class="kw-2">&amp;mut </span>handle,
-<a href=#1005 id=1005 data-nosnippet>1005</a>            axiam_oauth2::login_hop::LOGIN_HOP_MARKER =&gt; <span class="kw-2">&amp;mut </span>marker,
-<a href=#1006 id=1006 data-nosnippet>1006</a>            <span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
-<a href=#1007 id=1007 data-nosnippet>1007</a>        };
-<a href=#1008 id=1008 data-nosnippet>1008</a>        <span class="kw">if </span>slot.replace(value.into_owned()).is_some() {
-<a href=#1009 id=1009 data-nosnippet>1009</a>            <span class="kw">return </span>request_refused(RequestError::DuplicateParameter, tenant_id);
-<a href=#1010 id=1010 data-nosnippet>1010</a>        }
-<a href=#1011 id=1011 data-nosnippet>1011</a>    }
-<a href=#1012 id=1012 data-nosnippet>1012</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(handle) = handle.filter(|h| is_handle(h)) <span class="kw">else </span>{
-<a href=#1013 id=1013 data-nosnippet>1013</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle"</span>, tenant_id);
-<a href=#1014 id=1014 data-nosnippet>1014</a>    };
-<a href=#1015 id=1015 data-nosnippet>1015</a>    <span class="kw">let </span>handle_hash = sha256_hex(<span class="kw-2">&amp;</span>handle);
-<a href=#1016 id=1016 data-nosnippet>1016</a>
-<a href=#1017 id=1017 data-nosnippet>1017</a>    <span class="kw">let </span>pending = <span class="kw">match </span>state
-<a href=#1018 id=1018 data-nosnippet>1018</a>        .saml_idp
-<a href=#1019 id=1019 data-nosnippet>1019</a>        .pending_repo
-<a href=#1020 id=1020 data-nosnippet>1020</a>        .get_pending(tenant_id, <span class="kw-2">&amp;</span>handle_hash)
-<a href=#1021 id=1021 data-nosnippet>1021</a>        .<span class="kw">await
-<a href=#1022 id=1022 data-nosnippet>1022</a>    </span>{
-<a href=#1023 id=1023 data-nosnippet>1023</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(p)) =&gt; p,
-<a href=#1024 id=1024 data-nosnippet>1024</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_unknown"</span>, tenant_id),
-<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1026 id=1026 data-nosnippet>1026</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the request"</span>);
-<a href=#1027 id=1027 data-nosnippet>1027</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
-<a href=#1028 id=1028 data-nosnippet>1028</a>        }
-<a href=#1029 id=1029 data-nosnippet>1029</a>    };
-<a href=#1030 id=1030 data-nosnippet>1030</a>
-<a href=#1031 id=1031 data-nosnippet>1031</a>    <span class="comment">// The browser that started this request, and no other.
-<a href=#1032 id=1032 data-nosnippet>1032</a>    </span><span class="kw">let </span>bound = req
-<a href=#1033 id=1033 data-nosnippet>1033</a>        .cookie(<span class="kw-2">&amp;</span>binding_cookie_name(<span class="kw-2">&amp;</span>handle_hash))
-<a href=#1034 id=1034 data-nosnippet>1034</a>        .map(|c| sha256_hex(c.value()))
-<a href=#1035 id=1035 data-nosnippet>1035</a>        .is_some_and(|h| bool::from(h.as_bytes().ct_eq(pending.binding_hash.as_bytes())));
-<a href=#1036 id=1036 data-nosnippet>1036</a>    <span class="kw">if </span>!bound {
-<a href=#1037 id=1037 data-nosnippet>1037</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"binding"</span>, tenant_id);
-<a href=#1038 id=1038 data-nosnippet>1038</a>    }
-<a href=#1039 id=1039 data-nosnippet>1039</a>    <span class="kw">let </span>clear = || <span class="prelude-val">Some</span>(clear_binding_cookie(tenant_id, <span class="kw-2">&amp;</span>handle_hash));
-<a href=#1040 id=1040 data-nosnippet>1040</a>
-<a href=#1041 id=1041 data-nosnippet>1041</a>    <span class="comment">// The SP as it is now: deleted or disabled since the first leg ends it.
-<a href=#1042 id=1042 data-nosnippet>1042</a>    </span><span class="kw">let </span>sp = <span class="kw">match </span>state.saml_idp.sp_repo.get(tenant_id, pending.sp_id).<span class="kw">await </span>{
-<a href=#1043 id=1043 data-nosnippet>1043</a>        <span class="prelude-val">Ok</span>(sp) =&gt; sp,
-<a href=#1044 id=1044 data-nosnippet>1044</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-<a href=#1045 id=1045 data-nosnippet>1045</a>            <span class="kw">let _ </span>= state
-<a href=#1046 id=1046 data-nosnippet>1046</a>                .saml_idp
-<a href=#1047 id=1047 data-nosnippet>1047</a>                .pending_repo
-<a href=#1048 id=1048 data-nosnippet>1048</a>                .consume(tenant_id, <span class="kw-2">&amp;</span>handle_hash)
-<a href=#1049 id=1049 data-nosnippet>1049</a>                .<span class="kw">await</span>;
-<a href=#1050 id=1050 data-nosnippet>1050</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"sp_gone"</span>, tenant_id);
-<a href=#1051 id=1051 data-nosnippet>1051</a>        }
-<a href=#1052 id=1052 data-nosnippet>1052</a>    };
-<a href=#1053 id=1053 data-nosnippet>1053</a>    <span class="kw">let </span>fail = |status, actor| {
-<a href=#1054 id=1054 data-nosnippet>1054</a>        <span class="kw">let </span>state = <span class="kw-2">&amp;</span>state;
-<a href=#1055 id=1055 data-nosnippet>1055</a>        <span class="kw">let </span>req = <span class="kw-2">&amp;</span>req;
-<a href=#1056 id=1056 data-nosnippet>1056</a>        <span class="kw">let </span>sp = <span class="kw-2">&amp;</span>sp;
-<a href=#1057 id=1057 data-nosnippet>1057</a>        <span class="kw">let </span>pending = <span class="kw-2">&amp;</span>pending;
-<a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="kw">let </span>handle_hash = <span class="kw-2">&amp;</span>handle_hash;
-<a href=#1059 id=1059 data-nosnippet>1059</a>        <span class="kw">async move </span>{
-<a href=#1060 id=1060 data-nosnippet>1060</a>            <span class="kw">if </span>state
-<a href=#1061 id=1061 data-nosnippet>1061</a>                .saml_idp
-<a href=#1062 id=1062 data-nosnippet>1062</a>                .pending_repo
-<a href=#1063 id=1063 data-nosnippet>1063</a>                .consume(tenant_id, handle_hash)
-<a href=#1064 id=1064 data-nosnippet>1064</a>                .<span class="kw">await
-<a href=#1065 id=1065 data-nosnippet>1065</a>                </span>.ok()
-<a href=#1066 id=1066 data-nosnippet>1066</a>                .flatten()
-<a href=#1067 id=1067 data-nosnippet>1067</a>                .is_none()
-<a href=#1068 id=1068 data-nosnippet>1068</a>            {
-<a href=#1069 id=1069 data-nosnippet>1069</a>                <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_consumed"</span>, tenant_id);
-<a href=#1070 id=1070 data-nosnippet>1070</a>            }
-<a href=#1071 id=1071 data-nosnippet>1071</a>            post_failure(
-<a href=#1072 id=1072 data-nosnippet>1072</a>                state,
-<a href=#1073 id=1073 data-nosnippet>1073</a>                req,
-<a href=#1074 id=1074 data-nosnippet>1074</a>                tenant_id,
-<a href=#1075 id=1075 data-nosnippet>1075</a>                sp,
-<a href=#1076 id=1076 data-nosnippet>1076</a>                <span class="kw-2">&amp;</span>pending.acs_url,
-<a href=#1077 id=1077 data-nosnippet>1077</a>                pending.request_id.as_deref(),
-<a href=#1078 id=1078 data-nosnippet>1078</a>                pending.relay_state.as_deref(),
-<a href=#1079 id=1079 data-nosnippet>1079</a>                status,
-<a href=#1080 id=1080 data-nosnippet>1080</a>                actor,
-<a href=#1081 id=1081 data-nosnippet>1081</a>                clear(),
-<a href=#1082 id=1082 data-nosnippet>1082</a>            )
-<a href=#1083 id=1083 data-nosnippet>1083</a>            .<span class="kw">await
-<a href=#1084 id=1084 data-nosnippet>1084</a>        </span>}
-<a href=#1085 id=1085 data-nosnippet>1085</a>    };
-<a href=#1086 id=1086 data-nosnippet>1086</a>    <span class="kw">if </span>!sp.enabled {
-<a href=#1087 id=1087 data-nosnippet>1087</a>        <span class="kw">return </span>fail(SamlStatus::RequestDenied, <span class="prelude-val">None</span>).<span class="kw">await</span>;
-<a href=#1088 id=1088 data-nosnippet>1088</a>    }
-<a href=#1089 id=1089 data-nosnippet>1089</a>
-<a href=#1090 id=1090 data-nosnippet>1090</a>    <span class="comment">// The session, from the OP cookie, through the tenant-keyed lookup only.
-<a href=#1091 id=1091 data-nosnippet>1091</a>    </span><span class="kw">let </span>presented = req
-<a href=#1092 id=1092 data-nosnippet>1092</a>        .cookie(<span class="kw">crate</span>::middleware::csrf::COOKIE_OP_SESSION)
-<a href=#1093 id=1093 data-nosnippet>1093</a>        .is_some();
-<a href=#1094 id=1094 data-nosnippet>1094</a>    <span class="kw">let </span>resolved = resolve_session(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req, tenant_id).<span class="kw">await</span>;
-<a href=#1095 id=1095 data-nosnippet>1095</a>    <span class="kw">let </span>fresh = resolved
-<a href=#1096 id=1096 data-nosnippet>1096</a>        .as_ref()
-<a href=#1097 id=1097 data-nosnippet>1097</a>        .is_some_and(|(session, <span class="kw">_</span>)| satisfies_force_authn(<span class="kw-2">&amp;</span>pending, session));
-<a href=#1098 id=1098 data-nosnippet>1098</a>
-<a href=#1099 id=1099 data-nosnippet>1099</a>    <span class="kw">if let </span>(<span class="bool-val">true</span>, <span class="prelude-val">Some</span>((session, user))) = (fresh, resolved.as_ref()) {
-<a href=#1100 id=1100 data-nosnippet>1100</a>        <span class="kw">return </span>issue(
-<a href=#1101 id=1101 data-nosnippet>1101</a>            <span class="kw-2">&amp;</span>state,
-<a href=#1102 id=1102 data-nosnippet>1102</a>            <span class="kw-2">&amp;</span>req,
-<a href=#1103 id=1103 data-nosnippet>1103</a>            tenant_id,
-<a href=#1104 id=1104 data-nosnippet>1104</a>            org_id,
-<a href=#1105 id=1105 data-nosnippet>1105</a>            <span class="kw-2">&amp;</span>sp,
-<a href=#1106 id=1106 data-nosnippet>1106</a>            <span class="kw-2">&amp;</span>handle_hash,
-<a href=#1107 id=1107 data-nosnippet>1107</a>            session.clone(),
-<a href=#1108 id=1108 data-nosnippet>1108</a>            user.clone(),
-<a href=#1109 id=1109 data-nosnippet>1109</a>        )
-<a href=#1110 id=1110 data-nosnippet>1110</a>        .<span class="kw">await</span>;
-<a href=#1111 id=1111 data-nosnippet>1111</a>    }
-<a href=#1112 id=1112 data-nosnippet>1112</a>    <span class="kw">let </span>actor = resolved.as_ref().map(|(<span class="kw">_</span>, user)| user.id);
-<a href=#1113 id=1113 data-nosnippet>1113</a>    <span class="kw">if </span>pending.is_passive {
-<a href=#1114 id=1114 data-nosnippet>1114</a>        <span class="kw">return </span>fail(SamlStatus::NoPassive, actor).<span class="kw">await</span>;
-<a href=#1115 id=1115 data-nosnippet>1115</a>    }
-<a href=#1116 id=1116 data-nosnippet>1116</a>    <span class="kw">if </span>axiam_oauth2::login_hop::is_return_leg(marker.as_deref()) {
-<a href=#1117 id=1117 data-nosnippet>1117</a>        <span class="comment">// Back from the sign-in page with no session — or, under ForceAuthn,
-<a href=#1118 id=1118 data-nosnippet>1118</a>        // with none newer than the request. Answered, never hopped again; and
-<a href=#1119 id=1119 data-nosnippet>1119</a>        // a forged marker on a first visit lands here too, with no assertion.
-<a href=#1120 id=1120 data-nosnippet>1120</a>        </span><span class="kw">return </span>fail(SamlStatus::AuthnFailed, actor).<span class="kw">await</span>;
-<a href=#1121 id=1121 data-nosnippet>1121</a>    }
-<a href=#1122 id=1122 data-nosnippet>1122</a>
-<a href=#1123 id=1123 data-nosnippet>1123</a>    <span class="comment">// The hop. `reauth` when the browser holds a session that does not count:
-<a href=#1124 id=1124 data-nosnippet>1124</a>    // a stale cookie, or one older than a ForceAuthn request.
-<a href=#1125 id=1125 data-nosnippet>1125</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(return_to) = axiam_oauth2::login_hop::build_saml_return_to(tenant_id, <span class="kw-2">&amp;</span>handle) <span class="kw">else </span>{
-<a href=#1126 id=1126 data-nosnippet>1126</a>        <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"return_to"</span>, tenant_id);
-<a href=#1127 id=1127 data-nosnippet>1127</a>    };
-<a href=#1128 id=1128 data-nosnippet>1128</a>    <span class="kw">let </span>continue_path = axiam_oauth2::login_hop::saml_sso_continue_path(tenant_id);
-<a href=#1129 id=1129 data-nosnippet>1129</a>    <span class="kw">if </span>!<span class="kw">crate</span>::handlers::oauth2::return_to_is_on_this_deployment(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>return_to, <span class="kw-2">&amp;</span>continue_path)
-<a href=#1130 id=1130 data-nosnippet>1130</a>    {
-<a href=#1131 id=1131 data-nosnippet>1131</a>        <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"return_to"</span>, tenant_id);
-<a href=#1132 id=1132 data-nosnippet>1132</a>    }
-<a href=#1133 id=1133 data-nosnippet>1133</a>    <span class="kw">let </span>stale = presented &amp;&amp; resolved.is_none();
-<a href=#1134 id=1134 data-nosnippet>1134</a>    <span class="kw">let </span>reauth = stale || resolved.is_some();
-<a href=#1135 id=1135 data-nosnippet>1135</a>    <span class="kw">let </span>location = axiam_oauth2::login_hop::build_login_redirect(<span class="kw-2">&amp;</span>return_to, reauth);
-<a href=#1136 id=1136 data-nosnippet>1136</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = HttpResponse::Found();
-<a href=#1137 id=1137 data-nosnippet>1137</a>    builder
-<a href=#1138 id=1138 data-nosnippet>1138</a>        .insert_header((actix_web::http::header::LOCATION, location))
-<a href=#1139 id=1139 data-nosnippet>1139</a>        .insert_header((<span class="string">"Cache-Control"</span>, <span class="string">"no-store"</span>))
-<a href=#1140 id=1140 data-nosnippet>1140</a>        .insert_header((<span class="string">"Referrer-Policy"</span>, <span class="string">"no-referrer"</span>));
-<a href=#1141 id=1141 data-nosnippet>1141</a>    <span class="kw">if </span>stale {
-<a href=#1142 id=1142 data-nosnippet>1142</a>        builder.cookie(<span class="kw">crate</span>::middleware::csrf::clear_presented_saml_op_session_cookie(tenant_id));
-<a href=#1143 id=1143 data-nosnippet>1143</a>    }
-<a href=#1144 id=1144 data-nosnippet>1144</a>    builder.finish()
-<a href=#1145 id=1145 data-nosnippet>1145</a>}
-<a href=#1146 id=1146 data-nosnippet>1146</a>
-<a href=#1147 id=1147 data-nosnippet>1147</a><span class="doccomment">/// `ForceAuthn` bound to the request: the session must have authenticated
-<a href=#1148 id=1148 data-nosnippet>1148</a>/// strictly after the first leg accepted it (P23W1-08 not inherited).
-<a href=#1149 id=1149 data-nosnippet>1149</a></span><span class="kw">fn </span>satisfies_force_authn(pending: <span class="kw-2">&amp;</span>PendingSamlRequest, session: <span class="kw-2">&amp;</span>Session) -&gt; bool {
-<a href=#1150 id=1150 data-nosnippet>1150</a>    !pending.force_authn || session.authenticated_at &gt; pending.created_at
-<a href=#1151 id=1151 data-nosnippet>1151</a>}
-<a href=#1152 id=1152 data-nosnippet>1152</a>
-<a href=#1153 id=1153 data-nosnippet>1153</a><span class="doccomment">/// The session the OP cookie names in this tenant, and its account, when that
-<a href=#1154 id=1154 data-nosnippet>1154</a>/// account may act — the rule `/oauth2/authorize` applies
-<a href=#1155 id=1155 data-nosnippet>1155</a>/// (`check_session_holder`, i.e. `account_may_act`: `PendingVerification` is
-<a href=#1156 id=1156 data-nosnippet>1156</a>/// served). A failed read is no session.
-<a href=#1157 id=1157 data-nosnippet>1157</a></span><span class="kw">async fn </span>resolve_session&lt;C: Connection + Clone&gt;(
-<a href=#1158 id=1158 data-nosnippet>1158</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#1159 id=1159 data-nosnippet>1159</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
-<a href=#1160 id=1160 data-nosnippet>1160</a>    tenant_id: Uuid,
-<a href=#1161 id=1161 data-nosnippet>1161</a>) -&gt; <span class="prelude-ty">Option</span>&lt;(Session, User)&gt; {
-<a href=#1162 id=1162 data-nosnippet>1162</a>    <span class="kw">let </span>cookie = req.cookie(<span class="kw">crate</span>::middleware::csrf::COOKIE_OP_SESSION)<span class="question-mark">?</span>;
-<a href=#1163 id=1163 data-nosnippet>1163</a>    <span class="kw">let </span>digest = axiam_auth::token::hash_browser_session_token(cookie.value());
-<a href=#1164 id=1164 data-nosnippet>1164</a>    <span class="kw">let </span>session = <span class="kw">match </span>state
-<a href=#1165 id=1165 data-nosnippet>1165</a>        .session_repo
-<a href=#1166 id=1166 data-nosnippet>1166</a>        .get_by_browser_token_hash(tenant_id, <span class="kw-2">&amp;</span>digest)
-<a href=#1167 id=1167 data-nosnippet>1167</a>        .<span class="kw">await
-<a href=#1168 id=1168 data-nosnippet>1168</a>    </span>{
-<a href=#1169 id=1169 data-nosnippet>1169</a>        <span class="prelude-val">Ok</span>(found) =&gt; found<span class="question-mark">?</span>,
-<a href=#1170 id=1170 data-nosnippet>1170</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1171 id=1171 data-nosnippet>1171</a>            <span class="macro">tracing::warn!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not resolve the OP session"</span>);
-<a href=#1172 id=1172 data-nosnippet>1172</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#1173 id=1173 data-nosnippet>1173</a>        }
-<a href=#1174 id=1174 data-nosnippet>1174</a>    };
-<a href=#1175 id=1175 data-nosnippet>1175</a>    <span class="kw">let </span>user = <span class="kw">match </span>state.user_repo.get_by_id(tenant_id, session.user_id).<span class="kw">await </span>{
-<a href=#1176 id=1176 data-nosnippet>1176</a>        <span class="prelude-val">Ok</span>(user) =&gt; user,
-<a href=#1177 id=1177 data-nosnippet>1177</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1178 id=1178 data-nosnippet>1178</a>            <span class="macro">tracing::warn!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the session's account"</span>);
-<a href=#1179 id=1179 data-nosnippet>1179</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#1180 id=1180 data-nosnippet>1180</a>        }
-<a href=#1181 id=1181 data-nosnippet>1181</a>    };
-<a href=#1182 id=1182 data-nosnippet>1182</a>    <span class="kw">match </span>state.auth_service.check_session_holder(<span class="kw-2">&amp;</span>user) {
-<a href=#1183 id=1183 data-nosnippet>1183</a>        <span class="prelude-val">Ok</span>(()) =&gt; <span class="prelude-val">Some</span>((session, user)),
-<a href=#1184 id=1184 data-nosnippet>1184</a>        <span class="prelude-val">Err</span>(reason) =&gt; {
-<a href=#1185 id=1185 data-nosnippet>1185</a>            <span class="macro">tracing::info!</span>(%tenant_id, session_id = %session.id, reason = %reason,
-<a href=#1186 id=1186 data-nosnippet>1186</a>                <span class="string">"SAML SSO: the OP session's account may not act"</span>);
-<a href=#1187 id=1187 data-nosnippet>1187</a>            <span class="prelude-val">None
-<a href=#1188 id=1188 data-nosnippet>1188</a>        </span>}
-<a href=#1189 id=1189 data-nosnippet>1189</a>    }
-<a href=#1190 id=1190 data-nosnippet>1190</a>}
-<a href=#1191 id=1191 data-nosnippet>1191</a>
-<a href=#1192 id=1192 data-nosnippet>1192</a><span class="doccomment">/// Consume the pending request and issue the signed response.
-<a href=#1193 id=1193 data-nosnippet>1193</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
-<a href=#1194 id=1194 data-nosnippet>1194</a></span><span class="kw">async fn </span>issue&lt;C: Connection + Clone&gt;(
-<a href=#1195 id=1195 data-nosnippet>1195</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#1196 id=1196 data-nosnippet>1196</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
-<a href=#1197 id=1197 data-nosnippet>1197</a>    tenant_id: Uuid,
-<a href=#1198 id=1198 data-nosnippet>1198</a>    org_id: Uuid,
-<a href=#1199 id=1199 data-nosnippet>1199</a>    sp: <span class="kw-2">&amp;</span>SamlServiceProvider,
-<a href=#1200 id=1200 data-nosnippet>1200</a>    handle_hash: <span class="kw-2">&amp;</span>str,
-<a href=#1201 id=1201 data-nosnippet>1201</a>    session: Session,
-<a href=#1202 id=1202 data-nosnippet>1202</a>    user: User,
-<a href=#1203 id=1203 data-nosnippet>1203</a>) -&gt; HttpResponse {
-<a href=#1204 id=1204 data-nosnippet>1204</a>    <span class="comment">// Single use, decided here and nowhere else: of any number of concurrent
-<a href=#1205 id=1205 data-nosnippet>1205</a>    // continues, one gets the row.
-<a href=#1206 id=1206 data-nosnippet>1206</a>    </span><span class="kw">let </span>pending = <span class="kw">match </span>state
-<a href=#1207 id=1207 data-nosnippet>1207</a>        .saml_idp
-<a href=#1208 id=1208 data-nosnippet>1208</a>        .pending_repo
-<a href=#1209 id=1209 data-nosnippet>1209</a>        .consume(tenant_id, handle_hash)
-<a href=#1210 id=1210 data-nosnippet>1210</a>        .<span class="kw">await
-<a href=#1211 id=1211 data-nosnippet>1211</a>    </span>{
-<a href=#1212 id=1212 data-nosnippet>1212</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(p)) =&gt; p,
-<a href=#1213 id=1213 data-nosnippet>1213</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_consumed"</span>, tenant_id),
-<a href=#1214 id=1214 data-nosnippet>1214</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1215 id=1215 data-nosnippet>1215</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not consume the request"</span>);
-<a href=#1216 id=1216 data-nosnippet>1216</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
-<a href=#1217 id=1217 data-nosnippet>1217</a>        }
-<a href=#1218 id=1218 data-nosnippet>1218</a>    };
-<a href=#1219 id=1219 data-nosnippet>1219</a>    <span class="kw">let </span>clear = <span class="prelude-val">Some</span>(clear_binding_cookie(tenant_id, handle_hash));
-<a href=#1220 id=1220 data-nosnippet>1220</a>    <span class="kw">let </span>fail = |status: SamlStatus| {
-<a href=#1221 id=1221 data-nosnippet>1221</a>        post_failure(
-<a href=#1222 id=1222 data-nosnippet>1222</a>            state,
-<a href=#1223 id=1223 data-nosnippet>1223</a>            req,
-<a href=#1224 id=1224 data-nosnippet>1224</a>            tenant_id,
-<a href=#1225 id=1225 data-nosnippet>1225</a>            sp,
-<a href=#1226 id=1226 data-nosnippet>1226</a>            <span class="kw-2">&amp;</span>pending.acs_url,
-<a href=#1227 id=1227 data-nosnippet>1227</a>            pending.request_id.as_deref(),
-<a href=#1228 id=1228 data-nosnippet>1228</a>            pending.relay_state.as_deref(),
-<a href=#1229 id=1229 data-nosnippet>1229</a>            status,
-<a href=#1230 id=1230 data-nosnippet>1230</a>            <span class="prelude-val">Some</span>(user.id),
-<a href=#1231 id=1231 data-nosnippet>1231</a>            clear.clone(),
-<a href=#1232 id=1232 data-nosnippet>1232</a>        )
-<a href=#1233 id=1233 data-nosnippet>1233</a>    };
-<a href=#1234 id=1234 data-nosnippet>1234</a>
-<a href=#1235 id=1235 data-nosnippet>1235</a>    <span class="kw">let </span>groups = <span class="kw">match </span>state.group_repo.get_user_groups(tenant_id, user.id).<span class="kw">await </span>{
-<a href=#1236 id=1236 data-nosnippet>1236</a>        <span class="prelude-val">Ok</span>(g) =&gt; g,
-<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1238 id=1238 data-nosnippet>1238</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the user's groups"</span>);
-<a href=#1239 id=1239 data-nosnippet>1239</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
-<a href=#1240 id=1240 data-nosnippet>1240</a>        }
-<a href=#1241 id=1241 data-nosnippet>1241</a>    };
-<a href=#1242 id=1242 data-nosnippet>1242</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = axiam_federation::saml_idp::check_allowed_groups(sp, <span class="kw-2">&amp;</span>groups) {
-<a href=#1243 id=1243 data-nosnippet>1243</a>        <span class="kw">return </span>fail(e.status()).<span class="kw">await</span>;
-<a href=#1244 id=1244 data-nosnippet>1244</a>    }
-<a href=#1245 id=1245 data-nosnippet>1245</a>    <span class="kw">let </span>roles = <span class="kw">match </span>state.role_repo.get_user_roles(tenant_id, user.id).<span class="kw">await </span>{
-<a href=#1246 id=1246 data-nosnippet>1246</a>        <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#1247 id=1247 data-nosnippet>1247</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1248 id=1248 data-nosnippet>1248</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the user's roles"</span>);
-<a href=#1249 id=1249 data-nosnippet>1249</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
-<a href=#1250 id=1250 data-nosnippet>1250</a>        }
-<a href=#1251 id=1251 data-nosnippet>1251</a>    };
-<a href=#1252 id=1252 data-nosnippet>1252</a>    <span class="kw">let </span>key = <span class="kw">match </span>state
-<a href=#1253 id=1253 data-nosnippet>1253</a>        .saml_idp
-<a href=#1254 id=1254 data-nosnippet>1254</a>        .credential_service
-<a href=#1255 id=1255 data-nosnippet>1255</a>        .get_active_signing_key(org_id, tenant_id)
-<a href=#1256 id=1256 data-nosnippet>1256</a>        .<span class="kw">await
-<a href=#1257 id=1257 data-nosnippet>1257</a>    </span>{
-<a href=#1258 id=1258 data-nosnippet>1258</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(key)) =&gt; key,
-<a href=#1259 id=1259 data-nosnippet>1259</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {
-<a href=#1260 id=1260 data-nosnippet>1260</a>            <span class="macro">tracing::warn!</span>(%tenant_id, <span class="string">"SAML SSO: the tenant has no active signing credential"</span>);
-<a href=#1261 id=1261 data-nosnippet>1261</a>            <span class="kw">return </span>fail(SamlIdpError::NoActiveCredential.status()).<span class="kw">await</span>;
-<a href=#1262 id=1262 data-nosnippet>1262</a>        }
-<a href=#1263 id=1263 data-nosnippet>1263</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1264 id=1264 data-nosnippet>1264</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not open the signing credential"</span>);
-<a href=#1265 id=1265 data-nosnippet>1265</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
-<a href=#1266 id=1266 data-nosnippet>1266</a>        }
-<a href=#1267 id=1267 data-nosnippet>1267</a>    };
-<a href=#1268 id=1268 data-nosnippet>1268</a>
-<a href=#1269 id=1269 data-nosnippet>1269</a>    <span class="comment">// D-37, T-382: the participant record is written **before** anything is
-<a href=#1270 id=1270 data-nosnippet>1270</a>    // signed. Single logout can only end what it can map back, so no assertion
-<a href=#1271 id=1271 data-nosnippet>1271</a>    // may exist for which this row does not. The `NameID` is asked of the issuer
-<a href=#1272 id=1272 data-nosnippet>1272</a>    // first, because the row holds the one this SP is about to be given.
-<a href=#1273 id=1273 data-nosnippet>1273</a>    </span><span class="kw">let </span>(name_id, name_id_format) = <span class="kw">match </span>state.saml_idp.issuer.name_id_for(tenant_id, sp, <span class="kw-2">&amp;</span>user) {
-<a href=#1274 id=1274 data-nosnippet>1274</a>        <span class="prelude-val">Ok</span>(named) =&gt; named,
-<a href=#1275 id=1275 data-nosnippet>1275</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span>fail(e.status()).<span class="kw">await</span>,
-<a href=#1276 id=1276 data-nosnippet>1276</a>    };
-<a href=#1277 id=1277 data-nosnippet>1277</a>    <span class="kw">let </span>participant = <span class="kw">match </span>state
-<a href=#1278 id=1278 data-nosnippet>1278</a>        .saml_idp
-<a href=#1279 id=1279 data-nosnippet>1279</a>        .participant_repo
-<a href=#1280 id=1280 data-nosnippet>1280</a>        .record(NewSamlSpSession {
-<a href=#1281 id=1281 data-nosnippet>1281</a>            tenant_id,
-<a href=#1282 id=1282 data-nosnippet>1282</a>            session_id: session.id,
-<a href=#1283 id=1283 data-nosnippet>1283</a>            user_id: user.id,
-<a href=#1284 id=1284 data-nosnippet>1284</a>            sp_id: sp.id,
-<a href=#1285 id=1285 data-nosnippet>1285</a>            sp_entity_id: sp.entity_id.clone(),
-<a href=#1286 id=1286 data-nosnippet>1286</a>            name_id,
-<a href=#1287 id=1287 data-nosnippet>1287</a>            name_id_format: name_id_format.urn().to_owned(),
-<a href=#1288 id=1288 data-nosnippet>1288</a>            <span class="comment">// 32 CSPRNG bytes, base64url without padding; kept only when this
-<a href=#1289 id=1289 data-nosnippet>1289</a>            // session has no row for this SP yet.
-<a href=#1290 id=1290 data-nosnippet>1290</a>            </span>session_index: random_token(),
-<a href=#1291 id=1291 data-nosnippet>1291</a>            expires_at: session.expires_at,
-<a href=#1292 id=1292 data-nosnippet>1292</a>        })
-<a href=#1293 id=1293 data-nosnippet>1293</a>        .<span class="kw">await
-<a href=#1294 id=1294 data-nosnippet>1294</a>    </span>{
-<a href=#1295 id=1295 data-nosnippet>1295</a>        <span class="prelude-val">Ok</span>(row) =&gt; row,
-<a href=#1296 id=1296 data-nosnippet>1296</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1297 id=1297 data-nosnippet>1297</a>            <span class="comment">// No row, no assertion: `Responder`, and the SP is told nothing more.
-<a href=#1298 id=1298 data-nosnippet>1298</a>            </span><span class="macro">tracing::error!</span>(error = %e, %tenant_id, sp_id = %sp.id,
-<a href=#1299 id=1299 data-nosnippet>1299</a>                <span class="string">"SAML SSO: could not record the participant"</span>);
-<a href=#1300 id=1300 data-nosnippet>1300</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
-<a href=#1301 id=1301 data-nosnippet>1301</a>        }
-<a href=#1302 id=1302 data-nosnippet>1302</a>    };
-<a href=#1303 id=1303 data-nosnippet>1303</a>
-<a href=#1304 id=1304 data-nosnippet>1304</a>    <span class="comment">// RSA-4096 signing and the self-check, off the async workers, under the
-<a href=#1305 id=1305 data-nosnippet>1305</a>    // same gate that bounds the other CPU-heavy work.
-<a href=#1306 id=1306 data-nosnippet>1306</a>    </span><span class="kw">let </span>permit = state.crypto_semaphore.clone().acquire_owned().<span class="kw">await</span>;
-<a href=#1307 id=1307 data-nosnippet>1307</a>    <span class="kw">let </span>issuer = std::sync::Arc::clone(<span class="kw-2">&amp;</span>state.saml_idp.issuer);
-<a href=#1308 id=1308 data-nosnippet>1308</a>    <span class="kw">let </span>sp_owned = sp.clone();
-<a href=#1309 id=1309 data-nosnippet>1309</a>    <span class="kw">let </span>user_owned = user.clone();
-<a href=#1310 id=1310 data-nosnippet>1310</a>    <span class="kw">let </span>acs_url = pending.acs_url.clone();
-<a href=#1311 id=1311 data-nosnippet>1311</a>    <span class="kw">let </span>request_id = pending.request_id.clone();
-<a href=#1312 id=1312 data-nosnippet>1312</a>    <span class="kw">let </span>relay_state = pending.relay_state.clone();
-<a href=#1313 id=1313 data-nosnippet>1313</a>    <span class="kw">let </span>session_index = participant.session_index.clone();
-<a href=#1314 id=1314 data-nosnippet>1314</a>    <span class="kw">let </span>outcome = tokio::task::spawn_blocking(<span class="kw">move </span>|| {
-<a href=#1315 id=1315 data-nosnippet>1315</a>        <span class="kw">let </span>_permit = permit;
-<a href=#1316 id=1316 data-nosnippet>1316</a>        issuer.issue(
-<a href=#1317 id=1317 data-nosnippet>1317</a>            <span class="kw-2">&amp;</span>SsoIssuance {
-<a href=#1318 id=1318 data-nosnippet>1318</a>                tenant_id,
-<a href=#1319 id=1319 data-nosnippet>1319</a>                sp: <span class="kw-2">&amp;</span>sp_owned,
-<a href=#1320 id=1320 data-nosnippet>1320</a>                acs_url: <span class="kw-2">&amp;</span>acs_url,
-<a href=#1321 id=1321 data-nosnippet>1321</a>                in_response_to: request_id.as_deref(),
-<a href=#1322 id=1322 data-nosnippet>1322</a>                relay_state: relay_state.as_deref(),
-<a href=#1323 id=1323 data-nosnippet>1323</a>                session: <span class="kw-2">&amp;</span>session,
-<a href=#1324 id=1324 data-nosnippet>1324</a>                session_index: <span class="kw-2">&amp;</span>session_index,
-<a href=#1325 id=1325 data-nosnippet>1325</a>                user: <span class="kw-2">&amp;</span>user_owned,
-<a href=#1326 id=1326 data-nosnippet>1326</a>                groups: <span class="kw-2">&amp;</span>groups,
-<a href=#1327 id=1327 data-nosnippet>1327</a>                roles: <span class="kw-2">&amp;</span>roles,
-<a href=#1328 id=1328 data-nosnippet>1328</a>            },
-<a href=#1329 id=1329 data-nosnippet>1329</a>            <span class="kw-2">&amp;</span>key,
-<a href=#1330 id=1330 data-nosnippet>1330</a>            Utc::now(),
-<a href=#1331 id=1331 data-nosnippet>1331</a>        )
-<a href=#1332 id=1332 data-nosnippet>1332</a>    })
-<a href=#1333 id=1333 data-nosnippet>1333</a>    .<span class="kw">await</span>;
-<a href=#1334 id=1334 data-nosnippet>1334</a>    <span class="kw">match </span>outcome {
-<a href=#1335 id=1335 data-nosnippet>1335</a>        <span class="comment">// What was recorded must be what was asserted: the row is how a logout
-<a href=#1336 id=1336 data-nosnippet>1336</a>        // finds this assertion again. A mismatch (the address changed between the
-<a href=#1337 id=1337 data-nosnippet>1337</a>        // two reads) is posted nowhere.
-<a href=#1338 id=1338 data-nosnippet>1338</a>        </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(issued))
-<a href=#1339 id=1339 data-nosnippet>1339</a>            <span class="kw">if </span>issued.name_id != participant.name_id
-<a href=#1340 id=1340 data-nosnippet>1340</a>                || issued.session_index != participant.session_index =&gt;
-<a href=#1341 id=1341 data-nosnippet>1341</a>        {
-<a href=#1342 id=1342 data-nosnippet>1342</a>            <span class="macro">tracing::error!</span>(%tenant_id, sp_id = %sp.id,
-<a href=#1343 id=1343 data-nosnippet>1343</a>                <span class="string">"SAML SSO: the issued assertion does not match the participant record"</span>);
-<a href=#1344 id=1344 data-nosnippet>1344</a>            fail(SamlStatus::Responder).<span class="kw">await
-<a href=#1345 id=1345 data-nosnippet>1345</a>        </span>}
-<a href=#1346 id=1346 data-nosnippet>1346</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(issued)) =&gt; {
-<a href=#1347 id=1347 data-nosnippet>1347</a>            <span class="macro">tracing::info!</span>(%tenant_id, sp_id = %sp.id, user_id = %user.id,
-<a href=#1348 id=1348 data-nosnippet>1348</a>                <span class="string">"SAML SSO: assertion issued"</span>);
-<a href=#1349 id=1349 data-nosnippet>1349</a>            audit(
-<a href=#1350 id=1350 data-nosnippet>1350</a>                state,
-<a href=#1351 id=1351 data-nosnippet>1351</a>                req,
-<a href=#1352 id=1352 data-nosnippet>1352</a>                tenant_id,
-<a href=#1353 id=1353 data-nosnippet>1353</a>                <span class="prelude-val">Some</span>(user.id),
-<a href=#1354 id=1354 data-nosnippet>1354</a>                sp.id,
-<a href=#1355 id=1355 data-nosnippet>1355</a>                <span class="prelude-val">Ok</span>(<span class="kw-2">&amp;</span>issued.response_id),
-<a href=#1356 id=1356 data-nosnippet>1356</a>            )
-<a href=#1357 id=1357 data-nosnippet>1357</a>            .<span class="kw">await</span>;
-<a href=#1358 id=1358 data-nosnippet>1358</a>            post_page(<span class="kw-2">&amp;</span>issued.binding, clear, tenant_id)
-<a href=#1359 id=1359 data-nosnippet>1359</a>        }
-<a href=#1360 id=1360 data-nosnippet>1360</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e @ (SamlIdpError::AcsNotRegistered | SamlIdpError::AcsBindingUnsupported))) =&gt; {
-<a href=#1361 id=1361 data-nosnippet>1361</a>            refusal_page(StatusCode::BAD_REQUEST, error_reason(e), tenant_id)
-<a href=#1362 id=1362 data-nosnippet>1362</a>        }
-<a href=#1363 id=1363 data-nosnippet>1363</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; {
-<a href=#1364 id=1364 data-nosnippet>1364</a>            <span class="macro">tracing::info!</span>(%tenant_id, sp_id = %sp.id, error = %e, <span class="string">"SAML SSO: not issued"</span>);
-<a href=#1365 id=1365 data-nosnippet>1365</a>            fail(e.status()).<span class="kw">await
-<a href=#1366 id=1366 data-nosnippet>1366</a>        </span>}
-<a href=#1367 id=1367 data-nosnippet>1367</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; fail(SamlStatus::Responder).<span class="kw">await</span>,
-<a href=#1368 id=1368 data-nosnippet>1368</a>    }
-<a href=#1369 id=1369 data-nosnippet>1369</a>}
-<a href=#1370 id=1370 data-nosnippet>1370</a>
-<a href=#1371 id=1371 data-nosnippet>1371</a><span class="kw">fn </span>error_reason(e: SamlIdpError) -&gt; Reason {
-<a href=#1372 id=1372 data-nosnippet>1372</a>    <span class="kw">match </span>e {
-<a href=#1373 id=1373 data-nosnippet>1373</a>        SamlIdpError::AcsNotRegistered =&gt; <span class="string">"acs_not_registered"</span>,
-<a href=#1374 id=1374 data-nosnippet>1374</a>        SamlIdpError::AcsBindingUnsupported =&gt; <span class="string">"acs_binding"</span>,
-<a href=#1375 id=1375 data-nosnippet>1375</a>        <span class="kw">_ </span>=&gt; <span class="string">"issuance"</span>,
-<a href=#1376 id=1376 data-nosnippet>1376</a>    }
-<a href=#1377 id=1377 data-nosnippet>1377</a>}
-<a href=#1378 id=1378 data-nosnippet>1378</a>
-<a href=#1379 id=1379 data-nosnippet>1379</a><span class="attr">#[cfg(test)]
-<a href=#1380 id=1380 data-nosnippet>1380</a></span><span class="kw">mod </span>tests {
-<a href=#1381 id=1381 data-nosnippet>1381</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#1382 id=1382 data-nosnippet>1382</a>
-<a href=#1383 id=1383 data-nosnippet>1383</a>    <span class="attr">#[test]
-<a href=#1384 id=1384 data-nosnippet>1384</a>    </span><span class="kw">fn </span>html_escape_escapes_every_markup_character() {
-<a href=#1385 id=1385 data-nosnippet>1385</a>        <span class="macro">assert_eq!</span>(
-<a href=#1386 id=1386 data-nosnippet>1386</a>            html_escape(<span class="string">r#"&lt;a href="x"&gt;'&amp;'&lt;/a&gt;"#</span>),
-<a href=#1387 id=1387 data-nosnippet>1387</a>            <span class="string">"&amp;lt;a href=&amp;quot;x&amp;quot;&amp;gt;&amp;#39;&amp;amp;&amp;#39;&amp;lt;/a&amp;gt;"
-<a href=#1388 id=1388 data-nosnippet>1388</a>        </span>);
-<a href=#1389 id=1389 data-nosnippet>1389</a>    }
-<a href=#1390 id=1390 data-nosnippet>1390</a>
-<a href=#1391 id=1391 data-nosnippet>1391</a>    <span class="attr">#[test]
-<a href=#1392 id=1392 data-nosnippet>1392</a>    </span><span class="kw">fn </span>the_csp_origin_is_the_acs_origin_alone() {
-<a href=#1393 id=1393 data-nosnippet>1393</a>        <span class="macro">assert_eq!</span>(
-<a href=#1394 id=1394 data-nosnippet>1394</a>            acs_origin(<span class="string">"https://sp.example.test/saml/acs?x=1"</span>).as_deref(),
-<a href=#1395 id=1395 data-nosnippet>1395</a>            <span class="prelude-val">Some</span>(<span class="string">"https://sp.example.test"</span>)
-<a href=#1396 id=1396 data-nosnippet>1396</a>        );
-<a href=#1397 id=1397 data-nosnippet>1397</a>        <span class="macro">assert_eq!</span>(
-<a href=#1398 id=1398 data-nosnippet>1398</a>            acs_origin(<span class="string">"https://sp.example.test:8443/acs"</span>).as_deref(),
-<a href=#1399 id=1399 data-nosnippet>1399</a>            <span class="prelude-val">Some</span>(<span class="string">"https://sp.example.test:8443"</span>)
-<a href=#1400 id=1400 data-nosnippet>1400</a>        );
-<a href=#1401 id=1401 data-nosnippet>1401</a>        <span class="macro">assert_eq!</span>(acs_origin(<span class="string">"not a url"</span>), <span class="prelude-val">None</span>);
-<a href=#1402 id=1402 data-nosnippet>1402</a>    }
-<a href=#1403 id=1403 data-nosnippet>1403</a>
-<a href=#1404 id=1404 data-nosnippet>1404</a>    <span class="doccomment">/// F4 (W3 review, D-27): the auto-post page's own policy is narrower than
-<a href=#1405 id=1405 data-nosnippet>1405</a>    /// the global one everywhere but `script-src` (a per-response nonce) and
-<a href=#1406 id=1406 data-nosnippet>1406</a>    /// `form-action` (the ACS origin alone) — nothing may be loaded, framed or
-<a href=#1407 id=1407 data-nosnippet>1407</a>    /// re-based, and no directive is a wildcard or an `unsafe-` keyword.
-<a href=#1408 id=1408 data-nosnippet>1408</a>    </span><span class="attr">#[test]
-<a href=#1409 id=1409 data-nosnippet>1409</a>    </span><span class="kw">fn </span>the_auto_post_policy_is_narrower_than_the_global_one() {
-<a href=#1410 id=1410 data-nosnippet>1410</a>        <span class="kw">let </span>binding = PostBinding {
-<a href=#1411 id=1411 data-nosnippet>1411</a>            acs_url: <span class="string">"https://sp.example.test/saml/acs?x=1"</span>.into(),
-<a href=#1412 id=1412 data-nosnippet>1412</a>            saml_response: <span class="string">"PHNhbWxwOlJlc3BvbnNlLz4="</span>.into(),
-<a href=#1413 id=1413 data-nosnippet>1413</a>            relay_state: <span class="prelude-val">Some</span>(<span class="string">"rs-1"</span>.into()),
-<a href=#1414 id=1414 data-nosnippet>1414</a>        };
-<a href=#1415 id=1415 data-nosnippet>1415</a>        <span class="kw">let </span>page = post_page(<span class="kw-2">&amp;</span>binding, <span class="prelude-val">None</span>, Uuid::new_v4());
-<a href=#1416 id=1416 data-nosnippet>1416</a>        <span class="kw">let </span>csp = page
-<a href=#1417 id=1417 data-nosnippet>1417</a>            .headers()
-<a href=#1418 id=1418 data-nosnippet>1418</a>            .get(<span class="string">"content-security-policy"</span>)
-<a href=#1419 id=1419 data-nosnippet>1419</a>            .and_then(|v| v.to_str().ok())
-<a href=#1420 id=1420 data-nosnippet>1420</a>            .expect(<span class="string">"the page sets its own policy"</span>)
-<a href=#1421 id=1421 data-nosnippet>1421</a>            .to_owned();
-<a href=#1422 id=1422 data-nosnippet>1422</a>        <span class="kw">let </span>directives: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = csp.split(<span class="string">';'</span>).map(str::trim).collect();
-<a href=#1423 id=1423 data-nosnippet>1423</a>        <span class="kw">for </span>required <span class="kw">in </span>[
-<a href=#1424 id=1424 data-nosnippet>1424</a>            <span class="string">"default-src 'none'"</span>,
-<a href=#1425 id=1425 data-nosnippet>1425</a>            <span class="string">"frame-ancestors 'none'"</span>,
-<a href=#1426 id=1426 data-nosnippet>1426</a>            <span class="string">"base-uri 'none'"</span>,
-<a href=#1427 id=1427 data-nosnippet>1427</a>            <span class="string">"form-action https://sp.example.test"</span>,
-<a href=#1428 id=1428 data-nosnippet>1428</a>        ] {
-<a href=#1429 id=1429 data-nosnippet>1429</a>            <span class="macro">assert!</span>(directives.contains(<span class="kw-2">&amp;</span>required), <span class="string">"missing {required}"</span>);
-<a href=#1430 id=1430 data-nosnippet>1430</a>        }
-<a href=#1431 id=1431 data-nosnippet>1431</a>        <span class="macro">assert!</span>(
-<a href=#1432 id=1432 data-nosnippet>1432</a>            directives
-<a href=#1433 id=1433 data-nosnippet>1433</a>                .iter()
-<a href=#1434 id=1434 data-nosnippet>1434</a>                .any(|d| d.starts_with(<span class="string">"script-src 'nonce-"</span>) &amp;&amp; d.split(<span class="string">' '</span>).count() == <span class="number">2</span>),
-<a href=#1435 id=1435 data-nosnippet>1435</a>            <span class="string">"script-src is one nonce and nothing else"
-<a href=#1436 id=1436 data-nosnippet>1436</a>        </span>);
-<a href=#1437 id=1437 data-nosnippet>1437</a>        <span class="macro">assert_eq!</span>(directives.len(), <span class="number">5</span>, <span class="string">"no other directive widens the page"</span>);
-<a href=#1438 id=1438 data-nosnippet>1438</a>        <span class="macro">assert!</span>(!csp.contains(<span class="string">'*'</span>) &amp;&amp; !csp.contains(<span class="string">"unsafe-"</span>));
-<a href=#1439 id=1439 data-nosnippet>1439</a>    }
-<a href=#1440 id=1440 data-nosnippet>1440</a>
-<a href=#1441 id=1441 data-nosnippet>1441</a>    <span class="attr">#[test]
-<a href=#1442 id=1442 data-nosnippet>1442</a>    </span><span class="kw">fn </span>a_handle_is_exactly_what_is_minted() {
-<a href=#1443 id=1443 data-nosnippet>1443</a>        <span class="kw">let </span>minted = random_token();
-<a href=#1444 id=1444 data-nosnippet>1444</a>        <span class="macro">assert!</span>(is_handle(<span class="kw-2">&amp;</span>minted));
-<a href=#1445 id=1445 data-nosnippet>1445</a>        <span class="macro">assert!</span>(!is_handle(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{minted}a"</span>)));
-<a href=#1446 id=1446 data-nosnippet>1446</a>        <span class="macro">assert!</span>(!is_handle(<span class="kw-2">&amp;</span>minted.replacen(|<span class="kw">_</span>: char| <span class="bool-val">true</span>, <span class="string">"+"</span>, <span class="number">1</span>)));
-<a href=#1447 id=1447 data-nosnippet>1447</a>        <span class="macro">assert!</span>(!is_handle(<span class="string">""</span>));
-<a href=#1448 id=1448 data-nosnippet>1448</a>        <span class="macro">assert_ne!</span>(random_token(), random_token());
+<a href=#641 id=641 data-nosnippet>641</a>/// the permit is taken before the *signature* is evaluated, so the answer says
+<a href=#642 id=642 data-nosnippet>642</a>/// nothing about it, and the SP can retry. The request was parsed and its
+<a href=#643 id=643 data-nosnippet>643</a>/// `Issuer` looked up first, so the `503` does show that the `Issuer` is an
+<a href=#644 id=644 data-nosnippet>644</a>/// enabled registered SP with a certificate (public data, R110W2-06). A closed semaphore (it
+<a href=#645 id=645 data-nosnippet>645</a>/// never is) is the signature that did not verify.
+<a href=#646 id=646 data-nosnippet>646</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>verify_post_signature_off_worker&lt;C: Connection + Clone&gt;(
+<a href=#647 id=647 data-nosnippet>647</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#648 id=648 data-nosnippet>648</a>    document: <span class="kw-2">&amp;</span>str,
+<a href=#649 id=649 data-nosnippet>649</a>    sp_cert_der: <span class="kw-2">&amp;</span>[u8],
+<a href=#650 id=650 data-nosnippet>650</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), PostVerifyFailure&gt; {
+<a href=#651 id=651 data-nosnippet>651</a>    <span class="kw">let </span>permit = crypto_gate(state)
+<a href=#652 id=652 data-nosnippet>652</a>        .acquire(<span class="string">"saml_idp_receiver"</span>)
+<a href=#653 id=653 data-nosnippet>653</a>        .<span class="kw">await
+<a href=#654 id=654 data-nosnippet>654</a>        </span>.map_err(|refusal| <span class="kw">match </span>refusal {
+<a href=#655 id=655 data-nosnippet>655</a>            GateRefusal::Busy =&gt; PostVerifyFailure::Busy,
+<a href=#656 id=656 data-nosnippet>656</a>            GateRefusal::Closed =&gt; PostVerifyFailure::Request(RequestError::SignatureInvalid),
+<a href=#657 id=657 data-nosnippet>657</a>        })<span class="question-mark">?</span>;
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="kw">let </span>document = document.to_owned();
+<a href=#659 id=659 data-nosnippet>659</a>    <span class="kw">let </span>sp_cert_der = sp_cert_der.to_vec();
+<a href=#660 id=660 data-nosnippet>660</a>    tokio::task::spawn_blocking(<span class="kw">move </span>|| {
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>_permit = permit;
+<a href=#662 id=662 data-nosnippet>662</a>        saml_request::verify_post_signature(<span class="kw-2">&amp;</span>document, <span class="kw-2">&amp;</span>sp_cert_der)
+<a href=#663 id=663 data-nosnippet>663</a>    })
+<a href=#664 id=664 data-nosnippet>664</a>    .<span class="kw">await
+<a href=#665 id=665 data-nosnippet>665</a>    </span>.unwrap_or(<span class="prelude-val">Err</span>(RequestError::SignatureInvalid))
+<a href=#666 id=666 data-nosnippet>666</a>    .map_err(PostVerifyFailure::Request)
+<a href=#667 id=667 data-nosnippet>667</a>}
+<a href=#668 id=668 data-nosnippet>668</a>
+<a href=#669 id=669 data-nosnippet>669</a><span class="doccomment">/// Why [`verify_post_signature_off_worker`] did not verify a signature.
+<a href=#670 id=670 data-nosnippet>670</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#671 id=671 data-nosnippet>671</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>PostVerifyFailure {
+<a href=#672 id=672 data-nosnippet>672</a>    <span class="doccomment">/// The receiver's verdict on the message.
+<a href=#673 id=673 data-nosnippet>673</a>    </span>Request(RequestError),
+<a href=#674 id=674 data-nosnippet>674</a>    <span class="doccomment">/// No crypto permit came free within `hash_acquire_timeout_secs`.
+<a href=#675 id=675 data-nosnippet>675</a>    </span>Busy,
+<a href=#676 id=676 data-nosnippet>676</a>}
+<a href=#677 id=677 data-nosnippet>677</a>
+<a href=#678 id=678 data-nosnippet>678</a><span class="doccomment">/// The deployment's crypto semaphore with the wait every bounded waiter on it
+<a href=#679 id=679 data-nosnippet>679</a>/// gives (`hash_acquire_timeout_secs`, #654).
+<a href=#680 id=680 data-nosnippet>680</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>crypto_gate&lt;C: Connection + Clone&gt;(state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;) -&gt; CryptoGate {
+<a href=#681 id=681 data-nosnippet>681</a>    CryptoGate::new(
+<a href=#682 id=682 data-nosnippet>682</a>        std::sync::Arc::clone(<span class="kw-2">&amp;</span>state.crypto_semaphore),
+<a href=#683 id=683 data-nosnippet>683</a>        std::time::Duration::from_secs(state.auth_config.hash_acquire_timeout_secs),
+<a href=#684 id=684 data-nosnippet>684</a>    )
+<a href=#685 id=685 data-nosnippet>685</a>}
+<a href=#686 id=686 data-nosnippet>686</a>
+<a href=#687 id=687 data-nosnippet>687</a><span class="doccomment">/// `503`, for a verification that found the crypto gate saturated (#654): not
+<a href=#688 id=688 data-nosnippet>688</a>/// a verdict on the request, so not one of [`RequestError`]'s `400`s. Asks the
+<a href=#689 id=689 data-nosnippet>689</a>/// SP to retry shortly.
+<a href=#690 id=690 data-nosnippet>690</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>busy_page(tenant_id: Uuid) -&gt; HttpResponse {
+<a href=#691 id=691 data-nosnippet>691</a>    <span class="kw">let </span><span class="kw-2">mut </span>response = refusal_page(StatusCode::SERVICE_UNAVAILABLE, <span class="string">"busy"</span>, tenant_id);
+<a href=#692 id=692 data-nosnippet>692</a>    response.headers_mut().insert(
+<a href=#693 id=693 data-nosnippet>693</a>        actix_web::http::header::RETRY_AFTER,
+<a href=#694 id=694 data-nosnippet>694</a>        actix_web::http::header::HeaderValue::from_static(<span class="string">"5"</span>),
+<a href=#695 id=695 data-nosnippet>695</a>    );
+<a href=#696 id=696 data-nosnippet>696</a>    response
+<a href=#697 id=697 data-nosnippet>697</a>}
+<a href=#698 id=698 data-nosnippet>698</a>
+<a href=#699 id=699 data-nosnippet>699</a><span class="doccomment">/// Everything the first leg decides, in the order the module docs give.
+<a href=#700 id=700 data-nosnippet>700</a></span><span class="kw">async fn </span>accept&lt;C: Connection + Clone&gt;(
+<a href=#701 id=701 data-nosnippet>701</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#702 id=702 data-nosnippet>702</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
+<a href=#703 id=703 data-nosnippet>703</a>    tenant_id: Uuid,
+<a href=#704 id=704 data-nosnippet>704</a>    incoming: Incoming&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#705 id=705 data-nosnippet>705</a>) -&gt; HttpResponse {
+<a href=#706 id=706 data-nosnippet>706</a>    <span class="kw">let </span>now = Utc::now();
+<a href=#707 id=707 data-nosnippet>707</a>    <span class="kw">let </span>parsed = <span class="kw">match </span>saml_request::parse_authn_request(<span class="kw-2">&amp;</span>incoming.document, now) {
+<a href=#708 id=708 data-nosnippet>708</a>        <span class="prelude-val">Ok</span>(p) =&gt; p,
+<a href=#709 id=709 data-nosnippet>709</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span>request_refused(e, tenant_id),
+<a href=#710 id=710 data-nosnippet>710</a>    };
+<a href=#711 id=711 data-nosnippet>711</a>    <span class="comment">// A signature inside a Redirect-binding document is not that binding's
+<a href=#712 id=712 data-nosnippet>712</a>    // signature (Bindings §3.4.4.1); nothing checks it, so it is refused.
+<a href=#713 id=713 data-nosnippet>713</a>    </span><span class="kw">if </span>incoming.redirect.is_some() &amp;&amp; parsed.enveloped_signature {
+<a href=#714 id=714 data-nosnippet>714</a>        <span class="kw">return </span>request_refused(RequestError::SignaturePlacement, tenant_id);
+<a href=#715 id=715 data-nosnippet>715</a>    }
+<a href=#716 id=716 data-nosnippet>716</a>
+<a href=#717 id=717 data-nosnippet>717</a>    <span class="comment">// The SP, by issuer, within the path's tenant only.
+<a href=#718 id=718 data-nosnippet>718</a>    </span><span class="kw">let </span>sp = <span class="kw">match </span>state
+<a href=#719 id=719 data-nosnippet>719</a>        .saml_idp
+<a href=#720 id=720 data-nosnippet>720</a>        .sp_repo
+<a href=#721 id=721 data-nosnippet>721</a>        .get_by_entity_id(tenant_id, <span class="kw-2">&amp;</span>parsed.issuer)
+<a href=#722 id=722 data-nosnippet>722</a>        .<span class="kw">await
+<a href=#723 id=723 data-nosnippet>723</a>    </span>{
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(sp)) =&gt; sp,
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"unknown_sp"</span>, tenant_id),
+<a href=#726 id=726 data-nosnippet>726</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#727 id=727 data-nosnippet>727</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the SP registry"</span>);
+<a href=#728 id=728 data-nosnippet>728</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"registry"</span>, tenant_id);
+<a href=#729 id=729 data-nosnippet>729</a>        }
+<a href=#730 id=730 data-nosnippet>730</a>    };
+<a href=#731 id=731 data-nosnippet>731</a>
+<a href=#732 id=732 data-nosnippet>732</a>    <span class="comment">// The signature, before anything the request names is trusted.
+<a href=#733 id=733 data-nosnippet>733</a>    </span><span class="kw">let </span>signed = <span class="kw">match </span><span class="kw-2">&amp;</span>incoming.redirect {
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="prelude-val">Some</span>(query) =&gt; query.is_signed(),
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="prelude-val">None </span>=&gt; parsed.enveloped_signature,
+<a href=#736 id=736 data-nosnippet>736</a>    };
+<a href=#737 id=737 data-nosnippet>737</a>    <span class="kw">let </span>sp_cert = <span class="kw">match </span>sp.sp_signing_cert_pem.as_deref() {
+<a href=#738 id=738 data-nosnippet>738</a>        <span class="prelude-val">Some</span>(pem) =&gt; <span class="kw">match </span>axiam_federation::cert::pem_cert_to_der(pem) {
+<a href=#739 id=739 data-nosnippet>739</a>            <span class="prelude-val">Ok</span>(der) =&gt; <span class="prelude-val">Some</span>(der),
+<a href=#740 id=740 data-nosnippet>740</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+<a href=#741 id=741 data-nosnippet>741</a>                <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"sp_certificate"</span>, tenant_id);
+<a href=#742 id=742 data-nosnippet>742</a>            }
+<a href=#743 id=743 data-nosnippet>743</a>        },
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="prelude-val">None </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#745 id=745 data-nosnippet>745</a>    };
+<a href=#746 id=746 data-nosnippet>746</a>    <span class="kw">let </span>verified = <span class="kw">match </span>(<span class="kw-2">&amp;</span>sp_cert, signed) {
+<a href=#747 id=747 data-nosnippet>747</a>        (<span class="prelude-val">Some</span>(cert), <span class="bool-val">true</span>) =&gt; {
+<a href=#748 id=748 data-nosnippet>748</a>            <span class="kw">let </span>outcome = <span class="kw">match </span><span class="kw-2">&amp;</span>incoming.redirect {
+<a href=#749 id=749 data-nosnippet>749</a>                <span class="prelude-val">Some</span>(query) =&gt; query
+<a href=#750 id=750 data-nosnippet>750</a>                    .verify_signature(cert)
+<a href=#751 id=751 data-nosnippet>751</a>                    .map_err(PostVerifyFailure::Request),
+<a href=#752 id=752 data-nosnippet>752</a>                <span class="prelude-val">None </span>=&gt; verify_post_signature_off_worker(state, <span class="kw-2">&amp;</span>incoming.document, cert).<span class="kw">await</span>,
+<a href=#753 id=753 data-nosnippet>753</a>            };
+<a href=#754 id=754 data-nosnippet>754</a>            <span class="kw">match </span>outcome {
+<a href=#755 id=755 data-nosnippet>755</a>                <span class="prelude-val">Ok</span>(()) =&gt; {}
+<a href=#756 id=756 data-nosnippet>756</a>                <span class="prelude-val">Err</span>(PostVerifyFailure::Request(e)) =&gt; <span class="kw">return </span>request_refused(e, tenant_id),
+<a href=#757 id=757 data-nosnippet>757</a>                <span class="prelude-val">Err</span>(PostVerifyFailure::Busy) =&gt; <span class="kw">return </span>busy_page(tenant_id),
+<a href=#758 id=758 data-nosnippet>758</a>            }
+<a href=#759 id=759 data-nosnippet>759</a>            <span class="bool-val">true
+<a href=#760 id=760 data-nosnippet>760</a>        </span>}
+<a href=#761 id=761 data-nosnippet>761</a>        <span class="comment">// Signed, but the SP registered no certificate to check it with: the
+<a href=#762 id=762 data-nosnippet>762</a>        // signature cannot be evaluated, and is not relied on.
+<a href=#763 id=763 data-nosnippet>763</a>        </span>(<span class="prelude-val">None</span>, <span class="bool-val">true</span>) | (<span class="kw">_</span>, <span class="bool-val">false</span>) =&gt; <span class="bool-val">false</span>,
+<a href=#764 id=764 data-nosnippet>764</a>    };
+<a href=#765 id=765 data-nosnippet>765</a>    <span class="kw">if </span>sp.want_authn_requests_signed &amp;&amp; !verified {
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">return </span>request_refused(RequestError::SignatureMissing, tenant_id);
+<a href=#767 id=767 data-nosnippet>767</a>    }
+<a href=#768 id=768 data-nosnippet>768</a>
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="comment">// `Destination`: when present it must be this tenant's SSO URL, and a
+<a href=#770 id=770 data-nosnippet>770</a>    // signed request must carry it (Bindings §3.4.5.2, §3.5.5.2).
+<a href=#771 id=771 data-nosnippet>771</a>    </span><span class="kw">let </span>sso_url = idp_sso_url(state.auth_config.root_issuer(), tenant_id);
+<a href=#772 id=772 data-nosnippet>772</a>    <span class="kw">match </span>parsed.destination.as_deref() {
+<a href=#773 id=773 data-nosnippet>773</a>        <span class="prelude-val">Some</span>(destination) <span class="kw">if </span>destination != sso_url =&gt; {
+<a href=#774 id=774 data-nosnippet>774</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"destination"</span>, tenant_id);
+<a href=#775 id=775 data-nosnippet>775</a>        }
+<a href=#776 id=776 data-nosnippet>776</a>        <span class="prelude-val">None </span><span class="kw">if </span>verified =&gt; {
+<a href=#777 id=777 data-nosnippet>777</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"destination_missing"</span>, tenant_id);
+<a href=#778 id=778 data-nosnippet>778</a>        }
+<a href=#779 id=779 data-nosnippet>779</a>        <span class="kw">_ </span>=&gt; {}
+<a href=#780 id=780 data-nosnippet>780</a>    }
+<a href=#781 id=781 data-nosnippet>781</a>
+<a href=#782 id=782 data-nosnippet>782</a>    <span class="comment">// The ACS URL, resolved against the registration only.
+<a href=#783 id=783 data-nosnippet>783</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(acs_url) = resolve_acs(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>parsed) <span class="kw">else </span>{
+<a href=#784 id=784 data-nosnippet>784</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
+<a href=#785 id=785 data-nosnippet>785</a>    };
+<a href=#786 id=786 data-nosnippet>786</a>    <span class="kw">if </span>check_acs_url(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>acs_url).is_err() {
+<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
+<a href=#788 id=788 data-nosnippet>788</a>    }
+<a href=#789 id=789 data-nosnippet>789</a>    <span class="kw">if </span>parsed
+<a href=#790 id=790 data-nosnippet>790</a>        .protocol_binding
+<a href=#791 id=791 data-nosnippet>791</a>        .as_deref()
+<a href=#792 id=792 data-nosnippet>792</a>        .is_some_and(|b| b != BINDING_HTTP_POST)
+<a href=#793 id=793 data-nosnippet>793</a>    {
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"protocol_binding"</span>, tenant_id);
+<a href=#795 id=795 data-nosnippet>795</a>    }
+<a href=#796 id=796 data-nosnippet>796</a>    <span class="kw">if </span>check_relay_state(incoming.relay_state.as_deref()).is_err() {
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"relay_state"</span>, tenant_id);
+<a href=#798 id=798 data-nosnippet>798</a>    }
+<a href=#799 id=799 data-nosnippet>799</a>
+<a href=#800 id=800 data-nosnippet>800</a>    <span class="comment">// From here the ACS URL is one the SP registered: policy refusals are
+<a href=#801 id=801 data-nosnippet>801</a>    // answered to it as SAML failures.
+<a href=#802 id=802 data-nosnippet>802</a>    </span><span class="kw">let </span>respond = |status| {
+<a href=#803 id=803 data-nosnippet>803</a>        post_failure(
+<a href=#804 id=804 data-nosnippet>804</a>            state,
+<a href=#805 id=805 data-nosnippet>805</a>            req,
+<a href=#806 id=806 data-nosnippet>806</a>            tenant_id,
+<a href=#807 id=807 data-nosnippet>807</a>            <span class="kw-2">&amp;</span>sp,
+<a href=#808 id=808 data-nosnippet>808</a>            <span class="kw-2">&amp;</span>acs_url,
+<a href=#809 id=809 data-nosnippet>809</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>parsed.id),
+<a href=#810 id=810 data-nosnippet>810</a>            incoming.relay_state.as_deref(),
+<a href=#811 id=811 data-nosnippet>811</a>            status,
+<a href=#812 id=812 data-nosnippet>812</a>            <span class="prelude-val">None</span>,
+<a href=#813 id=813 data-nosnippet>813</a>            <span class="prelude-val">None</span>,
+<a href=#814 id=814 data-nosnippet>814</a>        )
+<a href=#815 id=815 data-nosnippet>815</a>    };
+<a href=#816 id=816 data-nosnippet>816</a>    <span class="kw">if </span>!sp.enabled {
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="kw">return </span>respond(SamlStatus::RequestDenied).<span class="kw">await</span>;
+<a href=#818 id=818 data-nosnippet>818</a>    }
+<a href=#819 id=819 data-nosnippet>819</a>    <span class="kw">if </span>sp.encrypt_assertions {
+<a href=#820 id=820 data-nosnippet>820</a>        <span class="kw">return </span>respond(SamlIdpError::EncryptionUnsupported.status()).<span class="kw">await</span>;
+<a href=#821 id=821 data-nosnippet>821</a>    }
+<a href=#822 id=822 data-nosnippet>822</a>    <span class="kw">if </span>!saml_request::name_id_format_compatible(parsed.name_id_format.as_deref(), sp.name_id_format)
+<a href=#823 id=823 data-nosnippet>823</a>    {
+<a href=#824 id=824 data-nosnippet>824</a>        <span class="kw">return </span>respond(SamlStatus::InvalidNameIdPolicy).<span class="kw">await</span>;
+<a href=#825 id=825 data-nosnippet>825</a>    }
+<a href=#826 id=826 data-nosnippet>826</a>
+<a href=#827 id=827 data-nosnippet>827</a>    hold(
+<a href=#828 id=828 data-nosnippet>828</a>        state,
+<a href=#829 id=829 data-nosnippet>829</a>        tenant_id,
+<a href=#830 id=830 data-nosnippet>830</a>        <span class="kw-2">&amp;</span>sp,
+<a href=#831 id=831 data-nosnippet>831</a>        <span class="prelude-val">Some</span>(parsed.id.clone()),
+<a href=#832 id=832 data-nosnippet>832</a>        acs_url.clone(),
+<a href=#833 id=833 data-nosnippet>833</a>        incoming.relay_state.clone(),
+<a href=#834 id=834 data-nosnippet>834</a>        parsed.force_authn,
+<a href=#835 id=835 data-nosnippet>835</a>        parsed.is_passive,
+<a href=#836 id=836 data-nosnippet>836</a>    )
+<a href=#837 id=837 data-nosnippet>837</a>    .<span class="kw">await
+<a href=#838 id=838 data-nosnippet>838</a></span>}
+<a href=#839 id=839 data-nosnippet>839</a>
+<a href=#840 id=840 data-nosnippet>840</a><span class="doccomment">/// The registered ACS URL a request names: by URL (exact), by index, or the
+<a href=#841 id=841 data-nosnippet>841</a>/// SP's default. A request naming both is malformed (SAML Core §3.4.1).
+<a href=#842 id=842 data-nosnippet>842</a></span><span class="kw">fn </span>resolve_acs(sp: <span class="kw-2">&amp;</span>SamlServiceProvider, parsed: <span class="kw-2">&amp;</span>ParsedAuthnRequest) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#843 id=843 data-nosnippet>843</a>    <span class="kw">let </span>endpoint = <span class="kw">match </span>(parsed.acs_url.as_deref(), parsed.acs_index) {
+<a href=#844 id=844 data-nosnippet>844</a>        (<span class="prelude-val">Some</span>(<span class="kw">_</span>), <span class="prelude-val">Some</span>(<span class="kw">_</span>)) =&gt; <span class="kw">return </span><span class="prelude-val">None</span>,
+<a href=#845 id=845 data-nosnippet>845</a>        (<span class="prelude-val">Some</span>(url), <span class="prelude-val">None</span>) =&gt; sp.acs_by_url(url),
+<a href=#846 id=846 data-nosnippet>846</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(index)) =&gt; sp.acs_by_index(index),
+<a href=#847 id=847 data-nosnippet>847</a>        (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>) =&gt; sp.default_acs(),
+<a href=#848 id=848 data-nosnippet>848</a>    }<span class="question-mark">?</span>;
+<a href=#849 id=849 data-nosnippet>849</a>    <span class="prelude-val">Some</span>(endpoint.url.clone())
+<a href=#850 id=850 data-nosnippet>850</a>}
+<a href=#851 id=851 data-nosnippet>851</a>
+<a href=#852 id=852 data-nosnippet>852</a><span class="doccomment">/// Store the pending request and send the browser to the second leg, bound to
+<a href=#853 id=853 data-nosnippet>853</a>/// it by a cookie.
+<a href=#854 id=854 data-nosnippet>854</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#855 id=855 data-nosnippet>855</a></span><span class="kw">async fn </span>hold&lt;C: Connection + Clone&gt;(
+<a href=#856 id=856 data-nosnippet>856</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#857 id=857 data-nosnippet>857</a>    tenant_id: Uuid,
+<a href=#858 id=858 data-nosnippet>858</a>    sp: <span class="kw-2">&amp;</span>SamlServiceProvider,
+<a href=#859 id=859 data-nosnippet>859</a>    request_id: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#860 id=860 data-nosnippet>860</a>    acs_url: String,
+<a href=#861 id=861 data-nosnippet>861</a>    relay_state: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#862 id=862 data-nosnippet>862</a>    force_authn: bool,
+<a href=#863 id=863 data-nosnippet>863</a>    is_passive: bool,
+<a href=#864 id=864 data-nosnippet>864</a>) -&gt; HttpResponse {
+<a href=#865 id=865 data-nosnippet>865</a>    <span class="kw">let </span>handle = random_token();
+<a href=#866 id=866 data-nosnippet>866</a>    <span class="kw">let </span>binding = random_token();
+<a href=#867 id=867 data-nosnippet>867</a>    <span class="kw">let </span>handle_hash = sha256_hex(<span class="kw-2">&amp;</span>handle);
+<a href=#868 id=868 data-nosnippet>868</a>    <span class="kw">let </span>created_at = Utc::now();
+<a href=#869 id=869 data-nosnippet>869</a>    <span class="kw">let </span>row = NewPendingSamlRequest {
+<a href=#870 id=870 data-nosnippet>870</a>        tenant_id,
+<a href=#871 id=871 data-nosnippet>871</a>        sp_id: sp.id,
+<a href=#872 id=872 data-nosnippet>872</a>        request_id,
+<a href=#873 id=873 data-nosnippet>873</a>        acs_url,
+<a href=#874 id=874 data-nosnippet>874</a>        relay_state,
+<a href=#875 id=875 data-nosnippet>875</a>        force_authn,
+<a href=#876 id=876 data-nosnippet>876</a>        is_passive,
+<a href=#877 id=877 data-nosnippet>877</a>        handle_hash: handle_hash.clone(),
+<a href=#878 id=878 data-nosnippet>878</a>        binding_hash: sha256_hex(<span class="kw-2">&amp;</span>binding),
+<a href=#879 id=879 data-nosnippet>879</a>        created_at,
+<a href=#880 id=880 data-nosnippet>880</a>        expires_at: created_at + Duration::seconds(PENDING_SAML_REQUEST_TTL_SECS),
+<a href=#881 id=881 data-nosnippet>881</a>    };
+<a href=#882 id=882 data-nosnippet>882</a>    <span class="kw">match </span>state.saml_idp.pending_repo.create(row).<span class="kw">await </span>{
+<a href=#883 id=883 data-nosnippet>883</a>        <span class="prelude-val">Ok</span>(()) =&gt; {}
+<a href=#884 id=884 data-nosnippet>884</a>        <span class="prelude-val">Err</span>(axiam_core::error::AxiamError::ReplayDetected) =&gt; {
+<a href=#885 id=885 data-nosnippet>885</a>            <span class="macro">tracing::warn!</span>(%tenant_id, sp_id = %sp.id, <span class="string">"SAML SSO: a request ID was replayed"</span>);
+<a href=#886 id=886 data-nosnippet>886</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"replayed_request_id"</span>, tenant_id);
+<a href=#887 id=887 data-nosnippet>887</a>        }
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#889 id=889 data-nosnippet>889</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not store the request"</span>);
+<a href=#890 id=890 data-nosnippet>890</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
+<a href=#891 id=891 data-nosnippet>891</a>        }
+<a href=#892 id=892 data-nosnippet>892</a>    }
+<a href=#893 id=893 data-nosnippet>893</a>    <span class="kw">let </span>location = <span class="macro">format!</span>(
+<a href=#894 id=894 data-nosnippet>894</a>        <span class="string">"{}?handle={handle}"</span>,
+<a href=#895 id=895 data-nosnippet>895</a>        axiam_oauth2::login_hop::saml_sso_continue_path(tenant_id)
+<a href=#896 id=896 data-nosnippet>896</a>    );
+<a href=#897 id=897 data-nosnippet>897</a>    HttpResponse::SeeOther()
+<a href=#898 id=898 data-nosnippet>898</a>        .insert_header((actix_web::http::header::LOCATION, location))
+<a href=#899 id=899 data-nosnippet>899</a>        .insert_header((<span class="string">"Cache-Control"</span>, <span class="string">"no-store"</span>))
+<a href=#900 id=900 data-nosnippet>900</a>        .insert_header((<span class="string">"Referrer-Policy"</span>, <span class="string">"no-referrer"</span>))
+<a href=#901 id=901 data-nosnippet>901</a>        .cookie(binding_cookie(
+<a href=#902 id=902 data-nosnippet>902</a>            tenant_id,
+<a href=#903 id=903 data-nosnippet>903</a>            binding_cookie_name(<span class="kw-2">&amp;</span>handle_hash),
+<a href=#904 id=904 data-nosnippet>904</a>            binding,
+<a href=#905 id=905 data-nosnippet>905</a>            PENDING_SAML_REQUEST_TTL_SECS,
+<a href=#906 id=906 data-nosnippet>906</a>        ))
+<a href=#907 id=907 data-nosnippet>907</a>        .finish()
+<a href=#908 id=908 data-nosnippet>908</a>}
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#911 id=911 data-nosnippet>911</a>// First leg: IdP-initiated (D-3)
+<a href=#912 id=912 data-nosnippet>912</a>// ---------------------------------------------------------------------------
+<a href=#913 id=913 data-nosnippet>913</a>
+<a href=#914 id=914 data-nosnippet>914</a></span><span class="doccomment">/// `GET /saml/v2/{tenant_id}/sso/idp-initiated?sp=&lt;entity id&gt;[&amp;RelayState=…]`.
+<a href=#915 id=915 data-nosnippet>915</a>///
+<a href=#916 id=916 data-nosnippet>916</a>/// For an SP that opted in (`allow_idp_initiated`), and refused before the hop
+<a href=#917 id=917 data-nosnippet>917</a>/// for any other. A cross-site trigger is refused (`Sec-Fetch-Site:
+<a href=#918 id=918 data-nosnippet>918</a>/// cross-site`): the link is meant for AXIAM's own pages and bookmarks, and a
+<a href=#919 id=919 data-nosnippet>919</a>/// third-party page that could start it could sign a visitor in to an SP with a
+<a href=#920 id=920 data-nosnippet>920</a>/// `RelayState` of its choosing. Every refusal is an error page: an unsolicited
+<a href=#921 id=921 data-nosnippet>921</a>/// failure response is no use to an SP.
+<a href=#922 id=922 data-nosnippet>922</a></span><span class="kw">pub async fn </span>sso_idp_initiated&lt;C: Connection + Clone&gt;(
+<a href=#923 id=923 data-nosnippet>923</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#924 id=924 data-nosnippet>924</a>    req: HttpRequest,
+<a href=#925 id=925 data-nosnippet>925</a>    path: web::Path&lt;String&gt;,
+<a href=#926 id=926 data-nosnippet>926</a>) -&gt; HttpResponse {
+<a href=#927 id=927 data-nosnippet>927</a>    <span class="kw">let </span><span class="prelude-val">Some</span>((tenant_id, _org)) = tenant_serving_saml(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>path).<span class="kw">await else </span>{
+<a href=#928 id=928 data-nosnippet>928</a>        <span class="kw">return </span>not_found().<span class="kw">await</span>;
+<a href=#929 id=929 data-nosnippet>929</a>    };
+<a href=#930 id=930 data-nosnippet>930</a>    <span class="kw">if </span>req
+<a href=#931 id=931 data-nosnippet>931</a>        .headers()
+<a href=#932 id=932 data-nosnippet>932</a>        .get(<span class="string">"sec-fetch-site"</span>)
+<a href=#933 id=933 data-nosnippet>933</a>        .and_then(|v| v.to_str().ok())
+<a href=#934 id=934 data-nosnippet>934</a>        .is_some_and(|v| v.eq_ignore_ascii_case(<span class="string">"cross-site"</span>))
+<a href=#935 id=935 data-nosnippet>935</a>    {
+<a href=#936 id=936 data-nosnippet>936</a>        <span class="kw">return </span>refusal_page(StatusCode::FORBIDDEN, <span class="string">"idp_initiated_cross_site"</span>, tenant_id);
+<a href=#937 id=937 data-nosnippet>937</a>    }
+<a href=#938 id=938 data-nosnippet>938</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>entity, <span class="kw-2">mut </span>relay) = (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
+<a href=#939 id=939 data-nosnippet>939</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span>url::form_urlencoded::parse(req.query_string().as_bytes()) {
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="kw">let </span>slot = <span class="kw">match </span>name.as_ref() {
+<a href=#941 id=941 data-nosnippet>941</a>            <span class="string">"sp" </span>=&gt; <span class="kw-2">&amp;mut </span>entity,
+<a href=#942 id=942 data-nosnippet>942</a>            <span class="string">"RelayState" </span>=&gt; <span class="kw-2">&amp;mut </span>relay,
+<a href=#943 id=943 data-nosnippet>943</a>            <span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
+<a href=#944 id=944 data-nosnippet>944</a>        };
+<a href=#945 id=945 data-nosnippet>945</a>        <span class="kw">if </span>slot.replace(value.into_owned()).is_some() {
+<a href=#946 id=946 data-nosnippet>946</a>            <span class="kw">return </span>request_refused(RequestError::DuplicateParameter, tenant_id);
+<a href=#947 id=947 data-nosnippet>947</a>        }
+<a href=#948 id=948 data-nosnippet>948</a>    }
+<a href=#949 id=949 data-nosnippet>949</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(entity) = entity.filter(|e| !e.is_empty()) <span class="kw">else </span>{
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"idp_initiated_no_sp"</span>, tenant_id);
+<a href=#951 id=951 data-nosnippet>951</a>    };
+<a href=#952 id=952 data-nosnippet>952</a>    <span class="kw">let </span>sp = <span class="kw">match </span>state
+<a href=#953 id=953 data-nosnippet>953</a>        .saml_idp
+<a href=#954 id=954 data-nosnippet>954</a>        .sp_repo
+<a href=#955 id=955 data-nosnippet>955</a>        .get_by_entity_id(tenant_id, <span class="kw-2">&amp;</span>entity)
+<a href=#956 id=956 data-nosnippet>956</a>        .<span class="kw">await
+<a href=#957 id=957 data-nosnippet>957</a>    </span>{
+<a href=#958 id=958 data-nosnippet>958</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(sp)) =&gt; sp,
+<a href=#959 id=959 data-nosnippet>959</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"unknown_sp"</span>, tenant_id),
+<a href=#960 id=960 data-nosnippet>960</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#961 id=961 data-nosnippet>961</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the SP registry"</span>);
+<a href=#962 id=962 data-nosnippet>962</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"registry"</span>, tenant_id);
+<a href=#963 id=963 data-nosnippet>963</a>        }
+<a href=#964 id=964 data-nosnippet>964</a>    };
+<a href=#965 id=965 data-nosnippet>965</a>    <span class="kw">if </span>!sp.allow_idp_initiated {
+<a href=#966 id=966 data-nosnippet>966</a>        <span class="kw">return </span>refusal_page(
+<a href=#967 id=967 data-nosnippet>967</a>            StatusCode::FORBIDDEN,
+<a href=#968 id=968 data-nosnippet>968</a>            <span class="string">"idp_initiated_not_allowed"</span>,
+<a href=#969 id=969 data-nosnippet>969</a>            tenant_id,
+<a href=#970 id=970 data-nosnippet>970</a>        );
+<a href=#971 id=971 data-nosnippet>971</a>    }
+<a href=#972 id=972 data-nosnippet>972</a>    <span class="kw">if </span>!sp.enabled {
+<a href=#973 id=973 data-nosnippet>973</a>        <span class="kw">return </span>refusal_page(StatusCode::FORBIDDEN, <span class="string">"sp_disabled"</span>, tenant_id);
+<a href=#974 id=974 data-nosnippet>974</a>    }
+<a href=#975 id=975 data-nosnippet>975</a>    <span class="kw">if </span>sp.encrypt_assertions {
+<a href=#976 id=976 data-nosnippet>976</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"encryption_unsupported"</span>, tenant_id);
+<a href=#977 id=977 data-nosnippet>977</a>    }
+<a href=#978 id=978 data-nosnippet>978</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(acs_url) = sp.default_acs().map(|e| e.url.clone()) <span class="kw">else </span>{
+<a href=#979 id=979 data-nosnippet>979</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
+<a href=#980 id=980 data-nosnippet>980</a>    };
+<a href=#981 id=981 data-nosnippet>981</a>    <span class="kw">if </span>check_acs_url(<span class="kw-2">&amp;</span>sp, <span class="kw-2">&amp;</span>acs_url).is_err() {
+<a href=#982 id=982 data-nosnippet>982</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"acs_not_registered"</span>, tenant_id);
+<a href=#983 id=983 data-nosnippet>983</a>    }
+<a href=#984 id=984 data-nosnippet>984</a>    <span class="kw">if </span>check_relay_state(relay.as_deref()).is_err() {
+<a href=#985 id=985 data-nosnippet>985</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"relay_state"</span>, tenant_id);
+<a href=#986 id=986 data-nosnippet>986</a>    }
+<a href=#987 id=987 data-nosnippet>987</a>    hold(<span class="kw-2">&amp;</span>state, tenant_id, <span class="kw-2">&amp;</span>sp, <span class="prelude-val">None</span>, acs_url, relay, <span class="bool-val">false</span>, <span class="bool-val">false</span>).<span class="kw">await
+<a href=#988 id=988 data-nosnippet>988</a></span>}
+<a href=#989 id=989 data-nosnippet>989</a>
+<a href=#990 id=990 data-nosnippet>990</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#991 id=991 data-nosnippet>991</a>// Second leg
+<a href=#992 id=992 data-nosnippet>992</a>// ---------------------------------------------------------------------------
+<a href=#993 id=993 data-nosnippet>993</a>
+<a href=#994 id=994 data-nosnippet>994</a></span><span class="doccomment">/// `GET /saml/v2/{tenant_id}/sso/continue?handle=…[&amp;axiam_login_hop=1]`.
+<a href=#995 id=995 data-nosnippet>995</a></span><span class="kw">pub async fn </span>sso_continue&lt;C: Connection + Clone&gt;(
+<a href=#996 id=996 data-nosnippet>996</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#997 id=997 data-nosnippet>997</a>    req: HttpRequest,
+<a href=#998 id=998 data-nosnippet>998</a>    path: web::Path&lt;String&gt;,
+<a href=#999 id=999 data-nosnippet>999</a>) -&gt; HttpResponse {
+<a href=#1000 id=1000 data-nosnippet>1000</a>    <span class="kw">let </span><span class="prelude-val">Some</span>((tenant_id, org_id)) = tenant_serving_saml(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>path).<span class="kw">await else </span>{
+<a href=#1001 id=1001 data-nosnippet>1001</a>        <span class="kw">return </span>not_found().<span class="kw">await</span>;
+<a href=#1002 id=1002 data-nosnippet>1002</a>    };
+<a href=#1003 id=1003 data-nosnippet>1003</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>handle, <span class="kw-2">mut </span>marker) = (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>);
+<a href=#1004 id=1004 data-nosnippet>1004</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span>url::form_urlencoded::parse(req.query_string().as_bytes()) {
+<a href=#1005 id=1005 data-nosnippet>1005</a>        <span class="kw">let </span>slot = <span class="kw">match </span>name.as_ref() {
+<a href=#1006 id=1006 data-nosnippet>1006</a>            <span class="string">"handle" </span>=&gt; <span class="kw-2">&amp;mut </span>handle,
+<a href=#1007 id=1007 data-nosnippet>1007</a>            axiam_oauth2::login_hop::LOGIN_HOP_MARKER =&gt; <span class="kw-2">&amp;mut </span>marker,
+<a href=#1008 id=1008 data-nosnippet>1008</a>            <span class="kw">_ </span>=&gt; <span class="kw">continue</span>,
+<a href=#1009 id=1009 data-nosnippet>1009</a>        };
+<a href=#1010 id=1010 data-nosnippet>1010</a>        <span class="kw">if </span>slot.replace(value.into_owned()).is_some() {
+<a href=#1011 id=1011 data-nosnippet>1011</a>            <span class="kw">return </span>request_refused(RequestError::DuplicateParameter, tenant_id);
+<a href=#1012 id=1012 data-nosnippet>1012</a>        }
+<a href=#1013 id=1013 data-nosnippet>1013</a>    }
+<a href=#1014 id=1014 data-nosnippet>1014</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(handle) = handle.filter(|h| is_handle(h)) <span class="kw">else </span>{
+<a href=#1015 id=1015 data-nosnippet>1015</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle"</span>, tenant_id);
+<a href=#1016 id=1016 data-nosnippet>1016</a>    };
+<a href=#1017 id=1017 data-nosnippet>1017</a>    <span class="kw">let </span>handle_hash = sha256_hex(<span class="kw-2">&amp;</span>handle);
+<a href=#1018 id=1018 data-nosnippet>1018</a>
+<a href=#1019 id=1019 data-nosnippet>1019</a>    <span class="kw">let </span>pending = <span class="kw">match </span>state
+<a href=#1020 id=1020 data-nosnippet>1020</a>        .saml_idp
+<a href=#1021 id=1021 data-nosnippet>1021</a>        .pending_repo
+<a href=#1022 id=1022 data-nosnippet>1022</a>        .get_pending(tenant_id, <span class="kw-2">&amp;</span>handle_hash)
+<a href=#1023 id=1023 data-nosnippet>1023</a>        .<span class="kw">await
+<a href=#1024 id=1024 data-nosnippet>1024</a>    </span>{
+<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(p)) =&gt; p,
+<a href=#1026 id=1026 data-nosnippet>1026</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_unknown"</span>, tenant_id),
+<a href=#1027 id=1027 data-nosnippet>1027</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1028 id=1028 data-nosnippet>1028</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the request"</span>);
+<a href=#1029 id=1029 data-nosnippet>1029</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
+<a href=#1030 id=1030 data-nosnippet>1030</a>        }
+<a href=#1031 id=1031 data-nosnippet>1031</a>    };
+<a href=#1032 id=1032 data-nosnippet>1032</a>
+<a href=#1033 id=1033 data-nosnippet>1033</a>    <span class="comment">// The browser that started this request, and no other.
+<a href=#1034 id=1034 data-nosnippet>1034</a>    </span><span class="kw">let </span>bound = req
+<a href=#1035 id=1035 data-nosnippet>1035</a>        .cookie(<span class="kw-2">&amp;</span>binding_cookie_name(<span class="kw-2">&amp;</span>handle_hash))
+<a href=#1036 id=1036 data-nosnippet>1036</a>        .map(|c| sha256_hex(c.value()))
+<a href=#1037 id=1037 data-nosnippet>1037</a>        .is_some_and(|h| bool::from(h.as_bytes().ct_eq(pending.binding_hash.as_bytes())));
+<a href=#1038 id=1038 data-nosnippet>1038</a>    <span class="kw">if </span>!bound {
+<a href=#1039 id=1039 data-nosnippet>1039</a>        <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"binding"</span>, tenant_id);
+<a href=#1040 id=1040 data-nosnippet>1040</a>    }
+<a href=#1041 id=1041 data-nosnippet>1041</a>    <span class="kw">let </span>clear = || <span class="prelude-val">Some</span>(clear_binding_cookie(tenant_id, <span class="kw-2">&amp;</span>handle_hash));
+<a href=#1042 id=1042 data-nosnippet>1042</a>
+<a href=#1043 id=1043 data-nosnippet>1043</a>    <span class="comment">// The SP as it is now: deleted or disabled since the first leg ends it.
+<a href=#1044 id=1044 data-nosnippet>1044</a>    </span><span class="kw">let </span>sp = <span class="kw">match </span>state.saml_idp.sp_repo.get(tenant_id, pending.sp_id).<span class="kw">await </span>{
+<a href=#1045 id=1045 data-nosnippet>1045</a>        <span class="prelude-val">Ok</span>(sp) =&gt; sp,
+<a href=#1046 id=1046 data-nosnippet>1046</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+<a href=#1047 id=1047 data-nosnippet>1047</a>            <span class="kw">let _ </span>= state
+<a href=#1048 id=1048 data-nosnippet>1048</a>                .saml_idp
+<a href=#1049 id=1049 data-nosnippet>1049</a>                .pending_repo
+<a href=#1050 id=1050 data-nosnippet>1050</a>                .consume(tenant_id, <span class="kw-2">&amp;</span>handle_hash)
+<a href=#1051 id=1051 data-nosnippet>1051</a>                .<span class="kw">await</span>;
+<a href=#1052 id=1052 data-nosnippet>1052</a>            <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"sp_gone"</span>, tenant_id);
+<a href=#1053 id=1053 data-nosnippet>1053</a>        }
+<a href=#1054 id=1054 data-nosnippet>1054</a>    };
+<a href=#1055 id=1055 data-nosnippet>1055</a>    <span class="kw">let </span>fail = |status, actor| {
+<a href=#1056 id=1056 data-nosnippet>1056</a>        <span class="kw">let </span>state = <span class="kw-2">&amp;</span>state;
+<a href=#1057 id=1057 data-nosnippet>1057</a>        <span class="kw">let </span>req = <span class="kw-2">&amp;</span>req;
+<a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="kw">let </span>sp = <span class="kw-2">&amp;</span>sp;
+<a href=#1059 id=1059 data-nosnippet>1059</a>        <span class="kw">let </span>pending = <span class="kw-2">&amp;</span>pending;
+<a href=#1060 id=1060 data-nosnippet>1060</a>        <span class="kw">let </span>handle_hash = <span class="kw-2">&amp;</span>handle_hash;
+<a href=#1061 id=1061 data-nosnippet>1061</a>        <span class="kw">async move </span>{
+<a href=#1062 id=1062 data-nosnippet>1062</a>            <span class="kw">if </span>state
+<a href=#1063 id=1063 data-nosnippet>1063</a>                .saml_idp
+<a href=#1064 id=1064 data-nosnippet>1064</a>                .pending_repo
+<a href=#1065 id=1065 data-nosnippet>1065</a>                .consume(tenant_id, handle_hash)
+<a href=#1066 id=1066 data-nosnippet>1066</a>                .<span class="kw">await
+<a href=#1067 id=1067 data-nosnippet>1067</a>                </span>.ok()
+<a href=#1068 id=1068 data-nosnippet>1068</a>                .flatten()
+<a href=#1069 id=1069 data-nosnippet>1069</a>                .is_none()
+<a href=#1070 id=1070 data-nosnippet>1070</a>            {
+<a href=#1071 id=1071 data-nosnippet>1071</a>                <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_consumed"</span>, tenant_id);
+<a href=#1072 id=1072 data-nosnippet>1072</a>            }
+<a href=#1073 id=1073 data-nosnippet>1073</a>            post_failure(
+<a href=#1074 id=1074 data-nosnippet>1074</a>                state,
+<a href=#1075 id=1075 data-nosnippet>1075</a>                req,
+<a href=#1076 id=1076 data-nosnippet>1076</a>                tenant_id,
+<a href=#1077 id=1077 data-nosnippet>1077</a>                sp,
+<a href=#1078 id=1078 data-nosnippet>1078</a>                <span class="kw-2">&amp;</span>pending.acs_url,
+<a href=#1079 id=1079 data-nosnippet>1079</a>                pending.request_id.as_deref(),
+<a href=#1080 id=1080 data-nosnippet>1080</a>                pending.relay_state.as_deref(),
+<a href=#1081 id=1081 data-nosnippet>1081</a>                status,
+<a href=#1082 id=1082 data-nosnippet>1082</a>                actor,
+<a href=#1083 id=1083 data-nosnippet>1083</a>                clear(),
+<a href=#1084 id=1084 data-nosnippet>1084</a>            )
+<a href=#1085 id=1085 data-nosnippet>1085</a>            .<span class="kw">await
+<a href=#1086 id=1086 data-nosnippet>1086</a>        </span>}
+<a href=#1087 id=1087 data-nosnippet>1087</a>    };
+<a href=#1088 id=1088 data-nosnippet>1088</a>    <span class="kw">if </span>!sp.enabled {
+<a href=#1089 id=1089 data-nosnippet>1089</a>        <span class="kw">return </span>fail(SamlStatus::RequestDenied, <span class="prelude-val">None</span>).<span class="kw">await</span>;
+<a href=#1090 id=1090 data-nosnippet>1090</a>    }
+<a href=#1091 id=1091 data-nosnippet>1091</a>
+<a href=#1092 id=1092 data-nosnippet>1092</a>    <span class="comment">// The session, from the OP cookie, through the tenant-keyed lookup only.
+<a href=#1093 id=1093 data-nosnippet>1093</a>    </span><span class="kw">let </span>presented = req
+<a href=#1094 id=1094 data-nosnippet>1094</a>        .cookie(<span class="kw">crate</span>::middleware::csrf::COOKIE_OP_SESSION)
+<a href=#1095 id=1095 data-nosnippet>1095</a>        .is_some();
+<a href=#1096 id=1096 data-nosnippet>1096</a>    <span class="kw">let </span>resolved = resolve_session(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>req, tenant_id).<span class="kw">await</span>;
+<a href=#1097 id=1097 data-nosnippet>1097</a>    <span class="kw">let </span>fresh = resolved
+<a href=#1098 id=1098 data-nosnippet>1098</a>        .as_ref()
+<a href=#1099 id=1099 data-nosnippet>1099</a>        .is_some_and(|(session, <span class="kw">_</span>)| satisfies_force_authn(<span class="kw-2">&amp;</span>pending, session));
+<a href=#1100 id=1100 data-nosnippet>1100</a>
+<a href=#1101 id=1101 data-nosnippet>1101</a>    <span class="kw">if let </span>(<span class="bool-val">true</span>, <span class="prelude-val">Some</span>((session, user))) = (fresh, resolved.as_ref()) {
+<a href=#1102 id=1102 data-nosnippet>1102</a>        <span class="kw">return </span>issue(
+<a href=#1103 id=1103 data-nosnippet>1103</a>            <span class="kw-2">&amp;</span>state,
+<a href=#1104 id=1104 data-nosnippet>1104</a>            <span class="kw-2">&amp;</span>req,
+<a href=#1105 id=1105 data-nosnippet>1105</a>            tenant_id,
+<a href=#1106 id=1106 data-nosnippet>1106</a>            org_id,
+<a href=#1107 id=1107 data-nosnippet>1107</a>            <span class="kw-2">&amp;</span>sp,
+<a href=#1108 id=1108 data-nosnippet>1108</a>            <span class="kw-2">&amp;</span>handle_hash,
+<a href=#1109 id=1109 data-nosnippet>1109</a>            session.clone(),
+<a href=#1110 id=1110 data-nosnippet>1110</a>            user.clone(),
+<a href=#1111 id=1111 data-nosnippet>1111</a>        )
+<a href=#1112 id=1112 data-nosnippet>1112</a>        .<span class="kw">await</span>;
+<a href=#1113 id=1113 data-nosnippet>1113</a>    }
+<a href=#1114 id=1114 data-nosnippet>1114</a>    <span class="kw">let </span>actor = resolved.as_ref().map(|(<span class="kw">_</span>, user)| user.id);
+<a href=#1115 id=1115 data-nosnippet>1115</a>    <span class="kw">if </span>pending.is_passive {
+<a href=#1116 id=1116 data-nosnippet>1116</a>        <span class="kw">return </span>fail(SamlStatus::NoPassive, actor).<span class="kw">await</span>;
+<a href=#1117 id=1117 data-nosnippet>1117</a>    }
+<a href=#1118 id=1118 data-nosnippet>1118</a>    <span class="kw">if </span>axiam_oauth2::login_hop::is_return_leg(marker.as_deref()) {
+<a href=#1119 id=1119 data-nosnippet>1119</a>        <span class="comment">// Back from the sign-in page with no session — or, under ForceAuthn,
+<a href=#1120 id=1120 data-nosnippet>1120</a>        // with none newer than the request. Answered, never hopped again; and
+<a href=#1121 id=1121 data-nosnippet>1121</a>        // a forged marker on a first visit lands here too, with no assertion.
+<a href=#1122 id=1122 data-nosnippet>1122</a>        </span><span class="kw">return </span>fail(SamlStatus::AuthnFailed, actor).<span class="kw">await</span>;
+<a href=#1123 id=1123 data-nosnippet>1123</a>    }
+<a href=#1124 id=1124 data-nosnippet>1124</a>
+<a href=#1125 id=1125 data-nosnippet>1125</a>    <span class="comment">// The hop. `reauth` when the browser holds a session that does not count:
+<a href=#1126 id=1126 data-nosnippet>1126</a>    // a stale cookie, or one older than a ForceAuthn request.
+<a href=#1127 id=1127 data-nosnippet>1127</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(return_to) = axiam_oauth2::login_hop::build_saml_return_to(tenant_id, <span class="kw-2">&amp;</span>handle) <span class="kw">else </span>{
+<a href=#1128 id=1128 data-nosnippet>1128</a>        <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"return_to"</span>, tenant_id);
+<a href=#1129 id=1129 data-nosnippet>1129</a>    };
+<a href=#1130 id=1130 data-nosnippet>1130</a>    <span class="kw">let </span>continue_path = axiam_oauth2::login_hop::saml_sso_continue_path(tenant_id);
+<a href=#1131 id=1131 data-nosnippet>1131</a>    <span class="kw">if </span>!<span class="kw">crate</span>::handlers::oauth2::return_to_is_on_this_deployment(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>return_to, <span class="kw-2">&amp;</span>continue_path)
+<a href=#1132 id=1132 data-nosnippet>1132</a>    {
+<a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"return_to"</span>, tenant_id);
+<a href=#1134 id=1134 data-nosnippet>1134</a>    }
+<a href=#1135 id=1135 data-nosnippet>1135</a>    <span class="kw">let </span>stale = presented &amp;&amp; resolved.is_none();
+<a href=#1136 id=1136 data-nosnippet>1136</a>    <span class="kw">let </span>reauth = stale || resolved.is_some();
+<a href=#1137 id=1137 data-nosnippet>1137</a>    <span class="kw">let </span>location = axiam_oauth2::login_hop::build_login_redirect(<span class="kw-2">&amp;</span>return_to, reauth);
+<a href=#1138 id=1138 data-nosnippet>1138</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = HttpResponse::Found();
+<a href=#1139 id=1139 data-nosnippet>1139</a>    builder
+<a href=#1140 id=1140 data-nosnippet>1140</a>        .insert_header((actix_web::http::header::LOCATION, location))
+<a href=#1141 id=1141 data-nosnippet>1141</a>        .insert_header((<span class="string">"Cache-Control"</span>, <span class="string">"no-store"</span>))
+<a href=#1142 id=1142 data-nosnippet>1142</a>        .insert_header((<span class="string">"Referrer-Policy"</span>, <span class="string">"no-referrer"</span>));
+<a href=#1143 id=1143 data-nosnippet>1143</a>    <span class="kw">if </span>stale {
+<a href=#1144 id=1144 data-nosnippet>1144</a>        builder.cookie(<span class="kw">crate</span>::middleware::csrf::clear_presented_saml_op_session_cookie(tenant_id));
+<a href=#1145 id=1145 data-nosnippet>1145</a>    }
+<a href=#1146 id=1146 data-nosnippet>1146</a>    builder.finish()
+<a href=#1147 id=1147 data-nosnippet>1147</a>}
+<a href=#1148 id=1148 data-nosnippet>1148</a>
+<a href=#1149 id=1149 data-nosnippet>1149</a><span class="doccomment">/// `ForceAuthn` bound to the request: the session must have authenticated
+<a href=#1150 id=1150 data-nosnippet>1150</a>/// strictly after the first leg accepted it (P23W1-08 not inherited).
+<a href=#1151 id=1151 data-nosnippet>1151</a></span><span class="kw">fn </span>satisfies_force_authn(pending: <span class="kw-2">&amp;</span>PendingSamlRequest, session: <span class="kw-2">&amp;</span>Session) -&gt; bool {
+<a href=#1152 id=1152 data-nosnippet>1152</a>    !pending.force_authn || session.authenticated_at &gt; pending.created_at
+<a href=#1153 id=1153 data-nosnippet>1153</a>}
+<a href=#1154 id=1154 data-nosnippet>1154</a>
+<a href=#1155 id=1155 data-nosnippet>1155</a><span class="doccomment">/// The session the OP cookie names in this tenant, and its account, when that
+<a href=#1156 id=1156 data-nosnippet>1156</a>/// account may act — the rule `/oauth2/authorize` applies
+<a href=#1157 id=1157 data-nosnippet>1157</a>/// (`check_session_holder`, i.e. `account_may_act`: `PendingVerification` is
+<a href=#1158 id=1158 data-nosnippet>1158</a>/// served). A failed read is no session.
+<a href=#1159 id=1159 data-nosnippet>1159</a></span><span class="kw">async fn </span>resolve_session&lt;C: Connection + Clone&gt;(
+<a href=#1160 id=1160 data-nosnippet>1160</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#1161 id=1161 data-nosnippet>1161</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
+<a href=#1162 id=1162 data-nosnippet>1162</a>    tenant_id: Uuid,
+<a href=#1163 id=1163 data-nosnippet>1163</a>) -&gt; <span class="prelude-ty">Option</span>&lt;(Session, User)&gt; {
+<a href=#1164 id=1164 data-nosnippet>1164</a>    <span class="kw">let </span>cookie = req.cookie(<span class="kw">crate</span>::middleware::csrf::COOKIE_OP_SESSION)<span class="question-mark">?</span>;
+<a href=#1165 id=1165 data-nosnippet>1165</a>    <span class="kw">let </span>digest = axiam_auth::token::hash_browser_session_token(cookie.value());
+<a href=#1166 id=1166 data-nosnippet>1166</a>    <span class="kw">let </span>session = <span class="kw">match </span>state
+<a href=#1167 id=1167 data-nosnippet>1167</a>        .session_repo
+<a href=#1168 id=1168 data-nosnippet>1168</a>        .get_by_browser_token_hash(tenant_id, <span class="kw-2">&amp;</span>digest)
+<a href=#1169 id=1169 data-nosnippet>1169</a>        .<span class="kw">await
+<a href=#1170 id=1170 data-nosnippet>1170</a>    </span>{
+<a href=#1171 id=1171 data-nosnippet>1171</a>        <span class="prelude-val">Ok</span>(found) =&gt; found<span class="question-mark">?</span>,
+<a href=#1172 id=1172 data-nosnippet>1172</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1173 id=1173 data-nosnippet>1173</a>            <span class="macro">tracing::warn!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not resolve the OP session"</span>);
+<a href=#1174 id=1174 data-nosnippet>1174</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1175 id=1175 data-nosnippet>1175</a>        }
+<a href=#1176 id=1176 data-nosnippet>1176</a>    };
+<a href=#1177 id=1177 data-nosnippet>1177</a>    <span class="kw">let </span>user = <span class="kw">match </span>state.user_repo.get_by_id(tenant_id, session.user_id).<span class="kw">await </span>{
+<a href=#1178 id=1178 data-nosnippet>1178</a>        <span class="prelude-val">Ok</span>(user) =&gt; user,
+<a href=#1179 id=1179 data-nosnippet>1179</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1180 id=1180 data-nosnippet>1180</a>            <span class="macro">tracing::warn!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the session's account"</span>);
+<a href=#1181 id=1181 data-nosnippet>1181</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#1182 id=1182 data-nosnippet>1182</a>        }
+<a href=#1183 id=1183 data-nosnippet>1183</a>    };
+<a href=#1184 id=1184 data-nosnippet>1184</a>    <span class="kw">match </span>state.auth_service.check_session_holder(<span class="kw-2">&amp;</span>user) {
+<a href=#1185 id=1185 data-nosnippet>1185</a>        <span class="prelude-val">Ok</span>(()) =&gt; <span class="prelude-val">Some</span>((session, user)),
+<a href=#1186 id=1186 data-nosnippet>1186</a>        <span class="prelude-val">Err</span>(reason) =&gt; {
+<a href=#1187 id=1187 data-nosnippet>1187</a>            <span class="macro">tracing::info!</span>(%tenant_id, session_id = %session.id, reason = %reason,
+<a href=#1188 id=1188 data-nosnippet>1188</a>                <span class="string">"SAML SSO: the OP session's account may not act"</span>);
+<a href=#1189 id=1189 data-nosnippet>1189</a>            <span class="prelude-val">None
+<a href=#1190 id=1190 data-nosnippet>1190</a>        </span>}
+<a href=#1191 id=1191 data-nosnippet>1191</a>    }
+<a href=#1192 id=1192 data-nosnippet>1192</a>}
+<a href=#1193 id=1193 data-nosnippet>1193</a>
+<a href=#1194 id=1194 data-nosnippet>1194</a><span class="doccomment">/// Consume the pending request and issue the signed response.
+<a href=#1195 id=1195 data-nosnippet>1195</a></span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#1196 id=1196 data-nosnippet>1196</a></span><span class="kw">async fn </span>issue&lt;C: Connection + Clone&gt;(
+<a href=#1197 id=1197 data-nosnippet>1197</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#1198 id=1198 data-nosnippet>1198</a>    req: <span class="kw-2">&amp;</span>HttpRequest,
+<a href=#1199 id=1199 data-nosnippet>1199</a>    tenant_id: Uuid,
+<a href=#1200 id=1200 data-nosnippet>1200</a>    org_id: Uuid,
+<a href=#1201 id=1201 data-nosnippet>1201</a>    sp: <span class="kw-2">&amp;</span>SamlServiceProvider,
+<a href=#1202 id=1202 data-nosnippet>1202</a>    handle_hash: <span class="kw-2">&amp;</span>str,
+<a href=#1203 id=1203 data-nosnippet>1203</a>    session: Session,
+<a href=#1204 id=1204 data-nosnippet>1204</a>    user: User,
+<a href=#1205 id=1205 data-nosnippet>1205</a>) -&gt; HttpResponse {
+<a href=#1206 id=1206 data-nosnippet>1206</a>    <span class="comment">// Single use, decided here and nowhere else: of any number of concurrent
+<a href=#1207 id=1207 data-nosnippet>1207</a>    // continues, one gets the row.
+<a href=#1208 id=1208 data-nosnippet>1208</a>    </span><span class="kw">let </span>pending = <span class="kw">match </span>state
+<a href=#1209 id=1209 data-nosnippet>1209</a>        .saml_idp
+<a href=#1210 id=1210 data-nosnippet>1210</a>        .pending_repo
+<a href=#1211 id=1211 data-nosnippet>1211</a>        .consume(tenant_id, handle_hash)
+<a href=#1212 id=1212 data-nosnippet>1212</a>        .<span class="kw">await
+<a href=#1213 id=1213 data-nosnippet>1213</a>    </span>{
+<a href=#1214 id=1214 data-nosnippet>1214</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(p)) =&gt; p,
+<a href=#1215 id=1215 data-nosnippet>1215</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">return </span>refusal_page(StatusCode::BAD_REQUEST, <span class="string">"handle_consumed"</span>, tenant_id),
+<a href=#1216 id=1216 data-nosnippet>1216</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1217 id=1217 data-nosnippet>1217</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not consume the request"</span>);
+<a href=#1218 id=1218 data-nosnippet>1218</a>            <span class="kw">return </span>refusal_page(StatusCode::INTERNAL_SERVER_ERROR, <span class="string">"store"</span>, tenant_id);
+<a href=#1219 id=1219 data-nosnippet>1219</a>        }
+<a href=#1220 id=1220 data-nosnippet>1220</a>    };
+<a href=#1221 id=1221 data-nosnippet>1221</a>    <span class="kw">let </span>clear = <span class="prelude-val">Some</span>(clear_binding_cookie(tenant_id, handle_hash));
+<a href=#1222 id=1222 data-nosnippet>1222</a>    <span class="kw">let </span>fail = |status: SamlStatus| {
+<a href=#1223 id=1223 data-nosnippet>1223</a>        post_failure(
+<a href=#1224 id=1224 data-nosnippet>1224</a>            state,
+<a href=#1225 id=1225 data-nosnippet>1225</a>            req,
+<a href=#1226 id=1226 data-nosnippet>1226</a>            tenant_id,
+<a href=#1227 id=1227 data-nosnippet>1227</a>            sp,
+<a href=#1228 id=1228 data-nosnippet>1228</a>            <span class="kw-2">&amp;</span>pending.acs_url,
+<a href=#1229 id=1229 data-nosnippet>1229</a>            pending.request_id.as_deref(),
+<a href=#1230 id=1230 data-nosnippet>1230</a>            pending.relay_state.as_deref(),
+<a href=#1231 id=1231 data-nosnippet>1231</a>            status,
+<a href=#1232 id=1232 data-nosnippet>1232</a>            <span class="prelude-val">Some</span>(user.id),
+<a href=#1233 id=1233 data-nosnippet>1233</a>            clear.clone(),
+<a href=#1234 id=1234 data-nosnippet>1234</a>        )
+<a href=#1235 id=1235 data-nosnippet>1235</a>    };
+<a href=#1236 id=1236 data-nosnippet>1236</a>
+<a href=#1237 id=1237 data-nosnippet>1237</a>    <span class="kw">let </span>groups = <span class="kw">match </span>state.group_repo.get_user_groups(tenant_id, user.id).<span class="kw">await </span>{
+<a href=#1238 id=1238 data-nosnippet>1238</a>        <span class="prelude-val">Ok</span>(g) =&gt; g,
+<a href=#1239 id=1239 data-nosnippet>1239</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1240 id=1240 data-nosnippet>1240</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the user's groups"</span>);
+<a href=#1241 id=1241 data-nosnippet>1241</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
+<a href=#1242 id=1242 data-nosnippet>1242</a>        }
+<a href=#1243 id=1243 data-nosnippet>1243</a>    };
+<a href=#1244 id=1244 data-nosnippet>1244</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = axiam_federation::saml_idp::check_allowed_groups(sp, <span class="kw-2">&amp;</span>groups) {
+<a href=#1245 id=1245 data-nosnippet>1245</a>        <span class="kw">return </span>fail(e.status()).<span class="kw">await</span>;
+<a href=#1246 id=1246 data-nosnippet>1246</a>    }
+<a href=#1247 id=1247 data-nosnippet>1247</a>    <span class="kw">let </span>roles = <span class="kw">match </span>state.role_repo.get_user_roles(tenant_id, user.id).<span class="kw">await </span>{
+<a href=#1248 id=1248 data-nosnippet>1248</a>        <span class="prelude-val">Ok</span>(r) =&gt; r,
+<a href=#1249 id=1249 data-nosnippet>1249</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1250 id=1250 data-nosnippet>1250</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not read the user's roles"</span>);
+<a href=#1251 id=1251 data-nosnippet>1251</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
+<a href=#1252 id=1252 data-nosnippet>1252</a>        }
+<a href=#1253 id=1253 data-nosnippet>1253</a>    };
+<a href=#1254 id=1254 data-nosnippet>1254</a>    <span class="kw">let </span>key = <span class="kw">match </span>state
+<a href=#1255 id=1255 data-nosnippet>1255</a>        .saml_idp
+<a href=#1256 id=1256 data-nosnippet>1256</a>        .credential_service
+<a href=#1257 id=1257 data-nosnippet>1257</a>        .get_active_signing_key(org_id, tenant_id)
+<a href=#1258 id=1258 data-nosnippet>1258</a>        .<span class="kw">await
+<a href=#1259 id=1259 data-nosnippet>1259</a>    </span>{
+<a href=#1260 id=1260 data-nosnippet>1260</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(key)) =&gt; key,
+<a href=#1261 id=1261 data-nosnippet>1261</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {
+<a href=#1262 id=1262 data-nosnippet>1262</a>            <span class="macro">tracing::warn!</span>(%tenant_id, <span class="string">"SAML SSO: the tenant has no active signing credential"</span>);
+<a href=#1263 id=1263 data-nosnippet>1263</a>            <span class="kw">return </span>fail(SamlIdpError::NoActiveCredential.status()).<span class="kw">await</span>;
+<a href=#1264 id=1264 data-nosnippet>1264</a>        }
+<a href=#1265 id=1265 data-nosnippet>1265</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1266 id=1266 data-nosnippet>1266</a>            <span class="macro">tracing::error!</span>(error = %e, %tenant_id, <span class="string">"SAML SSO: could not open the signing credential"</span>);
+<a href=#1267 id=1267 data-nosnippet>1267</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
+<a href=#1268 id=1268 data-nosnippet>1268</a>        }
+<a href=#1269 id=1269 data-nosnippet>1269</a>    };
+<a href=#1270 id=1270 data-nosnippet>1270</a>
+<a href=#1271 id=1271 data-nosnippet>1271</a>    <span class="comment">// D-37, T-382: the participant record is written **before** anything is
+<a href=#1272 id=1272 data-nosnippet>1272</a>    // signed. Single logout can only end what it can map back, so no assertion
+<a href=#1273 id=1273 data-nosnippet>1273</a>    // may exist for which this row does not. The `NameID` is asked of the issuer
+<a href=#1274 id=1274 data-nosnippet>1274</a>    // first, because the row holds the one this SP is about to be given.
+<a href=#1275 id=1275 data-nosnippet>1275</a>    </span><span class="kw">let </span>(name_id, name_id_format) = <span class="kw">match </span>state.saml_idp.issuer.name_id_for(tenant_id, sp, <span class="kw-2">&amp;</span>user) {
+<a href=#1276 id=1276 data-nosnippet>1276</a>        <span class="prelude-val">Ok</span>(named) =&gt; named,
+<a href=#1277 id=1277 data-nosnippet>1277</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span>fail(e.status()).<span class="kw">await</span>,
+<a href=#1278 id=1278 data-nosnippet>1278</a>    };
+<a href=#1279 id=1279 data-nosnippet>1279</a>    <span class="kw">let </span>participant = <span class="kw">match </span>state
+<a href=#1280 id=1280 data-nosnippet>1280</a>        .saml_idp
+<a href=#1281 id=1281 data-nosnippet>1281</a>        .participant_repo
+<a href=#1282 id=1282 data-nosnippet>1282</a>        .record(NewSamlSpSession {
+<a href=#1283 id=1283 data-nosnippet>1283</a>            tenant_id,
+<a href=#1284 id=1284 data-nosnippet>1284</a>            session_id: session.id,
+<a href=#1285 id=1285 data-nosnippet>1285</a>            user_id: user.id,
+<a href=#1286 id=1286 data-nosnippet>1286</a>            sp_id: sp.id,
+<a href=#1287 id=1287 data-nosnippet>1287</a>            sp_entity_id: sp.entity_id.clone(),
+<a href=#1288 id=1288 data-nosnippet>1288</a>            name_id,
+<a href=#1289 id=1289 data-nosnippet>1289</a>            name_id_format: name_id_format.urn().to_owned(),
+<a href=#1290 id=1290 data-nosnippet>1290</a>            <span class="comment">// 32 CSPRNG bytes, base64url without padding; kept only when this
+<a href=#1291 id=1291 data-nosnippet>1291</a>            // session has no row for this SP yet.
+<a href=#1292 id=1292 data-nosnippet>1292</a>            </span>session_index: random_token(),
+<a href=#1293 id=1293 data-nosnippet>1293</a>            expires_at: session.expires_at,
+<a href=#1294 id=1294 data-nosnippet>1294</a>        })
+<a href=#1295 id=1295 data-nosnippet>1295</a>        .<span class="kw">await
+<a href=#1296 id=1296 data-nosnippet>1296</a>    </span>{
+<a href=#1297 id=1297 data-nosnippet>1297</a>        <span class="prelude-val">Ok</span>(row) =&gt; row,
+<a href=#1298 id=1298 data-nosnippet>1298</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#1299 id=1299 data-nosnippet>1299</a>            <span class="comment">// No row, no assertion: `Responder`, and the SP is told nothing more.
+<a href=#1300 id=1300 data-nosnippet>1300</a>            </span><span class="macro">tracing::error!</span>(error = %e, %tenant_id, sp_id = %sp.id,
+<a href=#1301 id=1301 data-nosnippet>1301</a>                <span class="string">"SAML SSO: could not record the participant"</span>);
+<a href=#1302 id=1302 data-nosnippet>1302</a>            <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>;
+<a href=#1303 id=1303 data-nosnippet>1303</a>        }
+<a href=#1304 id=1304 data-nosnippet>1304</a>    };
+<a href=#1305 id=1305 data-nosnippet>1305</a>
+<a href=#1306 id=1306 data-nosnippet>1306</a>    <span class="comment">// RSA-4096 signing and the self-check, off the async workers, under the
+<a href=#1307 id=1307 data-nosnippet>1307</a>    // same gate that bounds the other CPU-heavy work, and with the same bound
+<a href=#1308 id=1308 data-nosnippet>1308</a>    // (#671). A busy gate cannot be answered with a signed `Responder` status —
+<a href=#1309 id=1309 data-nosnippet>1309</a>    // that needs the permit it could not get — so the answer is the retry page:
+<a href=#1310 id=1310 data-nosnippet>1310</a>    // `503` with `Retry-After`, no cookie cleared and nothing written. The SP
+<a href=#1311 id=1311 data-nosnippet>1311</a>    // asks again with a new request (this one's pending row is already spent).
+<a href=#1312 id=1312 data-nosnippet>1312</a>    </span><span class="kw">let </span>permit = <span class="kw">match </span>crypto_gate(state).acquire(<span class="string">"saml_idp_sso_sign"</span>).<span class="kw">await </span>{
+<a href=#1313 id=1313 data-nosnippet>1313</a>        <span class="prelude-val">Ok</span>(permit) =&gt; permit,
+<a href=#1314 id=1314 data-nosnippet>1314</a>        <span class="prelude-val">Err</span>(GateRefusal::Busy) =&gt; <span class="kw">return </span>busy_page(tenant_id),
+<a href=#1315 id=1315 data-nosnippet>1315</a>        <span class="prelude-val">Err</span>(GateRefusal::Closed) =&gt; <span class="kw">return </span>fail(SamlStatus::Responder).<span class="kw">await</span>,
+<a href=#1316 id=1316 data-nosnippet>1316</a>    };
+<a href=#1317 id=1317 data-nosnippet>1317</a>    <span class="kw">let </span>issuer = std::sync::Arc::clone(<span class="kw-2">&amp;</span>state.saml_idp.issuer);
+<a href=#1318 id=1318 data-nosnippet>1318</a>    <span class="kw">let </span>sp_owned = sp.clone();
+<a href=#1319 id=1319 data-nosnippet>1319</a>    <span class="kw">let </span>user_owned = user.clone();
+<a href=#1320 id=1320 data-nosnippet>1320</a>    <span class="kw">let </span>acs_url = pending.acs_url.clone();
+<a href=#1321 id=1321 data-nosnippet>1321</a>    <span class="kw">let </span>request_id = pending.request_id.clone();
+<a href=#1322 id=1322 data-nosnippet>1322</a>    <span class="kw">let </span>relay_state = pending.relay_state.clone();
+<a href=#1323 id=1323 data-nosnippet>1323</a>    <span class="kw">let </span>session_index = participant.session_index.clone();
+<a href=#1324 id=1324 data-nosnippet>1324</a>    <span class="kw">let </span>outcome = tokio::task::spawn_blocking(<span class="kw">move </span>|| {
+<a href=#1325 id=1325 data-nosnippet>1325</a>        <span class="kw">let </span>_permit = permit;
+<a href=#1326 id=1326 data-nosnippet>1326</a>        issuer.issue(
+<a href=#1327 id=1327 data-nosnippet>1327</a>            <span class="kw-2">&amp;</span>SsoIssuance {
+<a href=#1328 id=1328 data-nosnippet>1328</a>                tenant_id,
+<a href=#1329 id=1329 data-nosnippet>1329</a>                sp: <span class="kw-2">&amp;</span>sp_owned,
+<a href=#1330 id=1330 data-nosnippet>1330</a>                acs_url: <span class="kw-2">&amp;</span>acs_url,
+<a href=#1331 id=1331 data-nosnippet>1331</a>                in_response_to: request_id.as_deref(),
+<a href=#1332 id=1332 data-nosnippet>1332</a>                relay_state: relay_state.as_deref(),
+<a href=#1333 id=1333 data-nosnippet>1333</a>                session: <span class="kw-2">&amp;</span>session,
+<a href=#1334 id=1334 data-nosnippet>1334</a>                session_index: <span class="kw-2">&amp;</span>session_index,
+<a href=#1335 id=1335 data-nosnippet>1335</a>                user: <span class="kw-2">&amp;</span>user_owned,
+<a href=#1336 id=1336 data-nosnippet>1336</a>                groups: <span class="kw-2">&amp;</span>groups,
+<a href=#1337 id=1337 data-nosnippet>1337</a>                roles: <span class="kw-2">&amp;</span>roles,
+<a href=#1338 id=1338 data-nosnippet>1338</a>            },
+<a href=#1339 id=1339 data-nosnippet>1339</a>            <span class="kw-2">&amp;</span>key,
+<a href=#1340 id=1340 data-nosnippet>1340</a>            Utc::now(),
+<a href=#1341 id=1341 data-nosnippet>1341</a>        )
+<a href=#1342 id=1342 data-nosnippet>1342</a>    })
+<a href=#1343 id=1343 data-nosnippet>1343</a>    .<span class="kw">await</span>;
+<a href=#1344 id=1344 data-nosnippet>1344</a>    <span class="kw">match </span>outcome {
+<a href=#1345 id=1345 data-nosnippet>1345</a>        <span class="comment">// What was recorded must be what was asserted: the row is how a logout
+<a href=#1346 id=1346 data-nosnippet>1346</a>        // finds this assertion again. A mismatch (the address changed between the
+<a href=#1347 id=1347 data-nosnippet>1347</a>        // two reads) is posted nowhere.
+<a href=#1348 id=1348 data-nosnippet>1348</a>        </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(issued))
+<a href=#1349 id=1349 data-nosnippet>1349</a>            <span class="kw">if </span>issued.name_id != participant.name_id
+<a href=#1350 id=1350 data-nosnippet>1350</a>                || issued.session_index != participant.session_index =&gt;
+<a href=#1351 id=1351 data-nosnippet>1351</a>        {
+<a href=#1352 id=1352 data-nosnippet>1352</a>            <span class="macro">tracing::error!</span>(%tenant_id, sp_id = %sp.id,
+<a href=#1353 id=1353 data-nosnippet>1353</a>                <span class="string">"SAML SSO: the issued assertion does not match the participant record"</span>);
+<a href=#1354 id=1354 data-nosnippet>1354</a>            fail(SamlStatus::Responder).<span class="kw">await
+<a href=#1355 id=1355 data-nosnippet>1355</a>        </span>}
+<a href=#1356 id=1356 data-nosnippet>1356</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(issued)) =&gt; {
+<a href=#1357 id=1357 data-nosnippet>1357</a>            <span class="macro">tracing::info!</span>(%tenant_id, sp_id = %sp.id, user_id = %user.id,
+<a href=#1358 id=1358 data-nosnippet>1358</a>                <span class="string">"SAML SSO: assertion issued"</span>);
+<a href=#1359 id=1359 data-nosnippet>1359</a>            audit(
+<a href=#1360 id=1360 data-nosnippet>1360</a>                state,
+<a href=#1361 id=1361 data-nosnippet>1361</a>                req,
+<a href=#1362 id=1362 data-nosnippet>1362</a>                tenant_id,
+<a href=#1363 id=1363 data-nosnippet>1363</a>                <span class="prelude-val">Some</span>(user.id),
+<a href=#1364 id=1364 data-nosnippet>1364</a>                sp.id,
+<a href=#1365 id=1365 data-nosnippet>1365</a>                <span class="prelude-val">Ok</span>(<span class="kw-2">&amp;</span>issued.response_id),
+<a href=#1366 id=1366 data-nosnippet>1366</a>            )
+<a href=#1367 id=1367 data-nosnippet>1367</a>            .<span class="kw">await</span>;
+<a href=#1368 id=1368 data-nosnippet>1368</a>            post_page(<span class="kw-2">&amp;</span>issued.binding, clear, tenant_id)
+<a href=#1369 id=1369 data-nosnippet>1369</a>        }
+<a href=#1370 id=1370 data-nosnippet>1370</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e @ (SamlIdpError::AcsNotRegistered | SamlIdpError::AcsBindingUnsupported))) =&gt; {
+<a href=#1371 id=1371 data-nosnippet>1371</a>            refusal_page(StatusCode::BAD_REQUEST, error_reason(e), tenant_id)
+<a href=#1372 id=1372 data-nosnippet>1372</a>        }
+<a href=#1373 id=1373 data-nosnippet>1373</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; {
+<a href=#1374 id=1374 data-nosnippet>1374</a>            <span class="macro">tracing::info!</span>(%tenant_id, sp_id = %sp.id, error = %e, <span class="string">"SAML SSO: not issued"</span>);
+<a href=#1375 id=1375 data-nosnippet>1375</a>            fail(e.status()).<span class="kw">await
+<a href=#1376 id=1376 data-nosnippet>1376</a>        </span>}
+<a href=#1377 id=1377 data-nosnippet>1377</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; fail(SamlStatus::Responder).<span class="kw">await</span>,
+<a href=#1378 id=1378 data-nosnippet>1378</a>    }
+<a href=#1379 id=1379 data-nosnippet>1379</a>}
+<a href=#1380 id=1380 data-nosnippet>1380</a>
+<a href=#1381 id=1381 data-nosnippet>1381</a><span class="kw">fn </span>error_reason(e: SamlIdpError) -&gt; Reason {
+<a href=#1382 id=1382 data-nosnippet>1382</a>    <span class="kw">match </span>e {
+<a href=#1383 id=1383 data-nosnippet>1383</a>        SamlIdpError::AcsNotRegistered =&gt; <span class="string">"acs_not_registered"</span>,
+<a href=#1384 id=1384 data-nosnippet>1384</a>        SamlIdpError::AcsBindingUnsupported =&gt; <span class="string">"acs_binding"</span>,
+<a href=#1385 id=1385 data-nosnippet>1385</a>        <span class="kw">_ </span>=&gt; <span class="string">"issuance"</span>,
+<a href=#1386 id=1386 data-nosnippet>1386</a>    }
+<a href=#1387 id=1387 data-nosnippet>1387</a>}
+<a href=#1388 id=1388 data-nosnippet>1388</a>
+<a href=#1389 id=1389 data-nosnippet>1389</a><span class="attr">#[cfg(test)]
+<a href=#1390 id=1390 data-nosnippet>1390</a></span><span class="kw">mod </span>tests {
+<a href=#1391 id=1391 data-nosnippet>1391</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#1392 id=1392 data-nosnippet>1392</a>
+<a href=#1393 id=1393 data-nosnippet>1393</a>    <span class="attr">#[test]
+<a href=#1394 id=1394 data-nosnippet>1394</a>    </span><span class="kw">fn </span>html_escape_escapes_every_markup_character() {
+<a href=#1395 id=1395 data-nosnippet>1395</a>        <span class="macro">assert_eq!</span>(
+<a href=#1396 id=1396 data-nosnippet>1396</a>            html_escape(<span class="string">r#"&lt;a href="x"&gt;'&amp;'&lt;/a&gt;"#</span>),
+<a href=#1397 id=1397 data-nosnippet>1397</a>            <span class="string">"&amp;lt;a href=&amp;quot;x&amp;quot;&amp;gt;&amp;#39;&amp;amp;&amp;#39;&amp;lt;/a&amp;gt;"
+<a href=#1398 id=1398 data-nosnippet>1398</a>        </span>);
+<a href=#1399 id=1399 data-nosnippet>1399</a>    }
+<a href=#1400 id=1400 data-nosnippet>1400</a>
+<a href=#1401 id=1401 data-nosnippet>1401</a>    <span class="attr">#[test]
+<a href=#1402 id=1402 data-nosnippet>1402</a>    </span><span class="kw">fn </span>the_csp_origin_is_the_acs_origin_alone() {
+<a href=#1403 id=1403 data-nosnippet>1403</a>        <span class="macro">assert_eq!</span>(
+<a href=#1404 id=1404 data-nosnippet>1404</a>            acs_origin(<span class="string">"https://sp.example.test/saml/acs?x=1"</span>).as_deref(),
+<a href=#1405 id=1405 data-nosnippet>1405</a>            <span class="prelude-val">Some</span>(<span class="string">"https://sp.example.test"</span>)
+<a href=#1406 id=1406 data-nosnippet>1406</a>        );
+<a href=#1407 id=1407 data-nosnippet>1407</a>        <span class="macro">assert_eq!</span>(
+<a href=#1408 id=1408 data-nosnippet>1408</a>            acs_origin(<span class="string">"https://sp.example.test:8443/acs"</span>).as_deref(),
+<a href=#1409 id=1409 data-nosnippet>1409</a>            <span class="prelude-val">Some</span>(<span class="string">"https://sp.example.test:8443"</span>)
+<a href=#1410 id=1410 data-nosnippet>1410</a>        );
+<a href=#1411 id=1411 data-nosnippet>1411</a>        <span class="macro">assert_eq!</span>(acs_origin(<span class="string">"not a url"</span>), <span class="prelude-val">None</span>);
+<a href=#1412 id=1412 data-nosnippet>1412</a>    }
+<a href=#1413 id=1413 data-nosnippet>1413</a>
+<a href=#1414 id=1414 data-nosnippet>1414</a>    <span class="doccomment">/// F4 (W3 review, D-27): the auto-post page's own policy is narrower than
+<a href=#1415 id=1415 data-nosnippet>1415</a>    /// the global one everywhere but `script-src` (a per-response nonce) and
+<a href=#1416 id=1416 data-nosnippet>1416</a>    /// `form-action` (the ACS origin alone) — nothing may be loaded, framed or
+<a href=#1417 id=1417 data-nosnippet>1417</a>    /// re-based, and no directive is a wildcard or an `unsafe-` keyword.
+<a href=#1418 id=1418 data-nosnippet>1418</a>    </span><span class="attr">#[test]
+<a href=#1419 id=1419 data-nosnippet>1419</a>    </span><span class="kw">fn </span>the_auto_post_policy_is_narrower_than_the_global_one() {
+<a href=#1420 id=1420 data-nosnippet>1420</a>        <span class="kw">let </span>binding = PostBinding {
+<a href=#1421 id=1421 data-nosnippet>1421</a>            acs_url: <span class="string">"https://sp.example.test/saml/acs?x=1"</span>.into(),
+<a href=#1422 id=1422 data-nosnippet>1422</a>            saml_response: <span class="string">"PHNhbWxwOlJlc3BvbnNlLz4="</span>.into(),
+<a href=#1423 id=1423 data-nosnippet>1423</a>            relay_state: <span class="prelude-val">Some</span>(<span class="string">"rs-1"</span>.into()),
+<a href=#1424 id=1424 data-nosnippet>1424</a>        };
+<a href=#1425 id=1425 data-nosnippet>1425</a>        <span class="kw">let </span>page = post_page(<span class="kw-2">&amp;</span>binding, <span class="prelude-val">None</span>, Uuid::new_v4());
+<a href=#1426 id=1426 data-nosnippet>1426</a>        <span class="kw">let </span>csp = page
+<a href=#1427 id=1427 data-nosnippet>1427</a>            .headers()
+<a href=#1428 id=1428 data-nosnippet>1428</a>            .get(<span class="string">"content-security-policy"</span>)
+<a href=#1429 id=1429 data-nosnippet>1429</a>            .and_then(|v| v.to_str().ok())
+<a href=#1430 id=1430 data-nosnippet>1430</a>            .expect(<span class="string">"the page sets its own policy"</span>)
+<a href=#1431 id=1431 data-nosnippet>1431</a>            .to_owned();
+<a href=#1432 id=1432 data-nosnippet>1432</a>        <span class="kw">let </span>directives: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = csp.split(<span class="string">';'</span>).map(str::trim).collect();
+<a href=#1433 id=1433 data-nosnippet>1433</a>        <span class="kw">for </span>required <span class="kw">in </span>[
+<a href=#1434 id=1434 data-nosnippet>1434</a>            <span class="string">"default-src 'none'"</span>,
+<a href=#1435 id=1435 data-nosnippet>1435</a>            <span class="string">"frame-ancestors 'none'"</span>,
+<a href=#1436 id=1436 data-nosnippet>1436</a>            <span class="string">"base-uri 'none'"</span>,
+<a href=#1437 id=1437 data-nosnippet>1437</a>            <span class="string">"form-action https://sp.example.test"</span>,
+<a href=#1438 id=1438 data-nosnippet>1438</a>        ] {
+<a href=#1439 id=1439 data-nosnippet>1439</a>            <span class="macro">assert!</span>(directives.contains(<span class="kw-2">&amp;</span>required), <span class="string">"missing {required}"</span>);
+<a href=#1440 id=1440 data-nosnippet>1440</a>        }
+<a href=#1441 id=1441 data-nosnippet>1441</a>        <span class="macro">assert!</span>(
+<a href=#1442 id=1442 data-nosnippet>1442</a>            directives
+<a href=#1443 id=1443 data-nosnippet>1443</a>                .iter()
+<a href=#1444 id=1444 data-nosnippet>1444</a>                .any(|d| d.starts_with(<span class="string">"script-src 'nonce-"</span>) &amp;&amp; d.split(<span class="string">' '</span>).count() == <span class="number">2</span>),
+<a href=#1445 id=1445 data-nosnippet>1445</a>            <span class="string">"script-src is one nonce and nothing else"
+<a href=#1446 id=1446 data-nosnippet>1446</a>        </span>);
+<a href=#1447 id=1447 data-nosnippet>1447</a>        <span class="macro">assert_eq!</span>(directives.len(), <span class="number">5</span>, <span class="string">"no other directive widens the page"</span>);
+<a href=#1448 id=1448 data-nosnippet>1448</a>        <span class="macro">assert!</span>(!csp.contains(<span class="string">'*'</span>) &amp;&amp; !csp.contains(<span class="string">"unsafe-"</span>));
 <a href=#1449 id=1449 data-nosnippet>1449</a>    }
-<a href=#1450 id=1450 data-nosnippet>1450</a>}
+<a href=#1450 id=1450 data-nosnippet>1450</a>
+<a href=#1451 id=1451 data-nosnippet>1451</a>    <span class="attr">#[test]
+<a href=#1452 id=1452 data-nosnippet>1452</a>    </span><span class="kw">fn </span>a_handle_is_exactly_what_is_minted() {
+<a href=#1453 id=1453 data-nosnippet>1453</a>        <span class="kw">let </span>minted = random_token();
+<a href=#1454 id=1454 data-nosnippet>1454</a>        <span class="macro">assert!</span>(is_handle(<span class="kw-2">&amp;</span>minted));
+<a href=#1455 id=1455 data-nosnippet>1455</a>        <span class="macro">assert!</span>(!is_handle(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{minted}a"</span>)));
+<a href=#1456 id=1456 data-nosnippet>1456</a>        <span class="macro">assert!</span>(!is_handle(<span class="kw-2">&amp;</span>minted.replacen(|<span class="kw">_</span>: char| <span class="bool-val">true</span>, <span class="string">"+"</span>, <span class="number">1</span>)));
+<a href=#1457 id=1457 data-nosnippet>1457</a>        <span class="macro">assert!</span>(!is_handle(<span class="string">""</span>));
+<a href=#1458 id=1458 data-nosnippet>1458</a>        <span class="macro">assert_ne!</span>(random_token(), random_token());
+<a href=#1459 id=1459 data-nosnippet>1459</a>    }
+<a href=#1460 id=1460 data-nosnippet>1460</a>}
 </code></pre></div></section></main></body></html>

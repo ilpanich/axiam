@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["boot","cleanup","cli","device_grant_scan","fatal_stop","healthcheck","job_health","legacy_env","mds_job","messaging","mtls_anchors","profile","scim_notification","tls"]};
+window.SIDEBAR_ITEMS = {"mod":["audit_hold","boot","cleanup","cli","device_grant_scan","fatal_stop","healthcheck","job_health","legacy_env","limiter_sweep","mds_job","messaging","mtls_anchors","profile","scim_notification","tls"]};

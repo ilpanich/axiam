@@ -129,7 +129,7 @@
 <a href=#129 id=129 data-nosnippet>129</a>    (<span class="string">"reactors:create"</span>, <span class="string">"Register a reactor"</span>),
 <a href=#130 id=130 data-nosnippet>130</a>    (<span class="string">"reactors:update"</span>, <span class="string">"Update a reactor registration"</span>),
 <a href=#131 id=131 data-nosnippet>131</a>    (<span class="string">"reactors:delete"</span>, <span class="string">"Delete a reactor registration"</span>),
-<a href=#132 id=132 data-nosnippet>132</a>    <span class="comment">// Network segments and RADIUS reply profiles (RADIUS D4,
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="comment">// Network segments and RADIUS reply profiles (RADIUS Live profile,
 <a href=#133 id=133 data-nosnippet>133</a>    // `claude_dev/radius-reply-profile-design.md` §4.2).
 <a href=#134 id=134 data-nosnippet>134</a>    //
 <a href=#135 id=135 data-nosnippet>135</a>    // The whole `network:` namespace is reserved: `permissions:create` must
@@ -446,7 +446,7 @@
 <a href=#446 id=446 data-nosnippet>446</a>    <span class="string">"webauthn_policy"</span>,
 <a href=#447 id=447 data-nosnippet>447</a>    <span class="string">"scim"</span>,
 <a href=#448 id=448 data-nosnippet>448</a>    <span class="string">"scim_tokens"</span>,
-<a href=#449 id=449 data-nosnippet>449</a>    <span class="comment">// RADIUS D4 (W6.1): a segment's profile decides what VLAN and ACL a device
+<a href=#449 id=449 data-nosnippet>449</a>    <span class="comment">// RADIUS Live profile (W6.1): a segment's profile decides what VLAN and ACL a device
 <a href=#450 id=450 data-nosnippet>450</a>    // gets, and writing one is a grant (design note §5.2). A network
 <a href=#451 id=451 data-nosnippet>451</a>    // administrator is a human's role. The one machine caller, FreeRADIUS's
 <a href=#452 id=452 data-nosnippet>452</a>    // `network:decide` on the decision route, is placed by W6.4 as a named
@@ -459,7 +459,7 @@
 <a href=#459 id=459 data-nosnippet>459</a>/// name, each with the condition it adds — an exception to
 <a href=#460 id=460 data-nosnippet>460</a>/// [`HUMAN_ONLY_FAMILIES`], never a widening of a family.
 <a href=#461 id=461 data-nosnippet>461</a>///
-<a href=#462 id=462 data-nosnippet>462</a>/// Today one: `POST /api/v1/network/decide` (RADIUS D4, W6.4; design note §6.3,
+<a href=#462 id=462 data-nosnippet>462</a>/// Today one: `POST /api/v1/network/decide` (RADIUS Live profile, W6.4; design note §6.3,
 <a href=#463 id=463 data-nosnippet>463</a>/// T-468). Its caller is a FreeRADIUS server's service account, so a person's
 <a href=#464 id=464 data-nosnippet>464</a>/// token is refused (`401`); and because it is an authenticated oracle on
 <a href=#465 id=465 data-nosnippet>465</a>/// "is this certificate good here", a service account is admitted only with a
@@ -1381,7 +1381,7 @@
 <a href=#1381 id=1381 data-nosnippet>1381</a>        <span class="string">"/api/v1/scim-targets/{id}/reconcile"</span>,
 <a href=#1382 id=1382 data-nosnippet>1382</a>        <span class="string">"scim_targets:write"</span>,
 <a href=#1383 id=1383 data-nosnippet>1383</a>    ),
-<a href=#1384 id=1384 data-nosnippet>1384</a>    <span class="comment">// Network segments and RADIUS reply profiles (RADIUS D4, W6.3). The route
+<a href=#1384 id=1384 data-nosnippet>1384</a>    <span class="comment">// Network segments and RADIUS reply profiles (RADIUS Live profile, W6.3). The route
 <a href=#1385 id=1385 data-nosnippet>1385</a>    // permission is the one the write gate asks for first (design note §5.2,
 <a href=#1386 id=1386 data-nosnippet>1386</a>    // §4.2); a profile write also needs `network:grant` on the segment (H2).
 <a href=#1387 id=1387 data-nosnippet>1387</a>    </span>(<span class="string">"GET"</span>, <span class="string">"/api/v1/network/segments"</span>, <span class="string">"network:read"</span>),
@@ -1420,7 +1420,7 @@
 <a href=#1420 id=1420 data-nosnippet>1420</a>    // itself (`NetworkWrite::PolicyWrite`).
 <a href=#1421 id=1421 data-nosnippet>1421</a>    </span>(<span class="string">"GET"</span>, <span class="string">"/api/v1/network/policy"</span>, <span class="string">"network:read"</span>),
 <a href=#1422 id=1422 data-nosnippet>1422</a>    (<span class="string">"PUT"</span>, <span class="string">"/api/v1/network/policy"</span>, <span class="string">"network:segments_write"</span>),
-<a href=#1423 id=1423 data-nosnippet>1423</a>    <span class="comment">// The RADIUS placement decision (RADIUS D4, W6.4): checked on every site
+<a href=#1423 id=1423 data-nosnippet>1423</a>    <span class="comment">// The RADIUS placement decision (RADIUS Live profile, W6.4): checked on every site
 <a href=#1424 id=1424 data-nosnippet>1424</a>    // node the decision reads, inside the handler. Its caller is a machine, by
 <a href=#1425 id=1425 data-nosnippet>1425</a>    // the named exception `CERTIFICATE_BOUND_MACHINE_ROUTES`.
 <a href=#1426 id=1426 data-nosnippet>1426</a>    </span>(<span class="string">"POST"</span>, <span class="string">"/api/v1/network/decide"</span>, <span class="string">"network:decide"</span>),

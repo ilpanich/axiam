@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PROOF_MAX_AGE_SECS","DPOP_TYP","TOKEN_TYPE_BEARER","TOKEN_TYPE_DPOP"],"enum":["DpopError"],"fn":["is_dpop_scheme","new_nonce","token_type_for","verify_dpop_proof"],"struct":["DpopExpectation","VerifiedDpopProof"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PROOF_MAX_AGE_SECS","DPOP_TYP","TOKEN_TYPE_BEARER","TOKEN_TYPE_DPOP"],"enum":["DpopError"],"fn":["enforce_refresh_token_binding","is_dpop_scheme","new_nonce","refresh_token_binding","token_type_for","verify_dpop_proof"],"struct":["DpopExpectation","VerifiedDpopProof"]};

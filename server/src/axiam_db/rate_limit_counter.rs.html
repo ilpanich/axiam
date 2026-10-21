@@ -931,7 +931,7 @@
 <a href=#931 id=931 data-nosnippet>931</a>    }
 <a href=#932 id=932 data-nosnippet>932</a>
 <a href=#933 id=933 data-nosnippet>933</a>    <span class="doccomment">/// [`Self::check_at`] for a bucket a **person** spends at human speed —
-<a href=#934 id=934 data-nosnippet>934</a>    /// the REST browser-endpoint preset — whatever its limit: a newly seen key
+<a href=#934 id=934 data-nosnippet>934</a>    /// the REST browser-endpoint preset and the administrative presets — whatever its limit: a newly seen key
 <a href=#935 id=935 data-nosnippet>935</a>    /// gets its whole budget, with no cold-entry seed.
 <a href=#936 id=936 data-nosnippet>936</a>    ///
 <a href=#937 id=937 data-nosnippet>937</a>    /// The seed exists to stop a flood arriving late in a window from being
@@ -2506,51 +2506,74 @@
 <a href=#2506 id=2506 data-nosnippet>2506</a>        </span>);
 <a href=#2507 id=2507 data-nosnippet>2507</a>    }
 <a href=#2508 id=2508 data-nosnippet>2508</a>
-<a href=#2509 id=2509 data-nosnippet>2509</a>    <span class="doccomment">/// Skipping the seed is all `check_at_human` changes: the sliding-window
-<a href=#2510 id=2510 data-nosnippet>2510</a>    /// carry still applies, so a person who spent a whole minute's budget
-<a href=#2511 id=2511 data-nosnippet>2511</a>    /// cannot spend another at once in the next.
-<a href=#2512 id=2512 data-nosnippet>2512</a>    </span><span class="attr">#[test]
-<a href=#2513 id=2513 data-nosnippet>2513</a>    </span><span class="kw">fn </span>a_browser_preset_key_still_carries_the_sliding_window() {
-<a href=#2514 id=2514 data-nosnippet>2514</a>        <span class="kw">let </span>counter = counter_with_mode(WindowMode::Sliding);
-<a href=#2515 id=2515 data-nosnippet>2515</a>        <span class="kw">let </span>start = aligned_start();
-<a href=#2516 id=2516 data-nosnippet>2516</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">30 </span>{
-<a href=#2517 id=2517 data-nosnippet>2517</a>            <span class="macro">assert!</span>(counter.check_at_human(<span class="string">"oauth2_authorize:203.0.113.8"</span>, start, <span class="number">30</span>));
-<a href=#2518 id=2518 data-nosnippet>2518</a>        }
-<a href=#2519 id=2519 data-nosnippet>2519</a>        <span class="kw">let </span>next = start + chrono::Duration::seconds(<span class="number">61</span>);
-<a href=#2520 id=2520 data-nosnippet>2520</a>        <span class="kw">let </span>admitted = (<span class="number">0</span>..<span class="number">100</span>)
-<a href=#2521 id=2521 data-nosnippet>2521</a>            .filter(|<span class="kw">_</span>| counter.check_at_human(<span class="string">"oauth2_authorize:203.0.113.8"</span>, next, <span class="number">30</span>))
-<a href=#2522 id=2522 data-nosnippet>2522</a>            .count();
-<a href=#2523 id=2523 data-nosnippet>2523</a>        <span class="macro">assert!</span>(
-<a href=#2524 id=2524 data-nosnippet>2524</a>            admitted &lt;= <span class="number">1</span>,
-<a href=#2525 id=2525 data-nosnippet>2525</a>            <span class="string">"one second into the next minute nearly all of the previous one still \
-<a href=#2526 id=2526 data-nosnippet>2526</a>             counts (admitted {admitted})"
-<a href=#2527 id=2527 data-nosnippet>2527</a>        </span>);
-<a href=#2528 id=2528 data-nosnippet>2528</a>    }
-<a href=#2529 id=2529 data-nosnippet>2529</a>
-<a href=#2530 id=2530 data-nosnippet>2530</a>    <span class="doccomment">/// The threshold must sit between the human and machine posture families,
-<a href=#2531 id=2531 data-nosnippet>2531</a>    /// so the exemption lands on the distinction that already exists.
-<a href=#2532 id=2532 data-nosnippet>2532</a>    </span><span class="attr">#[test]
-<a href=#2533 id=2533 data-nosnippet>2533</a>    </span><span class="kw">fn </span>the_threshold_splits_human_from_machine_endpoints() {
-<a href=#2534 id=2534 data-nosnippet>2534</a>        <span class="kw">for </span>human <span class="kw">in </span>[<span class="number">3u32</span>, <span class="number">5</span>, <span class="number">10</span>] {
-<a href=#2535 id=2535 data-nosnippet>2535</a>            <span class="macro">assert!</span>(
-<a href=#2536 id=2536 data-nosnippet>2536</a>                human &lt; COLD_ENTRY_MIN_LIMIT,
-<a href=#2537 id=2537 data-nosnippet>2537</a>                <span class="string">"{human}/min is a human endpoint"
-<a href=#2538 id=2538 data-nosnippet>2538</a>            </span>);
-<a href=#2539 id=2539 data-nosnippet>2539</a>        }
-<a href=#2540 id=2540 data-nosnippet>2540</a>        <span class="kw">for </span>machine <span class="kw">in </span>[<span class="number">60u32</span>, <span class="number">120</span>, <span class="number">600</span>, <span class="number">1_800</span>, <span class="number">6_000</span>] {
-<a href=#2541 id=2541 data-nosnippet>2541</a>            <span class="macro">assert!</span>(
-<a href=#2542 id=2542 data-nosnippet>2542</a>                machine &gt;= COLD_ENTRY_MIN_LIMIT,
-<a href=#2543 id=2543 data-nosnippet>2543</a>                <span class="string">"{machine}/min is a machine endpoint and must keep the smoothing"
-<a href=#2544 id=2544 data-nosnippet>2544</a>            </span>);
-<a href=#2545 id=2545 data-nosnippet>2545</a>        }
-<a href=#2546 id=2546 data-nosnippet>2546</a>    }
-<a href=#2547 id=2547 data-nosnippet>2547</a>
-<a href=#2548 id=2548 data-nosnippet>2548</a>    <span class="doccomment">/// The env parser: only the exact opt-out string loosens enforcement.
-<a href=#2549 id=2549 data-nosnippet>2549</a>    </span><span class="attr">#[test]
-<a href=#2550 id=2550 data-nosnippet>2550</a>    </span><span class="kw">fn </span>window_mode_names_round_trip() {
-<a href=#2551 id=2551 data-nosnippet>2551</a>        <span class="macro">assert_eq!</span>(WindowMode::Sliding.as_str(), <span class="string">"sliding"</span>);
-<a href=#2552 id=2552 data-nosnippet>2552</a>        <span class="macro">assert_eq!</span>(WindowMode::Fixed.as_str(), <span class="string">"fixed"</span>);
-<a href=#2553 id=2553 data-nosnippet>2553</a>        <span class="macro">assert_eq!</span>(WindowMode::default(), WindowMode::Sliding);
-<a href=#2554 id=2554 data-nosnippet>2554</a>    }
-<a href=#2555 id=2555 data-nosnippet>2555</a>}
+<a href=#2509 id=2509 data-nosnippet>2509</a>    <span class="doccomment">/// The administrative presets (30 a minute) skip the seed as the browser
+<a href=#2510 id=2510 data-nosnippet>2510</a>    /// preset does (#718): an administrator first seen 3 s before the minute's
+<a href=#2511 id=2511 data-nosnippet>2511</a>    /// end still has the whole allowance. Before the change those buckets went
+<a href=#2512 id=2512 data-nosnippet>2512</a>    /// through `check_at` and kept only a handful of writes.
+<a href=#2513 id=2513 data-nosnippet>2513</a>    </span><span class="attr">#[test]
+<a href=#2514 id=2514 data-nosnippet>2514</a>    </span><span class="kw">fn </span>an_admin_family_first_seen_three_seconds_before_the_minute_end_keeps_its_allowance() {
+<a href=#2515 id=2515 data-nosnippet>2515</a>        <span class="kw">let </span>counter = counter_with_mode(WindowMode::Sliding);
+<a href=#2516 id=2516 data-nosnippet>2516</a>        <span class="kw">let </span>late = aligned_start() + chrono::Duration::seconds(<span class="number">57</span>);
+<a href=#2517 id=2517 data-nosnippet>2517</a>
+<a href=#2518 id=2518 data-nosnippet>2518</a>        <span class="kw">let </span>seeded = (<span class="number">0</span>..<span class="number">100</span>)
+<a href=#2519 id=2519 data-nosnippet>2519</a>            .filter(|<span class="kw">_</span>| counter.check_at(<span class="string">"network_admin:203.0.113.9"</span>, late, <span class="number">30</span>))
+<a href=#2520 id=2520 data-nosnippet>2520</a>            .count();
+<a href=#2521 id=2521 data-nosnippet>2521</a>        <span class="macro">assert!</span>(
+<a href=#2522 id=2522 data-nosnippet>2522</a>            seeded &lt; <span class="number">30</span>,
+<a href=#2523 id=2523 data-nosnippet>2523</a>            <span class="string">"the machine path still seeds a late key (admitted {seeded})"
+<a href=#2524 id=2524 data-nosnippet>2524</a>        </span>);
+<a href=#2525 id=2525 data-nosnippet>2525</a>
+<a href=#2526 id=2526 data-nosnippet>2526</a>        <span class="kw">let </span>admitted = (<span class="number">0</span>..<span class="number">100</span>)
+<a href=#2527 id=2527 data-nosnippet>2527</a>            .filter(|<span class="kw">_</span>| counter.check_at_human(<span class="string">"network_admin:203.0.113.10"</span>, late, <span class="number">30</span>))
+<a href=#2528 id=2528 data-nosnippet>2528</a>            .count();
+<a href=#2529 id=2529 data-nosnippet>2529</a>        <span class="macro">assert_eq!</span>(admitted, <span class="number">30</span>, <span class="string">"an administrator keeps all thirty writes"</span>);
+<a href=#2530 id=2530 data-nosnippet>2530</a>    }
+<a href=#2531 id=2531 data-nosnippet>2531</a>
+<a href=#2532 id=2532 data-nosnippet>2532</a>    <span class="doccomment">/// Skipping the seed is all `check_at_human` changes: the sliding-window
+<a href=#2533 id=2533 data-nosnippet>2533</a>    /// carry still applies, so a person who spent a whole minute's budget
+<a href=#2534 id=2534 data-nosnippet>2534</a>    /// cannot spend another at once in the next.
+<a href=#2535 id=2535 data-nosnippet>2535</a>    </span><span class="attr">#[test]
+<a href=#2536 id=2536 data-nosnippet>2536</a>    </span><span class="kw">fn </span>a_browser_preset_key_still_carries_the_sliding_window() {
+<a href=#2537 id=2537 data-nosnippet>2537</a>        <span class="kw">let </span>counter = counter_with_mode(WindowMode::Sliding);
+<a href=#2538 id=2538 data-nosnippet>2538</a>        <span class="kw">let </span>start = aligned_start();
+<a href=#2539 id=2539 data-nosnippet>2539</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">30 </span>{
+<a href=#2540 id=2540 data-nosnippet>2540</a>            <span class="macro">assert!</span>(counter.check_at_human(<span class="string">"oauth2_authorize:203.0.113.8"</span>, start, <span class="number">30</span>));
+<a href=#2541 id=2541 data-nosnippet>2541</a>        }
+<a href=#2542 id=2542 data-nosnippet>2542</a>        <span class="kw">let </span>next = start + chrono::Duration::seconds(<span class="number">61</span>);
+<a href=#2543 id=2543 data-nosnippet>2543</a>        <span class="kw">let </span>admitted = (<span class="number">0</span>..<span class="number">100</span>)
+<a href=#2544 id=2544 data-nosnippet>2544</a>            .filter(|<span class="kw">_</span>| counter.check_at_human(<span class="string">"oauth2_authorize:203.0.113.8"</span>, next, <span class="number">30</span>))
+<a href=#2545 id=2545 data-nosnippet>2545</a>            .count();
+<a href=#2546 id=2546 data-nosnippet>2546</a>        <span class="macro">assert!</span>(
+<a href=#2547 id=2547 data-nosnippet>2547</a>            admitted &lt;= <span class="number">1</span>,
+<a href=#2548 id=2548 data-nosnippet>2548</a>            <span class="string">"one second into the next minute nearly all of the previous one still \
+<a href=#2549 id=2549 data-nosnippet>2549</a>             counts (admitted {admitted})"
+<a href=#2550 id=2550 data-nosnippet>2550</a>        </span>);
+<a href=#2551 id=2551 data-nosnippet>2551</a>    }
+<a href=#2552 id=2552 data-nosnippet>2552</a>
+<a href=#2553 id=2553 data-nosnippet>2553</a>    <span class="doccomment">/// The threshold must sit between the human and machine posture families,
+<a href=#2554 id=2554 data-nosnippet>2554</a>    /// so the exemption lands on the distinction that already exists.
+<a href=#2555 id=2555 data-nosnippet>2555</a>    </span><span class="attr">#[test]
+<a href=#2556 id=2556 data-nosnippet>2556</a>    </span><span class="kw">fn </span>the_threshold_splits_human_from_machine_endpoints() {
+<a href=#2557 id=2557 data-nosnippet>2557</a>        <span class="kw">for </span>human <span class="kw">in </span>[<span class="number">3u32</span>, <span class="number">5</span>, <span class="number">10</span>] {
+<a href=#2558 id=2558 data-nosnippet>2558</a>            <span class="macro">assert!</span>(
+<a href=#2559 id=2559 data-nosnippet>2559</a>                human &lt; COLD_ENTRY_MIN_LIMIT,
+<a href=#2560 id=2560 data-nosnippet>2560</a>                <span class="string">"{human}/min is a human endpoint"
+<a href=#2561 id=2561 data-nosnippet>2561</a>            </span>);
+<a href=#2562 id=2562 data-nosnippet>2562</a>        }
+<a href=#2563 id=2563 data-nosnippet>2563</a>        <span class="kw">for </span>machine <span class="kw">in </span>[<span class="number">60u32</span>, <span class="number">120</span>, <span class="number">600</span>, <span class="number">1_800</span>, <span class="number">6_000</span>] {
+<a href=#2564 id=2564 data-nosnippet>2564</a>            <span class="macro">assert!</span>(
+<a href=#2565 id=2565 data-nosnippet>2565</a>                machine &gt;= COLD_ENTRY_MIN_LIMIT,
+<a href=#2566 id=2566 data-nosnippet>2566</a>                <span class="string">"{machine}/min is a machine endpoint and must keep the smoothing"
+<a href=#2567 id=2567 data-nosnippet>2567</a>            </span>);
+<a href=#2568 id=2568 data-nosnippet>2568</a>        }
+<a href=#2569 id=2569 data-nosnippet>2569</a>    }
+<a href=#2570 id=2570 data-nosnippet>2570</a>
+<a href=#2571 id=2571 data-nosnippet>2571</a>    <span class="doccomment">/// The env parser: only the exact opt-out string loosens enforcement.
+<a href=#2572 id=2572 data-nosnippet>2572</a>    </span><span class="attr">#[test]
+<a href=#2573 id=2573 data-nosnippet>2573</a>    </span><span class="kw">fn </span>window_mode_names_round_trip() {
+<a href=#2574 id=2574 data-nosnippet>2574</a>        <span class="macro">assert_eq!</span>(WindowMode::Sliding.as_str(), <span class="string">"sliding"</span>);
+<a href=#2575 id=2575 data-nosnippet>2575</a>        <span class="macro">assert_eq!</span>(WindowMode::Fixed.as_str(), <span class="string">"fixed"</span>);
+<a href=#2576 id=2576 data-nosnippet>2576</a>        <span class="macro">assert_eq!</span>(WindowMode::default(), WindowMode::Sliding);
+<a href=#2577 id=2577 data-nosnippet>2577</a>    }
+<a href=#2578 id=2578 data-nosnippet>2578</a>}
 </code></pre></div></section></main></body></html>

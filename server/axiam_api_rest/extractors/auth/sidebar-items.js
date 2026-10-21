@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ACTIVE_TENANT_HEADER"],"struct":["AuthenticatedPrincipal","AuthenticatedServiceAccount","AuthenticatedUser","MaybeAuthenticatedUser","TenantScope"],"trait":["DpopReplayGuard","PrincipalReachResolver","SessionValidator","TenantScopeResolver"]};
+window.SIDEBAR_ITEMS = {"constant":["ACTIVE_TENANT_HEADER"],"struct":["AuthenticatedPrincipal","AuthenticatedServiceAccount","AuthenticatedUser","ConsoleSignIn","MaybeAuthenticatedUser","TenantScope"],"trait":["DpopReplayGuard","PrincipalReachResolver","SessionValidator","TenantScopeResolver"]};

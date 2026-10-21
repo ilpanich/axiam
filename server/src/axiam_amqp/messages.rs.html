@@ -703,5 +703,72 @@
 <a href=#703 id=703 data-nosnippet>703</a>            <span class="string">"malformed signature hex must not verify"
 <a href=#704 id=704 data-nosnippet>704</a>        </span>);
 <a href=#705 id=705 data-nosnippet>705</a>    }
-<a href=#706 id=706 data-nosnippet>706</a>}
+<a href=#706 id=706 data-nosnippet>706</a>
+<a href=#707 id=707 data-nosnippet>707</a>    <span class="doccomment">/// A v1 message lacks the replay-protection fields. They deserialize to
+<a href=#708 id=708 data-nosnippet>708</a>    /// the current key version, the nil nonce and the Unix epoch (far outside
+<a href=#709 id=709 data-nosnippet>709</a>    /// any freshness window, so the freshness gate rejects it), on every signed
+<a href=#710 id=710 data-nosnippet>710</a>    /// message type.
+<a href=#711 id=711 data-nosnippet>711</a>    </span><span class="attr">#[test]
+<a href=#712 id=712 data-nosnippet>712</a>    </span><span class="kw">fn </span>a_v1_message_deserializes_to_values_the_gates_reject() {
+<a href=#713 id=713 data-nosnippet>713</a>        <span class="kw">let </span>id = Uuid::nil();
+<a href=#714 id=714 data-nosnippet>714</a>        <span class="kw">let </span>authz: AuthzRequest = serde_json::from_value(<span class="macro">serde_json::json!</span>({
+<a href=#715 id=715 data-nosnippet>715</a>            <span class="string">"correlation_id"</span>: id, <span class="string">"tenant_id"</span>: id, <span class="string">"subject_id"</span>: id,
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="string">"action"</span>: <span class="string">"read"</span>, <span class="string">"resource_id"</span>: id,
+<a href=#717 id=717 data-nosnippet>717</a>        }))
+<a href=#718 id=718 data-nosnippet>718</a>        .unwrap();
+<a href=#719 id=719 data-nosnippet>719</a>        <span class="kw">let </span>audit: AuditEventMessage = serde_json::from_value(<span class="macro">serde_json::json!</span>({
+<a href=#720 id=720 data-nosnippet>720</a>            <span class="string">"tenant_id"</span>: id, <span class="string">"actor_id"</span>: id, <span class="string">"actor_type"</span>: <span class="string">"User"</span>,
+<a href=#721 id=721 data-nosnippet>721</a>            <span class="string">"action"</span>: <span class="string">"login"</span>, <span class="string">"outcome"</span>: <span class="string">"Success"</span>,
+<a href=#722 id=722 data-nosnippet>722</a>        }))
+<a href=#723 id=723 data-nosnippet>723</a>        .unwrap();
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="kw">let </span>invalidation: CacheInvalidationMessage = serde_json::from_value(<span class="macro">serde_json::json!</span>({
+<a href=#725 id=725 data-nosnippet>725</a>            <span class="string">"origin_id"</span>: id, <span class="string">"tenant_id"</span>: id,
+<a href=#726 id=726 data-nosnippet>726</a>        }))
+<a href=#727 id=727 data-nosnippet>727</a>        .unwrap();
+<a href=#728 id=728 data-nosnippet>728</a>
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="kw">let </span>epoch = DateTime::&lt;Utc&gt;::from_timestamp(<span class="number">0</span>, <span class="number">0</span>).unwrap();
+<a href=#730 id=730 data-nosnippet>730</a>        <span class="kw">for </span>(key_version, nonce, issued_at) <span class="kw">in </span>[
+<a href=#731 id=731 data-nosnippet>731</a>            (authz.key_version, authz.nonce, authz.issued_at),
+<a href=#732 id=732 data-nosnippet>732</a>            (audit.key_version, audit.nonce, audit.issued_at),
+<a href=#733 id=733 data-nosnippet>733</a>            (
+<a href=#734 id=734 data-nosnippet>734</a>                invalidation.key_version,
+<a href=#735 id=735 data-nosnippet>735</a>                invalidation.nonce,
+<a href=#736 id=736 data-nosnippet>736</a>                invalidation.issued_at,
+<a href=#737 id=737 data-nosnippet>737</a>            ),
+<a href=#738 id=738 data-nosnippet>738</a>        ] {
+<a href=#739 id=739 data-nosnippet>739</a>            <span class="macro">assert_eq!</span>(key_version, CURRENT_KEY_VERSION);
+<a href=#740 id=740 data-nosnippet>740</a>            <span class="macro">assert_eq!</span>(nonce, Uuid::nil());
+<a href=#741 id=741 data-nosnippet>741</a>            <span class="macro">assert_eq!</span>(issued_at, epoch);
+<a href=#742 id=742 data-nosnippet>742</a>            <span class="macro">assert!</span>(
+<a href=#743 id=743 data-nosnippet>743</a>                !is_fresh(
+<a href=#744 id=744 data-nosnippet>744</a>                    issued_at,
+<a href=#745 id=745 data-nosnippet>745</a>                    Utc::now(),
+<a href=#746 id=746 data-nosnippet>746</a>                    chrono::Duration::seconds(DEFAULT_FRESHNESS_SKEW_SECS)
+<a href=#747 id=747 data-nosnippet>747</a>                ),
+<a href=#748 id=748 data-nosnippet>748</a>                <span class="string">"the epoch is outside the freshness window"
+<a href=#749 id=749 data-nosnippet>749</a>            </span>);
+<a href=#750 id=750 data-nosnippet>750</a>        }
+<a href=#751 id=751 data-nosnippet>751</a>        <span class="macro">assert!</span>(!invalidation.heartbeat, <span class="string">"an absent heartbeat is false"</span>);
+<a href=#752 id=752 data-nosnippet>752</a>    }
+<a href=#753 id=753 data-nosnippet>753</a>
+<a href=#754 id=754 data-nosnippet>754</a>    <span class="doccomment">/// `heartbeat: false` is omitted so an ordinary invalidation stays
+<a href=#755 id=755 data-nosnippet>755</a>    /// byte-identical to what a pre-heartbeat replica signs; `true` is emitted.
+<a href=#756 id=756 data-nosnippet>756</a>    </span><span class="attr">#[test]
+<a href=#757 id=757 data-nosnippet>757</a>    </span><span class="kw">fn </span>only_a_true_heartbeat_is_serialized() {
+<a href=#758 id=758 data-nosnippet>758</a>        <span class="kw">let </span>message = |heartbeat| CacheInvalidationMessage {
+<a href=#759 id=759 data-nosnippet>759</a>            origin_id: Uuid::nil(),
+<a href=#760 id=760 data-nosnippet>760</a>            tenant_id: Uuid::nil(),
+<a href=#761 id=761 data-nosnippet>761</a>            subject_id: <span class="prelude-val">None</span>,
+<a href=#762 id=762 data-nosnippet>762</a>            key_version: CURRENT_KEY_VERSION,
+<a href=#763 id=763 data-nosnippet>763</a>            nonce: Uuid::nil(),
+<a href=#764 id=764 data-nosnippet>764</a>            issued_at: DateTime::&lt;Utc&gt;::from_timestamp(<span class="number">0</span>, <span class="number">0</span>).unwrap(),
+<a href=#765 id=765 data-nosnippet>765</a>            heartbeat,
+<a href=#766 id=766 data-nosnippet>766</a>            hmac_signature: <span class="prelude-val">None</span>,
+<a href=#767 id=767 data-nosnippet>767</a>        };
+<a href=#768 id=768 data-nosnippet>768</a>        <span class="kw">let </span>plain = serde_json::to_value(message(<span class="bool-val">false</span>)).unwrap();
+<a href=#769 id=769 data-nosnippet>769</a>        <span class="macro">assert!</span>(plain.get(<span class="string">"heartbeat"</span>).is_none(), <span class="string">"{plain}"</span>);
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="kw">let </span>beat = serde_json::to_value(message(<span class="bool-val">true</span>)).unwrap();
+<a href=#771 id=771 data-nosnippet>771</a>        <span class="macro">assert_eq!</span>(beat[<span class="string">"heartbeat"</span>], <span class="bool-val">true</span>);
+<a href=#772 id=772 data-nosnippet>772</a>    }
+<a href=#773 id=773 data-nosnippet>773</a>}
 </code></pre></div></section></main></body></html>

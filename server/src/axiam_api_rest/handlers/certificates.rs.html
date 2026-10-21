@@ -742,27 +742,24 @@
 <a href=#742 id=742 data-nosnippet>742</a>    // account's joins, the binding), so binding to an account that holds a
 <a href=#743 id=743 data-nosnippet>743</a>    // `network:join` allow needs `network:grant` at every such node; and no
 <a href=#744 id=744 data-nosnippet>744</a>    // service account binds a certificate to itself.
-<a href=#745 id=745 data-nosnippet>745</a>    </span><span class="kw">let </span>_cleared = <span class="kw">crate</span>::network_gate::authorize(
-<a href=#746 id=746 data-nosnippet>746</a>        <span class="kw-2">&amp;</span>principal,
-<a href=#747 id=747 data-nosnippet>747</a>        authz.get_ref().as_ref(),
-<a href=#748 id=748 data-nosnippet>748</a>        <span class="kw-2">&amp;</span>state,
-<a href=#749 id=749 data-nosnippet>749</a>        axiam_authz::network_gate::NetworkWrite::CertificateBind {
-<a href=#750 id=750 data-nosnippet>750</a>            certificate_id: cert.id,
-<a href=#751 id=751 data-nosnippet>751</a>            service_account_id: sa_id,
-<a href=#752 id=752 data-nosnippet>752</a>        },
-<a href=#753 id=753 data-nosnippet>753</a>    )
-<a href=#754 id=754 data-nosnippet>754</a>    .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#755 id=755 data-nosnippet>755</a>
-<a href=#756 id=756 data-nosnippet>756</a>    state
-<a href=#757 id=757 data-nosnippet>757</a>        .pki
-<a href=#758 id=758 data-nosnippet>758</a>        .cert_repo
-<a href=#759 id=759 data-nosnippet>759</a>        .bind_to_service_account(principal.tenant_id, cert.id, sa_id)
-<a href=#760 id=760 data-nosnippet>760</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#761 id=761 data-nosnippet>761</a>
-<a href=#762 id=762 data-nosnippet>762</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({
-<a href=#763 id=763 data-nosnippet>763</a>        <span class="string">"certificate_id"</span>: cert.id,
-<a href=#764 id=764 data-nosnippet>764</a>        <span class="string">"service_account_id"</span>: sa_id,
-<a href=#765 id=765 data-nosnippet>765</a>        <span class="string">"status"</span>: <span class="string">"bound"
-<a href=#766 id=766 data-nosnippet>766</a>    </span>})))
-<a href=#767 id=767 data-nosnippet>767</a>}
+<a href=#745 id=745 data-nosnippet>745</a>    </span><span class="kw">let </span>write = axiam_authz::network_gate::NetworkWrite::CertificateBind {
+<a href=#746 id=746 data-nosnippet>746</a>        certificate_id: cert.id,
+<a href=#747 id=747 data-nosnippet>747</a>        service_account_id: sa_id,
+<a href=#748 id=748 data-nosnippet>748</a>    };
+<a href=#749 id=749 data-nosnippet>749</a>    <span class="kw">let </span>cleared =
+<a href=#750 id=750 data-nosnippet>750</a>        <span class="kw">crate</span>::network_gate::authorize(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref(), <span class="kw-2">&amp;</span>state, write).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#751 id=751 data-nosnippet>751</a>
+<a href=#752 id=752 data-nosnippet>752</a>    state
+<a href=#753 id=753 data-nosnippet>753</a>        .pki
+<a href=#754 id=754 data-nosnippet>754</a>        .cert_repo
+<a href=#755 id=755 data-nosnippet>755</a>        .bind_to_service_account(principal.tenant_id, cert.id, sa_id)
+<a href=#756 id=756 data-nosnippet>756</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#757 id=757 data-nosnippet>757</a>    <span class="kw">crate</span>::network_gate::record_cleared(<span class="kw-2">&amp;</span>principal, <span class="kw-2">&amp;</span>state, write, <span class="kw-2">&amp;</span>cleared).<span class="kw">await</span>;
+<a href=#758 id=758 data-nosnippet>758</a>
+<a href=#759 id=759 data-nosnippet>759</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(<span class="macro">serde_json::json!</span>({
+<a href=#760 id=760 data-nosnippet>760</a>        <span class="string">"certificate_id"</span>: cert.id,
+<a href=#761 id=761 data-nosnippet>761</a>        <span class="string">"service_account_id"</span>: sa_id,
+<a href=#762 id=762 data-nosnippet>762</a>        <span class="string">"status"</span>: <span class="string">"bound"
+<a href=#763 id=763 data-nosnippet>763</a>    </span>})))
+<a href=#764 id=764 data-nosnippet>764</a>}
 </code></pre></div></section></main></body></html>

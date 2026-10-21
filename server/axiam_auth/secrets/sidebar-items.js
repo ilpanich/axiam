@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["SecretProviderKind"],"fn":["bootstrap_client"],"struct":["EnvSecretProvider","FileSecretProvider","VaultConfig","VaultSecretProvider"]};
+window.SIDEBAR_ITEMS = {"constant":["VAULT_CONNECT_TIMEOUT","VAULT_TIMEOUT"],"enum":["SecretProviderKind"],"fn":["bootstrap_client","bootstrap_client_with_timeout"],"struct":["EnvSecretProvider","FileSecretProvider","VaultConfig","VaultSecretProvider"]};

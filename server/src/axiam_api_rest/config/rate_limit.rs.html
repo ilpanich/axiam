@@ -213,7 +213,7 @@
 <a href=#213 id=213 data-nosnippet>213</a>    <span class="doccomment">/// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
 <a href=#214 id=214 data-nosnippet>214</a>    </span><span class="kw">pub </span>bc_authorize_per_min: u32,
 <a href=#215 id=215 data-nosnippet>215</a>    <span class="doccomment">/// `POST /api/v1/network/decide` per minute per authenticated caller
-<a href=#216 id=216 data-nosnippet>216</a>    /// (RADIUS D4, W6.4; maintainer decision D-6).
+<a href=#216 id=216 data-nosnippet>216</a>    /// (RADIUS Live profile, W6.4; maintainer decision D-6).
 <a href=#217 id=217 data-nosnippet>217</a>    </span><span class="kw">pub </span>network_decide_per_min: u32,
 <a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// gRPC `AuthorizationService` per second per IP — applied to
 <a href=#219 id=219 data-nosnippet>219</a>    /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
@@ -257,9 +257,9 @@
 <a href=#257 id=257 data-nosnippet>257</a></span><span class="kw">pub const </span>ENV_SSF_ADMIN_PER_MIN: <span class="kw-2">&amp;</span>str = <span class="string">"AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN"</span>;
 <a href=#258 id=258 data-nosnippet>258</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 <a href=#259 id=259 data-nosnippet>259</a></span><span class="kw">pub const </span>ENV_SCIM_TARGET_ADMIN_PER_MIN: <span class="kw-2">&amp;</span>str = <span class="string">"AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN"</span>;
-<a href=#260 id=260 data-nosnippet>260</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS D4 / W6.4, preset (D-6).
+<a href=#260 id=260 data-nosnippet>260</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN` — RADIUS Live profile / W6.4, preset (D-6).
 <a href=#261 id=261 data-nosnippet>261</a></span><span class="kw">pub const </span>ENV_NETWORK_DECIDE_PER_MIN: <span class="kw-2">&amp;</span>str = <span class="string">"AXIAM__RATE_LIMIT__NETWORK_DECIDE_PER_MIN"</span>;
-<a href=#262 id=262 data-nosnippet>262</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS D4 / W6.3, never preset.
+<a href=#262 id=262 data-nosnippet>262</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN` — RADIUS Live profile / W6.3, never preset.
 <a href=#263 id=263 data-nosnippet>263</a></span><span class="kw">pub const </span>ENV_NETWORK_ADMIN_PER_MIN: <span class="kw-2">&amp;</span>str = <span class="string">"AXIAM__RATE_LIMIT__NETWORK_ADMIN_PER_MIN"</span>;
 <a href=#264 id=264 data-nosnippet>264</a><span class="doccomment">/// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
 <a href=#265 id=265 data-nosnippet>265</a></span><span class="kw">pub const </span>ENV_CIBA_APPROVAL_PER_MIN: <span class="kw-2">&amp;</span>str = <span class="string">"AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN"</span>;
@@ -334,7 +334,7 @@
 <a href=#334 id=334 data-nosnippet>334</a>                // of sign-in requests is the per-user notification bucket,
 <a href=#335 id=335 data-nosnippet>335</a>                // which no preset moves.
 <a href=#336 id=336 data-nosnippet>336</a>                </span>bc_authorize_per_min: <span class="number">600</span>,
-<a href=#337 id=337 data-nosnippet>337</a>                <span class="comment">// RADIUS D4 (D-6): the shipped 6 000 in every profile. The
+<a href=#337 id=337 data-nosnippet>337</a>                <span class="comment">// RADIUS Live profile (D-6): the shipped 6 000 in every profile. The
 <a href=#338 id=338 data-nosnippet>338</a>                // bucket is the authenticated caller's (one FreeRADIUS service
 <a href=#339 id=339 data-nosnippet>339</a>                // account), so a NAT'd fleet is not what moves it; a site's
 <a href=#340 id=340 data-nosnippet>340</a>                // power-restore storm is, and that is the same storm whatever
@@ -665,7 +665,7 @@
 <a href=#665 id=665 data-nosnippet>665</a>    <span class="doccomment">/// Max writes per minute per IP to each of the network-segment management
 <a href=#666 id=666 data-nosnippet>666</a>    /// routes — create, replace and delete a segment, create, replace and
 <a href=#667 id=667 data-nosnippet>667</a>    /// delete a segment's reply profile, and replace the tenant's `Session-Timeout`
-<a href=#668 id=668 data-nosnippet>668</a>    /// cap (default: 30 — RADIUS D4, W6.3,
+<a href=#668 id=668 data-nosnippet>668</a>    /// cap (default: 30 — RADIUS Live profile, W6.3,
 <a href=#669 id=669 data-nosnippet>669</a>    /// `claude_dev/radius-reply-profile-design.md` §5.1). Reads are not in it.
 <a href=#670 id=670 data-nosnippet>670</a>    /// A segment write decides which VLAN a device is placed on and a profile
 <a href=#671 id=671 data-nosnippet>671</a>    /// write shapes what that placement gives, so each is a grant (§5.2); every
@@ -674,7 +674,7 @@
 <a href=#674 id=674 data-nosnippet>674</a>    /// bucket per route (seven, named `network_*`); per-IP; never preset.
 <a href=#675 id=675 data-nosnippet>675</a>    </span><span class="kw">pub </span>network_admin_per_min: u32,
 <a href=#676 id=676 data-nosnippet>676</a>    <span class="doccomment">/// Max `POST /api/v1/network/decide` requests per minute **per
-<a href=#677 id=677 data-nosnippet>677</a>    /// authenticated caller** (default: 6 000 — RADIUS D4, W6.4; maintainer
+<a href=#677 id=677 data-nosnippet>677</a>    /// authenticated caller** (default: 6 000 — RADIUS Live profile, W6.4; maintainer
 <a href=#678 id=678 data-nosnippet>678</a>    /// decision D-6; `claude_dev/radius-reply-profile-design.md` §6.3).
 <a href=#679 id=679 data-nosnippet>679</a>    ///
 <a href=#680 id=680 data-nosnippet>680</a>    /// The decision route's caller is a FreeRADIUS server's service account,
@@ -912,10 +912,10 @@
 <a href=#912 id=912 data-nosnippet>912</a>            ssf_admin_per_min: <span class="number">30</span>,
 <a href=#913 id=913 data-nosnippet>913</a>            <span class="comment">// G-6 / T23.6.4 — see the field docs.
 <a href=#914 id=914 data-nosnippet>914</a>            </span>scim_target_admin_per_min: <span class="number">30</span>,
-<a href=#915 id=915 data-nosnippet>915</a>            <span class="comment">// RADIUS D4 / W6.3 — see the field docs. Administrator writes that
+<a href=#915 id=915 data-nosnippet>915</a>            <span class="comment">// RADIUS Live profile / W6.3 — see the field docs. Administrator writes that
 <a href=#916 id=916 data-nosnippet>916</a>            // each place devices on a VLAN or shape what the placement gives.
 <a href=#917 id=917 data-nosnippet>917</a>            </span>network_admin_per_min: <span class="number">30</span>,
-<a href=#918 id=918 data-nosnippet>918</a>            <span class="comment">// RADIUS D4 / W6.4 (D-6) — see the field docs. Per caller.
+<a href=#918 id=918 data-nosnippet>918</a>            <span class="comment">// RADIUS Live profile / W6.4 (D-6) — see the field docs. Per caller.
 <a href=#919 id=919 data-nosnippet>919</a>            </span>network_decide_per_min: <span class="number">6_000</span>,
 <a href=#920 id=920 data-nosnippet>920</a>            <span class="comment">// G-7 / T23.7.2 — see the field docs. Human-driven, per route.
 <a href=#921 id=921 data-nosnippet>921</a>            </span>ciba_approval_per_min: <span class="number">30</span>,

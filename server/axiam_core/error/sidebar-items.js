@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AxiamError"],"type":["AxiamResult"]};
+window.SIDEBAR_ITEMS = {"enum":["AxiamError","NetworkConflict"],"type":["AxiamResult"]};

@@ -113,7 +113,6 @@ ignore = [
     # quick-xml >=0.41.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). Parser only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). NsReader only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
-    # RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369: zip 8.6.0 — 0367 is a
 ]
 
 [licenses]

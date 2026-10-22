@@ -75,13 +75,28 @@ const MIN_TOKEN_BODY: usize = 8;
 /// A token starts at any position whose previous character is not a token
 /// character (`=`, `"`, `:`, `'`, or the start), so `token=hvs.…` and
 /// `{"token":"hvs.…"}` are masked and the text around them is kept.
+///
+/// A modern (`hvs.`/`hvb.`/`hvr.`) token also starts right after a recognised
+/// escape (`\n`, `\t`, `\r`, `\"`, `\uXXXX`, `%XX`), whose last character is
+/// itself a token character: the escape is kept, the token masked. The legacy
+/// prefixes get no such boundary (T-470). Each position looks back at most
+/// six characters (`\uXXXX`) and a match is skipped whole, so the scan stays
+/// linear in the word: nothing is re-read after a mask, and a failed attempt
+/// stops at the first non-token character.
 fn redact_tokens(word: &str) -> String {
     let chars: Vec<char> = word.chars().collect();
     let mut out = String::with_capacity(word.len());
     let mut i = 0;
     while i < chars.len() {
         let at_boundary = i == 0 || !is_token_char(chars[i - 1]);
-        match at_boundary.then(|| token_len(&chars[i..])).flatten() {
+        let found = if at_boundary {
+            token_len(&chars[i..])
+        } else if ends_with_escape(&chars[..i]) {
+            modern_token_len(&chars[i..])
+        } else {
+            None
+        };
+        match found {
             Some(len) => {
                 out.push_str("[redacted]");
                 i += len;
@@ -93,6 +108,17 @@ fn redact_tokens(word: &str) -> String {
         }
     }
     out
+}
+
+/// Whether `before` ends with a recognised escape sequence.
+fn ends_with_escape(before: &[char]) -> bool {
+    let n = before.len();
+    let at = |back: usize| (back <= n).then(|| before[n - back]);
+    let hex =
+        |from: usize, to: usize| (from..=to).all(|b| at(b).is_some_and(|c| c.is_ascii_hexdigit()));
+    (at(2) == Some('\\') && matches!(at(1), Some('n' | 't' | 'r' | '"')))
+        || (at(6) == Some('\\') && at(5) == Some('u') && hex(1, 4))
+        || (at(3) == Some('%') && hex(1, 2))
 }
 
 /// The length of the Vault token that `s` starts with, if it starts with one.
@@ -108,13 +134,8 @@ fn token_len(s: &[char]) -> Option<usize> {
     let run = |from: usize, accept: fn(char) -> bool| {
         s[from..].iter().take_while(|c| accept(**c)).count()
     };
-    if ["hvs.", "hvb.", "hvr."].iter().any(|p| starts(p)) {
-        let body = s[4..].iter().take_while(|c| is_token_char(**c)).count();
-        let body = s[4..4 + body]
-            .iter()
-            .rposition(|c| *c != '.')
-            .map_or(0, |last| last + 1);
-        return (body >= MIN_TOKEN_BODY).then_some(4 + body);
+    if let Some(len) = modern_token_len(s) {
+        return Some(len);
     }
     if starts("s.") || starts("b.") {
         let body = run(2, is_legacy_body_char);
@@ -124,6 +145,22 @@ fn token_len(s: &[char]) -> Option<usize> {
         return (body >= MIN_TOKEN_BODY && !continues).then_some(2 + body);
     }
     None
+}
+
+/// The length of the modern (`hvs.`, `hvb.`, `hvr.`) token `s` starts with.
+fn modern_token_len(s: &[char]) -> Option<usize> {
+    let prefixed = ["hvs.", "hvb.", "hvr."]
+        .iter()
+        .any(|p| s.len() >= p.len() && p.chars().zip(s).all(|(p, c)| p == *c));
+    if !prefixed {
+        return None;
+    }
+    let body = s[4..].iter().take_while(|c| is_token_char(**c)).count();
+    let body = s[4..4 + body]
+        .iter()
+        .rposition(|c| *c != '.')
+        .map_or(0, |last| last + 1);
+    (body >= MIN_TOKEN_BODY).then_some(4 + body)
 }
 
 fn is_token_char(c: char) -> bool {
@@ -211,6 +248,75 @@ mod tests {
             sanitise_reason("s.vault-1.eu-west.internal"),
             "s.vault-1.eu-west.internal"
         );
+    }
+
+    /// #740 (R111W1-06): a modern token right after an escape is masked, the
+    /// escape kept; the legacy trade-off and the host names stay as T-470 has them.
+    #[test]
+    fn a_token_after_an_escape_is_masked_and_the_escape_stays() {
+        let tok = fake_token("hvs.", 3);
+        for esc in [
+            "\\n", "\\t", "\\r", "\\\"", "\\u0022", "\\u00aF", "%3D", "%0a",
+        ] {
+            for prefix in ["hvs.", "hvb.", "hvr."] {
+                let tok = fake_token(prefix, 3);
+                assert_eq!(
+                    sanitise_reason(&format!("msg{esc}{tok}")),
+                    format!("msg{esc}[redacted]"),
+                    "{esc} {prefix}"
+                );
+            }
+        }
+        assert_eq!(
+            sanitise_reason(&format!("token%3D{tok}")),
+            "token%3D[redacted]"
+        );
+        // Not an escape: a token character, or a malformed escape, still joins the word.
+        for glued in ["abc", "\\x", "\\u12", "%G1", "%1"] {
+            assert_eq!(
+                sanitise_reason(&format!("{glued}{tok}")),
+                format!("{glued}{tok}")
+            );
+        }
+        // A short body after an escape is not a token.
+        assert_eq!(sanitise_reason("a\\nhvs.short"), "a\\nhvs.short");
+        // The legacy trade-off (T-470): `s.` + body + `.word` reads as a host, unmasked.
+        let legacy = ["s.", "AbCdEfGh", "1234", ".next"].concat();
+        assert_eq!(sanitise_reason(&legacy), legacy);
+        // The legacy prefixes get no escape boundary.
+        let after_escape = format!("msg\\n{}", fake_token("s.", 1));
+        assert_eq!(sanitise_reason(&after_escape), after_escape);
+        for host in ["b.vault-internal.example.com", "s.vault-1.eu-west.internal"] {
+            assert_eq!(sanitise_reason(host), host);
+            let escaped = format!("x\\n{host}");
+            assert_eq!(sanitise_reason(&escaped), escaped);
+        }
+        // Idempotent.
+        let once = sanitise_reason(&format!("a\\n{tok} b%3D{tok}"));
+        assert_eq!(sanitise_reason(&once), once);
+    }
+
+    /// The look-back is a constant six characters and a mask skips its span, so
+    /// a long run of escape-and-prefix pairs is read once, not once per pair.
+    #[test]
+    fn the_escape_scan_stays_linear() {
+        let unit = "\\nhvs.abc";
+        let (small, large) = (unit.repeat(2_000), unit.repeat(200_000));
+        let time = |s: &str| {
+            let t = std::time::Instant::now();
+            let out = sanitise_reason(s);
+            (t.elapsed(), out)
+        };
+        let (t1, _) = time(&small);
+        let (t2, _) = time(&large);
+        // 100x the input; a quadratic scan would take ~10_000x. Generous bound.
+        assert!(
+            t2 < t1.max(std::time::Duration::from_millis(5)) * 1_000,
+            "{t1:?} {t2:?}"
+        );
+        let pairs = format!("{}{}", "\\n", fake_token("hvs.", 1)).repeat(50_000);
+        let (_, out) = time(&pairs);
+        assert!(!out.contains("fake"));
     }
 
     /// R101W1-06: a legacy batch token (`b.` and a body) is masked as `s.` is.

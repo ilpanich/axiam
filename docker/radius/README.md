@@ -87,6 +87,8 @@ container when a case changes one (a wrong site key, AXIAM stopped).
 | `docker/radius/raddb/axiam_placement` | the `files` module that reads the placement table |
 | `docker/radius/fetch-crl.sh` | the revocation-list fetch job the guide's section 4 describes; the test runs it on the host, against a local stand-in for the CRL route (needs `curl` and `openssl`; it sets `FETCH_CRL_ALLOW_HTTP=1`, because the stand-in is plain HTTP and the script refuses that otherwise) |
 | `docker/radius/tests/` | `fetch-crl-test.sh <shell>`: the fetch script's own cases (tags, lock, curl options) against a stand-in for the route and a throwaway CA, no docker and no AXIAM; `radius-e2e.yml` runs it under `dash` and `bash` |
+| `docker/radius/tests/check-token-cache.py` | the shape of every call `raddb/live/check-eap-tls` makes on the token cache (read-only, or a negative-TTL store of a fetched token; #764); `--self-test` runs its fixtures; no docker |
+| `docker/radius/tests/token-cache-test.sh` | what those calls do in the pinned image: the concurrent interleavings of #720 and #764 played call by call in one `radclient` request against the cache module copied from `axiam_live`; needs docker |
 | `docker/.secrets/radius/` | per run: `env`, `server-ca.pem`, the supplicants' files, and `trust/` (`server.pem`, `server.key`, `ca.pem`, `capath/<hash>.r0`, `placement`), mounted at `/etc/freeradius/axiam` |
 | `.github/workflows/radius-e2e.yml` | the same, in CI |
 

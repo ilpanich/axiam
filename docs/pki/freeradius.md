@@ -719,6 +719,14 @@ token at once each get the `401`, and each logs in again. The drop is read-only
 create one holding the refused token, and the store after the new login uses a
 negative TTL, which replaces whatever entry is there with this request's token
 instead of merging another thread's over it ([#720](https://github.com/ilpanich/axiam/issues/720)).
+The read is one read-only call too, not a status probe followed by a second call
+that would insert this request's empty value had another thread dropped the entry
+in between, and the first login's store takes the same negative TTL, so a request
+that fetched a token decides with that token. No call on the cache can create an
+entry that does not hold a token a request fetched
+([#764](https://github.com/ilpanich/axiam/issues/764)); the shape of each call is
+checked by `docker/radius/tests/check-token-cache.py`, and what each shape does in
+the pinned image by `docker/radius/tests/token-cache-test.sh`.
 
 ### The FreeRADIUS configuration
 

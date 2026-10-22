@@ -129,6 +129,13 @@ jobs:
             docker/radius/tests/fetch-crl-test.sh "$shell"
           done
 
+      # The shape of every call the Live recipe makes on its token cache (R112W5-01, #764):
+      # read-only, or a store with a negative TTL of a token the request fetched. No docker.
+      - name: Live token cache, the calls' shape
+        run: |
+          python3 docker/radius/tests/check-token-cache.py --self-test
+          python3 docker/radius/tests/check-token-cache.py
+
       # The image is named once, in the compose file, by digest; pull exactly that,
       # with a retry, since Docker Hub rate-limits anonymous pulls.
       - name: Pull the pinned FreeRADIUS image
@@ -140,6 +147,11 @@ jobs:
             echo "pull failed (attempt $attempt)"; sleep $((attempt * 15))
           done
           exit 1
+
+      # What those shapes do in the pinned image (rlm_cache 3.2.8): the interleavings of
+      # R111W5-01 and R112W5-01 played call by call in one request, so deterministically.
+      - name: Live token cache cases
+        run: docker/radius/tests/token-cache-test.sh
 
       # The test mints the run's CA material, issues everything from AXIAM,
       # brings docker/docker-compose.radius.yml up itself (the trust material does

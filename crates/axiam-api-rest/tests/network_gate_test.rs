@@ -2104,9 +2104,12 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         "the node the gate checked network:grant at: {text}"
     );
 
-    // A re-bind records the account the certificate was taken from (#730 f).
+    // The route refuses a certificate that is already bound (409, the unique
+    // binding), so a success row's `before` is `null` here; the account a
+    // re-bind takes it from is carried by the clearance and pinned in
+    // `axiam-authz`'s `network_gate/tests.rs` (#730 f).
     let other = w.service_account(&[]).await;
-    let (status, err) = call(
+    let (status, _) = call(
         &app,
         &t,
         "POST",
@@ -2114,14 +2117,8 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         Some(json!({ "certificate_id": cert })),
     )
     .await;
-    assert_eq!(status, 200, "{err}");
-    let rows = w.audit("certificate_binding.bound").await;
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    let rebind = rows
-        .iter()
-        .find(|r| r.metadata["grantee"]["id"] == other.to_string())
-        .expect("the re-bind row");
-    assert_eq!(rebind.metadata["before"], device.to_string());
+    assert_eq!(status, 409);
+    assert_eq!(w.audit("certificate_binding.bound").await.len(), 1);
 
     // Nothing else was written: the five actions hold exactly these rows.
     let total = w.audit("network_role.assigned").await.len()
@@ -2129,7 +2126,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         + w.audit("network_role.granted").await.len()
         + w.audit("network_role.revoked").await.len()
         + w.audit("certificate_binding.bound").await.len();
-    assert_eq!(total, 7);
+    assert_eq!(total, 6);
 }
 
 /// A write that touches no `network:` permission leaves none of the five rows.

@@ -169,6 +169,11 @@ unless its condition is met before W8.4 writes the PR body.
 | 783 | R112W1-04: T-254 on replay records after #753 | Informational | W1 | sweep | S | Sonnet 5.5 |
 | 784 | R112W1-05: a unit stalled past the lease still scrubs and re-anonymizes the erased account | Informational | W1 | sweep | M | **Opus 5.5** |
 | 785 | R112W1-06: text and hygiene after W1 | Informational | W1 | sweep | S | Sonnet 5.5 |
+| 786 | R112W2-01: a revoked-session token still spends its user's principal allowance (in-process governor) | Low | W2 | sweep | M | **Opus 5.5** |
+| 787 | R112W2-02: the D-12 verdict is left by some extractors only | Informational | W2 | sweep | S | Sonnet 5.5 |
+| 788 | R112W2-03: the action-grammar pin misses `pub(crate)` and `&'static str` constants | Informational | W2 | sweep | S | Sonnet 5.5 |
+| 789 | R112W2-04: "a row without `ingested_via` was written by the server" is false before 1.1.2 | Informational | W2 | sweep | S | Sonnet 5.5 |
+| 790 | R112W2-05: the gRPC address rule is a hand-copied twin; no gRPC test of `none` | Informational | W2 | sweep | S | Sonnet 5.5 |
 | new | every issue filed while the plan runs (§1.4) | any | its wave / W9 | — | by §1.1 | by §1.1 |
 
 ### 1.1 How the model is chosen
@@ -303,7 +308,7 @@ Closes: #736, #737, #738, #739, #740, #753, and #758 (with W2, W5, W6, W8.3); fr
 | W2.10 | **#734.** T-212 drops "and the public-client bucket"; T-428 reads "after its route limiters and its DPoP check (the public-client bucket was removed in 1.1.1, #685)"; dated, both copies. | STRIDE T-212, T-428; `Axiam.json` | none (text); `check-remediation-evidence.py` | S | Sonnet 5.5 |
 | W2.11 | — | F4 review of the W2 diff → `claude_dev/security-review-release-1.1.2-w2-<date>.md`; then the sweep slot and the addendum (§1.4). | | | — | **Opus 5.5** |
 
-Closes: #731, #732, #733, #734, #735, #741, #751, #752, #754 (and #758's (a), (c), (d), (g)).
+Closes: #731, #732, #733, #734, #735, #741, #751, #752, #754 (and #758's (a), (c), (d), (g)); from the W2.11 review (§1.4): #786, #787, #788, #789, #790.
 
 ---
 
@@ -584,7 +589,8 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - W3.6 → #768 … #773: all closed in the wave (addendum `79f7ae9`).
   - W4.5 → #775 … #779: fixed in the wave (`128d376`, `aa203d9`, `89aacfc`, `34cd965`, `5474a2d`); addendum pending.
   - W1.8 → #780 … #785: in the sweep slot (Sonnet for #780 … #783 and #785, then Opus for #784); #780 blocks W1's merge.
-  No issue from outside the plan has been opened on the milestone, and none of the 22 needs the maintainer.
+  - W2.11 → #786 … #790 (22:01 UTC): in the sweep slot (Opus for #786, then Sonnet for #787 … #790).
+  No issue from outside the plan has been opened on the milestone, and none of the 27 needs the maintainer.
 - **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
   at the row's model. Each pushes to its wave branch, and the orchestrator reads its report and the branch. The
   first sessions, all started 09:12–09:14 UTC: W1.2 (Opus 5.5), W2.1 (Sonnet 5.5), W3.1 + W3.2 (one Opus 5.5

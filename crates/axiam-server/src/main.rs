@@ -646,7 +646,8 @@ async fn main() -> std::io::Result<()> {
                 // will start seeing 403s, and this line is where they find out
                 // why (see `ReconcileOutcome`). Two counters, one line each:
                 // organization-level actions and `network:` permissions are
-                // taken away for different reasons.
+                // taken away for different reasons. A tenant whose kind could
+                // not be read is skipped in both halves and counts in neither.
                 if reconciled.revoked > 0 {
                     tracing::warn!(
                         tenant = %tenant.id,

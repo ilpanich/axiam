@@ -334,6 +334,31 @@ enum NetworkHalf {
     Skip,
 }
 
+/// What the reconcile does about the organization-level actions in one tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrganizationHalf {
+    /// The tenant's kind is known: grant by the seeding rule and revoke what an
+    /// ordinary tenant's roles hold. `may_hold` is true for the organization's
+    /// own scope.
+    Reconcile { may_hold: bool },
+    /// The tenant's kind could not be read: touch no organization-level grant
+    /// this boot (R112W4-03).
+    Skip,
+}
+
+/// The reconcile's decision for the organization-level half, from the resolved
+/// scope. The same reasoning as [`network_half`]: the grants exist, so a failed
+/// read must not be taken as "not the organization scope" and strip that
+/// scope's super-admin of `organizations:*` until the next boot.
+const fn organization_half(scope: Option<bool>) -> OrganizationHalf {
+    match scope {
+        Some(organization_scope) => OrganizationHalf::Reconcile {
+            may_hold: organization_scope,
+        },
+        None => OrganizationHalf::Skip,
+    }
+}
+
 /// The reconcile's decision for the `network:` half, from the resolved scope.
 ///
 /// The seeder withholds the namespace from a tenant it cannot classify, which
@@ -871,14 +896,15 @@ pub async fn reconcile_default_role_grants<C: Connection>(
             tracing::warn!(
                 %tenant_id,
                 error = %e,
-                "could not read the tenant's kind; the network: half of the default-role \
-                 reconcile is skipped for it this boot (nothing revoked, nothing granted), \
-                 organization-level actions are withheld as usual"
+                "could not read the tenant's kind; the default-role reconcile is \
+                 skipped for it this boot, in both its network: and its organization-level \
+                 halves (nothing revoked, nothing granted)"
             );
             None
         }
     };
-    let may_hold_org_actions = organization_scope == Some(true);
+    let organization_half = organization_half(organization_scope);
+    let may_hold_org_actions = organization_half == OrganizationHalf::Reconcile { may_hold: true };
     let network_half = network_half(organization_scope);
     let network_super_admin = network_half
         == NetworkHalf::Reconcile {
@@ -887,6 +913,10 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 
     let mut outcome = ReconcileOutcome::default();
     for perm in &permissions.items {
+        if is_organization_level_action(&perm.action) && organization_half == OrganizationHalf::Skip
+        {
+            continue;
+        }
         // The reserved `network:` namespace: grant what the seeded roles may
         // hold, and take back what an earlier build of this branch granted them
         // (W6.1 gave both roles the whole namespace). Only the two seeded
@@ -1048,6 +1078,22 @@ mod tests {
         assert_eq!(network_half(None), NetworkHalf::Skip);
     }
 
+    /// R112W4-03: the organization-level half is decided the same way, and an
+    /// unresolved tenant revokes nothing in either half.
+    #[test]
+    fn the_organization_half_is_decided_from_the_resolved_kind() {
+        assert_eq!(
+            organization_half(Some(false)),
+            OrganizationHalf::Reconcile { may_hold: false }
+        );
+        assert_eq!(
+            organization_half(Some(true)),
+            OrganizationHalf::Reconcile { may_hold: true }
+        );
+        assert_eq!(organization_half(None), OrganizationHalf::Skip);
+        assert_eq!(network_half(None), NetworkHalf::Skip);
+    }
+
     /// #728 (R111W4-04): a tenant whose row cannot be read keeps the
     /// `network:` grants its roles hold and is granted none, while the
     /// organization-level withholding still applies. Here the tenant row does
@@ -1117,6 +1163,55 @@ mod tests {
         assert_eq!(outcome, ReconcileOutcome::default());
         assert_eq!(ids(roles.super_admin_role_id).await, sa_before);
         assert_eq!(ids(roles.admin_role_id).await, admin_before);
+    }
+
+    /// R112W4-03 probe: an unresolved tenant whose super-admin holds an
+    /// organization-level action keeps it (`revoked: 0`) and is granted nothing.
+    #[tokio::test]
+    async fn an_unresolved_tenant_revokes_no_organization_level_grant() {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        let tenant_id = Uuid::new_v4();
+        assert!(tenant_scope(&db, tenant_id).await.is_err());
+
+        let registry = [
+            ("users:list", "List users"),
+            ("organizations:update", "Update the organization"),
+        ];
+        seed_permissions(&db, tenant_id, &registry).await.unwrap();
+        let roles = seed_default_roles(&db, tenant_id, &registry).await.unwrap();
+        let perm_repo = SurrealPermissionRepository::new(db.clone());
+        let all = perm_repo
+            .list(
+                tenant_id,
+                Pagination {
+                    offset: 0,
+                    limit: 100,
+                    search: None,
+                },
+            )
+            .await
+            .unwrap()
+            .items;
+        let org_update = all
+            .iter()
+            .find(|p| p.action == "organizations:update")
+            .unwrap()
+            .id;
+        perm_repo
+            .grant_to_role(tenant_id, roles.super_admin_role_id, org_update)
+            .await
+            .unwrap();
+
+        let outcome = reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+
+        assert_eq!(outcome, ReconcileOutcome::default());
+        let held = perm_repo
+            .get_role_permissions(tenant_id, roles.super_admin_role_id)
+            .await
+            .unwrap();
+        assert!(held.iter().any(|p| p.id == org_update));
     }
 
     async fn setup_db() -> (Surreal<surrealdb::engine::local::Db>, Uuid) {

@@ -4297,3 +4297,230 @@ async fn a_pending_request_whose_account_is_anonymized_is_completed_and_recorded
         "DELETED_USER_pre0000000001"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #738 (R111W1-04) — two replicas' sweeps never run one erasure twice
+// ---------------------------------------------------------------------------
+
+use axiam_server::cleanup::{ERASURE_CLAIM_LEASE, purge_under_claim};
+
+fn erasure_claim_lease() -> chrono::TimeDelta {
+    chrono::TimeDelta::from_std(ERASURE_CLAIM_LEASE).unwrap()
+}
+
+/// One replica's GDPR sweep over the due accounts, as
+/// `CleanupTask::sweep_pending_purges` runs it: the accounts due at its `now`,
+/// each erased as a unit of its `work` under an exclusive claim. The unit's
+/// steps before the anonymization — the revocations of (a)…(b4) — are left
+/// out; the claim is taken before them, so they change nothing here. An error
+/// of any unit fails this sweep, which the real one only logs, so that "no
+/// error" is asserted, not assumed.
+async fn replica_sweep(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    sink: &Arc<RecordingPurgeSink>,
+    work: &AuditedWork,
+) -> Result<u64, AxiamError> {
+    let now = Utc::now();
+    let due = SurrealUserRepository::new(db.clone())
+        .find_due_for_purge(now)
+        .await?;
+    let mut purged = 0;
+    for user in due {
+        let (db, sink, unit_work) = (db.clone(), Arc::clone(sink), work.clone());
+        let (tenant_id, user_id) = (user.tenant_id, user.id);
+        let outcome = work
+            .run(async move {
+                let deletions = SurrealAccountDeletionRepository::new(db.clone());
+                let (audit, proofs, users, certs) = (
+                    SurrealAuditLogRepository::new(db.clone()),
+                    SurrealErasureProofRepository::new(db.clone()),
+                    SurrealUserRepository::new(db.clone()),
+                    SurrealCertificateRepository::new(db.clone()),
+                );
+                let pseudonym = format!("DELETED_USER_{}", user_id.simple());
+                // Per account: the address column is unique per tenant.
+                let email_hash = format!("hashed_{}", user_id.simple());
+                purge_under_claim(
+                    &deletions,
+                    tenant_id,
+                    user_id,
+                    now,
+                    erasure_claim_lease(),
+                    erase_and_record(
+                        &audit,
+                        &proofs,
+                        &users,
+                        &certs,
+                        &deletions,
+                        Some(sink.as_ref() as &dyn SsfSystemAccountSink),
+                        ErasureSubject {
+                            tenant_id,
+                            user_id,
+                            pseudonym: &pseudonym,
+                            email_hash: &email_hash,
+                            certificates_revoked: 0,
+                        },
+                        &unit_work,
+                    ),
+                )
+                .await
+            })
+            .await
+            .expect("the unit ran to its end");
+        if outcome? {
+            purged += 1;
+        }
+    }
+    Ok(purged)
+}
+
+/// The `account_purged` reports the sink received for `user`.
+fn reports_for(sink: &RecordingPurgeSink, user: Uuid) -> usize {
+    sink.purged
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, id, _, _)| *id == user)
+        .count()
+}
+
+/// #738: every replica runs the GDPR sweep. Two sweeps over one store, run at
+/// once against one due account — one with its deletion request, one without
+/// (claimed by the stamp on its user row) — erase each once: one unit erases,
+/// the other skips without an error, and the SSF sink sees one
+/// `account_purged` per account. Then, to make the overlap certain rather than
+/// likely, replica A is held after its claim and before the anonymization
+/// while replica B sweeps: B skips the account, and A erases it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sweeps_at_once_erase_one_due_account_once_and_neither_fails() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let with_request = erasure_due_with_its_request(&db, tenant_id, "race_738_req").await;
+    let without_request = user_due_for_erasure(&db, tenant_id, "race_738_bare").await;
+    let sink = Arc::new(RecordingPurgeSink::default());
+    let (a, b) = (never_stopping(), never_stopping());
+
+    let (one, other) = tokio::join!(replica_sweep(&db, &sink, &a), replica_sweep(&db, &sink, &b));
+    let (one, other) = (
+        one.expect("replica A's sweep reports no error"),
+        other.expect("replica B's sweep reports no error"),
+    );
+    assert_eq!(one + other, 2, "each account is erased by one replica");
+    for user in [&with_request, &without_request] {
+        assert_eq!(reports_for(&sink, user.id), 1, "one account_purged");
+        assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    }
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 2);
+    assert!(
+        SurrealAccountDeletionRepository::new(db.clone())
+            .find_pending_by_user_id(tenant_id, with_request.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the request is completed"
+    );
+
+    // The overlap, held open: A has claimed and not yet anonymized.
+    let held = erasure_due_with_its_request(&db, tenant_id, "held_738").await;
+    let (entered_tx, mut entered) = watch::channel(false);
+    let go = Arc::new(Notify::new());
+    let holding = never_stopping().with_step_for_tests(Some(hold_at(
+        UnitStep::ErasurePrepared(held.id),
+        entered_tx,
+        Arc::clone(&go),
+    )));
+    let replica_a = {
+        let (db, sink, holding) = (db.clone(), Arc::clone(&sink), holding.clone());
+        tokio::spawn(async move { replica_sweep(&db, &sink, &holding).await })
+    };
+    wait_until_entered(&mut entered).await;
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping())
+            .await
+            .expect("replica B's sweep reports no error"),
+        0,
+        "B skips the account A holds"
+    );
+    assert_eq!(reports_for(&sink, held.id), 0);
+    go.notify_one();
+    assert_eq!(replica_a.await.unwrap().expect("replica A's sweep"), 1);
+    assert_eq!(reports_for(&sink, held.id), 1);
+    assert_eq!(erasure_proof_count(&db, tenant_id, held.id).await, 1);
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 3);
+}
+
+/// #738: a claimant that stalls — a replica that died holding the claim, or a
+/// unit held past the lease — keeps the account from the other replicas for
+/// the lease only. Inside it, a sweep skips the account; past it, a sweep takes
+/// it over and erases it, once. A stalled unit that then wakes and runs its
+/// erasure meets the proof the other wrote and stops there: the proof's unique
+/// violation reads as "another unit erased it", not as an error, and nothing is
+/// written twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "stalled_738").await;
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
+    let sink = Arc::new(RecordingPurgeSink::default());
+
+    // The stalled replica's claim.
+    assert_eq!(
+        deletions
+            .claim_for_purge(tenant_id, user.id, Utc::now(), erasure_claim_lease())
+            .await
+            .unwrap(),
+        axiam_db::repository::PurgeClaimOutcome::Claimed
+    );
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping()).await.unwrap(),
+        0,
+        "inside the lease the account is skipped"
+    );
+    assert_eq!(reports_for(&sink, user.id), 0);
+
+    // The lease runs out (the claim is dated back past it).
+    db.query("UPDATE account_deletion SET purge_claimed_at = $at WHERE user_id = $u")
+        .bind(("u", user.id.to_string()))
+        .bind((
+            "at",
+            Utc::now() - erasure_claim_lease() - chrono::TimeDelta::minutes(1),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping()).await.unwrap(),
+        1,
+        "past the lease the account is taken over and erased"
+    );
+    assert_eq!(reports_for(&sink, user.id), 1);
+
+    // The stalled unit wakes and runs its erasure regardless.
+    let woke = erase_and_record(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &SurrealErasureProofRepository::new(db.clone()),
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &deletions,
+        None,
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: &format!("DELETED_USER_{}", user.id.simple()),
+            email_hash: &format!("hashed_{}", user.id.simple()),
+            certificates_revoked: 0,
+        },
+        &never_stopping(),
+    )
+    .await
+    .expect("another unit's proof is not an error");
+    assert!(!woke, "the stalled unit records nothing");
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await.len(),
+        1,
+        "gdpr.user_pseudonymized exists once"
+    );
+}

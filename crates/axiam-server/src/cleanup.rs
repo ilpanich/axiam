@@ -33,6 +33,7 @@ use axiam_core::repository::{
     SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsfEventBufferRepository,
     SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
+use axiam_db::repository::PurgeClaimOutcome;
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealConsentRepository, SurrealErasureProofRepository,
@@ -247,6 +248,22 @@ pub const TENANT_PURGE_LEASE: Duration = Duration::from_secs(60 * 60);
 /// written — a `SIGKILL`, or a unit cut at the stop's bound, whose spawned
 /// release the process exit may cancel (#687) — leaves the marker to this lease.
 pub const PENDING_RECORD_LEASE: Duration = TENANT_PURGE_LEASE;
+
+/// How long a unit's claim on an account's erasure (#738) keeps the other
+/// replicas' sweeps off the account: the tenant purge's lease, for the same
+/// reasons. Every replica runs the GDPR sweep, and two that read one due
+/// account used to run its erasure twice — the record stayed single, but the
+/// SSF `account_purged` went out twice and the later unit failed its tick on
+/// the proof. Now the first claim is exclusive: a second claimant skips the
+/// account without an error. A unit holds the claim from before its first
+/// destructive step to the anonymization — its point of no return, which
+/// clears `deletion_pending`, so no sweep selects the account again — and
+/// releases it on every exit before (a failure, a stop, a cut or a panic, from
+/// a drop guard), so the next sweep takes the account at once. Only a process
+/// that ends before the release is written — a `SIGKILL`, or a unit cut at the
+/// stop's bound, whose spawned release the process exit may cancel (#687) —
+/// leaves the account to this lease.
+pub const ERASURE_CLAIM_LEASE: Duration = TENANT_PURGE_LEASE;
 
 // ---------------------------------------------------------------------------
 // Shared rate-limit table (#638, R101W3-05)
@@ -943,6 +960,87 @@ impl<C: Connection> Drop for PurgeClaim<C> {
             Err(_) => tracing::warn!(
                 %tenant_id,
                 "the claim of a tenant purge that was cut outside a runtime lapses with its lease"
+            ),
+        }
+    }
+}
+
+/// A unit's claim on an account's erasure (#738), held from the claim to the
+/// anonymization and released on every other exit.
+///
+/// The unit releases it itself, awaited, where it can — a failure, or giving
+/// up at the stop. Every other exit — the unit aborted at the teardown's bound,
+/// a panic — drops the guard still holding the claim, and the drop spawns the
+/// release on the runtime, as [`PurgeClaim`]'s does, with the same residual: a
+/// release the process exit cancels leaves the account to
+/// [`ERASURE_CLAIM_LEASE`]. The release is conditional on the stamp and on the
+/// account still being deletion-pending, so a release after the anonymization
+/// (an error past the point of no return, a cut after it) changes nothing.
+struct ErasureClaim<C: Connection> {
+    deletions: SurrealAccountDeletionRepository<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    stamp: chrono::DateTime<Utc>,
+    held: bool,
+}
+
+impl<C: Connection> ErasureClaim<C> {
+    /// Release the claim, awaited.
+    async fn release(mut self) {
+        if let Err(e) = self
+            .deletions
+            .release_purge_claim(self.tenant_id, self.user_id, self.stamp)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                tenant_id = %self.tenant_id,
+                user_id = %self.user_id,
+                "could not release an erasure's claim; it lapses with its lease"
+            );
+        }
+        self.held = false;
+    }
+
+    /// The account is erased: no sweep selects it again, and there is nothing
+    /// left to release.
+    fn settle(mut self) {
+        self.held = false;
+    }
+}
+
+impl<C: Connection> Drop for ErasureClaim<C> {
+    fn drop(&mut self) {
+        if !self.held {
+            return;
+        }
+        let (deletions, tenant_id, user_id, stamp) = (
+            self.deletions.clone(),
+            self.tenant_id,
+            self.user_id,
+            self.stamp,
+        );
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(e) = deletions
+                        .release_purge_claim(tenant_id, user_id, stamp)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            %tenant_id,
+                            %user_id,
+                            "could not release the claim of an erasure that was cut; it lapses \
+                             with its lease"
+                        );
+                    }
+                });
+            }
+            Err(_) => tracing::warn!(
+                %tenant_id,
+                %user_id,
+                "the claim of an erasure cut outside a runtime lapses with its lease"
             ),
         }
     }
@@ -2136,11 +2234,16 @@ pub struct ErasureSubject<'a> {
 /// `Ok(true)`. A free function, and public, for the reason
 /// [`run_erasure_pipeline`] is one.
 ///
+/// `Ok(false)` too when the erasure proof turns out to exist already (#738):
+/// another unit erased the account after taking this one's claim over, and
+/// records it; this call records nothing.
+///
 /// # Errors
 ///
-/// Those of [`run_erasure_pipeline_reporting`], before anything is recorded.
-/// The completion and the audit row are not fallible here: a failed completion
-/// is logged, and a failed audit write is dead-lettered (SECHRD-12).
+/// Those of [`run_erasure_pipeline_reporting`], before anything is recorded,
+/// but the proof's unique violation (above). The completion and the audit row
+/// are not fallible here: a failed completion is logged, and a failed audit
+/// write is dead-lettered (SECHRD-12).
 pub async fn erase_and_record<A, EP, U, CR, C>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
@@ -2174,7 +2277,7 @@ where
     // never ran, so the user stays due for a retry via
     // `find_due_for_purge`, and NO erasure proof is ever written for an
     // incomplete erasure.
-    if !erasure_pipeline(
+    match erasure_pipeline(
         audit_repo,
         erasure_proof_repo,
         user_repo,
@@ -2185,9 +2288,24 @@ where
         sink,
         Some(work),
     )
-    .await?
+    .await
     {
-        return Ok(false);
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        // #738: the proof is unique per account, and only an erasure past its
+        // anonymization writes one, so a proof already there means another
+        // unit erased the account — one that took this unit's claim over after
+        // its lease. That unit records the erasure; this one has nothing left
+        // to do and is not a failure of the tick.
+        Err(AxiamError::AlreadyExists { entity }) if entity == ERASURE_PROOF_ENTITY => {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "cleanup: the account's erasure proof exists already; another unit erased it"
+            );
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
     }
     // #689: the anonymization stamped the account's erasure-record marker in
     // its own transaction. Hold it from here: cleared with the record below,
@@ -2300,6 +2418,10 @@ where
 
 /// The audit action that records an erasure.
 const USER_PSEUDONYMIZED_ACTION: &str = "gdpr.user_pseudonymized";
+
+/// The entity a duplicate erasure proof is refused as
+/// (`AxiamError::AlreadyExists`, from the proof's unique index).
+const ERASURE_PROOF_ENTITY: &str = "erasure_proof";
 
 /// Mark `user_id`'s pending deletion request completed, if it has one: the
 /// completion without the record marker (#689), logged and never fatal.
@@ -2445,6 +2567,82 @@ where
     Ok(recorded)
 }
 
+/// One due account's erasure under an exclusive claim (#738): claim it at the
+/// claimant's own `now`, run `erasure` — the unit's steps from the first
+/// destructive one to the record — and release the claim unless the account
+/// was erased.
+///
+/// `Ok(false)`, with nothing run, when the account is no longer due (its
+/// deletion was cancelled since the sweep's read, or another unit erased it)
+/// or another unit holds a claim on it younger than `lease`: two sweeps that
+/// read one due account erase it once, and the one that skips it reports no
+/// error. Otherwise the outcome is `erasure`'s. The claim is released, awaited,
+/// on every outcome but `Ok(true)`, and by its guard's drop if this future is
+/// dropped — a unit cut at the teardown's bound, or a panic — so the next sweep
+/// takes the account at once; the release changes nothing once the
+/// anonymization has run.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is:
+/// `axiam-server`'s integration tests run two sweeps' units against one store.
+///
+/// # Errors
+///
+/// A datastore failure of the claim (nothing ran), or `erasure`'s.
+pub async fn purge_under_claim<C, F>(
+    deletions: &SurrealAccountDeletionRepository<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    sweep_now: chrono::DateTime<Utc>,
+    lease: chrono::TimeDelta,
+    erasure: F,
+) -> Result<bool, AxiamError>
+where
+    C: Connection,
+    F: std::future::Future<Output = Result<bool, AxiamError>>,
+{
+    // The claimant's `now`, not the sweep's: the stamp starts the lease, and a
+    // sweep that reaches its last account long after it read them must not
+    // stamp a claim that is already old. Never earlier than the sweep's, so an
+    // account due at the sweep's read is due here too.
+    let stamp = Utc::now().max(sweep_now);
+    match deletions
+        .claim_for_purge(tenant_id, user_id, stamp, lease)
+        .await?
+    {
+        PurgeClaimOutcome::Claimed => {}
+        PurgeClaimOutcome::NotDue => {
+            tracing::info!(
+                %user_id,
+                %tenant_id,
+                "purge skipped: the account is no longer due (its deletion was cancelled, or \
+                 another unit erased it)"
+            );
+            return Ok(false);
+        }
+        PurgeClaimOutcome::Held => {
+            tracing::info!(
+                %user_id,
+                %tenant_id,
+                "purge skipped: another unit holds the account's erasure"
+            );
+            return Ok(false);
+        }
+    }
+    let claim = ErasureClaim {
+        deletions: deletions.clone(),
+        tenant_id,
+        user_id,
+        stamp,
+        held: true,
+    };
+    let erased = erasure.await;
+    match erased {
+        Ok(true) => claim.settle(),
+        _ => claim.release().await,
+    }
+    erased
+}
+
 /// What one account's purge needs, owned, so that it runs as a unit of
 /// [`AuditedWork`] — a task of its own (#624).
 struct ErasureUnit<C: Connection> {
@@ -2463,10 +2661,12 @@ struct ErasureUnit<C: Connection> {
 }
 
 impl<C: Connection> ErasureUnit<C> {
-    /// The purge of `user` (steps listed at `CleanupTask::sweep_pending_purges`):
-    /// `Ok(true)` once erased and recorded, `Ok(false)` when given up at the
-    /// stop before the point of no return — the account stays due — or when the
-    /// account is no longer due at the claim (its deletion was cancelled).
+    /// The purge of `user` (steps listed at `CleanupTask::sweep_pending_purges`),
+    /// under an exclusive claim ([`purge_under_claim`], #738): `Ok(true)` once
+    /// erased and recorded, `Ok(false)` when given up at the stop before the
+    /// point of no return — the account stays due — when the account is no
+    /// longer due at the claim (its deletion was cancelled) or another unit
+    /// holds it, or when another unit turned out to have erased it.
     async fn purge(
         self,
         user: axiam_core::models::user::User,
@@ -2476,23 +2676,35 @@ impl<C: Connection> ErasureUnit<C> {
     ) -> Result<bool, AxiamError> {
         // Item 11 of the 1.1.0 atomicity audit: the erasure is claimed before
         // its first destructive step, in a transaction that re-checks the
-        // account is still due at the sweep's `now`. A deletion cancelled since
-        // the sweep's read is skipped here, before anything is revoked; once
-        // claimed, a cancel is refused (`409`), so the subject is never told
-        // "cancelled" for an account this purge goes on to erase.
-        if !self
-            .account_deletion_repo
-            .claim_for_purge(user.tenant_id, user.id, now)
-            .await?
-        {
-            tracing::info!(
-                user_id = %user.id,
-                tenant_id = %user.tenant_id,
-                "purge skipped: the account's deletion was cancelled since the sweep read it"
-            );
-            return Ok(false);
-        }
+        // account is still due. A deletion cancelled since the sweep's read is
+        // skipped there, before anything is revoked; once claimed, a cancel is
+        // refused (`409`), so the subject is never told "cancelled" for an
+        // account this purge goes on to erase. #738: the claim is exclusive,
+        // for `ERASURE_CLAIM_LEASE`, so another replica's sweep that read the
+        // same account skips it.
+        let lease = chrono::TimeDelta::from_std(ERASURE_CLAIM_LEASE)
+            .map_err(|e| AxiamError::Internal(format!("erasure claim lease: {e}")))?;
+        let deletions = Arc::clone(&self.account_deletion_repo);
+        let (tenant_id, user_id) = (user.tenant_id, user.id);
+        purge_under_claim(
+            deletions.as_ref(),
+            tenant_id,
+            user_id,
+            now,
+            lease,
+            self.erase(user, pepper, work),
+        )
+        .await
+    }
 
+    /// The purge of a claimed account: steps (a)…(h), as
+    /// [`Self::purge`] lists them.
+    async fn erase(
+        self,
+        user: axiam_core::models::user::User,
+        pepper: [u8; 32],
+        work: AuditedWork,
+    ) -> Result<bool, AxiamError> {
         // Steps (a)…(b4) are idempotent and leave the account due: given up
         // where they are once the process is stopping.
         let Some(certificates_revoked) = work.until_stopped(self.prepare(&user)).await else {

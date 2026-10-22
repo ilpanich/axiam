@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
+use crate::helpers::classify_write_error;
 
 // ---------------------------------------------------------------------------
 // Row structs
@@ -71,9 +72,12 @@ impl<C: Connection> ErasureProofRepository for SurrealErasureProofRepository<C> 
             .await
             .map_err(DbError::from)?;
 
+        // A second proof for one account is refused by the unique index on
+        // `(tenant_id, user_id)` as `AlreadyExists`, so the purge can read it
+        // as "another unit erased it" (#738) rather than as an outage.
         let mut result = result
             .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+            .map_err(|e| classify_write_error(e, "erasure_proof"))?;
         let rows: Vec<ErasureProofRow> = result.take(0).map_err(DbError::from)?;
         let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
             entity: "erasure_proof".into(),
@@ -164,8 +168,13 @@ mod tests {
             .await;
 
         assert!(
-            duplicate.is_err(),
-            "a second erasure proof for the same (tenant_id, user_id) must be rejected by the UNIQUE index"
+            matches!(
+                duplicate,
+                Err(axiam_core::error::AxiamError::AlreadyExists { ref entity })
+                    if entity == "erasure_proof"
+            ),
+            "a second erasure proof for the same (tenant_id, user_id) must be rejected by the UNIQUE \
+             index, as AlreadyExists (#738): {duplicate:?}"
         );
     }
 }

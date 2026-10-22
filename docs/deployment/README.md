@@ -1930,9 +1930,9 @@ finished rather than wait for it:
   within the same bound, and cuts it there. Each has a point of no return — the
   erasure's anonymization of the account, the purge's removal of the tenant
   row — after which no later sweep finds the work again. Before it, the work
-  gives itself up as soon as the stop begins: the account stays due, the tenant
-  stays deleted and its purge claim is released, so the next start does the
-  work at once; once the stop has begun it starts no new crossing (a crossing
+  gives itself up as soon as the stop begins: the account stays due and its
+  erasure claim is released, the tenant stays deleted and its purge claim is
+  released, so the next start does the work at once; once the stop has begun it starts no new crossing (a crossing
   already being sent completes). So a stop
   can leave unfinished only:
   - an erasure or a tenant purge that crossed its point of no return **before**
@@ -1991,6 +1991,25 @@ finished rather than wait for it:
   records it once. (Corrected 2026-10-19, #714: before 1.1.1 a cut while the
   orphan purge read whether rows were left held the id for the lease, and could
   record an id another replica had already purged a second time.)
+  Every replica runs the GDPR purge sweep too, and an erasure is claimed the
+  same way (#738, 1.1.2): before its first destructive step the erasure takes
+  an exclusive claim on the account — on its deletion request
+  (`purge_claimed_at`), or, for an account deletion-pending without one, a
+  stamp on the user row — and another replica's sweep that read the same
+  account skips it without an error, so the account is erased once and its SSF
+  `account_purged` goes out once. The claim is released on every exit before
+  the anonymization (a failure, the stop, a cut or a panic), so the next sweep
+  takes the account at once; only a release that is not written — a
+  `SIGKILL`, or a unit cut at the stop's bound — leaves it to the one-hour
+  lease, after which any replica's sweep takes it over. A released claim still
+  refuses a cancel: the steps before the anonymization revoke what a cancel
+  does not restore. A unit that stalled past the lease and then runs on meets
+  the proof its successor wrote and stops there, recording nothing; the log
+  says `another unit erased it`. That case alone sends `account_purged` a
+  second time. (Corrected 2026-10-22, #738: before 1.1.2 two sweeps that read
+  one due account both ran its erasure; the record stayed single, but the SSF
+  notification went out twice and the later unit failed its tick on the
+  proof.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for

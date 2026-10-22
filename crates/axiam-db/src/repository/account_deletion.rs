@@ -283,17 +283,36 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
 // first makes the claim find the account no longer due, and the sweep skips
 // it. The loser of an overlap is retried on a fresh snapshot, where its
 // re-check sees the winner.
+//
+// The claim is also exclusive (#738): every replica runs the sweep, and a
+// claim was idempotent, so two sweeps that read one due account both ran its
+// erasure. Now a claim younger than the lease answers `Held` to a second
+// claimant, and the unit releases it on every exit before the anonymization.
 
 const DELETION_GONE: &str = "axiam:account_deletion_gone";
 const DELETION_CANCELLED: &str = "axiam:account_deletion_cancelled";
 const DELETION_ERASING: &str = "axiam:account_deletion_erasing";
 const DELETION_EXPIRED: &str = "axiam:account_deletion_expired";
 const PURGE_NOT_DUE: &str = "axiam:account_purge_not_due";
+const PURGE_HELD: &str = "axiam:account_purge_held";
 
 /// What a cancel that is no longer possible answers through
 /// [`AccountDeletionRepository::mark_cancelled`].
 const NOT_CANCELLABLE: &str = "the deletion request is no longer pending: it was cancelled already, or its erasure has \
      started";
+
+/// What [`SurrealAccountDeletionRepository::claim_for_purge`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeClaimOutcome {
+    /// The claim is this caller's, stamped with its `now`, until it erases the
+    /// account, releases the claim, or the lease runs out.
+    Claimed,
+    /// The account is no longer deletion-pending and due: its deletion was
+    /// cancelled, or another unit has erased it.
+    NotDue,
+    /// Another unit holds a claim on the account younger than the lease.
+    Held,
+}
 
 /// What [`SurrealAccountDeletionRepository::cancel_pending`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,22 +419,37 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     }
 
     /// Claim `user_id`'s erasure for the purge sweep, before its first
-    /// destructive step: `true` when the account is still deletion-pending and
-    /// due at `now` (the sweep's own `now`, the one it selected the account
-    /// with), and its pending request — if it has one — is marked
-    /// `purge_claimed_at`; `false` when it is no longer due (its deletion was
-    /// cancelled since the sweep's read), and the sweep skips it.
+    /// destructive step, exclusively and for `lease` (#738).
     ///
-    /// Idempotent: a claimed request keeps its first claim time, so a purge
-    /// that stopped before its point of no return is claimed again by the next
-    /// sweep. Once claimed, a request can no longer be cancelled.
+    /// [`PurgeClaimOutcome::NotDue`] when the account is no longer
+    /// deletion-pending and due at `now` (its deletion was cancelled since the
+    /// sweep's read), and [`PurgeClaimOutcome::Held`] when another unit holds a
+    /// claim on it younger than `lease`: the sweep skips the account either
+    /// way. Otherwise the claim is taken, stamped with `now`, and the answer is
+    /// [`PurgeClaimOutcome::Claimed`].
+    ///
+    /// The claim lives on the pending request, as `purge_claimed_at`; an
+    /// erasure without a request row is claimed by the same stamp on the user
+    /// row, in `erasure_audit_pending` — the field the anonymization overwrites
+    /// with its record marker, and the recovery reads only on an `Anonymized`
+    /// row, so a claim on an account not yet erased is never taken for an owed
+    /// record. A claim is free when its stamp is `NONE`, released (the Unix
+    /// epoch, [`Self::release_purge_claim`]) or at or before `now - lease`:
+    /// two sweeps that read one due account both reach this transaction, the
+    /// engine serialises their writes to the one row, and the second, retried
+    /// on a fresh snapshot, finds the first's claim live.
+    ///
+    /// Once claimed, a request can no longer be cancelled, released or not:
+    /// the steps before the point of no return revoke what a cancel does not
+    /// restore.
     pub async fn claim_for_purge(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         now: DateTime<Utc>,
-    ) -> AxiamResult<bool> {
-        retry_on_write_conflict(|| self.claim_tx(tenant_id, user_id, now))
+        lease: chrono::TimeDelta,
+    ) -> AxiamResult<PurgeClaimOutcome> {
+        retry_on_write_conflict(|| self.claim_tx(tenant_id, user_id, now, lease))
             .await
             .map_err(AxiamError::from)
     }
@@ -425,15 +459,32 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         tenant_id: Uuid,
         user_id: Uuid,
         now: DateTime<Utc>,
-    ) -> Result<bool, TxFail> {
+        lease: chrono::TimeDelta,
+    ) -> Result<PurgeClaimOutcome, TxFail> {
+        // A pending request is the claim's home; the user row's stamp stands
+        // in only where there is none. A live stamp on either holds the
+        // account, so a request created after a user-row claim does not open
+        // a second way in.
         let query = format!(
             "BEGIN TRANSACTION; \
              LET $due = (SELECT VALUE meta::id(id) FROM type::record('user', $user_id) \
                  WHERE tenant_id = $tenant_id AND deletion_pending = true \
                  AND scheduled_purge_at <= $now); \
              IF array::len($due) = 0 {{ THROW '{PURGE_NOT_DUE}'; }}; \
-             UPDATE account_deletion SET purge_claimed_at = purge_claimed_at ?? $now \
-                 WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending'; \
+             LET $held = (SELECT VALUE meta::id(id) FROM account_deletion \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending' \
+                 AND purge_claimed_at != NONE AND purge_claimed_at > $cutoff); \
+             LET $user_held = (SELECT VALUE meta::id(id) FROM type::record('user', $user_id) \
+                 WHERE erasure_audit_pending != NONE AND erasure_audit_pending > $cutoff); \
+             IF array::len($held) > 0 OR array::len($user_held) > 0 \
+                 {{ THROW '{PURGE_HELD}'; }}; \
+             LET $taken = (UPDATE account_deletion SET purge_claimed_at = $now \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id AND status = 'pending' \
+                 RETURN VALUE meta::id(id)); \
+             IF array::len($taken) = 0 {{ \
+                 UPDATE type::record('user', $user_id) SET erasure_audit_pending = $now \
+                 WHERE tenant_id = $tenant_id RETURN NONE; \
+             }}; \
              COMMIT TRANSACTION"
         );
         let mut result = self
@@ -443,23 +494,91 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             .bind(("user_id", user_id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("now", now))
+            .bind(("cutoff", now - lease))
             .await?;
         let errors = result.take_errors();
         if errors.is_empty() {
-            return Ok(true);
+            return Ok(PurgeClaimOutcome::Claimed);
         }
         let combined = errors
             .into_values()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
             .join("; ");
+        // The refusals first: the statements after a THROW report "not
+        // executed due to a failed transaction", a write-conflict marker too.
         if combined.contains(PURGE_NOT_DUE) {
-            return Ok(false);
+            return Ok(PurgeClaimOutcome::NotDue);
+        }
+        if combined.contains(PURGE_HELD) {
+            return Ok(PurgeClaimOutcome::Held);
         }
         Err(TxFail::Db(classify_write_error(
             combined,
             "account_deletion",
         )))
+    }
+
+    /// Give up the claim `stamp` on `user_id`'s erasure without erasing it,
+    /// so the next sweep takes the account at once rather than after the
+    /// lease (#738): the request's `purge_claimed_at` becomes the Unix epoch —
+    /// older than any lease, and still not `NONE`, so the request stays
+    /// uncancellable — and a user-row stamp is cleared.
+    ///
+    /// Only while the account is still deletion-pending: once the
+    /// anonymization — the point of no return — has cleared that flag, the
+    /// user row's `erasure_audit_pending` is the erasure's record marker, not
+    /// this claim, and is left alone; so is a claim another unit has since
+    /// taken over, which carries a different stamp.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure; the claim then lapses with its lease.
+    pub async fn release_purge_claim(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        stamp: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "BEGIN TRANSACTION; \
+                     LET $due = (SELECT VALUE meta::id(id) FROM type::record('user', $user_id) \
+                         WHERE tenant_id = $tenant_id AND deletion_pending = true); \
+                     IF array::len($due) > 0 { \
+                         UPDATE account_deletion SET purge_claimed_at = $epoch \
+                         WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                           AND status = 'pending' AND purge_claimed_at = $stamp RETURN NONE; \
+                         UPDATE type::record('user', $user_id) SET erasure_audit_pending = NONE \
+                         WHERE tenant_id = $tenant_id AND deletion_pending = true \
+                           AND erasure_audit_pending = $stamp RETURN NONE; \
+                     }; \
+                     COMMIT TRANSACTION;",
+                )
+                .bind(("user_id", user_id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("stamp", stamp))
+                .bind(("epoch", DateTime::<Utc>::UNIX_EPOCH))
+                .await?;
+            let errors = result.take_errors();
+            if errors.is_empty() {
+                return Ok(());
+            }
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(TxFail::Db(classify_write_error(
+                combined,
+                "account_deletion",
+            )))
+        })
+        .await
+        .map_err(AxiamError::from)
     }
 }
 

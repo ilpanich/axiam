@@ -76,7 +76,7 @@ use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
 use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
-use crate::extractors::auth::may_admit_as_session;
+use crate::extractors::auth::{SessionValidator, admissible_session};
 use crate::middleware::tenant_path::TenantPathBinding;
 
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
@@ -320,6 +320,70 @@ pub struct RateLimitPrincipal {
     pub sender_constrained: bool,
 }
 
+/// Left in a request's extensions by [`confirm_principal_session`] when the
+/// session the request's token names is live (#786, R112W2-01) — the one fact
+/// about admission [`verified_principal`] cannot read from the token itself.
+///
+/// It is a rate-limit key input and nothing else: the session extractor never
+/// reads it and makes its own check, so the limiter's verdict cannot admit
+/// anybody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrincipalSessionLive;
+
+/// The principal and session of a verified token the session extractor could
+/// admit, as far as that is decidable without the datastore.
+fn admissible_principal(req: &ServiceRequest) -> Option<(RateLimitPrincipal, Uuid)> {
+    let config = req.app_data::<web::Data<AuthConfig>>()?;
+    let extensions = req.extensions();
+    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
+    let path_tenant = extensions
+        .get::<TenantPathBinding>()
+        .map(|binding| binding.tenant_id);
+    let session = admissible_session(cached, config, path_tenant)?;
+    let principal = RateLimitPrincipal {
+        tenant_id: cached.tenant_id,
+        subject: cached.user_id,
+        sender_constrained: cached.claims.0.cnf.is_some(),
+    };
+    Some((principal, session))
+}
+
+/// Ask the session store whether the session behind this request's token is
+/// live, and record [`PrincipalSessionLive`] when it is — the asynchronous
+/// half of [`verified_principal`], run by the principal-keyed shared layer
+/// (`RateLimitShared::keyed_on_principal`) before either limiter charges
+/// (#786, R112W2-01).
+///
+/// The same [`SessionValidator`], with the same `(tenant, session)`, that
+/// [`AuthenticatedUser`](crate::extractors::auth::AuthenticatedUser) asks after
+/// the limiters. With no validator registered the extractor checks no session,
+/// so neither does this: the session counts as live. A token
+/// [`admissible_principal`] already declines costs no read.
+///
+/// The shared layer runs whether `AXIAM__RATE_LIMIT__SHARED` is on or off (off,
+/// its counter allows everything), and sits outside the in-process governor on
+/// each of the five routes, so the governor never charges a principal whose
+/// session this has not confirmed.
+pub async fn confirm_principal_session(req: &ServiceRequest) {
+    let Some((principal, session)) = admissible_principal(req) else {
+        return;
+    };
+    let validator = req
+        .app_data::<web::Data<Arc<dyn SessionValidator>>>()
+        .map(|d| d.get_ref().clone());
+    let live = match validator {
+        Some(validator) => {
+            validator
+                .is_session_active(principal.tenant_id, session)
+                .await
+        }
+        None => true,
+    };
+    if live {
+        req.extensions_mut().insert(PrincipalSessionLive);
+    }
+}
+
 /// The verified principal of this request, or `None` when no token verified
 /// or the token is one the session extractor would refuse.
 ///
@@ -336,24 +400,22 @@ pub struct RateLimitPrincipal {
 /// a device-grant token, a resource-audience token a relying party holds —
 /// must not spend the principal's allowance, or whoever holds one can drain
 /// it from many addresses. So the principal is returned only for a token
-/// [`may_admit_as_session`] passes (no `AuthConfig` in scope: the extractor
-/// would refuse every token, and so the address); the refusals it cannot
-/// decide without the datastore are refunded by the shared counter instead.
+/// [`admissible_session`] passes (no `AuthConfig` in scope: the extractor
+/// would refuse every token, and so the address).
+///
+/// #786 (R112W2-01): nor for a token whose session is revoked or expired. That
+/// needs the datastore, so [`confirm_principal_session`] asks it first and this
+/// returns the principal only when it found the session live
+/// ([`PrincipalSessionLive`]). The in-process governor beneath has no refund,
+/// so the key has to be right before it charges: a stale token is keyed on its
+/// address, in both layers. Without that check in the composition (a governor
+/// with no principal-keyed shared layer outside it) every request is keyed on
+/// its address.
 pub fn verified_principal(req: &ServiceRequest) -> Option<RateLimitPrincipal> {
-    let config = req.app_data::<web::Data<AuthConfig>>()?;
-    let extensions = req.extensions();
-    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
-    let path_tenant = extensions
-        .get::<TenantPathBinding>()
-        .map(|binding| binding.tenant_id);
-    if !may_admit_as_session(cached, config, path_tenant) {
+    if !req.extensions().contains::<PrincipalSessionLive>() {
         return None;
     }
-    Some(RateLimitPrincipal {
-        tenant_id: cached.tenant_id,
-        subject: cached.user_id,
-        sender_constrained: cached.claims.0.cnf.is_some(),
-    })
+    admissible_principal(req).map(|(principal, _)| principal)
 }
 
 /// The identity part of a bucket key — `{endpoint}:{this}` in the shared

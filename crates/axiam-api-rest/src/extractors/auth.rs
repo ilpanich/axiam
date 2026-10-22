@@ -1271,7 +1271,7 @@ fn check_user_aud_and_parse_jti(
 
 /// [`check_user_aud_and_parse_jti`]'s decision without its log line: the
 /// session a user-audience token names, or the extractor's reason for refusing
-/// it. Shared with [`may_admit_as_session`], so the rate limiter and the
+/// it. Shared with [`admissible_session`], so the rate limiter and the
 /// extractor cannot disagree about the audience rules.
 fn user_session_of(
     validated: &ValidatedClaims,
@@ -1324,26 +1324,31 @@ fn user_session_of(
 ///   so the session check refuses it whenever a [`SessionValidator`] is
 ///   registered, which the server always does.
 ///
-/// Not mirrored, because each needs a datastore read or write: the session's
-/// liveness (a revoked or expired session), the DPoP proof's single use, and
-/// the active tenant. A token refused on one of those is still keyed on its
-/// principal; the shared counter refunds that charge
+/// Returns the session the token names when all of these pass, `None`
+/// otherwise. That session's **liveness** (a revoked or expired session) needs
+/// the datastore, so it is not decided here: the principal-keyed rate limiter
+/// asks the same [`SessionValidator`] before either of its layers charges
+/// (`extractors::rate_limit::confirm_principal_session`, #786). Not mirrored at
+/// all: the DPoP proof's single use and the active tenant, each a datastore
+/// read or write. A token refused on the proof is keyed on its address and
+/// principal together and the shared counter refunds that charge
 /// ([`SessionCredentialRefused`]). The sender constraint is not mirrored
 /// either: the key already pairs a bound token with its address.
-pub fn may_admit_as_session(
+pub fn admissible_session(
     identity: &CachedUserIdentity,
     config: &AuthConfig,
     path_tenant: Option<Uuid>,
-) -> bool {
+) -> Option<Uuid> {
     let claims = &identity.claims.0;
     let grant_without_session = claims.sid.is_none()
         && (claims.client_id.is_some()
             || claims.permissions.is_some()
             || claims.act.is_some()
             || claims.ext_exchange.is_some());
-    user_session_of(&identity.claims, config.allow_missing_aud_as_user).is_ok()
-        && !grant_without_session
-        && path_tenant.is_none_or(|tenant| tenant == identity.tenant_id)
+    if grant_without_session || path_tenant.is_some_and(|tenant| tenant != identity.tenant_id) {
+        return None;
+    }
+    user_session_of(&identity.claims, config.allow_missing_aud_as_user).ok()
 }
 
 // ---------------------------------------------------------------------------

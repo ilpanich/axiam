@@ -67,8 +67,8 @@ use surrealdb::Connection;
 use crate::config::rate_limit::{RateLimitConfig, RateLimitKeyMode};
 use crate::extractors::auth::SessionCredentialRefused;
 use crate::extractors::rate_limit::{
-    RateLimitClientId, XForwardedForKeyExtractor, bucket_key_part, extract_client_id,
-    verified_principal,
+    RateLimitClientId, XForwardedForKeyExtractor, bucket_key_part, confirm_principal_session,
+    extract_client_id, verified_principal,
 };
 use crate::state::AppState;
 
@@ -218,6 +218,12 @@ impl<C: Connection + Clone> RateLimitShared<C> {
     /// `build_principal_governor`), and [`bucket_key_part`] makes both layers
     /// derive the same key. The request body is never read.
     ///
+    /// This layer is also where the token's session is confirmed live, before
+    /// either layer charges (`confirm_principal_session`, #786): the governor
+    /// reads that verdict, so it must sit **inside** this layer, as it does on
+    /// every route that pairs them. It costs one session read per request whose
+    /// token could be admitted — the read the extractor makes after it.
+    ///
     /// The route's handler must take
     /// [`AuthenticatedUser`](crate::extractors::auth::AuthenticatedUser) as a
     /// **required** extractor (#754): a credential refusal is refunded on the
@@ -318,11 +324,14 @@ where
 /// and `/auth/login`'s wrong passwords stay counted. A `401`/`403` the
 /// *handler* returned is never refunded: the request reached what the bucket
 /// protects. What a refund leaves uncounted is therefore only the extractor's
-/// own refusal of a validly signed token for that principal — a session
-/// lookup, or one DPoP proof's single use — and it is not an attempt at
-/// anything: no secret is guessed and no handler runs. It stays bounded per
-/// replica by the principal-keyed in-process governor (which has no refund)
-/// and per address by the route's backstop.
+/// own refusal of a validly signed token for that principal — one DPoP proof's
+/// single use, or a session revoked between this layer's liveness check and
+/// the extractor's — and it is not an attempt at anything: no secret is
+/// guessed and no handler runs. It stays bounded per replica by the
+/// principal-keyed in-process governor (which has no refund) and per address
+/// by the route's backstop. A session already revoked when the request arrives
+/// is not refunded here: [`verified_principal`] keys it on its address
+/// (#786).
 fn refunds_the_charge<B>(
     status: StatusCode,
     principal_keyed: bool,
@@ -443,8 +452,17 @@ where
             // #633: the verified principal, for the routes keyed on one —
             // read from the audit middleware's cached identity, never
             // verified here (see `verified_principal`).
+            //
+            // #786 (R112W2-01): first ask whether the token's session is live,
+            // which a key cannot read from the token. Here, before this layer
+            // or the in-process governor beneath it charges anything, so a
+            // token whose session was revoked is keyed on its address in both:
+            // the governor has no refund to undo a charge to the principal.
             let principal = match key_mode {
-                RateLimitKeyMode::Principal => verified_principal(&req),
+                RateLimitKeyMode::Principal => {
+                    confirm_principal_session(&req).await;
+                    verified_principal(&req)
+                }
                 _ => None,
             };
 
@@ -511,10 +529,11 @@ where
                 // #754 (R111-04): a principal's bucket is refunded, too, when
                 // the session extractor refused the request's credential
                 // (`401`/`403` with `SessionCredentialRefused`) — a token it
-                // only refuses after a datastore read, such as one whose
-                // session was revoked, must not spend the principal's
-                // allowance. See `refunds_the_charge` for why no other
-                // `401`/`403` is refunded.
+                // only refuses after a datastore read, such as a replayed DPoP
+                // proof, must not spend the principal's allowance (a revoked
+                // session is keyed on its address before this, #786). See
+                // `refunds_the_charge` for why no other `401`/`403` is
+                // refunded.
                 if refunds_the_charge(res.status(), principal_keyed, &res)
                     && let Some((counter, key, true)) = &charged
                 {

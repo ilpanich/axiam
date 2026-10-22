@@ -31,10 +31,15 @@
 //!   principal's bucket. A device-grant token and a resource-audience token
 //!   for a user are keyed on their address, so whoever holds one cannot drain
 //!   that user's allowance from many addresses; a token refused only after the
-//!   datastore read (a revoked session) and a client's token at a console-only
-//!   route (`403`) are refunded by the shared counter; and neither a handler's
-//!   own `401` nor an address-keyed refusal is refunded, so the refund cannot
-//!   be farmed.
+//!   datastore read (a session revoked while the request was in flight) and a
+//!   client's token at a console-only route (`403`) are refunded by the shared
+//!   counter; and neither a handler's own `401` nor an address-keyed refusal is
+//!   refunded, so the refund cannot be farmed.
+//! - #786 (R112W2-01): a token whose session is already revoked is keyed on its
+//!   address in both layers — the limiter asks the session store before either
+//!   charges — so in the production composition, with the in-process governor
+//!   (which has no refund) present and the shared counter on or off, it cannot
+//!   spend its user's allowance, and it is still limited on its address.
 //!
 //! The requests are ones the handler refuses (`400` for an empty
 //! `redirect_uri`, `401` for a token that does not verify) without touching
@@ -300,6 +305,29 @@ impl SessionValidator for LiveSessions {
 
 fn live_sessions(sessions: &[Uuid]) -> Arc<dyn SessionValidator> {
     Arc::new(LiveSessions(sessions.iter().copied().collect()))
+}
+
+/// `session` is revoked while every request is in flight: the limiter's
+/// liveness check (each request's first question) finds it live, the
+/// extractor's (its second) finds it gone. Every other session is live.
+struct RevokedInFlight {
+    session: Uuid,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl SessionValidator for RevokedInFlight {
+    fn is_session_active<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let live = session_id != self.session
+            || self
+                .asked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .is_multiple_of(2);
+        Box::pin(async move { live })
+    }
 }
 
 /// The production composition: the audit middleware (when `$audit`) around
@@ -973,6 +1001,100 @@ async fn a_client_token_with_a_live_session_spends_its_users_bucket() {
     );
 }
 
+/// #786 (R112W2-01), the review's probe B: the production composition, with
+/// the in-process governor — which has no refund — beneath the shared counter,
+/// on and off. `PER_MIN + 1` requests with X's revoked session's token, each
+/// from its own address, are refused `401`; X's live session then has its whole
+/// allowance, and is limited on it. Keyed on X, the governor would have
+/// refused X after the stale token's `PER_MIN`th request.
+#[actix_rt::test]
+async fn a_revoked_sessions_token_never_spends_its_users_bucket() {
+    for counter_on in [true, false] {
+        let db = fresh_db().await;
+        let auth = auth_config();
+        let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+        let counter = if counter_on {
+            enabled_counter(&db)
+        } else {
+            disabled_counter()
+        };
+        let app = routes_app!(
+            db, auth, counter, audit: true,
+            sessions: Some(live_sessions(&[live]))
+        );
+        let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+        let stale = x.session_token(&auth, revoked);
+
+        for i in 0..=PER_MIN {
+            let got = status(&app, oidc_authorize(&stale, peer(100 + i as u8))).await;
+            assert_eq!(
+                got, 401,
+                "shared counter on: {counter_on}; the revoked session's request {i} is refused, \
+                 not limited"
+            );
+        }
+        let own = x.session_token(&auth, live);
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize(&own, peer(110 + i as u8))).await;
+            assert_eq!(
+                got, 400,
+                "shared counter on: {counter_on}; X's live session's request {i} is served"
+            );
+        }
+        assert_eq!(
+            status(&app, oidc_authorize(&own, peer(119))).await,
+            429,
+            "shared counter on: {counter_on}; X's allowance is X's, whole and still bounded"
+        );
+    }
+}
+
+/// #786: the farming bound. A revoked session's token is keyed on its address,
+/// where nothing is refunded, so one address gets `PER_MIN` refusals and then
+/// `429` — with the shared counter on (whose address charge is kept) and off
+/// (the governor alone) — and X's live session is untouched by it.
+#[actix_rt::test]
+async fn a_revoked_sessions_token_is_limited_on_its_address() {
+    for counter_on in [true, false] {
+        let db = fresh_db().await;
+        let auth = auth_config();
+        let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+        let counter = if counter_on {
+            enabled_counter(&db)
+        } else {
+            disabled_counter()
+        };
+        let app = routes_app!(
+            db, auth, counter, audit: true,
+            sessions: Some(live_sessions(&[live]))
+        );
+        let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+        let stale = x.session_token(&auth, revoked);
+
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize(&stale, peer(120))).await;
+            assert_eq!(
+                got, 401,
+                "shared counter on: {counter_on}; the revoked session's refusal {i}"
+            );
+        }
+        assert_eq!(
+            status(&app, oidc_authorize(&stale, peer(120))).await,
+            429,
+            "shared counter on: {counter_on}; the address's allowance ends"
+        );
+        assert_eq!(
+            status(
+                &app,
+                oidc_authorize(&x.session_token(&auth, live), peer(121))
+            )
+            .await,
+            400,
+            "shared counter on: {counter_on}; X's live session is served"
+        );
+    }
+}
+
 /// The shared counter alone on one principal-keyed resource, whose handler is
 /// `handler` — so what is observed is the shared layer's charge and refund,
 /// with no governor beside it.
@@ -1005,12 +1127,12 @@ macro_rules! shared_only_app {
     }};
 }
 
-/// #754: a token refused only after the datastore read — X's revoked session —
-/// is keyed on X, and the shared counter refunds the charge on the extractor's
-/// `401`. Three allowances' worth from many addresses are all refused `401`,
+/// #754, as amended by #786: X's revoked session's token is keyed on its
+/// address by the shared counter alone too (the liveness check is the shared
+/// layer's). Three allowances' worth from many addresses are all refused `401`,
 /// none `429`, and X's live session then has the whole allowance.
 #[actix_rt::test]
-async fn the_shared_counter_refunds_a_revoked_sessions_401() {
+async fn the_shared_counter_alone_keys_a_revoked_sessions_token_on_its_address() {
     let db = fresh_db().await;
     let auth = auth_config();
     let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
@@ -1028,7 +1150,7 @@ async fn the_shared_counter_refunds_a_revoked_sessions_401() {
         let got = status(&app, oidc_authorize(&stale, peer(210 + i as u8))).await;
         assert_eq!(
             got, 401,
-            "the revoked session's request {i} is refused and refunded"
+            "the revoked session's request {i} is refused on its own address"
         );
     }
     let own = x.session_token(&auth, live);
@@ -1037,6 +1159,44 @@ async fn the_shared_counter_refunds_a_revoked_sessions_401() {
         assert_eq!(got, 400, "X's live session's request {i} is served");
     }
     assert_eq!(status(&app, oidc_authorize(&own, peer(230))).await, 429);
+}
+
+/// #754: the refund on `401`. A session revoked between the limiter's liveness
+/// check and the extractor's is keyed on X, and the extractor's `401` is
+/// refunded: three allowances' worth from many addresses are all refused
+/// `401`, none `429`, and X's live session then has the whole allowance.
+#[actix_rt::test]
+async fn the_shared_counter_refunds_a_session_revoked_in_flight() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+    let sessions: Arc<dyn SessionValidator> = Arc::new(RevokedInFlight {
+        session: revoked,
+        asked: Default::default(),
+    });
+    let app = shared_only_app!(
+        db,
+        auth,
+        sessions,
+        "refund_in_flight_principal_test",
+        |_: AuthenticatedUser| async { HttpResponse::BadRequest().finish() }
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let stale = x.session_token(&auth, revoked);
+
+    for i in 0..PER_MIN * 3 {
+        let got = status(&app, oidc_authorize(&stale, peer(220 + i as u8))).await;
+        assert_eq!(
+            got, 401,
+            "the in-flight revocation's request {i} is refused and refunded"
+        );
+    }
+    let own = x.session_token(&auth, live);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(235))).await;
+        assert_eq!(got, 400, "X's live session's request {i} is served");
+    }
+    assert_eq!(status(&app, oidc_authorize(&own, peer(235))).await, 429);
 }
 
 /// #754: the refund on `403` — a relying party's token at a console-only route

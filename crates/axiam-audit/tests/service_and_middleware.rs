@@ -10,7 +10,7 @@ use std::time::Duration;
 use actix_web::cookie::Cookie;
 use actix_web::dev::Service as _;
 use actix_web::{App, HttpMessage, HttpResponse, test, web};
-use axiam_audit::middleware::AuditMiddleware;
+use axiam_audit::middleware::{AuditMiddleware, ClientIpRule};
 use axiam_audit::service::AuditService;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
@@ -18,6 +18,7 @@ use axiam_auth::token::{
     issue_service_account_token, validate_access_token,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::forwarded_for::TrustedProxies;
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::Utc;
@@ -302,6 +303,59 @@ async fn middleware_records_client_ip() {
     wait_for_entries(&repo, 1).await;
     let entries = repo.snapshot();
     assert_eq!(entries[0].ip_address.as_deref(), Some("203.0.113.7"));
+}
+
+/// Record one request carrying `X-Forwarded-For: xff` from `peer` under
+/// `10.0.0.0/8` as the trusted proxies (#752, T-212). The rule is injected, not
+/// read from the process environment.
+async fn audit_one_forwarded(peer: &str, xff: &str, hops: usize) -> CreateAuditLogEntry {
+    let repo = RecordingRepo::new();
+    let rule = ClientIpRule {
+        trusted_hops: hops,
+        trusted_proxies: TrustedProxies::parse("10.0.0.0/8").unwrap(),
+    };
+    let mw = AuditMiddleware::spawn(repo.clone()).with_client_ip_rule(rule);
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/ip",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+    let req = test::TestRequest::get()
+        .uri("/api/ip")
+        .insert_header(("X-Forwarded-For", xff))
+        .peer_addr(peer.parse().unwrap())
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    repo.snapshot().remove(0)
+}
+
+#[actix_web::test]
+async fn a_peer_outside_the_trusted_proxies_is_recorded_as_itself_with_the_claim_beside_it() {
+    let row = audit_one_forwarded("203.0.113.7:5555", "1.2.3.4", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(
+        row.metadata.unwrap()["forwarded_for_claimed"],
+        serde_json::json!("1.2.3.4")
+    );
+}
+
+#[actix_web::test]
+async fn a_listed_peer_is_recorded_as_the_rightmost_untrusted_hop() {
+    // client-written `9.9.9.9`, then the address the proxy saw, `198.51.100.5`.
+    let row = audit_one_forwarded("10.1.2.3:5555", "9.9.9.9, 198.51.100.5", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("198.51.100.5"));
+    assert_eq!(
+        row.metadata.unwrap()["forwarded_for_claimed"],
+        serde_json::json!("9.9.9.9")
+    );
+}
+
+#[actix_web::test]
+async fn no_claim_is_recorded_when_the_leftmost_entry_is_the_recorded_address() {
+    let row = audit_one_forwarded("10.1.2.3:5555", "198.51.100.5", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("198.51.100.5"));
+    assert!(row.metadata.unwrap().get("forwarded_for_claimed").is_none());
 }
 
 /// T-110. The third of the three minimisations the GDPR document names —

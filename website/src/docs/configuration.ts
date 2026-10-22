@@ -529,7 +529,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__TRUSTED_PROXIES",
-            "The proxies whose X-Forwarded-For is read at all: CIDR blocks or addresses, comma-separated (default empty). With a list, a request whose transport peer is inside it is keyed under `TRUSTED_HOPS` as before, and every other request is keyed on its peer, whatever header it wrote — so a client that reaches the listener with no proxy in front can no longer choose its own bucket. Empty, every peer's header is read, as before 1.1.1; with native TLS on, the server then logs one `WARN` at boot. A value that does not parse stops the boot. Both listeners read it.",
+            "The proxies whose X-Forwarded-For is read at all: CIDR blocks or addresses, comma-separated (default empty). With a list, a request whose transport peer is inside it is keyed under `TRUSTED_HOPS` as before, and every other request is keyed on its peer, whatever header it wrote — so a client that reaches the listener with no proxy in front can no longer choose its own bucket. Empty, every peer's header is read, as before 1.1.1; with native TLS on, the server then logs one `WARN` at boot. A value that does not parse stops the boot. Both listeners read it. Audit rows follow the same rule: their `ip_address` is the address the limiters key on, and a request row's `forwarded_for_claimed` keeps the leftmost `X-Forwarded-For` entry as the caller wrote it when that differs.",
             "10.42.0.0/16",
           ],
           [

@@ -70,7 +70,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axiam_auth::token::CachedUserIdentity;
-use axiam_core::forwarded_for::TrustedProxies;
+use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
 use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
@@ -137,18 +137,7 @@ impl XForwardedForKeyExtractor {
     }
 }
 
-/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, or `0` when it is unset or unparseable.
-///
-/// The one reading of the variable every REST limiter keyed on the client's
-/// address uses: the route governors (`server.rs`), the shared counter
-/// (`middleware::rate_limit_shared`). Read per call, as the shared counter has
-/// always read it, so they cannot disagree about which address a request is.
-pub fn configured_trusted_hops() -> usize {
-    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
+pub use axiam_core::forwarded_for::configured_trusted_hops;
 
 /// The address a per-address rate limit keys a request on (SEC-048, T-212).
 ///
@@ -174,34 +163,15 @@ fn select_rate_limit_ip(
     trusted_hops: usize,
     trusted_proxies: &TrustedProxies,
 ) -> (Option<IpAddr>, Option<usize>) {
-    let peer = peer.map(|addr| addr.ip());
-    // #711: a peer the list does not name is not a proxy, so whatever it wrote
-    // is its own choice. Not an R-4 discard: `trusted_hops` is not wrong.
-    if !trusted_proxies.honours_forwarded_for(peer) {
-        return (peer, None);
-    }
-    let mut discarded_hops = None;
-    if let Some(forwarded_for) = headers.get("X-Forwarded-For")
-        && let Ok(val) = forwarded_for.to_str()
-    {
-        let hops: Vec<&str> = val.split(',').map(str::trim).collect();
-        // Select the rightmost-untrusted hop.
-        // hops = [client, proxy1, ..., trusted_proxy]
-        // trusted_hops=1 → index = len - 1 - 1 = len - 2
-        if trusted_hops < hops.len() {
-            let idx = hops.len() - 1 - trusted_hops;
-            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                return (Some(ip), None);
-            }
-        } else {
-            // Fewer hops than trusted_hops requires: the header cannot be
-            // trusted at all (an attacker could otherwise rotate it to get a
-            // fresh bucket per request via the old `hops[0]` fallback —
-            // SECHRD-03). Fall through to the peer instead of indexing into it.
-            discarded_hops = Some(hops.len());
-        }
-    }
-    (peer, discarded_hops)
+    // The rule lives in `axiam_core::forwarded_for`, shared with the audit rows
+    // and the log fields (#752), so they cannot disagree about the address.
+    let selected = select_client_ip(
+        headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()),
+        peer.map(|addr| addr.ip()),
+        trusted_hops,
+        trusted_proxies,
+    );
+    (selected.ip, selected.discarded_hops)
 }
 
 impl KeyExtractor for XForwardedForKeyExtractor {

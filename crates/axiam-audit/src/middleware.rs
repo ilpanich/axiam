@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
+use axiam_core::forwarded_for::{
+    TrustedProxies, configured_trusted_hops, forwarded_for_claimed, select_client_ip,
+};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use chrono::{DateTime, Utc};
@@ -164,6 +167,7 @@ pub struct AuditMiddleware {
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
     notifications_dropped: Arc<AtomicU64>,
+    client_ip_rule: ClientIpRule,
 }
 
 /// The audit worker's way to the sink: the sink's queue, and the count of rows
@@ -244,7 +248,16 @@ impl AuditMiddleware {
             shutting_down,
             loss,
             notifications_dropped,
+            client_ip_rule: ClientIpRule::configured(),
         }
+    }
+
+    /// This middleware, recording request rows under `rule` instead of the
+    /// one the environment configures. The seam tests inject.
+    #[must_use]
+    pub fn with_client_ip_rule(mut self, rule: ClientIpRule) -> Self {
+        self.client_ip_rule = rule;
+        self
     }
 
     /// Hand `entry` to the audit worker without waiting, from code that is not
@@ -476,7 +489,29 @@ where
             service,
             tx: self.tx.clone(),
             loss: self.loss.clone(),
+            client_ip_rule: self.client_ip_rule.clone(),
         }))
+    }
+}
+
+/// The rule that picks the address a request row records (#752): the
+/// limiters' `TRUSTED_HOPS` and `TRUSTED_PROXIES`.
+#[derive(Debug, Clone, Default)]
+pub struct ClientIpRule {
+    /// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`.
+    pub trusted_hops: usize,
+    /// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`.
+    pub trusted_proxies: TrustedProxies,
+}
+
+impl ClientIpRule {
+    /// The rule the environment configures, as every limiter reads it.
+    #[must_use]
+    pub fn configured() -> Self {
+        Self {
+            trusted_hops: configured_trusted_hops(),
+            trusted_proxies: TrustedProxies::configured(),
+        }
     }
 }
 
@@ -484,6 +519,7 @@ pub struct AuditMiddlewareService<S> {
     service: S,
     tx: mpsc::Sender<Queued>,
     loss: RequestAuditLoss,
+    client_ip_rule: ClientIpRule,
 }
 
 impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
@@ -511,10 +547,21 @@ where
         }
 
         let method = req.method().to_string();
-        let ip_address = req
-            .connection_info()
-            .realip_remote_addr()
-            .map(|s| s.to_owned());
+        // #752: the address the rate limiters key the request on, not the
+        // first `X-Forwarded-For` entry; what the caller wrote, when it
+        // differs, is kept beside it as `forwarded_for_claimed`.
+        let forwarded_for = req
+            .headers()
+            .get("X-Forwarded-For")
+            .and_then(|v| v.to_str().ok());
+        let selected = select_client_ip(
+            forwarded_for,
+            req.peer_addr().map(|addr| addr.ip()),
+            self.client_ip_rule.trusted_hops,
+            &self.client_ip_rule.trusted_proxies,
+        );
+        let ip_address = selected.ip.map(|ip| ip.to_string());
+        let claimed = forwarded_for_claimed(forwarded_for, selected.ip);
 
         // Extract cached claims from extensions (set by middleware or
         // extractor) or try to validate the JWT now and cache the result.
@@ -568,6 +615,13 @@ where
             // When the event happened: the response is complete. Carried to the
             // worker, so the dead-letter line keeps it (#595).
             let occurred_at = Utc::now();
+            let mut metadata = serde_json::json!({
+                "http_status": status,
+                "authenticated": authenticated,
+            });
+            if let Some(claimed) = claimed {
+                metadata["forwarded_for_claimed"] = serde_json::Value::String(claimed);
+            }
             let mut entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
@@ -576,10 +630,7 @@ where
                 resource_id: None,
                 outcome,
                 ip_address,
-                metadata: Some(serde_json::json!({
-                    "http_status": status,
-                    "authenticated": authenticated,
-                })),
+                metadata: Some(metadata),
             };
             // The path and the forwarded address are the client's to size; the
             // row, its dead-letter line and the notification all see them cut

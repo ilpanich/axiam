@@ -139,6 +139,94 @@ impl TrustedProxies {
     }
 }
 
+/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, or `0` when it is unset or unparseable.
+///
+/// The one reading of the variable every consumer of the client-address rule
+/// uses (the REST limiters, the audit rows, the log fields). Read per call.
+#[must_use]
+pub fn configured_trusted_hops() -> usize {
+    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The address a request is attributed to, and what the caller claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedClientIp {
+    /// The rule's address: `None` only with no peer and no usable header.
+    pub ip: Option<IpAddr>,
+    /// `Some(hops seen)` when the header was discarded because
+    /// `trusted_hops >= hops` (the R-4 misconfiguration signal).
+    pub discarded_hops: Option<usize>,
+}
+
+/// The address a per-address rate limit keys a request on, and the one audit
+/// rows and log fields record (SEC-048, T-212, #711, #752).
+///
+/// `peer`, the transport peer, when `trusted_proxies` does not honour its
+/// header. Otherwise the **rightmost untrusted** `X-Forwarded-For` hop —
+/// `hops[len - 1 - trusted_hops]` — when the header has more hops than
+/// `trusted_hops` and that entry parses as an address; otherwise `peer`. A
+/// header too short to reach past the trusted hops is ignored entirely rather
+/// than indexed from the left (SECHRD-03).
+#[must_use]
+pub fn select_client_ip(
+    forwarded_for: Option<&str>,
+    peer: Option<IpAddr>,
+    trusted_hops: usize,
+    trusted_proxies: &TrustedProxies,
+) -> SelectedClientIp {
+    if !trusted_proxies.honours_forwarded_for(peer) {
+        return SelectedClientIp {
+            ip: peer,
+            discarded_hops: None,
+        };
+    }
+    let mut discarded_hops = None;
+    if let Some(val) = forwarded_for {
+        let hops: Vec<&str> = val.split(',').map(str::trim).collect();
+        if trusted_hops < hops.len() {
+            let idx = hops.len() - 1 - trusted_hops;
+            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
+                return SelectedClientIp {
+                    ip: Some(ip),
+                    discarded_hops: None,
+                };
+            }
+        } else {
+            discarded_hops = Some(hops.len());
+        }
+    }
+    SelectedClientIp {
+        ip: peer,
+        discarded_hops,
+    }
+}
+
+/// The leftmost `X-Forwarded-For` entry as the caller asserted it, when it
+/// differs from `recorded` (the address [`select_client_ip`] chose). `None`
+/// when the header is absent, empty, or names the recorded address. Cut to
+/// 45 characters, an IPv6 address with a zone id.
+#[must_use]
+pub fn forwarded_for_claimed(
+    forwarded_for: Option<&str>,
+    recorded: Option<IpAddr>,
+) -> Option<String> {
+    let first = forwarded_for?.split(',').next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    if first
+        .parse::<IpAddr>()
+        .ok()
+        .is_some_and(|ip| Some(ip) == recorded)
+    {
+        return None;
+    }
+    Some(first.chars().take(45).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +304,29 @@ mod tests {
             configured.honours_forwarded_for(None),
             "no list: every request is honoured"
         );
+    }
+
+    #[test]
+    fn select_client_ip_follows_the_rule_and_reports_the_claim() {
+        let listed = TrustedProxies::parse("10.0.0.0/8").unwrap();
+        let outside = Some(ip("203.0.113.7"));
+        let selected = select_client_ip(Some("1.2.3.4"), outside, 0, &listed);
+        assert_eq!(selected.ip, outside);
+        assert_eq!(
+            forwarded_for_claimed(Some("1.2.3.4"), selected.ip).as_deref(),
+            Some("1.2.3.4")
+        );
+
+        let inside = Some(ip("10.0.0.9"));
+        let selected = select_client_ip(Some("9.9.9.9, 198.51.100.5"), inside, 0, &listed);
+        assert_eq!(selected.ip, Some(ip("198.51.100.5")));
+        assert_eq!(
+            forwarded_for_claimed(Some("198.51.100.5"), selected.ip),
+            None
+        );
+        assert_eq!(forwarded_for_claimed(None, selected.ip), None);
+        // Too few hops: the header is discarded and the peer recorded.
+        let short = select_client_ip(Some("9.9.9.9"), inside, 1, &listed);
+        assert_eq!((short.ip, short.discarded_hops), (inside, Some(1)));
     }
 }

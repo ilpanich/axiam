@@ -245,6 +245,12 @@ or a scale-out from zero needs no special ordering (#755).
   the boot continues.
 - The lease row left by a 1.1.1 or older binary (no holder, no expiry) is read
   as stale and replaced.
+- A migration missing **below** the newest one recorded — a datastore that
+  ran a branch build — is applied late, with a `WARN`, only if it is
+  additive (every statement a `DEFINE … IF NOT EXISTS`). Otherwise the replica
+  refuses to start with an error naming the version, because a backfill, a
+  `REMOVE` or an older `OVERWRITE` run after its successors would undo them;
+  resolve that gap by hand (#729). A released build never leaves such a gap.
 
 ## Required secrets & environment
 

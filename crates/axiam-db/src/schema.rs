@@ -2502,6 +2502,69 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 ";
 
 // -----------------------------------------------------------------------
+// Additive migrations (#729)
+// -----------------------------------------------------------------------
+
+/// The statements of a migration as SurrealDB parses them: `--` comment lines
+/// dropped, split at every `;` that is outside a string literal and outside
+/// a `{ … }`, `( … )` or `[ … ]` group, each trimmed, empty ones dropped.
+fn migration_statements(sql: &str) -> Vec<String> {
+    let code: String = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut depth = 0u32;
+    for c in code.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => {
+                    statements.push(std::mem::take(&mut current));
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        current.push(c);
+    }
+    statements.push(current);
+    statements
+        .into_iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Whether a migration only **adds** schema: every statement is
+/// `DEFINE <kind> IF NOT EXISTS …` (#729).
+///
+/// That is the class a late, out-of-order application cannot harm: it
+/// creates what is missing and leaves what exists — rows and definitions —
+/// as it is. Everything else is not additive: `UPDATE`, `DELETE`, `REMOVE`,
+/// `DEFINE … OVERWRITE`, a plain `DEFINE` (which fails, or on some kinds
+/// replaces, when the object exists), and any other data statement
+/// (`CREATE`, `UPSERT`, `INSERT`, `RELATE`). The rule is a whitelist on
+/// purpose: a statement form it does not recognise is refused, not trusted.
+fn is_additive(sql: &str) -> bool {
+    migration_statements(sql).iter().all(|statement| {
+        let words: Vec<String> = statement
+            .split_whitespace()
+            .take(5)
+            .map(str::to_ascii_uppercase)
+            .collect();
+        words.len() == 5 && words[0] == "DEFINE" && words[2..5] == ["IF", "NOT", "EXISTS"]
+    })
+}
+
+// -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
 
@@ -2541,7 +2604,19 @@ impl Default for MigrationLease {
 /// merely those above the highest recorded one (#704, R110W6-07). A datastore
 /// that recorded v100 without v99 (one that ran a build carrying v100 but not
 /// v99) therefore applies v99 on its next start instead of skipping it for
-/// ever; such an out-of-order application is logged at `warn`. Each pending
+/// ever; such an out-of-order application is logged at `warn`.
+///
+/// Applying a migration late is safe only when it is **additive** — every
+/// statement a `DEFINE … IF NOT EXISTS` — and the list holds many that are
+/// not: plain `DEFINE`s (v1 … v14), `UPDATE` backfills (v43 rewrites every
+/// tenant's mail override), v42's `REMOVE` of the SRP schema, and fields
+/// `OVERWRITE`n twice, whose older definition re-narrows the newer `ASSERT`
+/// (#729, R111W4-05). The runner therefore **refuses to boot**, naming the
+/// version, rather than apply a non-additive migration below the highest
+/// recorded one; an operator resolves that gap by hand. A released build
+/// never leaves such a gap — every migration added since 1.1.0 is additive,
+/// which a unit test over [`MIGRATIONS`] holds — so the refusal is reached only
+/// by a datastore that ran a branch build. Each pending
 /// migration is applied atomically: the schema DDL and the version-record
 /// `CREATE` are wrapped in a single `BEGIN TRANSACTION … COMMIT TRANSACTION`
 /// so that a mid-step failure leaves the row re-selectable (CQ-B06 / REQ-14
@@ -2753,6 +2828,18 @@ async fn apply_pending_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), 
     for migration in MIGRATIONS {
         if !recorded.contains(&migration.version) {
             if migration.version < highest_recorded {
+                // Late is safe only for a migration that adds and touches no
+                // row (#729): a backfill, a REMOVE or an older OVERWRITE run
+                // after its successors would undo them.
+                if !is_additive(migration.sql) {
+                    return Err(DbError::Migration(format!(
+                        "Migration v{} '{}' is not recorded but v{highest_recorded} is, and \
+                         v{} is not additive (it updates, deletes, removes or overwrites, or \
+                         defines without IF NOT EXISTS): refusing to apply it out of order. \
+                         The datastore ran a build that skipped v{}; resolve the gap by hand",
+                        migration.version, migration.name, migration.version, migration.version,
+                    )));
+                }
                 warn!(
                     version = migration.version,
                     name = migration.name,
@@ -7732,6 +7819,86 @@ mod tests {
         assert_eq!(
             versions, expected,
             "migration versions must be exactly 1 … N in order (86 … 89 excepted)"
+        );
+    }
+
+    /// The newest migration of the last release before 1.1.1: `v1.1.0` ends at
+    /// v107 (`git show v1.1.0:crates/axiam-db/src/schema.rs`), `v1.1.1` at v109.
+    const NEWEST_RELEASED_BEFORE_1_1_1: u32 = 107;
+
+    /// #729 (R111W4-05) — every migration since 1.1.0 is additive, so a
+    /// datastore that ran a branch build carrying one of them and not another
+    /// can always take the missing one late. W1's and W3's per-migration
+    /// checks of 1.1.1 (v108, v109), generalised to every later version: a
+    /// migration that is not additive needs the gap refusal reconsidered
+    /// before it merges.
+    #[test]
+    fn every_migration_since_1_1_0_is_additive() {
+        let newer: Vec<&Migration> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version > NEWEST_RELEASED_BEFORE_1_1_1)
+            .collect();
+        assert!(
+            newer.iter().any(|m| m.version == 109),
+            "v108 and v109 are in scope"
+        );
+        for migration in newer {
+            assert!(
+                is_additive(migration.sql),
+                "v{} '{}' is not additive: every statement must be DEFINE … IF NOT EXISTS",
+                migration.version,
+                migration.name
+            );
+        }
+    }
+
+    /// The rule read over the whole list gives the review's classes (#729):
+    /// v1 … v14 plain `DEFINE`, the `UPDATE` backfills (24, 41 … 45, 53),
+    /// v42's `REMOVE`, and every `OVERWRITE` (15, 16, 23, 46, 48, 52, 67, 81,
+    /// 82, 102) — the twice-overwritten fields among them. Old migrations do
+    /// not change, so this set does not either.
+    #[test]
+    fn the_additive_rule_refuses_exactly_the_reviewed_migrations() {
+        let refused: Vec<u32> = MIGRATIONS
+            .iter()
+            .filter(|m| !is_additive(m.sql))
+            .map(|m| m.version)
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 24, 35, 41, 42, 43, 44,
+                45, 46, 48, 52, 53, 67, 81, 82, 102
+            ]
+        );
+        // The #704 case stays applicable late.
+        assert!(is_additive(SCHEMA_V99));
+    }
+
+    #[test]
+    fn the_additive_rule_reads_statements_not_words() {
+        // Additive: every statement a DEFINE … IF NOT EXISTS, in any case, with
+        // comments and a `;` inside a literal or a block ignored.
+        assert!(is_additive(
+            "-- UPDATE nothing; this is a comment\n\
+             DEFINE FIELD IF NOT EXISTS a ON TABLE t TYPE string ASSERT $value != ';';\n\
+             define index if not exists i on table t columns a;\n\
+             DEFINE EVENT IF NOT EXISTS e ON TABLE t THEN { UPDATE u SET x = 1; DELETE v; };"
+        ));
+        // Not additive: each of the forms #729 names, and a data statement.
+        for sql in [
+            "DEFINE FIELD IF NOT EXISTS a ON TABLE t TYPE string; UPDATE t SET a = 'x';",
+            "DELETE t WHERE a = 'x';",
+            "REMOVE TABLE t;",
+            "DEFINE FIELD OVERWRITE a ON TABLE t TYPE string;",
+            "DEFINE TABLE t SCHEMAFULL;",
+            "CREATE t SET a = 'x';",
+        ] {
+            assert!(!is_additive(sql), "{sql:?} must not read as additive");
+        }
+        assert_eq!(
+            migration_statements("A 'x;y'; B { c; d }; ; C"),
+            ["A 'x;y'", "B { c; d }", "C"]
         );
     }
 

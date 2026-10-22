@@ -457,3 +457,50 @@ async fn a_live_lease_is_waited_on() {
     assert_eq!(records_of(&db, pending).await, 1);
     assert_eq!(lease_holder(&db).await, None, "the lease is released");
 }
+
+// ---------------------------------------------------------------------------
+// #729 (R111W4-05) — a gap below a non-additive migration is a boot error
+// ---------------------------------------------------------------------------
+
+/// v43 is an `UPDATE` backfill (`email_config.enabled_override = enabled`).
+/// Recorded v44 … without v43, the runner must not run it late — it would
+/// overwrite every tenant's explicit override — and refuses the boot instead,
+/// naming the version. Nothing is applied, and the lease is released.
+#[tokio::test]
+async fn a_gap_below_a_non_additive_migration_is_a_boot_error() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let newest = newest_version(&db).await;
+
+    db.query("DELETE _migration WHERE version = 43")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let refused = axiam_db::run_migrations_with_lease(&db, FAST)
+        .await
+        .expect_err("a non-additive migration below the highest recorded must not apply");
+    let message = refused.to_string();
+    assert!(
+        message.contains("Migration v43 'email_config_tenant_override_tristate'"),
+        "the boot error names the version: {message}"
+    );
+    assert!(message.contains("not additive"), "and says why: {message}");
+
+    assert_eq!(records_of(&db, 43).await, 0, "v43 was not applied");
+    assert_eq!(
+        records_of(&db, newest).await,
+        1,
+        "the record is otherwise intact"
+    );
+    assert_eq!(
+        lease_holder(&db).await,
+        None,
+        "the lease is released on refusal"
+    );
+
+    // A second start refuses the same way: the refusal is not a one-off.
+    assert!(axiam_db::run_migrations(&db).await.is_err());
+}

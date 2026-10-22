@@ -5,18 +5,30 @@
 //! ASSERT constraints for validation.
 
 use std::collections::HashSet;
+use std::time::Duration;
+
 use surrealdb::{Connection, Surreal};
 use surrealdb_types::SurrealValue;
 
 use tracing::{info, warn};
 
 use crate::error::DbError;
+use crate::helpers::{is_unique_violation, is_write_conflict};
 
 // -----------------------------------------------------------------------
 // Migration tracking
 // -----------------------------------------------------------------------
 
-/// DDL for the migration-tracking table (idempotent — all IF NOT EXISTS).
+/// DDL for the migration-tracking tables (idempotent — all IF NOT EXISTS).
+///
+/// It runs on every start, **before** the startup lease is taken and before
+/// any listed migration, which is why the lease's `holder` and `expires`
+/// columns (#755) are defined here and not by a numbered migration: a
+/// migration is applied under the lease, so it cannot define the columns the
+/// lease is written with. Both are `option<…>` so that a 1.1.1 binary — whose
+/// runner `UPSERT`s `locked_at` alone — still boots against a datastore this
+/// release has started (a rollback), and so that a lock row such a binary left
+/// behind reads as stale rather than failing the read.
 const MIGRATION_TABLE_DDL: &str = "\
 DEFINE TABLE IF NOT EXISTS _migration SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS version ON TABLE _migration TYPE int;
@@ -28,6 +40,8 @@ DEFINE INDEX IF NOT EXISTS idx_migration_version ON TABLE _migration \
 DEFINE TABLE IF NOT EXISTS _migration_lock SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS locked_at ON TABLE _migration_lock TYPE datetime \
     DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS holder ON TABLE _migration_lock TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS expires ON TABLE _migration_lock TYPE option<datetime>;
 ";
 
 struct Migration {
@@ -2491,44 +2505,247 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 // Public API
 // -----------------------------------------------------------------------
 
+/// How long the startup lease lives without a refresh, how often its holder
+/// refreshes it, and how often a starter that finds it held looks again.
+///
+/// [`run_migrations`] uses [`MigrationLease::default`]; the intervals are a
+/// parameter only so that the lease's tests can run in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationLease {
+    /// Lifetime of the lease from its last write. A holder that dies leaves a
+    /// lease that the next starter takes over once this has passed.
+    pub ttl: Duration,
+    /// How often the holder pushes `expires` forward while it migrates. Must
+    /// be well under `ttl`.
+    pub refresh_every: Duration,
+    /// How often a starter that finds a live lease tries again.
+    pub poll_every: Duration,
+}
+
+impl Default for MigrationLease {
+    /// Five minutes, refreshed every minute, polled every second.
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(300),
+            refresh_every: Duration::from_secs(60),
+            poll_every: Duration::from_secs(1),
+        }
+    }
+}
+
 /// Run all pending migrations against the given SurrealDB client.
 ///
-/// Creates `_migration` and `_migration_lock` tracking tables on first run,
-/// then applies, in ascending version order, **every listed migration whose
-/// version is not recorded** — not merely those above the highest recorded
-/// one (#704, R110W6-07). A datastore that recorded v100 without v99 (one that
-/// ran a build carrying v100 but not v99) therefore applies v99 on its next
-/// start instead of skipping it for ever; such an out-of-order application is
-/// logged at `warn`. Every migration is idempotent DDL, so applying one late is
-/// safe. Each pending migration is applied atomically: the schema DDL and the
-/// version-record INSERT are wrapped in a single `BEGIN TRANSACTION …
-/// COMMIT TRANSACTION` so that a mid-step failure leaves the row
-/// re-selectable (CQ-B06 / REQ-14 AC-5).
+/// Creates the `_migration` and `_migration_lock` tracking tables on first
+/// run, takes the startup lease (below), then applies, in ascending version
+/// order, **every listed migration whose version is not recorded** — not
+/// merely those above the highest recorded one (#704, R110W6-07). A datastore
+/// that recorded v100 without v99 (one that ran a build carrying v100 but not
+/// v99) therefore applies v99 on its next start instead of skipping it for
+/// ever; such an out-of-order application is logged at `warn`. Each pending
+/// migration is applied atomically: the schema DDL and the version-record
+/// `CREATE` are wrapped in a single `BEGIN TRANSACTION … COMMIT TRANSACTION`
+/// so that a mid-step failure leaves the row re-selectable (CQ-B06 / REQ-14
+/// AC-5).
 ///
-/// The `_migration_lock` record (`CREATE IF NOT EXISTS`) guards concurrent
-/// startup — only one process may hold the lock at a time.  The record is
-/// removed once migrations complete.
+/// # The startup lease (#755, R111-05)
+///
+/// `_migration_lock:startup` is a lease on the datastore's clock: a starter
+/// `CREATE`s it with its own random `holder` and `expires = time::now() +
+/// ttl`, in a transaction that first deletes the row only if it has expired
+/// (or carries no `expires`, as a 1.1.1 binary's leftover does). A live row
+/// makes the `CREATE` fail, and the starter waits [`MigrationLease::poll_every`]
+/// and tries again — for as long as the holder keeps the row live. The holder
+/// pushes `expires` forward every [`MigrationLease::refresh_every`] while it
+/// migrates and runs the organization-tenant backfill, and on the way out,
+/// whether it succeeded or failed, deletes the row **only if it is still its
+/// own**. A holder that dies leaves a row that expires after
+/// [`MigrationLease::ttl`] (five minutes) and is then taken over.
+///
+/// So two replicas starting together do not both migrate: the second waits,
+/// then reads the versions the first recorded and has nothing to apply.
+///
+/// # When the lease is not enough
+///
+/// A lease on a clock is not mutual exclusion against a holder that stalls
+/// past its TTL without dying. The runner therefore also tolerates the one
+/// collision that case can produce: when a migration's transaction fails and
+/// `_migration` now records that version, another starter applied it — the
+/// failure is the unique version index refusing a second record, the
+/// transaction rolled back whole, and the runner logs it and continues.
 pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbError> {
-    // Ensure migration-tracking tables exist (all DDL is IF NOT EXISTS).
-    db.query(MIGRATION_TABLE_DDL)
-        .await?
-        .check()
-        .map_err(|e| DbError::Migration(e.to_string()))?;
+    run_migrations_with_lease(db, MigrationLease::default()).await
+}
 
-    // Acquire a startup lock so that concurrent instances do not race on
-    // schema application.  UPSERT with a deterministic record ID is
-    // idempotent — if a lock record already exists this is a no-op.
-    db.query(
+/// [`run_migrations`] with explicit lease timings. Production calls
+/// [`run_migrations`]; this exists for the lease's tests.
+#[doc(hidden)]
+pub async fn run_migrations_with_lease<C: Connection>(
+    db: &Surreal<C>,
+    lease: MigrationLease,
+) -> Result<(), DbError> {
+    // Ensure migration-tracking tables exist (all DDL is IF NOT EXISTS). Two
+    // starters defining the same catalogue entries at once can lose a write
+    // conflict; it commits nothing and is retried.
+    let mut attempt = 0;
+    loop {
+        let defined = db.query(MIGRATION_TABLE_DDL).await?.check();
+        match defined {
+            Ok(_) => break,
+            Err(e) if is_write_conflict(&e.to_string()) && attempt < 4 => attempt += 1,
+            Err(e) => return Err(DbError::Migration(e.to_string())),
+        }
+    }
+
+    let holder = uuid::Uuid::new_v4().to_string();
+    acquire_lease(db, &holder, &lease).await?;
+
+    // The refresher never completes on its own (`Infallible`); it is dropped
+    // when the migrations finish, whichever way they finish.
+    let outcome = tokio::select! {
+        biased;
+        outcome = apply_pending_migrations(db) => outcome,
+        never = refresh_lease(db, &holder, &lease) => match never {},
+    };
+
+    // Release on success and on failure alike, so that a starter waiting
+    // behind a failed one does not sit out the TTL. Only our own row: a lease
+    // that expired under us and was taken over belongs to someone else now.
+    let released = db
+        .query("DELETE _migration_lock:`startup` WHERE holder = $holder")
+        .bind(("holder", holder))
+        .await
+        .map_err(DbError::from)
+        .and_then(|r| {
+            r.check()
+                .map(|_| ())
+                .map_err(|e| DbError::Migration(format!("failed to release migration lock: {e}")))
+        });
+    outcome?;
+    released
+}
+
+/// Take `_migration_lock:startup` for `holder`, waiting while another starter
+/// holds a live lease.
+async fn acquire_lease<C: Connection>(
+    db: &Surreal<C>,
+    holder: &str,
+    lease: &MigrationLease,
+) -> Result<(), DbError> {
+    // The TTL is formatted into the statement as a SurrealQL duration literal:
+    // it is a `u128` the caller's code chose, never input.
+    let take = format!(
         "BEGIN TRANSACTION; \
-         UPSERT _migration_lock:`startup` SET locked_at = time::now(); \
+         DELETE _migration_lock:`startup` WHERE expires = NONE OR expires <= time::now(); \
+         CREATE _migration_lock:`startup` SET holder = $holder, \
+             locked_at = time::now(), expires = time::now() + {}ms; \
          COMMIT TRANSACTION",
-    )
-    .await?
-    .check()
-    .map_err(|e| DbError::Migration(format!("failed to acquire _migration_lock: {e}")))?;
+        lease.ttl.as_millis()
+    );
+    let mut announced: Option<String> = None;
+    // Consecutive refusals while no live lease was visible. A refusal with a
+    // live holder is waiting and may go on for as long as that holder works;
+    // a refusal with nobody holding is a race that settles within a retry or
+    // two, or a fault that retrying will not cure.
+    let mut unexplained = 0u32;
+    loop {
+        let taken = db
+            .query(take.as_str())
+            .bind(("holder", holder.to_owned()))
+            .await?
+            .check();
+        let e = match taken {
+            Ok(_) => return Ok(()),
+            Err(e) => e.to_string(),
+        };
+        // A live row refuses the CREATE ("already exists"); a starter racing
+        // us to an empty or expired row loses a write conflict. Both mean
+        // "someone else has it": look again later. Anything else is a fault.
+        if !is_unique_violation(&e) && !is_write_conflict(&e) {
+            return Err(DbError::Migration(format!(
+                "failed to acquire _migration_lock: {e}"
+            )));
+        }
+        let mut current = db
+            .query(
+                "SELECT VALUE holder FROM _migration_lock:`startup` \
+                 WHERE expires != NONE AND expires > time::now()",
+            )
+            .await?;
+        let live: Option<String> = current
+            .take::<Vec<Option<String>>>(0)?
+            .into_iter()
+            .flatten()
+            .next();
+        match live {
+            Some(other) => {
+                unexplained = 0;
+                if announced.as_deref() != Some(other.as_str()) {
+                    info!(
+                        holder = %other,
+                        "Another instance holds the migration lease; waiting for it"
+                    );
+                    announced = Some(other);
+                }
+            }
+            None => {
+                unexplained += 1;
+                if unexplained > 8 {
+                    return Err(DbError::Migration(format!(
+                        "failed to acquire _migration_lock: {e}"
+                    )));
+                }
+            }
+        }
+        tokio::time::sleep(lease.poll_every).await;
+    }
+}
 
+/// Push the lease's `expires` forward every `refresh_every`, for as long as
+/// the caller polls this future. A refresh that finds the row is not ours any
+/// more logs it once and stops refreshing: the migrations in flight are each
+/// one transaction and tolerate another starter's record (see
+/// [`run_migrations`]), so losing the lease is not a reason to abort them.
+async fn refresh_lease<C: Connection>(
+    db: &Surreal<C>,
+    holder: &str,
+    lease: &MigrationLease,
+) -> std::convert::Infallible {
+    let refresh = format!(
+        "UPDATE _migration_lock:`startup` SET expires = time::now() + {}ms \
+         WHERE holder = $holder RETURN VALUE holder",
+        lease.ttl.as_millis()
+    );
+    loop {
+        tokio::time::sleep(lease.refresh_every).await;
+        let refreshed = match db
+            .query(refresh.as_str())
+            .bind(("holder", holder.to_owned()))
+            .await
+        {
+            Ok(mut r) => r.take::<Vec<String>>(0).map(|rows| !rows.is_empty()),
+            Err(e) => Err(e),
+        };
+        match refreshed {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    "The migration lease expired and was taken over or removed; \
+                     continuing without it"
+                );
+                return std::future::pending().await;
+            }
+            // A transient failure: the next tick tries again, well inside the TTL.
+            Err(e) => warn!(error = %e, "Failed to refresh the migration lease"),
+        }
+    }
+}
+
+/// Apply every listed migration that is not recorded, then the
+/// organization-tenant backfill. Runs under the startup lease.
+async fn apply_pending_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbError> {
     // Every recorded version, not just the highest: a gap below the highest
-    // (v100 recorded, v99 not) is a migration still to apply (#704).
+    // (v100 recorded, v99 not) is a migration still to apply (#704). Read
+    // under the lease, so a starter that waited sees what the holder recorded.
     let mut result = db.query("SELECT VALUE version FROM _migration").await?;
     let recorded: HashSet<u32> = result.take::<Vec<u32>>(0)?.into_iter().collect();
     let highest_recorded = recorded.iter().copied().max().unwrap_or(0);
@@ -2550,8 +2767,8 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
                 );
             }
 
-            // Wrap the schema DDL and the version-record INSERT in a single
-            // transaction (CQ-B06).  If the DDL succeeds but the INSERT
+            // Wrap the schema DDL and the version-record CREATE in a single
+            // transaction (CQ-B06).  If the DDL succeeds but the CREATE
             // fails, the whole block is rolled back and the migration will
             // be retried on the next startup.
             //
@@ -2567,12 +2784,24 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
                 v = migration.version,
                 n = migration.name,
             );
-            db.query(&txn).await?.check().map_err(|e| {
-                DbError::Migration(format!(
+            let applied = db.query(&txn).await?.check();
+            if let Err(e) = applied {
+                // The transaction rolled back whole. If the version is
+                // recorded now, another starter applied it (the unique
+                // version index refused our record): not a failure (#755).
+                if version_is_recorded(db, migration.version).await? {
+                    info!(
+                        version = migration.version,
+                        name = migration.name,
+                        "Migration was applied by another instance meanwhile"
+                    );
+                    continue;
+                }
+                return Err(DbError::Migration(format!(
                     "Migration v{} '{}' failed (transaction rolled back): {}",
                     migration.version, migration.name, e,
-                ))
-            })?;
+                )));
+            }
 
             info!(
                 version = migration.version,
@@ -2583,18 +2812,22 @@ pub async fn run_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), DbErro
 
     // Data, not schema: every organization needs the reserved tenant that
     // organization-level principals live in, and an organization created before
-    // v50 has none. Runs under the startup lock, after the DDL that defines
+    // v50 has none. Runs under the startup lease, after the DDL that defines
     // `kind`, and is idempotent — a deployment that is already migrated does
     // one SELECT and stops.
-    backfill_organization_tenants(db).await?;
+    backfill_organization_tenants(db).await
+}
 
-    // Release the startup lock now that migrations are complete.
-    db.query("DELETE _migration_lock:`startup`")
-        .await?
-        .check()
-        .map_err(|e| DbError::Migration(format!("failed to release migration lock: {e}")))?;
-
-    Ok(())
+/// Whether `_migration` records `version`.
+async fn version_is_recorded<C: Connection>(
+    db: &Surreal<C>,
+    version: u32,
+) -> Result<bool, DbError> {
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration WHERE version = $version")
+        .bind(("version", version))
+        .await?;
+    Ok(!result.take::<Vec<u32>>(0)?.is_empty())
 }
 
 /// Give every organization the reserved tenant its organization-level

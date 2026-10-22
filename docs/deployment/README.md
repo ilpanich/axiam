@@ -226,6 +226,26 @@ dependency bump that makes the name available.
 |---|---|
 | `AXIAM__DB__ALLOW_MEMORY_ENGINE` | **Development only.** `true` lets the server start against a positively-identified `memory` datastore instead of refusing. Never set it in a deployment; single-use redemption is not guaranteed when it is honoured. Unset (the default) fails closed. |
 
+## Schema migrations at startup
+
+Every replica runs the schema migrations when it starts, before it serves a
+request. Replicas started together do not migrate at the same time: the first
+takes a **lease** on the datastore (the row `_migration_lock:startup`, five
+minutes on the datastore's clock, refreshed every minute while it migrates)
+and the others wait, logging `Another instance holds the migration lease;
+waiting for it`, then find the migrations recorded and start. A rolling update
+or a scale-out from zero needs no special ordering (#755).
+
+- A replica that dies while migrating leaves its lease behind; the next
+  replica takes it over once it has expired, at most five minutes later. Each
+  migration is one transaction, so nothing is half applied.
+- A replica that stalls past the lease's lifetime without dying can overlap
+  with its successor. The runner tolerates that case too: a migration the
+  other replica recorded first is logged as applied by another instance, and
+  the boot continues.
+- The lease row left by a 1.1.1 or older binary (no holder, no expiry) is read
+  as stale and replaced.
+
 ## Required secrets & environment
 
 All AXIAM configuration keys use a **double underscore** after the `AXIAM`

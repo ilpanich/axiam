@@ -66,14 +66,18 @@ use actix_web::HttpMessage;
 use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
 use actix_web::http::header::{ContentType, HeaderMap, RETRY_AFTER};
+use actix_web::web;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use axiam_auth::config::AuthConfig;
 use axiam_auth::token::CachedUserIdentity;
 use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
 use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
+use crate::extractors::auth::may_admit_as_session;
+use crate::middleware::tenant_path::TenantPathBinding;
 
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
 ///
@@ -316,7 +320,8 @@ pub struct RateLimitPrincipal {
     pub sender_constrained: bool,
 }
 
-/// The verified principal of this request, or `None` when no token verified.
+/// The verified principal of this request, or `None` when no token verified
+/// or the token is one the session extractor would refuse.
 ///
 /// **Reads, never verifies.** `None` covers "no token", "a token that did not
 /// verify" (forged, expired, another issuer's) and "no audit middleware in this
@@ -325,9 +330,25 @@ pub struct RateLimitPrincipal {
 /// #633. A caller cannot reach this with a claim it wrote itself: request
 /// extensions are written by server code only, and the one writer of this
 /// extension inserts it after `validate_access_token` succeeded.
+///
+/// #754 (R111-04): a verified signature is not enough. A token
+/// [`AuthenticatedUser`](crate::extractors::auth::AuthenticatedUser) refuses —
+/// a device-grant token, a resource-audience token a relying party holds —
+/// must not spend the principal's allowance, or whoever holds one can drain
+/// it from many addresses. So the principal is returned only for a token
+/// [`may_admit_as_session`] passes (no `AuthConfig` in scope: the extractor
+/// would refuse every token, and so the address); the refusals it cannot
+/// decide without the datastore are refunded by the shared counter instead.
 pub fn verified_principal(req: &ServiceRequest) -> Option<RateLimitPrincipal> {
+    let config = req.app_data::<web::Data<AuthConfig>>()?;
     let extensions = req.extensions();
     let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
+    let path_tenant = extensions
+        .get::<TenantPathBinding>()
+        .map(|binding| binding.tenant_id);
+    if !may_admit_as_session(cached, config, path_tenant) {
+        return None;
+    }
     Some(RateLimitPrincipal {
         tenant_id: cached.tenant_id,
         subject: cached.user_id,

@@ -45,6 +45,26 @@ pub trait SessionValidator: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
+/// Left in a request's extensions when the session extractor refused the
+/// request's credential (#754): [`AuthenticatedUser`] or [`ConsoleSignIn`]
+/// answered `401`/`403` for the token itself, so the handler never ran.
+///
+/// Its reader is the shared rate-limit counter
+/// ([`crate::middleware::rate_limit_shared`]), which refunds a principal-keyed
+/// charge only when this is present: a refusal by the extractor is not an
+/// attempt at anything the bucket protects, a `401`/`403` from a handler is.
+/// The active-tenant decision ([`act_on_requested_tenant`]) does not set it:
+/// that is a decision about a principal the extractor admitted, not a refusal
+/// of its credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCredentialRefused;
+
+/// Record [`SessionCredentialRefused`] on `req` and hand the refusal back.
+fn refused(req: &HttpRequest, refusal: AxiamApiError) -> AxiamApiError {
+    req.extensions_mut().insert(SessionCredentialRefused);
+    refusal
+}
+
 /// Object-safe per-request DPoP replay guard (RFC 9449 §11.1).
 ///
 /// Here for the same reason [`SessionValidator`] is: the check belongs to the
@@ -389,7 +409,7 @@ impl actix_web::FromRequest for AuthenticatedUser {
         // Synchronous JWT/aud/jti extraction first (ends the `req` borrow before
         // the async block). [`RequestScopeHandles`] clones the optional
         // resolvers (each an `Arc`) so the returned future is `'static`.
-        let user_result = extract_user(req);
+        let user_result = extract_user(req).map_err(|e| refused(req, e));
         let handles = RequestScopeHandles::read(req);
         Box::pin(async move { handles.apply(user_result?, Admit::AnyUserToken).await })
     }
@@ -418,7 +438,7 @@ impl actix_web::FromRequest for ConsoleSignIn {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        let user_result = extract_user(req);
+        let user_result = extract_user(req).map_err(|e| refused(req, e));
         let handles = RequestScopeHandles::read(req);
         Box::pin(async move {
             handles
@@ -458,11 +478,15 @@ struct RequestScopeHandles {
     /// the synchronous side.
     dpop: Option<PendingDpopProof>,
     replay_guard: Option<Arc<dyn DpopReplayGuard>>,
+    /// The request itself (a reference-counted handle), so a refusal of the
+    /// credential can be recorded on it ([`SessionCredentialRefused`], #754).
+    request: HttpRequest,
 }
 
 impl RequestScopeHandles {
     fn read(req: &HttpRequest) -> Self {
         Self {
+            request: req.clone(),
             validator: req
                 .app_data::<web::Data<Arc<dyn SessionValidator>>>()
                 .map(|d| d.get_ref().clone()),
@@ -502,48 +526,15 @@ impl RequestScopeHandles {
             requested_tenant,
             dpop,
             replay_guard,
+            request,
         } = self;
 
-        // RFC 9449 §11.1, first: it is the credential check, and a replayed
-        // proof should be refused before the session store is consulted on its
-        // behalf. Reached only when a proof actually verified — see
-        // `record_verified_proof`, which is a no-op otherwise, so no request to
-        // an unbound token pays anything for this.
-        record_verified_proof(dpop, replay_guard).await?;
-
-        // T-447 / #681 — an approval surface refuses a client's token on what
-        // it is, before the session store is asked about it: see
-        // [`ConsoleSignIn`].
-        if admit == Admit::ConsoleSignInOnly && user.minted_for_client() {
-            return Err(AxiamError::AuthorizationDenied {
-                reason: "a console sign-in is required; this token was minted for an OAuth2 \
-                         client"
-                    .into(),
-                action: None,
-                resource_id: None,
-            }
-            .into());
-        }
-
-        // REQ-7 / D-15: reject access tokens whose session has been revoked
-        // (row deleted on password change/reset/MFA reset) or expired. The
-        // validator is optional so non-session test harnesses are unaffected;
-        // the production server (and session-security tests) always register it.
-        //
-        // Checked against the *principal's* tenant, which is where the
-        // session row is. It is the same value as `tenant_id` at this point
-        // — the header is applied below — but ordering matters: resolving
-        // the active tenant first would look the session up in whichever
-        // tenant the request asked to act on, and find none.
-        if let Some(validator) = validator
-            && !validator
-                .is_session_active(user.principal_tenant_id, user.session_id)
-                .await
-        {
-            return Err(AxiamError::AuthenticationFailed {
-                reason: "session revoked or expired".into(),
-            }
-            .into());
+        // #754: every check up to and including the session refuses the
+        // credential itself, so its refusal is recorded on the request for the
+        // shared rate-limit counter's refund. The active-tenant decision below
+        // is about a principal already admitted, and is not.
+        if let Err(refusal) = admit_credential(&user, admit, dpop, replay_guard, validator).await {
+            return Err(refused(&request, refusal));
         }
 
         if let Some(target) = act_on_requested_tenant(
@@ -561,6 +552,62 @@ impl RequestScopeHandles {
 
         Ok(user)
     }
+}
+
+/// The credential half of [`RequestScopeHandles::apply`], in its order: the
+/// DPoP proof's single use, an approval surface's refusal of a client's token,
+/// then the session. Each refusal here is about the token, not about what the
+/// admitted principal asked for (#754, [`SessionCredentialRefused`]).
+async fn admit_credential(
+    user: &AuthenticatedUser,
+    admit: Admit,
+    dpop: Option<PendingDpopProof>,
+    replay_guard: Option<Arc<dyn DpopReplayGuard>>,
+    validator: Option<Arc<dyn SessionValidator>>,
+) -> Result<(), AxiamApiError> {
+    // RFC 9449 §11.1, first: it is the credential check, and a replayed
+    // proof should be refused before the session store is consulted on its
+    // behalf. Reached only when a proof actually verified — see
+    // `record_verified_proof`, which is a no-op otherwise, so no request to
+    // an unbound token pays anything for this.
+    record_verified_proof(dpop, replay_guard).await?;
+
+    // T-447 / #681 — an approval surface refuses a client's token on what
+    // it is, before the session store is asked about it: see
+    // [`ConsoleSignIn`].
+    if admit == Admit::ConsoleSignInOnly && user.minted_for_client() {
+        return Err(AxiamError::AuthorizationDenied {
+            reason: "a console sign-in is required; this token was minted for an OAuth2 \
+                         client"
+                .into(),
+            action: None,
+            resource_id: None,
+        }
+        .into());
+    }
+
+    // REQ-7 / D-15: reject access tokens whose session has been revoked
+    // (row deleted on password change/reset/MFA reset) or expired. The
+    // validator is optional so non-session test harnesses are unaffected;
+    // the production server (and session-security tests) always register it.
+    //
+    // Checked against the *principal's* tenant, which is where the
+    // session row is. It is the same value as `tenant_id` at this point
+    // — the header is applied after this — but ordering matters: resolving
+    // the active tenant first would look the session up in whichever
+    // tenant the request asked to act on, and find none.
+    if let Some(validator) = validator
+        && !validator
+            .is_session_active(user.principal_tenant_id, user.session_id)
+            .await
+    {
+        return Err(AxiamError::AuthenticationFailed {
+            reason: "session revoked or expired".into(),
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 /// The active-tenant half of authentication, for every kind of principal.
@@ -1194,42 +1241,43 @@ fn check_user_aud_and_parse_jti(
     validated: &ValidatedClaims,
     config: &AuthConfig,
 ) -> Result<Uuid, AxiamApiError> {
+    if validated.0.aud.is_none() && config.allow_missing_aud_as_user {
+        // Back-compat window: treat as axiam:user, but warn unconditionally.
+        // TRADE-OFF: no in-process rate limit on this warn. Operator-side
+        // log filtering (e.g. Loki `rate()` alert, fluent-bit rewrite_tag
+        // dedup) is the intended mechanism for suppressing burst noise
+        // during the rollout window. Keeping this path lock-free is
+        // intentional — auth hot paths must not contend on shared atomics.
+        let jti = &validated.0.jti;
+        tracing::warn!(
+            token_jti = %jti,
+            "accepted access token without aud — backward-compat window active"
+        );
+    }
+    user_session_of(validated, config.allow_missing_aud_as_user).map_err(|reason| {
+        AxiamError::AuthenticationFailed {
+            reason: reason.into(),
+        }
+        .into()
+    })
+}
+
+/// [`check_user_aud_and_parse_jti`]'s decision without its log line: the
+/// session a user-audience token names, or the extractor's reason for refusing
+/// it. Shared with [`may_admit_as_session`], so the rate limiter and the
+/// extractor cannot disagree about the audience rules.
+fn user_session_of(
+    validated: &ValidatedClaims,
+    allow_missing_aud_as_user: bool,
+) -> Result<Uuid, &'static str> {
     match validated.0.aud.as_deref() {
-        Some(AUD_USER) => {
-            // Expected audience — accept.
-        }
-        None => {
-            if config.allow_missing_aud_as_user {
-                // Back-compat window: treat as axiam:user, but warn unconditionally.
-                // TRADE-OFF: no in-process rate limit on this warn. Operator-side
-                // log filtering (e.g. Loki `rate()` alert, fluent-bit rewrite_tag
-                // dedup) is the intended mechanism for suppressing burst noise
-                // during the rollout window. Keeping this path lock-free is
-                // intentional — auth hot paths must not contend on shared atomics.
-                let jti = &validated.0.jti;
-                tracing::warn!(
-                    token_jti = %jti,
-                    "accepted access token without aud — backward-compat window active"
-                );
-            } else {
-                return Err(AxiamError::AuthenticationFailed {
-                    reason: "aud required".into(),
-                }
-                .into());
-            }
-        }
-        Some(AUD_M2M) => {
-            return Err(AxiamError::AuthenticationFailed {
-                reason: "audience mismatch — this route requires axiam:user audience".into(),
-            }
-            .into());
-        }
-        Some(_) => {
-            return Err(AxiamError::AuthenticationFailed {
-                reason: "unknown audience".into(),
-            }
-            .into());
-        }
+        // Expected audience — accept.
+        Some(AUD_USER) => {}
+        // Back-compat window (the caller warns).
+        None if allow_missing_aud_as_user => {}
+        None => return Err("aud required"),
+        Some(AUD_M2M) => return Err("audience mismatch — this route requires axiam:user audience"),
+        Some(_) => return Err("unknown audience"),
     }
 
     // `sid` first, `jti` second — and the order is the fix, not a preference.
@@ -1246,12 +1294,49 @@ fn check_user_aud_and_parse_jti(
     // existed working exactly as it did, so this needs no migration and no
     // flag day.
     let raw = validated.0.sid.as_deref().unwrap_or(&validated.0.jti);
-    Uuid::parse_str(raw).map_err(|_| {
-        AxiamError::AuthenticationFailed {
-            reason: "invalid session identifier".into(),
-        }
-        .into()
-    })
+    Uuid::parse_str(raw).map_err(|_| "invalid session identifier")
+}
+
+/// Whether [`AuthenticatedUser`] can admit this verified token, as far as that
+/// is decidable without an `await` — the rule a rate-limit bucket keyed on the
+/// principal uses before charging it (#754, R111-04).
+///
+/// A principal-keyed bucket is the principal's own allowance, so only a token
+/// the session extractor would admit may spend it; any other token is keyed on
+/// its address. Mirrored here, synchronously, are the extractor's refusals that
+/// read only the token and the request:
+///
+/// - the **audience** and the **session identifier** ([`user_session_of`],
+///   the extractor's own function) — a resource-audience token held by a
+///   relying party, a machine token, a token with no usable session id;
+/// - the **tenant path binding** (`enforce_tenant_path_binding`);
+/// - a token **minted by a grant that names no session** — a client's token
+///   without `sid` (the device grant; a code grant with no session), an RPT,
+///   an exchanged token carrying `act` or `ext_exchange`. Its session id falls
+///   back to a `jti` minted fresh for that token, which names no session row,
+///   so the session check refuses it whenever a [`SessionValidator`] is
+///   registered, which the server always does.
+///
+/// Not mirrored, because each needs a datastore read or write: the session's
+/// liveness (a revoked or expired session), the DPoP proof's single use, and
+/// the active tenant. A token refused on one of those is still keyed on its
+/// principal; the shared counter refunds that charge
+/// ([`SessionCredentialRefused`]). The sender constraint is not mirrored
+/// either: the key already pairs a bound token with its address.
+pub fn may_admit_as_session(
+    identity: &CachedUserIdentity,
+    config: &AuthConfig,
+    path_tenant: Option<Uuid>,
+) -> bool {
+    let claims = &identity.claims.0;
+    let grant_without_session = claims.sid.is_none()
+        && (claims.client_id.is_some()
+            || claims.permissions.is_some()
+            || claims.act.is_some()
+            || claims.ext_exchange.is_some());
+    user_session_of(&identity.claims, config.allow_missing_aud_as_user).is_ok()
+        && !grant_without_session
+        && path_tenant.is_none_or(|tenant| tenant == identity.tenant_id)
 }
 
 // ---------------------------------------------------------------------------

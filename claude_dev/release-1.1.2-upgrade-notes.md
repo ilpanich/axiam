@@ -17,7 +17,7 @@ from 1.1.0 straight to 1.1.2 must replace the recipe as one set. The names that 
 | `docker/docker-compose.radius-d4.yml` | `docker/docker-compose.radius-live.yml` (the compose override) |
 | `docker/radius/raddb/d4/` | `docker/radius/raddb/live/` |
 | `raddb/d4/axiam-d4.sh` | `raddb/live/axiam-live.sh` |
-| the module `axiam_d4` (`raddb/d4/axiam_d4`) | the module `axiam_live` (`raddb/live/axiam_live`) |
+| the modules file `raddb/d4/axiam_d4` | the modules file `raddb/live/axiam_live` (its four modules, `axiam_token`, `axiam_decide`, `axiam_token_cache` and `axiam_take`, keep their names; the compose override mounts it as `mods-enabled/axiam_placement` in both releases) |
 | `AXIAM_D4_URL`, `AXIAM_D4_SITE` | `AXIAM_LIVE_URL`, `AXIAM_LIVE_SITE` |
 | `/var/run/axiam-d4` | `/var/run/axiam-live` |
 | `$-INCLUDE /etc/freeradius/axiam-d4/verify.conf` in `raddb/eap` | `$-INCLUDE /etc/freeradius/axiam-live/verify.conf` |
@@ -32,8 +32,8 @@ threat model).
 by path, and the `axiam_live` module reads `AXIAM_LIVE_URL`. Therefore:
 
 - an `eap` file from one release beside a `raddb/live/` set from another, or
-- an unrenamed `AXIAM_D4_URL` (the `axiam_live` module's `connect_uri` is empty, so
-  it fails, and the policy treats a module failure as a reject; FreeRADIUS may also
+- an unrenamed `AXIAM_D4_URL` (the `axiam_token` and `axiam_decide` modules' `connect_uri`, in `raddb/live/axiam_live`, is empty, so
+  they fail, and the policy treats a module failure as a reject; FreeRADIUS may also
   refuse to start),
 
 makes FreeRADIUS **reject every device**; it never admits one on the strength of a
@@ -49,3 +49,8 @@ Also worth restating in the same entry, because it changes what to alert on:
 quarter of its lifetime left or has expired, and, since 1.1.2, a run that finds the lock
 held reports it too (R111W5-02). Alert on any non-zero exit (T-462, amended
 2026-10-22).
+
+The Live compose override now starts FreeRADIUS as `freeradius -f -xx -l stdout` (it was
+`-X`, which serves one request at a time): same debug output, with the thread pool. An
+operator who copied the override's `command` gets threaded authentication from the new
+file; one who runs without debug output is unaffected.

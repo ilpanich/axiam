@@ -510,7 +510,8 @@ breaks when its owner is gone or it is older than 120 seconds). A run that finds
 the lock held prints that and touches nothing: it is not a failure (it exits **0**,
 or **3** when the installed list is near its end, below), so a timer that overlaps
 its own previous run, a manual run beside the cron entry or a Kubernetes CronJob
-left at `concurrencyPolicy: Allow` raises no alert. Without the lock, two runs that fetch different lists can leave the older one in place
+left at `concurrencyPolicy: Allow` raises no alert while the list is healthy, and
+exits 3 (the same alert as an unrefreshed list) when it is not. Without the lock, two runs that fetch different lists can leave the older one in place
 under the newer one's tag, and a revocation then waits until AXIAM's list next
 changes, up to half its lifetime, with a file fresh enough to silence the
 exit-status alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
@@ -735,7 +736,10 @@ and the files of section 3 stay, and
 [`docker-compose.radius-live.yml`](../../docker/docker-compose.radius-live.yml)
 **overrides** the one service (`docker compose -f docker-compose.radius.yml -f
 docker-compose.radius-live.yml up`). It names no image: the digest is pinned once, in
-the base file.
+the base file. It also sets the command to `freeradius -f -xx -l stdout`: the debug
+level and log lines of the base file's `-X`, but with the thread pool, since `-X`
+includes `-s` and serves one request at a time. If you copy the override, keep that
+in mind; production runs without debug output, as the logs note below says.
 
 | File ([`docker/radius/raddb/live/`](../../docker/radius/raddb/live/)) | What it does |
 |---|---|

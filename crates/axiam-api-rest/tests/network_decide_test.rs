@@ -777,7 +777,7 @@ async fn a_device_is_placed_with_its_segments_attributes() {
 // ---------------------------------------------------------------------------
 
 /// A revoked certificate, and a disabled account, are `allow: false` at the
-/// very next request (T-462's CRL lag closes for D4), with no reason on the
+/// very next request (T-462's CRL lag closes for the Live profile), with no reason on the
 /// wire and the internal one in the row.
 #[actix_rt::test]
 async fn revocation_and_a_disabled_account_refuse_at_the_next_request() {

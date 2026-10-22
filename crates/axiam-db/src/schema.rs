@@ -4896,7 +4896,7 @@ DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE ca_certific
 ";
 
 // -----------------------------------------------------------------------
-// Schema v100 — network segments, reply profiles and the session cap (#563, D4)
+// Schema v100 — network segments, reply profiles and the session cap (#563, the Live profile)
 // -----------------------------------------------------------------------
 //
 // `claude_dev/radius-reply-profile-design.md` §3.5 and §4. Three new

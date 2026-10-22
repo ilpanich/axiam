@@ -79,7 +79,8 @@
 # A run killed by HUP, INT or TERM (a cron or systemd timeout) cleans up like any
 # other: the signal trap turns it into `exit 1`, and so runs the EXIT trap, which
 # `dash` does not do on a signal alone (R110W5-06). Its temporary directory and
-# any `.incoming.*` file are removed; only SIGKILL leaves them.
+# any `.incoming.*` file are removed; a signal other than HUP, INT or TERM
+# (SIGKILL, but also QUIT, ALRM, USR1 or PIPE, which are not trapped) leaves them.
 #
 # Needs: sh, curl, openssl, sed, sort, tr, cut, head, tail, mktemp, date; `flock`
 # is used when it is there.
@@ -185,6 +186,7 @@ lock_held=
 
 work=$(mktemp -d)
 stage=
+# shellcheck disable=SC2329 # invoked by the EXIT trap below; shellcheck 0.11 cannot see trap callees
 cleanup() {
 	rm -rf "$work"
 	[ -z "$stage" ] || rm -f "$stage"

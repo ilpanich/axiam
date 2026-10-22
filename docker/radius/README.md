@@ -90,6 +90,13 @@ container when a case changes one (a wrong site key, AXIAM stopped).
 | `docker/.secrets/radius/` | per run: `env`, `server-ca.pem`, the supplicants' files, and `trust/` (`server.pem`, `server.key`, `ca.pem`, `capath/<hash>.r0`, `placement`), mounted at `/etc/freeradius/axiam` |
 | `.github/workflows/radius-e2e.yml` | the same, in CI |
 
+## History note
+
+The HUP/INT/TERM signal trap in `fetch-crl.sh` came in with `f0fe8b064` (the run-long lock,
+R110W5-02), on top of the `EXIT` trap that `384d2c772` had added. The body of `b915783`
+(1.1.1 W5.3) credits it to `3da7e0c`, which is an unrelated docs commit; that history is
+not rewritten, and this note is the correction.
+
 ## Changing the image
 
 The digest in the compose file is the manifest of the tag next to it. To move to

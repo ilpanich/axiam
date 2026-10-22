@@ -749,7 +749,7 @@ pub const NETWORK_PROFILES_WRITE: &str = "network:profiles_write";
 pub const NETWORK_GRANT: &str = "network:grant";
 /// Confer the administrative class. Option A only.
 pub const NETWORK_GRANT_ADMIN: &str = "network:grant_admin";
-/// Ask for placement decisions for a site (D4's caller).
+/// Ask for placement decisions for a site (the Live RADIUS profile's caller).
 pub const NETWORK_DECIDE: &str = "network:decide";
 /// Read the rendered export for a site.
 pub const NETWORK_EXPORT: &str = "network:export";

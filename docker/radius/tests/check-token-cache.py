@@ -66,6 +66,8 @@ TOKEN = "Tmp-String-2"
 
 ASSIGN = re.compile(r"^\s*(&?[A-Za-z][A-Za-z0-9-]*)\s*(:=|!\*)\s*(.*?)\s*$")
 CHECK = re.compile(r"^\s*if \(&control:(Tmp-String-\d+) !~ /(.*)/\) \{\s*$")
+# A call: bare, with an action block (`axiam_token_cache {`), optional (`-axiam_token_cache`).
+CALL = re.compile(rf"^-?{MODULE}(\s*\{{)?$")
 NEGATIVE_TTL = re.compile(r'^(-[1-9][0-9]*|"%\{expr:0 - [^"]+\}")$')
 
 
@@ -81,6 +83,7 @@ def check(text: str) -> list[str]:
     last_block: tuple[int, dict[str, str]] | None = None  # (end line, assignments)
     last_statement_end = 0
     in_block: dict[str, str] | None = None
+    action_depth = 0  # inside the action block of a call: its lines are not statements
     token_value: str | None = None
     literals: dict[str, list[tuple[int, str]]] = {}
     checks: list[tuple[int, str, str]] = []
@@ -88,6 +91,12 @@ def check(text: str) -> list[str]:
     for number, raw in enumerate(lines, 1):
         line = code(raw)
         if not line:
+            continue
+        if action_depth:
+            action_depth += line.count("{") - line.count("}")
+            if action_depth <= 0:
+                action_depth = 0
+                last_statement_end = number
             continue
         if in_block is not None:
             if line == "}":
@@ -115,7 +124,8 @@ def check(text: str) -> list[str]:
         match = CHECK.match(raw)
         if match:
             checks.append((number, match.group(1), match.group(2).replace(r"\/", "/")))
-        if line == MODULE:
+        call = CALL.match(line)
+        if call:
             calls += 1
             attrs = last_block[1] if last_block and last_block[0] == last_statement_end else {}
             read_only = attrs.get("Cache-Read-Only") == "yes"
@@ -132,6 +142,8 @@ def check(text: str) -> list[str]:
                     "request fetched (\"%{1}\")"
                 )
         last_statement_end = number
+        if call and call.group(1):
+            action_depth = 1
 
     for number, name, pattern in checks:
         for at, literal in literals.get(name, []):
@@ -156,6 +168,8 @@ def self_test() -> int:
         "update control {\n\tTmp-String-2 := \"%{1}\"\n}\n"
         "# the TTL\nupdate control {\n\tCache-TTL := \"%{expr:0 - %{1} / 2}\"\n}\naxiam_token_cache\n"
     )
+    optional = "update control {\n\tCache-Read-Only := yes\n}\n-axiam_token_cache\n"
+    actions = "axiam_token_cache {\n\tnotfound = ok\n}\n"
     cases = [
         ("the fixed shape", head + read_only + "if (notfound) {\n" + store + "}\n", None),
         ("a read-only drop", head + "update control {\n\tCache-Read-Only := yes\n\tCache-TTL := 0\n}\naxiam_token_cache\n", None),
@@ -167,6 +181,15 @@ def self_test() -> int:
         ("a block that is not the one directly before", head + "update control {\n\tCache-Read-Only := yes\n}\nok\naxiam_token_cache\n", "without Cache-Read-Only"),
         ("a store of the sentinel", head + "update control {\n\tCache-TTL := -450\n}\naxiam_token_cache\n", "not a token this"),
         ("the sentinel `-` (R112W5-01)", head.replace('"!"', '"-"') + read_only, "passes the check"),
+        ("a plain call with an action block", head + actions, "without Cache-Read-Only"),
+        ("a read-only call with an action block", head + "update control {\n\tCache-Read-Only := yes\n}\n" + actions, None),
+        ("an optional plain call", head + "-axiam_token_cache\n", "without Cache-Read-Only"),
+        ("an optional read-only call", head + optional, None),
+        ("an optional plain call with an action block", head + "-" + actions, "without Cache-Read-Only"),
+        ("an optional read-only call with an action block", head + "update control {\n\tCache-Read-Only := yes\n}\n-" + actions, None),
+        ("an optional store of the sentinel", head + "update control {\n\tCache-TTL := -450\n}\n-axiam_token_cache\n", "not a token this"),
+        ("an optional store of a fetched token, with an action block", head + "update control {\n\tTmp-String-2 := \"%{1}\"\n\tCache-TTL := -450\n}\n-" + actions, None),
+        ("a call after an action block does not inherit its block", head + read_only + actions, "without Cache-Read-Only"),
         ("no call at all", head, "no call on"),
     ]
     for name, text, needle in cases:

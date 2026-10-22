@@ -19,6 +19,11 @@
 //! The boot `WARN` of [`TrustedProxies::boot_warning`] is the empty list's
 //! other half.
 //!
+//! The value `none` (case-insensitive, the whole value) says the opposite of
+//! the empty list: no proxy sits in front, so no peer's header is read and
+//! every request is keyed on its own address (#758 (a)). It is a stated
+//! choice, so it draws no `WARN`; mixed with CIDR blocks it is refused.
+//!
 //! The REST and gRPC extractors are siblings that may not depend on each
 //! other, so the variable and the rule live here, below both, and both read
 //! [`TrustedProxies::configured`] — one parse per process.
@@ -32,9 +37,16 @@ use crate::ip_class::{IpNetwork, IpNetworkError};
 /// The environment variable that holds the list.
 pub const TRUSTED_PROXIES_VAR: &str = "AXIAM__RATE_LIMIT__TRUSTED_PROXIES";
 
-/// The peers whose `X-Forwarded-For` is honoured; empty means every peer's.
+/// The value that says "no proxy in front: honour nobody".
+pub const TRUSTED_PROXIES_NONE: &str = "none";
+
+/// The peers whose `X-Forwarded-For` is honoured; empty means every peer's,
+/// [`TRUSTED_PROXIES_NONE`] means no peer's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrustedProxies(Arc<[IpNetwork]>);
+pub struct TrustedProxies {
+    networks: Arc<[IpNetwork]>,
+    none: bool,
+}
 
 /// Why the list could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -54,20 +66,40 @@ pub enum TrustedProxiesError {
     /// must not be guessed at.
     #[error("{TRUSTED_PROXIES_VAR}: the value is not valid UTF-8")]
     NotUnicode,
+    /// `none` appears next to CIDR blocks; it only stands alone.
+    #[error(
+        "{TRUSTED_PROXIES_VAR}: `none` means no proxy is trusted and cannot be \
+         combined with other entries"
+    )]
+    NoneMixed,
 }
 
 impl TrustedProxies {
     /// The list `raw` names: CIDR blocks or bare addresses (a host block),
-    /// separated by commas; blank entries are skipped.
+    /// separated by commas; blank entries are skipped. The whole value `none`
+    /// (any case, surrounding blanks ignored) is the list that honours nobody.
     ///
     /// # Errors
     ///
     /// The first entry that does not parse, host bits below the prefix
-    /// included (`10.0.0.1/8` is refused rather than widened).
+    /// included (`10.0.0.1/8` is refused rather than widened);
+    /// [`TrustedProxiesError::NoneMixed`] for `none` beside other entries.
     pub fn parse(raw: &str) -> Result<Self, TrustedProxiesError> {
-        raw.split(',')
+        let entries: Vec<&str> = raw
+            .split(',')
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
+            .collect();
+        let is_none = |entry: &&str| entry.eq_ignore_ascii_case(TRUSTED_PROXIES_NONE);
+        if entries.iter().any(is_none) {
+            return if entries.len() == 1 {
+                Ok(Self::nobody())
+            } else {
+                Err(TrustedProxiesError::NoneMixed)
+            };
+        }
+        entries
+            .into_iter()
             .map(|entry| {
                 entry
                     .parse::<IpNetwork>()
@@ -77,7 +109,25 @@ impl TrustedProxies {
                     })
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(|networks| Self(networks.into()))
+            .map(|networks| Self {
+                networks: networks.into(),
+                none: false,
+            })
+    }
+
+    /// The list that honours no peer's header (`none`).
+    #[must_use]
+    pub fn nobody() -> Self {
+        Self {
+            networks: Arc::default(),
+            none: true,
+        }
+    }
+
+    /// Whether the operator said `none`: no peer's header is read.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.none
     }
 
     /// The list `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` names (empty when unset).
@@ -126,26 +176,28 @@ impl TrustedProxies {
             .clone()
     }
 
-    /// Whether no peer is named, i.e. every peer's header is read.
+    /// Whether the list is the unconfigured empty one, i.e. every peer's
+    /// header is read. `none` is not empty: it is a decision.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.networks.is_empty() && !self.none
     }
 
     /// The blocks, in the order written.
     #[must_use]
     pub fn networks(&self) -> &[IpNetwork] {
-        &self.0
+        &self.networks
     }
 
     /// Whether a request from `peer` may name its client in `X-Forwarded-For`.
     ///
-    /// Always with the list empty; otherwise only when `peer` is inside one of
-    /// the blocks. A request with no known peer is never honoured under a
-    /// list: there is nothing to check it against.
+    /// Always with the list empty; never under `none`; otherwise only when
+    /// `peer` is inside one of the blocks. A request with no known peer is
+    /// never honoured under a list: there is nothing to check it against.
     #[must_use]
     pub fn honours_forwarded_for(&self, peer: Option<IpAddr>) -> bool {
-        self.is_empty() || peer.is_some_and(|peer| self.0.iter().any(|block| block.contains(peer)))
+        self.is_empty()
+            || peer.is_some_and(|peer| self.networks.iter().any(|block| block.contains(peer)))
     }
 
     /// The boot `WARN` for this list on a server whose REST listener is on
@@ -355,6 +407,47 @@ mod tests {
         assert!(
             matches!(bad, TrustedProxiesError::Entry { ref entry, .. } if entry == "proxy.internal")
         );
+    }
+
+    #[test]
+    fn none_honours_nobody_in_any_case_and_is_not_the_empty_list() {
+        for raw in ["none", "NONE", " None ", "none,", ",nOnE"] {
+            let list = TrustedProxies::parse(raw).expect(raw);
+            assert!(list.is_none() && !list.is_empty(), "{raw}");
+            assert!(list.networks().is_empty());
+            assert!(!list.honours_forwarded_for(Some(ip("10.0.0.1"))));
+            assert!(!list.honours_forwarded_for(None));
+            assert_eq!(list, TrustedProxies::nobody());
+        }
+        assert!(!TrustedProxies::parse("").unwrap().is_none());
+        // Only the whole value counts; a near miss is an unparsable entry.
+        assert!(matches!(
+            TrustedProxies::parse("nonexistent"),
+            Err(TrustedProxiesError::Entry { .. })
+        ));
+    }
+
+    #[test]
+    fn none_beside_blocks_is_refused_by_variable_name() {
+        for raw in ["none,10.0.0.0/8", "10.0.0.0/8, NONE", "none,none"] {
+            let error = TrustedProxies::parse(raw).expect_err(raw);
+            assert_eq!(error, TrustedProxiesError::NoneMixed, "{raw}");
+            assert!(error.to_string().contains(TRUSTED_PROXIES_VAR), "{error}");
+        }
+        let via_lookup =
+            TrustedProxies::from_lookup(|_| Ok("none,10.0.0.0/8".into())).expect_err("mixed");
+        assert_eq!(via_lookup, TrustedProxiesError::NoneMixed);
+        let ok = TrustedProxies::from_lookup(|_| Ok("none".into())).expect("none");
+        assert!(ok.is_none());
+    }
+
+    #[test]
+    fn none_draws_no_boot_warning_and_keys_every_request_on_its_peer() {
+        let none = TrustedProxies::nobody();
+        assert_eq!(none.boot_warning_for(true, true), None);
+        let peer = Some(ip("203.0.113.7"));
+        let selected = select_client_ip(Some("1.2.3.4, 5.6.7.8"), peer, 0, &none);
+        assert_eq!((selected.ip, selected.discarded_hops), (peer, None));
     }
 
     #[test]

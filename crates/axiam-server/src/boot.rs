@@ -2748,6 +2748,12 @@ where
             variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
             "{warning}"
         );
+    } else if trusted_proxies.is_none() {
+        tracing::info!(
+            "Rate-limit client-IP derivation: {} is `none`; X-Forwarded-For is read from \
+             no peer and every request is keyed on its own address, on both listeners.",
+            axiam_core::forwarded_for::TRUSTED_PROXIES_VAR
+        );
     } else if !trusted_proxies.is_empty() {
         let networks: Vec<String> = trusted_proxies
             .networks()

@@ -571,6 +571,21 @@ async fn with_the_list_empty_every_peers_header_is_read_as_before() {
     assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
 }
 
+/// D-3 (#758 (a)): `none` honours nobody, so two logins from one peer that
+/// write different `X-Forwarded-For` values share the peer's one bucket.
+#[actix_web::test]
+async fn with_none_two_xffs_from_one_peer_share_a_bucket() {
+    let none = TrustedProxies::parse("None").unwrap();
+    let (first, second) = two_logins_from_one_peer(
+        XForwardedForKeyExtractor::with_trusted_hops(0).with_trusted_proxies(none),
+    )
+    .await;
+    assert_eq!(
+        (first, second),
+        (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS)
+    );
+}
+
 /// An unlisted peer's header is not trusted at any hop count, and not counted
 /// as an R-4 discard either: `trusted_hops` is not what is wrong.
 #[actix_web::test]
@@ -595,6 +610,21 @@ async fn an_unlisted_peer_is_keyed_on_itself_at_any_trusted_hops() {
         );
         assert_eq!(xff_metrics::xff_discarded(), before, "trusted_hops {hops}");
     }
+}
+
+/// `none` is a stated choice: no WARN on either listener's native TLS.
+#[test]
+fn the_boot_decision_emits_no_warning_for_none() {
+    let none = TrustedProxies::parse("none").unwrap();
+    for (rest, grpc) in [(true, false), (false, true), (true, true), (false, false)] {
+        assert_eq!(none.boot_warning_for(rest, grpc), None);
+    }
+    assert!(none.boot_warning_for(true, true).is_none());
+    assert!(
+        TrustedProxies::default()
+            .boot_warning_for(true, true)
+            .is_some()
+    );
 }
 
 /// The boot `WARN`: once, for the empty list on a native TLS listener.

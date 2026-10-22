@@ -123,6 +123,166 @@ mod tests {
         }
     }
 
+    /// Whether a constant's name says it holds an audit action: `AUDIT_…`,
+    /// `…_AUDIT_…` or `…_ACTION` (`AUDIT_EXPORT_ACTION`, `TENANT_DELETED_ACTION`,
+    /// `CIBA_APPROVED_AUDIT_ACTION`, `SCIM_DEAD_LETTER_AUDIT_ACTION`).
+    fn names_an_audit_action(name: &str) -> bool {
+        // Settings and patterns that mention the audit log are not actions.
+        const NOT_AN_ACTION: [&str; 4] = ["_ENV", "_VAR", "_REGEX", "_FILE"];
+        !NOT_AN_ACTION.iter().any(|tail| name.ends_with(tail))
+            && (name.starts_with("AUDIT_") || name.contains("_AUDIT_") || name.ends_with("_ACTION"))
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable source directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `const NAME: &str = "literal";` in the workspace's `crates/*/src`
+    /// whose name [`names_an_audit_action`], as `(file, NAME, literal)`.
+    ///
+    /// A source scan rather than a list: a constant added later in any crate is
+    /// found by its name alone, so it is held to the grammar without anyone
+    /// remembering to register it. An alias of another constant is skipped
+    /// (its definition is scanned); any other value that is not one plain
+    /// string literal (`concat!`) fails the test rather than slipping past it.
+    fn audit_action_constants() -> Vec<(String, String, String)> {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for krate in std::fs::read_dir(&crates).expect("crates directory") {
+            let src = krate.expect("crate entry").path().join("src");
+            if src.is_dir() {
+                rust_sources(&src, &mut files);
+            }
+        }
+        files.sort();
+        let mut found = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("utf-8 source");
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let Some(decl) = line
+                    .trim_start()
+                    .strip_prefix("pub const ")
+                    .or_else(|| line.trim_start().strip_prefix("const "))
+                else {
+                    continue;
+                };
+                let Some((name, rest)) = decl.split_once(": &str =") else {
+                    continue;
+                };
+                if !names_an_audit_action(name) {
+                    continue;
+                }
+                // The value may start on the next line (rustfmt wraps a long one).
+                let value = if rest.trim().is_empty() {
+                    lines.get(i + 1).copied().unwrap_or("")
+                } else {
+                    rest
+                };
+                let value = value.trim();
+                // An alias of another constant (`pub const A: &str = b::A;`) is
+                // held to the grammar at its definition.
+                let alias = value.strip_suffix(';').is_some_and(|path| {
+                    path.split("::").all(|seg| {
+                        !seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    })
+                });
+                if alias {
+                    continue;
+                }
+                let literal = value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix("\";"))
+                    .filter(|v| !v.contains('"') && !v.contains('\\'));
+                let literal = literal.unwrap_or_else(|| {
+                    panic!(
+                        "{}: `{name}` is not one plain string literal ({value}); \
+                         make it one, or rename it so it does not claim to be an audit action",
+                        file.display()
+                    )
+                });
+                found.push((
+                    file.display().to_string(),
+                    name.to_owned(),
+                    literal.to_owned(),
+                ));
+            }
+        }
+        found
+    }
+
+    /// W2.9 (#758 (d)): every server action constant is within the grammar the
+    /// AMQP ingestion enforces on producers, W4's network constants
+    /// (`network_gate.rs`, `handlers/network.rs`, the seeder) and the reserved
+    /// control records among them. A server constant outside it would be a row
+    /// the server itself could write but no producer could replay or filter by.
+    #[test]
+    fn every_server_action_constant_is_within_the_action_grammar() {
+        let constants = audit_action_constants();
+        let bad: Vec<String> = constants
+            .iter()
+            .filter(|(_, _, action)| !is_valid_audit_action(action))
+            .map(|(file, name, action)| format!("{file}: {name} = {action:?}"))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "outside the action grammar:\n{}",
+            bad.join("\n")
+        );
+
+        // The scan must still be seeing the workspace: these are a core file's,
+        // an authz file's, a db file's (reserved) and an api-rest file's.
+        for anchor in [
+            "directory.account_updated",
+            "network_role.unassigned",
+            "tenants.purged",
+            "gdpr.user_pseudonymized",
+            "network_segment.created",
+            "ciba.approved",
+        ] {
+            assert!(
+                constants.iter().any(|(_, _, action)| action == anchor),
+                "the scan no longer finds {anchor}"
+            );
+        }
+        assert!(
+            constants.len() >= 40,
+            "the scan found only {} constants",
+            constants.len()
+        );
+        // A reserved control record is a constant like any other here.
+        for (_, name, action) in &constants {
+            if reserved_action_namespace(action).is_some() {
+                assert!(is_valid_audit_action(action), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_scan_names_constants_by_their_audit_naming_convention() {
+        for name in [
+            "AUDIT_ROLE_ASSIGNED",
+            "CIBA_APPROVED_AUDIT_ACTION",
+            "TENANT_PURGED_ACTION",
+        ] {
+            assert!(names_an_audit_action(name), "{name}");
+        }
+        for name in [
+            "SSF_MANAGE_SCOPE",
+            "NETWORK_ACTION_REGEX",
+            "TOKEN_PRE_ISSUE",
+        ] {
+            assert!(!names_an_audit_action(name), "{name}");
+        }
+    }
+
     #[test]
     fn the_control_namespaces_are_reserved_whatever_their_case() {
         for action in [

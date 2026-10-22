@@ -477,3 +477,185 @@ healthy-list case for the directory lock, so that both lock kinds cover both out
 `docker/radius/fetch-crl.sh:75` was left at 124 columns by `bcf4cbb`; re-wrap it like its
 neighbours. Test: `fetch-crl-test.sh` under `dash` and `bash`; `shellcheck`; `cargo test -p
 axiam-db --lib every_migration_version_is_unique_and_ordered`; the acceptance `grep`.
+
+---
+
+## Addendum — the sweep (2026-10-22)
+
+**Against:** `33a3b80..13e16b3`, five commits: `cef83a1` (#764), `9c1b7e2` and `4870793`
+(#765), `7e1e05a` (#766), `13e16b3` (#767). Each carries one `gpgsig` header. Method: every
+commit message and the whole diff read against the tree and against §2.1's reading of
+`rlm_cache` 3.2.8; the static checker run against the head, the W5.1 file (`33a3b80`) and
+`main`'s, and probed with hand-made fixtures; the T-462 and T-486 copies compared decoded by
+script; the CI logs below read through the GitHub API. Still no Docker daemon here, so
+`token-cache-test.sh` and the e2e were not run locally; their CI runs are the evidence.
+
+### A.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| R112W5-01 (Low, #764) | **Closed** | §A.2 |
+| R112W5-02 (Info, #765) | **Closed** | §A.3, §A.4 |
+| R112W5-03 (Info, #766) | **Closed** | §A.5 |
+| R112W5-04 (Info, #767) | **Not closed** (one item of the issue left) | §A.5 |
+| R112W5-05 (Info, #774) | **New** | §A.6 |
+
+### A.2 R112W5-01: the read and the first store (`cef83a1`)
+
+`check-eap-tls` now makes three kinds of call on `axiam_token_cache`, and each is one of §2.1's
+safe shapes:
+
+- **The read (`:69-72`)** is one call with `Cache-Read-Only := yes`. Present → rule 6, merged,
+  `ok`. Absent or expired → rule 4 → rule 7, `notfound`, nothing inserted. The probe, the
+  `else` branch and the window between two calls are gone. A `fail` from the module leaves
+  `Tmp-String-2 = "!"`, which `:105` rejects.
+- **The first fetch's store (`:100-103`)** takes `Cache-TTL := "%{expr:0 - %{1} / 2}"`. Rule 8
+  removed the read's `Cache-Read-Only`, so this is rule 5 (expire, then insert) or rule 4
+  (insert) with this request's `%{1}`. A request with `Tmp-Integer-1 = 1` now decides with the
+  token it fetched, which also closes the related gap §2.2 named.
+- **The drop and the retry's store** are unchanged from W5.1 (§2.1).
+- **The sentinel** of `Tmp-String-2` is `!` at `:39` and `:154`, outside the token class, so
+  `:30-35`'s rule now holds for every attribute.
+
+No call can create an entry holding anything but a token some request fetched, so path C of
+§2.2 no longer exists. The tests are the ones §2.2 proposed:
+
+- `check-token-cache.py`: `--self-test` 11/11 here. On the head it exits 0. On `33a3b80` and
+  on `main` it exits 1, at the probe, the plain calls, the positive store and the `-` sentinel.
+- `token-cache-test.sh`: the five cases match §2.1 rule by rule. The `drops` case also shows
+  that a read-only `notfound` does not leave `Cache-Read-Only` behind for the next call (its
+  `old-drop` after the read-only `reset` answers `updated`).
+
+The module is extracted from `axiam_live` by `awk`, not copied, so it cannot drift. CI on the
+head (run 39803272347, job 119909630432): `11 passed, 0 failed`, then the check line
+`every call on axiam_token_cache is read-only or a fetched token's store`, then `ok` for
+old-read, new-read, new-store, old-store and drops, `token-cache cases: 5 passed, 0 failed`.
+Guide §5 and T-486 say the same as the file.
+
+### A.3 R112W5-02: the forced interleaving (`9c1b7e2`, `4870793`)
+
+- **The holds.** `wrap_fn` builds the handler future, then `Hold::pass` holds it before it is
+  polled. The first two `POST /api/v1/network/decide` wait for each other, and so do the first
+  two `/api/v1/auth/device`. Each `Notified` is created before the counter's `fetch_add`, and
+  tokio delivers `notify_waiters` to a `Notified` that exists but has not been polled yet, so
+  the second arrival cannot miss the first. `arm` clears the counters, and the holds are armed
+  only for the step.
+- **The bounds.** `HOLD_AT_MOST` is 3 s, under the `rest` modules' `timeout = 4.0`
+  (`axiam_live:43, 84`). Each hold is on a separate `rest` call with its own timeout, and
+  `connect_timeout = 3.0` is spent before AXIAM's handler, so a hold does not count against it.
+  The third and fourth decisions are not held.
+- **What the step asserts.** Both holds were released by the second arrival (`met()`), AXIAM
+  saw `(4, 2)` decisions and logins, and both attempts were admitted. A serialized run cannot
+  pass, and run 39786274608 (`9c1b7e2`, job 119850221633) is the proof: it panicked at
+  `radius_e2e.rs:3345` with `rotation: the two authentications interleaved (both decisions
+  arrived before either was answered: false; both logins before either was answered: false)`.
+- **Why it failed under `-X`.** `4870793`'s diagnosis is right. `-X` includes `-s`, so the
+  Live stack served one request at a time and could never have two post-auth sections at once.
+  W5.1's step had therefore only ever run the serialized order (§2.3 understated this).
+- **`log_has_status_code`.** It now strips the `(N)` request number and anchors on the value
+  (`REST-HTTP-Status-Code = "401"` at the end of the line, or the `EXPAND` line followed by
+  exactly `--> 401`). `the_status_matcher_is_anchored_on_the_value` covers request 401's
+  `200`, `4010`, the expansion of request 401 and a bare port.
+
+**Proof on the old recipe.** The scratch branch `claude/release-1.1.2-w5-probe-old-recipe`
+was `4870793` with `main`'s `check-eap-tls`.
+
+- Run 39797935666 failed at the new static step, which flagged the probe (`:61`), the plain and
+  positive calls (`:63, :90, :93, :132, :162`) and the `-` sentinel (`:38, :137`).
+- Commit `0ff76e0` then made that check non-fatal on the probe branch only, and run
+  39803266076 (job 119909604931) failed in
+  `a_decision_per_authentication_places_revokes_and_quarantines` at
+  **`radius_e2e.rs:3361`**: `rotation: the first concurrent authentication after the 401 is
+  admitted, with no wait for the entry`.
+- Line 3361 is the admission `assert!`. It comes after the `met()` assertion (`:3346`) and the
+  `(4, 2)` assertion (`:3354`), so on the old file **both holds met and AXIAM counted four
+  decisions and two logins**. The failure is the rotation step's admission, not a setup or
+  timing failure.
+- The `-xx` dump shows the mechanism of R111W5-01. Requests (58) and (59) each logged in
+  (`200`), stored with `Cache-TTL := 450` (positive), found an entry
+  (`Found entry … Merging cache entry into request`), decided with it, got `401` ("token is
+  bound to a different client certificate") and were sent `Access-Reject`. The last progress
+  line before the panic is `[radius-e2e] quarantine`.
+- On the same branch, `token-cache-test.sh` passed 5/5, as it should: it tests the cache
+  module, not the recipe.
+
+On the head (run 39803272347), `[radius-e2e] rotation … interleaved by AXIAM's holds (… 4
+decisions, 2 logins), each got the 401, logged in again and were admitted at once`, then
+`done Live cases passed in 102s` and `test result: ok. 3 passed`. Run 39794557988
+(`4870793`) also succeeded. The step now separates the two files in both directions.
+
+### A.4 The threaded Live stack (`4870793`): anything new under concurrency
+
+- **The command.** `docker-compose.radius-live.yml` now runs
+  `freeradius -f -xx -l stdout`, with the thread pool. The Static base file keeps `-X`.
+- **`axiam-live.sh`.** `stash` writes `.$serial.$$` (unique per process) and `mv`s it into
+  place atomically. `take` only reads. Two threads with one certificate write the same
+  fingerprint, and a serial names one certificate under the single trusted issuer. **Safe.**
+- **The token cache.** `rlm_cache_rbtree` serialises each call under its mutex, and §A.2's
+  shapes make the order of calls across threads harmless.
+- **`rlm_rest` pools.** They are per thread-safe connection (`max = 8`, `spare = 2`). The
+  probe log shows a connection being opened while another is reserved, as expected.
+- **Other state.** The recipe holds none: its `Tmp-*` attributes live in the request's
+  `control` list, and `exec axiam_take` is a separate process per call.
+- **The logs.** `-xx` keeps the `(N)` prefix and no timestamps, so the matcher and the job's
+  log dump are unchanged, and the head run passed with them.
+- **Who it reaches.** The change affects only the e2e override and an operator who copied its
+  `command`. The guide and the upgrade-note draft (`7e1e05a`) now say so.
+
+**Nothing new found.**
+
+### A.5 Text and hygiene (`7e1e05a`, `13e16b3`)
+
+**R112W5-03 is closed.**
+
+- **(a)** The guide's lock paragraph now says a lock-held run "raises no alert while the list
+  is healthy, and exits 3 … when it is not".
+- **(b)** T-486 carries a dated #766 correction. It names
+  `a_decision_per_authentication_places_revokes_and_quarantines` and says a fetched token gets
+  one call. The older text stays.
+- **(c)** The upgrade note's row now names the file `raddb/d4/axiam_d4` → `raddb/live/axiam_live`,
+  says its four modules keep their names, says it is mounted as `mods-enabled/axiam_placement`,
+  and gives `connect_uri` as the two `rest` modules'.
+
+**R112W5-04 is not closed.**
+
+- **Done:**
+  - (a) `schema.rs:7217` now reads "the Live profile". `git grep -nE '\bD[34]\b' -- crates/`
+    finds no RADIUS `D4`.
+  - (b, first half) the `mkdir` near-end case now truncates the request log and asserts
+    `reqs = 0`.
+  - (c) `fetch-crl.sh:72-77` is re-wrapped. Other lines over 100 columns predate the wave.
+  - `fetch-crl-test.sh`: 90/90 under `dash` and under `bash`.
+- **Not done:** #767 (b) also asks for the **healthy-list case for the directory lock**
+  ("so that both lock kinds cover both outcomes"). `13e16b3` neither adds it nor says why not.
+  `07/lock-held (mkdir)` still has only the near-end case, against four `flock` cases. This is
+  a one-case test addition, with **Sonnet 5.5** as the model; #767 stays open for it.
+
+**The threat-model copies.** The T-462 and T-486 `mitigation`, `description` and `status` are
+**identical** between `Axiam.json` and the decoded `THREAT_MODEL` object in
+`website/src/threatModel.ts`. The blockquote paragraphs of each entry in
+`threat-model-stride.md`, joined, equal the JSON `mitigation` byte for byte. Both stay
+**Open**, with no model bump. T-462 is not touched by the sweep.
+`node website/scripts/gen-threat-model.mjs` exits 0 and leaves no diff.
+
+### A.6 New finding
+
+| ID | Finding | Severity | Surface | Origin | Issue | Model for the fix |
+|---|---|---|---|---|---|---|
+| R112W5-05 | `check-token-cache.py` treats a call on `axiam_token_cache` as one only when the line is exactly `axiam_token_cache`. A call with an action block (`axiam_token_cache {`, the form `check-eap-tls` already uses for `axiam_decide`) or the optional form `-axiam_token_cache` is not counted, so its shape is not checked. With a fixture holding a plain call in either form, `check()` returns no finding. The shipped file uses neither form, so this is a false negative of the gate for later edits, not a defect today. | Informational | `docker/radius/tests/check-token-cache.py:117` | sweep (`cef83a1`) | [#774](https://github.com/ilpanich/axiam/issues/774) | Sonnet 5.5 |
+
+No false positive was found. A block the checker cannot parse (`update control{`, a trailing
+comment on the brace line) yields a finding, which is the safe direction.
+
+### A.7 Merge
+
+W5 **may not merge yet**. Under plan §1.4 two findings are open, both Informational and both
+test-only:
+
+- R112W5-04, the healthy-list `mkdir` case (#767);
+- R112W5-05, the checker's two spellings (#774).
+
+Neither touches the recipe or the code paths. Once a sweep commit closes both, with
+`fetch-crl-test.sh` under both shells and `check-token-cache.py --self-test` showing the new
+cases, the wave can merge without another e2e dispatch: neither file is an input of the
+Live case.

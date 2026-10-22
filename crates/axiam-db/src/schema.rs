@@ -2624,7 +2624,11 @@ impl Default for MigrationLease {
 ///
 /// # The startup lease (#755, R111-05)
 ///
-/// `_migration_lock:startup` is a lease on the datastore's clock: a starter
+/// `_migration_lock:startup` is a lease on the datastore's clock (one clock for
+/// the shipped single-node SurrealDB; a clustered SurrealDB evaluates
+/// `time::now()` on whichever node runs each statement, so the lease excludes
+/// only while the skew between nodes stays under the TTL less one refresh, about
+/// four minutes, and past that the tolerance below keeps the outcome correct): a starter
 /// `CREATE`s it with its own random `holder` and `expires = time::now() +
 /// ttl`, in a transaction that first deletes the row only if it has expired
 /// (or carries no `expires`, as a 1.1.1 binary's leftover does). A live row

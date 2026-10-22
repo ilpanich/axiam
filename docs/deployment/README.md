@@ -254,12 +254,21 @@ the shipped `failureThreshold` raised.
   a `SIGTERM` (or a kill) that reaches a replica while it holds the lease: no
   signal handler runs before the HTTP server exists, so the row is left behind
   and expires like a dead holder's.
+- "The datastore's clock" is one clock for the shipped single-node SurrealDB.
+  A clustered SurrealDB evaluates `time::now()` on whichever node runs each
+  statement, so the lease excludes only while the skew between nodes stays under
+  about four minutes (its lifetime less one refresh); past that, the tolerance
+  below still keeps the outcome correct.
 - A replica that stalls past the lease's lifetime without dying can overlap
   with its successor. The runner tolerates that case too: a migration the
   other replica recorded first is logged as applied by another instance, and
   the boot continues.
 - The lease row left by a 1.1.1 or older binary (no holder, no expiry) is read
-  as stale and replaced.
+  as stale and replaced. A 1.1.1
+  replica still running during a rolling update ignores the lease and removes the
+  row when it finishes, even a 1.1.2 holder's. That costs nothing from 1.1.1 to
+  1.1.2, which adds no migration; a 1.1.2 holder whose lease disappears logs it
+  and carries on.
 - A migration missing **below** the newest one recorded — a datastore that
   ran a branch build — is applied late, with a `WARN`, only if it is
   additive (every statement a `DEFINE … IF NOT EXISTS`). Otherwise the replica

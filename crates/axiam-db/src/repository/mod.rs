@@ -110,7 +110,7 @@ pub use permission::SurrealPermissionRepository;
 pub use permission_ticket::SurrealPermissionTicketRepository;
 pub use pgp_key::SurrealPgpKeyRepository;
 pub use pushed_auth_request::SurrealPushedAuthRequestRepository;
-pub use rate_limit::SurrealRateLimitBucketRepository;
+pub use rate_limit::{RATE_LIMIT_BUCKET_SWEEP_SELECTION, SurrealRateLimitBucketRepository};
 pub use reactor::SurrealReactorRepository;
 pub use resource::SurrealResourceRepository;
 pub use revoked_session::SurrealRevokedSessionRepository;

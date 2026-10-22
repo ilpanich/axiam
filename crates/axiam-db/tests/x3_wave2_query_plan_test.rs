@@ -129,7 +129,8 @@ async fn webauthn_attestation_policy_tenant_lookup_is_index_satisfied() {
 // ---------------------------------------------------------------------------
 
 /// The selection of `SurrealRateLimitBucketRepository::delete_stale_once`
-/// (#676, R111W3-04 (e)), written exactly as the sweep writes it. The planner
+/// (#676, R111W3-04 (e)), read from the constant the sweep itself uses
+/// (#773), so the two cannot drift. The planner
 /// folds `time::now() - duration::from_secs($retention)` into a constant and
 /// serves the range from `rate_limit_bucket_updated_at`; a plan that stops
 /// folding it, or a rewritten predicate, would make every pass of the server's
@@ -138,11 +139,10 @@ async fn webauthn_attestation_policy_tenant_lookup_is_index_satisfied() {
 async fn rate_limit_bucket_sweep_selection_is_index_satisfied() {
     let db = fresh_db().await;
     let mut res = db
-        .query(
-            "SELECT VALUE id FROM rate_limit_bucket \
-                 WHERE updated_at < time::now() - duration::from_secs($retention) \
-                 LIMIT $limit EXPLAIN",
-        )
+        .query(format!(
+            "{} EXPLAIN",
+            axiam_db::repository::RATE_LIMIT_BUCKET_SWEEP_SELECTION
+        ))
         .bind(("retention", 1_260_i64))
         .bind(("limit", 500_i64))
         .await

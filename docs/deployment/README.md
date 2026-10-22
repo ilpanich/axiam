@@ -226,6 +226,8 @@ dependency bump that makes the name available.
 |---|---|
 | `AXIAM__DB__ALLOW_MEMORY_ENGINE` | **Development only.** `true` lets the server start against a positively-identified `memory` datastore instead of refusing. Never set it in a deployment; single-use redemption is not guaranteed when it is honoured. Unset (the default) fails closed. |
 
+**Migration v109 on a development datastore.** A development datastore that applied migration v109 before commit `7a9b002c` has v109 recorded without the `dpop_jkt` field and fails closed on DPoP-bound refresh; re-run the migration by deleting the v109 record (`DELETE _migration WHERE version = 109;`) and restarting the server.
+
 ## Required secrets & environment
 
 All AXIAM configuration keys use a **double underscore** after the `AXIAM`

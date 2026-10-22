@@ -157,6 +157,8 @@ pub const AUDIT_ROLE_UNASSIGNED: &str = "network_role.unassigned";
 pub const AUDIT_ROLE_GRANTED: &str = "network_role.granted";
 /// A `network:` permission revoked from a role (cleared and landed).
 pub const AUDIT_ROLE_REVOKED: &str = "network_role.revoked";
+/// A role carrying `network:` grants deleted (cleared and landed; R111W4-03).
+pub const AUDIT_ROLE_DELETED: &str = "network_role.deleted";
 /// A certificate bound to a service account (cleared and landed).
 pub const AUDIT_BINDING_BOUND: &str = "certificate_binding.bound";
 

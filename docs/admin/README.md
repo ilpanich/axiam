@@ -568,10 +568,11 @@ gate cleared and that landed is a `success` row, written once, after the write:
 | `network_role.unassigned` | such a role is unassigned | role id and name, grantee, node, the role's `network:` permissions |
 | `network_role.granted` | a `network:` permission is granted to a role | role id and name, the permission (action, id, effect, scopes) |
 | `network_role.revoked` | a `network:` permission is revoked from a role | role id and name, the permission (action, id, the effect that was removed) |
+| `network_role.deleted` | a role carrying a `network:` permission (allow or deny) is deleted | role id and name, the role's `network:` permissions (action, effect, scopes) as the gate read them |
 | `certificate_binding.bound` | a certificate is bound to a service account | certificate id, service account id — never the certificate itself |
 
 The row's `actor_id` is the writer. A write that touches no `network:`
-permission, and a role update or delete, leaves none of these rows (the request
+permission (a role with no `network:` grant that is deleted included), and a role update, leaves none of these rows (the request
 row of the route still records them). If the row cannot be appended, the error
 is logged and the write stands.
 

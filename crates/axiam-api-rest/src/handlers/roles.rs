@@ -397,10 +397,19 @@ pub async fn delete<C: Connection + Clone>(
     let write = NetworkWrite::RoleDelete { role_id };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .delete_claimed(principal.tenant_id, role_id, cleared.role_claim())
-        .await
+    let role_repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let claim = cleared.role_claim();
+    // R111W4-03: a role carrying network: grants leaves a network_role.deleted
+    // row, built from the gate's read and appended in the write's own task.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move { role_repo.delete_claimed(tenant_id, role_id, claim).await },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }

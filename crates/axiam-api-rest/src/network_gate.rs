@@ -18,10 +18,10 @@ use actix_web::HttpResponse;
 use std::future::Future;
 
 use axiam_authz::network_gate::{
-    AUDIT_BINDING_BOUND, AUDIT_ROLE_ASSIGN_REFUSED, AUDIT_ROLE_ASSIGNED, AUDIT_ROLE_GRANT_REFUSED,
-    AUDIT_ROLE_GRANTED, AUDIT_ROLE_REVOKED, AUDIT_ROLE_UNASSIGN_REFUSED, AUDIT_ROLE_UNASSIGNED,
-    AUDIT_ROLE_WRITE_REFUSED, ClearedRole, GateClearance, GateRefusal, GateWriter, Grantee,
-    NetworkWrite, RefusalStatus, RepositoryGateStore, authorize_network_write,
+    AUDIT_BINDING_BOUND, AUDIT_ROLE_ASSIGN_REFUSED, AUDIT_ROLE_ASSIGNED, AUDIT_ROLE_DELETED,
+    AUDIT_ROLE_GRANT_REFUSED, AUDIT_ROLE_GRANTED, AUDIT_ROLE_REVOKED, AUDIT_ROLE_UNASSIGN_REFUSED,
+    AUDIT_ROLE_UNASSIGNED, AUDIT_ROLE_WRITE_REFUSED, ClearedRole, GateClearance, GateRefusal,
+    GateWriter, Grantee, NetworkWrite, RefusalStatus, RepositoryGateStore, authorize_network_write,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -286,8 +286,7 @@ pub async fn refused_after_clearance<C: Connection + Clone>(
 ///
 /// No row is written when the clearance is not network-sensitive, when the
 /// write fails (the caller answers that error — `refused_after_clearance` for
-/// a stale claim), or when the write is not one of the five (a role update or
-/// delete, a resource write, a segment or profile write — those keep their own
+/// a stale claim), or when the write is not one of the five (a role update, a resource write, a segment or profile write — those keep their own
 /// rows).
 ///
 /// A failure to describe the write or to append the row is logged and does not
@@ -457,6 +456,18 @@ fn cleared_row(
                         "permission_id": permission_id,
                         "effect": effect,
                     }],
+                }),
+            )
+        }
+        NetworkWrite::RoleDelete { role_id } => {
+            let role = role()?;
+            (
+                AUDIT_ROLE_DELETED,
+                None,
+                serde_json::json!({
+                    "role_id": role_id,
+                    "role": role.name,
+                    "permissions": network_permissions(role),
                 }),
             )
         }

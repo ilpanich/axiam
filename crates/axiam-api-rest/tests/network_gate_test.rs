@@ -2315,3 +2315,47 @@ async fn r111w4_02_a_role_deleted_after_the_write_is_still_named_with_the_grants
         "the grants the gate saw, not the deny written after it"
     );
 }
+
+/// R111W4-03 (#727): deleting a role that carries `network:` grants leaves
+/// exactly one `network_role.deleted` row naming the role and the grants the
+/// gate read; a role with no `network:` grant leaves none.
+#[actix_rt::test]
+async fn r111w4_03_deleting_a_role_with_network_grants_leaves_one_row_naming_them() {
+    let w = World::new().await;
+    let admin = network_admin(&w).await;
+    let t = w.user_token(admin);
+    let app = app!(w);
+    let denying = w.role("blocked-fleet", &[(NETWORK_JOIN, DENY)]).await;
+    let allowing = w.role("open-fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let plain = w.role("plain", &[]).await;
+
+    for (role, name, effect, expected) in [
+        (denying, "blocked-fleet", "deny", 1),
+        (allowing, "open-fleet", "allow", 2),
+    ] {
+        let (status, err) = call(&app, &t, "DELETE", &format!("/api/v1/roles/{role}"), None).await;
+        assert_eq!(status, 204, "{err}");
+        let rows = w.audit("network_role.deleted").await;
+        assert_eq!(rows.len(), expected, "one row per delete: {rows:?}");
+        let row = rows
+            .iter()
+            .find(|r| r.metadata["role_id"] == role.to_string())
+            .expect("the row of this delete");
+        assert_eq!(row.outcome, AuditOutcome::Success);
+        assert_eq!(row.actor_id, admin);
+        assert_eq!(row.metadata["role"], name);
+        assert_eq!(row.metadata["write"], "role_delete");
+        assert_eq!(
+            row.metadata["permissions"],
+            json!([{ "action": NETWORK_JOIN, "effect": effect, "scope_ids": [] }]),
+        );
+    }
+
+    let (status, err) = call(&app, &t, "DELETE", &format!("/api/v1/roles/{plain}"), None).await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(
+        w.audit("network_role.deleted").await.len(),
+        2,
+        "a role with no network: grant leaves no row"
+    );
+}

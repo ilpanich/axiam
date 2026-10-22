@@ -100,10 +100,12 @@ server check-eap-tls {
 		update control {
 			REST-HTTP-Header := "Authorization: Bearer %{control:Tmp-String-2}"
 		}
-		#    rlm_rest answers a 401 with `invalid`, which ends a post-auth section
-		#    at once; priority 1 lets this section carry on and look at the status.
-		#    Every other result keeps its own action, so a 403 or a 5xx still ends
-		#    the section as before.
+		#    In post-auth rlm_rest answers EVERY 4xx with `invalid`, which ends a
+		#    section at once; priority 1 lets this section carry on and look at the
+		#    status. So every 4xx (a 400, 403 or 404 as much as a 401) continues
+		#    below, and anything but a 401 is rejected by the status test there. A
+		#    5xx or a transport failure keeps its own action and still ends the
+		#    section as before.
 		axiam_decide {
 			invalid = 1
 		}

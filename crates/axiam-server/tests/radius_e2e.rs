@@ -113,6 +113,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use actix_web::dev::ServerHandle;
@@ -2599,6 +2600,8 @@ struct Stub {
     handle: ServerHandle,
     port: u16,
     answer: Arc<Mutex<(u16, String)>>,
+    /// How many times `/api/v1/network/decide` has been asked.
+    decisions: Arc<AtomicUsize>,
 }
 
 fn serve_stub(cert: &Path, key: &Path) -> Stub {
@@ -2617,10 +2620,13 @@ fn serve_stub(cert: &Path, key: &Path) -> Stub {
     .expect("the stub's certificate and key");
     let answer = Arc::new(Mutex::new((200, String::new())));
     let shared = Arc::clone(&answer);
+    let decisions = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&decisions);
     let listener = TcpListener::bind("0.0.0.0:0").expect("a port for the stub");
     let port = listener.local_addr().expect("its address").port();
     let server = HttpServer::new(move || {
         let answer = Arc::clone(&shared);
+        let decisions = Arc::clone(&counted);
         App::new()
             .route(
                 "/api/v1/auth/device",
@@ -2633,6 +2639,7 @@ fn serve_stub(cert: &Path, key: &Path) -> Stub {
             .route(
                 "/api/v1/network/decide",
                 web::post().to(move || {
+                    decisions.fetch_add(1, Ordering::SeqCst);
                     let (status, body) = answer.lock().expect("the answer").clone();
                     async move {
                         HttpResponse::build(
@@ -2654,10 +2661,16 @@ fn serve_stub(cert: &Path, key: &Path) -> Stub {
         handle,
         port,
         answer,
+        decisions,
     }
 }
 
 impl Stub {
+    /// How many decisions have been asked of the stub so far.
+    fn decisions_asked(&self) -> usize {
+        self.decisions.load(Ordering::SeqCst)
+    }
+
     /// What `/api/v1/network/decide` answers from now on.
     fn answers(&self, status: u16, body: impl Into<String>) {
         *self.answer.lock().expect("the stub's answer") = (status, body.into());
@@ -2687,6 +2700,23 @@ fn assert_tunnel(attempt: &Attempt, vlan: &str, what: &str) {
         "{what}: Tunnel-Private-Group-Id is the VLAN string, with no tag octet:\n{}",
         attempt.report()
     );
+}
+
+/// Whether the debug log records `rlm_rest` answering with `status`: a line that names
+/// `REST-HTTP-Status-Code` and the status, or the expansion of that attribute followed
+/// by the `--> status` line. A bare `401` elsewhere in the log (a port, a serial, a
+/// timestamp) is not the answer.
+fn log_has_status_code(log: &str, status: &str) -> bool {
+    let lines: Vec<&str> = log.lines().collect();
+    lines.iter().enumerate().any(|(i, line)| {
+        line.contains("REST-HTTP-Status-Code")
+            && (line
+                .split(|c: char| !c.is_ascii_digit())
+                .any(|t| t == status)
+                || lines.get(i + 1).is_some_and(|next| {
+                    next.trim().strip_prefix("--> ").map(str::trim) == Some(status)
+                }))
+    })
 }
 
 /// A refusal the decision made: the certificate was valid for EAP-TLS, and the
@@ -3189,7 +3219,7 @@ async fn decision_per_authentication() {
         healed
             .log
             .contains("Found entry for \"axiam-decide-caller\"")
-            && healed.log.contains("401")
+            && log_has_status_code(&healed.log, "401")
             && healed.log.contains("/api/v1/auth/device"),
         "rotation: the cached token was tried, answered 401, and a new one was fetched:\n{}",
         healed.log
@@ -3396,10 +3426,21 @@ async fn decision_per_authentication() {
     let count = refusals.len();
     for (what, (status, body)) in refusals {
         stub.answers(status, body);
+        let asked_before = stub.decisions_asked();
         let attempt = radius
             .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
             .await;
         assert_refused_by_the_decision(&attempt, what);
+        // Only a 401 is retried, and only once: a first call and one more with a new
+        // token. Every other answer is asked once. 1.1.0's file, with no retry, asks a
+        // 401 once; a retry that loops asks it more than twice (#722).
+        let expected = if status == 401 { 2 } else { 1 };
+        assert_eq!(
+            stub.decisions_asked() - asked_before,
+            expected,
+            "mapping: {what}: the decision is asked {expected} time(s) per authentication:\n{}",
+            attempt.report()
+        );
     }
     say(
         "mapping",

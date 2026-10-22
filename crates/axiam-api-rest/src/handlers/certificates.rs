@@ -233,6 +233,8 @@ async fn issuing_scope<C: Connection + Clone>(
     tag = "certificates",
     request_body = CreateCertificateRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "Certificate generated",
          body = GeneratedCertificate),
         (status = 400, description = "Invalid request: the subject is not a common name, the \
@@ -368,6 +370,8 @@ pub struct SignCertificateCsrRequest {
     tag = "certificates",
     request_body = SignCertificateCsrRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "Certificate issued from the request. Carries no \
                                       private key: there is none, which is the point.",
          body = Certificate),

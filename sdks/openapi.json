@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.1",
-    "x-axiam-spec-digest": "sha256:fb6739eb8f03d456e3419b7a5b026b6c6092159322ecd9069a7c06355887d401"
+    "x-axiam-spec-digest": "sha256:2a8630a55ccbee927fa8627e43e7831dfeaa7cfb492332a3203ec02f07ebb7ec"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -1331,6 +1331,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
           }
         }
       }
@@ -2443,6 +2446,12 @@
           },
           "404": {
             "description": "No such issuing CA within this caller's reach: it belongs to another organization, to another tenant, or is the organization CA and the caller is not an organization principal"
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -2495,6 +2504,12 @@
           },
           "404": {
             "description": "No such issuing CA within this caller's reach: it belongs to another organization, to another tenant, or is the organization CA and the caller is not an organization principal"
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -6679,6 +6694,12 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -6731,6 +6752,9 @@
           },
           "400": {
             "description": "Not a CA certificate, already expired, or the supplied key does not match it"
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
           }
         },
         "security": [
@@ -7395,6 +7419,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "`reserved_metadata_key`: the metadata uses a key the server reserves"
           }
         },
         "security": [
@@ -7505,6 +7532,9 @@
           },
           "404": {
             "description": "Tenant not found"
+          },
+          "422": {
+            "description": "`reserved_metadata_key`: the metadata uses a key the server reserves"
           }
         },
         "security": [
@@ -7864,6 +7894,12 @@
           },
           "400": {
             "description": "The parent CA is revoked, expired, holds no key, or is itself a tenant signing CA"
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -7926,6 +7962,12 @@
           },
           "400": {
             "description": "The request is not a valid PKCS#10 CSR, its signature does not verify, or the parent CA cannot sign"
+          },
+          "409": {
+            "description": "`already_exists`: a certificate with this issuer and serial number is already stored"
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -8389,6 +8431,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -8425,6 +8470,9 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"
           }
         },
         "security": [
@@ -9824,6 +9872,16 @@
           },
           "404": {
             "description": "Role not found"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -9859,6 +9917,16 @@
           },
           "404": {
             "description": "Role not found"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -9946,6 +10014,16 @@
         "responses": {
           "204": {
             "description": "Role assigned to group"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10003,6 +10081,16 @@
         "responses": {
           "204": {
             "description": "Role unassigned from group"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10089,6 +10177,16 @@
         "responses": {
           "204": {
             "description": "Permission granted to role"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10133,6 +10231,16 @@
         "responses": {
           "204": {
             "description": "Permission revoked from role"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10222,6 +10330,16 @@
           },
           "404": {
             "description": "Role or service account not found in this tenant"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10279,6 +10397,16 @@
         "responses": {
           "204": {
             "description": "Role unassigned from service account"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10366,6 +10494,16 @@
         "responses": {
           "204": {
             "description": "Role assigned to user"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -10423,6 +10561,16 @@
         "responses": {
           "204": {
             "description": "Role unassigned from user"
+          },
+          "409": {
+            "description": "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConflictResponse"
+                }
+              }
+            }
           }
         },
         "security": [

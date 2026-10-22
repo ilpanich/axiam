@@ -449,6 +449,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     tag = "auth",
     request_body = LoginRequest,
     responses(
+        (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
         (status = 200, description = "Login successful", body = LoginSuccessResponse),
         (status = 202, description = "MFA challenge required", body = MfaRequiredResponse),
         (status = 403, description = "MFA setup required", body = MfaSetupRequiredResponse),

@@ -3875,6 +3875,20 @@ fn record_lease() -> chrono::TimeDelta {
     chrono::TimeDelta::from_std(PENDING_RECORD_LEASE).unwrap()
 }
 
+/// One GDPR sweep's recovery step over `db` ([`record_owed_erasures`]), as a
+/// replica runs it.
+async fn record_owed(db: &Surreal<surrealdb::engine::local::Db>) -> Result<u64, AxiamError> {
+    record_owed_erasures(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &SurrealErasureProofRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &SurrealAccountDeletionRepository::new(db.clone()),
+        record_lease(),
+        &never_stopping(),
+    )
+    .await
+}
+
 /// The `tenant_purge_pending` markers standing for `tenant`.
 async fn purge_markers_of(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> usize {
     let mut result = db
@@ -4122,14 +4136,9 @@ async fn two_sweeps_finding_one_pending_purge_record_it_once() {
 /// briefly for the cut unit's spawned release; then once more, which records
 /// nothing.
 async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::Db>, user: &User) {
-    let (audit, deletions) = (
-        SurrealAuditLogRepository::new(db.clone()),
-        SurrealAccountDeletionRepository::new(db.clone()),
-    );
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
     for _ in 0..50 {
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .expect("the next start's sweep");
+        record_owed(db).await.expect("the next start's sweep");
         if !pseudonymized_rows(db, user.tenant_id).await.is_empty()
             && !erasure_marker_set(db, user.id).await
         {
@@ -4137,12 +4146,7 @@ async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::D
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(record_owed(db).await.unwrap(), 0);
     assert_eq!(
         pseudonymized_rows(db, user.tenant_id).await.len(),
         1,
@@ -4159,6 +4163,11 @@ async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::D
             .unwrap()
             .is_none(),
         "the deletion request, if any, is completed"
+    );
+    assert_eq!(
+        erasure_proof_count(db, user.tenant_id, user.id).await,
+        1,
+        "#737: the erasure and its proof stand, the proof once"
     );
 }
 
@@ -4183,14 +4192,8 @@ async fn an_erasure_cut_past_its_point_of_no_return_is_recorded_by_the_next_star
     let tick = erasure_tick(&db, &user, &work);
     wait_until_entered(&mut entered).await;
     assert!(erasure_marker_set(&db, user.id).await, "the marker stands");
-    let (audit, deletions) = (
-        SurrealAuditLogRepository::new(db.clone()),
-        SurrealAccountDeletionRepository::new(db.clone()),
-    );
     assert_eq!(
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .unwrap(),
+        record_owed(&db).await.unwrap(),
         0,
         "while the unit holds the marker, another replica's sweep records nothing"
     );
@@ -4228,6 +4231,165 @@ async fn an_erasure_without_a_request_cut_past_its_point_of_no_return_is_recorde
     assert!(erasure_marker_set(&db, user.id).await);
 
     next_start_records_the_erasure(&db, &user).await;
+}
+
+/// A `User` certificate bound to `user_id`, active for a month.
+fn bound_certificate(
+    tenant_id: Uuid,
+    user_id: Uuid,
+    fingerprint: &str,
+) -> axiam_core::models::certificate::StoreCertificate {
+    use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
+    StoreCertificate {
+        tenant_id,
+        issuer_ca_id: Uuid::new_v4(),
+        subject: "device".into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - chrono::Duration::minutes(1),
+        not_after: Utc::now() + chrono::Duration::days(30),
+        metadata: serde_json::json!({}),
+        user_id: Some(user_id),
+    }
+}
+
+/// #737 (R111W1-03): an erasure held between its anonymization — its point of
+/// no return — and its erasure proof, while an issuance that raced the
+/// erasure binds a certificate to the account, then cut at the teardown's
+/// bound. Before the fix the next start recorded the erasure and completed the
+/// request with no proof behind it, never ran the second revocation, and —
+/// the marker's guard being armed only after the proof — waited out the
+/// one-hour lease first. Now the guard is armed from the stamp the unit chose
+/// before the anonymization, so the cut releases the marker, and the next
+/// start's sweep, at once, writes the proof, revokes the certificate, writes
+/// the record and completes the request, each once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_cut_before_its_proof_is_proven_revoked_and_recorded_by_the_next_start_at_once()
+{
+    use axiam_core::models::certificate::CertificateStatus;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "cut_before_proof").await;
+    let certs = Arc::new(SurrealCertificateRepository::new(db.clone()));
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let issued = Arc::new(std::sync::Mutex::new(None));
+    let hold: UnitStepForTests = {
+        let (certs, issued, user_id) = (Arc::clone(&certs), Arc::clone(&issued), user.id);
+        Arc::new(move |step| {
+            let (certs, issued, entered) =
+                (Arc::clone(&certs), Arc::clone(&issued), entered_tx.clone());
+            Box::pin(async move {
+                if step == UnitStep::ErasureProofOwed(user_id) {
+                    let late = certs
+                        .create(bound_certificate(tenant_id, user_id, "fp-737-late"))
+                        .await
+                        .unwrap();
+                    *issued.lock().unwrap() = Some(late.id);
+                    entered.send_replace(true);
+                    std::future::pending::<()>().await;
+                }
+            })
+        })
+    };
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    let late = issued
+        .lock()
+        .unwrap()
+        .expect("the hook issued a certificate");
+    assert_eq!(
+        SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .email,
+        "hashed_held_email",
+        "the account is anonymized: past the point of no return"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+    assert!(erasure_marker_set(&db, user.id).await, "the marker stands");
+    assert_eq!(
+        record_owed(&db).await.unwrap(),
+        0,
+        "while the unit holds the marker, another replica's sweep finishes nothing"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+
+    stop_tx.send_replace(true);
+    assert!(
+        !join_like_the_teardown(tick, &work, Duration::from_millis(300)).await,
+        "the unit was cut where it was held"
+    );
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+    assert_eq!(
+        certs.get_by_id(tenant_id, late).await.unwrap().status,
+        CertificateStatus::Active,
+        "the cut unit never ran its second revocation"
+    );
+
+    // At once: within the few hundred milliseconds the guard's spawned release
+    // takes to land, never the hour of the lease.
+    let started = std::time::Instant::now();
+    next_start_records_the_erasure(&db, &user).await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let row = &pseudonymized_rows(&db, tenant_id).await[0];
+    assert_eq!(row.metadata["recovered"], true);
+    assert!(row.metadata["certificates_revoked"].is_null());
+    assert_eq!(
+        certs.get_by_id(tenant_id, late).await.unwrap().status,
+        CertificateStatus::Revoked,
+        "the recovery's second revocation revokes the late bound certificate"
+    );
+}
+
+/// #737 (R111W1-03 (a)): an erasure whose proof fails to write, past its point
+/// of no return, fails its tick and releases its marker, awaited; the next
+/// sweep writes the proof and the record at once, and completes the request.
+/// Before the fix the request was completed by the next sweep past the lease,
+/// with no proof ever written.
+#[tokio::test]
+async fn an_erasure_whose_proof_fails_is_proven_and_recorded_by_the_next_sweep_at_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "proof_fails").await;
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
+
+    let failed = erase_and_record(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &FailingErasureProofRepo,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &deletions,
+        None,
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: "DELETED_USER_proof00000001",
+            email_hash: "hashed_proof_fails",
+            certificates_revoked: 0,
+        },
+        &never_stopping(),
+    )
+    .await;
+    assert!(failed.is_err(), "a failed proof fails the tick");
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    assert_eq!(
+        record_owed(&db).await.unwrap(),
+        1,
+        "the marker was released, not left to its lease"
+    );
+    next_start_records_the_erasure(&db, &user).await;
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await[0].metadata["pseudonym"],
+        "DELETED_USER_proof00000001"
+    );
 }
 
 /// #689: an erasure cut after its record and before it settled is not recorded
@@ -4523,4 +4685,10 @@ async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
         1,
         "gdpr.user_pseudonymized exists once"
     );
+    // #737: its anonymization set the marker again, and it released it; the
+    // next sweep finds the proof and the record there and only clears it.
+    assert_eq!(record_owed(&db).await.unwrap(), 0);
+    assert!(!erasure_marker_set(&db, user.id).await);
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 1);
 }

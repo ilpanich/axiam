@@ -1943,37 +1943,44 @@ finished rather than wait for it:
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`. The erasure, or the purge,
-    stands (an erasure's proof too, unless it was cut before the proof: see
-    the list below), and **the next start writes the row** (#689, schema v108): the point
+    not reach its audit row in time`. The erasure and its proof, or the
+    purge, stand, and **the next start writes what the work still owed** (#689,
+    schema v108; #737, 1.1.2): the point
     of no return leaves a marker in its own transaction —
     `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
     row keyed by the tenant id — which the work clears with its row, and the
     first GDPR purge sweep and tenant purge sweep of the next start, on any
     replica, write what a marker still stands for, once. For a tenant purge
     that is the row the cut purge would have written (the marker keeps its
-    export time and counts); for an erasure it carries the pseudonym, `recovered:
+    export time and counts). For an erasure the sweep redoes the erasure's tail
+    in its order: the erasure proof, unless the account has one (a cut before
+    the proof leaves none); the second certificate revocation of #668, which
+    is idempotent; then the row, which carries the pseudonym, `recovered:
     true` and `certificates_revoked: null` (the count was the cut purge's alone),
     and the deletion request is completed in the same transaction as the marker
-    is cleared. A row the cut work had already written is found and not written
-    again. The log says `recorded an erasure whose unit was cut before its
-    record` or `recorded a tenant purge whose unit was cut before its record`.
+    is cleared — never before the proof is written and that revocation has
+    run: a failure of either leaves the marker to the next sweep. An erasure
+    whose proof fails to write fails its tick and releases its marker, so the
+    next sweep finishes it the same way. A row the cut work had already written
+    is found and not written again. The log says `recorded an erasure whose
+    unit was cut before its record` (with `wrote the erasure proof of an
+    erasure cut before it` when the proof was missing) or `recorded a tenant
+    purge whose unit was cut before its record`.
     The marker is the next start's at once when the cut work's drop guard
-    released it; when the release was not written — a `SIGKILL`, or a unit cut
+    released it — an erasure arms that guard from the stamp it writes, before
+    its anonymization, so this holds from the anonymization on; when the
+    release was not written — a `SIGKILL`, or a unit cut
     at the teardown's bound, whose guard releases the marker from a spawned task
     that the process exit may cancel — it is left to the one-hour lease, after
     which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
     is not in the datastore, so the sweep writes it there too: replay the
     dead-letter file with that in mind;
-  - an erasure cut between its anonymization and its erasure proof: the
-    recovery writes the record and completes the request, but it writes no
-    proof and does not repeat the second certificate revocation of #668, and
-    the unit's marker guard is armed only after the proof, so a cut before it
-    leaves the marker to the one-hour lease and not to the next start. The
-    erasure is complete as far as the account is concerned; what can be
-    missing is the proof and, for a certificate bound to the account in that
-    window, one revocation (an administrator revokes it by id). Open as
-    #737, for 1.1.2;
+    (Amended 2026-10-22, #737: until 1.1.2 this list had one more item — an
+    erasure cut between its anonymization and its erasure proof was recorded
+    and its request completed with no proof, without the second revocation,
+    and only after the one-hour lease, because the marker's guard was armed
+    after the proof. The recovery now writes both, and the guard is armed
+    before the anonymization);
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 

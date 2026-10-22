@@ -594,52 +594,31 @@ pub struct OwedErasureRecord {
     pub pseudonym: String,
     /// The claim this call holds on the account's marker.
     pub claimed_at: DateTime<Utc>,
+    /// The marker's stamp as this claim read it, when it was one a unit or an
+    /// earlier sweep set (never before the anonymization): `None` when the
+    /// marker was released (the Unix epoch) or unset (an erasure cut before
+    /// schema v108). The recovery dates a missing erasure proof from it
+    /// (#737).
+    pub marked_at: Option<DateTime<Utc>>,
 }
 
 /// The erasure-record marker, `user.erasure_audit_pending` (#689, schema v108).
 ///
-/// The anonymization — the erasure's point of no return — sets it to its own
-/// time in its own transaction (`SurrealUserRepository::anonymize_user`); the
-/// value is the claim's stamp. The erasure reads it back
-/// ([`Self::erasure_record_stamp`]), writes `gdpr.user_pseudonymized`, and
-/// then clears it, completing the account's deletion request in the same
-/// transaction ([`Self::settle_erasure_record`]). An erasure cut in between
-/// leaves it set, and the next GDPR sweep, on any replica, claims it
+/// The anonymization — the erasure's point of no return — sets it in its own
+/// transaction to a stamp the erasure chose and armed its guard from before
+/// the write (`UserRepository::anonymize_user_marked`, #737); the value is
+/// the claim's stamp. The erasure writes its proof and
+/// `gdpr.user_pseudonymized`, and then clears the marker, completing the
+/// account's deletion request in the same transaction
+/// ([`Self::settle_erasure_record`]). An erasure cut in between leaves it
+/// set, and the next GDPR sweep, on any replica, claims it
 /// ([`Self::claim_owed_erasure_records`]) once it is released
 /// ([`Self::release_erasure_record`]: the Unix epoch) or older than the lease,
-/// writes the record unless it is already there
-/// ([`Self::erasure_recorded`]), and settles it. Every write is conditional
-/// on the stamp read, so the erasure and a sweep, or two sweeps, never both
-/// own the marker.
+/// writes what the erasure still owed — the proof unless it exists, the
+/// record unless it is already there ([`Self::erasure_recorded`]) — and
+/// settles it. Every write is conditional on the stamp read, so the erasure
+/// and a sweep, or two sweeps, never both own the marker.
 impl<C: Connection> SurrealAccountDeletionRepository<C> {
-    /// The stamp of `user_id`'s erasure-record marker, `None` when no record
-    /// is owed (or the account is not in `tenant_id`).
-    ///
-    /// # Errors
-    ///
-    /// A datastore failure.
-    pub async fn erasure_record_stamp(
-        &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> AxiamResult<Option<DateTime<Utc>>> {
-        let mut result = self
-            .db
-            .current()
-            .query(
-                "SELECT VALUE erasure_audit_pending FROM type::record('user', $user_id) \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("user_id", user_id.to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(DbError::from)?;
-        let stamps: Vec<Option<DateTime<Utc>>> = result.take(0).map_err(DbError::from)?;
-        Ok(stamps.into_iter().next().flatten())
-    }
-
     /// The erasure's record is written: clear `user_id`'s marker and, in the
     /// same transaction, complete its pending deletion request — only while
     /// the marker still carries `stamp`, the claim the caller holds. `true`
@@ -833,16 +812,26 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
                     user_id,
                     pseudonym: row.username,
                     claimed_at: now,
+                    marked_at: row
+                        .stamp
+                        .filter(|stamp| *stamp != DateTime::<Utc>::UNIX_EPOCH),
                 });
             }
         }
         Ok(claimed)
     }
 
-    /// Whether `tenant_id`'s audit trail holds `action` written with
-    /// `user_id` as its actor — for `gdpr.user_pseudonymized`, whether the
+    /// Whether `tenant_id`'s audit trail holds `action` written for the
+    /// erasure of `user_id` — for `gdpr.user_pseudonymized`, whether the
     /// erasure's record was written before its marker could be cleared
     /// (#689). An account is erased once, so the first such row is the one.
+    ///
+    /// The row is written with `user_id` as its actor and `pseudonym` in its
+    /// metadata; it is matched by either. A unit that stalled past its claim's
+    /// lease and then ran its audit scrub after another unit had recorded the
+    /// erasure nils that row's `actor_id` (#737): the pseudonym, the keyed
+    /// HMAC of the tenant and the account and so the account's alone, still
+    /// names it.
     ///
     /// # Errors
     ///
@@ -851,6 +840,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+        pseudonym: &str,
         action: &str,
     ) -> AxiamResult<bool> {
         let mut result = self
@@ -858,11 +848,13 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             .current()
             .query(
                 "SELECT count() AS total FROM audit_log \
-                 WHERE tenant_id = $tenant_id AND actor_id = $user_id AND action = $action \
+                 WHERE tenant_id = $tenant_id AND action = $action \
+                   AND (actor_id = $user_id OR metadata.pseudonym = $pseudonym) \
                  GROUP ALL",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
+            .bind(("pseudonym", pseudonym.to_string()))
             .bind(("action", action.to_string()))
             .await
             .map_err(DbError::from)?

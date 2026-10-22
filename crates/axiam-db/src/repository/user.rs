@@ -1579,7 +1579,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     /// - metadata → `{}`
     /// - locked_until / last_failed_login_at → NULL
     /// - status → `Anonymized`
-    /// - erasure_audit_pending → the write's own time (#689, schema v108)
+    /// - erasure_audit_pending → now (#689, schema v108); the erasure's own
+    ///   unit chooses the stamp instead ([`Self::anonymize_user_marked`], #737)
     ///
     /// The row and its `id` are kept to preserve referential integrity for
     /// `created_by`/owner foreign-key references.
@@ -1595,6 +1596,22 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         user_id: Uuid,
         email_hash: &str,
         pseudonym: &str,
+    ) -> AxiamResult<()> {
+        self.anonymize_user_marked(tenant_id, user_id, email_hash, pseudonym, Utc::now())
+            .await
+    }
+
+    /// [`Self::anonymize_user`], with `erasure_audit_pending` set to
+    /// `record_stamp` (#737): the erasure arms its guard on the marker from
+    /// that stamp before this write, so a cut anywhere from here on releases
+    /// the marker and the next sweep records the erasure at once.
+    async fn anonymize_user_marked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+        record_stamp: DateTime<Utc>,
     ) -> AxiamResult<()> {
         // password_hash is TYPE string (not nullable) — use empty string as
         // tombstone value. Argon2 output is never empty, so login is permanently
@@ -1616,7 +1633,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
              deletion_pending = false, \
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
-             erasure_audit_pending = time::now(), \
+             erasure_audit_pending = $record_stamp, \
              updated_at = time::now() \
              WHERE tenant_id = $tenant_id; \
              {SAML_ERASURE_STATEMENTS} \
@@ -1631,6 +1648,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .bind(("email_replacement", email_hash.to_string()))
             .bind(("pseudonym", pseudonym.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("record_stamp", record_stamp))
             .await
             .map_err(DbError::from)?
             .check()

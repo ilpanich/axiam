@@ -418,6 +418,32 @@ pub trait UserRepository: Send + Sync {
         pseudonym: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// [`Self::anonymize_user`], with the erasure-record marker it sets in the
+    /// same write (#689) stamped `record_stamp`, a stamp the caller chose
+    /// (#737).
+    ///
+    /// The caller arms its guard on the marker from that stamp **before** the
+    /// write, so the marker is guarded from the instant it exists, rather than
+    /// from a read-back after it: every release and settle is conditional on
+    /// the stamp, so a guard whose write never landed changes nothing.
+    ///
+    /// The default is [`Self::anonymize_user`] and ignores the stamp: it is
+    /// for an implementation that keeps no record marker (every test double).
+    /// One that keeps a marker overrides it — without that, a guard armed from
+    /// the stamp would never match its marker, which would then wait out the
+    /// record lease.
+    fn anonymize_user_marked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+        record_stamp: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        let _ = record_stamp;
+        self.anonymize_user(tenant_id, user_id, email_hash, pseudonym)
+    }
+
     /// Make `user_id` a directory account (G-3): the **only** writer of
     /// [`User::directory_external_id`].
     ///

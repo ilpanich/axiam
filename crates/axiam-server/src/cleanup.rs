@@ -26,10 +26,10 @@ use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
 use axiam_core::models::ssf::SsfSystemAccountSink;
 use axiam_core::repository::{
-    AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
-    AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
-    FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
-    Pagination, PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
+    AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter, AuditLogRepository,
+    ConsentRepository, ErasureProofRepository, ExportJobRepository, FederationLinkRepository,
+    FederationLoginStateRepository, GroupRepository, MailPublisher, Pagination,
+    PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
     SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsfEventBufferRepository,
     SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
@@ -1212,10 +1212,15 @@ pub enum UnitStep {
     /// A tombstoned tenant's purge has removed the tenant's rows and not yet
     /// its tenant row: before the purge's point of no return.
     TenantRowsPurged(Uuid),
-    /// An erasure has anonymized the account (and written its proof) and has
-    /// not yet completed its `account_deletion` row or written
-    /// `gdpr.user_pseudonymized`: past the erasure's point of no return.
+    /// An erasure has anonymized the account and written its proof, and has
+    /// not yet run its second revocation, completed its `account_deletion` row
+    /// or written `gdpr.user_pseudonymized`: past the erasure's point of no
+    /// return.
     ErasureAnonymized(Uuid),
+    /// An erasure has anonymized the account — its point of no return — and
+    /// not yet written its erasure proof (#737): what the next sweep writes for
+    /// a unit cut here, with the second revocation and the record.
+    ErasureProofOwed(Uuid),
     /// An erasure has finished steps (a)…(b4) and not yet started the erasure
     /// pipeline: the window in which a certificate bound to the account can
     /// still be issued after (b4) revoked.
@@ -2036,10 +2041,8 @@ where
         pseudonym,
         email_hash,
         None,
-        None,
     )
     .await
-    .map(|_erased| ())
 }
 
 /// The three steps of [`run_erasure_pipeline`], with the SSF report (G-5, D-52)
@@ -2050,10 +2053,8 @@ where
 /// fails to write leaves an anonymized account that no sweep selects again, so a
 /// report that waited for the proof would never be sent.
 ///
-/// With `work` (#624), the steps give up before the anonymization — the point of
-/// no return — once the process is stopping, and answer `Ok(false)`: the audit
-/// scrub is idempotent and the account stays due. `Ok(true)` once the account
-/// is anonymized and its proof written.
+/// [`erase_and_record`] runs the same three steps in the same order, with its
+/// record marker guarded from a stamp it chose (#737).
 #[allow(clippy::too_many_arguments)]
 async fn erasure_steps<A, EP, U>(
     audit_repo: &A,
@@ -2064,30 +2065,16 @@ async fn erasure_steps<A, EP, U>(
     pseudonym: &str,
     email_hash: &str,
     report: Option<(&dyn SsfSystemAccountSink, axiam_core::models::user::User)>,
-    work: Option<&AuditedWork>,
-) -> Result<bool, AxiamError>
+) -> Result<(), AxiamError>
 where
     A: AuditLogRepository,
     EP: ErasureProofRepository,
     U: UserRepository,
 {
     // FATAL now (was: `if let Err(e) = ... { tracing::warn!(...) }`).
-    let scrub = audit_repo.pseudonymize_actor(tenant_id, user_id, pseudonym);
-    match work {
-        Some(work) => match work.until_stopped(scrub).await {
-            Some(scrubbed) => {
-                scrubbed?;
-            }
-            None => return Ok(false),
-        },
-        None => {
-            scrub.await?;
-        }
-    }
-    // #624: the anonymization is never started once the process is stopping.
-    if work.is_some_and(AuditedWork::stopping) {
-        return Ok(false);
-    }
+    audit_repo
+        .pseudonymize_actor(tenant_id, user_id, pseudonym)
+        .await?;
 
     // Clears `deletion_pending` — the re-selection anchor. Must run before
     // the proof so a failure here (unreachable in practice since this is
@@ -2102,16 +2089,58 @@ where
     }
 
     // Written STRICTLY LAST — only reached once every step above succeeded.
+    write_erasure_proof(
+        erasure_proof_repo,
+        tenant_id,
+        user_id,
+        pseudonym,
+        Utc::now(),
+    )
+    .await
+}
+
+/// The PII-free erasure proof (D-06) of an account the erasure has anonymized.
+/// A second one for the account is refused by the proof's unique index on
+/// `(tenant_id, user_id)` as `AlreadyExists` ([`ERASURE_PROOF_ENTITY`]).
+async fn write_erasure_proof<EP: ErasureProofRepository>(
+    erasure_proof_repo: &EP,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    pseudonym: &str,
+    erased_at: chrono::DateTime<Utc>,
+) -> Result<(), AxiamError> {
     erasure_proof_repo
         .create(CreateErasureProof {
             pseudonym: pseudonym.to_string(),
             tenant_id,
             user_id,
-            erased_at: Utc::now(),
+            erased_at,
         })
-        .await?;
+        .await
+        .map(|_proof| ())
+}
 
-    Ok(true)
+/// Whether `e` is the proof's unique violation: the account has its proof.
+fn is_existing_proof(e: &AxiamError) -> bool {
+    matches!(e, AxiamError::AlreadyExists { entity } if entity == ERASURE_PROOF_ENTITY)
+}
+
+/// The account as it is before the erasure, for the SSF `account-purged`
+/// report: read only when `sink` is attached and active.
+async fn account_for_report<'s, U: UserRepository>(
+    user_repo: &U,
+    sink: Option<&'s dyn SsfSystemAccountSink>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Option<(&'s dyn SsfSystemAccountSink, axiam_core::models::user::User)> {
+    match sink {
+        Some(sink) if sink.is_active() => user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .ok()
+            .map(|user| (sink, user)),
+        _ => None,
+    }
 }
 
 /// [`run_erasure_pipeline`] and an SSF `account-purged` for the erased account
@@ -2143,48 +2172,7 @@ where
     EP: ErasureProofRepository,
     U: UserRepository,
 {
-    erasure_pipeline(
-        audit_repo,
-        erasure_proof_repo,
-        user_repo,
-        tenant_id,
-        user_id,
-        pseudonym,
-        email_hash,
-        sink,
-        None,
-    )
-    .await
-    .map(|_erased| ())
-}
-
-/// [`run_erasure_pipeline_reporting`], giving up before the anonymization once
-/// `work` is stopping (`Ok(false)`; see [`erasure_steps`]).
-#[allow(clippy::too_many_arguments)]
-async fn erasure_pipeline<A, EP, U>(
-    audit_repo: &A,
-    erasure_proof_repo: &EP,
-    user_repo: &U,
-    tenant_id: Uuid,
-    user_id: Uuid,
-    pseudonym: &str,
-    email_hash: &str,
-    sink: Option<&dyn SsfSystemAccountSink>,
-    work: Option<&AuditedWork>,
-) -> Result<bool, AxiamError>
-where
-    A: AuditLogRepository,
-    EP: ErasureProofRepository,
-    U: UserRepository,
-{
-    let report = match sink {
-        Some(sink) if sink.is_active() => user_repo
-            .get_by_id(tenant_id, user_id)
-            .await
-            .ok()
-            .map(|user| (sink, user)),
-        _ => None,
-    };
+    let report = account_for_report(user_repo, sink, tenant_id, user_id).await;
     erasure_steps(
         audit_repo,
         erasure_proof_repo,
@@ -2194,7 +2182,6 @@ where
         pseudonym,
         email_hash,
         report,
-        work,
     )
     .await
 }
@@ -2216,34 +2203,42 @@ pub struct ErasureSubject<'a> {
     pub certificates_revoked: u64,
 }
 
-/// An erasure through its point of no return to its record (#624): the erasure
-/// pipeline ([`run_erasure_pipeline_reporting`]: audit scrub, anonymization,
-/// proof), then the `gdpr.user_pseudonymized` audit row, then the
-/// `account_deletion` row marked completed (#689 (i): the record first). Run
-/// inside a unit of [`AuditedWork`], so a cut of the cleanup task does not
-/// reach it.
+/// An erasure through its point of no return to its record (#624): the steps of
+/// [`run_erasure_pipeline_reporting`] in its order — audit scrub,
+/// anonymization, SSF report, proof — then the #668 second revocation, the
+/// `gdpr.user_pseudonymized` audit row, and the `account_deletion` row marked
+/// completed (#689 (i): the record first). Run inside a unit of
+/// [`AuditedWork`], so a cut of the cleanup task does not reach it.
 ///
 /// The anonymization is the point of no return: it clears `deletion_pending`,
 /// so no later sweep selects the account again, and in the same transaction
-/// sets the account's record marker (#689), which this call holds from there
-/// (released by a guard if it is cut) and clears with the completion once the
-/// audit row is written; a marker left set is recorded by the next sweep
-/// ([`record_owed_erasures`]). Until then — the audit scrub — the call gives
-/// up once `work` is stopping and answers `Ok(false)`: the account stays due.
-/// Past it, it runs on to the audit row whatever the stop says, and answers
-/// `Ok(true)`. A free function, and public, for the reason
-/// [`run_erasure_pipeline`] is one.
+/// sets the account's record marker (#689) to a stamp this call chose (#737).
+/// The marker's guard is armed from that stamp **before** the write — the
+/// orphan unit's pattern since #714 — so the marker is guarded from the
+/// instant it exists: cleared with the completion once the audit row is
+/// written, and released on every other exit, awaited where it can be and by
+/// the guard's drop on a cut, so the next sweep ([`record_owed_erasures`])
+/// writes at once what the erasure still owes: the proof, the second
+/// revocation and the record. A release whose anonymization never landed
+/// changes nothing, since it is conditional on the stamp. Until the
+/// anonymization — the audit scrub — the call gives up once `work` is stopping
+/// and answers `Ok(false)`: the account stays due. Past it, it runs on to the
+/// audit row whatever the stop says, and answers `Ok(true)`. A free function,
+/// and public, for the reason [`run_erasure_pipeline`] is one.
 ///
 /// `Ok(false)` too when the erasure proof turns out to exist already (#738):
 /// another unit erased the account after taking this one's claim over, and
-/// records it; this call records nothing.
+/// records it; this call records nothing, and releases the marker its own
+/// anonymization set again, which the next sweep settles without a second
+/// record.
 ///
 /// # Errors
 ///
-/// Those of [`run_erasure_pipeline_reporting`], before anything is recorded,
-/// but the proof's unique violation (above). The completion and the audit row
-/// are not fallible here: a failed completion is logged, and a failed audit
-/// write is dead-lettered (SECHRD-12).
+/// Those of the scrub and the anonymization, before anything is recorded; and
+/// a proof that failed to write, past the point of no return, with the marker
+/// released so that the next sweep writes the proof and the record. The
+/// completion and the audit row are not fallible here: a failed completion is
+/// logged, and a failed audit write is dead-lettered (SECHRD-12).
 pub async fn erase_and_record<A, EP, U, CR, C>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
@@ -2269,75 +2264,96 @@ where
         certificates_revoked,
     } = subject;
     work.step(UnitStep::ErasurePrepared(user_id)).await;
-    // (d)/(e)/(g) Run the erasure pipeline: pseudonymize audit actor refs
-    // (now FATAL, was swallowed) -> anonymize the user row -> write the
-    // erasure proof STRICTLY LAST (SECHRD-06 / D-03a, T-25-13). A failure
-    // anywhere in this call propagates with `?` and aborts the purge:
-    // `anonymize_user` (the only step that clears `deletion_pending`)
-    // never ran, so the user stays due for a retry via
-    // `find_due_for_purge`, and NO erasure proof is ever written for an
-    // incomplete erasure.
-    match erasure_pipeline(
-        audit_repo,
+    // G-5 (D-52): the account as it is, read before anything is written — the
+    // erasure replaces the address the report's subject is resolved from.
+    let report = account_for_report(user_repo, sink, tenant_id, user_id).await;
+
+    // (d) Pseudonymize the audit actor references: FATAL (SECHRD-06 / D-03a,
+    // T-25-13) — no PII-bearing step is ever silently skipped. Idempotent and
+    // before the point of no return, so it is given up where it is once the
+    // process is stopping; the account stays due.
+    match work
+        .until_stopped(audit_repo.pseudonymize_actor(tenant_id, user_id, pseudonym))
+        .await
+    {
+        Some(scrubbed) => {
+            scrubbed?;
+        }
+        None => return Ok(false),
+    }
+    // #624: the anonymization is never started once the process is stopping.
+    if work.stopping() {
+        return Ok(false);
+    }
+
+    // #737: the marker's stamp is chosen here and its guard armed from it
+    // before the anonymization writes it, not read back afterwards, so a cut
+    // at any point from the write on releases the marker.
+    let stamp = Utc::now();
+    let record = RecordClaim {
+        marker: PendingMarker::Erasure {
+            deletions: account_deletion_repo.clone(),
+            tenant_id,
+            user_id,
+        },
+        stamp,
+        held: true,
+    };
+    // (e) Anonymize the user row in place: the point of no return. It is the
+    // only step that clears `deletion_pending`, so a failure here leaves the
+    // account due for a retry.
+    if let Err(e) = user_repo
+        .anonymize_user_marked(tenant_id, user_id, email_hash, pseudonym, stamp)
+        .await
+    {
+        // The transaction may have committed before the error reached us:
+        // release a marker stamped with ours, if there is one, so the next
+        // sweep finishes the erasure at once. Nothing matches otherwise.
+        record.release().await;
+        return Err(e);
+    }
+
+    // G-5 (D-52): the account is gone; tell the receivers what it was.
+    if let Some((sink, user)) = report {
+        sink.account_purged(tenant_id, &user).await;
+    }
+    work.step(UnitStep::ErasureProofOwed(user_id)).await;
+
+    // (g) The erasure proof, once every PII-bearing step above has succeeded:
+    // a proof never certifies an erasure that did not fully happen (Pitfall 3).
+    match write_erasure_proof(
         erasure_proof_repo,
-        user_repo,
         tenant_id,
         user_id,
         pseudonym,
-        email_hash,
-        sink,
-        Some(work),
+        Utc::now(),
     )
     .await
     {
-        Ok(true) => {}
-        Ok(false) => return Ok(false),
+        Ok(()) => {}
         // #738: the proof is unique per account, and only an erasure past its
         // anonymization writes one, so a proof already there means another
         // unit erased the account — one that took this unit's claim over after
         // its lease. That unit records the erasure; this one has nothing left
-        // to do and is not a failure of the tick.
-        Err(AxiamError::AlreadyExists { entity }) if entity == ERASURE_PROOF_ENTITY => {
+        // to do and is not a failure of the tick. Its own anonymization set the
+        // marker again: released, the next sweep finds the record written and
+        // clears it.
+        Err(e) if is_existing_proof(&e) => {
             tracing::info!(
                 %tenant_id,
                 %user_id,
                 "cleanup: the account's erasure proof exists already; another unit erased it"
             );
+            record.release().await;
             return Ok(false);
         }
-        Err(e) => return Err(e),
-    }
-    // #689: the anonymization stamped the account's erasure-record marker in
-    // its own transaction. Hold it from here: cleared with the record below,
-    // released by the guard if this unit is cut before, so the next sweep
-    // writes the record at once.
-    let record = match account_deletion_repo
-        .erasure_record_stamp(tenant_id, user_id)
-        .await
-    {
-        Ok(Some(stamp)) => Some(RecordClaim {
-            marker: PendingMarker::Erasure {
-                deletions: account_deletion_repo.clone(),
-                tenant_id,
-                user_id,
-            },
-            stamp,
-            held: true,
-        }),
-        // Taken over already, which only a unit held past the lease sees.
-        Ok(None) => None,
-        // The marker stays set: a sweep past the lease finds the record
-        // written and clears it.
+        // Past the point of no return: the released marker makes the next
+        // sweep write the proof and the record (#737).
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                %tenant_id,
-                %user_id,
-                "cleanup: could not read the erasure's record marker; a later sweep clears it"
-            );
-            None
+            record.release().await;
+            return Err(e);
         }
-    };
+    }
     work.step(UnitStep::ErasureAnonymized(user_id)).await;
 
     // (#668) A second revocation, by binding only, outside the pinned pipeline
@@ -2400,13 +2416,9 @@ where
     work.step(UnitStep::Recorded(user_id)).await;
 
     // (f) Complete the account_deletion row, and clear the record marker,
-    // in one transaction (#689). Without the marker in hand — its read
-    // failed above — the request is completed on its own and the marker is
-    // left for a later sweep, which finds the record written.
-    match record {
-        Some(record) => record.settle().await,
-        None => complete_deletion_request(account_deletion_repo, tenant_id, user_id).await,
-    }
+    // in one transaction (#689). A marker another unit has taken over — this
+    // one held past the lease — is left to it; it finds the record written.
+    record.settle().await;
 
     tracing::info!(
         pseudonym = %pseudonym,
@@ -2423,40 +2435,7 @@ const USER_PSEUDONYMIZED_ACTION: &str = "gdpr.user_pseudonymized";
 /// (`AxiamError::AlreadyExists`, from the proof's unique index).
 const ERASURE_PROOF_ENTITY: &str = "erasure_proof";
 
-/// Mark `user_id`'s pending deletion request completed, if it has one: the
-/// completion without the record marker (#689), logged and never fatal.
-async fn complete_deletion_request<C: Connection>(
-    account_deletion_repo: &SurrealAccountDeletionRepository<C>,
-    tenant_id: Uuid,
-    user_id: Uuid,
-) {
-    match account_deletion_repo
-        .find_pending_by_user_id(tenant_id, user_id)
-        .await
-    {
-        Ok(Some(deletion)) => {
-            if let Err(e) = account_deletion_repo
-                .mark_completed(tenant_id, deletion.id)
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    %tenant_id,
-                    deletion_id = %deletion.id,
-                    "cleanup: failed to mark account_deletion completed"
-                );
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(user_id = %user_id, "no pending account_deletion row found at purge time");
-        }
-        Err(e) => {
-            tracing::warn!(error = ?e, user_id = %user_id, "failed to find account_deletion row");
-        }
-    }
-}
-
-/// Record the erasures whose record is still owed — a unit cut between the
+/// Finish the erasures whose record is still owed — a unit cut between the
 /// anonymization and the clearing of its marker (#689) — and settle each: the
 /// first step of every GDPR purge sweep; none starts once the process is
 /// stopping.
@@ -2465,30 +2444,53 @@ async fn complete_deletion_request<C: Connection>(
 /// each owed erasure, conditionally on the marker read: a marker released by a
 /// cut unit or older than `lease`, and (#689 (i)) an anonymized account whose
 /// deletion request is still pending with no marker at all — an erasure cut
-/// before schema v108 between its anonymization and its completion. The
-/// `gdpr.user_pseudonymized` row is written unless the tenant's trail already
-/// holds one for the account (a unit cut after its record and before the
-/// clearing): an account is erased once, so that row is this erasure's. The
-/// row carries the pseudonym the anonymization wrote, `certificates_revoked`
-/// as `null` — the count lived only in the cut unit — and `recovered: true`.
+/// before schema v108 between its anonymization and its completion. For each,
+/// it redoes the part of the erasure's tail the unit may not have reached
+/// (#737), in the unit's order:
+///
+/// 1. the erasure proof, unless the account has one: the proof's unique index
+///    refuses a second, which reads as "written already" — the unit's own, or
+///    a racing sweep's. It carries the pseudonym on the row and is dated from
+///    the marker the claim read, or now when the marker was released or unset;
+/// 2. the #668 second revocation, by binding only (empty names), which is
+///    idempotent: a certificate bound to the account between the unit's (b4)
+///    and its anonymization is revoked even when the unit was cut before its
+///    own pass;
+/// 3. the `gdpr.user_pseudonymized` row, unless the tenant's trail already
+///    holds one for the account (a unit cut after its record and before the
+///    clearing), matched by its actor or by its pseudonym — a unit that
+///    stalled past its claim's lease runs its audit scrub over the row
+///    another unit wrote and nils its actor: an account is erased once, so
+///    that row is this erasure's. It
+///    carries the pseudonym the anonymization wrote, `certificates_revoked` as
+///    `null` — the unit's count lived only in the cut unit, and the second
+///    pass's alone would understate it — and `recovered: true`.
+///
 /// Then the marker is cleared and the request completed, in one transaction.
-/// The claim is held by the same guard the unit holds.
+/// The claim is held by the same guard the unit holds. A failure of step 1 or
+/// 2 releases the claim, so the next sweep retries the account whole: no
+/// request is completed without its proof, nor before the second revocation
+/// ran.
 ///
 /// `Ok(n)` is the number of records this call wrote.
 ///
 /// # Errors
 ///
 /// The datastore error that kept the owed erasures from being read or
-/// claimed, or [`AxiamError::Internal`] naming how many could not be checked
+/// claimed, or [`AxiamError::Internal`] naming how many could not be finished
 /// (each of those is released for the next sweep).
-pub async fn record_owed_erasures<A, C>(
+pub async fn record_owed_erasures<A, EP, CR, C>(
     audit_repo: &A,
+    erasure_proof_repo: &EP,
+    cert_repo: &CR,
     account_deletion_repo: &SurrealAccountDeletionRepository<C>,
     lease: chrono::TimeDelta,
     work: &AuditedWork,
 ) -> Result<u64, AxiamError>
 where
     A: AuditWriteSink,
+    EP: ErasureProofRepository,
+    CR: axiam_core::repository::CertificateRepository,
     C: Connection,
 {
     if work.stopping() {
@@ -2513,8 +2515,24 @@ where
             claim.release().await;
             continue;
         }
+        if let Err(e) = finish_owed_erasure(erasure_proof_repo, cert_repo, &erasure).await {
+            failed += 1;
+            tracing::warn!(
+                error = %e,
+                %tenant_id,
+                %user_id,
+                "could not finish an owed erasure; the next sweep retries it"
+            );
+            claim.release().await;
+            continue;
+        }
         match account_deletion_repo
-            .erasure_recorded(tenant_id, user_id, USER_PSEUDONYMIZED_ACTION)
+            .erasure_recorded(
+                tenant_id,
+                user_id,
+                &erasure.pseudonym,
+                USER_PSEUDONYMIZED_ACTION,
+            )
             .await
         {
             Ok(true) => {}
@@ -2561,10 +2579,53 @@ where
     }
     if failed > 0 {
         return Err(AxiamError::Internal(format!(
-            "{failed} owed erasure record(s) could not be checked"
+            "{failed} owed erasure record(s) could not be finished"
         )));
     }
     Ok(recorded)
+}
+
+/// Steps 1 and 2 of [`record_owed_erasures`] for one claimed erasure (#737):
+/// its proof unless it has one, then the second revocation.
+async fn finish_owed_erasure<EP, CR>(
+    erasure_proof_repo: &EP,
+    cert_repo: &CR,
+    erasure: &axiam_db::repository::OwedErasureRecord,
+) -> Result<(), AxiamError>
+where
+    EP: ErasureProofRepository,
+    CR: axiam_core::repository::CertificateRepository,
+{
+    let (tenant_id, user_id) = (erasure.tenant_id, erasure.user_id);
+    match write_erasure_proof(
+        erasure_proof_repo,
+        tenant_id,
+        user_id,
+        &erasure.pseudonym,
+        erasure.marked_at.unwrap_or_else(Utc::now),
+    )
+    .await
+    {
+        Ok(()) => tracing::warn!(
+            %tenant_id,
+            %user_id,
+            "wrote the erasure proof of an erasure cut before it (#737)"
+        ),
+        Err(e) if is_existing_proof(&e) => {}
+        Err(e) => return Err(e),
+    }
+    let revoked = cert_repo
+        .revoke_user_certificates(tenant_id, user_id, "", "", Utc::now())
+        .await?;
+    if revoked > 0 {
+        tracing::warn!(
+            %tenant_id,
+            %user_id,
+            revoked,
+            "revoked certificates bound to an erased account whose unit was cut (#737)"
+        );
+    }
+    Ok(())
 }
 
 /// One due account's erasure under an exclusive claim (#738): claim it at the
@@ -3720,6 +3781,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             .map_err(|e| AxiamError::Internal(format!("pending record lease: {e}")))?;
         let owed_error = record_owed_erasures(
             self.audit_repo.as_ref(),
+            self.erasure_proof_repo.as_ref(),
+            self.cert_repo.as_ref(),
             self.account_deletion_repo.as_ref(),
             lease,
             &self.audited,
@@ -4251,8 +4314,6 @@ mod personal_data_export_tests {
 mod w1_failure_arm_tests {
     use std::io::Write;
 
-    use axiam_core::models::gdpr::CreateAccountDeletion;
-    use axiam_core::repository::AccountDeletionRepository;
     use axiam_db::run_migrations;
     use surrealdb::Surreal;
     use surrealdb::engine::local::{Db, Mem};
@@ -4492,72 +4553,6 @@ mod w1_failure_arm_tests {
         );
     }
 
-    fn a_deletion(tenant_id: Uuid, user_id: Uuid) -> CreateAccountDeletion {
-        CreateAccountDeletion {
-            tenant_id,
-            user_id,
-            cancel_token_hash: format!("{:064x}", 9),
-            scheduled_purge_at: Utc::now() - chrono::Duration::seconds(1),
-        }
-    }
-
-    /// The completion without the record marker (#689, the branch an erasure
-    /// takes when it holds no marker): a pending request is completed.
-    #[tokio::test]
-    async fn complete_deletion_request_completes_the_pending_request() {
-        let db = migrated_db().await;
-        let deletions = SurrealAccountDeletionRepository::new(db.clone());
-        let (tenant_id, user_id) = (Uuid::new_v4(), Uuid::new_v4());
-        deletions
-            .create(a_deletion(tenant_id, user_id))
-            .await
-            .unwrap();
-        assert!(
-            deletions
-                .find_pending_by_user_id(tenant_id, user_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        complete_deletion_request(&deletions, tenant_id, user_id).await;
-
-        assert!(
-            deletions
-                .find_pending_by_user_id(tenant_id, user_id)
-                .await
-                .unwrap()
-                .is_none(),
-            "the request is no longer pending"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_deletion_request_without_a_request_changes_nothing_and_says_so() {
-        let db = migrated_db().await;
-        let deletions = SurrealAccountDeletionRepository::new(db.clone());
-        let (log, _guard) = capture();
-        complete_deletion_request(&deletions, Uuid::new_v4(), Uuid::new_v4()).await;
-        let text = log.text();
-        assert!(
-            text.contains("no pending account_deletion row found at purge time"),
-            "{text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_deletion_request_is_never_fatal_when_the_lookup_fails() {
-        let db = unreachable_db().await;
-        let deletions = SurrealAccountDeletionRepository::new(db.clone());
-        let (log, _guard) = capture();
-        complete_deletion_request(&deletions, Uuid::new_v4(), Uuid::new_v4()).await;
-        let text = log.text();
-        assert!(
-            text.contains("failed to find account_deletion row"),
-            "{text}"
-        );
-    }
-
     /// Once the process is stopping, no sweep starts recording.
     #[tokio::test]
     async fn the_record_sweeps_start_nothing_once_the_process_is_stopping() {
@@ -4565,6 +4560,8 @@ mod w1_failure_arm_tests {
         let (_tx, work) = stopped();
         let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
         let audit = SurrealAuditLogRepository::new(db.clone());
+        let proofs = SurrealErasureProofRepository::new(db.clone());
+        let certs = axiam_db::SurrealCertificateRepository::new(db.clone());
         let deletions = SurrealAccountDeletionRepository::new(db.clone());
         let lease = chrono::TimeDelta::seconds(60);
         assert_eq!(
@@ -4574,7 +4571,7 @@ mod w1_failure_arm_tests {
             0
         );
         assert_eq!(
-            record_owed_erasures(&audit, &deletions, lease, &work)
+            record_owed_erasures(&audit, &proofs, &certs, &deletions, lease, &work)
                 .await
                 .unwrap(),
             0
@@ -4589,6 +4586,8 @@ mod w1_failure_arm_tests {
         let (_tx, work) = running();
         let tenants = Arc::new(SurrealTenantRepository::new(db.clone()));
         let audit = SurrealAuditLogRepository::new(db.clone());
+        let proofs = SurrealErasureProofRepository::new(db.clone());
+        let certs = axiam_db::SurrealCertificateRepository::new(db.clone());
         let deletions = SurrealAccountDeletionRepository::new(db.clone());
         let lease = chrono::TimeDelta::seconds(60);
         assert!(
@@ -4597,7 +4596,7 @@ mod w1_failure_arm_tests {
                 .is_err()
         );
         assert!(
-            record_owed_erasures(&audit, &deletions, lease, &work)
+            record_owed_erasures(&audit, &proofs, &certs, &deletions, lease, &work)
                 .await
                 .is_err()
         );

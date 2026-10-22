@@ -8,7 +8,7 @@ pub mod network_gate;
 pub mod types;
 
 pub use config::{AuthzConfig, BatchStrategy};
-pub use decision_cache::{DecisionCache, DecisionCacheConfig, DecisionCacheStats};
+pub use decision_cache::{CacheGeneration, DecisionCache, DecisionCacheConfig, DecisionCacheStats};
 pub use engine::AuthorizationEngine;
 pub use invalidation::{InvalidationBroadcaster, InvalidationEvent};
 pub use network_gate::{

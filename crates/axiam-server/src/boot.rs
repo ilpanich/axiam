@@ -1832,6 +1832,7 @@ where
                         // evaluating everything against the database.
                         trusted = s.trusted,
                         bypassed = s.bypassed,
+                        overtaken = s.overtaken,
                         "AuthZ decision cache stats (D7)"
                     );
                 }

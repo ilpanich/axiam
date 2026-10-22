@@ -234,11 +234,26 @@ takes a **lease** on the datastore (the row `_migration_lock:startup`, five
 minutes on the datastore's clock, refreshed every minute while it migrates)
 and the others wait, logging `Another instance holds the migration lease;
 waiting for it`, then find the migrations recorded and start. A rolling update
-or a scale-out from zero needs no special ordering (#755).
+or a scale-out from zero needs no special ordering (#755), **provided the
+orchestrator gives a starting replica time to wait**: the HTTP listener, and
+with it `/health`, is bound only after the migrations, so a replica that is
+waiting for the lease, or migrating, answers no probe. In the logs such a
+replica shows the `waiting for it` line above and nothing more, up to five
+minutes behind a dead holder and longer behind a long migration. The shipped
+`k8s/server/deployment.yml` therefore carries a `startupProbe` on `/health`
+(10 s period, 60 failures, ten minutes) that holds the liveness probe back until
+the server is up; without it, the liveness probe (30 s delay, three failures)
+kills the waiting replica after about 90 s and it restarts into
+`CrashLoopBackOff` until the row expires. Another orchestrator needs the same
+allowance, and a datastore whose migrations run longer than ten minutes needs
+the shipped `failureThreshold` raised.
 
 - A replica that dies while migrating leaves its lease behind; the next
   replica takes it over once it has expired, at most five minutes later. Each
-  migration is one transaction, so nothing is half applied.
+  migration is one transaction, so nothing is half applied. The same holds for
+  a `SIGTERM` (or a kill) that reaches a replica while it holds the lease: no
+  signal handler runs before the HTTP server exists, so the row is left behind
+  and expires like a dead holder's.
 - A replica that stalls past the lease's lifetime without dying can overlap
   with its successor. The runner tolerates that case too: a migration the
   other replica recorded first is logged as applied by another instance, and

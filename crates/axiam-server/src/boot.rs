@@ -2922,6 +2922,11 @@ where
         shared_rate_limit_counter.arm_machine_traffic_advisory();
     }
 
+    // R112W4-02 (T-444): a cleared network write runs, with its row and its
+    // D7 flush, on this runtime rather than on the worker's, which a stop drops
+    // as soon as its last connection is gone; the teardown waits for it below.
+    let network_writes =
+        axiam_api_rest::network_gate::NetworkWriteTasks::on(tokio::runtime::Handle::current());
     // QUAL-01: single composition root — one AppState<C> built here and
     // registered once per worker below, replacing the ~49 individual
     // `.app_data(web::Data::new(...))` calls this closure used to make.
@@ -2934,6 +2939,7 @@ where
         job_health: std::sync::Arc::new(job_health.clone()),
         deployment_profile,
         audit_repo: audit_repo.clone(),
+        network_writes: network_writes.clone(),
         org_repo: org_repo.clone(),
         tenant_repo: tenant_repo.clone(),
         // A2/J2: refresh rotation reads the tenant only for `organization_id`,
@@ -3427,7 +3433,25 @@ where
     // the stop past the grace period, where the orchestrator's SIGKILL ends it
     // anyway and the backstops are moot. At the bound it is cut where it is,
     // and so is the erasure or tenant purge it left in flight (#655, #624).
-    join_cleanup(cleanup_handle, &cleanup_units, budget.cleanup).await;
+    //
+    // Within the same bound, the cleared network writes still in flight
+    // (R112W4-02): each is a write, its D7 flush and its audit row in one task
+    // on this runtime, which the workers' stop did not take with it. One whose
+    // client had gone was not counted by the REST drain; it is waited for here,
+    // so an orderly stop keeps a write and its row together. Past the bound it
+    // is dropped with the runtime when `serve` returns.
+    let (_, writes_done) = tokio::join!(
+        join_cleanup(cleanup_handle, &cleanup_units, budget.cleanup),
+        network_writes.wait_within(budget.cleanup),
+    );
+    if !writes_done {
+        tracing::error!(
+            deadline_secs = budget.cleanup.as_secs_f64(),
+            in_flight = network_writes.in_flight(),
+            "a cleared network write did not finish in time — it is cut where it is, and a \
+             write that committed may have no `network_role.*` row (see T-484)"
+        );
+    }
 
     // The teardown is done: disarm the backstops.
     component_died_stop.abort();
@@ -3487,7 +3511,9 @@ pub struct ShutdownBudget {
     /// a sweep still running at this bound is cut where it is. The same bound
     /// covers the erasure or tenant purge the task leaves in flight, a task of
     /// its own (`cleanup::AuditedWork`, #655, #624): it is waited for until
-    /// then, and cut at it.
+    /// then, and cut at it. So do the cleared network writes still in flight
+    /// (`network_gate::NetworkWriteTasks`, R112W4-02), waited for beside the
+    /// cleanup task, not after it.
     pub cleanup: Duration,
 }
 

@@ -333,9 +333,11 @@ impl StaleRefusal {
 /// spawned task**, which this function awaits through its `JoinHandle`. Actix
 /// drops a handler's future when its client goes away; dropping the handle
 /// does not cancel the task, so a write that commits is appended whether or not
-/// anyone still waits for the answer. The task is spawned on the worker's local
-/// runtime (`actix_web::rt::spawn`), so the write need not be `Send`; it must
-/// own what it uses (`'static`).
+/// anyone still waits for the answer. The task is spawned through
+/// [`AppState::network_writes`] — on the composition root's runtime, which an
+/// orderly stop keeps until the task is done or the stop's budget is spent
+/// ([`NetworkWriteTasks`], R112W4-02) — so the write must be `Send` and own
+/// what it uses (`'static`).
 ///
 /// **What follows the commit rides the same task (R112W4-01, #775).** The D7
 /// decision-cache flush the write needs (`flush`: the grantee for a user or
@@ -378,15 +380,15 @@ pub async fn write_and_record<C, T, W>(
 ) -> Result<T, AxiamError>
 where
     C: Connection + Clone,
-    T: 'static,
-    W: Future<Output = Result<T, AxiamError>> + 'static,
+    T: Send + 'static,
+    W: Future<Output = Result<T, AxiamError>> + Send + 'static,
 {
     let row = cleared_row(actor, write, cleared);
     let stale = StaleRefusal::of(actor, write);
     let audit = state.audit_repo.clone();
     let authz = Arc::clone(authz);
     let tenant_id = actor.writer.tenant_id;
-    let task = actix_web::rt::spawn(async move {
+    let task = state.network_writes.spawn(async move {
         let written = match repository_write.await {
             Ok(written) => written,
             Err(error) => {
@@ -434,6 +436,66 @@ where
         Err(join) => Err(AxiamError::Internal(format!(
             "a cleared network write was cancelled by the runtime: {join}"
         ))),
+    }
+}
+
+/// Where the task of a cleared network write runs, and the tracker an orderly
+/// stop waits on (R112W4-02, #776, T-444).
+///
+/// Actix runs each worker on a runtime of its own and, on a stop, waits only
+/// for its **connections**; once the last one is gone the worker's runtime
+/// stops and every task spawned on it is dropped. A write whose client had
+/// gone no longer counted, so a stop could drop its task between the commit
+/// and the append. The composition root therefore hands the handlers its own
+/// runtime ([`Self::on`]), which outlives the workers until `serve` returns,
+/// and the teardown waits for every task this tracks ([`Self::wait_within`])
+/// inside the stop's budget, as it waits for the cleanup units.
+///
+/// The default (no runtime, [`AppState::for_test`]) spawns on the worker, as
+/// 1.1.2 W4.1 did, and still tracks the task.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkWriteTasks {
+    runtime: Option<tokio::runtime::Handle>,
+    tracker: tokio_util::task::TaskTracker,
+}
+
+impl NetworkWriteTasks {
+    /// Tasks spawned on `runtime`, the composition root's.
+    #[must_use]
+    pub fn on(runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            runtime: Some(runtime),
+            tracker: tokio_util::task::TaskTracker::new(),
+        }
+    }
+
+    fn spawn<T, F>(&self, task: F) -> tokio::task::JoinHandle<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        let task = self.tracker.track_future(task);
+        match &self.runtime {
+            Some(runtime) => runtime.spawn(task),
+            None => actix_web::rt::spawn(task),
+        }
+    }
+
+    /// The tasks still running: what a stop would wait for.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.tracker.len()
+    }
+
+    /// Wait, at most `bound`, for every task spawned so far; `false` when some
+    /// were still running at the bound. A task spawned after the call is still
+    /// run and tracked, and waited for too while the bound lasts (nothing is
+    /// refused: after the REST listener has stopped, no handler spawns one).
+    pub async fn wait_within(&self, bound: std::time::Duration) -> bool {
+        self.tracker.close();
+        tokio::time::timeout(bound, self.tracker.wait())
+            .await
+            .is_ok()
     }
 }
 

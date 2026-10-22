@@ -311,6 +311,9 @@ pub struct AppState<C: Connection + Clone> {
     /// which answer `409` rather than `503` in the minimal profile.
     pub deployment_profile: axiam_core::models::deployment::DeploymentProfile,
     pub audit_repo: SurrealAuditLogRepository<C>,
+    /// R112W4-02 (T-444): where a cleared network write's task runs, and the
+    /// tracker an orderly stop waits on so the write keeps its row.
+    pub network_writes: crate::network_gate::NetworkWriteTasks,
     pub org_repo: SurrealOrganizationRepository<C>,
     pub tenant_repo: SurrealTenantRepository<C>,
     /// A2/J2: `tenant_id -> organization_id`, so the refresh rotation path
@@ -864,6 +867,9 @@ impl<C: Connection + Clone> AppState<C> {
             job_health: Arc::new(crate::health::NoJobs),
             deployment_profile: axiam_core::models::deployment::DeploymentProfile::Full,
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
+            // Worker-local and still tracked: a test that stops a server sets
+            // `NetworkWriteTasks::on` itself.
+            network_writes: crate::network_gate::NetworkWriteTasks::default(),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
             tenant_org_cache,

@@ -558,3 +558,80 @@ duplicates.
 | R112W3-04 | [#771](https://github.com/ilpanich/axiam/issues/771) |
 | R112W3-05 | [#772](https://github.com/ilpanich/axiam/issues/772) |
 | R112W3-06 | [#773](https://github.com/ilpanich/axiam/issues/773) |
+
+---
+
+## Addendum — the sweep
+
+**Date:** 2026-10-22. **Against:** `90c6e72..6d674c6` (6 commits, 18 files, 650 lines added
+and 98 removed): `c0e4f6d` (#768), `1511e17` (#770), `d18bcc2` (#771), `dc91af1` (#772),
+`125ce20` (#773) and `6d674c6` (#769). Every commit carries one `gpgsig` header. Each diff
+was read against the finding it closes, and the four checks the orchestrator named were made
+(the seam, the probe numbers, the spec, the shared CIMD predicate). The touched test binaries
+were run, and two mutations of the lease were run against the new tests.
+
+### Verdict per finding
+
+| ID | Issue | Closed? | Evidence |
+|---|---|---|---|
+| R112W3-01 | #768 | **Closed** | `cimd::validate`'s per-URI checks moved, unchanged, into `pub fn cimd::redirect_uri_refusal(&CimdPolicy, client_host, uri)` (`cimd.rs:592-635`). `validate` calls it (`:432-436`), and so does the handler for `ManagedBy::Cimd` rows (`oauth2_clients.rs:756-778`). It is **shared, not copied**: the old body was removed from `validate`, and the handler holds no second copy. The `client_host` is the stored `client_id` parsed as a URL; a row whose `client_id` has no host is refused (fail closed). Both parse with `url::Url`, so the hosts compare in the same normalised form. `dcr` rows keep `dcr::redirect_uri_refusal`. New test `admin_put_of_a_redirect_on_a_cimd_row_follows_the_cimd_policy` covers four cases: a DCR-listed host outside the CIMD policy gets `422` and the row is unchanged; the client's own trusted host is accepted with the DCR list empty; another trusted host is refused under `restrict_same_domain` and accepted without it; loopback is accepted. Scheme and fragment get `400` from the shape check that runs before the policy. Doc paragraphs (DCR and CIMD guides), the utoipa text and the spec are corrected. |
+| R112W3-02 | #769 | **Closed** | `two_concurrent_starters_…` now asserts that the two critical sections do not overlap: each holds 150 ms inside the lease. New `a_holder_that_outlasts_the_ttl_keeps_its_lease` (refresh) and `a_takeover_is_observable_and_the_old_holders_release_spares_it` (the `Ok(false)` branch; the old holder's refresh and release leave the successor's row and `expires` untouched). Mutations run here: **refresh disabled** fails `a_holder_that_outlasts_…`; **acquisition returns at once** (no lease) fails five tests, including `two_concurrent_starters_…`. `schema_test` passed 5 of 5 repeated runs, so the timing margins (TTL 500 ms against a 100 ms refresh; 300 ms against 600 ms) are not flaky here. |
+| R112W3-03 | #770 | **Closed** | `startupProbe` on `/health`, `periodSeconds: 10`, `failureThreshold: 60`: 600 s, which covers the documented worst case (a waiter behind a dead holder, ≤ 300 s, plus its own migrations) with 300 s of margin. Until it succeeds, the liveness probe does not run. The guide says the HTTP listener binds only after the migrations, gives the numbers and what happens without the probe, says SIGTERM leaves the row, and says that another orchestrator needs the same allowance and a migration over ten minutes needs the threshold raised. A remark, not a defect: each replica's ten minutes run from its own start, so a replica waiting behind a **live** holder whose migrations run past its own window is still restarted; the guide's "a datastore whose migrations run longer than ten minutes needs the shipped `failureThreshold` raised" covers that case. |
+| R112W3-04 | #771 | **Closed** | A new "Recovering from a refused migration gap" section, in four ordered steps (inspect; record without running; run in one transaction with its record; restore). The `_migration` field list is correct (`version`, `name`, `applied_at` with a default; checked against `MIGRATION_TABLE_DDL`). The boot error points to the anchor, `a_gap_below_…` asserts the pointer, and `check-doc-links.sh` passes. |
+| R112W3-05 | #772 | **Closed** | `503` declared on `POST /api/v1/auth/password/change` and `POST /api/v1/auth/reset/confirm` with login's text. Both are in `declared_refusal_tests::UNAVAILABLE`. The doc comment of `change_password` names the status. |
+| R112W3-06 | #773 | **Closed** | (a) The cluster-clock sentence is in `run_migrations`' doc and in the guide. (b) `RATE_LIMIT_BUCKET_SWEEP_SELECTION` (`repository/rate_limit.rs:22-30`, `#[doc(hidden)] pub`) is used by `delete_stale_once` through `format!` and by the `EXPLAIN` test, which appends ` EXPLAIN`. The SQL text is unchanged, the sweep's tests pass, and so does the plan pin. (c) The rolling-update sentence is in the guide. |
+
+**The test seam.** `run_migrations_under_lease` (`schema.rs:2672-2689`) and
+`PendingMigrations` are `#[doc(hidden)] pub`. The seam takes a closure that receives the
+migrations future, so it can be reached only from Rust code. No configuration key, environment
+variable or CLI flag selects it. `run_migrations` → `run_migrations_with_lease` passes the
+future through unchanged (`|migrate| migrate`), and nothing outside `axiam-db`'s own tests
+calls either seam (`grep` over `crates/`: only `schema.rs`, `lib.rs` and `tests/`). A
+dependent crate could call it, as it can call `run_migrations_with_lease`; that is the same
+trade 1.1.2 already accepted for the timings, and it grants nothing a caller with a datastore
+handle does not already have.
+
+**The spec.** `cargo build -p axiam-server --no-default-features` and then `--dump-openapi`
+give output byte-identical to `sdks/openapi.json` (`cmp` 0). The new digest is
+`sha256:341270842703e04dc8b5326c2d193540bc44eb21bb3adad28bce996d1f661dee`.
+`check-spec-digest.py` passes (0), `gen-management-registry.py --check` passes (0), and
+`gen-api-index.mjs` leaves no diff. The spec diff is the digest, the two `503`s, the
+password-change description line, and the admin `PUT`'s `422` text.
+
+**New findings: none.** Two remarks, neither a defect:
+
+- The last case of the CIMD test is commented "Loopback is always allowed, and a held URI is
+  never re-checked". Loopback is admitted there because `restrict_same_domain` was turned off
+  two steps earlier. With it on, a loopback redirect fails the same-domain rule, exactly as a
+  document's does. The held-URI exemption is exercised by the `dcr` test, through the same
+  code path that precedes the `managed_by` branch. The comment would read better as "with
+  `restrict_same_domain` off, loopback is admitted"; this can ride any later edit of the file.
+- `redirect_uri_refusal` has no unit test of its own in `cimd.rs`. `validate`'s existing
+  tests reach it, and the new integration test covers the handler's call.
+
+### Checks run on `6d674c6` (each tool's own exit code)
+
+| Command | Exit |
+|---|---|
+| `cargo build -p axiam-server --no-default-features`; `--dump-openapi`; `cmp` with `sdks/openapi.json` | 0; 0; 0 |
+| `check-spec-digest.py` / `gen-management-registry.py --check` / `gen-api-index.mjs` (no diff) / `check-doc-links.sh` | 0 / 0 / 0 / 0 |
+| `cargo test -p axiam-db --no-fail-fast` | 0 (87 binaries: 1119 passed, 0 failed, 5 ignored) |
+| `cargo test -p axiam-api-rest --no-default-features --test oauth2_client_test` | 0 (44 passed) |
+| `cargo test -p axiam-api-rest --no-default-features --lib openapi` | 0 (15 passed) |
+| `cargo test -p axiam-oauth2 --no-fail-fast` | 0 (8 binaries: 840 passed) |
+| `cargo fmt --all -- --check`; clippy `-D warnings` on `axiam-db`, `axiam-api-rest` (`--no-default-features`), `axiam-oauth2` (`--lib --tests`) | 0; 0, 0, 0 |
+| `cargo test -p axiam-db --test schema_test`, 5 repeats | 0 ×5 |
+| mutation: refresh tick skipped (`schema.rs`, reverted) | 101: `a_holder_that_outlasts_the_ttl_keeps_its_lease` fails |
+| mutation: `acquire_lease` returns at once (reverted) | 101: five lease tests fail, `two_concurrent_starters_…` among them |
+| `git cat-file -p <c> \| grep -c gpgsig`, six commits | 1 each |
+
+Not verified: CI. There is still no workflow run on the branch. The probe's behaviour was not
+observed in a cluster.
+
+### May W3 merge?
+
+**Yes.** All six findings (#768 … #773) are closed by the sweep and verified above. No new
+finding was filed. Eleven issues close with this wave: #729, #746, #747, #755, #756 and
+#768 … #773. For W8.4, also note the two new upgrade-relevant items: the `startupProbe`
+(#770) and the CIMD redirect rule for admin edits (#768). For W7.1, CONTRACT §27.4 rule 7
+should state the `cimd` row's rule as #768 shipped it.

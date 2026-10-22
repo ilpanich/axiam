@@ -308,13 +308,23 @@ pub async fn grant_to_role<C: Connection + Clone>(
     let granted_scopes = req.scope_ids;
     let effect = req.effect;
     let claim = cleared.role_claim();
-    // R111W4-02: the write and its row run as one task, which a client
-    // that goes away does not cancel.
+    // R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+    // task, which a client that goes away does not cancel.
+    // D7: an ALLOW grant widens access (safe direction) for every subject
+    // holding the role (set unknown here) — flush the tenant so the new grant
+    // is visible immediately.
+    //
+    // B1: a DENY grant *narrows* access, which is the direction where a stale
+    // cache is a security problem rather than an inconvenience. The same
+    // tenant flush covers it, on the same event path and with the same
+    // measured 262 ms contract — a deny rule is a grant, not a special case.
     if let Err(error) = network_gate::write_and_record(
         &state,
+        authz.get_ref(),
         &network_gate::GateActor::principal(&principal),
         write,
         &cleared,
+        network_gate::CacheFlush::Tenant,
         async move {
             repo.grant_to_role_claimed(
                 tenant_id,
@@ -329,21 +339,8 @@ pub async fn grant_to_role<C: Connection + Clone>(
     )
     .await
     {
-        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
+        return network_gate::refused_in_task(error);
     }
-    // D7: an ALLOW grant widens access (safe direction) for every subject
-    // holding the role (set unknown here) — flush the tenant so the new grant
-    // is visible immediately.
-    //
-    // B1: a DENY grant *narrows* access, which is the direction where a stale
-    // cache is a security problem rather than an inconvenience. The same
-    // tenant flush covers it, on the same event path and with the same
-    // measured 262 ms contract — a deny rule is a grant, not a special case.
-    authz
-        .get_ref()
-        .as_ref()
-        .invalidate_tenant(principal.tenant_id)
-        .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -519,13 +516,18 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     let role_id = p.role_id;
     let permission_id = p.permission_id;
     let claim = cleared.role_claim();
-    // R111W4-02: the write and its row run as one task, which a client
-    // that goes away does not cancel.
+    // R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+    // task, which a client that goes away does not cancel.
+    // D7 (REVOCATION — security critical): revoking a grant removes access for
+    // every subject holding this role. The subject set isn't known here without
+    // a query, so flush the whole tenant — this must never leave a stale allow.
     if let Err(error) = network_gate::write_and_record(
         &state,
+        authz.get_ref(),
         &network_gate::GateActor::principal(&principal),
         write,
         &cleared,
+        network_gate::CacheFlush::Tenant,
         async move {
             repo.revoke_from_role_claimed(tenant_id, role_id, permission_id, claim)
                 .await
@@ -533,15 +535,7 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     )
     .await
     {
-        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
+        return network_gate::refused_in_task(error);
     }
-    // D7 (REVOCATION — security critical): revoking a grant removes access for
-    // every subject holding this role. The subject set isn't known here without
-    // a query, so flush the whole tenant — this must never leave a stale allow.
-    authz
-        .get_ref()
-        .as_ref()
-        .invalidate_tenant(principal.tenant_id)
-        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::AuthzChecker;
+use axiam_api_rest::network_gate::CacheFlush;
 use axiam_api_rest::permissions::PERMISSION_REGISTRY;
 use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
@@ -2234,12 +2235,14 @@ async fn r111w4_02_a_handler_dropped_after_its_write_landed_still_leaves_the_row
         released.notified().await;
         written
     };
-    let actor = actor_for(&w, admin);
+    let (actor, engine) = (actor_for(&w, admin), w.engine());
     let mut handler = Box::pin(axiam_api_rest::network_gate::write_and_record(
         &state,
+        &engine,
         &actor,
         write,
         &cleared,
+        CacheFlush::Subject(device),
         repository_write,
     ));
     tokio::select! {
@@ -2270,6 +2273,224 @@ async fn r111w4_02_a_handler_dropped_after_its_write_landed_still_leaves_the_row
     assert_eq!(row.metadata["node"], root.to_string());
     assert_eq!(row.metadata["permissions"][0]["action"], NETWORK_JOIN);
     assert_eq!(w.joins(device, root).await, "allowed", "the write landed");
+}
+
+/// An `InvalidationBroadcaster` that records every event it is handed, as the
+/// AMQP fan-out would publish it.
+#[derive(Default)]
+struct RecordingBroadcaster(std::sync::Mutex<Vec<axiam_authz::InvalidationEvent>>);
+
+impl axiam_authz::InvalidationBroadcaster for RecordingBroadcaster {
+    fn broadcast<'a>(
+        &'a self,
+        event: axiam_authz::InvalidationEvent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = axiam_core::error::AxiamResult<()>> + Send + 'a>,
+    > {
+        self.0.lock().unwrap().push(event);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// R112W4-01 (#775): the D7 flush of a revocation rides the write's task. A
+/// device holds a `network:join` allow, cached; its unassignment lands and the
+/// handler's future is dropped there (the client went away). Once released,
+/// the task still drops the cached allow locally and publishes the broadcast,
+/// before it appends the row — with the flush in the handler's future, as
+/// before, the allow stayed cached until the TTL and nothing was published.
+#[actix_rt::test]
+async fn r112w4_01_a_handler_dropped_after_its_revocation_landed_still_flushes_the_cached_allow() {
+    let w = World::new().await;
+    let root = network_root_id(w.tenant);
+    let admin = network_admin(&w).await;
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let device = w.service_account(&[(fleet, Some(root))]).await;
+    let cache = Arc::new(axiam_authz::DecisionCache::new(
+        axiam_authz::DecisionCacheConfig {
+            ttl: std::time::Duration::from_secs(300),
+            ..Default::default()
+        },
+    ));
+    let broadcaster = Arc::new(RecordingBroadcaster::default());
+    let engine: Arc<dyn AuthzChecker> = Arc::new(
+        AuthorizationEngine::new(
+            SurrealRoleRepository::new(w.db.clone()),
+            SurrealPermissionRepository::new(w.db.clone()),
+            SurrealResourceRepository::new(w.db.clone()),
+            SurrealScopeRepository::new(w.db.clone()),
+            SurrealGroupRepository::new(w.db.clone()),
+        )
+        .with_decision_cache(Arc::clone(&cache))
+        .with_invalidation_broadcaster(broadcaster.clone()),
+    );
+    let join = AccessRequest {
+        tenant_id: w.tenant,
+        subject_scope: SubjectScope::Tenant,
+        subject_id: device,
+        action: NETWORK_JOIN.into(),
+        resource_id: root,
+        scope: None,
+    };
+    assert_eq!(
+        engine.check_access(&join).await.unwrap(),
+        AccessDecision::Allow
+    );
+    assert!(cache.get(&join).is_some(), "the allow is cached");
+
+    let state = AppState::for_test(w.db.clone(), w.auth.clone());
+    let write = axiam_authz::network_gate::NetworkWrite::RoleUnassign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::ServiceAccount(device),
+        resource_id: Some(root),
+    };
+    let cleared = gate(&w, admin, SubjectScope::Tenant, write)
+        .await
+        .expect("the network administrator is cleared");
+    let (landed, has_landed) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let roles = w.roles();
+    let (tenant, claim, released) = (w.tenant, cleared.role_claim(), Arc::clone(&release));
+    let repository_write = async move {
+        let written = roles
+            .unassign_from_service_account_claimed(tenant, device, fleet, Some(root), claim)
+            .await;
+        landed.send(()).expect("the test waits for the write");
+        released.notified().await;
+        written
+    };
+    let actor = actor_for(&w, admin);
+    let mut handler = Box::pin(axiam_api_rest::network_gate::write_and_record(
+        &state,
+        &engine,
+        &actor,
+        write,
+        &cleared,
+        CacheFlush::Subject(device),
+        repository_write,
+    ));
+    tokio::select! {
+        _ = &mut handler => panic!("the write pends until released"),
+        landed = has_landed => landed.expect("the write landed"),
+    }
+    drop(handler);
+    assert!(cache.get(&join).is_some(), "the flush follows the write");
+
+    release.notify_one();
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        rows = w.audit("network_role.unassigned").await;
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        rows.len(),
+        1,
+        "the dropped handler's revocation has its row"
+    );
+    assert!(
+        cache.get(&join).is_none(),
+        "the cached allow is gone by the time the row is readable"
+    );
+    assert_eq!(
+        *broadcaster.0.lock().unwrap(),
+        [axiam_authz::InvalidationEvent::Subject {
+            tenant_id: w.tenant,
+            subject_id: device,
+        }],
+        "the other replicas are told"
+    );
+    assert_eq!(
+        w.joins(device, root).await,
+        "no_grant",
+        "the revocation landed"
+    );
+}
+
+/// R112W4-01 (#775): a stale claim whose handler is dropped while its write is
+/// being refused still leaves its `version:stale` row — the refusal row is
+/// appended in the write's task, not in the handler's future.
+#[actix_rt::test]
+async fn r112w4_01_a_handler_dropped_on_a_stale_claim_still_leaves_the_refusal_row() {
+    let w = World::new().await;
+    let root = network_root_id(w.tenant);
+    let admin = network_admin(&w).await;
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let device = w.service_account(&[]).await;
+    let read = w
+        .permission_id(axiam_core::models::network::NETWORK_READ)
+        .await;
+    let state = AppState::for_test(w.db.clone(), w.auth.clone());
+    let write = axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::ServiceAccount(device),
+        resource_id: Some(root),
+        inherit: true,
+    };
+    let cleared = gate(&w, admin, SubjectScope::Tenant, write)
+        .await
+        .expect("the network administrator is cleared");
+    let (landed, has_landed) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let roles = w.roles();
+    let permissions = SurrealPermissionRepository::new(w.db.clone());
+    let (tenant, claim, released) = (w.tenant, cleared.role_claim(), Arc::clone(&release));
+    let repository_write = async move {
+        // A grant the gate never saw lands first: the claim is stale.
+        permissions
+            .grant_to_role_with_effect(tenant, fleet, read, vec![], DENY)
+            .await
+            .unwrap();
+        let written = roles
+            .assign_to_service_account_claimed(
+                tenant,
+                device,
+                fleet,
+                AssignmentScope::from(Some(root)),
+                claim,
+            )
+            .await;
+        landed.send(()).expect("the test waits for the write");
+        released.notified().await;
+        written
+    };
+    let (actor, engine) = (actor_for(&w, admin), w.engine());
+    let mut handler = Box::pin(axiam_api_rest::network_gate::write_and_record(
+        &state,
+        &engine,
+        &actor,
+        write,
+        &cleared,
+        CacheFlush::Subject(device),
+        repository_write,
+    ));
+    tokio::select! {
+        _ = &mut handler => panic!("the write pends until released"),
+        landed = has_landed => landed.expect("the write was refused"),
+    }
+    drop(handler);
+
+    release.notify_one();
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        rows = w.audit("network_role.assign_refused").await;
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let row = the_row(&rows);
+    assert_eq!(row.outcome, AuditOutcome::Denied);
+    assert_eq!(row.metadata["rule"], "version:stale");
+    assert_eq!(row.metadata["status"], 409);
+    assert_eq!(row.metadata["write"], "role_assign");
+    assert_eq!(row.metadata["before"]["role_id"], fleet.to_string());
+    assert!(
+        w.audit("network_role.assigned").await.is_empty(),
+        "nothing landed"
+    );
+    assert_eq!(w.joins(device, root).await, "no_grant", "nothing landed");
 }
 
 /// A role deleted between the write and the append — after a grant the gate
@@ -2319,9 +2540,11 @@ async fn r111w4_02_a_role_deleted_after_the_write_is_still_named_with_the_grants
     };
     axiam_api_rest::network_gate::write_and_record(
         &state,
+        &w.engine(),
         &actor_for(&w, admin),
         write,
         &cleared,
+        CacheFlush::Subject(device),
         repository_write,
     )
     .await

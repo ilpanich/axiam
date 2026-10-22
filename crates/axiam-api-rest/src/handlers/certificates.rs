@@ -756,9 +756,11 @@ pub async fn bind<C: Connection + Clone>(
     let certificate_id = cert.id;
     crate::network_gate::write_and_record(
         &state,
+        authz.get_ref(),
         &crate::network_gate::GateActor::principal(&principal),
         write,
         &cleared,
+        crate::network_gate::CacheFlush::None,
         async move {
             repo.bind_to_service_account(tenant_id, certificate_id, sa_id)
                 .await

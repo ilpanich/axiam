@@ -646,20 +646,26 @@ pub async fn assign_to_user<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .assign_to_user_claimed(
-            principal.tenant_id,
-            req.user_id,
-            role_id,
-            scope,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let user_id = req.user_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.assign_to_user_claimed(tenant_id, user_id, role_id, scope, claim)
+                .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: only this subject's effective permissions change — targeted flush.
     // (Assignment widens access, the safe direction, but we invalidate anyway
     // so the new grant is visible immediately rather than after the TTL.)
@@ -705,20 +711,28 @@ pub async fn unassign_from_user<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .unassign_from_user_claimed(
-            principal.tenant_id,
-            p.user_id,
-            p.role_id,
-            query.resource_id,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let user_id = p.user_id;
+    let role_id = p.role_id;
+    let resource_id = query.resource_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.unassign_from_user_claimed(tenant_id, user_id, role_id, resource_id, claim)
+                .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): unassigning a role removes access
     // for exactly this subject. Invalidate immediately so a cached allow cannot
     // survive — a stale allow is the dangerous staleness direction, because a
@@ -826,20 +840,32 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .assign_to_service_account_claimed(
-            principal.tenant_id,
-            req.service_account_id,
-            role_id,
-            scope,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let service_account_id = req.service_account_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.assign_to_service_account_claimed(
+                tenant_id,
+                service_account_id,
+                role_id,
+                scope,
+                claim,
+            )
+            .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: the machine's own effective permissions changed — targeted flush, on
     // the same terms as the user path. The engine caches by `(tenant, subject)`
     // and does not care which table the subject came from.
@@ -885,20 +911,34 @@ pub async fn unassign_from_service_account<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .unassign_from_service_account_claimed(
-            principal.tenant_id,
-            p.service_account_id,
-            p.role_id,
-            query.resource_id,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let service_account_id = p.service_account_id;
+    let role_id = p.role_id;
+    let resource_id = query.resource_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.unassign_from_service_account_claimed(
+                tenant_id,
+                service_account_id,
+                role_id,
+                resource_id,
+                claim,
+            )
+            .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): a cached allow must not outlive the
     // grant. See `unassign_from_user` for why this direction of staleness is the
     // dangerous one.
@@ -1074,20 +1114,26 @@ pub async fn assign_to_group<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .assign_to_group_claimed(
-            principal.tenant_id,
-            req.group_id,
-            role_id,
-            scope,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let group_id = req.group_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.assign_to_group_claimed(tenant_id, group_id, role_id, scope, claim)
+                .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7: the affected subjects are every member of the group (set unknown
     // without a query) — conservative per-tenant flush.
     authz
@@ -1133,20 +1179,28 @@ pub async fn unassign_from_group<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .role_repo
-        .unassign_from_group_claimed(
-            principal.tenant_id,
-            p.group_id,
-            p.role_id,
-            query.resource_id,
-            cleared.role_claim(),
-        )
-        .await
+    let repo = state.role_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let group_id = p.group_id;
+    let role_id = p.role_id;
+    let resource_id = query.resource_id;
+    let claim = cleared.role_claim();
+    // R111W4-02: the write and its row run as one task, which a client
+    // that goes away does not cancel.
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.unassign_from_group_claimed(tenant_id, group_id, role_id, resource_id, claim)
+                .await
+        },
+    )
+    .await
     {
         return network_gate::refused_after_clearance(&principal, &state, write, error).await;
     }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
     // D7 (REVOCATION — security critical): unassigning a role from a group
     // revokes it from every member. The member set isn't known here without a
     // query, so flush the whole tenant — this must never leave a stale allow.

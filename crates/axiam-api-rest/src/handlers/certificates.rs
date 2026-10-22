@@ -749,12 +749,22 @@ pub async fn bind<C: Connection + Clone>(
     let cleared =
         crate::network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
 
-    state
-        .pki
-        .cert_repo
-        .bind_to_service_account(principal.tenant_id, cert.id, sa_id)
-        .await?;
-    crate::network_gate::record_cleared(&principal, &state, write, &cleared).await;
+    // R111W4-02: the binding and its row run as one task, which a client that
+    // goes away does not cancel.
+    let repo = state.pki.cert_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let certificate_id = cert.id;
+    crate::network_gate::write_and_record(
+        &state,
+        &crate::network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        async move {
+            repo.bind_to_service_account(tenant_id, certificate_id, sa_id)
+                .await
+        },
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "certificate_id": cert.id,

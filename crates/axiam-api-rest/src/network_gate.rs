@@ -15,16 +15,17 @@
 //! even compile without the clearance [`authorize`] returns.
 
 use actix_web::HttpResponse;
+use std::future::Future;
+
 use axiam_authz::network_gate::{
     AUDIT_BINDING_BOUND, AUDIT_ROLE_ASSIGN_REFUSED, AUDIT_ROLE_ASSIGNED, AUDIT_ROLE_GRANT_REFUSED,
     AUDIT_ROLE_GRANTED, AUDIT_ROLE_REVOKED, AUDIT_ROLE_UNASSIGN_REFUSED, AUDIT_ROLE_UNASSIGNED,
-    AUDIT_ROLE_WRITE_REFUSED, GateClearance, GateRefusal, GateWriter, Grantee, NetworkWrite,
-    RefusalStatus, RepositoryGateStore, authorize_network_write,
+    AUDIT_ROLE_WRITE_REFUSED, ClearedRole, GateClearance, GateRefusal, GateWriter, Grantee,
+    NetworkWrite, RefusalStatus, RepositoryGateStore, authorize_network_write,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::network::is_network_action;
-use axiam_core::repository::{AuditLogRepository, PermissionRepository, RoleRepository};
+use axiam_core::repository::AuditLogRepository;
 use axiam_db::repository::{
     SurrealNetworkPolicyRepository, SurrealNetworkSegmentRepository, SurrealReplyProfileRepository,
 };
@@ -261,214 +262,228 @@ pub async fn refused_after_clearance<C: Connection + Clone>(
         .error_response_with_reason_code(Some(NetworkConflictReason::StaleVersion.as_str())))
 }
 
-/// Record a network-sensitive write that the gate cleared **and that landed**
-/// (R110W6-06, #703, T-484): one `network_role.assigned` / `.unassigned` /
-/// `.granted` / `.revoked` or `certificate_binding.bound` row, with the role,
-/// the grantee, the node and the `network:` permissions the write conferred
-/// (or removed); an assignment's row also carries `exemption`, the named
-/// exemption it cleared under (`organization-bootstrap`) or `null`. Without it a
-/// cleared write is visible only in the route's
-/// generic request row, which says neither that it touched the network
-/// namespace nor where a join landed.
+/// Run the repository write of a network-sensitive write that the gate
+/// cleared, and record it once it landed (R110W6-06, #703, T-484): one
+/// `network_role.assigned` / `.unassigned` / `.granted` / `.revoked` or
+/// `certificate_binding.bound` row, with the role, the grantee, the node and the
+/// `network:` permissions the write conferred (or removed); an assignment's row
+/// also carries `exemption`, the named exemption it cleared under
+/// (`organization-bootstrap`) or `null`. Without it a cleared write is visible
+/// only in the route's generic request row, which says neither that it touched
+/// the network namespace nor where a join landed.
 ///
-/// Call it after the repository write returned `Ok`. It does nothing when the
-/// clearance is not network-sensitive, or the write is not one of the five
-/// (a role update or delete, a resource write, a segment or profile write —
-/// those keep their own rows).
+/// **The row cannot be separated from the write (R111W4-02, #726).** It is
+/// built here, before the write, from what the gate read
+/// ([`GateClearance::role`], [`GateClearance::permission`]) — not from reads
+/// after the write, which a concurrent role delete made fail and a concurrent
+/// regrant made lie. Then `repository_write` and the append run as **one
+/// spawned task**, which this function awaits through its `JoinHandle`. Actix
+/// drops a handler's future when its client goes away; dropping the handle
+/// does not cancel the task, so a write that commits is appended whether or not
+/// anyone still waits for the answer. The task is spawned on the worker's local
+/// runtime (`actix_web::rt::spawn`), so the write need not be `Send`; it must
+/// own what it uses (`'static`).
 ///
-/// A failure to read the role or to append the row is logged and does not undo
-/// or fail the write that already landed — the convention of
+/// No row is written when the clearance is not network-sensitive, when the
+/// write fails (the caller answers that error — `refused_after_clearance` for
+/// a stale claim), or when the write is not one of the five (a role update or
+/// delete, a resource write, a segment or profile write — those keep their own
+/// rows).
+///
+/// A failure to describe the write or to append the row is logged and does not
+/// undo or fail the write that already landed — the convention of
 /// [`audit_refusal`], and of every other audit append in the handlers. The row
 /// carries ids, names and actions only; never a certificate, key or token.
-pub async fn record_cleared<C: Connection + Clone>(
-    principal: &AuthenticatedPrincipal,
+///
+/// # Errors
+///
+/// Whatever `repository_write` returns; `AxiamError::Internal` if the runtime
+/// cancels the task (it shuts down). A panic in the task is resumed here.
+pub async fn write_and_record<C, T, W>(
     state: &AppState<C>,
+    actor: &GateActor,
     write: NetworkWrite<'_>,
     cleared: &GateClearance,
-) {
-    if !cleared.is_network_sensitive() {
-        return;
+    repository_write: W,
+) -> Result<T, AxiamError>
+where
+    C: Connection + Clone,
+    T: 'static,
+    W: Future<Output = Result<T, AxiamError>> + 'static,
+{
+    let row = cleared_row(actor, write, cleared);
+    let audit = state.audit_repo.clone();
+    let tenant_id = actor.writer.tenant_id;
+    let task = actix_web::rt::spawn(async move {
+        let written = repository_write.await?;
+        match row {
+            Ok(None) => {}
+            Ok(Some(entry)) => {
+                let action = entry.action.clone();
+                if let Err(error) = audit.append(entry).await {
+                    tracing::error!(
+                        target: "axiam::network_gate",
+                        %tenant_id,
+                        %action,
+                        %error,
+                        "a cleared network write could not be audited; the write stands"
+                    );
+                }
+            }
+            Err(missing) => tracing::error!(
+                target: "axiam::network_gate",
+                %tenant_id,
+                missing,
+                "a cleared network write could not be described for the audit; the write stands"
+            ),
+        }
+        Ok(written)
+    });
+    match task.await {
+        Ok(result) => result,
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => Err(AxiamError::Internal(format!(
+            "a cleared network write was cancelled by the runtime: {join}"
+        ))),
     }
-    let tenant_id = principal.tenant_id;
+}
+
+/// The success row of a cleared write, built from the clearance alone
+/// (R111W4-02): `Ok(None)` when the write gets no row, `Err` naming what the
+/// clearance lacks when it cannot be described.
+fn cleared_row(
+    actor: &GateActor,
+    write: NetworkWrite<'_>,
+    cleared: &GateClearance,
+) -> Result<Option<CreateAuditLogEntry>, &'static str> {
+    if !cleared.is_network_sensitive() {
+        return Ok(None);
+    }
     let node = |r: Option<uuid::Uuid>| r.map_or_else(|| "none".to_owned(), |r| r.to_string());
     let grantee = |g: Grantee| match g {
         Grantee::User(id) => serde_json::json!({ "kind": "user", "id": id }),
         Grantee::ServiceAccount(id) => serde_json::json!({ "kind": "service_account", "id": id }),
         Grantee::Group(id) => serde_json::json!({ "kind": "group", "id": id }),
     };
-    let role_name = async |role_id| {
-        state
-            .role_repo
-            .get_by_id(tenant_id, role_id)
-            .await
-            .map(|r| r.name)
-    };
-    let network_permissions = async |role_id| {
-        state
-            .permission_repo
-            .get_role_permission_grants(tenant_id, role_id)
-            .await
-            .map(|grants| {
-                grants
-                    .into_iter()
-                    .filter(|g| is_network_action(&g.permission.action))
-                    .map(|g| {
-                        serde_json::json!({
-                            "action": g.permission.action,
-                            "effect": g.effect.as_str(),
-                            "scope_ids": g.scope_ids,
-                        })
-                    })
-                    .collect::<Vec<_>>()
+    let role = || cleared.role().ok_or("the role the gate read");
+    let permission = || cleared.permission().ok_or("the permission the gate read");
+    let network_permissions = |role: &ClearedRole| {
+        role.network_grants
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "action": g.permission.action,
+                    "effect": g.effect.as_str(),
+                    "scope_ids": g.scope_ids,
+                })
             })
+            .collect::<Vec<_>>()
     };
-    let built: Result<(&'static str, Option<uuid::Uuid>, serde_json::Value), AxiamError> =
-        match write {
-            NetworkWrite::RoleAssign {
-                role_id,
-                grantee: g,
+    let (audit_action, resource_id, mut metadata) = match write {
+        NetworkWrite::RoleAssign {
+            role_id,
+            grantee: g,
+            resource_id,
+            inherit,
+        } => {
+            let role = role()?;
+            (
+                AUDIT_ROLE_ASSIGNED,
                 resource_id,
-                inherit,
-            } => {
-                async {
-                    Ok((
-                        AUDIT_ROLE_ASSIGNED,
-                        resource_id,
-                        serde_json::json!({
-                            "role_id": role_id,
-                            "role": role_name(role_id).await?,
-                            "grantee": grantee(g),
-                            "node": node(resource_id),
-                            "inherit": inherit,
-                            "permissions": network_permissions(role_id).await?,
-                            "exemption": cleared.exemption(),
-                        }),
-                    ))
-                }
-                .await
-            }
-            NetworkWrite::RoleUnassign {
-                role_id,
-                grantee: g,
+                serde_json::json!({
+                    "role_id": role_id,
+                    "role": role.name,
+                    "grantee": grantee(g),
+                    "node": node(resource_id),
+                    "inherit": inherit,
+                    "permissions": network_permissions(role),
+                    "exemption": cleared.exemption(),
+                }),
+            )
+        }
+        NetworkWrite::RoleUnassign {
+            role_id,
+            grantee: g,
+            resource_id,
+        } => {
+            let role = role()?;
+            (
+                AUDIT_ROLE_UNASSIGNED,
                 resource_id,
-            } => {
-                async {
-                    Ok((
-                        AUDIT_ROLE_UNASSIGNED,
-                        resource_id,
-                        serde_json::json!({
-                            "role_id": role_id,
-                            "role": role_name(role_id).await?,
-                            "grantee": grantee(g),
-                            "node": node(resource_id),
-                            "permissions": network_permissions(role_id).await?,
-                        }),
-                    ))
-                }
-                .await
-            }
-            NetworkWrite::PermissionGrant {
-                role_id,
-                permission_id,
-                effect,
-                scope_ids,
-            } => {
-                async {
-                    let permission = state
-                        .permission_repo
-                        .get_by_id(tenant_id, permission_id)
-                        .await?;
-                    Ok((
-                        AUDIT_ROLE_GRANTED,
-                        None,
-                        serde_json::json!({
-                            "role_id": role_id,
-                            "role": role_name(role_id).await?,
-                            "permissions": [{
-                                "action": permission.action,
-                                "permission_id": permission_id,
-                                "effect": effect.as_str(),
-                                "scope_ids": scope_ids,
-                            }],
-                        }),
-                    ))
-                }
-                .await
-            }
-            NetworkWrite::PermissionRevoke {
-                role_id,
-                permission_id,
-            } => {
-                async {
-                    let permission = state
-                        .permission_repo
-                        .get_by_id(tenant_id, permission_id)
-                        .await?;
-                    let effect = cleared
-                        .revoked_effect()
-                        .flatten()
-                        .map_or("none", |e| e.as_str());
-                    Ok((
-                        AUDIT_ROLE_REVOKED,
-                        None,
-                        serde_json::json!({
-                            "role_id": role_id,
-                            "role": role_name(role_id).await?,
-                            "permissions": [{
-                                "action": permission.action,
-                                "permission_id": permission_id,
-                                "effect": effect,
-                            }],
-                        }),
-                    ))
-                }
-                .await
-            }
-            NetworkWrite::CertificateBind {
-                certificate_id,
-                service_account_id,
-            } => Ok((
-                AUDIT_BINDING_BOUND,
+                serde_json::json!({
+                    "role_id": role_id,
+                    "role": role.name,
+                    "grantee": grantee(g),
+                    "node": node(resource_id),
+                    "permissions": network_permissions(role),
+                }),
+            )
+        }
+        NetworkWrite::PermissionGrant {
+            role_id,
+            permission_id,
+            effect,
+            scope_ids,
+        } => (
+            AUDIT_ROLE_GRANTED,
+            None,
+            serde_json::json!({
+                "role_id": role_id,
+                "role": role()?.name,
+                "permissions": [{
+                    "action": permission()?.action,
+                    "permission_id": permission_id,
+                    "effect": effect.as_str(),
+                    "scope_ids": scope_ids,
+                }],
+            }),
+        ),
+        NetworkWrite::PermissionRevoke {
+            role_id,
+            permission_id,
+        } => {
+            let effect = cleared
+                .revoked_effect()
+                .flatten()
+                .map_or("none", |e| e.as_str());
+            (
+                AUDIT_ROLE_REVOKED,
                 None,
                 serde_json::json!({
-                    "certificate_id": certificate_id,
-                    "grantee": { "kind": "service_account", "id": service_account_id },
+                    "role_id": role_id,
+                    "role": role()?.name,
+                    "permissions": [{
+                        "action": permission()?.action,
+                        "permission_id": permission_id,
+                        "effect": effect,
+                    }],
                 }),
-            )),
-            _ => return,
-        };
-    let (audit_action, resource_id, mut metadata) = match built {
-        Ok(built) => built,
-        Err(error) => {
-            tracing::error!(
-                target: "axiam::network_gate",
-                %tenant_id,
-                %error,
-                "a cleared network write could not be described for the audit; the write stands"
-            );
-            return;
+            )
         }
+        NetworkWrite::CertificateBind {
+            certificate_id,
+            service_account_id,
+        } => (
+            AUDIT_BINDING_BOUND,
+            None,
+            serde_json::json!({
+                "certificate_id": certificate_id,
+                "grantee": { "kind": "service_account", "id": service_account_id },
+            }),
+        ),
+        _ => return Ok(None),
     };
     metadata["write"] = serde_json::json!(write_kind(&write));
-    let entry = CreateAuditLogEntry {
-        tenant_id,
-        actor_id: principal.subject_id,
-        actor_type: principal.actor_type(),
+    Ok(Some(CreateAuditLogEntry {
+        tenant_id: actor.writer.tenant_id,
+        actor_id: actor.writer.subject_id,
+        actor_type: actor.actor_type.clone(),
         action: audit_action.to_owned(),
         resource_id,
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(metadata),
-    };
-    if let Err(error) = state.audit_repo.append(entry).await {
-        tracing::error!(
-            target: "axiam::network_gate",
-            %tenant_id,
-            action = audit_action,
-            %error,
-            "a cleared network write could not be audited; the write stands"
-        );
-    }
+    }))
 }
 
 /// A short name for the write, for the audit row.

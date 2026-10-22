@@ -575,6 +575,13 @@ permission, and a role update or delete, leaves none of these rows (the request
 row of the route still records them). If the row cannot be appended, the error
 is logged and the write stands.
 
+The row describes the role and its `network:` permissions as the gate read
+them when it decided, not as they are after the write, so a role renamed,
+regranted or deleted in between is still named as it was cleared. The write
+and its row run together, and a client that disconnects once the write has
+landed does not stop the row (1.1.2, #726); the route's generic request row
+is not covered by that and can still be lost with the connection.
+
 ## Authorization decision cache (optional, D7)
 
 AXIAM can cache effective-permission decisions per tenant to cut the 3–4

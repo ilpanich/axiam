@@ -2147,3 +2147,171 @@ async fn r110w6_06_a_non_network_write_leaves_no_row() {
         assert!(w.audit(action).await.is_empty(), "{action}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// R111W4-02 (#726, T-484): the row cannot be separated from the write
+// ---------------------------------------------------------------------------
+
+/// The writer `network_gate::write_and_record` records, as a handler builds it
+/// from its principal.
+fn actor_for(w: &World, subject: Uuid) -> axiam_api_rest::network_gate::GateActor {
+    axiam_api_rest::network_gate::GateActor {
+        writer: axiam_authz::network_gate::GateWriter {
+            tenant_id: w.tenant,
+            subject_id: subject,
+            subject_scope: SubjectScope::Tenant,
+        },
+        actor_type: axiam_core::models::audit::ActorType::User,
+        label: None,
+    }
+}
+
+/// The handler's future is dropped right after the repository write returned
+/// — the client went away — and the write's row is still appended: the write
+/// and the append are one spawned task that dropping its awaiter does not
+/// cancel. The store wrapper signals that the write landed and then pends, so
+/// the drop happens between the write and the append, deterministically.
+#[actix_rt::test]
+async fn r111w4_02_a_handler_dropped_after_its_write_landed_still_leaves_the_row() {
+    let w = World::new().await;
+    let root = network_root_id(w.tenant);
+    let admin = network_admin(&w).await;
+    let fleet = w.role("fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let device = w.service_account(&[]).await;
+    let state = AppState::for_test(w.db.clone(), w.auth.clone());
+    let write = axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::ServiceAccount(device),
+        resource_id: Some(root),
+        inherit: true,
+    };
+    let cleared = gate(&w, admin, SubjectScope::Tenant, write)
+        .await
+        .expect("the network administrator is cleared");
+
+    let (landed, has_landed) = tokio::sync::oneshot::channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let roles = w.roles();
+    let (tenant, claim, released) = (w.tenant, cleared.role_claim(), Arc::clone(&release));
+    let repository_write = async move {
+        let written = roles
+            .assign_to_service_account_claimed(
+                tenant,
+                device,
+                fleet,
+                AssignmentScope::from(Some(root)),
+                claim,
+            )
+            .await;
+        landed.send(()).expect("the test waits for the write");
+        released.notified().await;
+        written
+    };
+    let actor = actor_for(&w, admin);
+    let mut handler = Box::pin(axiam_api_rest::network_gate::write_and_record(
+        &state,
+        &actor,
+        write,
+        &cleared,
+        repository_write,
+    ));
+    tokio::select! {
+        _ = &mut handler => panic!("the write pends until released"),
+        landed = has_landed => landed.expect("the write landed"),
+    }
+    drop(handler);
+    assert!(
+        w.audit("network_role.assigned").await.is_empty(),
+        "the row follows the write, not the gate"
+    );
+
+    release.notify_one();
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        rows = w.audit("network_role.assigned").await;
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(rows.len(), 1, "the dropped handler's write has its row");
+    let row = &rows[0];
+    assert_eq!(row.outcome, AuditOutcome::Success);
+    assert_eq!(row.actor_id, admin);
+    assert_eq!(row.metadata["role"], "fleet");
+    assert_eq!(row.metadata["grantee"]["id"], device.to_string());
+    assert_eq!(row.metadata["node"], root.to_string());
+    assert_eq!(row.metadata["permissions"][0]["action"], NETWORK_JOIN);
+    assert_eq!(w.joins(device, root).await, "allowed", "the write landed");
+}
+
+/// A role deleted between the write and the append — after a grant the gate
+/// never saw — still gets a row naming it, with the grants the gate saw: the
+/// row is built from the clearance before the write, not read after it.
+#[actix_rt::test]
+async fn r111w4_02_a_role_deleted_after_the_write_is_still_named_with_the_grants_the_gate_saw() {
+    let w = World::new().await;
+    let root = network_root_id(w.tenant);
+    let admin = network_admin(&w).await;
+    let fleet = w.role("doomed-fleet", &[(NETWORK_JOIN, ALLOW)]).await;
+    let device = w.service_account(&[]).await;
+    let read = w
+        .permission_id(axiam_core::models::network::NETWORK_READ)
+        .await;
+    let state = AppState::for_test(w.db.clone(), w.auth.clone());
+    let write = axiam_authz::network_gate::NetworkWrite::RoleAssign {
+        role_id: fleet,
+        grantee: axiam_authz::network_gate::Grantee::ServiceAccount(device),
+        resource_id: Some(root),
+        inherit: true,
+    };
+    let cleared = gate(&w, admin, SubjectScope::Tenant, write)
+        .await
+        .expect("the network administrator is cleared");
+
+    let roles = w.roles();
+    let permissions = SurrealPermissionRepository::new(w.db.clone());
+    let (tenant, claim) = (w.tenant, cleared.role_claim());
+    let repository_write = async move {
+        let written = roles
+            .assign_to_service_account_claimed(
+                tenant,
+                device,
+                fleet,
+                AssignmentScope::from(Some(root)),
+                claim,
+            )
+            .await;
+        // What a concurrent writer does before the append: regrant, then delete.
+        permissions
+            .grant_to_role_with_effect(tenant, fleet, read, vec![], DENY)
+            .await
+            .unwrap();
+        roles.delete(tenant, fleet).await.unwrap();
+        written
+    };
+    axiam_api_rest::network_gate::write_and_record(
+        &state,
+        &actor_for(&w, admin),
+        write,
+        &cleared,
+        repository_write,
+    )
+    .await
+    .expect("the write landed");
+
+    assert!(
+        w.roles().get_by_id(w.tenant, fleet).await.is_err(),
+        "deleted"
+    );
+    let rows = w.audit("network_role.assigned").await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.metadata["role_id"], fleet.to_string());
+    assert_eq!(row.metadata["role"], "doomed-fleet");
+    assert_eq!(
+        row.metadata["permissions"],
+        json!([{ "action": NETWORK_JOIN, "effect": "allow", "scope_ids": [] }]),
+        "the grants the gate saw, not the deny written after it"
+    );
+}

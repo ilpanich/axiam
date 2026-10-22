@@ -337,8 +337,9 @@ newcap; hold_flock; serve 20 '"t20"'; run
 t "07/lock-held (flock): no installed list to age -> exit 0, nothing installed" '[ $rc -eq 0 ] && [ ! -e "$(installed)" ] && [ "$(reqs)" = 0 ]'
 release_flock
 newcap; serve 20 '"t20"'; run; mkdir "$(statefile).lock.d"; printf '%s\n%s\n' "$$" "$(date +%s)" >"$(statefile).lock.d/owner"; before=$(snap)
+: >"$T/req.log"
 env PATH="$NOFLOCK_PATH" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
-t "07/lock-held (mkdir): a list near its end -> exit 3, lock left alone, nothing touched" '[ $rc -eq 3 ] && msg | grep -qi "holds the lock" && [ -d "$(statefile).lock.d" ] && [ "$(snap)" = "$before" ]'
+t "07/lock-held (mkdir): a list near its end -> exit 3, lock left alone, nothing touched, no request" '[ $rc -eq 3 ] && msg | grep -qi "holds the lock" && [ -d "$(statefile).lock.d" ] && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
 
 # ---- R110W5-08 -----------------------------------------------------------------
 echo "-- R110W5-08"

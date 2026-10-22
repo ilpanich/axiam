@@ -7214,7 +7214,7 @@ mod tests {
              the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`; \
              v101 was #701 (R110W6-04 — `role.grant_epoch` and \
              `role.holder_epoch`, which every role write the network gate decides moves and \
-             compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \
+             compares, so the gate's reads and the write act as one transaction); v100 was #563 (the Live profile — `network_segment`, `reply_profile` and \
              `network_policy`, the reserved-subtree segments, their typed reply profiles and the \
              tenant's `Session-Timeout` cap); v99 was #653 — `certificate.serial` and \
              `ca_certificate.serial`, each with a UNIQUE index under the issuer, so a serial is \

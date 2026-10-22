@@ -72,8 +72,9 @@
 # than a quarter of its lifetime (`nextUpdate` minus `lastUpdate`), or has
 # expired; that is read off the list itself, after a 200, a 304 or a refusal
 # alike, and takes the place of exit 0 or 1 (the refusal's reason is still on
-# stderr; a run that finds the lock held checks it too), because FreeRADIUS refuses every device of the tenant once the list
-# passes its `nextUpdate` (R110W5-07). AXIAM re-signs at half the lifetime, so a
+# stderr; a run that finds the lock held checks it too), because FreeRADIUS
+# refuses every device of the tenant once the list passes its `nextUpdate`
+# (R110W5-07). AXIAM re-signs at half the lifetime, so a
 # healthy list never gets there. Exit 2: wrong usage. Alert on any non-zero exit.
 #
 # A run killed by HUP, INT or TERM (a cron or systemd timeout) cleans up like any

@@ -545,9 +545,22 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 
 ### 12.0 Base commit
 
-- **Base:** `main` at `________` (the plan's own commit on top of `dedbf81`).
-- **Decisions (§11):** which defaults applied, which answers arrived and when.
-- **Intake (§1.4):** issues opened on `1.1.x` after 2026-10-22 and the wave each joined.
+- **Base:** `main` at `dc5bfd4` (the plan's own commit on top of `dedbf81`). `claude/release-1.1.2` and
+  `claude/release-1.1.2-w1` … `-w6` were cut from it on 2026-10-22 at about 09:11 UTC by the orchestrator.
+- **Decisions (§11):** the milestone was read at 09:05 UTC on 2026-10-22. No maintainer answer on the plan, so
+  every default D-1 … D-17 applies. Two answers that predate the plan, both on issues, bind W7.1:
+  - #750 (2026-10-20, Q3): relax C163-10, as §8.1 (c) writes it. "The seven SDKs then conform as they are", so
+    D-15's kept raw value is an improvement the SDK issues propose, not a contract requirement.
+  - #760 (2026-10-20, a second comment): contract 1.64 also records #745, fixed in 1.1.1 by `ae8562ef4`.
+    §20 rule 9 is extended (`/uma2/perm` mints a ticket only for a set the PAT's own client registered; every
+    other id gets an unknown id's `400`, and an SDK must not tell the cases apart), and the error table gains
+    the `/uma2/perm` `400` row. **Plan vs issue:** §8.1 does not list it, so W7.1 takes it as item (i).
+- **Intake (§1.4):** none at the start. 36 issues on `ilpanich/axiam` and one per SDK repository, as §0 counts.
+- **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
+  at the row's model. Each pushes to its wave branch, and the orchestrator reads its report and the branch. The
+  first sessions, all started 09:12–09:14 UTC: W1.2 (Opus 5.5), W2.1 (Sonnet 5.5), W3.1 + W3.2 (one Opus 5.5
+  session, as §4 allows), W4.1 (Opus 5.5), W5.1 (Sonnet 5.5), W6.1 (Sonnet 5.5).
+- **SAGE** was not connected in the orchestrator's session; nothing came from it.
 
 ### 12.1 W1 … 12.9 W9
 

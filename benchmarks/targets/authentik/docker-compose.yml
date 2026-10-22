@@ -1,9 +1,9 @@
 # Benchmark target: authentik (resource-capped reference setup).
 #
 # Same CPU/memory envelope as the Keycloak and Zitadel targets so resource
-# efficiency is comparable. Pinned to authentik 2026.8.3 (override the image
+# efficiency is comparable. Pinned to authentik 2026.8.5 (re-pinned 2026-10-22, was 2026.8.3; override the image
 # with BENCH_AUTHENTIK_IMAGE, e.g. the identical Docker Hub mirror
-# authentik/server:2026.8.3 where ghcr.io is unreachable).
+# authentik/server:2026.8.5 where ghcr.io is unreachable).
 #
 # SHAPE. authentik 2025.10 dropped Redis (cache, channels and the task queue
 # moved into PostgreSQL), so the stack is exactly the one authentik's own
@@ -63,7 +63,7 @@ x-authentik-env: &authentik-env
   AUTHENTIK_LISTEN__METRICS: "${BENCH_AUTHENTIK_LISTEN_METRICS:-0.0.0.0:9300}"
 
 x-authentik-common: &authentik-common
-  image: ${BENCH_AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:2026.8.3}
+  image: ${BENCH_AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:2026.8.5}
   # authentik keeps scratch state in /dev/shm (TMPDIR=/dev/shm/), and its own
   # compose gives it 512 MiB. tmpfs pages count against the container's memory
   # limit, so this is part of the memory accounting.

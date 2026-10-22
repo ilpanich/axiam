@@ -1,21 +1,24 @@
 # Benchmark run 6 — execution runbook
 
 - **Date written**: 2026-10-06 (T23.10.2(a), Phase 23 wave W6a)
-- **What run 6 measures**: the released **`1.0.0-beta18`** server image —
-  `ghcr.io/ilpanich/axiam/server:1.0.0-beta18`, tag `v1.0.0-beta18` — a release the
-  maintainer cuts from `main` **after W6a merges** (D-75), so it contains W1–W5 and
-  this wave's harness. **Do not build the server from source** — see §1.0.
-  - **Commit the tag points at: `____________` — filled in by the maintainer when the
-    tag is cut.** (The provenance preflight, §1.1, checks the image's `build_ref`
-    against `origin/main`; the commit is recorded here, not guessed.)
-- **The four pinned versions** (fixed at W6 kickoff, 2026-10-06):
+- **What run 6 measures**: the released **`1.1.1`** server image —
+  `ghcr.io/ilpanich/axiam/server:1.1.1`, tag `v1.1.1` (commit dated 2026-10-21), an ancestor of
+  `origin/main` (re-pinned from `1.0.0-beta18` on 2026-10-22, W6.3 of the 1.1.2 plan; the beta18 pin
+  predates 1.0.0 and every 1.0.x/1.1.x change). **Do not build the server from source** — see §1.0.
+  - **Commit the tag points at: `a3174c972782a848025ee358834c46cb5c178431`** (`git rev-list -n1 v1.1.1`,
+    2026-10-22). The registry's index digest for the tag on that date was
+    `sha256:94a942a8ccbb662b7cf4a9eb976aadf7869724d97592abd386aa55f18f65acd5` (anonymous manifest request,
+    `ghcr.io/ilpanich/axiam/server:1.1.1`); §12.4 records the digest actually pulled.
+    The provenance preflight (§1.1) checks the checkout against `origin/main`; the commit is recorded here, not guessed.
+- **Status, 2026-10-22**: no run-6 numbers exist (`benchmarks/results/run6/` is absent), so W6b — the seventh draft — has not run; this runbook is ready for the `1.1.1` image and the maintainer's G-box run.
+- **The four pinned versions** (fixed at W6 kickoff, 2026-10-06; re-checked and re-pinned 2026-10-22, W6.3):
 
   | Target | Version | Image (default in the compose file) | Notes |
   |---|---|---|---|
-  | AXIAM | **`1.0.0-beta18`** | `ghcr.io/ilpanich/axiam/server:1.0.0-beta18` (derived from the workspace version by `bench-up`) | SurrealDB `surrealdb/surrealdb:v3` (floating tag, **pinned by digest in §12.4**), RabbitMQ `rabbitmq:4-management-alpine` |
-  | Keycloak | **26.8.0** | `quay.io/keycloak/keycloak:26.8.0` (`BENCH_KEYCLOAK_IMAGE`) | PostgreSQL 16. The only 26.8.x tag when this was written (Docker Hub, `keycloak/keycloak:26.8.0`, released 2026-10-01). **§1.3 re-checks quay.io for a later patch before the run.** |
-  | Zitadel | **v4.19.4** | `ghcr.io/zitadel/zitadel:v4.19.4` (`BENCH_ZITADEL_IMAGE`) | PostgreSQL 16 |
-  | authentik | **2026.8.3** | `ghcr.io/goauthentik/server:2026.8.3` (`BENCH_AUTHENTIK_IMAGE`) | server + worker + PostgreSQL 16, no Redis |
+  | AXIAM | **`1.1.1`** | `ghcr.io/ilpanich/axiam/server:1.1.1` (derived from the workspace version by `bench-up`) | SurrealDB `surrealdb/surrealdb:v3` (floating tag, **pinned by digest in §12.4**), RabbitMQ `rabbitmq:4-management-alpine` |
+  | Keycloak | **26.8.1** | `quay.io/keycloak/keycloak:26.8.1` (`BENCH_KEYCLOAK_IMAGE`) | PostgreSQL 16. Re-pinned 2026-10-22 from 26.8.0: Docker Hub (`keycloak/keycloak`) lists 26.8.1 (pushed 2026-10-13) as the newest 26.8.x. **`quay.io` was unreachable from the sandbox, so 26.8.1 there is not verified**; if the pull from quay fails, use the Docker Hub image (§12.3). **§1.3 re-checks for a later patch before the run.** |
+  | Zitadel | **v4.19.5** | `ghcr.io/zitadel/zitadel:v4.19.5` (`BENCH_ZITADEL_IMAGE`) | PostgreSQL 16. Re-pinned 2026-10-22 from v4.19.4: the ghcr.io tag list (paged in full) ends the v4.19 line at v4.19.5; no v4.20+ tag existed. |
+  | authentik | **2026.8.5** | `ghcr.io/goauthentik/server:2026.8.5` (`BENCH_AUTHENTIK_IMAGE`) | server + worker + PostgreSQL 16, no Redis. Re-pinned 2026-10-22 from 2026.8.3: ghcr.io and the Docker Hub mirror both list 2026.8.5 (pushed 2026-10-21) as the newest 2026.8.x. |
 
 - **Predecessors**: [`improvement-after-run5-benchmark.md`](improvement-after-run5-benchmark.md)
   (the A/B/E items run 6 collects data for), `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (the
@@ -29,8 +32,8 @@
 
 Run 6 has five jobs, in this order of importance:
 
-1. **Re-measure the matrix** against the product as it is now, with **authentik 2026.8.3 as a fourth
-   target**, Keycloak 26.8.0 and Zitadel v4.19.4, on the same box with the **run-5 caps**
+1. **Re-measure the matrix** against the product as it is now, with **authentik 2026.8.5 as a fourth
+   target**, Keycloak 26.8.1 and Zitadel v4.19.5, on the same box with the **run-5 caps**
    (G-10). Draft seven has four targets; the three comparison documents' performance rows
    are rewritten from it.
 2. **Measure Keycloak 26.8's "reduced memory usage" as Keycloak ships it** — at rest and
@@ -116,10 +119,10 @@ from `[1.0.0-alpha25]` through today's `[Unreleased]` (about forty releases) and
 
 ## 1. Preflight — do not skip
 
-### 1.0 The image — the published `1.0.0-beta18`, not a build
+### 1.0 The image — the published `1.1.1`, not a build
 
-Run 6 measures a **released artifact**: `ghcr.io/ilpanich/axiam/server:1.0.0-beta18`,
-published by the release pipeline from `v1.0.0-beta18`. A local build is slower, is not
+Run 6 measures a **released artifact**: `ghcr.io/ilpanich/axiam/server:1.1.1`,
+published by the release pipeline from `v1.1.1`. A local build is slower, is not
 what a reader can reproduce, and loses the provenance preflight. As in run 5:
 
 1. **Check out the release tag**, not a branch. The workspace version is what `bench-up`
@@ -133,7 +136,7 @@ The competitors are prebuilt images and are pulled by the same script.
 ### 1.1 Provenance
 
 `run-benchmark.sh` refuses to start an AXIAM cell unless `build_ref` (the checkout's
-`HEAD`) is an ancestor of `origin/main`. Checking out `v1.0.0-beta18` makes that pass by
+`HEAD`) is an ancestor of `origin/main`. Checking out `v1.1.1` makes that pass by
 construction; verify anyway (§12.2). **`build_ref` describes the checkout, not the image**
 — nothing cross-checks them, so the tag checkout is what collapses the gap.
 `BENCH_ALLOW_UNMERGED_BUILD_REF=1` is for deliberate pre-merge validation only: run 6 does
@@ -171,7 +174,7 @@ not need it, and needing it means the checkout is wrong.
 ### 1.3 Re-check for a later patch release (quay.io is unreachable from the sandbox)
 
 The pins were fixed on 2026-10-06 as "the latest patch of each named line". For Keycloak that
-was **26.8.0 — the only 26.8.x tag on Docker Hub**; `quay.io`, the registry the compose file
+was **26.8.0 — the only 26.8.x tag on Docker Hub**; on 2026-10-22 (W6.3) Docker Hub listed **26.8.1** and the pin moved. `quay.io`, the registry the compose file
 names, could not be reached from the sandbox, so **whether quay.io already has a later
 26.8.x patch is unverified**. Check **before** pulling (§12.3 has the commands; the same
 check for Zitadel `v4.19.*` and authentik `2026.8.*` is there too):
@@ -179,11 +182,11 @@ check for Zitadel `v4.19.*` and authentik `2026.8.*` is there too):
 - **No later patch** → run the pins as they are.
 - **A later 26.8.N exists** → run **that** patch for Keycloak: export
   `BENCH_KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.N` before `pull-pinned-images.sh`
-  (the compose file's default stays `26.8.0`; the exported override is the audit trail, and
+  (the compose file's default is `26.8.1`; the exported override is the audit trail, and
   `meta.json` records the image and its digest in every cell). Read that release's notes for
   anything touching memory, HTTP, sessions, token or introspection endpoints (patch releases
   are fixes, so this is a five-minute read), and **write the version actually run in
-  `RUN6-NOTES.md`** so W6b and the three comparison documents name it, not "26.8.0".
+  `RUN6-NOTES.md`** so W6b and the three comparison documents name it, not "26.8.1".
 - **A later minor (26.9.x)** is **not** a patch: do not take it. The line is the decision.
 
 ### 1.4 Credentials
@@ -469,7 +472,7 @@ that resumes it per pass if it is interrupted.
 
 From the authentik target's smoke runs (T23.10.1), verbatim in substance:
 
-- **Env vars.** `BENCH_AUTHENTIK_IMAGE` (default `ghcr.io/goauthentik/server:2026.8.3`);
+- **Env vars.** `BENCH_AUTHENTIK_IMAGE` (default `ghcr.io/goauthentik/server:2026.8.5`; the smoke runs below used 2026.8.3);
   `BENCH_AUTHENTIK_WORKER_CPUS` and `_MEM` default to `BENCH_CPUS` and `BENCH_MEM`, so **setting `BENCH_MEM`
   also moves the worker**; `BENCH_AUTHENTIK_LISTEN_HTTP`, `_HTTPS` and `_METRICS` default to **IPv4 wildcards**,
   because authentik's stock `[::]` binding crashes on a host with no IPv6; `BENCH_AUTHENTIK_SEED_TIMEOUT`
@@ -515,10 +518,13 @@ Others a run needs to know:
 
 - **The minimal overlay needs Compose ≥ 2.24.** Under an older Compose the `!reset` tags are a syntax error (loud).
 - **`rl=prod` is a different posture from `rl=neutralized` for seven more families than in run 5** (§0.3).
-- **Zitadel under v4.19.4 is unverified from the sandbox** (§0.2). If its seed or login cell fails the dry run, that is a harness
+- **Zitadel under v4.19.4 (and now v4.19.5) is unverified from the sandbox** (§0.2). If its seed or login cell fails the dry run, that is a harness
   finding for W6b, not a reason to change a pin.
-- **AXIAM `1.0.0-beta18` could not be pulled where this was written.** The AXIAM seed, the minimal overlay's boot and every AXIAM
-  scenario were **not** exercised against it: §12.5 is what proves they work.
+- **AXIAM `1.1.1` has not been run by this harness.** On 2026-10-22 the sandbox could confirm the image's manifest (anonymous request,
+  digest in the header) but has no Docker daemon, so the AXIAM seed, the minimal overlay's boot and every AXIAM scenario were **not**
+  exercised against it; only the static self-tests ran (`credential-selftest.sh`, `deploy-profile-selftest.sh`, `bind-addr-selftest.sh`,
+  all OK). §12.5 is what proves the rest works. The 1.0.0-beta18 → 1.1.1 span includes the 1.0.x and 1.1.0 changes: read §8 before
+  assuming a FAIL is the harness.
 - **`k6`'s version moves numbers slightly**; record it.
 - **A throttled thermal state looks like a regression.** Check `mhz_avg` before believing a delta.
 
@@ -526,7 +532,7 @@ Others a run needs to know:
 
 ## 7. Checklist
 
-- [ ] Checkout at `v1.0.0-beta18`; `grep -m1 '^version' Cargo.toml` reads `1.0.0-beta18`; the commit written into the header
+- [ ] Checkout at `v1.1.1`; `grep -m1 '^version' Cargo.toml` reads `1.1.1`; `git rev-parse HEAD` equals the commit in the header (`a3174c97…`)
 - [ ] `docker login ghcr.io` and `docker login`; Docker ≥ 25, Compose ≥ 2.24
 - [ ] §12.3 quay.io re-check done; the Keycloak version actually run written down
 - [ ] `pull-pinned-images.sh` succeeded for every image; `pinned-images.sh` sourced in the shell that runs the matrix
@@ -547,7 +553,7 @@ Others a run needs to know:
 ## 8. If the dry run fails
 
 A FAIL is a cell that would have produced no data. Do not start the matrix. For AXIAM the likely causes, in order:
-a compose variable beta18 now requires (`bench-up` prints the server's last lines), a seed step against an API that changed
+a compose variable 1.1.1 now requires (`bench-up` prints the server's last lines), a seed step against an API that changed
 (`results/dry-run/axiam/seed-failure/`), a scenario whose request shape changed (the per-cell `.dryrun.log`). **Do not loosen
 a check to make a cell pass.** Send the failure back; W6a's harness may need a patch, which is a W6b fix, not a re-measurement.
 Under the minimal profile a FAIL that does not occur under the full profile is a **finding** (a scenario the profile cannot serve):
@@ -613,8 +619,8 @@ jq -r '[.target,.profile,.scenario,(.build_ref[0:8]),(.containers|map("\(.name)=
 
 ```text
 # Run 6 notes
-- Tag / commit run:                v1.0.0-beta18 @ <sha>
-- Keycloak version actually run:   26.8.0 / 26.8.N (why)            - Zitadel: v4.19.4 / …        - authentik: 2026.8.3 / …
+- Tag / commit run:                v1.1.1 @ a3174c972782a848025ee358834c46cb5c178431 (confirm)
+- Keycloak version actually run:   26.8.1 / 26.8.N (why)            - Zitadel: v4.19.5 / …        - authentik: 2026.8.5 / …
 - k6 version, Docker, Compose:     (from results/provenance/run.txt)
 - Start / end dates, interruptions, restarts, which passes re-run and why:
 - Thermal or power events (battery, throttling, fan, other load on the box):
@@ -688,11 +694,11 @@ docker login                  # Docker Hub (anonymous pulls are rate-limited: HT
 ```bash
 cd /path/to/axiam
 git fetch origin main --tags
-git checkout v1.0.0-beta18
+git checkout v1.1.1
 git merge-base --is-ancestor HEAD origin/main \
   && echo "OK: checkout is on main" \
   || echo "STOP: checkout is NOT on main — do not start run 6"
-grep -m1 '^version' Cargo.toml          # must read: version = "1.0.0-beta18"
+grep -m1 '^version' Cargo.toml          # must read: version = "1.1.1"
 git rev-parse HEAD                      # write this commit into the header of run6-runbook.md and RUN6-NOTES.md
 cd benchmarks
 just bench-certs                        # throwaway TLS/mTLS certificates for p2/p3 (idempotent)
@@ -704,7 +710,7 @@ just bench-certs                        # throwaway TLS/mTLS certificates for p2
 # Keycloak 26.8.x — the registry the compose file names (unverified from the sandbox: quay.io was unreachable there)
 curl -fsS 'https://quay.io/api/v1/repository/keycloak/keycloak/tag/?limit=100&onlyActiveTags=true&filter_tag_name=like:26.8' \
   | jq -r '.tags[].name' | sort -V
-# the Docker Hub mirror (verified on 2026-10-06: it listed 26.8, 26.8.0 and 26.8.0-0 only):
+# the Docker Hub mirror (verified on 2026-10-22: it listed 26.8.0, 26.8.0-1 and 26.8.1; 2026-10-06 saw 26.8.0 only):
 curl -fsS 'https://hub.docker.com/v2/repositories/keycloak/keycloak/tags/?page_size=100&name=26.8' | jq -r '.results[].name' | sort -V
 # if skopeo is installed, the most direct:
 skopeo list-tags docker://quay.io/keycloak/keycloak | jq -r '.Tags[]' | grep -E '^26\.8\.[0-9]+$' | sort -V
@@ -721,13 +727,13 @@ export BENCH_KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.N      # only if a la
 # export BENCH_ZITADEL_IMAGE=ghcr.io/zitadel/zitadel:v4.19.N      # likewise
 # export BENCH_AUTHENTIK_IMAGE=ghcr.io/goauthentik/server:2026.8.N
 # quay.io blocked on this host? the same Keycloak image from Docker Hub:
-# export BENCH_KEYCLOAK_IMAGE=keycloak/keycloak:26.8.0
+# export BENCH_KEYCLOAK_IMAGE=keycloak/keycloak:26.8.1
 ```
 
 ### 12.4 Pull every image, record and pin its digest
 
 ```bash
-# Pulls AXIAM beta18, SurrealDB, RabbitMQ, Keycloak, Zitadel, authentik and PostgreSQL; a failed pull is a hard error
+# Pulls AXIAM 1.1.1, SurrealDB, RabbitMQ, Keycloak, Zitadel, authentik and PostgreSQL; a failed pull is a hard error
 # (bench-up would otherwise fall back to a LOCAL SOURCE BUILD of the AXIAM image and the run would stop measuring the release).
 bash runner/pull-pinned-images.sh
 source results/provenance/pinned-images.sh        # exports BENCH_*_IMAGE=<repo>@sha256:… for every image

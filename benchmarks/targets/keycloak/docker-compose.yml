@@ -13,10 +13,10 @@ name: bench-keycloak
 
 services:
   keycloak:
-    # Pinned to Keycloak 26.8.0 (run 6). Override with BENCH_KEYCLOAK_IMAGE: the
-    # identical image is on Docker Hub as keycloak/keycloak:26.8.0, for a host that
+    # Pinned to Keycloak 26.8.1 (run 6; re-pinned 2026-10-22, was 26.8.0). Override with BENCH_KEYCLOAK_IMAGE: the
+    # identical image is on Docker Hub as keycloak/keycloak:26.8.1, for a host that
     # cannot reach quay.io. `meta.json` records the pulled digest either way.
-    image: ${BENCH_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.0}
+    image: ${BENCH_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1}
     container_name: bench-keycloak
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}

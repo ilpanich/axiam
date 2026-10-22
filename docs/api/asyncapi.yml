@@ -722,7 +722,9 @@ components:
             (#741); a producer-supplied `ingested_via` is overwritten, never
             honoured. Metadata that is not a JSON object is stored under
             `producer_metadata` beside the stamp. Server-written rows do not
-            carry `ingested_via`.
+            carry `ingested_via`. The stamp starts with 1.1.2: rows ingested
+            before the upgrade carry none, so an unstamped row is
+            server-written only if it was written after the upgrade.
         key_version:
           type: integer
           minimum: 0

@@ -73,7 +73,10 @@ function DcrEventBadge() {
  * persists, after the producer's own metadata, so a producer cannot clear or
  * change it. The server's own rows never carry the key. A row with the badge
  * was reported by a holder of the tenant's signing subkey, not observed by the
- * server — the forgery residual `docs/admin/README.md` describes.
+ * server — the forgery residual `docs/admin/README.md` describes. The stamp
+ * starts with 1.1.2: a row ingested before the upgrade has no badge although
+ * it arrived over AMQP, so no badge means server-written only for rows
+ * written after the upgrade.
  */
 function isIngestedViaAmqp(metadata: AuditLog["metadata"]): boolean {
   return metadata?.ingested_via === "amqp";

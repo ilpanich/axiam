@@ -3167,15 +3167,24 @@ async fn decision_per_authentication() {
         axiam_server::tls::build_rustls_server_config(&tls_config)
             .expect("AXIAM's TLS configuration, again"),
     );
-    let healed = radius
-        .eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key))
-        .await;
-    assert!(
-        healed.accepted,
-        "rotation: the authentication after the 401 is admitted, with no wait for the entry:\n{}",
-        healed.report()
+    // Two authentications at once, both holding the cached token: both get the 401, both
+    // drop and both log in again (#720). The drop must not insert the refused token when
+    // the other has dropped it first, and the store must not merge it over the new one.
+    // The identity is the supplicant's own; the decision is asked for the certificate's
+    // fingerprint, so both are press-07.
+    let (healed, healed_too) = tokio::join!(
+        radius.eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key)),
+        radius.eap_tls_live("press-07b", path_str(&press07.cert), path_str(&press07.key)),
     );
-    assert_tunnel(&healed, "20", "rotation");
+    for (which, attempt) in [("first", &healed), ("second", &healed_too)] {
+        assert!(
+            attempt.accepted,
+            "rotation: the {which} concurrent authentication after the 401 is admitted, with no \
+             wait for the entry:\n{}",
+            attempt.report()
+        );
+        assert_tunnel(attempt, "20", "rotation");
+    }
     assert!(
         healed
             .log
@@ -3204,8 +3213,8 @@ async fn decision_per_authentication() {
     );
     say(
         "rotation",
-        "the binding rotated under the cached token: the 401 dropped it, a new login and one \
-         more decision admitted press-07 at once; the next authentication used the new token",
+        "the binding rotated under the cached token: two concurrent authentications each got the \
+         401, logged in again and were admitted at once; the next one used the new token",
     );
 
     // ---- a wrong site key ------------------------------------------------------

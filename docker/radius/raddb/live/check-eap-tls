@@ -125,8 +125,13 @@ server check-eap-tls {
 			if (&control:Tmp-String-5 !~ /^401$/) {
 				reject
 			}
+			#    Cache-TTL 0 expires the entry; on an ABSENT entry rlm_cache
+			#    (3.2.8) would instead insert this request's refused token, so the
+			#    drop is read-only: a thread that finds the entry already dropped
+			#    by another creates nothing (#720).
 			update control {
 				Cache-Status-Only !* ANY
+				Cache-Read-Only := yes
 				Cache-TTL := 0
 			}
 			axiam_token_cache
@@ -156,8 +161,12 @@ server check-eap-tls {
 			if (&control:Tmp-String-4 !~ /"expires_in"\s*:\s*([1-9][0-9]{2,5})/) {
 				reject
 			}
+			#    A negative TTL expires whatever entry is there and inserts THIS
+			#    request's token. A positive one would merge a concurrent thread's
+			#    (refused) entry over the token just fetched (#720).
 			update control {
-				Cache-TTL := "%{expr:%{1} / 2}"
+				Cache-Read-Only !* ANY
+				Cache-TTL := "%{expr:0 - %{1} / 2}"
 			}
 			axiam_token_cache
 			if (&control:Tmp-String-2 !~ /^[A-Za-z0-9._~+\/=-]+$/) {

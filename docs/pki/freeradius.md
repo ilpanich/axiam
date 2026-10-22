@@ -712,6 +712,12 @@ decision **once** more; a token fetched in that same authentication is not retri
 A second `401`, a `403` and every other failure are an Access-Reject as before, so
 a rotation costs one extra login rather than up to half a token's life
 (7.5 minutes by default) of refused authentications ([#707](https://github.com/ilpanich/axiam/issues/707); T-486).
+Under load the same holds per thread: several authentications that read the old
+token at once each get the `401`, and each logs in again. The drop is read-only
+(`Cache-Read-Only`), so a thread that finds the entry already dropped does not
+create one holding the refused token, and the store after the new login uses a
+negative TTL, which replaces whatever entry is there with this request's token
+instead of merging another thread's over it ([#720](https://github.com/ilpanich/axiam/issues/720)).
 
 ### The FreeRADIUS configuration
 

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.1",
-    "x-axiam-spec-digest": "sha256:c359e15a6cfef5931e5d7b2f0ee0055dcccaf2771ca436897dded038d18d570a"
+    "x-axiam-spec-digest": "sha256:341270842703e04dc8b5326c2d193540bc44eb21bb3adad28bce996d1f661dee"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -1696,7 +1696,7 @@
           "auth"
         ],
         "summary": "`POST /api/v1/auth/password/change`",
-        "description": "Change the authenticated user's password. Requires the current password for\nre-verification (T-04-21: guards against session-hijack pivot). On success,\nall other sessions and OAuth2 refresh tokens are revoked; the caller's\ncurrent session is preserved (D-14, D-15).\n\nReturns 204 on success, 401 on wrong current password, 422 on policy\nviolation.",
+        "description": "Change the authenticated user's password. Requires the current password for\nre-verification (T-04-21: guards against session-hijack pivot). On success,\nall other sessions and OAuth2 refresh tokens are revoked; the caller's\ncurrent session is preserved (D-14, D-15).\n\nReturns 204 on success, 401 on wrong current password, 422 on policy\nviolation, 503 when the password-hash gate is saturated.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -1717,6 +1717,9 @@
           },
           "422": {
             "description": "New password violates policy"
+          },
+          "503": {
+            "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
           }
         },
         "security": [
@@ -1834,6 +1837,9 @@
           },
           "400": {
             "description": "Invalid token or password policy violation"
+          },
+          "503": {
+            "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
           }
         }
       }

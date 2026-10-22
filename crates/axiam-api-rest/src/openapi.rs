@@ -1272,9 +1272,13 @@ mod declared_refusal_tests {
     ];
 
     /// `503 service_unavailable`: a crypto permit (`axiam-pki::permit`) or the
-    /// login hash gate. CA import takes no permit, so it is not here.
+    /// password-hash gate (`axiam_auth::crypto_gate::acquire_hash_permit`:
+    /// login, password change and reset confirmation, #772). CA import takes
+    /// no permit, so it is not here.
     const UNAVAILABLE: &[(&str, &str)] = &[
         ("post", "/api/v1/auth/login"),
+        ("post", "/api/v1/auth/password/change"),
+        ("post", "/api/v1/auth/reset/confirm"),
         ("post", "/api/v1/certificates"),
         ("post", "/api/v1/certificates/sign-csr"),
         ("post", "/api/v1/organizations/{org_id}/ca-certificates"),

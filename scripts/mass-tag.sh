@@ -92,7 +92,8 @@
 #   axiam-swift-sdk    the CocoaPods AxiamSDK.podspec s.version and README (SwiftPM
 #                      itself is tag-derived, like Go).
 #   axiam-c-sdk,       the CMake project() version, vcpkg.json version, conanfile.py
-#   axiam-cplusplus-sdk version, and the README install coords — kept in lockstep.
+#   axiam-cplusplus-sdk version, the Doxyfile PROJECT_NUMBER, the README install
+#                      coords and, for C++, axiam::kVersion — kept in lockstep.
 #
 # EVERY SDK REPO ALSO GETS THE PLATFORM'S SPEC RE-VENDORED (revendor_spec_artifacts).
 # CONTRACT.md, openapi.json and management-registry.json are authored in the
@@ -574,6 +575,29 @@ set_cmake_project_version() {
   VAL="$triple" rewrite_file "$file" \
     's/(\bproject[ \t]*\([^)]*?\bVERSION[ \t]+)[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/$1$ENV{VAL}/s' \
     "project() VERSION -> $triple"
+}
+
+# Set the C++ SDK's `kVersion = "..."` in header $1 to the MAJOR.MINOR.PATCH of
+# version $2 -- the same triple as project(), which tests/test_version_policy.cpp
+# requires it to equal. No-op on a missing file (the C SDK has no such header).
+set_cpp_kversion() {
+  local file="$1" triple="${2%%[-+]*}"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$triple" rewrite_file "$file" \
+    's/(\bkVersion[ \t]*=[ \t]*)"[^"]*"/$1"$ENV{VAL}"/' \
+    "kVersion -> \"$triple\""
+}
+
+# Set a Doxyfile's PROJECT_NUMBER in file $1 to version $2, full spelling
+# (it is free text, so a pre-release suffix is fine). No-op on a missing file.
+set_doxygen_number() {
+  local file="$1" val="$2"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$val" rewrite_file "$file" \
+    's/^(PROJECT_NUMBER[ \t]*=[ \t]*)\S*/$1$ENV{VAL}/m' \
+    "PROJECT_NUMBER -> $val"
 }
 
 # Set the first `<prefix>"<value>"` occurrence in file $1 to $3, where $2 is a
@@ -1083,6 +1107,15 @@ bump_versions() {
       set_cmake_project_version CMakeLists.txt "$version"
       sub_literal conanfile.py             "$old" "$version"
       sub_readme  README.md                "$old" "$version"
+      # What the C header above never reached: the C++ SDK's axiam::kVersion,
+      # and the Doxygen PROJECT_NUMBER (both SDKs; a no-op where absent). Set outright rather than
+      # substituted, because both drift. 1.1.1 is what that cost: the release
+      # moved every manifest to 1.1.1, kVersion stayed "1.2.0", and the C++
+      # suite's version-policy test -- which pins kVersion to the project()
+      # triple -- failed every leg of sdk-ci-cpp and coverage on the tag.
+      # kVersion therefore takes the triple too; the Doxyfile the full spelling.
+      set_cpp_kversion   include/axiam/axiam.hpp "$version"
+      set_doxygen_number Doxyfile                "$version"
       ;;
   esac
 }

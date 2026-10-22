@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.1",
-    "x-axiam-spec-digest": "sha256:607473bb3549458ec1e29087dc8281f84f6e9410f8fba8d56dead58b9d3a2765"
+    "x-axiam-spec-digest": "sha256:fb6739eb8f03d456e3419b7a5b026b6c6092159322ecd9069a7c06355887d401"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -19358,7 +19358,7 @@
               "string",
               "null"
             ],
-            "description": "Optional (#683): a `client_secret_basic` client names itself in the\n`Authorization` header and a `private_key_jwt` client in its\nassertion (RFC 6749 §2.3.1, RFC 7521 §4.2). The handler resolves it\nwith `resolve_client_id`, as the token endpoint does."
+            "description": "Optional: a `client_secret_basic` client names itself in the\n`Authorization` header and a `private_key_jwt` client in its\nassertion (RFC 6749 §2.3.1, RFC 7521 §4.2)."
           },
           "client_secret": {
             "type": [

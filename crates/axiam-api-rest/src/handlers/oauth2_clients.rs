@@ -1065,7 +1065,8 @@ pub async fn update<C: Connection + Clone>(
     // registration would refuse. Asked first, before the structural rules below, so
     // the answer is the policy's rather than a `400` about the grant's own shape.
     // It composes with the #675 public-conversion rule: that rule needs a
-    // device-only stored row, which a `dcr`/`cimd` row can never be.
+    // device-only stored row. A self-registration never gives a row the device
+    // grant; an older admin edit may have.
     if let Some(ref requested) = req.grant_types {
         let refused = grants_refused_by_registration_policy(&state, &stored, requested).await?;
         if !refused.is_empty() {

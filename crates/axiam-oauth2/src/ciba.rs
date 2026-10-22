@@ -920,7 +920,10 @@ enum HintName {
 /// above still assumes that the replicas serving the cap agree with the
 /// datastore to within the sweep's margin (one minute): a reader whose clock
 /// runs further ahead may find the previous window's row already swept and read
-/// it as zero, and the stretch may then admit up to twice the allowance.
+/// it as zero, and the stretch may then admit up to twice the allowance. The
+/// datastore's clock is one clock for the shipped single-node SurrealDB; a
+/// clustered SurrealDB evaluates `time::now()` on whichever compute node runs
+/// the statement, so the margin must also cover the skew between its nodes.
 #[derive(Clone)]
 pub struct CibaHintCap {
     store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,

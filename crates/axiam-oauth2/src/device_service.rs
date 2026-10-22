@@ -116,10 +116,11 @@ impl DeviceClient {
 // `Debug` is written by hand so that the credentials never reach a log line.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeviceAuthorizationRequest {
-    /// Optional (#683): a `client_secret_basic` client names itself in the
+    /// Optional: a `client_secret_basic` client names itself in the
     /// `Authorization` header and a `private_key_jwt` client in its
-    /// assertion (RFC 6749 §2.3.1, RFC 7521 §4.2). The handler resolves it
-    /// with `resolve_client_id`, as the token endpoint does.
+    /// assertion (RFC 6749 §2.3.1, RFC 7521 §4.2).
+    // #683: the handler resolves it with `resolve_client_id`, as the token
+    // endpoint does.
     #[serde(default)]
     pub client_id: Option<String>,
     /// The client's secret, for a client registered for `client_secret_post`

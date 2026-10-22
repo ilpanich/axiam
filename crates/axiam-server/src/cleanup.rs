@@ -318,6 +318,11 @@ pub const RATE_LIMIT_BUCKET_CLOCK_MARGIN: Duration = Duration::from_secs(60);
 /// allowance, so its "exactly" holds under the assumption that readers and
 /// the datastore agree to within the margin (T-424).
 ///
+/// "The datastore's clock" is one clock for the shipped single-node SurrealDB
+/// (`k8s/surrealdb/statefulset.yml`, `replicas: 1`). A clustered SurrealDB
+/// evaluates `time::now()` on whichever compute node runs the statement, so the
+/// margin must also cover the skew between SurrealDB nodes.
+///
 /// The table is bounded by what was written in the last `RETENTION`; the
 /// sweep makes the growth of a table that gained a row per hint, per client
 /// IP and per endpoint, forever, a steady state.

@@ -61,7 +61,11 @@
 //! What remains is recorded for the threat model (T-457), not hidden:
 //! `authenticate_der`'s own early refusals for a row of **this** tenant (a
 //! revoked, expired or server certificate stops before the chain is verified),
-//! and the engine's answer for a subject with no role assignment.
+//! the engine's answer for a subject with no role assignment, and the **global
+//! fingerprint read** of step 1: a hit deserialises the row of another tenant's
+//! certificate and a miss is `NotFound`, so a caller can tell, by one indexed
+//! read against a verification, whether a certificate with that fingerprint
+//! exists in any tenant (T-457, residual (f); Informational, not closed).
 //!
 //! # What is never on the wire, and never in the row
 //!

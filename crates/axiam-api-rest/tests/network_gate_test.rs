@@ -2005,7 +2005,12 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(row.metadata["role"], "fleet");
     assert_eq!(row.metadata["grantee"]["kind"], "user");
     assert_eq!(row.metadata["grantee"]["id"], user.to_string());
-    assert_eq!(row.metadata["node"], "none", "assigned at the tenant");
+    assert_eq!(
+        row.metadata["node"],
+        root.to_string(),
+        "a tenant-wide assignment is decided, and recorded, at /network (#730 g)"
+    );
+    assert_eq!(row.resource_id, None, "the row's resource is the caller's");
     assert_eq!(row.metadata["permissions"][0]["action"], NETWORK_JOIN);
     assert_eq!(row.metadata["permissions"][0]["effect"], "allow");
 
@@ -2092,6 +2097,31 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(rows[0].metadata["grantee"]["id"], device.to_string());
     let text = rows[0].metadata.to_string();
     assert!(!text.contains("BEGIN"), "no certificate in the row: {text}");
+    assert!(rows[0].metadata["before"].is_null(), "first bind: {text}");
+    assert_eq!(
+        rows[0].metadata["nodes"],
+        json!([root.to_string()]),
+        "the node the gate checked network:grant at: {text}"
+    );
+
+    // A re-bind records the account the certificate was taken from (#730 f).
+    let other = w.service_account(&[]).await;
+    let (status, err) = call(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/service-accounts/{other}/bind-certificate"),
+        Some(json!({ "certificate_id": cert })),
+    )
+    .await;
+    assert_eq!(status, 200, "{err}");
+    let rows = w.audit("certificate_binding.bound").await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let rebind = rows
+        .iter()
+        .find(|r| r.metadata["grantee"]["id"] == other.to_string())
+        .expect("the re-bind row");
+    assert_eq!(rebind.metadata["before"], device.to_string());
 
     // Nothing else was written: the five actions hold exactly these rows.
     let total = w.audit("network_role.assigned").await.len()
@@ -2099,7 +2129,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         + w.audit("network_role.granted").await.len()
         + w.audit("network_role.revoked").await.len()
         + w.audit("certificate_binding.bound").await.len();
-    assert_eq!(total, 6);
+    assert_eq!(total, 7);
 }
 
 /// A write that touches no `network:` permission leaves none of the five rows.

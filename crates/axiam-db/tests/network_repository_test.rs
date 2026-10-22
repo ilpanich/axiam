@@ -867,6 +867,20 @@ async fn a_segment_write_cannot_strand_its_profile() {
 // Uniqueness per site
 // ---------------------------------------------------------------------------
 
+/// A segment name spelt like a `THROW` marker cannot be created: the name
+/// grammar (letters, digits, `.`, `_`, `-`) refuses the `:`. So the uniqueness
+/// error never echoes a marker through a name, and `refusal_of` reads a marker
+/// only in the `THROW` form besides (its unit test, #730 d).
+#[tokio::test]
+async fn a_segment_named_like_a_throw_marker_is_refused_as_a_name() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let mut s = corp(tenant);
+    s.path = "/network/zones/hq/axiam:network_segment_version_stale".into();
+    let err = segments(&db).create(s).await.unwrap_err();
+    assert!(matches!(err, AxiamError::Validation { .. }), "{err:?}");
+}
+
 #[tokio::test]
 async fn a_site_cannot_repeat_a_name_a_vlan_or_a_rank() {
     let db = setup().await;

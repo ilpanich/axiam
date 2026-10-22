@@ -87,7 +87,10 @@ const POLICY_ENTITY: &str = "network_policy";
 
 // The messages the write transactions `THROW`. `refusal_of` turns each into its
 // typed `NetworkConflict` on the way out, so the caller sees a typed refusal
-// rather than an opaque database error.
+// rather than an opaque database error. It reads one back only in the form the
+// engine renders a `THROW` — `An error occurred: <marker>`, then the end of the
+// error or `;` — never as a substring, so a value a user can put in a field the
+// engine echoes (a segment named like a marker) is not taken for one (#730 d).
 const STALE_SEGMENT: &str = "axiam:network_segment_version_stale";
 const STALE_PROFILE: &str = "axiam:reply_profile_version_stale";
 const STRANDS_PROFILE: &str = "axiam:segment_update_strands_profile";
@@ -117,7 +120,8 @@ fn conflict(reason: NetworkConflict) -> TxFail {
 /// the `THROW` markers (and the uniqueness indexes) written by this module are
 /// read back.
 fn refusal_of(combined: &str) -> Option<NetworkConflict> {
-    let hit = |marker: &str| combined.contains(marker);
+    let hit = |marker: &str| thrown(combined, marker);
+    let index = |name: &str| combined.contains(name);
     Some(if hit(STALE_SEGMENT) {
         NetworkConflict::StaleSegment
     } else if hit(STALE_PROFILE) {
@@ -133,15 +137,24 @@ fn refusal_of(combined: &str) -> Option<NetworkConflict> {
         NetworkConflict::HasChildren
     } else if hit(SITE_GONE) {
         NetworkConflict::SiteGone
-    } else if hit(IDX_VLAN) {
+    } else if index(IDX_VLAN) {
         NetworkConflict::DuplicateVlan
-    } else if hit(IDX_RANK) {
+    } else if index(IDX_RANK) {
         NetworkConflict::DuplicateRank
-    } else if hit(IDX_NAME) {
+    } else if index(IDX_NAME) {
         NetworkConflict::DuplicateName
     } else {
         return None;
     })
+}
+
+/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
+/// of it: `An error occurred: <marker>`, ended by the end of the text or `;`.
+fn thrown(combined: &str, marker: &str) -> bool {
+    let head = format!("An error occurred: {marker}");
+    combined
+        .match_indices(&head)
+        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
 }
 
 /// Turn a transaction's statement errors into the right answer.
@@ -1206,5 +1219,16 @@ mod tests {
             assert_eq!(refusal_of(&text), Some(want), "{marker}");
         }
         assert_eq!(refusal_of("something the engine said"), None);
+    }
+
+    #[test]
+    fn a_marker_echoed_inside_a_value_is_not_a_throw() {
+        // The duplicate-name text echoes the user's value; a name spelt like a
+        // marker must stay a `duplicate_name` (#730 d).
+        let text = format!(
+            "Database index `{IDX_NAME}` already contains ['site', '{STALE_SEGMENT}'], \
+             with record `network_segment:x`"
+        );
+        assert_eq!(refusal_of(&text), Some(NetworkConflict::DuplicateName));
     }
 }

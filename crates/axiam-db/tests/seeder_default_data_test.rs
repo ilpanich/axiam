@@ -364,7 +364,8 @@ async fn reconcile_backfills_grants_for_new_permission_and_is_idempotent() {
         created,
         ReconcileOutcome {
             granted: 2,
-            revoked: 0
+            revoked: 0,
+            network_revoked: 0
         },
         "expected 2 new grants (super-admin + admin) and no revocations"
     );
@@ -577,7 +578,8 @@ async fn reconcile_revokes_an_organization_level_grant_an_older_version_made() {
         outcome,
         ReconcileOutcome {
             granted: 0,
-            revoked: 6
+            revoked: 6,
+            network_revoked: 0
         },
         "three organization-level actions across two roles must be revoked, \
          and nothing granted"
@@ -744,7 +746,8 @@ async fn reconcile_takes_back_the_network_grants_the_seeded_roles_must_not_hold(
         outcome,
         ReconcileOutcome {
             granted: 0,
-            revoked: 12
+            revoked: 0,
+            network_revoked: 12
         }
     );
     assert!(
@@ -944,7 +947,8 @@ async fn reconcile_revokes_the_network_grants_from_an_upgraded_organization_scop
         outcome,
         ReconcileOutcome {
             granted: 0,
-            revoked: SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
+            revoked: 0,
+            network_revoked: SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
         }
     );
     assert!(

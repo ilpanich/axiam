@@ -127,7 +127,8 @@ pub async fn authorize_as<C: Connection + Clone>(
 /// So the gate hands the write a claim on the role's epochs
 /// ([`GateClearance::role_claim`]), the `*_claimed` repository writes compare
 /// it inside their transaction, and a write that lost comes back as
-/// `AxiamError::Conflict` ("the role changed since it was read …"). That
+/// `AxiamError::Network(NetworkConflict::StaleRole { .. })` ("the role changed
+/// since it was read …"). That
 /// answers `409` with `reason_code` `stale_version` — the network routes'
 /// sub-code for "read again, decide again" (contract §36.3 rule 2): sent again,
 /// the request goes back through the gate, which decides on the role as it now
@@ -358,7 +359,10 @@ fn cleared_row(
     if !cleared.is_network_sensitive() {
         return Ok(None);
     }
-    let node = |r: Option<uuid::Uuid>| r.map_or_else(|| "none".to_owned(), |r| r.to_string());
+    // The node the gate decided the assignment at — `/network`'s id for a
+    // tenant-wide assignment and for every assignment of a global role — not
+    // the resource the caller named (#730 g).
+    let node = || cleared.node().ok_or("the node the gate checked");
     let grantee = |g: Grantee| match g {
         Grantee::User(id) => serde_json::json!({ "kind": "user", "id": id }),
         Grantee::ServiceAccount(id) => serde_json::json!({ "kind": "service_account", "id": id }),
@@ -393,7 +397,7 @@ fn cleared_row(
                     "role_id": role_id,
                     "role": role.name,
                     "grantee": grantee(g),
-                    "node": node(resource_id),
+                    "node": node()?,
                     "inherit": inherit,
                     "permissions": network_permissions(role),
                     "exemption": cleared.exemption(),
@@ -413,7 +417,7 @@ fn cleared_row(
                     "role_id": role_id,
                     "role": role.name,
                     "grantee": grantee(g),
-                    "node": node(resource_id),
+                    "node": node()?,
                     "permissions": network_permissions(role),
                 }),
             )
@@ -474,14 +478,24 @@ fn cleared_row(
         NetworkWrite::CertificateBind {
             certificate_id,
             service_account_id,
-        } => (
-            AUDIT_BINDING_BOUND,
-            None,
-            serde_json::json!({
-                "certificate_id": certificate_id,
-                "grantee": { "kind": "service_account", "id": service_account_id },
-            }),
-        ),
+        } => {
+            let binding = cleared
+                .cleared_binding()
+                .ok_or("the binding the gate read")?;
+            (
+                AUDIT_BINDING_BOUND,
+                None,
+                serde_json::json!({
+                    "certificate_id": certificate_id,
+                    "grantee": { "kind": "service_account", "id": service_account_id },
+                    // The account the certificate was taken from on a re-bind
+                    // (`null` when it was unbound), and the nodes at which the
+                    // gate required the binder to hold `network:grant`.
+                    "before": binding.before,
+                    "nodes": binding.nodes,
+                }),
+            )
+        }
         _ => return Ok(None),
     };
     metadata["write"] = serde_json::json!(write_kind(&write));

@@ -736,11 +736,14 @@ async fn audit_network_revocation<C: Connection>(
 
 /// What [`reconcile_default_role_grants`] changed for one tenant.
 ///
-/// Two counters rather than one, because they mean opposite things to an
+/// Three counters rather than one, because they mean different things to an
 /// operator reading the boot log: `granted` is a back-fill catching a role up
-/// with a registry that grew, while `revoked` is a **capability being taken
-/// away** from a role that already had it. The second deserves its own line in
-/// the log and its own number.
+/// with a registry that grew, while `revoked` and `network_revoked` are a
+/// **capability being taken away** from a role that already had it — an
+/// organization-level action from an ordinary tenant's role, and a `network:`
+/// permission a seeded role may no longer hold (the organization scope's
+/// super-admin and, on any tenant, the roles the rule withholds it from). The
+/// last two deserve their own line in the log and their own numbers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReconcileOutcome {
     /// Grants created because a role was missing a permission it should hold.
@@ -748,12 +751,16 @@ pub struct ReconcileOutcome {
     /// Grants removed because an ordinary tenant's role held an
     /// organization-level action.
     pub revoked: usize,
+    /// Grants removed because a seeded role held a `network:` permission the
+    /// seeding rule withholds from it (a count apart from `revoked`, whose
+    /// organization-level actions the operator reads differently).
+    pub network_revoked: usize,
 }
 
 impl ReconcileOutcome {
     /// Whether anything changed — the condition for logging at all.
     pub const fn is_empty(&self) -> bool {
-        self.granted == 0 && self.revoked == 0
+        self.granted == 0 && self.revoked == 0 && self.network_revoked == 0
     }
 }
 
@@ -911,7 +918,7 @@ pub async fn reconcile_default_role_grants<C: Connection>(
                                 perm.action
                             ))
                         })?;
-                    outcome.revoked += 1;
+                    outcome.network_revoked += 1;
                     audit_network_revocation(db, tenant_id, role_id, role, &perm.action, perm.id)
                         .await;
                 }

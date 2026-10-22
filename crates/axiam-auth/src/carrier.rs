@@ -103,3 +103,23 @@ mod tests {
         );
     }
 }
+
+/// What the session extractor decided about a request's access token, left in
+/// the request's extensions for the audit middleware to read after the handler
+/// (#758 (c), D-12).
+///
+/// The middleware verifies a token's signature and expiry to name the actor in
+/// the request row; it does not apply the extractor's further checks (audience,
+/// session, `client_id`-minted refusal, DPoP). `authenticated` on the row used
+/// to mean only "the signature checked out", so a device-grant token refused
+/// `403` at `/api/v1/device/verify` was recorded `authenticated: true`. It now
+/// means the extractor's verdict wherever the extractor ran. Lives here, in the
+/// lowest crate the middleware and the extractors both reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthVerdict {
+    /// The extractor admitted the credential (the active-tenant decision that
+    /// follows is about what the principal asked for, not about the token).
+    Admitted,
+    /// The extractor refused the credential itself (`401`/`403`).
+    Refused,
+}

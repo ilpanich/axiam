@@ -2462,3 +2462,88 @@ async fn every_other_change_across_the_public_line_is_still_refused() {
         assert!(conversion_rows(&f, &client_id).await.is_empty());
     }
 }
+
+/// D-12 (#758 (c)): the request row's `authenticated` is the session
+/// extractor's verdict. A device-grant token is validly signed, so the audit
+/// middleware names its subject — but `ConsoleSignIn` refuses it `403` at the
+/// verification page, and the row says `authenticated: false` with the denial;
+/// the console sign-in on the same route stays `authenticated: true`.
+#[actix_web::test]
+async fn a_refused_device_token_is_recorded_unauthenticated_at_the_verify_page() {
+    use axiam_core::models::audit::AuditOutcome;
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let f = setup().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.auth.clone()))
+            .app_data(web::Data::new(AppState::for_test(
+                f.db.clone(),
+                f.auth.clone(),
+            )))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .wrap(axiam_audit::middleware::AuditMiddleware::spawn(
+                SurrealAuditLogRepository::new(f.db.clone()),
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "{body}");
+    let device_token = body["access_token"].as_str().unwrap().to_owned();
+    let console = mint_token(&f);
+    let (_, user_code) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+
+    let mut statuses = Vec::new();
+    for token in [&device_token, &console] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("/api/v1/device/verify?user_code={user_code}"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        statuses.push(resp.status().as_u16());
+    }
+    assert_eq!(statuses, [403, 200]);
+
+    let repo = SurrealAuditLogRepository::new(f.db.clone());
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = repo
+            .list(
+                f.tenant_id,
+                AuditLogFilter::default(),
+                Pagination::default(),
+            )
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|e| e.action == "GET /api/v1/device/verify")
+            .collect();
+        if rows.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let by_status = |code: u64| {
+        rows.iter()
+            .find(|e| e.metadata["http_status"] == code)
+            .unwrap_or_else(|| panic!("no row with http_status {code}"))
+    };
+    let refused = by_status(403);
+    assert_eq!(refused.outcome, AuditOutcome::Denied);
+    assert_eq!(refused.metadata["authenticated"], false);
+    let admitted = by_status(200);
+    assert_eq!(admitted.outcome, AuditOutcome::Success);
+    assert_eq!(admitted.metadata["authenticated"], true);
+    assert_eq!(admitted.actor_id, f.user_id);
+}

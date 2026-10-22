@@ -61,7 +61,11 @@ pub struct SessionCredentialRefused;
 
 /// Record [`SessionCredentialRefused`] on `req` and hand the refusal back.
 fn refused(req: &HttpRequest, refusal: AxiamApiError) -> AxiamApiError {
-    req.extensions_mut().insert(SessionCredentialRefused);
+    let mut extensions = req.extensions_mut();
+    extensions.insert(SessionCredentialRefused);
+    // The audit middleware's `authenticated` (D-12, #758 (c)).
+    extensions.insert(axiam_auth::carrier::AuthVerdict::Refused);
+    drop(extensions);
     refusal
 }
 
@@ -536,6 +540,9 @@ impl RequestScopeHandles {
         if let Err(refusal) = admit_credential(&user, admit, dpop, replay_guard, validator).await {
             return Err(refused(&request, refusal));
         }
+        request
+            .extensions_mut()
+            .insert(axiam_auth::carrier::AuthVerdict::Admitted);
 
         if let Some(target) = act_on_requested_tenant(
             user.principal_tenant_id,

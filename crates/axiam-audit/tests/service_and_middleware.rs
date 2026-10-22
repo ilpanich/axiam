@@ -527,6 +527,62 @@ async fn middleware_authenticates_via_bearer_header() {
     assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
 }
 
+/// D-12 (#758 (c)): where the session extractor ran, its verdict is the row's
+/// `authenticated`. `axiam-audit` cannot reach the real extractor, so the
+/// handler leaves the verdict the extractor would (the real one is exercised by
+/// `device_flow_test.rs`); a route that never ran it keeps the signature check.
+async fn audit_with_verdict(
+    verdict: Option<axiam_auth::carrier::AuthVerdict>,
+    status: actix_web::http::StatusCode,
+) -> CreateAuditLogEntry {
+    use actix_web::HttpMessage;
+    use actix_web::HttpRequest;
+    let cfg = test_auth_config();
+    let token = mint_token(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), &cfg);
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+        "/api/secure",
+        web::get().to(move |req: HttpRequest| async move {
+            if let Some(v) = verdict {
+                req.extensions_mut().insert(v);
+            }
+            HttpResponse::build(status).finish()
+        }),
+    ))
+    .await;
+    let req = test::TestRequest::get()
+        .uri("/api/secure")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    repo.snapshot().remove(0)
+}
+
+#[actix_web::test]
+async fn a_token_the_extractor_refused_is_recorded_unauthenticated_with_its_outcome() {
+    use actix_web::http::StatusCode;
+    use axiam_auth::carrier::AuthVerdict;
+    let e = audit_with_verdict(Some(AuthVerdict::Refused), StatusCode::FORBIDDEN).await;
+    assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], false);
+    assert_eq!(e.metadata.as_ref().unwrap()["http_status"], 403);
+    assert_eq!(e.outcome, AuditOutcome::Denied);
+    // The actor is still the token's subject: the signature verified.
+    assert_eq!(e.actor_type, ActorType::User);
+    assert!(!e.actor_id.is_nil());
+}
+
+#[actix_web::test]
+async fn an_admitted_token_and_a_route_without_the_extractor_stay_authenticated() {
+    use actix_web::http::StatusCode;
+    use axiam_auth::carrier::AuthVerdict;
+    for verdict in [Some(AuthVerdict::Admitted), None] {
+        let e = audit_with_verdict(verdict, StatusCode::OK).await;
+        assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+    }
+}
+
 #[actix_web::test]
 async fn middleware_authenticates_via_access_cookie() {
     let cfg = test_auth_config();

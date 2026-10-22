@@ -576,19 +576,20 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution) = match fut.await {
+            let (status, result, attribution, verdict) = match fut.await {
                 Ok(res) => {
                     let s = res.status().as_u16();
-                    let attribution = res
-                        .request()
-                        .extensions()
-                        .get::<AuditAttribution>()
+                    let extensions = res.request().extensions();
+                    let attribution = extensions.get::<AuditAttribution>().copied();
+                    let verdict = extensions
+                        .get::<axiam_auth::carrier::AuthVerdict>()
                         .copied();
-                    (s, Ok(res), attribution)
+                    drop(extensions);
+                    (s, Ok(res), attribution, verdict)
                 }
                 Err(err) => {
                     let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None)
+                    (s, Err(err), None, None)
                 }
             };
 
@@ -603,7 +604,16 @@ where
             // The verified token first: it is proof, where an attribution is a
             // handler's assertion. They agree in practice; where they cannot
             // both exist, whichever is present is used.
-            let authenticated = user_info.is_some();
+            // `authenticated` is the session extractor's verdict where it ran
+            // (D-12, #758 (c)): a token whose signature verified but which the
+            // extractor refused (`403` at the device-verification page for a
+            // client-minted token, a revoked session) is `false`, with the
+            // outcome in `http_status` and `outcome`. On a route that never
+            // ran the extractor there is no verdict and it stays what it was:
+            // whether the middleware itself verified a token's signature and
+            // expiry. The actor is still the token's subject either way.
+            let authenticated =
+                user_info.is_some() && verdict != Some(axiam_auth::carrier::AuthVerdict::Refused);
             let (actor_id, tenant_id, org_id, actor_type) = match user_info {
                 Some((uid, tid, oid, kind)) => (uid, tid, oid, kind),
                 None => match attribution {

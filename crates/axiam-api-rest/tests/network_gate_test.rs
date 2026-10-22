@@ -449,10 +449,10 @@ async fn assigning_a_join_without_network_grant_at_the_node_is_403_with_an_audit
     let body = json!({ "service_account_id": device, "resource_id": iot.id });
     let uri = format!("/api/v1/roles/{join}/service-accounts");
     let (status, err) = call(&app, &w.user_token(admin), "POST", &uri, Some(body.clone())).await;
-    assert_eq!(status, 403, "{err}");
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     assert_eq!(
         err["action"], NETWORK_GRANT,
-        "the response names the permission: {err}"
+        "the response names the permission"
     );
     assert_eq!(
         w.joins(device, iot.id).await,
@@ -479,8 +479,8 @@ async fn assigning_a_join_without_network_grant_at_the_node_is_403_with_an_audit
             (netadmin_role, Some(site)),
         ])
         .await;
-    let (status, err) = call(&app, &w.user_token(netadmin), "POST", &uri, Some(body)).await;
-    assert_eq!(status, 204, "{err}");
+    let (status, _err) = call(&app, &w.user_token(netadmin), "POST", &uri, Some(body)).await;
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(device, iot.id).await, "allowed");
 }
 
@@ -506,8 +506,8 @@ async fn binding_to_an_account_that_holds_joins_needs_network_grant_at_every_joi
     let cert = w.certificate().await;
     let uri = format!("/api/v1/service-accounts/{device}/bind-certificate");
     let body = json!({ "certificate_id": cert });
-    let (status, err) = call(&app, &w.user_token(half), "POST", &uri, Some(body.clone())).await;
-    assert_eq!(status, 403, "{err}");
+    let (status, _err) = call(&app, &w.user_token(half), "POST", &uri, Some(body.clone())).await;
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     let rows = w.audit("certificate_binding.refused").await;
     let row = the_row(&rows);
     assert_eq!(row.metadata["rule"], "5.3:bind");
@@ -533,12 +533,12 @@ async fn binding_to_an_account_that_holds_joins_needs_network_grant_at_every_joi
             ),
         ])
         .await;
-    let (status, err) = call(&app, &w.user_token(both), "POST", &uri, Some(body)).await;
-    assert_eq!(status, 200, "{err}");
+    let (status, _err) = call(&app, &w.user_token(both), "POST", &uri, Some(body)).await;
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 
     // An account with no join asks nothing beyond certificates:bind.
     let bare = w.service_account(&[]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &w.user_token(half),
         "POST",
@@ -546,7 +546,7 @@ async fn binding_to_an_account_that_holds_joins_needs_network_grant_at_every_joi
         Some(json!({ "certificate_id": w.certificate().await })),
     )
     .await;
-    assert_eq!(status, 200, "{err}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 }
 
 /// H6: a service account cannot bind a certificate to itself, whatever it
@@ -560,7 +560,7 @@ async fn a_service_account_cannot_bind_a_certificate_to_itself() {
     let app = app!(w);
     let token = w.sa_token(sa);
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &token,
         "POST",
@@ -568,7 +568,7 @@ async fn a_service_account_cannot_bind_a_certificate_to_itself() {
         Some(json!({ "certificate_id": w.certificate().await })),
     )
     .await;
-    assert_eq!(status, 403, "{err}");
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     let rows = w.audit("certificate_binding.refused").await;
     let row = the_row(&rows);
     assert_eq!(row.metadata["rule"], "H6");
@@ -576,7 +576,7 @@ async fn a_service_account_cannot_bind_a_certificate_to_itself() {
 
     // Binding to another account is the ordinary case.
     let other = w.service_account(&[]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &token,
         "POST",
@@ -584,7 +584,7 @@ async fn a_service_account_cannot_bind_a_certificate_to_itself() {
         Some(json!({ "certificate_id": w.certificate().await })),
     )
     .await;
-    assert_eq!(status, 200, "{err}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 }
 
 /// §4.4: a quarantine (a `network:join` deny at `/network/zones`) beats the
@@ -624,16 +624,16 @@ async fn a_quarantine_is_imposed_and_released_only_with_network_grant_at_its_nod
     )
     .await;
     assert_eq!(status, 403);
-    let (status, err) = call(&app, &w.user_token(netadmin), "POST", &assign, Some(body)).await;
-    assert_eq!(status, 204, "{err}");
+    let (status, _err) = call(&app, &w.user_token(netadmin), "POST", &assign, Some(body)).await;
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(device, iot.id).await, "denied_by_rule", "Q2");
 
     // Release: the administrator without network:grant at /network/zones
     // cannot; the deny stays.
     let release =
         format!("/api/v1/roles/{quarantine}/service-accounts/{device}?resource_id={zones}");
-    let (status, err) = call(&app, &w.user_token(admin), "DELETE", &release, None).await;
-    assert_eq!(status, 403, "{err}");
+    let (status, _err) = call(&app, &w.user_token(admin), "DELETE", &release, None).await;
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     assert_eq!(w.joins(device, iot.id).await, "denied_by_rule");
     let rows = w.audit("network_role.unassign_refused").await;
     let row = the_row(&rows);
@@ -663,8 +663,8 @@ async fn a_quarantine_is_imposed_and_released_only_with_network_grant_at_its_nod
     assert_eq!(w.joins(device, iot.id).await, "denied_by_rule");
 
     // The network administrator for that node releases it.
-    let (status, err) = call(&app, &w.user_token(netadmin), "DELETE", &release, None).await;
-    assert_eq!(status, 204, "{err}");
+    let (status, _err) = call(&app, &w.user_token(netadmin), "DELETE", &release, None).await;
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(device, iot.id).await, "allowed");
 }
 
@@ -702,7 +702,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
     let place = format!("/api/v1/roles/{devices}/service-accounts");
 
     // 1. Self-assignment of a join: 403, nothing written, one H6 row.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "POST",
@@ -710,7 +710,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "service_account_id": agent, "resource_id": iot.id })),
     )
     .await;
-    assert_eq!(status, 403, "{err}");
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     assert_eq!(w.joins(agent, iot.id).await, "no_grant", "nothing written");
     let rows = w.audit("network_role.assign_refused").await;
     let row = the_row(&rows);
@@ -719,7 +719,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
     assert_eq!(row.metadata["after"]["service_account"], agent.to_string());
     // Positive twin: the agent places another device (its job).
     let other = w.service_account(&[]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "POST",
@@ -727,10 +727,10 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "service_account_id": other, "resource_id": iot.id })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(other, iot.id).await, "allowed");
     // ... and another administrator places the agent.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &netadmin_token,
         "POST",
@@ -738,12 +738,12 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "service_account_id": agent, "resource_id": iot.id })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(agent, iot.id).await, "allowed");
 
     // 2. Quarantined by the network administrator, the agent cannot release
     //    itself by unassigning the deny.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &netadmin_token,
         "POST",
@@ -751,13 +751,13 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "service_account_id": agent, "resource_id": zones })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(agent, iot.id).await, "denied_by_rule");
     let release = |who: Uuid| {
         format!("/api/v1/roles/{quarantined}/service-accounts/{who}?resource_id={zones}")
     };
-    let (status, err) = call(&app, &agent_token, "DELETE", &release(agent), None).await;
-    assert_eq!(status, 403, "{err}");
+    let (status, _err) = call(&app, &agent_token, "DELETE", &release(agent), None).await;
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     assert_eq!(
         w.joins(agent, iot.id).await,
         "denied_by_rule",
@@ -781,7 +781,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         .await
         .unwrap();
     let join_perm = w.permission_id(NETWORK_JOIN).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "DELETE",
@@ -789,8 +789,8 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         None,
     )
     .await;
-    assert_eq!(status, 403, "revoke of its own deny: {err}");
-    let (status, err) = call(
+    assert_eq!(status, 403, "revoke of its own deny");
+    let (status, _err) = call(
         &app,
         &agent_token,
         "DELETE",
@@ -798,7 +798,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         None,
     )
     .await;
-    assert_eq!(status, 403, "delete of its own deny role: {err}");
+    assert_eq!(status, 403, "delete of its own deny role");
     assert_eq!(
         w.joins(agent, iot.id).await,
         "denied_by_rule",
@@ -809,7 +809,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         .assign_to_service_account(w.tenant, agent, fleet, AssignmentScope::from(Some(iot.id)))
         .await
         .unwrap();
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "POST",
@@ -817,7 +817,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "permission_id": join_perm, "effect": "allow" })),
     )
     .await;
-    assert_eq!(status, 403, "a join granted to a role it holds: {err}");
+    assert_eq!(status, 403, "a join granted to a role it holds");
     let grant_rows = w.audit("network_role.grant_refused").await;
     assert_eq!(grant_rows.len(), 2, "{grant_rows:?}");
     assert!(
@@ -831,7 +831,7 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
 
     // Positive twins of 3: the same writes on roles the agent does not hold.
     let other_fleet = w.role("other-fleet", &[]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "POST",
@@ -839,9 +839,9 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         Some(json!({ "permission_id": join_perm, "effect": "allow" })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let other_quarantine = w.role("other-quarantine", &[(NETWORK_JOIN, DENY)]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "DELETE",
@@ -849,9 +849,9 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         None,
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let spare_quarantine = w.role("spare-quarantine", &[(NETWORK_JOIN, DENY)]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &agent_token,
         "DELETE",
@@ -859,11 +859,11 @@ async fn a_service_account_cannot_place_itself_or_release_its_own_quarantine() {
         None,
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
 
     // 4. The network administrator releases the agent.
-    let (status, err) = call(&app, &netadmin_token, "DELETE", &release(agent), None).await;
-    assert_eq!(status, 204, "{err}");
+    let (status, _err) = call(&app, &netadmin_token, "DELETE", &release(agent), None).await;
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(agent, iot.id).await, "allowed");
 }
 
@@ -922,11 +922,11 @@ async fn a_member_cannot_release_a_deny_its_group_carries() {
         "/api/v1/roles/{quarantined}/groups/{}?resource_id={zones}",
         group.id
     );
-    let (status, err) = call(&app, &w.user_token(member), "DELETE", &unassign, None).await;
-    assert_eq!(status, 403, "{err}");
+    let (status, _err) = call(&app, &w.user_token(member), "DELETE", &unassign, None).await;
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.unassign_refused").await;
     assert_eq!(the_row(&rows).metadata["rule"], "H6");
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &w.user_token(member),
         "DELETE",
@@ -934,14 +934,14 @@ async fn a_member_cannot_release_a_deny_its_group_carries() {
         None,
     )
     .await;
-    assert_eq!(status, 403, "{err}");
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.write_refused").await;
     assert_eq!(the_row(&rows).metadata["rule"], "H6");
     assert_eq!(w.joins(member, iot.id).await, "denied_by_rule");
 
     // Positive twin: an administrator outside the group releases it.
-    let (status, err) = call(&app, &w.user_token(outsider), "DELETE", &unassign, None).await;
-    assert_eq!(status, 204, "{err}");
+    let (status, _err) = call(&app, &w.user_token(outsider), "DELETE", &unassign, None).await;
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     assert_eq!(w.joins(member, iot.id).await, "allowed");
 }
 
@@ -977,7 +977,7 @@ async fn deny_override_holds_for_the_writer_at_equal_specificity() {
     let body = json!({ "service_account_id": device, "resource_id": iot.id });
 
     for writer in [same_node, inherited] {
-        let (status, err) = call(
+        let (status, _err) = call(
             &app,
             &w.user_token(writer),
             "POST",
@@ -985,7 +985,7 @@ async fn deny_override_holds_for_the_writer_at_equal_specificity() {
             Some(body.clone()),
         )
         .await;
-        assert_eq!(status, 403, "{err}");
+        assert_eq!(status, 403, "unexpected answer (body withheld)");
     }
     assert_eq!(w.audit("network_role.assign_refused").await.len(), 2);
     assert_eq!(w.joins(device, iot.id).await, "no_grant");
@@ -1017,7 +1017,7 @@ async fn the_seeded_super_admin_bootstraps_network_administration_and_admin_cann
     let grant_uri = format!("/api/v1/roles/{role_id}/permissions");
     let grant_body = json!({ "permission_id": grant_perm });
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &w.user_token(admin),
         "POST",
@@ -1025,11 +1025,11 @@ async fn the_seeded_super_admin_bootstraps_network_administration_and_admin_cann
         Some(grant_body.clone()),
     )
     .await;
-    assert_eq!(status, 403, "{err}");
+    assert_eq!(status, 403, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.grant_refused").await;
     assert_eq!(the_row(&rows).metadata["node"], root.to_string());
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &w.user_token(super_admin),
         "POST",
@@ -1037,7 +1037,7 @@ async fn the_seeded_super_admin_bootstraps_network_administration_and_admin_cann
         Some(grant_body),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
 
     let target = w.user(&[]).await;
     let assign_uri = format!("/api/v1/roles/{role_id}/users");
@@ -1051,7 +1051,7 @@ async fn the_seeded_super_admin_bootstraps_network_administration_and_admin_cann
     )
     .await;
     assert_eq!(status, 403, "admin holds no network:grant to delegate");
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &w.user_token(super_admin),
         "POST",
@@ -1059,7 +1059,7 @@ async fn the_seeded_super_admin_bootstraps_network_administration_and_admin_cann
         Some(assign_body),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
 
     // And assigning the super-admin role itself is now bounded: it carries
     // the meta permissions, which admin does not hold.
@@ -1126,8 +1126,8 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
         ),
     ];
     for (method, uri, body, audit) in cases {
-        let (status, err) = call(&app, &t, method, &uri, body).await;
-        assert_eq!(status, 400, "{method} {uri}: {err}");
+        let (status, _err) = call(&app, &t, method, &uri, body).await;
+        assert_eq!(status, 400, "{method}");
         assert!(
             !w.audit(audit).await.is_empty(),
             "{method} {uri} left no {audit} row"
@@ -1148,7 +1148,7 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
     )
     .await;
     assert_eq!(status, 201, "{group}");
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -1156,10 +1156,10 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
         Some(json!({ "group_id": group["id"], "resource_id": iot.id })),
     )
     .await;
-    assert_eq!(status, 400, "{err}");
+    assert_eq!(status, 400, "unexpected answer (body withheld)");
 
     // Rule 1: not made global.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "PUT",
@@ -1167,12 +1167,12 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
         Some(json!({ "is_global": true })),
     )
     .await;
-    assert_eq!(status, 400, "{err}");
+    assert_eq!(status, 400, "unexpected answer (body withheld)");
 
     // Rule 3: no network deny on a role assigned with inherit: false.
     let narrow = w.role("narrow", &[]).await;
     let device = w.service_account(&[]).await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -1180,8 +1180,8 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
         Some(json!({ "service_account_id": device, "resource_id": iot.id, "inherit": false })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
-    let (status, err) = call(
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -1189,7 +1189,7 @@ async fn the_generic_routes_refuse_the_reserved_namespace_subtree_and_rules() {
         Some(json!({ "permission_id": join_perm, "effect": "deny" })),
     )
     .await;
-    assert_eq!(status, 400, "{err}");
+    assert_eq!(status, 400, "unexpected answer (body withheld)");
     let rule_rows = w.audit("network_role.grant_refused").await;
     assert!(rule_rows.iter().any(|r| r.metadata["rule"] == "4.2:rule-3"));
 }
@@ -1310,9 +1310,15 @@ async fn a_network_grant_that_loses_to_a_group_assignment_is_409_stale_version_a
         Some(grant.clone()),
     )
     .await;
-    assert_eq!(status, 409, "{body}");
-    assert_eq!(body["error"], "conflict", "{body}");
-    assert_eq!(body["reason_code"], "stale_version", "{body}");
+    assert_eq!(status, 409, "unexpected answer (body withheld)");
+    assert_eq!(
+        body["error"], "conflict",
+        "unexpected answer (body withheld)"
+    );
+    assert_eq!(
+        body["reason_code"], "stale_version",
+        "unexpected answer (body withheld)"
+    );
     let rows = w.audit("network_role.grant_refused").await;
     let row = the_row(&rows);
     assert_eq!(row.metadata["rule"], "version:stale");
@@ -1332,8 +1338,8 @@ async fn a_network_grant_that_loses_to_a_group_assignment_is_409_stale_version_a
     );
 
     // Again: the gate now sees the group, and rule 2 answers.
-    let (status, body) = call(&app, &w.user_token(writer), "POST", &uri, Some(grant)).await;
-    assert_eq!(status, 400, "{body}");
+    let (status, _body) = call(&app, &w.user_token(writer), "POST", &uri, Some(grant)).await;
+    assert_eq!(status, 400, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.grant_refused").await;
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert!(
@@ -1987,7 +1993,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     let grant_perm = w.permission_id(NETWORK_GRANT).await;
 
     // A role carrying a network permission, assigned and unassigned.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -1995,7 +2001,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         Some(json!({ "user_id": user })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.assigned").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     let row = &rows[0];
@@ -2009,7 +2015,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(row.metadata["permissions"][0]["action"], NETWORK_JOIN);
     assert_eq!(row.metadata["permissions"][0]["effect"], "allow");
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -2017,7 +2023,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         Some(json!({ "service_account_id": device, "resource_id": root })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.assigned").await;
     assert_eq!(rows.len(), 2, "one row per assignment: {rows:?}");
     let row = rows
@@ -2028,7 +2034,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(row.metadata["node"], root.to_string());
     assert_eq!(row.resource_id, Some(root));
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "DELETE",
@@ -2036,7 +2042,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         None,
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.unassigned").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].metadata["role_id"], fleet.to_string());
@@ -2044,7 +2050,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_JOIN);
 
     // A grant and a revoke of a network permission on a role.
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -2052,7 +2058,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         Some(json!({ "permission_id": grant_perm, "effect": "deny" })),
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.granted").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].metadata["role_id"], plain.to_string());
@@ -2060,7 +2066,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_GRANT);
     assert_eq!(rows[0].metadata["permissions"][0]["effect"], "deny");
 
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "DELETE",
@@ -2068,7 +2074,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         None,
     )
     .await;
-    assert_eq!(status, 204, "{err}");
+    assert_eq!(status, 204, "unexpected answer (body withheld)");
     let rows = w.audit("network_role.revoked").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].metadata["permissions"][0]["action"], NETWORK_GRANT);
@@ -2076,7 +2082,7 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
 
     // A binding.
     let cert = w.certificate().await;
-    let (status, err) = call(
+    let (status, _err) = call(
         &app,
         &t,
         "POST",
@@ -2084,14 +2090,14 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
         Some(json!({ "certificate_id": cert })),
     )
     .await;
-    assert_eq!(status, 200, "{err}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let rows = w.audit("certificate_binding.bound").await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].outcome, AuditOutcome::Success);
     assert_eq!(rows[0].metadata["certificate_id"], cert.to_string());
     assert_eq!(rows[0].metadata["grantee"]["id"], device.to_string());
     let text = rows[0].metadata.to_string();
-    assert!(!text.contains("BEGIN"), "no certificate in the row: {text}");
+    assert!(!text.contains("BEGIN"), "no certificate in the row");
 
     // Nothing else was written: the five actions hold exactly these rows.
     let total = w.audit("network_role.assigned").await.len()

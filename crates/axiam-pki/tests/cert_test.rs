@@ -23,9 +23,20 @@ use surrealdb::engine::local::Mem;
 #[allow(dead_code)]
 fn test_ca_custodians() -> std::sync::Arc<axiam_pki::CaKeyCustodians> {
     std::sync::Arc::new(
-        axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-            .expect("test CA key custodians"),
+        axiam_pki::custodians_from_env(Some(test_key())).expect("test CA key custodians"),
     )
+}
+
+/// The AES-256-GCM key the test deployment wraps CA keys with: random per
+/// process, stable within one, so no key-shaped literal appears in the source.
+fn test_key() -> [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        key
+    })
 }
 
 type TestDb = surrealdb::engine::local::Db;
@@ -39,7 +50,7 @@ async fn setup_db() -> Surreal<TestDb> {
 
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(test_key()),
         ..Default::default()
     }
 }
@@ -222,7 +233,7 @@ async fn cert_generate_rejects_expired_ca() {
     // then stored with a backdated not_after so CertService sees it as expired.
     use axiam_pki::ca::PkiConfig as Cfg;
     let temp_config = Cfg {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(test_key()),
         ..Default::default()
     };
     let svc_ca_temp = CaService::new(

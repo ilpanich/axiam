@@ -223,7 +223,7 @@ async fn a_subject_too_long_for_the_default_intermediate_name_never_reaches_vaul
         .expect_err("the derived intermediate name would be 80 characters");
 
     let AxiamError::Validation { message } = &err else {
-        panic!("expected a validation refusal, got {err:?}");
+        panic!("expected a validation refusal, got another error");
     };
     assert!(message.contains("intermediate_subject"), "{message}");
     assert!(
@@ -317,7 +317,10 @@ async fn a_refused_call_names_what_vault_said_rather_than_the_status_alone() {
         .generate(create_ca("Acme Root", Uuid::new_v4()))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("permission denied"), "{err}");
+    assert!(
+        err.to_string().contains("permission denied"),
+        "unexpected text (withheld)"
+    );
 }
 
 /// T-476: a Vault that answers `307` to a second host must not get the token
@@ -350,9 +353,9 @@ async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
     let host = reqwest::Url::parse(&vault.uri()).unwrap();
     assert!(
         err.contains("redirect") && err.contains(host.host_str().unwrap()),
-        "the refusal names the host that redirected: {err}"
+        "the refusal names the host that redirected (text withheld)"
     );
-    assert!(!err.contains(TOKEN), "{err}");
+    assert!(!err.contains(TOKEN), "unexpected text (withheld)");
     assert_eq!(vault.received_requests().await.unwrap().len(), 1);
     assert!(
         elsewhere.received_requests().await.unwrap().is_empty(),
@@ -386,8 +389,14 @@ async fn the_key_cannot_be_loaded_and_the_refusal_says_why() {
         locator: String::new(),
     };
     let err = store.load(&key_ref, None).await.unwrap_err();
-    assert!(err.to_string().contains("cannot be exported"), "{err}");
-    assert!(err.to_string().contains("signs through Vault"), "{err}");
+    assert!(
+        err.to_string().contains("cannot be exported"),
+        "unexpected text (withheld)"
+    );
+    assert!(
+        err.to_string().contains("signs through Vault"),
+        "unexpected text (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -519,7 +528,10 @@ async fn importing_a_certificate_vault_holds_no_key_for_is_refused() {
         })
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("no private key"), "{err}");
+    assert!(
+        err.to_string().contains("no private key"),
+        "unexpected text (withheld)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,9 +1115,21 @@ async fn a_generated_leaf_states_the_same_profile_as_a_caller_csr() {
     .expect("issued");
 
     let body = seen.lock().unwrap()[0].clone();
-    assert_eq!(body["key_usage"], json!(["DigitalSignature"]), "{body}");
-    assert_eq!(body["ext_key_usage"], json!(["ClientAuth"]), "{body}");
-    assert_eq!(body["exclude_cn_from_sans"], json!(true), "{body}");
+    assert_eq!(
+        body["key_usage"],
+        json!(["DigitalSignature"]),
+        "unexpected text (withheld)"
+    );
+    assert_eq!(
+        body["ext_key_usage"],
+        json!(["ClientAuth"]),
+        "unexpected text (withheld)"
+    );
+    assert_eq!(
+        body["exclude_cn_from_sans"],
+        json!(true),
+        "unexpected text (withheld)"
+    );
     let csr =
         rcgen::CertificateSigningRequestParams::from_pem(body["csr"].as_str().unwrap()).unwrap();
     assert!(
@@ -1251,7 +1275,7 @@ async fn a_csr_with_two_common_names_never_reaches_vault() {
     assert!(
         matches!(&err, axiam_core::error::AxiamError::Validation { message }
             if message.contains("more than one common name")),
-        "a validation error (a 400) naming the second common name: {err:?}"
+        "a validation error (a 400) naming the second common name (text withheld)"
     );
 }
 
@@ -1268,7 +1292,7 @@ async fn a_csr_attribute_holding_a_bidi_override_never_reaches_vault() {
     assert!(
         matches!(&err, axiam_core::error::AxiamError::Validation { message }
             if message.contains("subject attribute") && message.contains("printable")),
-        "a validation error (a 400) naming the attribute, not repeating its value: {err:?}"
+        "a validation error (a 400) naming the attribute, not repeating its value (text withheld)"
     );
     if let axiam_core::error::AxiamError::Validation { message } = &err {
         assert!(

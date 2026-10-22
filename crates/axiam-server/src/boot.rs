@@ -2851,6 +2851,11 @@ where
             axiam_db::SurrealDeviceGrantRepository::new(db_handle.clone()),
             axiam_db::SurrealCibaRequestRepository::new(db_handle.clone(), None),
         )),
+        // #753 — an erasure deletes the user's refresh-token rows; a sweep ages
+        // out the expired ones.
+        Arc::new(axiam_db::SurrealRefreshTokenRepository::new(
+            db_handle.clone(),
+        )),
         job_health.clone(),
         cleanup_shutdown_rx,
     )

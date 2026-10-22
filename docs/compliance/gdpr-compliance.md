@@ -116,7 +116,14 @@ short-lived security/token material deliberately excluded by design
 `federation_login_state`, `account_deletion`, `export_job`,
 `erasure_proof`) — consistent with the same "no live credential/token
 material in the export" principle already applied to sessions and WebAuthn
-above. `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
+above. "Short-lived" describes the token, not the row, and the row names the
+user, the client and (since v109) the device key's thumbprint, so it is not kept
+for the life of the tenant: an erasure **deletes** the user's `oauth2_refresh_token`
+rows (revoking them first; Art. 17, #753), and the cleanup task's
+`oauth2_refresh_token` job **sweeps** every other row once its expiry is more
+than seven days past — the window in which a replay of a rotated token is still
+detected (T-254). (Corrected 2026-10-22, #753: before 1.1.2 the erasure revoked
+the rows and nothing deleted them.) `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
 confirms no repository file has been added since Phase 25 other than
 `rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). **No
 user-owned table is missing from the export blob.**

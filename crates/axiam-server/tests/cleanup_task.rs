@@ -4692,3 +4692,172 @@ async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
     assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
     assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// #753 — the OAuth2 refresh-token rows: deleted at erasure, swept after the
+// replay-detection retention
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::oauth2_client::CreateRefreshToken;
+use axiam_core::repository::RefreshTokenRepository as _;
+use axiam_db::SurrealRefreshTokenRepository;
+use axiam_server::cleanup::{
+    REFRESH_REPLAY_RETENTION, erase_oauth2_refresh_tokens, sweep_refresh_tokens,
+};
+
+async fn issue_refresh_token(
+    repo: &SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    expires_at: chrono::DateTime<Utc>,
+) -> String {
+    let hash = Uuid::new_v4().to_string();
+    repo.create(CreateRefreshToken {
+        tenant_id,
+        user_id: Some(user_id),
+        token_hash: hash.clone(),
+        client_id: "client-a".into(),
+        scopes: vec!["openid".into()],
+        session_id: None,
+        requested_userinfo_claims: Vec::new(),
+        expires_at,
+        resource: None,
+        auth_time: None,
+        acr: None,
+        amr: Vec::new(),
+        dpop_jkt: Some("thumbprint-of-the-device-key".into()),
+    })
+    .await
+    .unwrap();
+    hash
+}
+
+#[derive(SurrealValue)]
+struct RowCount {
+    total: u64,
+}
+
+async fn refresh_rows_naming(db: &Surreal<surrealdb::engine::local::Db>, user: Uuid) -> u64 {
+    let mut res = db
+        .query("SELECT count() AS total FROM oauth2_refresh_token WHERE user_id = $u GROUP ALL")
+        .bind(("u", user.to_string()))
+        .await
+        .unwrap();
+    let rows: Vec<RowCount> = res.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+async fn refresh_rows_total(db: &Surreal<surrealdb::engine::local::Db>) -> u64 {
+    let mut res = db
+        .query("SELECT count() AS total FROM oauth2_refresh_token GROUP ALL")
+        .await
+        .unwrap();
+    let rows: Vec<RowCount> = res.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+/// R111-03: after an erasure no `oauth2_refresh_token` row names the user —
+/// revoked, rotated or live — and another user's rows are untouched. The step
+/// is re-entered by the recovery of a cut erasure (#737), so a second run
+/// deletes nothing and fails nothing.
+#[tokio::test]
+async fn an_erasure_leaves_no_refresh_token_row_naming_the_user_and_can_be_re_entered() {
+    let db = setup_db().await;
+    let (tenant_id, user_id, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let later = Utc::now() + chrono::Duration::days(1);
+
+    let revoked = issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    repo.revoke(tenant_id, &revoked).await.unwrap();
+    let rotated = issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
+    issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    issue_refresh_token(&repo, tenant_id, other, later).await;
+    assert_eq!(refresh_rows_naming(&db, user_id).await, 3);
+
+    let deleted = erase_oauth2_refresh_tokens(&repo, tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+    assert_eq!(refresh_rows_naming(&db, user_id).await, 0);
+    assert_eq!(refresh_rows_naming(&db, other).await, 1);
+    assert!(
+        repo.find_rotated(tenant_id, &rotated)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    assert_eq!(
+        erase_oauth2_refresh_tokens(&repo, tenant_id, user_id)
+            .await
+            .unwrap(),
+        0,
+        "a re-run finds nothing and does not fail"
+    );
+    assert_eq!(refresh_rows_naming(&db, other).await, 1);
+}
+
+/// R111-03: a tick removes a token expired past the replay-detection
+/// retention, and keeps a live one, one expired inside the retention, and a
+/// revoked/rotated one whose expiry is still ahead — its replay must stay
+/// detectable (T-254).
+#[tokio::test]
+async fn the_refresh_token_sweep_removes_only_rows_expired_past_the_retention() {
+    let db = setup_db().await;
+    let (tenant_id, user_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let now = Utc::now();
+
+    let _past_window = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION - chrono::Duration::hours(1),
+    )
+    .await;
+    // Revoked as well: revocation does not shorten the retention.
+    let past_window_revoked = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION - chrono::Duration::hours(1),
+    )
+    .await;
+    repo.revoke(tenant_id, &past_window_revoked).await.unwrap();
+    let _inside_window = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION + chrono::Duration::hours(1),
+    )
+    .await;
+    let live =
+        issue_refresh_token(&repo, tenant_id, user_id, now + chrono::Duration::days(1)).await;
+    let rotated =
+        issue_refresh_token(&repo, tenant_id, user_id, now + chrono::Duration::days(1)).await;
+    repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
+    assert_eq!(refresh_rows_total(&db).await, 5);
+
+    assert_eq!(sweep_refresh_tokens(&repo, now).await.unwrap(), 2);
+    assert_eq!(refresh_rows_total(&db).await, 3);
+    assert!(repo.get_by_token_hash(tenant_id, &live).await.is_ok());
+    assert!(
+        repo.find_rotated(tenant_id, &rotated)
+            .await
+            .unwrap()
+            .is_some(),
+        "a rotated token's replay is still detectable"
+    );
+
+    // The next tick finds nothing more; the in-window row goes once the
+    // retention has run out on it.
+    assert_eq!(sweep_refresh_tokens(&repo, now).await.unwrap(), 0);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now + chrono::Duration::hours(2))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(refresh_rows_total(&db).await, 2);
+}

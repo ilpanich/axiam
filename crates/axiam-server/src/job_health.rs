@@ -51,6 +51,9 @@ pub const SWEEP_JOBS: &[&str] = &[
     "ssf_step_up",
     // G-7 (T23.7.1): the CIBA pending-request store's expiry.
     "ciba_request",
+    // #753: refresh-token rows past their expiry plus the replay-detection
+    // retention.
+    "oauth2_refresh_token",
     // #638: the shared rate-limit table's stale buckets (the hint cap's, the
     // limiters' counters).
     "rate_limit_bucket",
@@ -255,6 +258,8 @@ mod tests {
             "ssf_step_up",
             "scim_reconcile",
             "ciba_request",
+            // #753: the refresh-token rows past the replay-detection retention.
+            "oauth2_refresh_token",
             // #638: the shared rate-limit table's sweep.
             "rate_limit_bucket",
             // #523 (D-4): the deleted tenants' purge.

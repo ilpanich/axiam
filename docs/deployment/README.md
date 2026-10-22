@@ -2053,6 +2053,23 @@ rows of deliveries lost on restart, external audit ingestion — is reviewed pat
 by path in
 [`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
 
+#### The refresh-token sweep (`oauth2_refresh_token`)
+
+The cleanup task's `oauth2_refresh_token` job (on `GET /health/jobs`, run at the
+cleanup interval by every replica) deletes the OAuth2 refresh-token rows whose
+`expires_at` is more than **seven days** in the past, revoked or not
+(`REFRESH_REPLAY_RETENTION`, #753, 1.1.2). The cutoff is the expiry, not the
+revocation: a rotated token is recognised as a replay by its row (T-254), so a
+revoked or rotated row whose expiry is still ahead is kept, and a token that
+lapsed a week ago can no longer be redeemed or tell the session anything it
+does not already carry. The table is therefore bounded by the refresh-token
+lifetime plus a week. A GDPR erasure deletes the user's rows outright, after
+revoking them, as erasure step (a); the step is idempotent, so the recovery of
+a cut erasure re-runs it harmlessly. (Corrected 2026-10-22, #753: before 1.1.2
+the erasure revoked a user's rows and nothing deleted any, so they stayed, with
+`user_id`, `client_id`, the scopes and the DPoP key thumbprint, until the tenant
+was purged.)
+
 #### The audit dead-letter file
 
 An audit row the datastore refuses is never lost to a log line alone (T19.27,

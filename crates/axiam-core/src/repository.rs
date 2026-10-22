@@ -2547,8 +2547,31 @@ pub trait RefreshTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete expired and revoked refresh tokens (garbage collection).
-    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+    /// Delete every refresh token of a user within a tenant, revoked or not
+    /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a
+    /// re-run of the erasure is safe. The caller revokes first; this removes
+    /// the rows the revocation left.
+    ///
+    /// Returns the number of rows deleted.
+    fn delete_all_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete the refresh tokens whose `expires_at` is before `before`,
+    /// revoked or not (garbage collection).
+    ///
+    /// A **revoked row whose expiry is still ahead is kept**: a rotated token
+    /// is identified as a replay by its row (`find_rotated`, T-254), so the
+    /// row must outlive the token. The caller picks `before` as now minus the
+    /// replay-detection retention.
+    ///
+    /// Returns the number of rows deleted.
+    fn delete_expired(
+        &self,
+        before: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait FederationConfigRepository: Send + Sync {

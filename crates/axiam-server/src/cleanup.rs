@@ -154,6 +154,9 @@ pub struct CleanupTask<C: Connection> {
     settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
     /// #517 — what a swept client was granted, revoked before its row goes.
     client_grants: Arc<SweptClientGrants<C>>,
+    /// #753: the OAuth2 refresh tokens an erasure deletes and the
+    /// `oauth2_refresh_token` sweep ages out.
+    refresh_token_repo: Arc<axiam_db::SurrealRefreshTokenRepository<C>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
     /// G-3 (T23.3.5): the directory sync job. `None` — the default — runs no
@@ -373,6 +376,54 @@ pub async fn sweep_rate_limit_buckets<C: Connection + Send + Sync + 'static>(
     }
     Ok(removed)
 }
+
+/// Erasure step (a), for the OAuth2 refresh tokens (#753): revoke every row
+/// of the user, then delete them.
+///
+/// The rows carry `user_id`, `client_id`, the scopes and, since v109, the
+/// device key's `dpop_jkt`; revoking left them in the table until the tenant
+/// was purged. The revocation runs first so a token redeemable in the window
+/// between the two statements is dead before its row goes, and both are
+/// idempotent — the recovery of a cut erasure (#737) re-enters this step and
+/// finds nothing to do.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is.
+///
+/// # Errors
+///
+/// The datastore error of either statement; the purge fails closed on it and
+/// the next sweep retries.
+pub async fn erase_oauth2_refresh_tokens<RT: axiam_core::repository::RefreshTokenRepository>(
+    repo: &RT,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<u64, AxiamError> {
+    repo.revoke_all_for_user(tenant_id, user_id).await?;
+    repo.delete_all_for_user(tenant_id, user_id).await
+}
+
+/// The `oauth2_refresh_token` sweep (#753): delete the rows whose token
+/// expired more than [`REFRESH_REPLAY_RETENTION`] before `now`, revoked or not.
+///
+/// The cutoff is `expires_at`, never `revoked`: a rotated or revoked token is
+/// recognised as a replay by its row until it is deleted (T-254), so a revoked
+/// row whose expiry is still ahead stays. A public free function, for the
+/// reason [`run_erasure_pipeline`] is.
+///
+/// # Errors
+///
+/// The datastore error of the delete.
+pub async fn sweep_refresh_tokens<RT: axiam_core::repository::RefreshTokenRepository>(
+    repo: &RT,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, AxiamError> {
+    repo.delete_expired(now - REFRESH_REPLAY_RETENTION).await
+}
+
+/// How long a refresh-token row is kept past its `expires_at`:
+/// [`axiam_oauth2::token::REFRESH_REPLAY_RETENTION_SECS`].
+pub const REFRESH_REPLAY_RETENTION: chrono::TimeDelta =
+    chrono::TimeDelta::seconds(axiam_oauth2::token::REFRESH_REPLAY_RETENTION_SECS);
 
 /// Rows one batch of the `certificate_retention` sweep deletes (R101W1-05).
 pub const CERTIFICATE_RETENTION_BATCH: u32 = 500;
@@ -2718,6 +2769,7 @@ struct ErasureUnit<C: Connection> {
     erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
     user_repo: Arc<SurrealUserRepository<C>>,
     account_deletion_repo: Arc<SurrealAccountDeletionRepository<C>>,
+    refresh_token_repo: Arc<axiam_db::SurrealRefreshTokenRepository<C>>,
     ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
 }
 
@@ -2814,10 +2866,13 @@ impl<C: Connection> ErasureUnit<C> {
     /// certificates were revoked.
     async fn prepare(&self, user: &axiam_core::models::user::User) -> Result<u64, AxiamError> {
         let (user_id, tenant_id) = (user.id, user.tenant_id);
-        // (a) Revoke all sessions and OAuth2 refresh tokens.
+        // (a) Revoke all sessions and OAuth2 refresh tokens, then delete the
+        // refresh-token rows (#753): they name the user, the client and the
+        // device key. Both are idempotent, so a re-entered erasure is safe.
         self.auth_svc
             .revoke_all_sessions(tenant_id, user_id)
             .await?;
+        erase_oauth2_refresh_tokens(self.refresh_token_repo.as_ref(), tenant_id, user_id).await?;
 
         // (b) Hard-delete federation identity links.
         match self
@@ -2973,6 +3028,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
         // #517 — revoked for every client the sweep removes.
         client_grants: Arc<SweptClientGrants<C>>,
+        // #753: required, not a builder step — an absent repository would
+        // silently skip the erasure's deletion.
+        refresh_token_repo: Arc<axiam_db::SurrealRefreshTokenRepository<C>>,
         // T-129: passed in rather than constructed here so `main` can hand
         // the same handle to `AppState`, which is what lets the HTTP layer
         // read what this loop writes.
@@ -3012,6 +3070,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             oauth2_registration_token_repo,
             settings_repo,
             client_grants,
+            refresh_token_repo,
             job_health,
             directory_sync: None,
             ssf_buffer_repo: None,
@@ -3353,6 +3412,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         if self.stop_requested() {
             return;
         }
+        // #753: refresh-token rows a week past their expiry. DEBUG: such a
+        // row is one no token can redeem and no replay still needs.
+        Self::record(
+            &self.job_health,
+            "oauth2_refresh_token",
+            self.sweep_refresh_tokens().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
         // #638: rate-limit buckets no limiter can still read. DEBUG: a
         // stale bucket is one whose window has long passed.
         Self::record(
@@ -3632,6 +3703,12 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         repo.delete_expired(Utc::now()).await
     }
 
+    /// Delete refresh-token rows past their expiry plus the replay-detection
+    /// retention (#753): see [`sweep_refresh_tokens`].
+    async fn sweep_refresh_tokens(&self) -> Result<u64, AxiamError> {
+        sweep_refresh_tokens(self.refresh_token_repo.as_ref(), Utc::now()).await
+    }
+
     /// Mark and delete expired CIBA requests (G-7, T23.7.1).
     ///
     /// A size bound and a state bound, not a correctness one: approval and
@@ -3873,6 +3950,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             erasure_proof_repo: Arc::clone(&self.erasure_proof_repo),
             user_repo: Arc::clone(&self.user_repo),
             account_deletion_repo: Arc::clone(&self.account_deletion_repo),
+            refresh_token_repo: Arc::clone(&self.refresh_token_repo),
             ssf_sink: self.ssf_sink.clone(),
         };
         let (user, work) = (user.clone(), self.audited.clone());

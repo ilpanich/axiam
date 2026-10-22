@@ -545,15 +545,42 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
-    async fn delete_expired(&self) -> AxiamResult<u64> {
+    async fn delete_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        // Art. 17: the rows carry `user_id`, `client_id`, the scopes and the
+        // DPoP thumbprint. One statement, so the count is the rows this call
+        // removed, and a second call (the erasure re-entered) removes none.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "DELETE oauth2_refresh_token \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                 RETURN BEFORE",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
+
+    async fn delete_expired(&self, before: DateTime<Utc>) -> AxiamResult<u64> {
+        // Keyed on `expires_at` alone, revoked or not: a rotated or logged-out
+        // token stays readable by `find_rotated` until its expiry has passed
+        // by the caller's retention, which is what keeps a replay of it
+        // detectable (T-254). No index on `expires_at`: the sweep is one
+        // scan a tick, as the sibling token tables' are.
         let mut result = self
             .db
             .current()
             .query(
                 "SELECT count() AS total FROM oauth2_refresh_token \
-                 WHERE expires_at < time::now() OR revoked = true \
+                 WHERE expires_at < $before \
                  GROUP ALL",
             )
+            .bind(("before", before))
             .await
             .map_err(DbError::from)?;
 
@@ -562,10 +589,8 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
 
         self.db
             .current()
-            .query(
-                "DELETE FROM oauth2_refresh_token \
-                 WHERE expires_at < time::now() OR revoked = true",
-            )
+            .query("DELETE FROM oauth2_refresh_token WHERE expires_at < $before")
+            .bind(("before", before))
             .await
             .map_err(DbError::from)?;
 

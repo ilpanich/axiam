@@ -626,42 +626,27 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid,
 
     let config = req.app_data::<web::Data<AuthConfig>>()?;
 
-    // Prefer an `Authorization: Bearer <jwt>` (or `DPoP <jwt>`) header
-    // (service-to-service / API clients), but fall back to the `axiam_access` cookie. The admin UI uses
-    // cookie-based auth, so authenticated browser requests carry the access token
-    // as a cookie, not a header — without this fallback every UI action was logged
-    // as `System` with a nil tenant_id and never appeared in the tenant audit log.
-    let credentials: String = match req
+    // One carrier rule shared with the REST extractors (#751): the
+    // `axiam_access` cookie first, then `Authorization: Bearer|DPoP`. A header
+    // that is not a token carrier (`Basic`, a proxy credential) does not shadow
+    // the cookie, so the row names the same user the extractor admitted.
+    //
+    // Caching the identity is safe: the signature and expiry are facts about the
+    // token, and every reader that admits a request from the cache
+    // (`cached_identity` in the REST extractors) enforces the `cnf` sender
+    // constraint against that request's own proof; the rate-limit key reads
+    // `sender_constrained` and keys such a token on `(ip, principal)`. A request
+    // with no proof is still refused there.
+    let cookie = req.cookie(axiam_auth::carrier::ACCESS_COOKIE);
+    let authorization = req
         .headers()
         .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-    {
-        Some(header) => {
-            let header = header.trim();
-            let mut parts = header.splitn(2, char::is_whitespace);
-            let scheme = parts.next().unwrap_or("");
-            let creds = parts.next().unwrap_or("").trim();
-            // `DPoP` joins `Bearer` (RFC 9449 §7.1; #670): a sender-constrained
-            // token arrives under its own scheme, and a request carrying one was
-            // recorded as `System` with a nil tenant. The match is spelled here
-            // rather than called from `axiam_oauth2::dpop::is_dpop_scheme`
-            // because `axiam-oauth2` sits above this crate in the layering.
-            //
-            // Caching the identity is safe: the signature and expiry are facts
-            // about the token, and every reader that admits a request from the
-            // cache (`cached_identity` in the REST extractors) enforces the
-            // `cnf` sender constraint against that request's own proof; the
-            // rate-limit key reads `sender_constrained` and keys such a token on
-            // `(ip, principal)`. A request with no proof is still refused there.
-            let known =
-                scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("dpop");
-            if !known || creds.is_empty() {
-                return None;
-            }
-            creds.to_owned()
-        }
-        None => req.cookie("axiam_access")?.value().to_owned(),
-    };
+        .and_then(|h| h.to_str().ok());
+    let (_, credentials) = axiam_auth::carrier::access_token_carrier(
+        cookie.as_ref().map(|c| c.value()),
+        authorization,
+    )?;
+    let credentials = credentials.to_owned();
 
     let validated = validate_access_token(&credentials, config).ok()?;
     let user_id = Uuid::parse_str(&validated.0.sub).ok()?;

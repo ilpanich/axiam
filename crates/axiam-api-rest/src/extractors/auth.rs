@@ -715,37 +715,31 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
         .app_data::<web::Data<AuthConfig>>()
         .ok_or(AxiamError::Internal("missing auth config".into()))?;
 
-    // Try cookie first (browser clients), then Authorization header (service clients).
-    let token = if let Some(cookie) = req.cookie("axiam_access") {
-        cookie.value().to_owned()
-    } else {
-        // Fall back to the Authorization header for non-browser clients.
-        let header = req
-            .headers()
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AxiamError::AuthenticationFailed {
-                reason: "missing authentication credentials".into(),
-            })?;
-
-        // Parse `Authorization` as a case-insensitive scheme with flexible
-        // whitespace. `DPoP` joins `Bearer` here (X5.1, RFC 9449 §7.1): a
-        // DPoP-bound token arrives under its own scheme, and a guard that only
-        // ever splits on `Bearer ` would not find the token at all.
-        let header = header.trim();
-        let mut parts = header.splitn(2, char::is_whitespace);
-        let scheme = parts.next().unwrap_or("");
-        let credentials = parts.next().unwrap_or("").trim();
-
-        let known_scheme =
-            scheme.eq_ignore_ascii_case("bearer") || axiam_oauth2::dpop::is_dpop_scheme(scheme);
-        if !known_scheme || credentials.is_empty() {
+    // One carrier rule shared with the audit middleware (#751): the
+    // `axiam_access` cookie first (browser clients), then `Authorization`
+    // with a `Bearer` or `DPoP` scheme (RFC 9449 §7.1) for service clients.
+    let cookie = req.cookie(axiam_auth::carrier::ACCESS_COOKIE);
+    let authorization = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok());
+    let token = match axiam_auth::carrier::access_token_carrier(
+        cookie.as_ref().map(|c| c.value()),
+        authorization,
+    ) {
+        Some((_, token)) => token.to_owned(),
+        None if req.headers().contains_key("Authorization") => {
             return Err(AxiamError::AuthenticationFailed {
                 reason: "invalid Authorization scheme, expected Bearer or DPoP".into(),
             }
             .into());
         }
-        credentials.to_owned()
+        None => {
+            return Err(AxiamError::AuthenticationFailed {
+                reason: "missing authentication credentials".into(),
+            }
+            .into());
+        }
     };
 
     validate_presented_token(req, &token, config)

@@ -720,6 +720,48 @@ async fn middleware_authenticates_via_dpop_scheme() {
     }
 }
 
+/// A valid `axiam_access` cookie plus an `Authorization` header that is not the
+/// cookie's token: the request row must still name the cookie's user (#751).
+async fn assert_cookie_wins_over_header(header: &str) {
+    let cfg = test_auth_config();
+    let user_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let token = mint_token(user_id, tenant_id, Uuid::new_v4(), &cfg);
+
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+        "/api/secure",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/api/secure")
+        .insert_header(("Authorization", header))
+        .cookie(Cookie::new("axiam_access", token))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    wait_for_entries(&repo, 1).await;
+    let e = &repo.snapshot()[0];
+    assert_eq!(e.actor_type, ActorType::User);
+    assert_eq!(e.actor_id, user_id);
+    assert_eq!(e.tenant_id, tenant_id);
+    assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+}
+
+#[actix_web::test]
+async fn middleware_cookie_survives_a_basic_authorization_header() {
+    assert_cookie_wins_over_header("Basic eDp5").await;
+}
+
+#[actix_web::test]
+async fn middleware_cookie_survives_an_invalid_bearer_header() {
+    assert_cookie_wins_over_header("Bearer not-a-real-jwt").await;
+}
+
 #[actix_web::test]
 async fn middleware_non_bearer_scheme_is_unauthenticated() {
     let cfg = test_auth_config();

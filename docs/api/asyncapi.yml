@@ -716,6 +716,13 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+          description: >-
+            Free-form producer metadata. The consumer persists it with one
+            server-set key added after the merge, `ingested_via: "amqp"`
+            (#741); a producer-supplied `ingested_via` is overwritten, never
+            honoured. Metadata that is not a JSON object is stored under
+            `producer_metadata` beside the stamp. Server-written rows do not
+            carry `ingested_via`.
         key_version:
           type: integer
           minimum: 0

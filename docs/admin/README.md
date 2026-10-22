@@ -553,6 +553,29 @@ assignment specifically, not every assignment of that role.
 In the admin UI: **Roles → (a role) → Assignments → Service accounts**, and
 **Groups → (a group) → Service Accounts**.
 
+## Rows ingested over AMQP are marked
+
+Audit events reach the log two ways: the server writes its own rows, and
+external services publish signed events to `axiam.audit.events`. The consumer
+stamps every row it persists from the second path with
+`metadata.ingested_via = "amqp"`. It writes the stamp after the producer's
+metadata is merged, so a producer cannot supply, change or clear it; metadata
+that is not a JSON object is kept under `producer_metadata` beside the stamp.
+The server's own rows never carry the key. (`metadata.source` is a different,
+older key that some server writers use for other meanings, such as `directory`
+or `scim`; do not filter on it for provenance.)
+
+The console shows an `AMQP` badge on such a row, and the tenant audit export
+carries the field with the rest of the metadata.
+
+What this means for the forgery residual: a producer holds the tenant's signing
+subkey, and every action outside the server's reserved namespaces (`tenants.*`,
+`gdpr.*`) is the producer's to write. Before the stamp, a reviewer could not tell
+a producer's `network_segment.created` from the server's own. With it they can:
+a row without `ingested_via` was written by the server, a row with it was
+*reported* over AMQP. The stamp records how the row arrived; it does not vouch
+for its content, and a stamped row is not thereby wrong.
+
 ## Audit actions of the network write gate
 
 A write that touches the reserved `network:` permissions is decided by the

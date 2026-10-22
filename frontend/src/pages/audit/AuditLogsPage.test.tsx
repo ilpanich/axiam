@@ -62,6 +62,21 @@ beforeEach(() => {
 });
 
 describe("AuditLogsPage", () => {
+  it("badges a row ingested over AMQP and no other (#741)", async () => {
+    const ingested = {
+      ...logs[0],
+      id: "l3",
+      action: "network_segment.created",
+      metadata: { ingested_via: "amqp" },
+    };
+    // `source` is a different, server-side key and must not raise the badge.
+    const serverRow = { ...logs[1], id: "l4", metadata: { source: "directory" } };
+    apiMock.get.mockResolvedValue(res(page([ingested, logs[0], serverRow], 3)));
+    renderWithProviders(<AuditLogsPage />);
+    expect(await screen.findByText("network_segment.created")).toBeInTheDocument();
+    expect(screen.getAllByText("AMQP")).toHaveLength(1);
+  });
+
   it("renders the fetched audit logs with outcome badges", async () => {
     apiMock.get.mockResolvedValue(res(page(logs, 2)));
     renderWithProviders(<AuditLogsPage />);

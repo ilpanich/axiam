@@ -684,3 +684,140 @@ async fn the_refusal_of_a_lookalike_action_logs_its_length_and_never_the_action(
         "the action is not: {log}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #741 — the provenance stamp
+// ---------------------------------------------------------------------------
+
+fn signed_with_metadata(
+    tenant_id: Uuid,
+    action: &str,
+    metadata: Option<serde_json::Value>,
+    now: DateTime<Utc>,
+) -> Vec<u8> {
+    let mut msg = AuditEventMessage {
+        tenant_id,
+        actor_id: Uuid::new_v4(),
+        actor_type: "User".into(),
+        action: action.into(),
+        resource_id: None,
+        outcome: "Success".into(),
+        ip_address: None,
+        metadata,
+        key_version: CURRENT_KEY_VERSION,
+        nonce: Uuid::new_v4(),
+        issued_at: now,
+        hmac_signature: None,
+    };
+    let canonical = serde_json::to_vec(&msg).unwrap();
+    let subkey = derive_tenant_key(MASTER, tenant_id, CURRENT_KEY_VERSION);
+    msg.hmac_signature = Some(sign_payload(&subkey, &canonical));
+    serde_json::to_vec(&msg).unwrap()
+}
+
+async fn rows_for(
+    audit_repo: &SurrealAuditLogRepository<Db>,
+    tenant_id: Uuid,
+) -> Vec<AuditLogEntry> {
+    audit_repo
+        .list(
+            tenant_id,
+            AuditLogFilter::default(),
+            Pagination {
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+#[tokio::test]
+async fn ingested_network_events_carry_ingested_via_amqp() {
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    for action in ["network_segment.created", "network_role.assigned"] {
+        let raw = signed_with_metadata(tenant_id, action, Some(serde_json::json!({"k": "v"})), now);
+        let outcome =
+            process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+        assert!(matches!(outcome, AuditIngestOutcome::Ack), "{action}");
+    }
+    let rows = rows_for(&audit_repo, tenant_id).await;
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row.metadata["ingested_via"], "amqp", "{}", row.action);
+        assert_eq!(row.metadata["k"], "v", "the producer's keys are kept");
+    }
+}
+
+#[tokio::test]
+async fn a_producer_supplied_ingested_via_is_overwritten() {
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    let raw = signed_with_metadata(
+        tenant_id,
+        "network_segment.created",
+        Some(serde_json::json!({"ingested_via": "server", "source": "directory"})),
+        now,
+    );
+    let outcome = process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+    assert!(matches!(outcome, AuditIngestOutcome::Ack));
+    let rows = rows_for(&audit_repo, tenant_id).await;
+    assert_eq!(rows[0].metadata["ingested_via"], "amqp");
+}
+
+#[tokio::test]
+async fn non_object_producer_metadata_is_kept_beside_the_stamp() {
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    let raw = signed_with_metadata(
+        tenant_id,
+        "user.login",
+        Some(serde_json::json!(["a", 1])),
+        now,
+    );
+    let outcome = process_audit_event(&raw, &audit_repo, MASTER, &nonce_repo, skew(), now).await;
+    assert!(matches!(outcome, AuditIngestOutcome::Ack));
+    let rows = rows_for(&audit_repo, tenant_id).await;
+    assert_eq!(rows[0].metadata["ingested_via"], "amqp");
+    assert_eq!(
+        rows[0].metadata["producer_metadata"],
+        serde_json::json!(["a", 1])
+    );
+}
+
+#[tokio::test]
+async fn a_server_written_row_has_no_ingested_via() {
+    let db = setup_db().await;
+    let audit_repo = SurrealAuditLogRepository::new(db.clone());
+    let tenant_id = Uuid::new_v4();
+    audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: axiam_core::models::audit::ActorType::System,
+            action: "network_segment.created".into(),
+            resource_id: None,
+            outcome: axiam_core::models::audit::AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({"source": "sync"})),
+        })
+        .await
+        .unwrap();
+    let rows = rows_for(&audit_repo, tenant_id).await;
+    assert!(rows[0].metadata.get("ingested_via").is_none());
+}

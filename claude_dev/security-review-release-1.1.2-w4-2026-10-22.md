@@ -455,3 +455,54 @@ with the attribution footer. A search of the open issues for the network gate, t
 | R112W4-03 | [#777](https://github.com/ilpanich/axiam/issues/777) |
 | R112W4-04 | [#778](https://github.com/ilpanich/axiam/issues/778) |
 | R112W4-05 | [#779](https://github.com/ilpanich/axiam/issues/779) |
+
+---
+
+## Addendum — the sweep
+
+**Against:** `8c5be33..5474a2d` (5 commits, 16 files, 975 lines added and 253 removed):
+`128d376` (#775), `aa203d9` (#776), `89aacfc` (#777), `34cd965` (#778), `5474a2d` (#779). Each
+carries one `gpgsig` header. Every commit message was read in full, and every hunk was read
+against the finding it closes.
+
+| ID | Verdict | Why |
+|---|---|---|
+| R112W4-01 (#775) | **closed** | All ten callers pass their old flush unchanged (seven `roles.rs` sites, two `permissions.rs` sites with `Subject`/`Tenant` as before, `certificates::bind` with `None`). Inside the task the order is write, flush, row. The flush drops the local cache before it broadcasts, so a revocation's row cannot be read while the writer's replica still serves the allow. A failed flush still appends the row and returns the same `AxiamError` the old `?` returned, so the status is unchanged. The stale-claim row is described before the spawn (`StaleRefusal::of`, the same function `refused_after_clearance` uses) and appended in the task under the same `StaleVersion` filter. `refused_in_task` only maps the answer. Both `r112w4_01_*` tests pass. **Accepted residuals:** `roles::update` and the routes outside the gate (groups, resources, scopes) still flush in the handler's future; T-484 names this. Separately, the cache has no guard against a decision evaluated before the commit and inserted after the flush (R112W4-06, below). |
+| R112W4-02 (#776) | **closed** | The task runs on `#[tokio::main]`'s multi-threaded runtime (`NetworkWriteTasks::on(Handle::current())`), which outlives the actix workers until `serve` returns, and a `TaskTracker` tracks it. The teardown `join!`s `wait_within(budget.cleanup)` beside `join_cleanup` under the **same** bound: no new step, and the 38 s / 13 s totals and the 40 s grace period are unchanged. **Shutdown cannot hang.** `wait_within` is a `tokio::time::timeout` around `tracker.wait()`. A task still running at the bound is logged with its count and dropped when the runtime is dropped, and a tokio runtime's drop does not wait on async tasks. Only REST handlers spawn these tasks, and the REST listener has stopped before the wait, so `close()` refuses nothing that matters. T-444's amendment is dated and appended to its paragraph. `r112w4_02_an_orderly_stop_waits_for_a_cleared_write_whose_client_has_gone` passes. |
+| R112W4-03 (#777) | **closed** | `organization_half(None) = Skip`. The loop `continue`s past every organization-level action for such a tenant before any grant or revoke, and the `warn` now says both halves are skipped. The probe of §8 is now a unit test (`an_unresolved_tenant_revokes_no_organization_level_grant`: `ReconcileOutcome::default()`, grant kept) and passes. The T-483 amendment is dated, and `main.rs`'s comment says such a tenant counts in neither counter. |
+| R112W4-04 (#778) | **closed** | `violated_index` reads the name only from the first ``Database index `<name>` already contains`` head. A name or site key admits only `[A-Za-z0-9._-]`, with no backtick or space, so it cannot spell that head. The echoed values come after it and are ignored. The parser was checked against the real engine (SurrealDB 3.3.4, `Cargo.lock`) by the integration tests: `a_site_cannot_repeat_a_name_a_vlan_or_a_rank` (all three real clashes) and the new `a_name_clash_is_a_name_clash_whatever_the_values_spell` (both of §8's probe cases and their mirrors) pass. When one write clashes on two indexes, the class is now whichever index the engine reports first, not VLAN-first; either answer names a real clash. |
+| R112W4-05 (#779) | **closed** | `before` is gone from the success row (`cleared_row`), from `docs/admin/README.md`'s table and from T-484 (dated amendment), and `r110w6_06_…` asserts its absence. The refusal rows keep their own `before`. `write_and_record`'s doc now names six actions, and the long line is rewrapped. `sdks/CONTRACT.md` never listed the member, so no contract edit is needed. Left alone, and acceptable: `ClearedBinding::before` in `axiam-authz` keeps its "re-bind" doc. That doc describes the gate's own decision, which `network_gate/tests.rs` pins, and the REST layer no longer reads the field. |
+
+**Copies.** All five `> ` lines the sweep changed in `threat-model-stride.md` (T-444, T-483 and
+three in T-484) appear verbatim in `Axiam.json`, which still parses.
+
+### New finding
+
+| ID | Finding | Severity | Surface | Origin | Issue | Model for the fix |
+|---|---|---|---|---|---|---|
+| R112W4-06 | `check_access` evaluates a cache miss and then `insert`s the result, with no invalidation generation between the two. A check that read S's grants before a revocation committed can insert its allow **after** the revocation's flush (and after the broadcast, on any replica). That allow is then served until `decision_cache_ttl_secs`. The module doc bounds a stale allow by the TTL only for a *missed* invalidation; this one is overtaken, not missed. #775 makes the flush reliable but cannot prevent this. | Informational (cache off by default) | `axiam-authz` `engine.rs` `check_access` / `check_access_batch`; `decision_cache.rs` `insert` | pre-existing (D7) | [#791](https://github.com/ilpanich/axiam/issues/791) | **Opus 5.5** |
+
+**Fix:** keep a per-shard (or per-subject) invalidation generation that both invalidations and
+received broadcasts bump. Read it before evaluating, and drop the insert if it changed.
+**Test:** read the generation, invalidate, insert with the stale generation, and assert a miss.
+Then the same at the engine level, with a store that pends during evaluation.
+
+### Checks (each tool's own exit code, debug info off as in §8)
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-api-rest` (SAML on) `--lib` + the ten binaries of §8 | 0 (11 binaries, 467 passed; `r112w4_01_*` ×2 and `r112w4_02_*` among them) |
+| `cargo test -p axiam-authz` | 0 (6 binaries, 206 passed) |
+| `cargo test -p axiam-db --tests` | 0 (86 binaries, 1 116 passed, 5 ignored; the new seeder and `refusal_of` units and `a_name_clash_is_a_name_clash_whatever_the_values_spell` among them) |
+| `cargo test -p axiam-server --no-default-features --tests` | 0 (28 binaries, 348 passed) |
+| `cargo clippy -p axiam-api-rest -p axiam-authz -p axiam-db --lib --tests -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+
+Not verified here: the sweep's claims that each new test fails without its fix were not
+re-run, and the full `axiam-api-rest` suite (112 binaries) was not run.
+
+### Verdict
+
+R112W4-01 … -05 are **closed**. The one new finding, R112W4-06, is Informational,
+pre-existing, and outside W4's diff. **W4 may merge.** R112W4-06 belongs in the 1.1.x sweep,
+next to D7, and does not block this wave.

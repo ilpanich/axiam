@@ -704,8 +704,10 @@ async fn grants_refused_by_registration_policy<C: Connection + Clone>(
 /// bounds: `(resources, redirect_uris)`, each with the reason it is refused.
 ///
 /// `allowed_resources` is bounded by `external_client_allowed_resources` and
-/// `redirect_uris` by `dcr_allowed_redirect_hosts`, through the helpers
-/// `dcr::validate` itself calls, so the admin `PUT` and the registration
+/// `redirect_uris` by `dcr_allowed_redirect_hosts` (a `dcr` row) or by the CIMD
+/// policy (`cimd.trusted_redirect_domains`, `restrict_same_domain`; a `cimd` row,
+/// #768), through the helpers `dcr::validate` and `cimd::validate` themselves
+/// call, so the admin `PUT` and the registration
 /// endpoints cannot disagree. Same held-value exemption as
 /// [`scopes_outside_ceiling`]: a resource or redirect URI the stored row already
 /// holds is never counted, so a form posting the whole record back still saves.
@@ -746,14 +748,35 @@ async fn registration_policy_refusals<C: Connection + Clone>(
     }
     let mut refused_redirects = Vec::new();
     if let Some(requested) = redirect_uris {
+        use axiam_core::models::oauth2_client::ManagedBy;
         for uri in requested {
             if stored.redirect_uris.contains(uri) {
                 continue;
             }
-            if let Some(reason) = axiam_oauth2::dcr::redirect_uri_refusal(
-                &settings.oidc.dcr_allowed_redirect_hosts,
-                uri,
-            ) {
+            let refusal = if stored.managed_by == ManagedBy::Cimd {
+                // A CIMD `client_id` is the document's URL; a row whose
+                // `client_id` is not one has no host to hold a redirect to,
+                // so fail closed.
+                match url::Url::parse(&stored.client_id)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+                {
+                    Some(client_host) => axiam_oauth2::cimd::redirect_uri_refusal(
+                        &settings.oidc.cimd,
+                        &client_host,
+                        uri,
+                    ),
+                    None => Some(format!(
+                        "redirect_uri {uri:?}: the client_id is not a URL with a host"
+                    )),
+                }
+            } else {
+                axiam_oauth2::dcr::redirect_uri_refusal(
+                    &settings.oidc.dcr_allowed_redirect_hosts,
+                    uri,
+                )
+            };
+            if let Some(reason) = refusal {
                 refused_redirects.push(reason);
             }
         }
@@ -1008,7 +1031,7 @@ pub async fn get<C: Connection + Clone>(
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
         (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
-        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`), a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`), an allowed_resources entry outside the tenant's external_client_allowed_resources (`resource_exceeds_registration_policy`), or a redirect URI whose host is outside dcr_allowed_redirect_hosts (`redirect_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope, grant, resource or redirect URI the row already holds is not counted. An administrator-managed client is not bounded."),
+        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`), a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`), an allowed_resources entry outside the tenant's external_client_allowed_resources (`resource_exceeds_registration_policy`), or a redirect URI its registration would refuse: a host outside dcr_allowed_redirect_hosts for a dcr client, or one the tenant's CIMD policy (cimd.trusted_redirect_domains, restrict_same_domain, https or loopback, no fragment) does not admit for a cimd client (`redirect_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope, grant, resource or redirect URI the row already holds is not counted. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
 )]
@@ -1247,7 +1270,8 @@ pub async fn update<C: Connection + Clone>(
 
     // #746 (R111W3-03) — nor an audience or a redirect host its registration
     // would refuse: `allowed_resources` is the tenant's list and nothing else (D3),
-    // and `redirect_uris` stay within `dcr_allowed_redirect_hosts`.
+    // and `redirect_uris` stay within `dcr_allowed_redirect_hosts` (a `dcr` row) or
+    // the CIMD policy (a `cimd` row).
     let (outside_resources, refused_redirects) = registration_policy_refusals(
         &state,
         &stored,
@@ -1273,8 +1297,9 @@ pub async fn update<C: Connection + Clone>(
             "redirect_exceeds_registration_policy",
             format!(
                 "this client is managed_by {} and the administrator API may not give it a \
-                 redirect its registration would be refused: {}; add the host to \
-                 dcr_allowed_redirect_hosts first, or register an administrator-managed client",
+                 redirect its registration would be refused: {}; change the tenant's \
+                 dcr_allowed_redirect_hosts (dcr) or cimd.trusted_redirect_domains and \
+                 restrict_same_domain (cimd) first, or register an administrator-managed client",
                 stored.managed_by,
                 refused_redirects.join("; "),
             ),

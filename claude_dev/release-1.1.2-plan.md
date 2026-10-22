@@ -147,6 +147,28 @@ unless its condition is met before W8.4 writes the PR body.
 | 760, 750 | contract 1.64 (Q1, Q2, C163-10) and the W1 … W5 items the contract records | — | W7 | W7.1 | M | Sonnet 5.5 |
 | SDK ×11 | the contract 1.63 conformance follow-ups and the §14.2 poll rule (§8.2) | Low / Informational | W7 | W7.2 … W7.12 | S–M | Sonnet 5.5 (Rust: see §8.2) |
 | — | contract 1.64 conformance review | — | W7 | W7.13 | — | **Opus 5.5** |
+| 764 | R112W5-01: the Live token cache's read can insert the `-` sentinel | Low | W5 | sweep | M | **Opus 5.5** |
+| 765 | R112W5-02: the concurrent rotation step neither forces nor checks its race | Informational | W5 | sweep | M | **Opus 5.5** |
+| 766 | R112W5-03: text after W5 (lock-held alert, T-486, the upgrade note's module) | Informational | W5 | sweep | S | Sonnet 5.5 |
+| 767 | R112W5-04: hygiene after W5 (schema test message, `mkdir` lock case, header line) | Informational | W5 | sweep | S | Sonnet 5.5 |
+| 774 | R112W5-05: `check-token-cache.py` misses the action-block and optional call forms | Informational | W5 | sweep | S | Sonnet 5.5 |
+| 768 | R112W3-01: the admin `PUT` bounds a CIMD client's redirects by the DCR list | Informational | W3 | sweep | S | Sonnet 5.5 |
+| 769 | R112W3-02: the migration lease's refresh and own-row release are untested | Informational | W3 | sweep | M | **Opus 5.5** |
+| 770 | R112W3-03: the k8s liveness probe kills a replica waiting on the lease | Informational | W3 | sweep | S | Sonnet 5.5 |
+| 771 | R112W3-04: the non-additive gap refusal has no procedure | Informational | W3 | sweep | S | Sonnet 5.5 |
+| 772 | R112W3-05: the hash gate's `503` undeclared on password change and reset confirm | Informational | W3 | sweep | S | Sonnet 5.5 |
+| 773 | R112W3-06: text and hygiene after W3 | Informational | W3 | sweep | S | Sonnet 5.5 |
+| 775 | R112W4-01: a revocation's cache flush and stale-claim row still ride the handler's future | Low | W4 | sweep | M | **Opus 5.5** |
+| 776 | R112W4-02: an orderly stop does not wait for a cleared write's spawned task | Informational | W4 | sweep | M | **Opus 5.5** |
+| 777 | R112W4-03: the reconcile still revokes organization-level actions from an unresolved tenant | Informational | W4 | sweep | S | Sonnet 5.5 |
+| 778 | R112W4-04: `refusal_of` reads index names as substrings | Informational | W4 | sweep | S | Sonnet 5.5 |
+| 779 | R112W4-05: text after W4 (`before`, T-484's re-bind claim, "five" actions) | Informational | W4 | sweep | S | Sonnet 5.5 |
+| 780 | R112W1-01: W1.6 turns `network_gate_enumeration_test` red (blocks W1's merge) | Low | W1 | sweep | S | Sonnet 5.5 |
+| 781 | R112W1-02: the refresh-token sweep is one unbounded `DELETE` over full scans | Low | W1 | sweep | M | Sonnet 5.5 |
+| 782 | R112W1-03: two new `audit_log` reads on the erasure path scan the tenant's trail | Informational | W1 | sweep | S | Sonnet 5.5 |
+| 783 | R112W1-04: T-254 on replay records after #753 | Informational | W1 | sweep | S | Sonnet 5.5 |
+| 784 | R112W1-05: a unit stalled past the lease still scrubs and re-anonymizes the erased account | Informational | W1 | sweep | M | **Opus 5.5** |
+| 785 | R112W1-06: text and hygiene after W1 | Informational | W1 | sweep | S | Sonnet 5.5 |
 | new | every issue filed while the plan runs (§1.4) | any | its wave / W9 | — | by §1.1 | by §1.1 |
 
 ### 1.1 How the model is chosen
@@ -261,7 +283,7 @@ the recovery that W1.1 completes, and W1.6's concurrency test needs both.
 | W1.7 | **#739**, verify and close (§0.1). (a) the two `cleanup.rs` sentences and the `AuditedWork` doc worded as #688 does; (b) T-472's "#714 amendment" tail and the orphan-marker sentence corrected, dated, both copies; (c) the `append_off_thread` doc says the join-error branch is logged by the awaiter, or the panic is caught inside the closure (default: the sentence, D-11). Edit only what still differs from the issue's wording. | `cleanup.rs`; STRIDE T-472 (both copies); `crates/axiam-audit/src/dead_letter.rs` | none (text); `check-remediation-evidence.py`; `check-doc-links.sh` | S | Sonnet 5.5 |
 | W1.8 | — | F4 review of the W1 diff → `claude_dev/security-review-release-1.1.2-w1-<date>.md`. Medium and higher fixed first; Low and Informational filed on `1.1.x` **and fixed in the wave's sweep slot** (§1.4); the review gains an addendum on the sweep's diff. | | | — | **Opus 5.5** |
 
-Closes: #736, #737, #738, #739, #740, #753, and #758 (with W2, W5, W6, W8.3).
+Closes: #736, #737, #738, #739, #740, #753, and #758 (with W2, W5, W6, W8.3); from the W1.8 review (§1.4): #780, #781, #782, #783, #784, #785.
 
 ---
 
@@ -300,7 +322,7 @@ lease.
 | W3.5 | **#756** (D-8: declare only). The `responses(...)` entries for `422 reserved_metadata_key` (tenants create/update), `409 already_exists` (the six certificate and CA operations), `503 service_unavailable` (the eight crypto-permit sites and login's hash gate) and `409 conflict` / `stale_version` (the ten role and permission operations); regenerate the spec and the registry; the digest. A unit test in `axiam-api-rest` lists the operations that must declare each of the four and reads the generated spec, so the next handler that returns one is caught. | the handlers the issue lists; `sdks/openapi.json`; `sdks/management-registry.json`; `website/src/apiIndex.ts` | the new spec test; the drift job; `check-spec-digest.py` | M | Sonnet 5.5 |
 | W3.6 | — | F4 review of the W3 diff → `claude_dev/security-review-release-1.1.2-w3-<date>.md`; the sweep slot and the addendum. | | | — | **Opus 5.5** |
 
-Closes: #729, #746, #747, #755, #756.
+Closes: #729, #746, #747, #755, #756; from the W3.6 review (§1.4): #768, #769, #770, #771, #772, #773.
 
 ---
 
@@ -317,7 +339,7 @@ W4.1 carries on `GateClearance`.
 | W4.4 | **#730.** (a) the `network_gate.rs` comment names `NetworkConflict::StaleRole`; (b) the reconcile's revoke counters split (organization-scope network revocations vs ordinary), the `warn` worded for both; (c) `docs/admin/README.md` lists `network_role.permission_revoked_by_reconcile` and says a group cannot hold a network role; (d) `network.rs:96-98` reworded, or `refusal_of` matches the `THROW` form exactly (default: match exactly, D-14); (e) T-457 and the `network_decide.rs` module doc name the global fingerprint read as a residual; (f) `certificate_binding.bound` records `before` (the account the certificate was taken from) and the nodes the gate checked; (g) the assignment row's `node` is the gate's node (`/network`'s id for a tenant-wide assignment). | `network_gate.rs:128-129,424-434`; `crates/axiam-server/src/main.rs:650-656`; `docs/admin/README.md`; `crates/axiam-db/src/repository/network.rs:96-145`; STRIDE T-457, T-484 | (f), (g): extend `r110w6_06_…` with a re-bind (`before` present) and a tenant-wide assignment (`node` = `/network`'s id); (d): a segment named `axiam:network_segment_version_stale` is a `duplicate_name`, not `stale_version`; `check-doc-links.sh`, `check-remediation-evidence.py` | M | Sonnet 5.5 |
 | W4.5 | — | F4 review of the W4 diff → `claude_dev/security-review-release-1.1.2-w4-<date>.md`, reading H1 … H6 against the code once more; the sweep slot and the addendum. | | | — | **Opus 5.5** |
 
-Closes: #726, #727, #728, #730.
+Closes: #726, #727, #728, #730; from the W4.5 review (§1.4): #775, #776, #777, #778, #779.
 
 ---
 
@@ -337,7 +359,7 @@ Closes: #726, #727, #728, #730.
 | W5.6 | **#725** (D-9). T-462 amended, dated, for exit 3 and `Cache-Control: no-cache`, naming the `fetch-crl-test.sh` cases; the fail-closed rename note written for **W8.4** as an "Upgrading from 1.1.0 directly" paragraph under `[1.1.2]`, listing the moved names (compose override, `raddb/live/`, `axiam_live`, `axiam-live.sh`, `AXIAM_LIVE_URL`/`SITE`, `/var/run/axiam-live`); `[1.1.1]` is not rewritten. | STRIDE T-462 (both copies); the §12.5 note for W8.4 | none (text); `check-remediation-evidence.py` | S | Sonnet 5.5 |
 | W5.7 | — | F4 review of the W5 diff → `claude_dev/security-review-release-1.1.2-w5-<date>.md`; the sweep slot and the addendum. | | | — | **Opus 5.5** |
 
-Closes: #720, #721, #722, #723, #724, #725.
+Closes: #720, #721, #722, #723, #724, #725; from the W5.7 review (§1.4): #764, #765, #766, #767, #774.
 
 ---
 
@@ -556,6 +578,13 @@ wave's next commit, or recorded in §12 as "answered after the fact".
     other id gets an unknown id's `400`, and an SDK must not tell the cases apart), and the error table gains
     the `/uma2/perm` `400` row. **Plan vs issue:** §8.1 does not list it, so W7.1 takes it as item (i).
 - **Intake (§1.4):** none at the start. 36 issues on `ilpanich/axiam` and one per SDK repository, as §0 counts.
+  By 21:10 UTC the wave reviews had filed 22 more, all on `1.1.x`, all Low or Informational, and every one is worked
+  in 1.1.2 in its own wave's sweep slot (the rows above §1.1's rule, after #760 … #758 in the table of §1):
+  - W5.7 → #764 … #767 and, from its addendum, #774: all closed in the wave (two addenda, `5d40dad`, `86768f9`).
+  - W3.6 → #768 … #773: all closed in the wave (addendum `79f7ae9`).
+  - W4.5 → #775 … #779: fixed in the wave (`128d376`, `aa203d9`, `89aacfc`, `34cd965`, `5474a2d`); addendum pending.
+  - W1.8 → #780 … #785: in the sweep slot (Sonnet for #780 … #783 and #785, then Opus for #784); #780 blocks W1's merge.
+  No issue from outside the plan has been opened on the milestone, and none of the 22 needs the maintainer.
 - **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
   at the row's model. Each pushes to its wave branch, and the orchestrator reads its report and the branch. The
   first sessions, all started 09:12–09:14 UTC: W1.2 (Opus 5.5), W2.1 (Sonnet 5.5), W3.1 + W3.2 (one Opus 5.5

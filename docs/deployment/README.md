@@ -265,7 +265,39 @@ the shipped `failureThreshold` raised.
   additive (every statement a `DEFINE … IF NOT EXISTS`). Otherwise the replica
   refuses to start with an error naming the version, because a backfill, a
   `REMOVE` or an older `OVERWRITE` run after its successors would undo them;
-  resolve that gap by hand (#729). A released build never leaves such a gap.
+  resolve that gap by hand (#729; the procedure is
+  [below](#recovering-from-a-refused-migration-gap)). A released build never
+  leaves such a gap.
+
+### Recovering from a refused migration gap
+
+The boot error reads `Migration vN 'name' is not recorded but vM is, and vN is
+not additive …`. The replica has changed nothing and released its lease; no
+other migration was applied. Work through these in order:
+
+1. **Inspect.** `SELECT version, name, applied_at FROM _migration ORDER BY
+   version;` shows what the datastore recorded; compare it with the binary's
+   list (the `SCHEMA_V*` constants and `MIGRATIONS` in
+   `crates/axiam-db/src/schema.rs`). vN is the version the error names; the
+   datastore ran a branch build that skipped it. Read vN's statements.
+2. **If vN's effect is already in place** (a later migration redefined or
+   overwrote the same objects, or its backfill's target rows have since been
+   changed by the application or by a later migration), do not run it. Record
+   it, so the runner stops asking, and decide separately whether any data needs
+   repairing:
+   `CREATE _migration SET version = N, name = '<name from the error>';`
+   (`applied_at` defaults to now; the table's only other fields are `version`
+   and `name`, as `MIGRATION_TABLE_DDL` defines them).
+3. **If vN's effect is missing** and its statements are safe to run now (they
+   define an object nothing else defines, or backfill rows nothing has touched
+   since), run vN's statements by hand in one transaction together with the
+   `CREATE _migration` above, so that a failure records nothing.
+4. **Otherwise, restore** the backup taken before the branch build, and start
+   the release binary against it. Never run a backfill or a `REMOVE` over data
+   written after its successors: that is what the refusal protects.
+
+Start the replicas again afterwards; the runner finds every version recorded and
+boots. If you cannot tell which case applies, take step 4 and ask.
 
 ## Required secrets & environment
 

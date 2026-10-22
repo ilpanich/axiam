@@ -488,6 +488,10 @@ async fn a_gap_below_a_non_additive_migration_is_a_boot_error() {
         "the boot error names the version: {message}"
     );
     assert!(message.contains("not additive"), "and says why: {message}");
+    assert!(
+        message.contains("docs/deployment/README.md#recovering-from-a-refused-migration-gap"),
+        "and points at the procedure: {message}"
+    );
 
     assert_eq!(records_of(&db, 43).await, 0, "v43 was not applied");
     assert_eq!(

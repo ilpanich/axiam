@@ -2836,7 +2836,9 @@ async fn apply_pending_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), 
                         "Migration v{} '{}' is not recorded but v{highest_recorded} is, and \
                          v{} is not additive (it updates, deletes, removes or overwrites, or \
                          defines without IF NOT EXISTS): refusing to apply it out of order. \
-                         The datastore ran a build that skipped v{}; resolve the gap by hand",
+                         The datastore ran a build that skipped v{}; resolve the gap by hand, \
+                         as docs/deployment/README.md#recovering-from-a-refused-migration-gap \
+                         describes",
                         migration.version, migration.name, migration.version, migration.version,
                     )));
                 }

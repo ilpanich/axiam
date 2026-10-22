@@ -118,6 +118,8 @@ pub struct CleanupTask<C: Connection> {
     // Credential/authorization tables purged on erasure and surfaced in exports
     // (SEC-056, CQ-B38).
     role_repo: Arc<SurrealRoleRepository<C>>,
+    // #758 (e): reads a removed role's `network:` grants for its audit row.
+    permission_repo: Arc<axiam_db::SurrealPermissionRepository<C>>,
     group_repo: Arc<SurrealGroupRepository<C>>,
     webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
     password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
@@ -400,6 +402,92 @@ pub async fn erase_oauth2_refresh_tokens<RT: axiam_core::repository::RefreshToke
 ) -> Result<u64, AxiamError> {
     repo.revoke_all_for_user(tenant_id, user_id).await?;
     repo.delete_all_for_user(tenant_id, user_id).await
+}
+
+/// Step (b3)'s role pass (#758 (e)): unassign every direct role assignment of
+/// the erased account, and write one `network_role.unassigned` row (the
+/// [`axiam_authz::network_gate::AUDIT_ROLE_UNASSIGNED`] action) for each
+/// **network role** it removes.
+///
+/// A network role here is what the gate calls a network-sensitive role: one
+/// carrying at least one `network:` grant, allow or deny
+/// ([`axiam_core::models::network::is_network_action`] over the role's
+/// permission grants, read before the unassignment). The row has the shape the
+/// REST gate writes for an administrator's unassignment (`role_id`, `role`,
+/// `grantee {kind, id}`, `node`, `permissions`), tenant of the account,
+/// resource the node, actor the platform (`System`, nil id) — the erasure is
+/// the platform's act, and the row says so. The grantee's id is cleared again
+/// by `pseudonymize_actor` when the account is anonymized, so no row names
+/// the erased subject.
+///
+/// Each row is written after its unassignment landed, like the gate's; a
+/// re-entered erasure finds no assignment left and writes none. A public free
+/// function, for the reason [`run_erasure_pipeline`] is.
+///
+/// # Errors
+///
+/// The datastore error of a read or an unassignment (fail-closed: the purge
+/// retries). A failed audit append is dead-lettered, not returned.
+pub async fn remove_erased_users_roles<R, P, A>(
+    role_repo: &R,
+    permission_repo: &P,
+    audit_repo: &A,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<u64, AxiamError>
+where
+    R: RoleRepository,
+    P: axiam_core::repository::PermissionRepository,
+    A: AuditWriteSink,
+{
+    let assignments = role_repo
+        .get_user_role_assignments(tenant_id, user_id)
+        .await?;
+    let mut network_rows = 0;
+    for a in assignments {
+        let network_permissions: Vec<serde_json::Value> = permission_repo
+            .get_role_permission_grants(tenant_id, a.role.id)
+            .await?
+            .into_iter()
+            .filter(|g| axiam_core::models::network::is_network_action(&g.permission.action))
+            .map(|g| {
+                serde_json::json!({
+                    "action": g.permission.action,
+                    "effect": g.effect.as_str(),
+                    "scope_ids": g.scope_ids,
+                })
+            })
+            .collect();
+        role_repo
+            .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
+            .await?;
+        if network_permissions.is_empty() {
+            continue;
+        }
+        write_audit_with_dead_letter(
+            audit_repo,
+            CreateAuditLogEntry {
+                tenant_id,
+                actor_id: Uuid::nil(),
+                actor_type: ActorType::System,
+                action: axiam_authz::network_gate::AUDIT_ROLE_UNASSIGNED.to_owned(),
+                resource_id: a.resource_id,
+                outcome: AuditOutcome::Success,
+                ip_address: None,
+                metadata: Some(serde_json::json!({
+                    "role_id": a.role.id,
+                    "role": a.role.name,
+                    "grantee": { "kind": "user", "id": user_id },
+                    "node": a.resource_id.map_or_else(|| "none".to_owned(), |r| r.to_string()),
+                    "permissions": network_permissions,
+                    "reason": "account_erasure",
+                })),
+            },
+        )
+        .await;
+        network_rows += 1;
+    }
+    Ok(network_rows)
 }
 
 /// The `oauth2_refresh_token` sweep (#753): delete the rows whose token
@@ -2764,6 +2852,7 @@ struct ErasureUnit<C: Connection> {
     password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
     group_repo: Arc<SurrealGroupRepository<C>>,
     role_repo: Arc<SurrealRoleRepository<C>>,
+    permission_repo: Arc<axiam_db::SurrealPermissionRepository<C>>,
     cert_repo: Arc<axiam_db::SurrealCertificateRepository<C>>,
     audit_repo: Arc<SurrealAuditLogRepository<C>>,
     erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
@@ -2923,15 +3012,14 @@ impl<C: Connection> ErasureUnit<C> {
                 .remove_member(tenant_id, user_id, group.id)
                 .await?;
         }
-        let assignments = self
-            .role_repo
-            .get_user_role_assignments(tenant_id, user_id)
-            .await?;
-        for a in assignments {
-            self.role_repo
-                .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
-                .await?;
-        }
+        remove_erased_users_roles(
+            self.role_repo.as_ref(),
+            self.permission_repo.as_ref(),
+            self.audit_repo.as_ref(),
+            tenant_id,
+            user_id,
+        )
+        .await?;
 
         // (b4) Revoke the account's `User` certificates (#533) and clear their
         // `metadata` (R101W1-05), while its username and email — which the
@@ -2998,6 +3086,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         erasure_proof_repo: Arc<SurrealErasureProofRepository<C>>,
         federation_link_repo: Arc<SurrealFederationLinkRepository<C>>,
         role_repo: Arc<SurrealRoleRepository<C>>,
+        permission_repo: Arc<axiam_db::SurrealPermissionRepository<C>>,
         group_repo: Arc<SurrealGroupRepository<C>>,
         webauthn_repo: Arc<SurrealWebauthnCredentialRepository<C>>,
         password_history_repo: Arc<SurrealPasswordHistoryRepository<C>>,
@@ -3052,6 +3141,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             erasure_proof_repo,
             federation_link_repo,
             role_repo,
+            permission_repo,
             group_repo,
             webauthn_repo,
             password_history_repo,
@@ -3945,6 +4035,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             password_history_repo: Arc::clone(&self.password_history_repo),
             group_repo: Arc::clone(&self.group_repo),
             role_repo: Arc::clone(&self.role_repo),
+            permission_repo: Arc::clone(&self.permission_repo),
             cert_repo: Arc::clone(&self.cert_repo),
             audit_repo: Arc::clone(&self.audit_repo),
             erasure_proof_repo: Arc::clone(&self.erasure_proof_repo),

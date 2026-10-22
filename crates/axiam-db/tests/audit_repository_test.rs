@@ -398,3 +398,53 @@ async fn pseudonymize_actor_scrubs_pii_and_relinks_resource() {
     assert_eq!(about_after.actor_id, other_actor);
     assert_eq!(about_after.resource_id, Some(Uuid::nil()));
 }
+
+/// #758 (e): the grantee of a `network_role.assigned` / `.unassigned` row is
+/// the erased subject whoever wrote the row; its id is cleared, a stranger's
+/// is not, and a second run changes nothing.
+#[tokio::test]
+async fn pseudonymize_actor_clears_the_grantee_id_of_network_role_rows() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let (user_id, stranger, admin) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let row = |action: &str, grantee: Uuid, kind: &str| {
+        let mut e = entry(tenant_id, admin, action, AuditOutcome::Success, None);
+        e.metadata = Some(serde_json::json!({
+            "role": "net-admin",
+            "grantee": { "kind": kind, "id": grantee },
+            "node": "none",
+        }));
+        e
+    };
+    let mut ids = Vec::new();
+    for e in [
+        row("network_role.assigned", user_id, "user"),
+        row("network_role.unassigned", user_id, "user"),
+        row("network_role.assigned", stranger, "user"),
+        // A service account that happens to share the id is not the subject.
+        row("network_role.assigned", user_id, "service_account"),
+    ] {
+        ids.push(repo.append(e).await.unwrap().id);
+    }
+
+    for _ in 0..2 {
+        repo.pseudonymize_actor(tenant_id, user_id, "DELETED_USER_deadbeef")
+            .await
+            .unwrap();
+        let rows = repo.get_by_ids(tenant_id, &ids).await.unwrap();
+        let grantee = |i: usize| {
+            let r = rows.iter().find(|r| r.id == ids[i]).unwrap();
+            r.metadata["grantee"]["id"].clone()
+        };
+        let nil = serde_json::json!(Uuid::nil());
+        assert_eq!(grantee(0), nil);
+        assert_eq!(grantee(1), nil);
+        assert_eq!(grantee(2), serde_json::json!(stranger));
+        assert_eq!(grantee(3), serde_json::json!(user_id));
+        // The rest of the row is left as it was.
+        let kept = rows.iter().find(|r| r.id == ids[0]).unwrap();
+        assert_eq!(kept.metadata["role"], "net-admin");
+        assert_eq!(kept.metadata["grantee"]["kind"], "user");
+        assert_eq!(kept.actor_id, admin);
+    }
+}

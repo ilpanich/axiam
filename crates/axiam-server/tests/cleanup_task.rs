@@ -4861,3 +4861,230 @@ async fn the_refresh_token_sweep_removes_only_rows_expired_past_the_retention() 
     );
     assert_eq!(refresh_rows_total(&db).await, 2);
 }
+
+// ---------------------------------------------------------------------------
+// #758 (e) — the erasure's role pass writes `network_role.unassigned` rows,
+// and no `network_role.*` row keeps the subject's id
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
+use axiam_core::repository::{PermissionRepository as _, RoleRepository as _};
+use axiam_db::{SurrealPermissionRepository, SurrealRoleRepository};
+use axiam_server::cleanup::remove_erased_users_roles;
+
+async fn role_granting(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    name: &str,
+    action: &str,
+) -> Uuid {
+    let role = SurrealRoleRepository::new(db.clone())
+        .create(CreateRole {
+            tenant_id,
+            name: name.into(),
+            description: String::new(),
+            is_global: false,
+        })
+        .await
+        .expect("role");
+    let perms = SurrealPermissionRepository::new(db.clone());
+    let permission = perms
+        .create(CreatePermission {
+            tenant_id,
+            action: action.into(),
+            description: String::new(),
+        })
+        .await
+        .expect("permission");
+    perms
+        .grant_to_role(tenant_id, role.id, permission.id)
+        .await
+        .expect("grant");
+    role.id
+}
+
+async fn rows_of(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    action: &str,
+) -> Vec<AuditLogEntry> {
+    SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(action.into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 50,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_row_keeps_the_subject()
+ {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = user_due_for_erasure(&db, tenant_id, "network_holder").await;
+    let (roles, audit) = (
+        SurrealRoleRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let network_a = role_granting(&db, tenant_id, "net-a", "network:join").await;
+    let network_b = role_granting(&db, tenant_id, "net-b", "NETWORK:admin").await;
+    let plain = role_granting(&db, tenant_id, "docs", "documents:read").await;
+    for role in [network_a, network_b, plain] {
+        roles
+            .assign_to_user(tenant_id, user.id, role, AssignmentScope::global())
+            .await
+            .expect("assign");
+    }
+    // An administrator's earlier assignment row names the subject as grantee.
+    audit
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::User,
+            action: "network_role.assigned".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "role_id": network_a,
+                "grantee": { "kind": "user", "id": user.id },
+            })),
+        })
+        .await
+        .unwrap();
+
+    let written = remove_erased_users_roles(
+        &roles,
+        &SurrealPermissionRepository::new(db.clone()),
+        &audit,
+        tenant_id,
+        user.id,
+    )
+    .await
+    .expect("role pass");
+    assert_eq!(
+        written, 2,
+        "one row per network role removed, none for the plain one"
+    );
+    assert!(
+        roles
+            .get_user_role_assignments(tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "every assignment is gone"
+    );
+    let unassigned = rows_of(&db, tenant_id, "network_role.unassigned").await;
+    assert_eq!(unassigned.len(), 2);
+    let mut names: Vec<_> = unassigned
+        .iter()
+        .map(|r| r.metadata["role"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["net-a", "net-b"]);
+    for row in &unassigned {
+        assert_eq!(row.actor_type, ActorType::System);
+        assert_eq!(row.actor_id, Uuid::nil());
+        assert_eq!(row.metadata["grantee"]["kind"], "user");
+        assert_eq!(row.metadata["node"], "none");
+        assert!(!row.metadata["permissions"].as_array().unwrap().is_empty());
+    }
+
+    // A re-entered erasure finds nothing left and writes nothing.
+    let again = remove_erased_users_roles(
+        &roles,
+        &SurrealPermissionRepository::new(db.clone()),
+        &audit,
+        tenant_id,
+        user.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, 0);
+    assert_eq!(
+        rows_of(&db, tenant_id, "network_role.unassigned")
+            .await
+            .len(),
+        2
+    );
+
+    audit
+        .pseudonymize_actor(tenant_id, user.id, "DELETED_USER_net00000001")
+        .await
+        .unwrap();
+    for action in ["network_role.assigned", "network_role.unassigned"] {
+        let rows = rows_of(&db, tenant_id, action).await;
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert!(
+                !row.metadata.to_string().contains(&user.id.to_string()),
+                "{action} row still names the erased user: {}",
+                row.metadata
+            );
+            assert_eq!(
+                row.metadata["grantee"]["id"],
+                serde_json::json!(Uuid::nil())
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #758 (f) — two recoveries over one store record each owed erasure once
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_recoveries_over_one_store_record_an_owed_erasure_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    // An erasure cut past its point of no return (the helper's pseudonym is
+    // fixed, so one account per store).
+    let user = erasure_due_with_its_request(&db, tenant_id, "owed_one").await;
+    {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (entered_tx, mut entered) = watch::channel(false);
+        let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+            UnitStep::ErasureAnonymized(user.id),
+            entered_tx,
+            Arc::new(Notify::new()),
+        )));
+        let tick = erasure_tick(&db, &user, &work);
+        wait_until_entered(&mut entered).await;
+        stop_tx.send_replace(true);
+        assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(300)).await);
+    }
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    // Two replicas' recoveries at once, repeated while the cut units' spawned
+    // releases land; the owed erasures are recorded exactly once between them.
+    let mut recorded = 0;
+    for _ in 0..50 {
+        let (a, b) = tokio::join!(record_owed(&db), record_owed(&db));
+        recorded += a.expect("replica A") + b.expect("replica B");
+        if recorded >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (a, b) = tokio::join!(record_owed(&db), record_owed(&db));
+    recorded += a.unwrap() + b.unwrap();
+    assert_eq!(recorded, 1, "the owed erasure is recorded once");
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await.len(),
+        1,
+        "one gdpr.user_pseudonymized row"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    assert!(!erasure_marker_set(&db, user.id).await);
+}

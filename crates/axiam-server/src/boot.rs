@@ -2823,6 +2823,7 @@ where
         Arc::new(erasure_proof_repo.clone()),
         Arc::new(cleanup_federation_link_repo),
         Arc::new(role_repo.clone()),
+        Arc::new(permission_repo.clone()),
         Arc::new(group_repo.clone()),
         Arc::new(webauthn_cred_repo.clone()),
         Arc::new(password_history_repo.clone()),

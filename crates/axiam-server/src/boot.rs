@@ -1597,24 +1597,8 @@ where
     // proxy in front (the FreeRADIUS recipe's mutual TLS) reaches directly.
     let trusted_proxies = axiam_core::forwarded_for::TrustedProxies::from_env()
         .unwrap_or_else(|e| panic!("invalid rate-limit configuration: {e}"));
-    if let Some(warning) = trusted_proxies.boot_warning(config.server.tls.enabled) {
-        tracing::warn!(
-            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
-            "{warning}"
-        );
-    } else if !trusted_proxies.is_empty() {
-        let networks: Vec<String> = trusted_proxies
-            .networks()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        tracing::info!(
-            trusted_proxies = %networks.join(","),
-            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
-             peers; every other request is keyed on its own address. Both listeners \
-             read the same list."
-        );
-    }
+    // The WARN / INFO for this list is emitted below, once the gRPC listener's
+    // TLS is resolved: it names whichever listener(s) terminate TLS here.
 
     // §4 item 1 (security-analysis-2026-08-02): the bucket key for
     // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
@@ -2655,6 +2639,32 @@ where
         }
         None => axiam_api_grpc::GrpcTls::Plaintext,
     };
+
+    // #731 (R111W2-01, T-212): the empty-list WARN, decided on both listeners'
+    // native TLS. Here rather than beside the parse because the gRPC settings
+    // resolve here (they need the reload interval, read from the config far
+    // below the parse), and a bad list still stops the boot at the parse.
+    if let Some(warning) = trusted_proxies.boot_warning_for(
+        config.server.tls.enabled,
+        matches!(grpc_tls, axiam_api_grpc::GrpcTls::Rustls(_)),
+    ) {
+        tracing::warn!(
+            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
+            "{warning}"
+        );
+    } else if !trusted_proxies.is_empty() {
+        let networks: Vec<String> = trusted_proxies
+            .networks()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::info!(
+            trusted_proxies = %networks.join(","),
+            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
+             peers; every other request is keyed on its own address. Both listeners \
+             read the same list."
+        );
+    }
 
     // Resolved by the teardown once the REST listener has stopped (P23W5-A11);
     // dropping the sender, on an early return, resolves it too.

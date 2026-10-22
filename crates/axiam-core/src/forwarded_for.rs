@@ -116,26 +116,52 @@ impl TrustedProxies {
         self.is_empty() || peer.is_some_and(|peer| self.0.iter().any(|block| block.contains(peer)))
     }
 
-    /// The boot `WARN` for this list on a server whose native TLS listener is
-    /// `native_tls`, or `None` when there is nothing to warn about.
+    /// The boot `WARN` for this list on a server whose REST listener is on
+    /// native TLS when `native_tls`, or `None` when there is nothing to warn
+    /// about. The REST-only reading of [`Self::boot_warning_for`].
+    #[must_use]
+    pub fn boot_warning(&self, native_tls: bool) -> Option<&'static str> {
+        self.boot_warning_for(native_tls, false)
+    }
+
+    /// The boot `WARN` for this list given which listeners terminate TLS in
+    /// the process (`rest_tls`: `server.tls.enabled`; `grpc_tls`: the gRPC
+    /// listener's certificate pair is set), or `None` when there is nothing to
+    /// warn about. The message names each listener that is on native TLS.
     ///
     /// The case is the empty list on a native TLS listener: a client that must
     /// reach that listener directly (the FreeRADIUS recipe's mutual TLS ends
-    /// at AXIAM) writes the header nothing appends to, and so chooses its own
-    /// rate-limit key on every route — while the proxy that re-encrypts to the
-    /// same listener (`k8s/`) needs its header read. Only the operator knows
-    /// which peers are which; the list is how they say so.
+    /// at AXIAM, and the gRPC device topology's does too) writes the header
+    /// nothing appends to, and so chooses its own rate-limit key on every
+    /// route — while the proxy that re-encrypts to the same listener (`k8s/`)
+    /// needs its header read. Only the operator knows which peers are which;
+    /// the list is how they say so.
     #[must_use]
-    pub fn boot_warning(&self, native_tls: bool) -> Option<&'static str> {
-        (native_tls && self.is_empty()).then_some(
-            "native TLS is on and AXIAM__RATE_LIMIT__TRUSTED_PROXIES is empty: \
-             X-Forwarded-For is read from every peer, so a client that reaches this \
-             listener with no appending proxy in front chooses its own rate-limit key \
-             on every per-address limiter (T-212). List the proxies in front of the \
-             server (CIDR blocks); every other peer is then keyed on its own address. \
-             Both listeners read the list. See docs/deployment/README.md, \
-             \"Deriving TRUSTED_HOPS\"",
-        )
+    pub fn boot_warning_for(&self, rest_tls: bool, grpc_tls: bool) -> Option<&'static str> {
+        macro_rules! warning {
+            ($on:literal) => {
+                concat!(
+                    "native TLS is on (",
+                    $on,
+                    ") and AXIAM__RATE_LIMIT__TRUSTED_PROXIES is empty: \
+                     X-Forwarded-For is read from every peer, so a client that reaches \
+                     that listener with no appending proxy in front chooses its own \
+                     rate-limit key on every per-address limiter (T-212). List the \
+                     proxies in front of the server (CIDR blocks); every other peer is \
+                     then keyed on its own address. Both listeners read the list. See \
+                     docs/deployment/README.md, \"Deriving TRUSTED_HOPS\""
+                )
+            };
+        }
+        if !self.is_empty() {
+            return None;
+        }
+        match (rest_tls, grpc_tls) {
+            (false, false) => None,
+            (true, false) => Some(warning!("REST listener")),
+            (false, true) => Some(warning!("gRPC listener")),
+            (true, true) => Some(warning!("REST and gRPC listeners")),
+        }
     }
 }
 
@@ -282,6 +308,25 @@ mod tests {
         assert!(empty.boot_warning(false).is_none());
         assert!(listed.boot_warning(true).is_none());
         assert!(listed.boot_warning(false).is_none());
+    }
+
+    /// #731: the decision is on both listeners; REST TLS off and gRPC TLS on
+    /// still warns, and the message names the gRPC listener.
+    #[test]
+    fn the_boot_warning_covers_the_grpc_listener() {
+        let empty = TrustedProxies::default();
+        let listed = TrustedProxies::parse("10.0.0.0/8").expect("parses");
+        let grpc_only = empty.boot_warning_for(false, true).expect("gRPC TLS warns");
+        assert!(grpc_only.contains("gRPC listener"));
+        assert!(!grpc_only.contains("REST"));
+        assert!(grpc_only.contains("AXIAM__RATE_LIMIT__TRUSTED_PROXIES"));
+        let rest_only = empty.boot_warning_for(true, false).expect("REST TLS warns");
+        assert!(rest_only.contains("REST listener") && !rest_only.contains("gRPC"));
+        let both = empty.boot_warning_for(true, true).expect("both warn");
+        assert!(both.contains("REST and gRPC listeners"));
+        assert!(empty.boot_warning_for(false, false).is_none());
+        assert!(listed.boot_warning_for(false, true).is_none());
+        assert!(listed.boot_warning_for(true, true).is_none());
     }
 
     /// The variable is unset in the test environment, which reads as the empty

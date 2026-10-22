@@ -70,6 +70,14 @@ on:
       - "crates/axiam-db/src/repository/network.rs"
       - "crates/axiam-api-rest/src/handlers/network.rs"
       - "crates/axiam-authz/src/engine.rs"
+      # The caller's identity and the gate in front of the decision (#723): the TLS terminator
+      # that hands over the peer certificate, the bearer extractor and the token it verifies,
+      # and the guard and gate that refuse a call before the decision runs.
+      - "crates/axiam-server/src/tls.rs"
+      - "crates/axiam-api-rest/src/extractors/auth.rs"
+      - "crates/axiam-auth/src/token.rs"
+      - "crates/axiam-api-rest/src/network_decide_guard.rs"
+      - "crates/axiam-api-rest/src/network_gate.rs"
       - "docker/radius/**"
       - "docker/docker-compose.radius.yml"
       - "scripts/check-radius-vendors-nothing.py"

@@ -570,7 +570,7 @@ gate cleared and that landed is a `success` row, written once, after the write:
 | `network_role.revoked` | a `network:` permission is revoked from a role | role id and name, the permission (action, id, the effect that was removed) |
 | `network_role.deleted` | a role carrying a `network:` permission (allow or deny) is deleted | role id and name, the role's `network:` permissions (action, effect, scopes) as the gate read them |
 | `network_role.permission_revoked_by_reconcile` | the boot-time reconcile takes a `network:` permission back from a seeded `super-admin` or `admin` role that the seeding rule withholds it from (system actor, not a writer) | `resource_id` is the role's id; role name, the permission (action, id), the reason |
-| `certificate_binding.bound` | a certificate is bound to a service account | certificate id, service account id, `before` (the account the certificate was taken from on a re-bind, else `null`) and `nodes` (the nodes at which the gate required `network:grant`) — never the certificate itself |
+| `certificate_binding.bound` | a certificate is bound to a service account | certificate id, service account id and `nodes` (the nodes at which the gate required `network:grant`) — never the certificate itself |
 
 The row's `actor_id` is the writer. A write that touches no `network:`
 permission (a role with no `network:` grant that is deleted included), and a role update, leaves none of these rows (the request

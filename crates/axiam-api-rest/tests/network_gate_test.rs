@@ -2098,7 +2098,10 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     assert_eq!(rows[0].metadata["grantee"]["id"], device.to_string());
     let text = rows[0].metadata.to_string();
     assert!(!text.contains("BEGIN"), "no certificate in the row: {text}");
-    assert!(rows[0].metadata["before"].is_null(), "first bind: {text}");
+    assert!(
+        rows[0].metadata.get("before").is_none(),
+        "a success row names no previous account: {text}"
+    );
     assert_eq!(
         rows[0].metadata["nodes"],
         json!([root.to_string()]),
@@ -2106,9 +2109,9 @@ async fn r110w6_06_each_cleared_network_write_leaves_exactly_one_row_with_its_me
     );
 
     // The route refuses a certificate that is already bound (409, the unique
-    // binding), so a success row's `before` is `null` here; the account a
-    // re-bind takes it from is carried by the clearance and pinned in
-    // `axiam-authz`'s `network_gate/tests.rs` (#730 f).
+    // binding), so a success row never takes a certificate from an account and
+    // carries no `before` (R112W4-05); the clearance's own `before` is pinned
+    // in `axiam-authz`'s `network_gate/tests.rs`.
     let other = w.service_account(&[]).await;
     let (status, _) = call(
         &app,

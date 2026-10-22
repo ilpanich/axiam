@@ -317,9 +317,10 @@ impl StaleRefusal {
 
 /// Run the repository write of a network-sensitive write that the gate
 /// cleared, and record it once it landed (R110W6-06, #703, T-484): one
-/// `network_role.assigned` / `.unassigned` / `.granted` / `.revoked` or
-/// `certificate_binding.bound` row, with the role, the grantee, the node and the
-/// `network:` permissions the write conferred (or removed); an assignment's row
+/// `network_role.assigned` / `.unassigned` / `.granted` / `.revoked` /
+/// `.deleted` or `certificate_binding.bound` row (one of the six), with the
+/// role, the grantee, the node and the `network:` permissions the write
+/// conferred (or removed); an assignment's row
 /// also carries `exemption`, the named exemption it cleared under
 /// (`organization-bootstrap`) or `null`. Without it a cleared write is visible
 /// only in the route's generic request row, which says neither that it touched
@@ -655,10 +656,10 @@ fn cleared_row(
                 serde_json::json!({
                     "certificate_id": certificate_id,
                     "grantee": { "kind": "service_account", "id": service_account_id },
-                    // The account the certificate was taken from on a re-bind
-                    // (`null` when it was unbound), and the nodes at which the
-                    // gate required the binder to hold `network:grant`.
-                    "before": binding.before,
+                    // The nodes at which the gate required the binder to hold
+                    // `network:grant`. No `before`: the route refuses a bound
+                    // certificate, so a success row never takes one from an
+                    // account (R112W4-05).
                     "nodes": binding.nodes,
                 }),
             )

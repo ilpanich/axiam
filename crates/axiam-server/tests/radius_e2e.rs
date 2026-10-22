@@ -113,10 +113,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use actix_web::dev::ServerHandle;
+use actix_web::dev::{ServerHandle, Service as _};
 use actix_web::{App, HttpResponse, HttpServer, test, web};
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::config::{ClientAuth, TlsConfig};
@@ -2546,8 +2546,81 @@ fn serve_axiam(
     auth: AuthConfig,
     authz: Arc<dyn AuthzChecker>,
     tls: rustls::ServerConfig,
+    holds: Arc<Holds>,
 ) -> Axiam {
-    serve_axiam_on(0, state, auth, authz, tls)
+    serve_axiam_on(0, state, auth, authz, tls, holds)
+}
+
+/// The longest a [`Hold`] keeps a request: under the recipe's 4-second `rest`
+/// timeout (`raddb/live/axiam_live`), so a request held this long still gets its answer.
+const HOLD_AT_MOST: Duration = Duration::from_secs(3);
+
+/// Holds the first two requests to one route, once armed, until both have arrived
+/// (or [`HOLD_AT_MOST`] has passed): what makes two concurrent authentications
+/// interleave the way the test needs, rather than the way the scheduler likes.
+#[derive(Default)]
+struct Hold {
+    armed: AtomicBool,
+    arrived: AtomicUsize,
+    timed_out: AtomicUsize,
+    both: tokio::sync::Notify,
+}
+
+impl Hold {
+    fn arm(&self, on: bool) {
+        self.arrived.store(0, Ordering::SeqCst);
+        self.timed_out.store(0, Ordering::SeqCst);
+        self.armed.store(on, Ordering::SeqCst);
+    }
+
+    async fn pass(&self) {
+        if !self.armed.load(Ordering::SeqCst) {
+            return;
+        }
+        // Made before the count, so the second arrival's wake-up cannot be missed.
+        let both = self.both.notified();
+        match self.arrived.fetch_add(1, Ordering::SeqCst) + 1 {
+            1 => {
+                if tokio::time::timeout(HOLD_AT_MOST, both).await.is_err() {
+                    self.timed_out.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            2 => self.both.notify_waiters(),
+            _ => {}
+        }
+    }
+
+    /// Requests that reached the route since it was armed.
+    fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::SeqCst)
+    }
+
+    /// Whether the first request was let go by the second, not by the clock.
+    fn met(&self) -> bool {
+        self.arrived() >= 2 && self.timed_out.load(Ordering::SeqCst) == 0
+    }
+}
+
+/// One [`Hold`] in front of the decision and one in front of the device login.
+#[derive(Default)]
+struct Holds {
+    decide: Arc<Hold>,
+    device: Arc<Hold>,
+}
+
+impl Holds {
+    fn arm(&self, on: bool) {
+        self.decide.arm(on);
+        self.device.arm(on);
+    }
+
+    fn on(&self, path: &str) -> Option<Arc<Hold>> {
+        match path {
+            "/api/v1/network/decide" => Some(Arc::clone(&self.decide)),
+            "/api/v1/auth/device" => Some(Arc::clone(&self.device)),
+            _ => None,
+        }
+    }
 }
 
 /// [`serve_axiam`] on `port` (`0`: any). A port just released by a stopped listener
@@ -2559,6 +2632,7 @@ fn serve_axiam_on(
     auth: AuthConfig,
     authz: Arc<dyn AuthzChecker>,
     tls: rustls::ServerConfig,
+    holds: Arc<Holds>,
 ) -> Axiam {
     // All interfaces: the container reaches the host at its network's gateway.
     let mut tries = 0;
@@ -2574,7 +2648,18 @@ fn serve_axiam_on(
     };
     let port = listener.local_addr().expect("its address").port();
     let server = HttpServer::new(move || {
+        let holds = Arc::clone(&holds);
         App::new()
+            .wrap_fn(move |req, srv| {
+                let hold = holds.on(req.path());
+                let answer = srv.call(req);
+                async move {
+                    if let Some(hold) = hold {
+                        hold.pass().await;
+                    }
+                    answer.await
+                }
+            })
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(authz.clone()))
             .app_data(web::Data::new(state.clone()))
@@ -2702,21 +2787,53 @@ fn assert_tunnel(attempt: &Attempt, vlan: &str, what: &str) {
     );
 }
 
-/// Whether the debug log records `rlm_rest` answering with `status`: a line that names
-/// `REST-HTTP-Status-Code` and the status, or the expansion of that attribute followed
-/// by the `--> status` line. A bare `401` elsewhere in the log (a port, a serial, a
-/// timestamp) is not the answer.
+/// Whether the debug log records `rlm_rest` answering with `status`: the line `rest.c`
+/// writes for it (`Adding reply:REST-HTTP-Status-Code = "401"`, release_3_2_8 :2428),
+/// or the expansion of that attribute followed by the `--> 401` line. Both are anchored
+/// on the attribute's value, so a `401` elsewhere on the line (the `(401)` request
+/// number `-X` puts in front of it, a port, a serial) is not the answer (#765).
 fn log_has_status_code(log: &str, status: &str) -> bool {
-    let lines: Vec<&str> = log.lines().collect();
+    let added = format!("REST-HTTP-Status-Code = \"{status}\"");
+    let expanded = format!("--> {status}");
+    let lines: Vec<&str> = log.lines().map(without_request_number).collect();
     lines.iter().enumerate().any(|(i, line)| {
-        line.contains("REST-HTTP-Status-Code")
-            && (line
-                .split(|c: char| !c.is_ascii_digit())
-                .any(|t| t == status)
-                || lines.get(i + 1).is_some_and(|next| {
-                    next.trim().strip_prefix("--> ").map(str::trim) == Some(status)
-                }))
+        line.ends_with(&added)
+            || (line.ends_with("%{reply:REST-HTTP-Status-Code}")
+                && lines.get(i + 1) == Some(&expanded.as_str()))
     })
+}
+
+/// A `-X` debug line without the `(N)` request number in front of it, trimmed.
+fn without_request_number(line: &str) -> &str {
+    let line = line.trim();
+    line.strip_prefix('(')
+        .and_then(|rest| rest.split_once(')'))
+        .filter(|(number, _)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(line, |(_, rest)| rest.trim())
+}
+
+/// The matcher, on lines shaped as `freeradius -X` writes them. Needs no container.
+// `test` is `actix_web::test` in this file, so the attribute is spelt in full.
+#[::core::prelude::v1::test]
+fn the_status_matcher_is_anchored_on_the_value() {
+    let added =
+        |n: &str, code: &str| format!("({n}) Adding reply:REST-HTTP-Status-Code = \"{code}\"");
+    assert!(log_has_status_code(&added("3", "401"), "401"));
+    assert!(
+        !log_has_status_code(&added("401", "200"), "401"),
+        "request 401's 200 is not a 401"
+    );
+    assert!(!log_has_status_code(&added("3", "4010"), "401"));
+    let expanded = "(7)        EXPAND %{reply:REST-HTTP-Status-Code}\n(7)           --> 401";
+    assert!(log_has_status_code(expanded, "401"));
+    assert!(!log_has_status_code(
+        "(401)        EXPAND %{reply:REST-HTTP-Status-Code}\n(401)           --> 200",
+        "401"
+    ));
+    assert!(!log_has_status_code(
+        "(9) port 401 REST-HTTP-Status-Code",
+        "401"
+    ));
 }
 
 /// A refusal the decision made: the certificate was valid for EAP-TLS, and the
@@ -2911,7 +3028,14 @@ async fn decision_per_authentication() {
     };
     let tls = axiam_server::tls::build_rustls_server_config(&tls_config)
         .expect("AXIAM's TLS configuration");
-    let mut axiam = serve_axiam(state.clone(), auth.clone(), Arc::clone(&engine), tls);
+    let holds = Arc::new(Holds::default());
+    let mut axiam = serve_axiam(
+        state.clone(),
+        auth.clone(),
+        Arc::clone(&engine),
+        tls,
+        Arc::clone(&holds),
+    );
     let host_ip = gateway_of(&ip);
     let axiam_url = format!("https://{AXIAM_HOST}:{}", axiam.port);
 
@@ -3196,15 +3320,40 @@ async fn decision_per_authentication() {
         Arc::clone(&engine),
         axiam_server::tls::build_rustls_server_config(&tls_config)
             .expect("AXIAM's TLS configuration, again"),
+        Arc::clone(&holds),
     );
     // Two authentications at once, both holding the cached token: both get the 401, both
     // drop and both log in again (#720). The drop must not insert the refused token when
     // the other has dropped it first, and the store must not merge it over the new one.
     // The identity is the supplicant's own; the decision is asked for the certificate's
     // fingerprint, so both are press-07.
+    //
+    // The interleaving is forced, not hoped for (#765): AXIAM holds the first two
+    // decisions until both have arrived, so both threads have read the old token before
+    // either drops it, and the first two device logins until both have arrived, so both
+    // drops come before either store. That is the order in which 1.1.1's file put the
+    // refused token back (the second drop inserted it, both stores merged it) and
+    // rejected both; this file admits both.
+    holds.arm(true);
     let (healed, healed_too) = tokio::join!(
         radius.eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key)),
         radius.eap_tls_live("press-07b", path_str(&press07.cert), path_str(&press07.key)),
+    );
+    let (decided, logged_in) = (holds.decide.arrived(), holds.device.arrived());
+    let (decide_met, device_met) = (holds.decide.met(), holds.device.met());
+    holds.arm(false);
+    assert!(
+        decide_met && device_met,
+        "rotation: the two authentications interleaved (both decisions arrived before either \
+         was answered: {decide_met}; both logins before either was answered: {device_met}):\n{}\n{}",
+        healed.report(),
+        healed_too.report()
+    );
+    assert_eq!(
+        (decided, logged_in),
+        (4, 2),
+        "rotation: each authentication asked the decision twice and logged in once:\n{}",
+        healed.log
     );
     for (which, attempt) in [("first", &healed), ("second", &healed_too)] {
         assert!(
@@ -3243,8 +3392,10 @@ async fn decision_per_authentication() {
     );
     say(
         "rotation",
-        "the binding rotated under the cached token: two concurrent authentications each got the \
-         401, logged in again and were admitted at once; the next one used the new token",
+        "the binding rotated under the cached token: two concurrent authentications, interleaved \
+         by AXIAM's holds (both decisions in before either answer, both logins in before either \
+         answer; 4 decisions, 2 logins), each got the 401, logged in again and were admitted at \
+         once; the next one used the new token",
     );
 
     // ---- a wrong site key ------------------------------------------------------

@@ -37,6 +37,13 @@
 
 services:
   freeradius:
+    # The base file's debug output, but THREADED: `-X` is `-sfxx -l stdout`, and its
+    # `-s` serves one request at a time (radiusd.c 3.2.8, `case 'X'` clears
+    # spawn_flag), so two authentications can never be in post-auth at once and the
+    # e2e's concurrent rotation step could not run concurrently at all (#765).
+    # `-xx` is the same debug level 2, so the log lines (no timestamps, the `(N)`
+    # request number in front) are the ones `-X` writes (log.c :405).
+    command: ["freeradius", "-f", "-xx", "-l", "stdout"]
     environment:
       AXIAM_LIVE_URL: "${RADIUS_E2E_AXIAM_URL:?the test writes docker/.secrets/radius/env; pass --env-file}"
       AXIAM_LIVE_SITE: "${RADIUS_E2E_SITE:?the test writes docker/.secrets/radius/env; pass --env-file}"

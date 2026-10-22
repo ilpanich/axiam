@@ -3333,7 +3333,8 @@ async fn decision_per_authentication() {
     // either drops it, and the first two device logins until both have arrived, so both
     // drops come before either store. That is the order in which 1.1.1's file put the
     // refused token back (the second drop inserted it, both stores merged it) and
-    // rejected both; this file admits both.
+    // rejected both; this file admits both. It needs FreeRADIUS's thread pool, which
+    // `-X` does not run (docker-compose.radius-live.yml runs `-f -xx -l stdout`).
     holds.arm(true);
     let (healed, healed_too) = tokio::join!(
         radius.eap_tls_live("press-07", path_str(&press07.cert), path_str(&press07.key)),
@@ -3345,7 +3346,8 @@ async fn decision_per_authentication() {
     assert!(
         decide_met && device_met,
         "rotation: the two authentications interleaved (both decisions arrived before either \
-         was answered: {decide_met}; both logins before either was answered: {device_met}):\n{}\n{}",
+         was answered: {decide_met}; both logins before either was answered: {device_met}; \
+         {decided} decisions, {logged_in} logins):\n{}\n{}",
         healed.report(),
         healed_too.report()
     );

@@ -361,8 +361,8 @@ time, each binary's own exit code.
 | `cargo test -p axiam-api-grpc` (lib + 8 binaries; `grpc_auth_test`, `grpc_authz_test`, `grpc_reactor_test`, `grpc_userinfo_test` require `client` and are covered below) | 0 each (114 passed, 0 failed) |
 | `cargo test -p axiam-api-grpc --features client` | 0 (149 passed) |
 | `cargo check -p axiam-api-rest --no-default-features` | 0 |
-| `cargo test -p axiam-api-rest` (SAML on), lib + 113 binaries | running at this commit; recorded in the follow-up commit |
-| `cargo test -p axiam-server --no-default-features`, lib + 28 binaries | running at this commit; recorded in the follow-up commit |
+| `cargo test -p axiam-api-rest` (SAML on), lib + 112 binaries, `rate_limit_principal_test`, `device_flow_test`, `rate_limit_keying_test`, `rate_limit_bucket_names_test` and `federation_test` among them | 0 each (2 067 passed, 9 ignored) |
+| `cargo test -p axiam-server --no-default-features`, lib + 26 binaries (`audit_wraps_routes` among them; `radius_e2e` skips its body without Docker) | 0 each (351 passed) |
 | `cargo fmt -p` (the eight crates) `-- --check` | 0 |
 | `npx vitest run src/pages/audit/AuditLogsPage.test.tsx` | 0 (18 passed) |
 | `npx tsc -b --noEmit` (frontend) | 0 |

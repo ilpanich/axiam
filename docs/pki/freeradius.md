@@ -507,10 +507,10 @@ It runs one at a time per URL. The whole run, from reading the stored tag to
 writing it, holds a lock in `ca_path` (`flock` on `.fetch-crl.*.lock` where
 `flock` exists; otherwise a directory of that name plus `.d`, which a later run
 breaks when its owner is gone or it is older than 120 seconds). A run that finds
-the lock held prints that, exits **0** and touches nothing: it is not a failure,
-so a timer that overlaps its own previous run, a manual run beside the cron entry
-or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. Without
-the lock, two runs that fetch different lists can leave the older one in place
+the lock held prints that and touches nothing: it is not a failure (it exits **0**,
+or **3** when the installed list is near its end, below), so a timer that overlaps
+its own previous run, a manual run beside the cron entry or a Kubernetes CronJob
+left at `concurrencyPolicy: Allow` raises no alert. Without the lock, two runs that fetch different lists can leave the older one in place
 under the newer one's tag, and a revocation then waits until AXIAM's list next
 changes, up to half its lifetime, with a file fresh enough to silence the
 exit-status alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
@@ -545,7 +545,8 @@ would have had (a refusal's reason is still on stderr). AXIAM re-signs at half t
 lifetime, so a healthy list never gets there; a fetch that no longer moves, or a
 server that keeps answering `304` to an old list, does, with at least a quarter of
 the lifetime still to act in ([below](#the-revocation-lag)). A run that finds the
-lock held exits `0` and checks nothing (R110W5-07).
+lock held still reads the installed list's age, which needs no lock, and exits `3`
+if the list is near its end, else `0`; it fetches and writes nothing (R111W5-02).
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request

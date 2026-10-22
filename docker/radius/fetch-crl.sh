@@ -65,13 +65,14 @@
 # (the guide, section 4, "The revocation lag"). `--max-filesize` stops an unsized (chunked)
 # body only from curl 8.4; before that `--max-time` alone bounds it.
 #
-# Exit 0: installed, unchanged, or another run holds the lock. Exit 1: the list
+# Exit 0: installed, unchanged, or another run holds the lock (the age check
+# below still runs then: it reads the list and needs no lock). Exit 1: the list
 # was refused or could not be fetched; the installed list is untouched and the
 # reason is on stderr. Exit 3: the list in `capath` for this CA expires in less
 # than a quarter of its lifetime (`nextUpdate` minus `lastUpdate`), or has
 # expired; that is read off the list itself, after a 200, a 304 or a refusal
 # alike, and takes the place of exit 0 or 1 (the refusal's reason is still on
-# stderr), because FreeRADIUS refuses every device of the tenant once the list
+# stderr; a run that finds the lock held checks it too), because FreeRADIUS refuses every device of the tenant once the list
 # passes its `nextUpdate` (R110W5-07). AXIAM re-signs at half the lifetime, so a
 # healthy list never gets there. Exit 2: wrong usage. Alert on any non-zero exit.
 #
@@ -199,6 +200,10 @@ trap 'exit 1' HUP INT TERM
 # ---- one run at a time ---------------------------------------------------------
 busy() {
 	echo "fetch-crl: another run holds the lock on $capath; nothing touched"
+	# The age check only reads the installed list, which is replaced by a rename
+	# and so is always whole: it needs no lock, and a timer that keeps meeting its
+	# own previous run must not hide a list near its end (R111W5-02).
+	if near_expiry; then exit 3; fi
 	exit 0
 }
 

@@ -1219,7 +1219,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**Alert on a non-zero exit status of the fetch job.** `fetch-crl.sh` exits `1` when it refuses a list or cannot fetch, and `3` when the installed list has less than a quarter of its lifetime left, after a `304` as after a refusal. A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. The Live profile keeps `check_crl = yes` as a second check, so the fetch job stays in the Live profile too unless you decide the decision is enough.",
+        text: "**Alert on a non-zero exit status of the fetch job.** `fetch-crl.sh` exits `1` when it refuses a list or cannot fetch, and `3` when the installed list has less than a quarter of its lifetime left, after a `304`, a refusal or a run that finds another holding the lock. A fetch that stops is fail-closed: once the installed list passes its `nextUpdate`, FreeRADIUS refuses **every** device of the tenant. The Live profile keeps `check_crl = yes` as a second check, so the fetch job stays in the Live profile too unless you decide the decision is enough.",
       },
 
       { type: "h", id: "segments", text: "Live: network segments" },

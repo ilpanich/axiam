@@ -1595,8 +1595,8 @@ where
     // from ingress-nginx to this native TLS listener — so on a native TLS
     // listener it is said once, here: that is the listener a client with no
     // proxy in front (the FreeRADIUS recipe's mutual TLS) reaches directly.
-    let trusted_proxies = axiam_core::forwarded_for::TrustedProxies::from_env()
-        .unwrap_or_else(|e| panic!("invalid rate-limit configuration: {e}"));
+    let trusted_proxies =
+        trusted_proxies_for_boot(|name| std::env::var(name)).unwrap_or_else(|e| panic!("{e}"));
     // The WARN / INFO for this list is emitted below, once the gRPC listener's
     // TLS is resolved: it names whichever listener(s) terminate TLS here.
 
@@ -3636,9 +3636,40 @@ const _: () =
 const _: () =
     assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < LEASE_LOSS_STOP.outbound.as_millis());
 
+/// The rate-limit trusted-proxy list as the boot reads it, or the message it
+/// stops on (R111W2-02, #732): an unset variable is the empty list; a value
+/// that does not parse, or is not UTF-8, refuses to start rather than read as
+/// empty and honour every peer's `X-Forwarded-For`.
+fn trusted_proxies_for_boot(
+    lookup: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> Result<axiam_core::forwarded_for::TrustedProxies, String> {
+    axiam_core::forwarded_for::TrustedProxies::from_lookup(lookup)
+        .map_err(|e| format!("invalid rate-limit configuration: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn a_non_utf8_trusted_proxies_value_stops_the_boot() {
+        use std::os::unix::ffi::OsStringExt;
+        let refused = super::trusted_proxies_for_boot(|_| {
+            Err(std::env::VarError::NotUnicode(
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
+            ))
+        })
+        .expect_err("boot must refuse");
+        assert!(
+            refused.starts_with("invalid rate-limit configuration"),
+            "{refused}"
+        );
+        assert!(refused.contains("TRUSTED_PROXIES"), "{refused}");
+        let unparsable = super::trusted_proxies_for_boot(|_| Ok("nope".into()));
+        assert!(unparsable.is_err());
+        let absent = super::trusted_proxies_for_boot(|_| Err(std::env::VarError::NotPresent));
+        assert!(absent.expect("absent is empty").is_empty());
+    }
 
     /// Builds the configuration the way `load_config` does, from an injected
     /// environment instead of the process's.

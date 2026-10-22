@@ -23,6 +23,7 @@
 //! other, so the variable and the rule live here, below both, and both read
 //! [`TrustedProxies::configured`] — one parse per process.
 
+use std::env::VarError;
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 
@@ -35,14 +36,24 @@ pub const TRUSTED_PROXIES_VAR: &str = "AXIAM__RATE_LIMIT__TRUSTED_PROXIES";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustedProxies(Arc<[IpNetwork]>);
 
-/// An entry of the list that is not a CIDR block or an address.
+/// Why the list could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{TRUSTED_PROXIES_VAR}: entry `{entry}` is not a CIDR block or an IP address: {reason}")]
-pub struct TrustedProxiesError {
-    /// The entry as written.
-    pub entry: String,
-    /// Why it did not parse.
-    pub reason: IpNetworkError,
+pub enum TrustedProxiesError {
+    /// An entry of the list that is not a CIDR block or an address.
+    #[error(
+        "{TRUSTED_PROXIES_VAR}: entry `{entry}` is not a CIDR block or an IP address: {reason}"
+    )]
+    Entry {
+        /// The entry as written.
+        entry: String,
+        /// Why it did not parse.
+        reason: IpNetworkError,
+    },
+    /// The variable is set, but its value is not valid Unicode. The bytes are
+    /// not echoed: they are not known to be printable, and a half-read list
+    /// must not be guessed at.
+    #[error("{TRUSTED_PROXIES_VAR}: the value is not valid UTF-8")]
+    NotUnicode,
 }
 
 impl TrustedProxies {
@@ -60,7 +71,7 @@ impl TrustedProxies {
             .map(|entry| {
                 entry
                     .parse::<IpNetwork>()
-                    .map_err(|reason| TrustedProxiesError {
+                    .map_err(|reason| TrustedProxiesError::Entry {
                         entry: entry.to_owned(),
                         reason,
                     })
@@ -73,11 +84,32 @@ impl TrustedProxies {
     ///
     /// # Errors
     ///
-    /// As [`TrustedProxies::parse`]. The composition root calls this once at
-    /// boot and refuses to start on an error.
+    /// As [`TrustedProxies::from_lookup`]. The composition root calls this once
+    /// at boot and refuses to start on an error.
     pub fn from_env() -> Result<Self, TrustedProxiesError> {
-        std::env::var(TRUSTED_PROXIES_VAR)
-            .map_or_else(|_| Ok(Self::default()), |raw| Self::parse(&raw))
+        Self::from_lookup(|name| std::env::var(name))
+    }
+
+    /// [`TrustedProxies::from_env`] over any lookup of a variable by name, so
+    /// the refusals are testable without the process environment.
+    ///
+    /// An unset variable is the empty list. A value that is not valid Unicode
+    /// is an error, not an unset variable: reading it as empty would honour
+    /// every peer's `X-Forwarded-For` while the operator believes a list is in
+    /// force (R111W2-02, #732).
+    ///
+    /// # Errors
+    ///
+    /// [`TrustedProxiesError::NotUnicode`] for a non-Unicode value, otherwise
+    /// as [`TrustedProxies::parse`].
+    pub fn from_lookup(
+        lookup: impl FnOnce(&str) -> Result<String, VarError>,
+    ) -> Result<Self, TrustedProxiesError> {
+        match lookup(TRUSTED_PROXIES_VAR) {
+            Ok(raw) => Self::parse(&raw),
+            Err(VarError::NotPresent) => Ok(Self::default()),
+            Err(VarError::NotUnicode(_)) => Err(TrustedProxiesError::NotUnicode),
+        }
     }
 
     /// The process-wide list every extractor reads, parsed once.
@@ -276,9 +308,53 @@ mod tests {
             ("10.0.0.0/33", "10.0.0.0/33"),
         ] {
             let error = TrustedProxies::parse(raw).expect_err(raw);
-            assert_eq!(error.entry, entry, "{raw}");
+            assert!(
+                matches!(&error, TrustedProxiesError::Entry { entry: e, .. } if e == entry),
+                "{raw}: {error}"
+            );
             assert!(error.to_string().contains(TRUSTED_PROXIES_VAR), "{error}");
         }
+    }
+
+    #[cfg(unix)]
+    fn non_utf8() -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b"10.0.0.0/8,\xff\xfe".to_vec())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_value_is_refused_without_echoing_it() {
+        let error = TrustedProxies::from_lookup(|name| {
+            assert_eq!(name, TRUSTED_PROXIES_VAR);
+            Err(VarError::NotUnicode(non_utf8()))
+        })
+        .expect_err("a non-UTF-8 value must not read as an empty list");
+        assert_eq!(error, TrustedProxiesError::NotUnicode);
+        let shown = error.to_string();
+        assert!(shown.contains(TRUSTED_PROXIES_VAR), "{shown}");
+        assert!(
+            !shown.contains("10.0.0.0") && !shown.contains('\u{fffd}'),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_lookup_twin_reads_absent_valid_and_unparsable_values() {
+        let absent = TrustedProxies::from_lookup(|_| Err(VarError::NotPresent)).expect("absent");
+        assert!(absent.is_empty());
+        let valid =
+            TrustedProxies::from_lookup(|_| Ok("10.0.0.0/8, 192.0.2.7".into())).expect("valid");
+        assert_eq!(
+            valid,
+            TrustedProxies::parse("10.0.0.0/8,192.0.2.7").unwrap()
+        );
+        assert_eq!(valid.networks().len(), 2);
+        let bad = TrustedProxies::from_lookup(|_| Ok("10.0.0.0/8,proxy.internal".into()))
+            .expect_err("unparsable entry");
+        assert!(
+            matches!(bad, TrustedProxiesError::Entry { ref entry, .. } if entry == "proxy.internal")
+        );
     }
 
     #[test]

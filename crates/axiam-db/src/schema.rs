@@ -5,6 +5,8 @@
 //! ASSERT constraints for validation.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use surrealdb::{Connection, Surreal};
@@ -2662,6 +2664,29 @@ pub async fn run_migrations_with_lease<C: Connection>(
     db: &Surreal<C>,
     lease: MigrationLease,
 ) -> Result<(), DbError> {
+    run_migrations_under_lease(db, lease, |migrate| migrate).await
+}
+
+/// The migrations, as the lease holder runs them, handed to a test.
+#[doc(hidden)]
+pub type PendingMigrations<'a> = Pin<Box<dyn Future<Output = Result<(), DbError>> + Send + 'a>>;
+
+/// [`run_migrations_with_lease`] with a test seam: `in_lease` receives the
+/// migrations future and runs inside the lease — after it is taken, while it
+/// is refreshed, before it is released — so a test can record when it entered
+/// and left the critical section, or hold it past a TTL. Code only; nothing in
+/// configuration reaches it. Production passes the future through unchanged.
+#[doc(hidden)]
+pub async fn run_migrations_under_lease<'a, C, F, Fut>(
+    db: &'a Surreal<C>,
+    lease: MigrationLease,
+    in_lease: F,
+) -> Result<(), DbError>
+where
+    C: Connection,
+    F: FnOnce(PendingMigrations<'a>) -> Fut,
+    Fut: Future<Output = Result<(), DbError>>,
+{
     // Ensure migration-tracking tables exist (all DDL is IF NOT EXISTS). Two
     // starters defining the same catalogue entries at once can lose a write
     // conflict; it commits nothing and is retried.
@@ -2682,7 +2707,7 @@ pub async fn run_migrations_with_lease<C: Connection>(
     // when the migrations finish, whichever way they finish.
     let outcome = tokio::select! {
         biased;
-        outcome = apply_pending_migrations(db) => outcome,
+        outcome = in_lease(Box::pin(apply_pending_migrations(db))) => outcome,
         never = refresh_lease(db, &holder, &lease) => match never {},
     };
 

@@ -340,6 +340,102 @@ impl Default for AppConfig {
     }
 }
 
+/// Everything [`compose_app`] reads, owned once and cloned per worker.
+///
+/// A struct rather than a long argument list so that the composition the
+/// listener runs and the one `tests/audit_wraps_routes.rs` runs are the same
+/// function over different values.
+#[derive(Clone)]
+pub struct AppDeps<C: Connection + Clone + 'static> {
+    /// The request-audit middleware that wraps the whole `App`.
+    pub audit_middleware: AuditMiddleware,
+    /// `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`.
+    pub cors_allowed_origins: Vec<String>,
+    /// The authorisation checker the RBAC-protected handlers read.
+    pub rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker>,
+    /// Token verification configuration.
+    pub auth_config: AuthConfig,
+    /// Whether a session is still live.
+    pub session_validator: Arc<dyn axiam_api_rest::SessionValidator>,
+    /// DPoP proof replay guard.
+    pub dpop_replay_guard: Arc<dyn axiam_api_rest::DpopReplayGuard>,
+    /// Resolves the tenants a principal may act in.
+    pub tenant_scope_resolver: Arc<dyn axiam_api_rest::TenantScopeResolver>,
+    /// Resolves the reach of a principal.
+    pub principal_reach_resolver: Arc<dyn axiam_api_rest::PrincipalReachResolver>,
+    /// Resolves SCIM bearer tokens.
+    pub scim_token_resolver: Arc<dyn axiam_api_rest::ScimTokenResolver>,
+    /// The single `AppState<C>` composition root.
+    pub app_state: AppState<C>,
+    /// The resolved rate-limit configuration.
+    pub rate_limit: RateLimitConfig,
+    /// Which optional route groups are mounted.
+    pub route_options: RouteOptions,
+}
+
+/// The `App` the REST listener serves, factored out of [`serve`] unchanged so
+/// a test can compose the same wraps and routes (#733).
+pub fn compose_app<C>(
+    deps: AppDeps<C>,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+>
+where
+    C: Connection + Clone + 'static,
+{
+    App::new()
+        .wrap(SecurityHeadersMiddleware)
+        // F4 P23W3-03 (T-325): the default builder's field set, with query
+        // values (a SAML handle, `RelayState`, `state`, a reset token) and
+        // `{token}` path segments redacted from `http.target`.
+        .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
+        .wrap(deps.audit_middleware)
+        .wrap(build_cors(&deps.cors_allowed_origins))
+        // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
+        // web::Data<Arc<dyn AuthzChecker>>, matching the AuthzData type alias used
+        // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
+        // register it as web::Data<dyn AuthzChecker>, causing "Requested application
+        // data is not configured correctly" 500s on every admin endpoint.
+        //
+        // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
+        // AppState<C> alongside the single AppState registration below — see
+        // `axiam_api_rest::state` module docs for the full rationale (Rust
+        // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
+        // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
+        // `AuthConfig`/`SessionValidator` without knowing `C`, and
+        // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
+        // App — independently looks up `web::Data<AuthConfig>`).
+        .app_data(web::Data::new(deps.rest_authz))
+        .app_data(web::Data::new(deps.auth_config))
+        .app_data(web::Data::new(deps.session_validator))
+        .app_data(web::Data::new(deps.dpop_replay_guard))
+        .app_data(web::Data::new(deps.tenant_scope_resolver))
+        .app_data(web::Data::new(deps.principal_reach_resolver))
+        .app_data(web::Data::new(deps.scim_token_resolver))
+        // QUAL-01: single composition root — every other REST handler
+        // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
+        // lives on this one AppState<C> value (see above).
+        .app_data(web::Data::new(deps.app_state))
+        .configure(health_routes::<C>)
+        .configure(|cfg| {
+            register_api_v1_routes_with::<C>(cfg, &deps.rate_limit, deps.route_options)
+        })
+        // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
+        // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
+        // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
+        // posture log line) actually govern the provisioning surface.
+        .configure(|cfg| {
+            axiam_scim::scim_routes_with_rate_limits::<C>(cfg, &deps.rate_limit)
+        })
+        .configure(openapi_routes)
+}
+
 /// How [`serve`] is embedded, beyond the configuration. The default is what
 /// `main` uses.
 pub struct ServeOptions {
@@ -3143,53 +3239,22 @@ where
     }
     let app_state = app_state;
 
+    let deps = AppDeps {
+        audit_middleware: audit_middleware.clone(),
+        cors_allowed_origins: server_config.cors_allowed_origins.clone(),
+        rest_authz,
+        auth_config,
+        session_validator,
+        dpop_replay_guard,
+        tenant_scope_resolver,
+        principal_reach_resolver,
+        scim_token_resolver,
+        app_state,
+        rate_limit: rate_limit_cfg,
+        route_options,
+    };
     let http_server = HttpServer::new(move || {
-        let rl = rate_limit_cfg.clone();
-        App::new()
-            .wrap(SecurityHeadersMiddleware)
-            // F4 P23W3-03 (T-325): the default builder's field set, with query
-            // values (a SAML handle, `RelayState`, `state`, a reset token) and
-            // `{token}` path segments redacted from `http.target`.
-            .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
-            .wrap(audit_middleware.clone())
-            .wrap(build_cors(&server_config.cors_allowed_origins))
-            // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
-            // web::Data<Arc<dyn AuthzChecker>>, matching the AuthzData type alias used
-            // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
-            // register it as web::Data<dyn AuthzChecker>, causing "Requested application
-            // data is not configured correctly" 500s on every admin endpoint.
-            //
-            // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
-            // AppState<C> alongside the single AppState registration below — see
-            // `axiam_api_rest::state` module docs for the full rationale (Rust
-            // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
-            // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
-            // `AuthConfig`/`SessionValidator` without knowing `C`, and
-            // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
-            // App — independently looks up `web::Data<AuthConfig>`).
-            .app_data(web::Data::new(rest_authz.clone()))
-            .app_data(web::Data::new(auth_config.clone()))
-            .app_data(web::Data::new(session_validator.clone()))
-            .app_data(web::Data::new(dpop_replay_guard.clone()))
-            .app_data(web::Data::new(tenant_scope_resolver.clone()))
-            .app_data(web::Data::new(principal_reach_resolver.clone()))
-            .app_data(web::Data::new(scim_token_resolver.clone()))
-            // QUAL-01: single composition root — every other REST handler
-            // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
-            // lives on this one AppState<C> value (see above).
-            .app_data(web::Data::new(app_state.clone()))
-            .configure(health_routes::<C>)
-            .configure(|cfg| {
-                register_api_v1_routes_with::<C>(cfg, &rl, route_options)
-            })
-            // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
-            // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
-            // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
-            // posture log line) actually govern the provisioning surface.
-            .configure(|cfg| {
-                axiam_scim::scim_routes_with_rate_limits::<C>(cfg, &rl)
-            })
-            .configure(openapi_routes)
+        compose_app(deps.clone())
     })
     // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS
     // connection into the per-connection extensions so cert-auth handlers read

@@ -659,3 +659,69 @@ Neither touches the recipe or the code paths. Once a sweep commit closes both, w
 `fetch-crl-test.sh` under both shells and `check-token-cache.py --self-test` showing the new
 cases, the wave can merge without another e2e dispatch: neither file is an input of the
 Live case.
+
+### A.8 Second addendum — the sweep, part c (2026-10-22)
+
+**Against:** `5d40dad..1ffe247`, two commits, both carrying one `gpgsig` header:
+
+- `71385db` (#767 (b)) adds 5 lines to `fetch-crl-test.sh`;
+- `1ffe247` (#774) adds 25 lines to `check-token-cache.py`.
+
+**Checks run** (each tool's own exit code):
+
+| Command | Exit |
+|---|---|
+| `bash docker/radius/tests/fetch-crl-test.sh dash` | 0 (91 passed, 0 failed) |
+| `bash docker/radius/tests/fetch-crl-test.sh bash` | 0 (91 passed, 0 failed) |
+| `python3 docker/radius/tests/check-token-cache.py --self-test` | 0 (20 passed, 0 failed) |
+| `python3 docker/radius/tests/check-token-cache.py` (head) | 0 |
+| `… check-token-cache.py <33a3b80:check-eap-tls>` | 1 (8 findings, as in §A.3) |
+| `… check-token-cache.py <main:check-eap-tls>` | 1 |
+
+**R112W5-04 (#767): closed.** The new case `07/lock-held (mkdir): a healthy list -> exit 0, lock
+left alone, nothing touched, no request` is built like its `flock` twin:
+
+- it serves `L21`, the healthy list the `flock` case uses;
+- the lock's owner is the live test shell (`$$`, with the current time), so the lock is held and
+  not stale;
+- it truncates the request log before the locked run;
+- it asserts exit 0, the lock message, the lock directory still there, an unchanged `capath`
+  snapshot and no request.
+
+Both lock kinds now cover both outcomes. With R112W5-04's other three items closed in §A.5, the
+finding is closed.
+
+**R112W5-05 (#774): closed.** `CALL = ^-?axiam_token_cache(\s*\{)?$` recognises four spellings:
+
+- bare;
+- with an action block;
+- optional (`-axiam_token_cache`);
+- optional with an action block.
+
+Each counts as a call and is shape-checked against the `update control` block directly before
+it. The lines of an action block are skipped by brace depth, and the block's closing line becomes
+the last statement. So a call that follows an action block does not inherit the read-only block
+of the call before it, and the self-test case `a call after an action block does not inherit its
+block` checks exactly that. There are nine new fixtures, a bad and a good call in each form plus
+that case. The shipped file and the two old files give the same results as before.
+
+**Noted, not raised as a finding.** FreeRADIUS 3.2.8's parser accepts more than one item per line
+(`conffile.c`, `check_for_more` → `get_more`). So a one-line action block,
+`axiam_token_cache { notfound = ok }`, is valid unlang, and `CALL` does not match it. A plain call
+spelt that way would therefore not be checked. A bare module name followed by `}` on the same
+line (`{ axiam_token_cache }`) is a parse error (`do_bare_word` accepts only end of line, `#` or
+`,`), so the plain form cannot hide that way. Three reasons this is not raised:
+
+- The regex is the one #774 itself specified. The optional hardening the issue offered ("fail on
+  any other line that names the module") was not taken, which the issue allowed.
+- The gate guards later edits only, and the shipped recipe is checked by its two other witnesses:
+  `token-cache-test.sh` and the e2e's forced interleaving, which fails on the old shapes (§A.3).
+- A one-line action block appears nowhere in this repository's `raddb`.
+
+If the maintainer wants it closed, the hardening is the issue's own optional bullet.
+
+**New findings: none.** Neither commit touches the recipe, the e2e or the workflow, so no new
+e2e dispatch is needed.
+
+**Merge.** Every finding of this review is closed: R112W5-01 … -05 (#764 … #767, #774).
+**W5 may merge.**

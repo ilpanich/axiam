@@ -699,6 +699,68 @@ async fn grants_refused_by_registration_policy<C: Connection + Clone>(
     Ok(refused)
 }
 
+/// #746 (R111W3-03) — what `requested` would **newly** put on a
+/// `managed_by: dcr | cimd` client that its tenant's registration policy
+/// bounds: `(resources, redirect_uris)`, each with the reason it is refused.
+///
+/// `allowed_resources` is bounded by `external_client_allowed_resources` and
+/// `redirect_uris` by `dcr_allowed_redirect_hosts`, through the helpers
+/// `dcr::validate` itself calls, so the admin `PUT` and the registration
+/// endpoints cannot disagree. Same held-value exemption as
+/// [`scopes_outside_ceiling`]: a resource or redirect URI the stored row already
+/// holds is never counted, so a form posting the whole record back still saves.
+/// An administrator's own client is not bounded. A failed read of the policy is
+/// an error, never "no policy": fail closed. The policy is read only when the
+/// request carries a member the check looks at.
+async fn registration_policy_refusals<C: Connection + Clone>(
+    state: &AppState<C>,
+    stored: &OAuth2Client,
+    resources: Option<&[String]>,
+    redirect_uris: Option<&[String]>,
+) -> Result<(Vec<String>, Vec<String>), AxiamApiError> {
+    if !axiam_oauth2::scope_ceiling::applies_to(stored.managed_by)
+        || (resources.is_none() && redirect_uris.is_none())
+    {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let tenant =
+        axiam_core::repository::TenantRepository::get_by_id(&state.tenant_repo, stored.tenant_id)
+            .await?;
+    let settings = axiam_core::repository::SettingsRepository::get_effective_settings(
+        &state.settings_repo,
+        tenant.organization_id,
+        stored.tenant_id,
+    )
+    .await?;
+    let mut outside_resources = Vec::new();
+    if let Some(requested) = resources {
+        let fresh: Vec<String> = requested
+            .iter()
+            .filter(|r| !stored.allowed_resources.contains(r))
+            .cloned()
+            .collect();
+        outside_resources = axiam_oauth2::dcr::resources_outside_policy(
+            &settings.oidc.external_client_allowed_resources,
+            &fresh,
+        );
+    }
+    let mut refused_redirects = Vec::new();
+    if let Some(requested) = redirect_uris {
+        for uri in requested {
+            if stored.redirect_uris.contains(uri) {
+                continue;
+            }
+            if let Some(reason) = axiam_oauth2::dcr::redirect_uri_refusal(
+                &settings.oidc.dcr_allowed_redirect_hosts,
+                uri,
+            ) {
+                refused_redirects.push(reason);
+            }
+        }
+    }
+    Ok((outside_resources, refused_redirects))
+}
+
 /// Grants a public client may never be registered for (T21.2).
 ///
 /// Both mint a token on the strength of the client's own credential, and a
@@ -946,7 +1008,7 @@ pub async fn get<C: Connection + Clone>(
          body = OAuth2ClientResponse),
         (status = 404, description = "OAuth2 client not found"),
         (status = 409, description = "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."),
-        (status = 422, description = "The client is managed_by dcr or cimd and the request adds either a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`) or a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope or grant the row already holds is not counted. An administrator-managed client is not bounded."),
+        (status = 422, description = "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`), a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`), an allowed_resources entry outside the tenant's external_client_allowed_resources (`resource_exceeds_registration_policy`), or a redirect URI whose host is outside dcr_allowed_redirect_hosts (`redirect_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope, grant, resource or redirect URI the row already holds is not counted. An administrator-managed client is not bounded."),
     ),
     security(("bearer" = []))
 )]
@@ -1180,6 +1242,42 @@ pub async fn update<C: Connection + Clone>(
                 ),
             ));
         }
+    }
+
+    // #746 (R111W3-03) — nor an audience or a redirect host its registration
+    // would refuse: `allowed_resources` is the tenant's list and nothing else (D3),
+    // and `redirect_uris` stay within `dcr_allowed_redirect_hosts`.
+    let (outside_resources, refused_redirects) = registration_policy_refusals(
+        &state,
+        &stored,
+        allowed_resources.as_deref(),
+        req.redirect_uris.as_deref(),
+    )
+    .await?;
+    if !outside_resources.is_empty() {
+        return Ok(crate::error::unprocessable_entity(
+            "resource_exceeds_registration_policy",
+            format!(
+                "the allowed_resources {} are outside the tenant's \
+                 external_client_allowed_resources, and this client is managed_by {} so its \
+                 audiences are the tenant's list; add them there first, or register an \
+                 administrator-managed client",
+                outside_resources.join(", "),
+                stored.managed_by,
+            ),
+        ));
+    }
+    if !refused_redirects.is_empty() {
+        return Ok(crate::error::unprocessable_entity(
+            "redirect_exceeds_registration_policy",
+            format!(
+                "this client is managed_by {} and the administrator API may not give it a \
+                 redirect its registration would be refused: {}; add the host to \
+                 dcr_allowed_redirect_hosts first, or register an administrator-managed client",
+                stored.managed_by,
+                refused_redirects.join("; "),
+            ),
+        ));
     }
 
     let update = UpdateOAuth2Client {

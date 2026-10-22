@@ -351,6 +351,17 @@ record back still saves. A client an administrator created (`managed_by: admin`)
 is not bounded; to give an application such a grant, register it through the
 admin API.
 
+Two more members are bounded by the same rule (#746). An `allowed_resources`
+entry outside the tenant's `external_client_allowed_resources` answers `422
+resource_exceeds_registration_policy`, and a `redirect_uris` entry whose host is
+outside `dcr_allowed_redirect_hosts` (the loopback hosts are always inside)
+answers `422 redirect_exceeds_registration_policy`. Both call the functions
+`POST /oauth2/register` uses, name the offending entries in the message, and
+leave the row unchanged. As for scopes and grants, a resource or redirect URI
+the row already holds is not counted, so a policy that has narrowed since
+registration does not strand an otherwise editable client; an
+administrator-managed client is not bounded.
+
 **Rotation.** A successful `PUT` returns a new token and the old one stops
 working in the same database statement. Of two concurrent updates with one
 token, one succeeds and the other gets `401`. A refused update rotates nothing.

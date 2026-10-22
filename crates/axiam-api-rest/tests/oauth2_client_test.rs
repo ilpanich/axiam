@@ -1896,6 +1896,17 @@ async fn seed_managed_client(
     managed_by: axiam_core::models::oauth2_client::ManagedBy,
     scopes: &[&str],
 ) -> String {
+    seed_managed_client_holding(db, tenant_id, managed_by, scopes, &[]).await
+}
+
+/// [`seed_managed_client`] with `allowed_resources` the row already holds.
+async fn seed_managed_client_holding(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    managed_by: axiam_core::models::oauth2_client::ManagedBy,
+    scopes: &[&str],
+    resources: &[&str],
+) -> String {
     use axiam_core::models::oauth2_client::{
         AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client,
     };
@@ -1923,7 +1934,7 @@ async fn seed_managed_client(
             dpop_require_nonce: false,
             authn_request_params: AuthnRequestParamsMode::Ignore,
             browser_sso: false,
-            allowed_resources: Vec::new(),
+            allowed_resources: resources.iter().map(|r| (*r).to_owned()).collect(),
             managed_by,
             ciba: Default::default(),
         })
@@ -2250,5 +2261,195 @@ async fn admin_put_of_a_grant_registration_would_refuse_is_422_on_dcr_and_cimd_r
             "authorization_code".to_owned(),
             "client_credentials".to_owned()
         ]
+    );
+}
+
+/// Set the organization baseline `external_client_allowed_resources` and
+/// `dcr_allowed_redirect_hosts`, bypassing the handler (setup, not the test).
+async fn set_registration_policy(
+    db: &Surreal<TestDb>,
+    org_id: Uuid,
+    resources: &[&str],
+    redirect_hosts: &[&str],
+) {
+    use axiam_core::models::settings::{SetOrgSettings, system_defaults};
+    use axiam_core::repository::SettingsRepository;
+    axiam_db::repository::SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org_id,
+            SetOrgSettings {
+                external_client_allowed_resources: resources
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                dcr_allowed_redirect_hosts: redirect_hosts
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                ..system_defaults()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn stored_row(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    id: &str,
+) -> axiam_core::models::oauth2_client::OAuth2Client {
+    use axiam_core::repository::OAuth2ClientRepository;
+    axiam_db::repository::SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_id(tenant_id, id.parse().unwrap())
+        .await
+        .unwrap()
+}
+
+/// #746 (R111W3-03) — an `allowed_resources` entry outside the tenant's
+/// `external_client_allowed_resources` is `422 resource_exceeds_registration_policy`
+/// on a `dcr` and a `cimd` row and writes nothing; the same body on an `admin`
+/// row is accepted; an entry the row already holds, and one inside the list,
+/// still save.
+#[actix_rt::test]
+async fn admin_put_of_a_resource_outside_the_tenant_list_is_422_on_dcr_and_cimd_rows_only() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    let (db, org_id, tenant_id) = setup_db().await;
+    set_registration_policy(&db, org_id, &["https://api.allowed.test/mcp"], &[]).await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+        let id = seed_managed_client_holding(
+            &db,
+            tenant_id,
+            managed_by,
+            &["openid"],
+            &["https://held.example/api"],
+        )
+        .await;
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "allowed_resources": ["https://evil.example/api"] })
+        );
+        assert_eq!(status, 422, "{managed_by}: {body}");
+        assert_eq!(
+            body["error"], "resource_exceeds_registration_policy",
+            "{body}"
+        );
+        assert_eq!(
+            stored_row(&db, tenant_id, &id).await.allowed_resources,
+            vec!["https://held.example/api".to_owned()],
+            "{managed_by}: a refusal leaves the row unchanged"
+        );
+
+        // Held value: re-sending it adds nothing, though the list no longer has it.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "allowed_resources": ["https://held.example/api"] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+
+        // Inside the tenant's list is an ordinary edit.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "allowed_resources": ["https://api.allowed.test/mcp"] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+    }
+
+    // The control: the same body on an administrator's own client.
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "allowed_resources": ["https://evil.example/api"] })
+    );
+    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(
+        stored_row(&db, tenant_id, &id).await.allowed_resources,
+        vec!["https://evil.example/api".to_owned()]
+    );
+}
+
+/// #746 — the same for `redirect_uris` against `dcr_allowed_redirect_hosts`:
+/// `422 redirect_exceeds_registration_policy`, row unchanged; an admin row, a
+/// held URI and a URI on an allowed host are accepted.
+#[actix_rt::test]
+async fn admin_put_of_a_redirect_host_outside_the_tenant_list_is_422_on_dcr_and_cimd_rows_only() {
+    use axiam_core::models::oauth2_client::ManagedBy;
+    let (db, org_id, tenant_id) = setup_db().await;
+    set_registration_policy(&db, org_id, &[], &["*.allowed.test"]).await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let held = "https://app.example.com/callback";
+    for managed_by in [ManagedBy::Dcr, ManagedBy::Cimd] {
+        let id = seed_managed_client(&db, tenant_id, managed_by, &["openid"]).await;
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "redirect_uris": [held, "https://evil.example/cb"] })
+        );
+        assert_eq!(status, 422, "{managed_by}: {body}");
+        assert_eq!(
+            body["error"], "redirect_exceeds_registration_policy",
+            "{body}"
+        );
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.contains("evil.example") && !message.contains("app.example.com"),
+            "only the new host is named: {body}"
+        );
+        assert_eq!(
+            stored_row(&db, tenant_id, &id).await.redirect_uris,
+            vec![held.to_owned()],
+            "{managed_by}: a refusal leaves the row unchanged"
+        );
+
+        // Held URI: the whole record posted back still saves.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({ "redirect_uris": [held] })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+
+        // An allowed host, and loopback, are ordinary edits.
+        let (status, body) = put_client!(
+            app,
+            token,
+            id,
+            serde_json::json!({
+                "redirect_uris": ["https://app.allowed.test/cb", "http://127.0.0.1:9000/cb"]
+            })
+        );
+        assert_eq!(status, 200, "{managed_by}: {body}");
+    }
+
+    // The control: an administrator's own client is not bounded.
+    let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
+    let (status, body) = put_client!(
+        app,
+        token,
+        id,
+        serde_json::json!({ "redirect_uris": ["https://evil.example/cb"] })
+    );
+    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(
+        stored_row(&db, tenant_id, &id).await.redirect_uris,
+        vec!["https://evil.example/cb".to_owned()]
     );
 }

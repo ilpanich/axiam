@@ -366,6 +366,48 @@ pub fn redirect_host_is_allowed(policy_hosts: &[String], host: &str) -> bool {
         || policy_hosts.iter().any(|p| host_glob_matches(p, host))
 }
 
+/// Why a redirect URI is outside the tenant's `dcr_allowed_redirect_hosts`, or
+/// `None` when it is inside.
+///
+/// The one predicate behind `validate` and the administrator `PUT` on a
+/// `managed_by: dcr | cimd` row (#746), so the two cannot disagree about which
+/// hosts a self-registered client may redirect to. A URI that does not parse or
+/// has no host is refused here too; the caller has already checked structure,
+/// so this is the fail-closed direction.
+pub fn redirect_uri_refusal(policy_hosts: &[String], uri: &str) -> Option<String> {
+    let Ok(parsed) = uri.parse::<url::Url>() else {
+        return Some(format!("{uri:?} is not a valid URI"));
+    };
+    let Some(host) = parsed.host_str() else {
+        return Some(format!("{uri:?} has no host component"));
+    };
+    if redirect_host_is_allowed(policy_hosts, host) {
+        return None;
+    }
+    Some(format!(
+        "the host {host:?} is not one this tenant accepts a self-registered redirect \
+         for; an administrator sets dcr_allowed_redirect_hosts"
+    ))
+}
+
+/// The entries of `requested` that are not in the tenant's
+/// `external_client_allowed_resources`, in request order, without repeats.
+///
+/// D3: a self-registered client's audiences are the tenant's list and nothing
+/// else (`validate` copies it verbatim), so an entry outside it is one the
+/// administrator API may not add (#746). Both sides are in normalised form —
+/// the settings write and `validate_allowed_resources` both normalise — so the
+/// comparison is exact.
+pub fn resources_outside_policy(policy_resources: &[String], requested: &[String]) -> Vec<String> {
+    let mut outside: Vec<String> = Vec::new();
+    for entry in requested {
+        if !policy_resources.contains(entry) && !outside.contains(entry) {
+            outside.push(entry.clone());
+        }
+    }
+    outside
+}
+
 /// Resolve the requested `token_endpoint_auth_method`.
 ///
 /// An absent value is `client_secret_basic`, which is **RFC 7591 §2's**
@@ -520,17 +562,8 @@ pub fn validate(
         ));
     }
     for uri in &req.redirect_uris {
-        let parsed: url::Url = uri
-            .parse()
-            .map_err(|_| DcrError::InvalidRedirectUri(format!("{uri:?} is not a valid URI")))?;
-        let host = parsed.host_str().ok_or_else(|| {
-            DcrError::InvalidRedirectUri(format!("{uri:?} has no host component"))
-        })?;
-        if !redirect_host_is_allowed(&policy.dcr_allowed_redirect_hosts, host) {
-            return Err(DcrError::InvalidRedirectUri(format!(
-                "the host {host:?} is not one this tenant accepts a self-registered redirect \
-                 for; an administrator sets dcr_allowed_redirect_hosts"
-            )));
+        if let Some(message) = redirect_uri_refusal(&policy.dcr_allowed_redirect_hosts, uri) {
+            return Err(DcrError::InvalidRedirectUri(message));
         }
     }
 
@@ -1223,6 +1256,27 @@ mod tests {
         // With the glob, the same request is accepted.
         let p = policy(|p| p.dcr_allowed_redirect_hosts = vec!["*.example.com".into()]);
         assert!(validate(Uuid::new_v4(), &req, &p).is_ok());
+    }
+
+    #[test]
+    fn the_shared_policy_helpers_agree_with_validate() {
+        let hosts = vec!["*.example.com".to_owned()];
+        assert!(redirect_uri_refusal(&hosts, "https://mcp.example.com/cb").is_none());
+        assert!(redirect_uri_refusal(&hosts, "http://127.0.0.1:8080/cb").is_none());
+        assert!(redirect_uri_refusal(&hosts, "https://evil.test/cb").is_some());
+        assert!(redirect_uri_refusal(&hosts, "not a uri").is_some());
+
+        let allowed = vec!["https://a.example/".to_owned()];
+        let requested = vec![
+            "https://a.example/".to_owned(),
+            "https://b.example/".to_owned(),
+            "https://b.example/".to_owned(),
+        ];
+        assert_eq!(
+            resources_outside_policy(&allowed, &requested),
+            vec!["https://b.example/".to_owned()]
+        );
+        assert!(resources_outside_policy(&[], &[]).is_empty());
     }
 
     #[test]

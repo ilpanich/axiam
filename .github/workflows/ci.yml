@@ -731,6 +731,17 @@ jobs:
       - name: Website build
         working-directory: website
         run: npm run build
+      # The generated page index is committed, so it can silently go stale when
+      # sdks/openapi.json changes. Regenerate and fail on a diff, as
+      # sdk-openapi-drift.yml does for the spec itself.
+      - name: Website API index is up to date
+        working-directory: website
+        run: |
+          npm run gen:api-index
+          git diff --exit-code -- src/apiIndex.ts || {
+            echo "::error::website/src/apiIndex.ts is stale; run 'npm run gen:api-index' in website/ and commit it"
+            exit 1
+          }
 
   bench-harness:
     name: Bench Harness Self-Tests

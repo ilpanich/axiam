@@ -12,7 +12,7 @@
  *
  *   npm run gen:api-index
  *
- * The generated file is committed; CI does not regenerate it.
+ * The generated file is committed; the `website-quality` CI job regenerates it and fails on a diff.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";

@@ -174,6 +174,7 @@ unless its condition is met before W8.4 writes the PR body.
 | 788 | R112W2-03: the action-grammar pin misses `pub(crate)` and `&'static str` constants | Informational | W2 | sweep | S | Sonnet 5.5 |
 | 789 | R112W2-04: "a row without `ingested_via` was written by the server" is false before 1.1.2 | Informational | W2 | sweep | S | Sonnet 5.5 |
 | 790 | R112W2-05: the gRPC address rule is a hand-copied twin; no gRPC test of `none` | Informational | W2 | sweep | S | Sonnet 5.5 |
+| 791 | R112W4-06: the decision cache can insert a decision computed before a revocation's flush (pre-existing D7) | Informational | W4 | sweep | M | **Opus 5.5** |
 | new | every issue filed while the plan runs (§1.4) | any | its wave / W9 | — | by §1.1 | by §1.1 |
 
 ### 1.1 How the model is chosen
@@ -344,7 +345,7 @@ W4.1 carries on `GateClearance`.
 | W4.4 | **#730.** (a) the `network_gate.rs` comment names `NetworkConflict::StaleRole`; (b) the reconcile's revoke counters split (organization-scope network revocations vs ordinary), the `warn` worded for both; (c) `docs/admin/README.md` lists `network_role.permission_revoked_by_reconcile` and says a group cannot hold a network role; (d) `network.rs:96-98` reworded, or `refusal_of` matches the `THROW` form exactly (default: match exactly, D-14); (e) T-457 and the `network_decide.rs` module doc name the global fingerprint read as a residual; (f) `certificate_binding.bound` records `before` (the account the certificate was taken from) and the nodes the gate checked; (g) the assignment row's `node` is the gate's node (`/network`'s id for a tenant-wide assignment). | `network_gate.rs:128-129,424-434`; `crates/axiam-server/src/main.rs:650-656`; `docs/admin/README.md`; `crates/axiam-db/src/repository/network.rs:96-145`; STRIDE T-457, T-484 | (f), (g): extend `r110w6_06_…` with a re-bind (`before` present) and a tenant-wide assignment (`node` = `/network`'s id); (d): a segment named `axiam:network_segment_version_stale` is a `duplicate_name`, not `stale_version`; `check-doc-links.sh`, `check-remediation-evidence.py` | M | Sonnet 5.5 |
 | W4.5 | — | F4 review of the W4 diff → `claude_dev/security-review-release-1.1.2-w4-<date>.md`, reading H1 … H6 against the code once more; the sweep slot and the addendum. | | | — | **Opus 5.5** |
 
-Closes: #726, #727, #728, #730; from the W4.5 review (§1.4): #775, #776, #777, #778, #779.
+Closes: #726, #727, #728, #730; from the W4.5 review (§1.4): #775, #776, #777, #778, #779, and from its addendum #791.
 
 ---
 
@@ -587,10 +588,10 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   in 1.1.2 in its own wave's sweep slot (the rows above §1.1's rule, after #760 … #758 in the table of §1):
   - W5.7 → #764 … #767 and, from its addendum, #774: all closed in the wave (two addenda, `5d40dad`, `86768f9`).
   - W3.6 → #768 … #773: all closed in the wave (addendum `79f7ae9`).
-  - W4.5 → #775 … #779: fixed in the wave (`128d376`, `aa203d9`, `89aacfc`, `34cd965`, `5474a2d`); addendum pending.
+  - W4.5 → #775 … #779: closed in the wave (addendum `965ee35`); the addendum filed #791 (pre-existing D7), taken in the wave per §1.4 although the reviewer judged it non-blocking.
   - W1.8 → #780 … #785: in the sweep slot (Sonnet for #780 … #783 and #785, then Opus for #784); #780 blocks W1's merge.
   - W2.11 → #786 … #790 (22:01 UTC): in the sweep slot (Opus for #786, then Sonnet for #787 … #790).
-  No issue from outside the plan has been opened on the milestone, and none of the 27 needs the maintainer.
+  No issue from outside the plan has been opened on the milestone, and none of the 28 needs the maintainer.
 - **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
   at the row's model. Each pushes to its wave branch, and the orchestrator reads its report and the branch. The
   first sessions, all started 09:12–09:14 UTC: W1.2 (Opus 5.5), W2.1 (Sonnet 5.5), W3.1 + W3.2 (one Opus 5.5

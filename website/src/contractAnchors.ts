@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.62";
+export const CONTRACT_VERSION = "1.64";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -124,6 +124,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "21.7.1": "#§2171-what-a-dpop-bound-request-looks-like",
  "21.7.2": "#§2172-verifying-a-proof-normative-for-any-sdk-that-claims-to",
  "21.7.3": "#§2173-declining-is-a-supported-answer",
+ "21.7.4": "#§2174-the-refresh-token-of-a-public-client-is-bound-to-its-key-contract-163",
  "21.8": "#§218-private_key_jwt-client-authentication-contract-116-rfc-7523-§22",
  "21.9": "#§219-per-sdk-dpop-posture",
  "21.10": "#§2110-per-sdk-mtls_endpoint_aliases-posture-contract-143",
@@ -268,6 +269,8 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34.4": "#§344-contract-160--answers-to-588-and-the-rows-assigned",
  "34.5": "#§345-contract-161--the-101-fields",
  "34.6": "#§346-contract-162--the-110-release",
+ "34.7": "#§347-contract-163--the-111-release",
+ "34.8": "#§348-contract-164--the-112-release",
  "36.1": "#§361-canonical-operation-set",
  "36.2": "#§362-shapes-normative",
  "36.3": "#§363-server-rules-every-sdk-can-observe-normative",

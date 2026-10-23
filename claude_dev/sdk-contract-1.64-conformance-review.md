@@ -1017,4 +1017,829 @@ to each SDK.
 
 ## 7. Addenda
 
-One addendum per SDK whose PR changes after the head read in §1, at the orchestrator's request.
+### 7.0 Addendum round 1 (2026-10-23): W7.1b and the eleven fix-pass heads
+
+**What was read.**
+
+The amended contract is W7.1b `21beda0` (`sdks/CONTRACT.md` sha256
+`8b2cb9a385782b5e4575aa79f6e481915a63d19453cdcd9b921a0b92794d7a9a`; `openapi.json` and the registry are
+unchanged).
+
+The eleven fix-pass heads:
+
+| SDK | PR | Head |
+|---|---|---|
+| TypeScript | #150 | `402c6c00f` |
+| Rust | #138 | `42d0be449` |
+| Python | #103 | `570efce7d` |
+| C | #77 | `0c80e3d97` |
+| C++ | #80 | `2b28526c7` |
+| C# | #111 | `fd0869a49` |
+| Go | #103 | `a6551ae8d` |
+| Java | #121 | `4d40fd84b` |
+| Kotlin | #80 | `ecf58ce99` |
+| PHP | #87 | `70ce245e9` |
+| Swift | #78 | `d8e48a073` |
+
+These are the heads the orchestrator named at 12:13 UTC, and `git ls-remote` showed the same. The method was §1's:
+- one reviewer per SDK, against `<old head>..<new head>` and the §4 rows naming the SDK;
+- a mutant for each fix wherever a toolchain existed;
+- probes of the amended rules with AXIAM's exact bodies;
+- one added cross-SDK check: does the replay after a `401` refresh carry the fresh credential, CSRF token
+  and cookies? PHP's session found this push-order bug in its own code.
+
+As before, C# and Swift were read only; there is no toolchain for either.
+
+**Vendoring and drift.** All eleven heads vendor `CONTRACT.md` byte-identical to `21beda0`, and `openapi.json` and
+`management-registry.json` byte-identical to `fb92ec4`'s (unchanged). `scripts/check-sdk-artifact-drift.py
+--local-root` over the eleven new heads reports **11 repos, 0 artifact problems**.
+
+#### 7.0.1 W7.1b `21beda0`: the amended text
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| C164-16, §14.2 rule 6 | **Closed.** "A `5xx` is a transport failure whatever its body … the status is read before the body", cites P8 and AXIAM's `500 {"error":"server_error"}`. | `sdks/CONTRACT.md:3099-3105` |
+| C164-16, §14.6 | **Closed.** The rule-6 test's mock carries `500 {"error":"server_error","error_description":…}`, "not a bodiless `500`". The 429 mock carries "the server's own [body], with no `error_description`". | `:3210-3212`, `:3218-3219` |
+| C164-04, rule 9 status sentence | **Correct and sufficient.** "Any `429` on a poll is this wait, whatever its body names … rule 5's dispatch on `error` applies to the `400`." §14.6 gains the `429 slow_down` case. "Whatever its body names" also covers a bodiless or non-OAuth 429, so C164-17 is now a normative point. All eleven heads meet it (§7.0.3). | `:3148-3151`, `:3226-3227` |
+| P11 and `device_poll` | **Correct.** `device_poll` on a 5xx or transport failure joins the requests an SDK "does retry" and may give a fresh connection. That matches §16.2's eligibility table. | `:13173-13174` |
+| C164-18, §34.8 (c) | **Closed.** TypeScript, Python, Go, Rust and Swift keep the text. C++, C#, Java, Kotlin and PHP keep it through D-15. Only C does not. All eleven reports agree. | `:13894-13900` |
+| §34.8 amendment note; Breaking Changes Log | **Correct.** No version change, "none breaking", each change marked *contract 1.64 (amended)* inline. | `:13863-13875`, `:4315-4316` |
+
+**Swift's question: does rule 6 with §16.2 require a retry inside the poll, or does the loop's next interval suffice?**
+The text requires the in-poll retry. Swift's and C#'s addendum reviewers each confirmed this reading
+independently.
+- Rule 6 says 5xx and transport failures "are retried under the bounded read-only retry policy of §16, then
+  surfaced". It sets that budget "per poll attempt", separate from the polling loop, where "an exhausted retry
+  budget ends that one poll, not the flow".
+- §16.2 lists `device_poll` on a 5xx or transport failure as **eligible**.
+- §16.1 says the switch MUST default to **on**.
+- Amended P11 counts `device_poll` among "the requests it does retry".
+
+The next interval meets rule 6's safety property ("must not lose a grant") but not §16. The retry covers a 5xx
+or a transport failure only, never a 429: otherwise the 429 is waited twice, once in the poll and once by the
+loop's rule-9 wait. **The wording does not need another touch.**
+- It is unambiguous, and C and C++ implement it as written.
+- Nine SDKs miss it (C164-25), because no required test exercises it: §16.7's tests are about `check_access`.
+- A one-sentence §14.6 addition would make the miss visible. That is **C164-35 (Info, contract)**, for 1.65,
+  not a 1.64 re-amendment: the fixes of C164-25 need no text change.
+
+**Java's note: a `Retry-After` in HTTP-date form is read as absent.** This is not a finding.
+- §14.2, §16.1 and §33.7 name no form, and AXIAM sends delta-seconds only.
+- Java's loop then waits exactly the interval, never less. It never ends the flow and never polls faster than
+  the interval.
+- It can poll before an intermediary's date. Reading the date form is optional hardening: Python, Swift,
+  Kotlin and PHP already do it.
+
+**TypeScript's note: C164-23(a) was taken narrower than proposed.** The narrower fix is accepted. The 429 is
+mapped in `mapOidcError` with a tolerant decoder, and the §2 mapper is not widened to every 4xx (tests pin
+403/409 as non-OAuth). It closes the defect:
+- a 429 `rate_limit_exceeded` on `oidcRefresh`, `loginClientCredentials`, `deviceAuthorize` and `devicePoll`
+  is an `OAuthProtocolError`;
+- a 5xx stays `NetworkError` whatever its body.
+
+The new branch is not path-gated, though (C164-31).
+
+**C++'s note: the patch version was kept despite two exception-class changes.** Confirmed.
+- The only header change since the review is a defaulted trailing constructor parameter on
+  `OAuthProtocolError` (`std::optional<long> http_status`) and its accessor. It is source-compatible.
+- The single-poll exception types change, as the amended contract requires: a bodiless 429 becomes
+  `OAuthProtocolError`, and a 5xx with an OAuth body becomes `NetworkError`. These are behaviour changes of the
+  same kind as C163-07, which was accepted at patch.
+- SOVERSION 4, not yet shipped, covers the new trailing member. A shared build gives `libaxiam_cpp.so.4`.
+
+**PHP's note: the other SDKs' replay paths may share its push-order bug.** Two do.
+- **Python** copies the stale `Cookie` header into the replay, and httpx does not overwrite it.
+- **Java**'s OkHttp `Authenticator` replaces only `Authorization`. The follow-up runs below the application
+  interceptors, so the stale `X-CSRF-Token` goes out.
+
+Both are pre-existing, and both make a refresh that succeeded end in `401`/`403` (C164-26, **Medium**). The
+other nine are clean:
+- probed: TypeScript, Rust, C, C++, Kotlin, PHP, and Go's gRPC path (Go has no REST replay by design);
+- read: C#, Swift.
+
+#### 7.0.2 New findings (C164-25 onward)
+
+| ID | Severity | SDK | `path:line` (new head) | Rule | What | Fix |
+|---|---|---|---|---|---|---|
+| C164-25 | Low | typescript, rust, python, csharp, go, java, kotlin, php, swift (pre-existing) | TS `src/node/oidc.ts` `devicePoll` (no `withRetry`); Rust `src/oidc/device.rs:470-491`; Python `_oidc.py` `device_poll` (no `retry_sync`/`retry_async`); C# `AxiamClient.Oidc*.cs` `DevicePollAsync` (no `RetryPolicy.ExecuteAsync`); Go `oidc_device.go:207-225`; Java `AxiamClient.java:3449-3455`; Kotlin `devicePoll` (no §16 runner); PHP `src/Oidc/OidcClient.php:842`, `:2555-2570`; Swift `Oidc/DeviceGrant.swift:158` | §14.2 rule 6 ("retried under … §16, then surfaced"; budget "per poll attempt"); §16.2 (`device_poll` on 5xx/transport eligible); §16.1 (on by default) | With retry on, a device poll answered `5xx` or failed in transport is sent once. `device_poll` surfaces it at once, and `device_login` waits a full interval. Rust also ignores a 503's `Retry-After`. No grant is lost, since the loop is non-terminal everywhere (C164-03), but the §16 budget is never used. C and C++ do it right. | Send the poll through the SDK's own §16 runner, the one its `ciba_poll` already uses, with a mode that retries **only** on a transport failure or a `5xx`, never on a `429`. Keep the 200's parsing outside the retry, and bound the retry waits by the loop's deadline (as CIBA's P10 does). Test: three `500 {"error":"server_error",…}`, then `200`; `device_login` completes in one interval with 4 requests, the single `device_poll` returns the tokens, and with retry disabled there is one request per poll. Restore the Swift comment and the README §16 row. |
+| C164-26 | **Medium** | python, java (pre-existing) | Python `src/axiam_sdk/_client.py:1679-1685`, `_async_client.py:513-519`; Java `AuthAuthenticator.java:106-108` | §9.3 (refresh then resend once); §3 (CSRF on state-changing requests) | After a `401`, the refresh succeeds but the replay carries stale session state, so the caller gets `AuthError` or `403` anyway. **Python:** `_retry_after_refresh_*` copies the original `Cookie` header, which httpx keeps over the jar's fresh one, so the expired `axiam_access` and old `axiam_csrf` go out next to the new `X-CSRF-Token`. Probed on sync and async `check_access` and on a management call. **Java:** the OkHttp `Authenticator` sets only `Authorization`, and its follow-up never passes `AuthInterceptor`, so it carries `X-CSRF-Token: CSRF-OLD` with the rotated `axiam_csrf` cookie, which AXIAM's CSRF middleware refuses. Probed; the proactive path and gRPC are fine. PHP had the same class of bug and fixed it in this PR (C164-10, `f469880`). | **Python:** add `"cookie"` to the excluded header names in both helpers (verified in a copy: all three probe paths `200`, and 1024 related tests pass). **Java:** in `authenticate()`, also `.header("X-CSRF-Token", session.csrfToken())` when the request is state-changing and not `/oauth2/*`, mirroring `AuthInterceptor`'s condition. **Test in both:** a cookie login, then a `401` on a state-changing management request, then the refresh `200` rotating `axiam_access`, `axiam_csrf` and `X-CSRF-Token`, then `200`. Assert that the replay carries the new cookie and the new `X-CSRF-Token`, and that the caller gets the `200`. |
+| C164-27 | Low (rust); Info (c) | rust, c | Rust `src/oidc/device.rs:421` (doc), the single-poll mapping; C `src/oidc_device.c:213` | §14.2 rule 6 ("`5xx` … remain §2 `NetworkError`") for the single `device_poll` | C164-03 is closed for `device_login` in both SDKs, but a single call still types a 5xx with an OAuth body as an auth error. **Rust:** `device_poll` returns `500 server_error` and `503 temporarily_unavailable` as `AxiamError` with `oauth_error_code()` set, which contradicts its own new doc, so a hand-rolled loop ends. **C:** this happens only when the caller passes `err == NULL`: the return code is `AXIAM_ERR_AUTH`, because the reclassification needs the struct. | **Rust:** map any status of 500 or above through `from_http_status` before the body, as `ciba_poll` does, and test that a single `device_poll` on that `500` is a network error. **C:** classify on the transport status before `oidc_map_grant_error`, so that `err == NULL` also returns the network code, and add a test with `err == NULL`. |
+| C164-28 | Low | kotlin | `oidc/OidcSupport.kt:1129` vs `:1135` | §14.2 rule 4; C164-05 (partly closed) | The deadline is now a clock instant, but it is taken **after** `onUserCode`. Probe: a 25 s callback with `expires_in` 30 let 5 polls go out after the real deadline. | Move the `deadline` line above the `onUserCode` call. Test: a recording clock advanced 25 s inside the callback, `expires_in` 30, interval 5: `expired_token` with at most one poll. |
+| C164-29 | Low | java, python, kotlin | Java `AxiamClientDeviceFlowTest.java` (19 device-flow tests); Python `tests/test_device_flow.py` (the clock test exercises `PollSchedule` only); Kotlin `OidcDeviceFlowTest.kt` (the §14.6 429 mock) | §14.6 (1.64 case 2, "sends nothing after the deadline"; amended: "the mock's body is the server's own, with no `error_description`") | Required tests that do not pin the fix. **Java:** no test advances the clock outside `sleep`, so a "sum of the sleeps" mutant survives all 19 device-flow tests (C164-05 partly closed). **Python:** removing the monotonic clock from both `device_login`s leaves all 41 device-flow tests green. **Kotlin:** the 429 mock still carries `error_description`. The code is right in all three (probed). | **Java and Python:** a fake clock that also advances a fixed request time per poll (or inside `on_user_code`); assert no poll at or after the deadline, through `device_login` itself. **Kotlin:** the mock sends exactly `{"error":"rate_limit_exceeded"}`. |
+| C164-30 | Low | java (new in this PR) | `AxiamClient.java:3493`; `ErrorMapper.java:196-206` | §14.2 rule 9 / rule 4 (capped at the deadline; the typed `expired_token`) | A huge `Retry-After` overflows `Instant.plus`. `99999999999999999` throws `DateTimeException` and `Long.MAX_VALUE` throws `ArithmeticException`, instead of the typed `expired_token`. The old head's `long` comparison did not overflow. | Clamp the parsed `Retry-After` (for example to `expires_in`, or to §16's 3600 s cap), or compare `Duration`s against `Duration.between(now, deadline)` before adding. Test: `Retry-After: 99999999999999999` gives `expired_token` with nothing sent after it. |
+| C164-31 | Low | typescript (new in this PR) | `src/node/oidc.ts:567` (`mapOidcError`) | §2 (`/oauth2/*` row vs the generic row) | The new 429 branch is not path-gated. A `429 rate_limit_exceeded` from discovery, `/api/v1/auth/federation/*` or `/uma2/*` now throws `OAuthProtocolError`, an `AuthError`, where §2 makes it a `NetworkError` (probed). The CHANGELOG says "from `/oauth2/*`". | Gate the branch on an anchored `/oauth2/` match, `isOAuth2Endpoint`. The `isOAuth2EndpointUrl` fallback also matches `federation/oauth2/start`, so do not use it. Test: a `429` from the discovery GET and from `/uma2/perm` stays `NetworkError`. |
+| C164-32 | Info | typescript, rust, c, cplusplus, csharp, go, java, kotlin, swift | per §7.0.3 | text after the fix pass | Text drift after the fix pass. **CHANGELOG:** TypeScript, Rust and C++ still name `fb92ec4` as the CONTRACT source, now `21beda0`. **README and docs:** Rust, C, C++ and C# describe only the pre-amendment 429/5xx behaviour. **API docs:** Rust's public `PollSchedule` and `tick_for` docs describe a schedule `device_login` no longer uses. **Unrecorded changes:** the reverse single-poll type changes are missing from C++'s and Kotlin's CHANGELOGs; Java's lacks `ErrorMapper.fromDevicePollResponse`; Go's lacks the CI floor bump, and its `README.md:188` still says 1.26.9. **Overstated row:** Swift's README §16 row (C164-25). | Per §7.0.3, each SDK's addendum under C164-32. |
+| C164-33 | Info | c, cplusplus, csharp, go, kotlin, php, swift | per §7.0.3 | test strength | <ul><li>PHP: the new C164-10 test's `Cookie` assertions pass with the rebuild removed, because `HandlerStack::create($mock)` nests a second cookie middleware.</li><li>Swift: no test of a single `devicePoll` on `429 slow_down`, and the code-rewrite mutant survives.</li><li>C++: no test pins the fresh CSRF on the post-refresh replay, and one test comment overstates what it checks.</li><li>C: only four of the eleven C164-08 sites have a 400 assertion.</li><li>Go: the `authorization_pending` subtest of C164-04 sends no `Retry-After`.</li><li>C#: `StopsAtExpiresIn` sits on a clock boundary.</li><li>Kotlin: `OidcRefreshTest` flaked once under load (passes alone, 3/3).</li><li>PHP: C164-23 has no test.</li></ul> | PHP: pass the bare `$mock`. The others: per §7.0.3. |
+| C164-35 | Info | contract | `sdks/CONTRACT.md` §14.6 | test coverage of §14.2 rule 6 / §16.2 | No required test exercises the in-poll §16 retry of `device_poll`, which is why nine SDKs miss it (C164-25). | For contract 1.65 (no 1.64 re-amendment): add to §14.6, "with retry enabled, a `500` on a poll is retried within the poll under §16 (at most three attempts) before the loop takes its next interval; a `429` is not". |
+
+(C164-34 is not used.)
+
+**Counts, round 1:** Medium 1 (C164-26, two SDKs) · Low 6 (C164-25, -27 (Rust), -28, -29, -30, -31) ·
+Informational 4 (C164-27 (C), -32, -33, -35).
+
+#### 7.0.3 Per-SDK status
+
+| SDK | Head | Review findings | New / remaining | Version |
+|---|---|---|---|---|
+| typescript | `402c6c00f` | C164-05, -06, -19, -20, -22, -23 **closed** | C164-25, -31 (Low), -32 | 1.1.2 ✓ |
+| rust | `42d0be449` | C164-04, -05, -07, -20, -23 **closed**; C164-03 **partly** (the loop is fixed; the single poll is C164-27) | C164-25, -27 (Low), -32 | 1.1.2 ✓ |
+| python | `570efce7d` | C164-01, -03, -04, -05, -15 **closed** | **C164-26 (Medium)**, -25, -29 | 1.1.2 ✓ |
+| c | `0c80e3d97` | C164-03, -04, -08, -17, -22, -23 **closed** | C164-27 (Info), -32, -33 | 1.1.2 ✓ (SOVERSION 2) |
+| cplusplus | `2b28526c7` | C164-03, -04, -12, -19, -20, -21, -22 **closed** | C164-32, -33 | 1.1.2 ✓ (SOVERSION 4) |
+| csharp | `fd0869a49` | C164-03, -04, -05, -20, -21, -22, -23 **closed** (read only) | C164-25, -32, -33 | 1.1.2 ✓ |
+| go | `a6551ae8d` | C164-02, -04, -05, -17, -22, -23, -24 **closed** | C164-25, -32 | 1.1.2 ✓; `9d7460a` touches only `sdk-ci-go.yml` |
+| java | `4d40fd84b` | C164-04, -11, -12, -17, -19, -22 **closed**; C164-05 **partly** (code fixed; the test is C164-29) | **C164-26 (Medium)**, -25, -29, -30, -32 | 1.1.2 ✓ |
+| kotlin | `ecf58ce99` | C164-04, -13, -17, -21, -22 **closed**; C164-05 **partly** (C164-28) | C164-25, -28, -29, -32, -33 | 1.1.2 ✓ |
+| php | `70ce245e9` | C164-03, -04, -05, -09, -10, -17, -19, -21, -22, -23, -24 **closed** | C164-25, -33 | 1.1.2 ✓ |
+| swift | `d8e48a073` | C164-03, -04, -14, -17 **closed** (read only) | C164-25, -32, -33 | 1.1.2 ✓ |
+
+**All three Medium findings of the review are closed**: C164-01 (Python), C164-02 (Go) and C164-03 (all
+seven). **Every SDK now meets amended rules 6 and 9 and has the three §14.6 cases**, probed against AXIAM's
+exact bodies, except where the table names a remaining finding:
+- every 429 is waited at least its `Retry-After`, bodiless and `slow_down` bodies included, and never raises
+  the interval;
+- a `400 slow_down` still raises it;
+- a `500 server_error` and a `503` never end `device_login`.
+
+**Can W7 merge? Not yet.** Plan §1.4 asks every finding to be fixed in its SDK's PR before W8, the Medium ones
+first. Open findings remain in ten SDKs:
+- **C164-26 (Medium)** in Python and Java;
+- the Lows C164-25, -27, -28, -29, -30 and -31;
+- the Informationals C164-27 (C), -32 and -33.
+
+C++ has only Informational items left. A round 2 addendum reads each SDK's PR once it changes again. C164-35
+needs nothing before W8.
+
+The eleven addenda follow, with the reviewers' N-numbers mapped to the ids above. Where an addendum names a
+severity, §7.0.2 is the binding one.
+
+---
+
+#### Addendum — typescript — commit 402c6c00f (PR #150), read after 46461b6f5
+
+Four commits on the old head: `e540aff` re-vendors CONTRACT.md from 21beda0 (sha256 8b2cb9a3…7a9a, matches), `329e5c5` (C164-05, -20, -23), `077cc52` (C164-06, -19), `402c6c0` (C164-22). Each commit's claims were checked against its diff. Read-only on `/home/user/sdks/typescript`. The work was done in a fresh throwaway clone at `/home/user/work/typescript`, which replaced the review's old-head copy.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-05 (Low, pre-existing) wall-clock deadline | **CLOSED** | 329e5c5 | `src/node/oidc.ts:1740` takes `deadline = clock.now() + expiresIn*1000` when `deviceAuthorize` returns, before `onUserCode`. `:1754` stops with `expired_token` when `!tick() \|\| now + wait >= deadline`. The clock is injectable through `DeviceLoginParams.clock?: CibaClock` (`src/node/oidcTypes.ts:892`); this is additive, documented in the CHANGELOG, and is the same type `cibaAwait` takes. Test `test/node/deviceFlow.test.ts:313`: a fake clock advances 2 s per poll, with expires_in 5 and interval 1, and the loop must make 2 polls. **Mutant M05** (drop the clock clause) fails it (1 failed). |
+| C164-06 (Low) RFC 7592 calls in the browser | **CLOSED** | 077cc52 | `src/rest/bareTransport.ts:57` is `...session.oauth2RequestConfig()`, followed by `withCredentials:false`. The other callers of `bareRequest` (SSF) are in `src/node`, where `NodeSession` overrides the config to `noCredentialsConfig()`, so nothing changes there. Tests `test/rest/oauth2BrowserCredentials.test.ts:108` (browser: `adapter==='fetch'`, `fetchOptions` `{credentials:'omit'}`) and `:117` (Node: no adapter, agent kept). **Mutant M06** (revert to `noCredentialsConfig()`) fails the browser case. |
+| C164-19 (Info) test strength / TSDoc | **CLOSED** | 077cc52 | The TSDoc at `src/rest/session.ts:315-317` now says the fetch adapter derives `credentials` from `withCredentials:false`. New test `test/rest/oauth2BrowserCredentials.test.ts:75` stubs `globalThis.fetch` and asserts that the `Request` reaching it has `credentials==='omit'`. **Mutant M19** (`withCredentials:true` in `oauth2RequestConfig`, `fetchOptions` kept) fails the new Request test as well as the 4 config tests. So the test now pins the setting that really withholds the cookie. |
+| C164-20 (Info) `devicePoll` doc | **CLOSED** | 329e5c5 | `src/node/oidc.ts:1672-1686`: "sees exactly what" became "dispatches on the same answers". It now says that any `429` is `rate_limit_exceeded`, that its `Retry-After` is not exposed, and that a hand-rolled loop waits at least one interval without raising it, or uses `deviceLogin`. This is doc only, so there is no mutant. |
+| C164-22 (Info) README §34.7 cells / CHANGELOG | **CLOSED** | 402c6c0 | `README.md:51-52` now read `C162-07 (§34.6 (ab)): …` and `C162-08 (§34.6 (ac)): …`, as the review proposed. `CHANGELOG.md:45-46` describes them accurately. A separate stale sentence in the CHANGELOG intro is C164-32. |
+| C164-23(a) (Info) 429 on the other `/oauth2/*` token calls | **CLOSED for the defect; the fix overreaches (C164-31)** | 329e5c5 | `src/node/oidc.ts:567-570`: in `mapOidcError`, a `429` whose body decodes through the tolerant `oauth2ErrorFromBody` (a non-empty string `error`; `error_description` optional) is that `OAuthProtocolError`. Everything else still goes through the unchanged §2 mapper (400/401 only), so 403/409 keep `AuthzError` as the existing tests require. **Judgement on the session's note:** the defect is closed. Probed with the server's exact `429 {"error":"rate_limit_exceeded"}`, and with the `"retry_after":3` + `Retry-After: 3` variant: `oidcRefresh`, `loginClientCredentials`, `deviceAuthorize` and `devicePoll` all raise `OAuthProtocolError` `rate_limit_exceeded`. A 5xx stays `NetworkError`: `500 {"error":"server_error","error_description":"db"}` and `503 {"error":"temporarily_unavailable"}` give `NetworkError` on all four (probed). A bodiless 429 stays `NetworkError` on the three non-poll calls, which is right because §2 needs an OAuth body. The narrowing is defensible: §2's "any status" row would also make a 403 OAuth body an `OAuthProtocolError`, and that residual (403/409) is pre-existing and still deliberately documented in `mapUmaGrantError`'s TSDoc (`:577-589`). **But** the new branch has no `/oauth2/*` URL gate. `mapOidcError` also maps discovery, the federation `/api/v1/auth/federation/*` calls and UMA `/uma2/*`, and these now turn AXIAM's rate-limiter body into `OAuthProtocolError` too. See C164-31. Test `test/node/deviceFlow.test.ts:637` (loginClientCredentials 429) and `:649` (500 stays NetworkError). **Mutant M23a** (branch removed) fails `:637`. **M23a5xx** (branch widened to ≥500) fails 2. |
+| C164-23(b) (Info) wall-clock flaky tests | **CLOSED** | 329e5c5 | `recordSleeps()` moved to the describe (`test/node/deviceFlow.test.ts:223`, `beforeEach` `:244`). Every §14.2 polling test now asserts recorded delays and runs in about 100-450 ms. Residual: the §14.3 ordering tests (`:505-566`, 1 real 1 s sleep each) and `deviceClientAuth.test.ts` (up to 2.3 s) still sleep for real. That is well under the 5 s timeout and not what flaked. The full suite passed once with no timeout. |
+
+**Amended rules (probes, `deviceLogin` with an injected recording clock, interval 1 s; each script starts with a `400 authorization_pending`)**
+
+| Rule / case | Probe (AXIAM's exact body) | Result |
+|---|---|---|
+| §14.2 rule 9: 429 is the wait, ≥ Retry-After | `429 {"error":"rate_limit_exceeded"}` + `Retry-After: 4` | sleeps `[1000,1000,4000]`, 3 calls, tokens. Pass |
+| same, `retry_after` variant | `{"error":"rate_limit_exceeded","retry_after":4}` + RA 4, then pending, ok | `[1000,1000,4000,1000]`: interval unchanged after. Pass |
+| rule 9 amended: bodiless 429 | `429` no body + `Retry-After: 3` | `[1000,1000,3000]`. Pass (C164-17 point holds) |
+| §14.6 third case: 429 `slow_down` does not raise | `429 {"error":"slow_down"}` + RA 2, pending, ok | `[1000,1000,2000,1000]`. Pass |
+| 400 `slow_down` still raises | `400 slow_down`, pending, ok | `[1000,1000,6000,6000]`. Pass |
+| rule 6 amended / §14.6 500 body | `500 {"error":"server_error","error_description":"db"}` | non-terminal, `[1000,1000,1000]`, tokens. Pass. **Not §16-retried inside the poll** (C164-25) |
+| 503 | `503 {"error":"temporarily_unavailable"}` | non-terminal, `[1000,1000,1000]`. Pass, same C164-25 caveat |
+| single `devicePoll` on 429 | `{"error":"rate_limit_exceeded"}` / bodiless / `slow_down` body | `OAuthProtocolError` `rate_limit_exceeded` in all three. Pass |
+| single `devicePoll` on 5xx | 500 server_error / 503 | `NetworkError`. Pass |
+
+The repository's own §14.6 tests: the server's body with no description (`deviceFlow.test.ts:58-62`, used at `:385`), the cap case (`:450`), the bodiless case (`:411`), the 429 slow_down case (`:426`), and the 500 body (`:360`, `error_description` included). **M9body** (pollRateLimit gated on the body again) fails 3. **M9slow** (a 429 slow_down read as slow_down) fails 2. **M6term** (a 5xx with an OAuth body made terminal) fails `:360`.
+
+Replay after refresh: **correct, no push-order bug.** `src/rest/interceptors.ts:109-127`: the response interceptor sets `_retry`, runs the single-flight refresh, and then `onAuthenticated()`, which on Node re-reads `axiam_csrf` from the jar (`src/node/session.ts:111-138`). It then replays through `axiosInstance(originalRequest)`. That re-runs the request interceptors: the CSRF interceptor (`:61-82`) overwrites `X-CSRF-Token` from the refreshed token, and the jar-wrapped agent attaches cookies at send time. Probed (Node persona, jar, a POST that is answered 401 once; the refresh rotates both cookies): the first send carried `csrf-login-1` / `axiam_access=access-token-login`. The replay carried `X-CSRF-Token: csrf-refresh-2` and `axiam_access=access-token-refreshed-2; axiam_csrf=csrf-refresh-2`, and got 200. In the browser persona the CSRF value is read live from `document.cookie`. A device credential never enters the refresh (`isDeviceSession`, `:107`). One theoretical edge: if a refresh left no `axiam_csrf` at all, the stale header would stay on the replayed config, because the interceptor only sets the header and never deletes it. AXIAM always rotates the cookie on refresh, so this is not a finding.
+
+Version: `package.json` 1.1.2 (patch is right: the only API change is the additive optional `DeviceLoginParams.clock`; the class change for 429s is recorded). The CHANGELOG `[1.1.2]` records all six fixes. The README conformance sentence still says contract 1.64. The CHANGELOG intro's vendoring sentence is stale (C164-32).
+
+Run by the reviewer (throwaway clone `/home/user/work/typescript` at 402c6c00f, Node 22.22.0, proxy variables unset):
+- `npm ci` OK; `npx tsc --noEmit` exit 0.
+- `npx vitest run`: **119 files, 1757 passed, 3 skipped, 0 failed** (257 s). The old head gave 1746/3/1 in the review.
+- `npm run docs` (typedoc): exit 0, 0 errors; the 3 pre-existing `middleware.OidcLoginOutcome` warnings.
+- `node scripts/gen-management.mjs --check`: 32 files current, 202 ops. `npx tsup` OK; `npm run bundle-grep` OK for rest and browser; token-leak grep on `dist/` clean.
+- 8 mutants (`/home/user/work/ts-add-mut.sh`, logs `/home/user/work/ts-add-mut-*.log`), all killed: M05, M06, M19, M23a, M23a5xx, M9body, M9slow, M6term.
+- Probes: `/home/user/work/ts-add-probes/zprobe.test.ts`, run from inside the copy's `test/node` and then removed; a separate replay probe was removed too.
+- Not run: `npm run build`'s `buf generate` (`buf` not installed, remote BSR plugins unavailable); `tsup` was run directly. `node_modules`, `dist` and `_docs` were deleted afterwards. The SDK clone is unmodified.
+
+New findings:
+
+- **C164-31 — Low — `src/node/oidc.ts:567-570`.** Rule: §2. The `OAuthProtocolError` row is "Any status **from `/oauth2/*`** with an `OAuth2ErrorResponse` body"; otherwise `408, 429 → NetworkError`. The CHANGELOG says "A `429 {"error":…}` from `/oauth2/*`". **What happens:** the new 429 branch in `mapOidcError` has no URL gate, and `mapOidcError` also maps `oidcDiscover` (`/.well-known/openid-configuration`, through `#get`), `ssoProviders` (`/api/v1/auth/federation/providers`), the federation POSTs (`ssoStart`, `ssoStartOauth2`, the callback/handoff completions through `#postJson`) and the UMA protection API (`/uma2/*`, `:2074`). AXIAM's rate limiter answers all of them with `429 {"error":"rate_limit_exceeded"}`. Probed: `ssoProviders`, `oidcDiscover` and `umaListResources` now throw `OAuthProtocolError` `rate_limit_exceeded`, an `AuthError` subtype, where 1.1.1 and §2 give `NetworkError`. A caller that catches `NetworkError` to back off on a rate-limited SSO login page no longer catches it, and a caller that reads `AuthError` as "sign in again" misreads it. **Fix:** gate the branch the way the §2 mapper gates its row: `if (status === 429 && isOAuth2EndpointUrl(url)) { … }`. `isOAuth2EndpointUrl` is already exported from `src/core/errorMapper.ts:94`. Note that its relative-path fallback `url.includes('/oauth2/')` also matches `/api/v1/auth/federation/oauth2/start`, so either pass the absolute URL or use `isOAuth2Endpoint(url, session.baseUrl)` from `src/rest/interceptors.ts` (a prefix match). **Test:** a `429 {"error":"rate_limit_exceeded"}` on `ssoProviders` (and on discovery) is `NetworkError`, while the existing `loginClientCredentials` case stays `OAuthProtocolError`.
+- **C164-25 — Low, pre-existing (not in the diff) — `src/node/oidc.ts:1699` (`devicePoll` → `#postForm`, no `withRetry`), `:1794-1796`.** Rule: §14.2 rule 6 as amended ("retried under the bounded read-only retry policy of §16, then surfaced"; §16.2 lists `device_poll` on a 5xx/transport failure as eligible, per poll attempt). `retryEnabled` defaults to `true` (`src/core/config.ts:56-68`). **What happens:** a 5xx or transport failure on a poll makes exactly one attempt. A single `devicePoll` surfaces the `NetworkError` at once, and `deviceLogin` takes its next full interval (probed: `[…,1000]`, 1 request per poll) instead of the §16 retries (200/400 ms full jitter, `Retry-After` floor, 3 attempts) inside the attempt. No grant is lost, so the caller-visible effect is a delay of one interval per 5xx. The README/CHANGELOG "is retried" is true only of the loop. **Fix:** in `devicePoll`, wrap the post in `withRetry` as `cibaPoll` does (`:2398-2430`): `idempotent: true`, `operation: 'device_poll'`, `enabled: session.retryEnabled`, retrying only a `NetworkError` from a 5xx or no response (never the 400/401/429 answers). Keep the loop's `continue` for an exhausted budget. **Test:** `500 {"error":"server_error"}` twice then `200` on one `devicePoll` with an injected sleep gives 3 requests and a token set; with `retryEnabled:false` it gives 1 request and `NetworkError`.
+- **C164-32 — Informational — `CHANGELOG.md:12-14`.** The intro still says "`CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` are vendored byte for byte from that commit" (`fb92ec4`). Since `e540aff`, `CONTRACT.md` is axiam `21beda0` (contract 1.64 as amended, sha256 8b2cb9a3…). **Fix:** "`CONTRACT.md` is vendored from axiam `21beda0` (contract 1.64 as amended, W7.1b); `openapi.json`, `management-registry.json` and `proto/` from `fb92ec4`, which `21beda0` does not change."
+
+---
+
+#### Addendum — rust — commit 42d0be449 (PR #138), read after 5e91fa574
+
+Four commits on top of the reviewed head, in a straight line: `7472de8` re-vendors CONTRACT.md at axiam
+`21beda0`; `551b5e6` fixes C164-03/-04/-05; `82a4c6d` fixes C164-07; `42d0be4` covers C164-20 and C164-23 (docs,
+test comments, CHANGELOG). The commit messages match what each diff does. The clone was not modified. All
+runs used a throwaway copy, `/home/user/work/rust`, which has since been deleted.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium) | **PARTLY**: CLOSED for `device_login`. The single `device_poll` still surfaces the 5xx as an `OAuthProtocolError`. | `551b5e6` | `PollFailure.status` is set from the response before the body is read (`src/oidc/device.rs:482-490`). `classify_failure` returns `Transient` for any `s >= 500` before it reads the body (`:274-283`). The loop `continue`s on `Transient` (`:628`). Tests: `a_500_with_an_error_body_mid_poll_is_not_terminal` (`:975`, script `500 {"error":"server_error","error_description":"db"}`, then pending, then 200; it asserts 3 polls and sleeps `[5,5,5]`), and `tests/device_flow_test.rs:420-428`, whose 500 mock now carries the server's JSON body. Mutants: dropping the `>=500` arm fails the unit test; the pre-fix `classify` fails it and 2 others. **Residual:** the single `device_poll` maps through `oauth2_error_or_fallback` (`:487`), so `500 {"error":"server_error"}` gives `AxiamError::Auth`, `oauth_error_code()==Some("server_error")`, `is_retryable_transport()==false` (probed; `503 temporarily_unavailable` gives the same). The row's fix asks for the §2 `NetworkError` "whatever its body", as `ciba_poll` does (`src/oidc/ciba.rs`, `status >= 500` → `from_http_status`). The new doc says "A `5xx` is a transport failure whatever its body (rule 6)" (`:421`), and the call does not do what that sentence says. A hand-rolled loop that dispatches on `error`, as the doc at `:391-395` invites, ends on AXIAM's 500. Fix: in `device_poll_step`, when `status >= 500`, build `err` with `AxiamError::from_http_status(status, text)` and do not call `oauth2_error_or_fallback`. Test: a single `device_poll` against that 500 gives `is_retryable_transport()` and `oauth_error_code()==None`. |
+| C164-04 (Low) | **CLOSED** | `551b5e6` | `Some(429) => RateLimited` whatever the body, and `slow_down` is read only on `Some(400) \| None` (`src/oidc/device.rs:274-283`). Tests: `a_429_slow_down_waits_and_does_not_raise_the_interval` (`:1002`, sleeps `[5,5,5]`), `a_400_slow_down_still_raises_the_interval` (`:1029`, `[5,10]`) and `a_bodiless_429_honours_retry_after` (`:1054`, `[5,12]`; this also closes C164-17's trigger for Rust). Mutant: dropping the 429 arm fails 2 tests. |
+| C164-05 (Low) | **CLOSED** | `551b5e6` | `deadline = now() + expires_in` is taken after `on_user_code` returns (`:594`). The loop stops when `now() + wait >= deadline` before the sleep (`:609`), and checks `now() >= deadline` again after it (`:614`). The clock is injected through `device_login_with`'s `now` (`:567-571`); production passes `crate::time::Instant::now` (web-time on wasm). Test: `the_time_a_poll_takes_counts_against_the_deadline` (`:1106`). In it a fake clock advances 30 s per poll and by each sleep; with `expires_in` 60 it asserts `expired_token`, 2 polls and waits `[5,5]`. Mutant: restoring the slept-seconds budget (`schedule.tick_for`) fails that test. |
+| C164-07 (Low) | **CLOSED** | `82a4c6d` | Crate-internal `OmitBrowserCredentials` (`src/client.rs:37-52`), which is `fetch_credentials_omit()` on wasm32 and the identity elsewhere. It is applied in `oauth2_post` (`:1124`), the client and SSF JWKS fetch (`src/token/jwks.rs:1292`), SSF discovery (`src/ssf.rs:436`), the SSF poll (`:680`), and RFC 7592 GET, PUT and DELETE (`src/oidc/registration.rs:311`, `:375`, `:404`). That covers every `http_bare()` caller in `src/`. `CHANGELOG.md:24` has the "(native targets; in the browser build, redirects are the browser's)" text, and `:53-54` records the change. The check is compile-only, as the row allows. **wasm32 now built:** `cargo check --target wasm32-unknown-unknown --no-default-features --features rest` exit 0. Its one `dead_code` warning (`resolved_principal_tenant_id`, `src/client.rs:1326`) comes from leaving out `opaque` and is not in the diff. CI's exact cell, `RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo check --lib --target wasm32-unknown-unknown --no-default-features --features rest,opaque`, exits 0 with no warnings. |
+| C164-20 (Info) | **CLOSED** | `551b5e6`, `42d0be4` | The doc now says "the same answers … (a `429`'s `Retry-After` apart, below)" (`src/oidc/device.rs:394-395`). It adds a paragraph: a 429 is `OAuthProtocolError` `rate_limit_exceeded` and is not terminal; wait at least Retry-After or one interval, without raising the interval; this call does not expose Retry-After; `device_login` does it (`:415-421`). The last sentence of that paragraph is wrong about the call's behaviour; see the C164-03 residual. |
+| C164-23 (Info) | **CLOSED** | `42d0be4` | `tests/oauth2_no_session_bearer_test.rs:345-346` has the requested wording. The SSF test's `logout` control now runs after the fetches, and the assertions are `seen.last()` and `seen[..len-1]` (`tests/ssf_receiver_test.rs:1062-1075`). Mutant: SSF back on `http()` at `src/ssf.rs:400` and `:434` fails it (`/ssf/jwks: no session cookie`). So the reordered test still has teeth: the cookie is present at fetch time. |
+
+**Amended rules: probes** (temporary unit test in the copy, `device_login_with` with recorded sleeps, interval 5, client retry **on**, the default):
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| §14.2 rule 9: AXIAM's 429 | `429 {"error":"rate_limit_exceeded"}` `Retry-After: 12`, then pending, then 200 | sleeps `[5,12,5]`, 3 polls, OK |
+| rule 9: `retry_after` variant | `429 {"error":"rate_limit_exceeded","retry_after":12}` RA 12, then 200 | `[5,12]`, OK |
+| rule 9: bodiless 429 | `429` with no body, `Retry-After: 7`, then 200 | `[5,7]`, OK (non-OAuth `429 <html>` with RA 4: `[5,5]`, the interval being the floor) |
+| §14.6 case 3: 429 `slow_down` | `429 {"error":"slow_down"}` RA 1, then 200; and `429 slow_down` without RA, then pending, then 200 | `[5,5]` and `[5,5,5]`; the interval is never raised. `429 {"error":"invalid_grant"}` is waited too, `[5,5]` |
+| rule 1: the 400 still raises | `400 {"error":"slow_down"}`, then pending, then 200 | `[5,10,10]`, OK |
+| rule 6: 500 body | `500 {"error":"server_error","error_description":"db"}` once, and three times, then 200 | completes: `[5,5]` / `[5,5,5,5]`, OK (but see C164-25: no §16 retry inside the poll) |
+| rule 6: 503 | `503 {"error":"temporarily_unavailable"}`, then 200 (also with `Retry-After: 9`) | completes `[5,5]` in both cases. A 5xx's Retry-After is not honoured (C164-25) |
+| §14.6 case 2 | Retry-After 3600 past `expires_in` 60 | the existing test passes: `expired_token`, 1 poll |
+| single `device_poll` | 429 `rate_limit_exceeded` / bodiless 429 / 500 `server_error` / 503 | `Auth`+`rate_limit_exceeded` (OK) / `Network` (OK) / **`Auth`+`server_error`** / **`Auth`+`temporarily_unavailable`**, 1 request each (C164-03 residual) |
+
+**Replay after refresh:** correct. `management_raw` refreshes first (`src/management/request.rs:183-188`), then calls `management_attempt` again. That call rebuilds the request from scratch (`:211-219`): `session_credential_of`, then `maybe_csrf_header`, which reads `client.csrf_token()` at build time (`src/rest/auth.rs:1046-1051`; `refresh` calls `capture_csrf_from_jar`). reqwest's jar supplies cookies at send time. There is no interceptor or middleware stack whose order could matter. A device/bearer credential returns the 401 without refreshing (`:182`). Probed, with a DELETE user that answers 401 once and then 204, and a refresh that rotates the cookies. The first DELETE carried `X-CSRF-Token: test-csrf-token` and the original `axiam_access`/`axiam_refresh`/`axiam_csrf`. The replay carried `X-CSRF-Token: rotated-csrf-token`, `axiam_csrf=rotated-csrf-token`, `axiam_refresh=rotated-refresh-token` and the rotated `axiam_access`. The other `refresh()` at `src/token/revocation.rs:231` is the revocation feed's own cache, not a §9 replay. 1.63 rules in touched code: both device operations still use `oauth2_post` (`http_bare`, no jar, no CSRF, no adopted bearer, §6.1 rule 11). `oauth2_no_session_bearer_test` passes 3/3. §27.6.2 is untouched, and `network_manifest_test` passes 15/15.
+
+**Version:** 1.1.2 is right. `Cargo.toml:25`, `:127` (`=1.1.2`), the macros crate and the wasm crate all say 1.1.2. No public signature changed (`device_login_with` is `pub(crate)`), so a patch is right. The CHANGELOG `[1.1.2]` records C164-03/-04/-05/-07 (`CHANGELOG.md:44-54`). The README says contract 1.64 (`README.md:72`). The CHANGELOG intro still says CONTRACT.md is vendored from `fb92ec4`, which is now stale (C164-32).
+
+**Run by the reviewer** (copy at `/home/user/work/rust`, the clone untouched; protoc present; `rustup target add wasm32-unknown-unknown` succeeded):
+- `cargo test --all-features --lib --test device_flow_test --test oauth2_no_session_bearer_test --test ssf_receiver_test --test management_semantics_test --test network_manifest_test`: lib 239, device_flow 14, management_semantics 33, network_manifest 15, oauth2_no_session_bearer 3, ssf_receiver 19; 0 failed.
+- `cargo fmt --all --check`: clean. `cargo clippy --lib --tests --all-features -- -D warnings`: clean.
+- `cargo clippy --lib --no-default-features --features amqp -- -D warnings`: clean. `cargo test --lib --no-default-features --features amqp`: 93 passed.
+- wasm32: `--features rest` exit 0; CI's `rest,opaque` cell with `getrandom_backend="wasm_js"` exit 0, no warnings.
+- Mutants, switched by an env var in one build, run with `cargo test --all-features --lib oidc::device` (18 tests): baseline 18/18. The pre-fix `classify`: 3 fail. No 5xx arm: 1 fails. No 429 arm: 2 fail. Slept-seconds deadline: 1 fails. SSF on `http()`: the SSF cookie test fails.
+- Probes: the table above, and the replay probe (a temporary integration test).
+- Not run: the full unscoped `cargo test --all-features`, `cargo build --examples`, `cargo doc`, the macros publish dry-run, and the wasm-pack artifact build.
+- `target/` and the whole copy were deleted afterwards.
+
+**New findings:**
+- **C164-25 — Low (pre-existing, newly measurable against the amended text)** — `src/oidc/device.rs:470-491` (`device_poll_step` sends once). Rule: §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced… that budget is per poll attempt"), and §16.2's table, which lists `device_poll` on a 5xx or transport failure as eligible.
+  - What happens: the device poll never goes through `RetryRunner`, although `retry_enabled` defaults to true (`src/client.rs:677`) and `ciba_poll` uses it (`src/oidc/ciba.rs:551-590`). A 5xx or transport failure costs a whole interval instead of the up to 3 attempts with backoff that §16 allows. Probed with retry on: `500` then 200 gives 2 polls, sleeps `[5,5]`. A 5xx's `Retry-After` is ignored: `503` with `Retry-After: 9` was polled again after 5 s, so the §16.1 floor is not served. The flow survives, so no grant is lost; hence Low.
+  - Fix: in `device_poll_step`, wrap the send in `RetryRunner { enabled: self.retry_enabled(), operation: "device_poll", .. }.run_until(Some(&RetryBound { deadline, now, sleeper }), …)`, passing `device_login`'s deadline, clock and sleeper so a retry never waits past `expires_in` (the P10 pattern `ciba_poll` uses). Inside the attempt, a `status >= 500` or a send error becomes a retryable `Attempt { err: from_http_status(..), retry_after }`. Every 4xx, the 429 included, is returned without a retry: the 429 is the loop's wait, and the 400s are answers. Note that a bodiless 429 maps to `Network`, which `is_retryable` would retry, so the 429 must be taken out before the runner. The single `device_poll` uses no bound.
+  - Test: retry on, script `[500, 500, tokens]`, recorded sleeper. Assert 3 polls, one loop wait `[5]` plus two backoff waits of at most 200 ms and 400 ms, and the token. With `retry_enabled(false)`: 3 polls, `[5,5,5]`.
+- **C164-32 — Informational** — `CHANGELOG.md:12-14`; `README.md:99-103`.
+  - What happens: the 1.1.2 intro still says "`CONTRACT.md` … vendored byte for byte from `fb92ec4`". After `7472de8`, CONTRACT.md is axiam `21beda0` (sha256 `8b2cb9a3…7a9a`); `openapi.json` is unchanged. The README's contract-1.64 paragraph names only the 429 wait, not the amended rules 6 and 9.
+  - Fix: write "`CONTRACT.md` from `21beda0` (1.64 amended); `openapi.json` and `management-registry.json` from `fb92ec4`". Add one README sentence: "the poll's status decides: a 5xx is not terminal whatever its body, any 429 is the wait, and only the 400 `slow_down` raises the interval."
+- **C164-32 — Informational** — `src/oidc/device.rs:172`, `:215-226`.
+  - What happens: the `PollSchedule` doc says it holds "the deadline it stops at", and `tick_for`'s doc describes the loop's 429 wait. `device_login` now takes its deadline from the clock (`:594`, `:609`) and no longer calls `tick`/`tick_for`, so the public type's remaining-life budget is a helper nothing in the SDK uses, and it still counts only sleeps.
+  - Fix, doc only (the public API stays): "`device_login` takes its deadline from the clock (§14.2 rule 4); `tick`/`tick_for` count waits only and suit a loop that also checks the clock."
+
+---
+
+#### Addendum — python — commit 570efce7d (PR #103), read after 08a691423
+
+Four commits since the review: `843ecf8` (re-vendor CONTRACT.md from 21beda0), `659971f` (fix C164-01, -03, -04, -05, plus the async half of -15),
+`fd2bc14` (async C163-14 twin, C164-15), `570efce` (CHANGELOG and README). The commit messages match what the diff does.
+The fix adds one helper, `_OidcMixin._handle_device_poll_response` (`src/axiam_sdk/_oidc.py:1708-1738`). Both `device_poll`s call it
+(`_client.py:1964`, `_async_client.py:785`). It reads the status first: `>= 500` gives the §2 `NetworkError` (`:1726-1727`). Any `429` gives
+`OAuthProtocolError("rate_limit_exceeded")` with `retry_after_ms` from the header (`:1728-1736`), whatever the body. Any other status goes to the
+old `_handle_token_response`. `PollSchedule` takes an optional monotonic clock (`_oidc.py:312-331`, `:368-369`). Both `device_login`s now build it
+from `time.monotonic` **before** `on_user_code` runs (`_client.py:2005`, `_async_client.py:813`).
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-01 (Medium) | **CLOSED** | 659971f | `_oidc.py:1728-1736`: a `429` no longer goes through `description_optional=False`, so AXIAM's `{"error":"rate_limit_exceeded"}` (with or without `"retry_after":N`) is an `OAuthProtocolError` with `retry_after_ms`. Test helper `tests/test_device_flow.py:62-74` now sends the server's exact body, so the existing (b) tests are no longer vacuous. New: `:635` (parametrised over no-description and the `retry_after` member, sync, `[2,7,2]`). Mutant (429 branch disabled): **11 failed**. |
+| C164-03 (Medium, python row) | **CLOSED** (with C164-25) | 659971f | `_oidc.py:1726-1727`: a 5xx is a `NetworkError` before the body is read. `_device_poll_outcome` classes it `"retry"`. Tests: `:350` (sync: `500 {"error":"server_error","error_description":"db"}`, `503 {"error":"temporarily_unavailable"}`, a bodiless 502, then 200, 5 calls); `:731` (single `device_poll` gives `NetworkError`); `:798` (async: 500 server body, then 429 slow_down, then 200, sleeps `[2,2,2]`). Mutant (5xx branch disabled): **3 failed**. The poll is still not retried under §16 *inside* the attempt (C164-25). |
+| C164-04 (Low, python row) | **CLOSED** | 659971f | Status first: `429 {"error":"slow_down"}` never reaches the `"slow_down"` branch (`_oidc.py:1698`). Tests: `:672` (sync `[2,2,2]`), `:697` (`429 invalid_grant` not terminal), `:714` (single poll: `rate_limit_exceeded`, `retry_after_ms == 3000`), `:798` (async). Mutant: the review's narrower fix only (`description_optional=True` on a 429, no status-first) gives **5 failed**, so the status-first tests separate the two fixes. A bodiless 429 is covered too (`:657`, `[2,7]`), which closes the C164-17 behaviour for Python. |
+| C164-05 (Low, pre-existing) | **CLOSED in code; test PARTLY** | 659971f | `_oidc.py:328-329`, `:368-369`. The deadline is `monotonic() + expires_in`, taken before `on_user_code` in both clients (`_client.py:2005`, `_async_client.py:813`). `tick` uses `min(sum-of-waits, deadline - now)`. Probed through the real loops with a fake `time.monotonic`: sync with 3 s per request, `expires_in=10, interval=2`, sends at t=2 and t=7, then `expired_token`. Async with a 7 s callback sends once at t=9, then `expired_token`. Nothing is sent at or after 10. Unit test `:744` is PollSchedule-only. Mutant (tick ignores the clock): 1 failed. Mutant (**`time.monotonic` not passed in either `device_login`**): **0 failed, 41 passed**, so the wiring is untested (C164-29). |
+| C164-15 (Low + Info) | **CLOSED** | 659971f, fd2bc14 | Async deadline twin `tests/test_device_flow.py:755` (`Retry-After: 3600`, `expires_in=10`: `expired_token`, 1 call, every wait ≤ 10). Async no-Retry-After twin `:779` (`[2,2]`). Async C163-14 twin `tests/test_no_session_cookie_on_oauth2.py:206-241`: six operations after `await login()`, PAT alone, no cookie, no CSRF, then the control. Mutants on the async twin only: CSRF skip on `Cookie == ""` removed gives **4 failed** (the four writes); the old `token is None` early return gives **6 failed**. |
+
+**Amended rules, probed** (sync **and** async `device_login`, `interval=2`, recorded `time.sleep` / `asyncio.sleep`; identical results in both clients):
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| Rule 9: AXIAM's 429 | `429 {"error":"rate_limit_exceeded"}`, `Retry-After: 7`, then 200 | `[2,7]`. Conforms |
+| Rule 9: `retry_after` member | `429 {"error":"rate_limit_exceeded","retry_after":7}`, RA 7 | `[2,7]`. Conforms |
+| Rule 9: no Retry-After | `429 {"error":"rate_limit_exceeded"}`, no header | `[2,2]`. Conforms |
+| Rule 9: bodiless 429 | `429`, no body, RA 7 | `[2,7]`. Conforms (C164-17 behaviour) |
+| Rule 9 / §14.6 case 3 | `429 {"error":"slow_down"}`, RA 1, then 200; also then pending, then 200 | `[2,2]` and `[2,2,2]`. The interval is not raised. Conforms |
+| Rule 1 control | `400 slow_down`, then 200 | `[2,7]`. Still raises. Conforms |
+| Rule 6 / §14.6 500 body | `500 {"error":"server_error","error_description":"db"}` ×3, then 200 | Completes, 4 calls, `[2,2,2,2]`. Non-terminal and conforms. **No §16 retry inside the poll**: each 5xx costs one interval (C164-25) |
+| Rule 6 | `503 {"error":"temporarily_unavailable"}`, then 200 | Completes, `[2,2]` |
+| Single `device_poll` | 429 RLE / RLE+member / bodiless / slow_down | `OAuthProtocolError`, `error == "rate_limit_exceeded"`, `retry_after_ms` 7000/7000/7000/1000 (sync and async). An HTTP-date 30 s ahead gives about 29.5 s |
+| Single `device_poll` | 500 server_error / 503 | `NetworkError` (sync and async) |
+
+**1.63 rules where the diff touched code:** the diff touches only the device-poll path and docstrings. `/oauth2/*` stripping (`_session.py:404-416`) and `_apply_bearer_credential`'s `/oauth2/` early return (`_client.py:989-990`) are unchanged. `tests/test_no_session_cookie_on_oauth2.py` passes in full. §27.6.2 refusal at plan: untouched, and its tests pass.
+
+Replay after refresh: **DEFECT (pre-existing since `e980db9`, not touched by this PR). See C164-26.** `_retry_after_refresh_sync` (`src/axiam_sdk/_client.py:1671-1686`) and `_retry_after_refresh_async` (`_async_client.py:505-520`) copy every header of the original request into the replay, dropping only `content-length` and `x-csrf-token`. The original's `Cookie` header was merged from the jar when it was built, so it carries the **old** `axiam_access` and `axiam_csrf`. httpx's `build_request` does not overwrite a `Cookie` header that is already there (`http.cookiejar` adds one only when none is present). The order is otherwise right: refresh runs first, then `_rest_send_*` re-applies the tenant header, the bearer and the fresh `X-CSRF-Token`. Probed with httpx 0.28.1 against a mock that accepts only the refreshed cookie. Sync `check_access` path, async `check_access` path, and the management `send_management` path (shared `_retry_after_refresh_sync`, `management/_request.py:125`, `:162`) give the same result. The refresh is called once and the jar holds the NEW access. The replay carries `axiam_access=<OLD>` and `axiam_csrf=csrf-old` together with `X-CSRF-Token: csrf-new`. The replay gets 401, and the caller gets `AuthError`. Against AXIAM, the cookie/header CSRF mismatch would also fail the double-submit check. With `"cookie"` added to the excluded names in both helpers, the replay carries the new access and the new CSRF in both cookie and header, and gets 200. 1024 related tests (`-k "refresh or acting_tenant or cookie or csrf or uma or login or authz or management"`) still pass. A PAT/bearer replay keeps `Cookie: ""`, because `_apply_bearer_credential` re-sets it whenever `Authorization` is present.
+
+Version: `pyproject.toml:7` and `__init__.py:109` are 1.1.2, which is right (no source-breaking change). The CHANGELOG `[1.1.2]` records C164-01, -03, -04 and -05 accurately, including the `device_poll` thrown-type change on a 429 (`NetworkError` to `OAuthProtocolError`) and the 21beda0 re-vendor. C164-15 is test-only and not listed, which is acceptable. README `:30` says "1.1.2 … contract 1.64", and `:1598-1605` documents the status-first rule and the clock deadline.
+
+Run by the reviewer (throwaway copy `/home/user/work/python`, venv on Python 3.13.16, `pip install -e '.[dev,fastapi,django]'`; mutants in a `git archive` copy `/home/user/work/python-mut` with `PYTHONPATH=src`; both deleted afterwards):
+- `ruff check .`: passed. `ruff format --check .`: 217 files formatted. `mypy --strict src`: no issues in 98 files. `interrogate`: 100%. `scripts/gen_management.py --check`: OK (32 files, 202 ops).
+- `pytest tests -q`: **2141 passed**, 7 warnings (5 min 29 s). That is 2124 + 17 new.
+- Probe suite (35 cases, sync and async: the table above, HTTP-date, two clock-deadline loops): all passed. Replay probe (3 paths): stale cookie on all three. With the one-word fix, all three are fresh and return 200.
+- Mutants: see the findings table (M1 11 failed, M1b 5 failed, M2 3 failed, M4 1 failed, M3 **survived**, async C163-14 4 and 6 failed).
+- Not run: CI (no GitHub API).
+
+New findings:
+- **C164-26 — Medium (pre-existing, not introduced by PR #103; found by the cross-SDK check 4)**. Location: `src/axiam_sdk/_client.py:1679-1685` and `src/axiam_sdk/_async_client.py:513-519`. Rule broken: §9.3 (refresh once, then replay the failed call once with the refreshed session) and §3 (CSRF double-submit). What happens: the replay is rebuilt with the original request's `Cookie` header, so it sends the expired `axiam_access` and the old `axiam_csrf` next to the new `X-CSRF-Token`. Every cookie-session `check_access`/`can`/`batch_check` call and every management call that meets an expired access token gets the 401 again and raises `AuthError`, even though the refresh succeeded. The next call works because the jar is fresh. This is probed in sync and async. Exact fix, in both helpers: `if k.lower() not in ("content-length", "x-csrf-token", "cookie")`. The jar is then merged again by `build_request`, and `_apply_bearer_credential` restores `Cookie: ""` for a request with `Authorization` (verified: 3/3 probe paths get 200, and 1024 related tests pass). Test: log in with access A and csrf c1; the authz endpoint answers 401 to A and 200 to B; refresh sets B and c2. Assert that the replay's `cookie` contains `axiam_access=B` and `axiam_csrf=c2` and not A, and that `x-csrf-token == c2`. Run it sync and async, and once through `send_management`.
+- **C164-25 — Low (pre-existing)**. Location: `src/axiam_sdk/_client.py:1923-1964` and `_async_client.py:754-785` (`device_poll`). Rule broken: §14.2 rule 6 as amended ("retried under the bounded read-only retry policy of §16, then surfaced") and §16.2 (`device_poll` on a 5xx or transport failure is eligible). The switch defaults on (`self._retry_enabled`), and `ciba_poll` uses it (`_client.py:2239`). What happens: a 5xx or transport failure on a poll is not retried inside the attempt. `device_login` waits a full interval and polls again (`500` ×3 gives `[2,2,2,2]`), and a single `device_poll` surfaces the first 5xx. No grant is lost. Exact fix: wrap the send-and-parse of `device_poll` in `retry_sync(lambda attempt: ..., operation="device_poll", enabled=self._retry_enabled, telemetry=self._telemetry)` (and `retry_async`). `_handle_device_poll_response` already raises a `NetworkError` only for a 5xx, and a 429 stays an `OAuthProtocolError` that `_should_retry` does not retry, so there is no double wait. Test: `500 {"error":"server_error","error_description":"db"}` ×2, then 200, inside one `device_login` poll. Expect 3 token calls, interval sleeps `[2]`, and §16 retry sleeps recorded separately. With `retry=False`, the current behaviour.
+- **C164-29 — Informational (test strength, C164-05)**. Location: `tests/test_device_flow.py:744`. What happens: the clock deadline is tested on `PollSchedule` only. Removing `time.monotonic` from both `device_login` calls (`_client.py:2005`, `_async_client.py:813`) leaves all 41 device-flow tests passing. The code is right (probed). Exact fix: a sync and an async `device_login` test that monkeypatches `time.monotonic` to advance 3 s per token request (`expires_in=10, interval=2`), with `sleep` advancing the same clock. Assert `expired_token`, 2 requests, and every request sent at t < 10.
+
+---
+
+#### Addendum — c — commit 0c80e3d97 (PR #77), read after 0a9200858
+
+Two commits over the reviewed head: `a55a0b2` re-vendors the amended `CONTRACT.md` (21beda0; not re-checked, per the brief), and `0c80e3d` is the fix pass. The fix pass touches `src/oidc_device.c`, `src/management_manifest.c`, `include/axiam/error.h` (a comment only), `tests/CMakeLists.txt`, `tests/test_oidc_grants.c`, `tests/test_management_manifest.c` and `CHANGELOG.md`. The commit message's finding-to-change map matches the diff.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium) | **CLOSED** | 0c80e3d | `src/oidc_device.c:213-220`: `device_poll_with` turns `AXIAM_ERR_AUTH` with `transport_cause` 5xx into `AXIAM_ERR_NETWORK` and clears `oauth_error`. The loop then takes the `!code[0]` branch (`:335-339`) and waits the interval. §16 still retries inside the poll, because `oidc_post` (`src/oidc.c:456-461`) retries on the status before any body is read. Tests: `test_a_500_mid_poll_is_retried_rather_than_treated_as_terminal` (`tests/test_oidc_grants.c:306-331`) now uses `500 {"error":"server_error","error_description":"db"}` ×3, then 200. It asserts 4 calls and an unchanged interval. `test_a_5xx_on_a_single_poll_is_a_network_error_whatever_its_body` (`:333-347`) covers the single poll. Mutant MA (the conversion disabled) fails both, at `:323` and `:342`. Mutant MD (kind converted, `oauth_error` kept) also fails both, because the loop then reads `server_error` as terminal. Both tests are non-vacuous. One gap remains, for a caller who passes `err == NULL` (C164-27). |
+| C164-04 (Low) | **CLOSED** | 0c80e3d | `src/oidc_device.c:327-334`: the loop now tests `poll_err.transport_cause == 429` before any dispatch on the `error` code. Any 429 is the wait, and the old body-keyed branch is gone. The `slow_down` branch (`:341-346`) is reached only by a non-429, so in practice only by a 400. Test: `test_a_429_slow_down_does_not_raise_the_interval_and_a_bodiless_429_honours_retry_after` (`tests/test_oidc_grants.c:349-372`) expects waits `[2000,2000,7000,2000]`. Mutant MB (the old `== 429 && rate_limit_exceeded` gate) fails it at `:367` ("Expected 2000 Was 7000"). |
+| C164-17 (Info) | **CLOSED** | 0c80e3d | The same branch handles a bodiless 429 or one without an OAuth body: `if (retry_after_ms > wait_ms) wait_ms = retry_after_ms` (`:332`). `Retry-After` comes from `oidc_token_grant_ex` on every non-2xx (`src/oidc.c:920-922`). The same test, `:368` (`sleeps[2] == 7000`). Mutant MB2 (`== 429 && code[0]`, which sends a bodiless 429 back to the interval) fails at `:368`. Mutant MC (the floor removed) fails `:261`, `:299` and `:368`. |
+| C164-08 (Low) | **CLOSED** | 0c80e3d | Every site the review listed now calls `refuse()`: `src/management_manifest.c:179`, `:188`, `:202`, `:215`, `:232`, `:254`, `:264`, `:278`, `:291`, `:298`, `:645`. `oom()` (`:886-890`) sets cause 0 directly. `include/axiam/error.h:34` now reads "the error did not come from the server (no write was sent; a manifest `plan` may have sent reads)". Tests (`tests/test_management_manifest.c`): duplicate key on `validate` and on `plan` (`:263`, `:270`), dangling `depends_on` on `plan` (`:225`), cycle (`:247`), no key (`:285`). These cover what the fix asked for; `plan` runs `validate`, so the dangling case covers both paths. Per-site mutants (each site reverted to cause 0): sites `:179`, `:188`, `:215` and `:232` are killed. Sites `:202`, `:254`, `:264`, `:278`, `:291`, `:298` and `:645` survive: no test asserts 400 for those refusals. The review did not require those tests, so this is test strength only. |
+| C164-22 (Info) | **CLOSED** | 0c80e3d | `CHANGELOG.md:33-34`: "Test: `test_device_auth` (`test_adopted_bearer_is_not_sent_on_jwks_or_revocations`)". |
+| C164-23 (Info) | **CLOSED** (the fallback fix) | 0c80e3d | `tests/CMakeLists.txt:42-44`: `set_tests_properties(test_client_failing_transport PROPERTIES RUN_SERIAL TRUE)`, with a comment that names the reason. `ctest --show-only=json-v1` lists `RUN_SERIAL: true` on that test, and the property is gone when the line is removed. `ctest -j8` passed 81/81. The 60 ms window itself was kept; the review allowed `RUN_SERIAL` for that case. |
+
+**Amended rules, probed** (temporary tests in the copy `/home/user/work/c`, run against 0c80e3d with the fake transport, recorded sleeps and an interval of 2 s; retry on unless noted):
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| Rule 9: 429 `{"error":"rate_limit_exceeded","retry_after":7}` + `Retry-After: 7` | P1 | **PASS**: waits `[2000,7000]`, 2 calls. The 429 is not retried inside the poll. |
+| Rule 9: 429 `{"error":"rate_limit_exceeded"}`, no `Retry-After` | existing `:265-281` | **PASS**: waits at the interval. |
+| Rule 9 / §14.6 case 3: 429 `{"error":"slow_down"}`, then pending, then 200 | P5 | **PASS**: `[2000,2000,2000]`. The interval was not raised. |
+| Rule 9: bodiless 429 + `Retry-After: 7` | P7 | **PASS**: `[2000,7000]`. |
+| Rule 1 control: 400 `slow_down`, then 200 | P6 | **PASS**: `[2000,7000]`, so the interval is still raised. |
+| Rule 6 / §14.6: 500 `{"error":"server_error","error_description":"db"}` ×3, then pending, then 200 | P2 | **PASS**: 5 calls, sleeps `[2000,33,273,2000,2000]` (the §16 backoff inside the first poll, then the interval unchanged). |
+| Rule 6: 503 `{"error":"temporarily_unavailable"}` + `Retry-After: 4`, then 200 | P4 | **PASS**: retried inside the poll, waiting 4000 ms (`Retry-After` is the floor). 2 calls. |
+| Rule 6, retry off (`retry_enabled = 0`): 503 `temporarily_unavailable`, then 200 | P3 | **PASS**: not terminal. The loop polls again at the interval. |
+| Single `axiam_device_poll` on 429 `rate_limit_exceeded` | P8 | **PASS**: `AXIAM_ERR_AUTH`, `oauth_error="rate_limit_exceeded"`, cause 429, 1 call. |
+| Single `axiam_device_poll` on a bodiless 429 | P9 | Returns `AXIAM_ERR_NETWORK`, cause 429, 1 call. The error is raised, as expected. |
+| Single `axiam_device_poll` on 503 `temporarily_unavailable` | P11 | **PASS**: `AXIAM_ERR_NETWORK`, `oauth_error=""`, 3 attempts (§16). |
+| Single `axiam_device_poll`, `err == NULL`, 500 `server_error` | P10 | **FAIL**: returns `AXIAM_ERR_AUTH` (C164-27). |
+
+**Replay after refresh:** correct, probed. There is no middleware stack. `authz_post` (`src/client.c:1676-1697`) gets a 401, runs `single_flight_refresh`, then replays through `transport_retrying` → `transport_once_ex` (`:1620`). `transport_once_ex` calls `build_headers()` again for every attempt (`:327`), and `build_headers` reads `c->csrf_token` and the device bearer under `state_mtx` at send time (`:279-304`). `capture_csrf` (`:308-315`) stores the refresh response's token before the replay is built. Probe (scripted transport: login → `X-CSRF-Token: csrf-OLD`; `check_access` → 401; refresh → 200 with `csrf-NEW`; replay → 200): the first check sent `csrf-OLD`, the refresh sent `csrf-OLD`, the replay sent `csrf-NEW`, and the call returned OK. Cookies were checked by reading the code. There is one persistent curl handle per client, and `curl_easy_reset` keeps the in-memory jar (`src/transport_curl.c:89-90`, `:113-118`), so the refresh's `Set-Cookie` is in the jar when the replay is sent. A device session does not enter refresh (`:1686`). `authz_post` is the only refresh-and-replay path in the SDK; nothing else retries a 401. The diff does not touch `/oauth2/*` isolation (`src/oidc.c:415-429` still sends the empty `Cookie` and no CSRF), §6.1 rule 11 (`build_headers`'s `oauth2` gate is unchanged), or the §27.6.2 refusal at `plan` (unchanged; `test_manifest_network` 17/17).
+
+**Version:** 1.1.2 is correct (CMake project and CPack, `AXIAM_VERSION`, Doxyfile, `conanfile.py`, `ports/axiam-c-sdk/vcpkg.json`). SOVERSION 2 is still right: since the review, the only public-header change is a comment in `error.h`, with no struct or signature change, and the `abi_soname` test passes. The CHANGELOG intro records the one observable change to a single poll (a 5xx with an OAuth body is now `AXIAM_ERR_NETWORK`, not `AXIAM_ERR_AUTH`/`server_error`) and lists each fix with its test. The README contract sentence still says 1.64, but the 1.64 paragraph (`README.md:40-50`) was not updated for the amended rules (C164-32).
+
+**Run by the reviewer** (throwaway copy `/home/user/work/c`; `libcurl4-openssl-dev` and `libssl-dev` were already installed; `build-asan/` was deleted afterwards):
+- `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAXIAM_BUILD_TESTS=ON -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -g" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"`, then `cmake --build build-asan -j8`: 0 warnings.
+- `ctest --test-dir build-asan` (serial): **81/81 passed**, ASan/UBSan clean. `ctest -j8`: 81/81.
+- Per binary: `test_oidc_grants` 31/31 (29 + 2 new), `test_management_manifest` 25/25, `test_device_auth` 13/13, `test_manifest_network` 17/17, `test_client_failing_transport` 14/14.
+- `python3 scripts/gen_management.py --check`: clean.
+- Mutants (`ASAN_OPTIONS=detect_leaks=0`, each reverted and rebuilt afterwards): MA, MB, MB2, MC, MD and the manifest sites `:179`, `:188`, `:215`, `:232` were all killed. The manifest sites `:202`, `:254-298` and `:645` survive (no test asserts them).
+- 11 rule probes (P1-P11) and 1 replay probe, as above.
+- Not run: the plain Debug C-standard matrix, valgrind, Doxygen, the package recipes.
+
+**New findings:**
+- **C164-27 — Informational** — `src/oidc_device.c:213`. Rule: §14.2 rule 6 as amended ("the status is read before the body").
+  - What happens: the 5xx reclassification depends on the caller's error struct (`kind == AXIAM_ERR_AUTH && err && err->transport_cause >= 500`). A caller of `axiam_device_poll()` that passes `err == NULL`, which `axiam_error_set` explicitly allows, gets `AXIAM_ERR_AUTH` for `500 {"error":"server_error"}` and `AXIAM_ERR_NETWORK` for a bodiless 500 (probe P10). The rule is still decided on the body for that caller. `axiam_device_login` always passes its own `poll_err`, so the loop is not affected.
+  - Fix: at the top of `device_poll_with`, `axiam_error_t local; if (!err) { axiam_error_reset(&local); err = &local; }`. Alternatively, decide on `resp.status >= 500` inside `oidc_token_grant_ex` before calling `oidc_map_grant_error` when `retryable == OIDC_RETRY_LOOP_OWNS_429`. Test: the existing single-poll test with `err == NULL`, asserting `AXIAM_ERR_NETWORK`.
+- **C164-32 — Informational** — `README.md:40-45`; `include/axiam/oidc.h:1086-1089` (the `axiam_device_login` doc) and the `axiam_device_poll` doc (`:1030-1056`). Documentation accuracy.
+  - What happens: the README's 1.64 paragraph still describes only `429 rate_limit_exceeded`. Neither header doc says that any 429 is the wait whatever its body (a 429 `slow_down` does not raise the interval) or that a 5xx is `AXIAM_ERR_NETWORK` whatever its body. A single poll that is answered 5xx now returns a different kind, which the CHANGELOG records but the API docs do not.
+  - Fix: in the README, write "any `429` on a device-code poll (whatever its body, `slow_down` included) is waited out … and a `5xx` is a transport failure whatever its body (contract 1.64 as amended)". Add the same two sentences to the `axiam_device_poll` and `axiam_device_login` docs.
+
+---
+
+#### Addendum — cplusplus — commit 2b28526c7 (PR #80), read after 0c7bfd731
+
+Commits read (`git log 0c7bfd731..HEAD`): `077209a` re-vendors the amended contract from 21beda0 (CONTRACT.md sha256 8b2cb9a3…7a9a). `7b0267e` is the device-poll fix (C164-03, -04, -19, -20). `65a5567` is the manifest fix (C164-12, -21). `2b28526` is the CHANGELOG (C164-22). Each commit message matches its diff. `path:line` is on 2b28526c7.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium) 5xx with an OAuth body ends `device_login` | **CLOSED** | 7b0267e | `src/oidc.cpp:907-913`: on the retryable (device-poll) grant, `status >= 500` throws `NetworkError("http_5xx")` before `raise_grant_error` reads the body. `device_login`'s `catch (const NetworkError&)` continues (`:1766-1772`). Tests: `tests/test_oidc_grants.cpp:582` (3× `500 {"error":"server_error","error_description":"db"}` then 200 → tokens, `token_calls == 4`) and `:598` (single `device_poll` → `NetworkError`). Mutant Ma (block removed) fails both. Scoped to `retryable` only, so other token grants still dispatch on the body (allowed by the fix: "either"). |
+| C164-04 (Low) `429 slow_down` raises the interval | **CLOSED** | 7b0267e | `src/oidc.cpp:891`: any 429 on the poll breaks out of §16. `:915-923`: a 429 on the poll is always rethrown as `OAuthProtocolError("rate_limit_exceeded", …, retry_after, 429)`, whatever the body. `include/axiam/uma.hpp:177,182,198,211`: new `http_status()`. `src/oidc.cpp:1746`: the loop treats `rate_limit_exceeded \|\| http_status()==429` as the wait, before the `slow_down` branch. Tests `:481` (`429 slow_down`, pending, 200 → sleeps all 2000) and `:496` (bodiless 429, RA 7 → `[2000, ≥7000, 2000]`). Mutant Mb1 (no 429 synthesis) fails `:496`. Mb3 (synthesis and status check removed) fails `:481` and `:496`. Mb2 (only the loop's `http_status()` check removed) **survives**: it is an equivalent mutant, because `token_grant` already renames every poll 429. It is defence in depth, not a gap. |
+| C164-12 (Info) NoChange case is plan-only, so vacuous | **CLOSED** | 65a5567 | `tests/test_manifest_network.cpp:772-783` now calls `apply` for both `termination_action` and `service_type` (`"future_value"`) and asserts `report.complete()` and GET-only. `:785-802` adds the stated-`service_type` PUT case (body `framed_user`, never `future_type`). Mutant Me (`Plan::pending()` keeps an Unchanged network profile, so apply writes it; `src/management_manifest.cpp:353`) fails `:780` twice, plus four other §27.9 tests. |
+| C164-19 (Info) case 1 does not pin "not retried inside the poll" | **CLOSED (through the added single-poll test)** | 7b0267e | Case 1 (`:441-463`) now scripts two 429s and asserts `token_calls == 3`, sleeps `[2000, ≥9000, ≥9000]`. That alone is **still vacuous** against mutant Mc (429 retried by §16, `src/oidc.cpp:891` removed): §16 floors at Retry-After, so the calls and sleeps are the same, and case 1 passes. The new `:465-479` (single `device_poll`, one request, `retry_after() == 9000ms`) fails under Mc (`:473`), and so do the `slow_down` case (`:493`) and the cap case (`:533`). The fix asked for both. The guard is present, but the comment at `:448-449` overstates what case 1 checks. |
+| C164-20 (Info) `device_poll` / `device_login` docs omit the 429 | **CLOSED** | 7b0267e | `include/axiam/client.hpp:858-862` (`device_poll`: any 429 → `OAuthProtocolError`, `rate_limit_exceeded`, `retry_after()`, not retried, not terminal; a 5xx → `NetworkError`) and `:877-881` (`device_login`: 429 waited, RA a minimum capped at `expires_in`, one interval, not raised; a 5xx whatever its body is not terminal). Doc only, no mutant. |
+| C164-21 (Info) quoted server text unbounded and unescaped | **CLOSED** | 65a5567 | `src/management_manifest.cpp:256-265` `quote_server_value`: at most 64 bytes, bytes `<0x20` or `>=0x7f` become `?`, and `...` is appended when truncated. Used at `:269`. Test `tests/test_manifest_network.cpp:804-821`. Mutant Md (no cap) fails `:818-819`. Md2 (no escape) fails `:816-817`. Non-ASCII also becomes `?`, which is stricter than asked: UTF-8 is mangled, but it cannot split a code point. |
+| C164-22 (Info) no `### Binary compatibility` section for 1.1.2 | **CLOSED** | 2b28526 | `CHANGELOG.md:34-38` names `libaxiam_cpp.so.4`, both types and all four members (`retry_after`, `http_status`, the two `*_wire`), and says "not source-breaking". |
+
+**Amended rules, probed** (temporary test cases in a throwaway copy, recorded sleeper, interval 2 s, §16 retry on by default):
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| Rule 9, AXIAM's 429 | `429 {"error":"rate_limit_exceeded"}`, RA 5, pending, 200 | sleeps 2000, 5000, 2000; 3 calls → tokens. **Conforms** |
+| Rule 9, `retry_after` body | `429 {"error":"rate_limit_exceeded","retry_after":9}`, RA 9 | 2000, 9000, 2000 → tokens. **Conforms** |
+| Rule 9, `429 slow_down` (§14.6 third case) | RA 1, then pending, then 200; and with no RA, then 200 | 2000, 2000, 2000 and 2000, 2000. Interval not raised. **Conforms** |
+| Rule 9, bodiless 429 | `429 ""`, RA 7, pending, 200 | 2000, 7000, 2000. Waited ≥ RA, not raised. **Conforms** |
+| Rule 1 control, `400 slow_down` | `400 slow_down`, pending, 200 | 2000, 7000, 7000. Still raised. **Conforms** |
+| Rule 6, `500` with AXIAM body (§14.6 500 mock) | 3× `500 {"error":"server_error","error_description":"db"}`, pending, 200 | 5 calls, sleeps 2000, 100, 200, 2000, 2000. The first poll is §16-retried inside the attempt (3 attempts), then the loop takes its next interval → tokens. **Conforms** |
+| Rule 6, `503 temporarily_unavailable` | then 200 | 2 calls, 2000, 100. Retried inside the poll → tokens. **Conforms** |
+| Single `device_poll` | 429 rle RA 9 / bodiless 429 RA 4 / `429 slow_down` / always 503 / 500 then 200 / `400 slow_down` | `OAuthProtocolError(rate_limit_exceeded)` ra 9000, status 429, 1 call / same, ra 4000, 1 call / same, no RA, 1 call / `NetworkError (HTTP 503)` after 3 calls / tokens after the §16 retry / `OAuthProtocolError(slow_down)`, status 400, 1 call. **Conforms** |
+
+`Replay after refresh:` **Correct.** Both paths rebuild the replay after the refresh: `execute_retrying` (`src/client_impl.hpp:465-487`) and `execute` (`:497-514`) call `do_single_flight_refresh()` first, then `send_raw(build_request(…))`. `build_request` reads the current `csrf` under the lock (`:260`), and `send_raw` → `capture_csrf` (`:288-293`) has already stored the refresh response's `X-CSRF-Token`. Cookies come from the curl jar at send time, which holds the refresh response's `Set-Cookie`. The C++ SDK has no middleware chain in which order could invert this. Probe (fake transport): login CSRF `STALE`, `check_access` → 401, refresh answers `X-CSRF-Token: FRESH`. Wire order: login, check (`STALE`), refresh (`STALE`), check replay (`FRESH`). The management transport (`src/management_transport.cpp:177`) does no refresh-on-401. There is no repository test that pins the fresh CSRF on the replay. The single-flight tests use one constant token, so a future regression would be invisible (Informational, see C164-33).
+
+`Version:` 1.1.2 is still right. **No change since the review is source-breaking.** The `OAuthProtocolError` constructor gains a trailing defaulted `std::optional<long> http_status` (`include/axiam/uma.hpp:174-182`) and a new accessor, so every existing call and catch compiles. The only header changes since `0c7bfd731` are that and doc comments in `client.hpp`. C163-07's `ValidationError` → `std::invalid_argument` predates the review, and the review accepted it at patch. The new single-`device_poll` exception changes (a bodiless 429 is now `OAuthProtocolError`, not `NetworkError`; a 5xx with an OAuth body is now `NetworkError`, not `OAuthProtocolError("server_error")`) change behaviour but not source. The amended contract requires them, and they are in the same class as C163-07. **SOVERSION 4 still covers every layout change.** The only layout change after the review is `http_status_` appended to `OAuthProtocolError` (`uma.hpp:211`). `v1.1.2` is not tagged (the latest local tag is `v1.1.1`), so SOVERSION 4 has not shipped and needs no second bump. `CMakeLists.txt:116` `set(AXIAM_SOVERSION 4)`. A shared Release build gives `libaxiam_cpp.so.1.1.2` with `SONAME libaxiam_cpp.so.4` (readelf). The README contract sentence (`README.md:15`) still says contract 1.64.
+
+`Run by the reviewer` (throwaway copy `/home/user/work/cplusplus`, deleted afterwards; gcc 13, Ninja, C++17 Debug):
+- `python3 scripts/gen_management.py --check` → "§27 surface is current (7 files)", exit 0.
+- `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DAXIAM_BUILD_TESTS=ON -DAXIAM_BUILD_EXAMPLES=ON -DCMAKE_CXX_STANDARD=17 && cmake --build build` → exit 0 (121 steps).
+- `ctest --test-dir build --output-on-failure` → 1/1 passed. The binary reports **1622 test cases, 6130 checks, 0 failed** (review: 1614 / 6097; +8 cases).
+- Shared: `cmake -S . -B build-so -G Ninja -DBUILD_SHARED_LIBS=ON -DAXIAM_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build build-so --target axiam_cpp` → SONAME `libaxiam_cpp.so.4`.
+- Probes: 15 rule probes and 1 replay probe, all as tabled. Suite with probes: 1624 cases, 0 failed.
+- Mutants, each applied alone, rebuilt, full suite run. Killed: Ma (2 fail), Mb1 (1), Mb3 (2), Mc (3; case 1 survives, see C164-19), Md (1), Md2 (1), Me (5). Survived: Mb2 (equivalent mutant).
+- Not run: the ASan/UBSan and valgrind legs, clang, C++23, coverage, Doxygen, abi_soname under ctest (the shared build was library-only; SONAME was checked with readelf instead).
+
+`New findings:`
+- **C164-32 — Informational** — `CHANGELOG.md:11-13`, `:17-19`, `:26-27`; `README.md:32-35`; `CMakeLists.txt:112`. Rule: plan §8.2 (the CHANGELOG records what is vendored and what changed). Text drift after the fix pass:
+  - The intro still says the contract is "re-vendored byte for byte from ilpanich/axiam `fb92ec4`", but `077209a` re-vendored it from `21beda0`.
+  - The intro says "One behaviour of 1.1.1 is corrected", but *Changed* now also carries the device-poll status-decides change.
+  - The *Fixed* bullet still says "The `429` that names its error is no longer retried inside the poll"; it is now every 429 on the poll.
+  - The README 1.64 paragraph describes only `429 rate_limit_exceeded`, not the amendment (5xx whatever its body; any 429).
+  - The CMake SOVERSION comment lists `OAuthProtocolError (retry_after)` only.
+
+  **Fix:** change `fb92ec4` → `21beda0` (keep the other three files' source as they are), "One behaviour" → "Two behaviours", "The `429` that names its error" → "A `429` on the poll". Add one README sentence: "As amended, the status decides on the poll: a `5xx` is a `NetworkError` whatever its body, and any `429` is the wait." Add `http_status` to the CMake comment.
+- **C164-32 — Informational** — `CHANGELOG.md:42-50`. Rule: plan §8.2 (behaviour notes). The bold catch-advice covers only the 429 direction (`NetworkError` → `OAuthProtocolError`). The reverse direction is not flagged: a single `device_poll` answered `5xx {"error":…}` was `OAuthProtocolError("server_error")` and is now `NetworkError`. **Fix:** append "and a hand-rolled loop that caught `OAuthProtocolError` with `error() == "server_error"` from `device_poll` now receives a `NetworkError`, which is not terminal."
+- **C164-33 — Informational** — `tests/test_single_flight.cpp` (cross-SDK check 4). The code is correct (probed), but no repository test pins that the replay after a 401 refresh carries the refreshed `X-CSRF-Token`. The existing tests answer the same `tok` throughout. **Fix:** a test where login sets `X-CSRF-Token: STALE`, the refresh answers `FRESH`, and the assertion is that the replayed `POST` carries `FRESH` (the probe above, made permanent).
+- **C164-33 — Informational** — `tests/test_oidc_grants.cpp:448-449`. Test strength. The comment claims the two-429 case 1 would differ "had they been retried inside the poll". It would not: the §16 retry floors at Retry-After, and mutant Mc passes case 1. The guard is the new single-poll test `:465`. **Fix:** reword the comment to point at `:465` as the guard, or make case 1 assert `client.device_poll` separately.
+
+---
+
+#### Addendum — csharp — commit fd0869a49 (PR #111), read after 87b88122e
+
+Two commits since the review: `ad1014b` (re-vendors CONTRACT.md from 21beda0; sha256 `8b2cb9a3…` confirmed, not otherwise re-checked) and `fd0869a` (fixes C164-03/04/05/20/21/22/23). The commit message's finding-to-commit map matches the diff. **Read only:** there is no .NET toolchain here (`which dotnet` finds nothing; apt has no `dotnet-sdk-8.0`; the dotnet-install script gets a 403). Nothing was built or run. Every mutant below was judged by reading the test against the code.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium, regression in this PR) | **CLOSED** | fd0869a | `Axiam.Sdk/AxiamClient.Oidc.cs:1313-1316`: in the `anyStatusErrors` branch, `>= 500` now throws `NetworkError.FromResponse` before the body is read, as `CibaPollAsync` does (`AxiamClient.Ciba.cs:197-202`). **The 429 path is untouched:** 429 < 500, so it still reaches `MapOAuth2ErrorAnyStatusAsync`. A 429 with an OAuth body becomes `OAuthProtocolError` with `HttpStatus = 429` and the header `Retry-After` (`:1320-1327`). A bodiless or non-OAuth 429 falls through to `ErrorMapper`, which gives a `NetworkError` with `HttpStatus` 429 and `RetryAfter` (`Core/NetworkError.cs:111-112`). The loop's `catch (NetworkError)` (`AxiamClient.OidcDeviceExchangeLogout.cs:334-339`) waits that `Retry-After`. Tests: `Contract164DevicePollRateLimitTests.A500WithTheServersOwnOAuthBodyIsNotTerminal` (`:195`; Pending, 500, 500, Tokens gives 4 polls and sleeps `[5,5,5,5]`), `ASinglePollOnA500WithAnOAuthBodyIsANetworkError` (`:209`; `HttpStatus == 500`). The rule-6 test `OidcDeviceFlowTests.cs:217-218` now uses the server's body. Mutant (drop the `>= 500` check): the 500 becomes `OAuthProtocolError("server_error")`, which no catch takes, so the loop ends. All three tests fail. Non-vacuous. |
+| C164-04 (Low) | **CLOSED** | fd0869a | `Core/OAuthProtocolError.cs:55` adds internal `HttpStatus`. The loop's catches (`AxiamClient.OidcDeviceExchangeLogout.cs:319` before `:328`): `HttpStatus == 429 \|\| Error is "rate_limit_exceeded"` comes before `slow_down`, so only the 400 raises the interval. Tests: `A429WhoseBodySaysSlowDownIsTheWaitAndDoesNotRaiseTheInterval` (`:167`; sleeps `[5,5,5]`), with control `ASlowDownOnA400StillRaisesTheInterval` (`:178`; `[5,10,10]`). The 429 mock now carries `{"error":"rate_limit_exceeded"}` with no `error_description` (`:21-31`). Mutants: (a) swap the catch order, or (b) drop `HttpStatus == 429`. Either way the 429 `slow_down` reaches the `slow_down` catch, the sleeps become `[5,10,10]`, and the test fails. (c) Never raising the interval fails the 400 control. Non-vacuous. One limit: that case's Retry-After (1) is below the interval, so the test does not show that a 429 `slow_down`'s Retry-After is honoured. The code does honour it (`:325`). |
+| C164-05 (Low, pre-existing) | **CLOSED** | fd0869a | `AxiamClient.OidcDeviceExchangeLogout.cs:34` adds internal `TimeProvider DevicePollTime = TimeProvider.System`. **It is wired into the public `DeviceLoginAsync`** (the only overload; `:255`). The deadline is taken from it right after `DeviceAuthorizeAsync` returns and before `OnUserCode` (`:273`), and checked with `now + wait >= deadline` before each sleep (`:299`). `remainingSeconds` is gone. Production uses wall time. Test: `NoPollIsSentAtOrAfterTheDeadlineWhenRequestsTakeTime` (`:224`; FakeTime advanced by the recorded sleep and by 10 s per request; `expires_in` 30, interval 5; polls start at t=5 and t=20, then `expired_token`). Mutant (restore `remainingSeconds -= wait`): polls start at 5, 20, 35, 50, 65. That gives 5 polls instead of 2, and starts at or after 30, so the test fails. Non-vacuous. The other recorded-sleep tests advance the same FakeTime, so they are deterministic. |
+| C164-20 (Info) | **CLOSED** (for the four places named) | fd0869a | The `WriteIsolatingHandler` comment now sits in `if (fresh)` (`Rest/WriteIsolatingHandler.cs:159-161`). The class remarks list `device_poll` and add the `/oauth2/*` pooled/fresh cookie-less paragraph (`:41`, `:46-50`). `AxiamClient.Oidc.cs:1280` now names `ciba_poll` and `device_poll`. `Rest/AxiamHttpClientFactory.cs:178-184` is reworded as the review asked. Two more drifted sentences remain; see C164-32. |
+| C164-21 (Info) | **CLOSED** | fd0869a | `Management/ManifestApi.cs:664-676`: the value is capped at 64 characters plus `…`, and every `char.IsControl` character becomes `?`. `RequireNoUnknownCarried` is now `internal` (`:633`); `plan` still calls it at `:617`. Test: `NetworkManifestTests.TheRefusalCapsAndEscapesTheQuotedValueAndSaysUnknownWhenNoneWasKept` (`:463`) checks the cap, the escape, and the "the value is unknown" branch with `Fields` naming the member. Mutants: removing the cap fails the `DoesNotContain(x×65)` and `…` checks; removing the escape fails the `bad\nvalue` check. Non-vacuous. Nit, no finding: `raw[..64]` can split a surrogate pair. |
+| C164-22 (Info) | **CLOSED** | fd0869a | `CHANGELOG.md:23-28` uses the review's sentence nearly word for word: 1.1.1 raised `NetworkError`, so a hand-rolled loop must also catch `OAuthProtocolError`/`rate_limit_exceeded`. Text only; no mutant applies. |
+| C164-23 (Info) | **CLOSED** | fd0869a | `Management/ManagementChecks.cs:335`, `:354`, `:365-378` hold both spellings in internal `RawEnumSpellings`, with `Equals => obj is RawEnumSpellings` and `GetHashCode => 0`. `RawTerminationAction` and `RawServiceType` are now computed from it. Test: `ADecodedProfileEqualsOneBuiltFromItsPublicMembers` (`NetworkManifestTests.cs:490`) checks `Equal(plain, decoded)`, equal hash codes and `decoded with {}`. Mutants: restoring two string init properties, or dropping the `Equals` override (reference equality), makes `Equal(plain, decoded)` fail. Non-vacuous. |
+
+**Amended rules, against AXIAM's exact bodies (traced by reading, not run):**
+
+| Case | Result |
+|---|---|
+| Rule 6: `500 {"error":"server_error","error_description":"db"}` mid-poll | `NetworkError` (500), not terminal; waited one interval. Single poll gives `NetworkError`. **Conforms** for the outcome. The poll is **not** retried under §16 inside the attempt (C164-25). |
+| Rule 6: `503 {"error":"temporarily_unavailable"}` | Same path (`>= 500`): `NetworkError`, not terminal. **Conforms** (same C164-25 caveat). |
+| Rule 9: `429 {"error":"rate_limit_exceeded"}`, and with `"retry_after":N` | `OAuthProtocolError`, `HttpStatus` 429. The loop waits `max(interval, Retry-After header)`, counts it as one interval and does not raise the interval. Body `retry_after` is ignored (correct). Single `DevicePollAsync` raises `OAuthProtocolError("rate_limit_exceeded")`. **Conforms.** |
+| Rule 9: bodiless 429 with Retry-After (also a non-OAuth body) | `NetworkError` with `HttpStatus` 429 and `RetryAfter`. The loop waits `max(interval, RA)` and does not raise the interval. **Conforms** (C164-17 point). |
+| §14.6 third case: `429 {"error":"slow_down"}` then 200 | Taken by the 429 catch before `slow_down`: the wait, interval unchanged. Test at `:167`. **Conforms.** |
+| `400 slow_down` | Still raises the interval by 5 s for good (`:328-332`; test `:178`). **Conforms.** |
+| §14.6 cases 1 and 2 | Case 1 `[5,5,20,5]` (`:97`). Case 2: RA 120 > `expires_in` 30 gives `expired_token` after 1 poll, sleeps `[5]` (`:138`). **Conform.** |
+
+**Replay after refresh:** **Conforms** (by reading; no probe possible).
+- REST, `Rest/AxiamHttpMessageHandler.cs:289-342`. On a 401, the refresh is awaited first (`:294`). Then a new `HttpRequestMessage` is built. It copies the caller headers except the managed ones (Authorization, X-Tenant-Id, X-CSRF-Token, Content-Type; `:176`, `:318-325`). Then `ApplyHeaders(retryRequest, refreshed.AccessToken)` runs (`:338`). So the bearer is the refreshed one, and the CSRF value is re-read after the refresh (`_csrfToken ?? jar`, `:437`).
+- The refresh itself runs through the same handler chain (`AxiamClient.cs:861-866`). Its `Set-Cookie` updates the shared `CookieContainer`, and `SocketsHttpHandler` writes jar cookies at send time, so the replay carries the fresh cookies. Jar cookies are not in `request.Headers`, so no stale `Cookie` header is copied. That is .NET's behaviour, read, not probed.
+- Tests: the fresh bearer is asserted (`AxiamHttpMessageHandlerTests.cs:247-263`). The CSRF and cookie values on the replay are not. Pre-existing, outside the diff, and not numbered:
+  - a cached `_csrfToken` (only ever set from an `X-CSRF-Token` *response header*, which AXIAM never sends) takes precedence over a rotated `axiam_csrf` cookie;
+  - against AXIAM it stays null, so the jar value is used.
+- gRPC, `Grpc/AuthInterceptor.cs:146-148`. Refresh first, then `InjectAuthMetadata(originalContext)`, which reads the token accessor again. Fresh.
+- `/oauth2/*` stays exempt from the refresh, and no bearer or CSRF is put on those requests (`:420-437`). The diff does not touch this.
+
+**Version:** 1.1.2 is right. Both csproj files and the README are unchanged. Every addition since the review is `internal` (`HttpStatus`, `DevicePollTime`, `RawEnumSpellings`, and `RequireNoUnknownCarried` made internal), so nothing is source-breaking. The CHANGELOG records C164-03/04/05/21/22/23 and the re-vendor from 21beda0 (`CHANGELOG.md:13-14`, `:20-43`). C164-20 is doc-only and is not listed, which is fine. The README still says "conforms to **contract 1.64**" (`README.md:27`).
+
+**1.63 rules where the diff touched code:**
+- `WriteIsolatingHandler` and `AxiamHttpClientFactory` changed in comments only.
+- The `/oauth2/*` cookie/CSRF/bearer isolation and §6.1 rule 11 are unchanged.
+- The §27.6.2 refusal still runs in `plan` (`ManifestApi.cs:617`), before any write.
+
+**Run by the reviewer:**
+- `which dotnet`: none. No build, no `dotnet test`, no `dotnet format`, no mutants executed; the toolchain is unavailable as in the review.
+- `git log` / `git diff 87b88122e..HEAD` read in full: 12 files (+327/−62), of which 46 lines are the vendored CONTRACT.md.
+- `sha256sum CONTRACT.md` gives `8b2cb9a385782b5e…`.
+- Compile-readiness checked by reading:
+  - the test's `NetworkReplyProfile` initialiser sets every `required` member (`Models/NetworkReplyProfile.cs:25-104`);
+  - `ManagementSupport.Decode<T>` and `ManagementJson.Reader` exist as internals;
+  - `TimeProvider` is in the net8.0 BCL;
+  - `ImplicitUsings` covers `Select` in `QuoteRaw`;
+  - the primary-constructor class's same-named property initialisers are legal C# 12.
+- 7 mutants judged by reading; all are killed.
+
+**New findings:**
+- **C164-25 — Low (pre-existing, not introduced by this PR; made normative-visible by the amended rule 6)**
+  - Where: `Axiam.Sdk/AxiamClient.OidcDeviceExchangeLogout.cs:216-218`.
+  - Rule: §14.2 rule 6 (amended), "retried under the bounded read-only retry policy of §16, then surfaced … per poll attempt", and §16.2's table row for `device_poll` on a 5xx or transport failure.
+  - What happens: the SDK has a §16 layer, `RetryPolicy.ExecuteAsync`, with `RetryEnabled` defaulting to `true` (`Options/AxiamClientOptions.cs:170`). `CibaPollAsync` uses it (`AxiamClient.Ciba.cs:189-216`). `DevicePollAsync` does not.
+    - A 5xx or transport failure on a poll is never retried inside the attempt (3 attempts, with Retry-After as a floor).
+    - A single `DevicePollAsync` surfaces the first transient 5xx.
+    - `DeviceLoginAsync` waits a full interval instead.
+    - The comment at `:216` ("is retried (the loop below re-sends it)") stands in for the §16 retry.
+    - The flow still survives, so the user-visible harm is narrow.
+  - Fix (code): in `DevicePollAsync`, send the POST inside `RetryPolicy.ExecuteAsync("device_poll", _options, _telemetry, Random.Shared.NextDouble, …, cancellationToken, retryable: e => e.HttpStatus is null or >= 500)`.
+    - Do **not** use `RetryPolicy.IsTransient`. It retries 408 and 429, and a 429 is the loop's rule-9 wait, not a §16 retry.
+    - Inside the callback: throw `NetworkError.FromResponse` on `>= 500`; throw the mapped error (with `HttpStatus`/`RetryAfter`) on any other non-2xx; return the 200 body string.
+    - Parse the `TokenResponseWire` **outside** the retry, as `CibaPollAsync` does (`:218-227`). A parse failure is a `NetworkError` with a null status and would otherwise re-send a redeemed `device_code`.
+  - Fix (test):
+    - Single `DevicePollAsync`: 500, 500, 200 gives 3 requests and tokens; 500 ×3 gives `NetworkError` after 3 requests.
+    - A bodiless 429 gives exactly 1 request.
+    - With `RetryEnabled = false`, a 500 gives 1 request.
+- **C164-32 — Informational (doc drift, partly pre-existing)**
+  - Where: `Axiam.Sdk/AxiamClient.OidcDeviceExchangeLogout.cs:178-180` and `:241-245`.
+  - What happens: the `DevicePollAsync` remarks say a hand-rolled loop "sees exactly what `DeviceLoginAsync` sees". It does not. `DeviceLoginAsync` decides on the internal `OAuthProtocolError.HttpStatus` and `RetryAfter`, which a caller cannot read. So a caller's loop cannot tell a 429 `slow_down` from a 400 `slow_down`, and cannot honour the 429's Retry-After. The `DeviceLoginAsync` remarks still say only "a `429` `rate_limit_exceeded`" is waited, but now any 429 is.
+  - Fix: reword `:178-180` to say a hand-rolled loop sees the same five answers, but not the status or `Retry-After` of a `429`, which `DeviceLoginAsync` reads internally to apply §14.2 rule 9, and that a caller who needs the rule-9 wait uses `DeviceLoginAsync`. Make `:242` "a `429` (whatever its body) is not terminal either". Making `HttpStatus`/`RetryAfter` public would be an additive public change and a minor bump, so it is not proposed for 1.1.2.
+- **C164-33 — Informational (test robustness, introduced by C164-05)**
+  - Where: `tests/Axiam.Sdk.Tests/OidcDeviceFlowTests.cs:192-205` (`DeviceLoginAsync_StopsAtExpiresIn_EvenWhileTheServerSaysPending`).
+  - What happens: before this change, the deadline was a counter and the test was deterministic. The fixture keeps the real `Task.Delay` and the real clock (`expires_in` 2, interval 1). The test now passes only if `UtcNow` after a 1 s `Task.Delay` plus the poll reads at least 1 s past the deadline capture. The Linux timer queue can fire up to about 1 ms early on `TickCount64` granularity. The time spent in `OnUserCode` and the mocked poll almost always covers that, so the risk is small, but it is now a wall-clock boundary.
+  - Fix: give `OidcDeviceFlowTests`' `SetUp` the same FakeTime and advancing recorded sleep as `Contract164DevicePollRateLimitTests` (`:52-88`). That also removes its real 1 s sleeps.
+
+---
+
+#### Addendum — go — commit a6551ae8d (PR #103), read after a47ac8f94
+
+Six commits on top of the reviewed head, in a straight line: `9d7460a` (CI floor), `bbf7b24` (re-vendor CONTRACT.md as amended; vendoring not re-checked, per the brief), `483eec5` (C164-04/-05/-17), `077838c` (C164-02/-24), `d9efd9c` (C164-23), `a6551ae` (C164-22). Each commit message's finding map matches its diff.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-02 (Medium) | **CLOSED** | `077838c` | `oidc_wire.go:372-374`: the verifier gets `bare := *c.httpc; bare.Jar = nil`, so CA, client cert, timeout and CheckRedirect are kept and the jar is not. Test `oidc_jwks_client_test.go:110` (`TestOidcJWKSFetchAfterLoginCarriesNoSessionCookie`): a real `Login` sets `axiam_access` and `axiam_csrf`, a guard checks that the jar is non-empty, then a real `VerifyPayload` fetches the JWKS and the test asserts there is no `Cookie` and no `X-CSRF-Token`. The C163-16 mTLS and timeout tests (`:21`, `:64`) are kept and pass. Mutant (drop `bare.Jar = nil`): **killed** by that test. |
+| C164-04 (Low) | **CLOSED** | `483eec5` | `oidc_wire.go:280-305`: the status decides. Only `429` with `error == "rate_limit_exceeded"` becomes `*OAuthProtocolError` (`:286`). Every other 429 (any body, or none) and every 5xx goes to `errorFromHTTPStatus`, which gives `*NetworkError`. Test `contract_164_test.go:213`: a 429 with `slow_down`, `authorization_pending` or `invalid_grant`, then 200, gives waits `[1s 1s]` and 2 calls; the control, a 400 `slow_down`, gives `[1s 6s]`. Mutant (any decoded 429 becomes typed): **killed** (the `slow_down` and `invalid_grant` subtests fail). The `authorization_pending` subtest survives that mutant because the waits are the same; it has no `Retry-After` to tell the cases apart. This is test strength only. |
+| C164-17 (Info) | **CLOSED** | `483eec5` | `oidc_wire.go:300-304` sets `RetryAfter` on the fall-through `*NetworkError` for 429 and 503. `oidc_device.go:359` (`schedule.rateLimited(networkErr.RetryAfter)`) uses it in the `*NetworkError` arm; a zero value is a no-op. Test `contract_164_test.go:242`: a bodiless 429 with `Retry-After: 7` gives `[1s 7s]`. Mutants: drop the loop floor, **killed**; drop the mapper's `RetryAfter`, **killed**. |
+| C164-05 (Low) | **CLOSED** | `483eec5` | `oidc_device.go:278` records `received` right after `DeviceAuthorize` returns, before `OnUserCode`. `:289-290` set `schedule.now` and `schedule.deadline = received + expires_in`, and `:79` stops when `!now().Add(step).Before(deadline)`. The `pollNow` clock can be injected (`client.go:296-298`, `oidc_device.go:367`). The old waits budget stays as a second bound that never wins (it is always ≥ the wall-clock bound). Test `contract_164_test.go:259`: `OnUserCode` takes 10 s of a 12 s grant at a 5 s interval, which gives `expired_token` with 0 polls. Mutants: disable the wall-clock check, **killed**; take `received` after `OnUserCode`, **killed**. |
+| C164-22 (Info, both bullets) | **CLOSED** | `a6551ae` | `CHANGELOG.md:17-18` now says "an unkeyed `OAuthProtocolError{…}` composite literal". `[1.1.1]` and every older section are byte-identical to tag `v1.1.1` (diffed); the correction is kept under `[1.1.2]` → Changed (`:72-73`). Docs only, no mutant. |
+| C164-23 (Info, CIBA) | **CLOSED** | `d9efd9c` | `oidc_ciba.go:707-717`: `wait = max(interval, floor)`, checked against the wall-clock deadline before sleeping, and the floor is cleared after one use. `:740-743` set the floor from `RetryAfter` on `rate_limit_exceeded`. `oidc_registration.go:405-407` now carries `RetryAfter` on a 429 in `oauth2ErrorAnyStatus`, which is additive for registration and SSF. No double wait: a typed 429 is still decisive (`errStopRetry`) in `cibaPoll`. Test `oidc_ciba_test.go:1097`: 429 with `Retry-After: 17`, then pending, then tokens, gives `[5 17 5]`. Mutants: drop the floor assignment, **killed**; drop `RetryAfter` in `oauth2ErrorAnyStatus`, **killed**. |
+| C164-24 (Info) | **CLOSED** | `077838c` | `client.go:843-844`: matches the base prefix + `/oauth2/` **or** a root `/oauth2/`. Federation routes still never match. The pinned row is flipped to `true` (`contract_163_test.go:275`). Mutant (drop the root alternative): **killed** by `TestIsOAuth2PathIsAnchoredToTheBasePath`. |
+| CI floor `9d7460a` | **Consistent, with one stale doc line (C164-32)** | `9d7460a` | Touches only `.github/workflows/sdk-ci-go.yml`: the matrix `1.26.9` → `1.26.10` (`:44`) and the govulncheck guard (`:61`). `go.mod` stays `go 1.26.0`, there is no `toolchain` line, and `MinGoVersion = "1.26"` is unchanged, so consumers see no change. The interop job (`:91`), the publish job (`:248`) and `coverage.yml:20` keep `1.26.9`. None of them runs govulncheck, as the commit message says. The `version_policy_test.go` floor and matrix tests pass on both go1.26.0 and go1.26.10. Not followed: `README.md:188` still says the matrix is "1.26.9 and 1.27.0", the `version_policy_test.go:39` comment shows the old matrix, and the CHANGELOG does not record the move (earlier floor moves were recorded, `CHANGELOG.md:355`, `:372`). |
+
+**Amended rules: probe results** (a throwaway probe test drove `DeviceLogin` through `runDeviceLogin` with a recorded sleep: interval 1 s, `expires_in` 30. The script was the first answer, then 400 `authorization_pending`, then 200. Each single `DevicePoll` was probed separately.)
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| §14.2 rule 9: AXIAM 429 | `429 {"error":"rate_limit_exceeded"}`, Retry-After 7 | waits `[1s 7s 1s]`, completes. Single poll: `*OAuthProtocolError` `rate_limit_exceeded`, `RetryAfter=7s`, 1 call. **ok** |
+| rule 9: the variant | `{"error":"rate_limit_exceeded","retry_after":7}`, Retry-After 7 | the same as above. **ok** |
+| rule 9: bodiless 429 | Retry-After 7, no body | `[1s 7s 1s]`. Single poll: `*NetworkError`, `RetryAfter=7s`. **ok** |
+| rule 9 / §14.6 case 3 | `429 {"error":"slow_down"}` with Retry-After 1, and without it | `[1s 1s 1s]` both times; the interval is never raised. Single poll: `*NetworkError` (not read as `slow_down`). **ok** |
+| rule 9: past the deadline | 429 `rate_limit_exceeded`, Retry-After 100, deadline 30 s | `expired_token` at once after 1 call. **ok** |
+| rule 5 control | `400 {"error":"slow_down"}` | `[1s 6s 6s]`, raised and persistent. **ok** |
+| rule 6 / §14.6 500 body | `500 {"error":"server_error","error_description":"db"}` | non-terminal, `[1s 1s 1s]`, completes. Single poll: `*NetworkError`. **Not §16-retried inside the poll (C164-25).** |
+| rule 6: 503 | `503 {"error":"temporarily_unavailable"}`, without and with Retry-After 4 | non-terminal, `[1s 1s 1s]` and `[1s 4s 1s]` (Retry-After as a floor). Not §16-retried (C164-25). |
+| §14.6 1.64 cases 1 and 2 | existing tests `contract_164_test.go:45-148` | pass, unchanged |
+
+Single `DevicePoll` still raises on every 429. It raises `*OAuthProtocolError` for the server's `rate_limit_exceeded` body. For a 429 whose body names something else, it deliberately raises `*NetworkError`, so a hand-rolled loop cannot misread the 429 as `slow_down`.
+
+**Replay after refresh:** **Not affected.** REST has no refresh-and-replay at all. `doRequest` (`client.go:885-918`) returns every status as received, and `RefreshIfNeeded` is called only from `Refresh()` (`login.go:497`). That is a documented invariant (`client.go:862-884`), so the stale-capture push-order bug has nowhere to happen. Decoration (`decorateRequest`, `client.go:764-828`) reads the CSRF token, the adopted bearer and the jar when the request is sent. gRPC (`grpc/client.go:107-114`, `:132-139`, `grpc/token.go:213-219`, `:239-245`, `grpc/userinfoclient.go:60`) refreshes on `Unauthenticated` and then calls `c.inner.X` again. That second call goes back through `authUnaryInterceptor` (`grpc/interceptor.go:27-37`), which reads `tokenFn()` on every call. Probe: the first call carried `Bearer old`, the refresh set the token to `new`, and the replay carried `Bearer new`. AMQP and `middleware/` have no refresh path.
+
+**1.63 rules where the diff touched code:** these hold. The CSRF skip, the jar bypass and the bearer withholding still go through `c.isOAuth2Path` (`client.go:811`, `:825`, `:905`). The root-`/oauth2/` widening only adds isolation. The JWKS GET is now jar-less and goes around `decorateRequest`, so it sends no CSRF and no bearer. The C163-08 test passes. §6.1 rule 11 and the §27.6.2 plan-time refusal are untouched.
+
+**Version:** 1.1.2 (`## [1.1.2] - Unreleased`, tag-based, no version constant) is still right. Nothing since the review is source-breaking. The C164-04 change narrows which 429s become `*OAuthProtocolError`, but compared with 1.1.1 every 429 was a `*NetworkError`, so it only shrinks the change the release already records. The CHANGELOG records C164-02/-04/-05/-17/-23/-24 and the amendment (`21beda0`), plus C164-16 as "held already, now tested". README `:23` says contract 1.64; `:168` pins `@v1.1.2`.
+
+**Run by the reviewer** (throwaway copy `/home/user/work/go`, deleted afterwards; `GOTOOLCHAIN=auto` resolved go1.26.0):
+- `go build ./...` ok. `go vet ./...` clean. `go test -count=1 ./...` passed: 15 packages ok, **1686 test/subtest passes, 0 failures, 0 skips**. `go run ./internal/cmd/genmanagement -check` passed: "32 generated files are current (202 operations)".
+- On go1.26.10: the version-policy tests (`TestCIBuildsTheDeclaredFloor`, `TestCINeverBuildsBelowTheFloor`, `TestCIMatrixIsFloorAndNewest`, `TestRunningToolchainSatisfiesTheFloor`, `TestMinGoVersionMatchesGoMod`) pass.
+- 11 mutants, each reverted after its run, **all killed**: C164-02 jar ×1, C164-04 ×1, C164-17 ×2, C164-05 ×2, C164-24 ×1, C164-23 ×2, plus the C164-16 control (a 5xx with an OAuth body typed as a protocol error), killed by `TestDeviceLoginA500ServerErrorBodyMidPollIsNotTerminal`.
+- Probes: the device loop and single-poll table above; the gRPC replay token.
+- Not run: `govulncheck`, because `vuln.go.dev` was refused by the egress proxy (CONNECT 403). The CI run of PR #103 was not read (no GitHub API). CI has no staticcheck or golangci-lint, so neither was run.
+
+**New findings:**
+- **C164-25 — Low (pre-existing; made visible by the amended rule 6).** `oidc_device.go:207-225` (`DevicePoll` → `postToken`, with no `retryReadOnly`). Rule: §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced") and §16.2 (`device_poll` on a 5xx or transport failure is eligible). §16.1 says retry MUST default to on, and in this SDK it does (`client.go:410`). What happens: a `500 {"error":"server_error"}`, a 503 or a transport failure on a device poll is never retried inside the attempt. The single `DevicePoll` surfaces it after 1 request (probed), and `DeviceLogin` absorbs it at a full interval (`[1s 1s 1s]`) instead of the 3-attempt §16 budget. The flow still survives, so the trigger is narrow. `cibaPoll` already does the right thing (`oidc_ciba.go:617-641`). Fix: in `DevicePoll`, wrap the token POST in `c.retryReadOnly`, or `retryReadOnlyUntil` bounded by the grant deadline when called from the loop. Retry only a `*NetworkError` from a 5xx or a transport failure. Make every 429 (typed or not) and every 4xx decisive through `errStopRetry`, so the 429 wait stays the loop's and is never waited twice. `WithRetryDisabled` must still give exactly one attempt. Test: `500 {"error":"server_error","error_description":"db"}` then 200, with `c.rand` pinned to 0, gives 2 token calls inside one `DeviceLogin` wait (`[1s]`). A 429 then 200 still gives 1 call per wait. With `WithRetryDisabled`, the 500 case gives `[1s 1s]`.
+- **C164-32 — Informational.** `README.md:188` and `version_policy_test.go:39` (a comment). The CI floor bump `9d7460a` left the README saying the gating matrix runs "1.26.9 and 1.27.0", and the CHANGELOG has no line for it, although the earlier floor moves are recorded (`CHANGELOG.md:355`, `:372`). The Fixed bullets also do not name the new tests (plan §8.2), except C164-16's "now tested". Fix: write "1.26.10 and 1.27.0" in the README and the comment. Under `[1.1.2]` → Notes, add "CI: the floor leg runs Go 1.26.10 (GO-2026-6809 in crypto/x509, found in 1.26.9); `go.mod` stays `go 1.26.0`". Name the five new tests in the `### Added` Tests bullet.
+
+---
+
+#### Addendum — java — commit 4d40fd84b (PR #121), read after b4072a9f1
+
+Commits `b4072a9f1..4d40fd84b`: `688b047` re-vendor CONTRACT.md from 21beda0 (sha256 8b2cb9a3…7a9a, matches);
+`66532fd` fix(oauth): the status decides on a device poll, deadline on a clock; `6bd133b` tests for C164-12/-19
+and the C164-22 citation; `4d40fd8` CHANGELOG/README. The commit messages' finding map matches the diff.
+The SDK clone was not modified. Probes and mutants ran in `/home/user/work/java-probe`, the suite in `/home/user/work/java`.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-04 (Low) | **CLOSED** | 66532fd | `ErrorMapper.java:186-194`: any `429` → `OAuthProtocolError("rate_limit_exceeded", body?.description, Retry-After)`, whatever the body names. `AxiamClient.java:3517-3521`: `slow_down` is reached by a `400` only. Test `AxiamClientDeviceFlowTest.anyRateLimitIsTheWaitWhateverItsBodyNames` (:262) asserts sleeps `[1,1,1,4]`. Mutant "keep the body's code on a 429" **fails** it: `[1,6,6,6]`. |
+| C164-05 (Low, pre-existing) | **PARTLY** (code done, untested) | 66532fd | `AxiamClient.java:3476`: `deadline = clock.now() + expires_in`, taken when the authorization returns. `:3493`: `!clock.now().plus(wait).isBefore(deadline)`, so request time and `onUserCode` time now count. **No test advances the clock outside `sleep`.** `RecordedClock` (test :188) moves only on `sleep`, so a sum-of-sleeps deadline behaves identically. Mutant "deadline = start + Σ sleeps" **survives** all 19 tests of `AxiamClientDeviceFlowTest`. The index asks for a test: a clock that also advances per poll / in `onUserCode` sends no poll at or after the deadline. |
+| C164-11 (Low) | **CLOSED** | 66532fd | Package-private `deviceLogin(..., CibaClock clock)` at `AxiamClient.java:3470`; the public overload (:3460) passes `CibaClock.system()`. Case 1 (:219) asserts sleeps `[1,2,1]` and 5 requests. Case 2 (:304) asserts `expired_token`, 3 requests, sleeps `[1]`, inside `assertTimeoutPreemptively(10 s)`. The 429 mock is the server's exact `{"error":"rate_limit_exceeded"}` (`serverRateLimit`, :205). Mutants: "on top" (interval + RA) **fails** (`[1,3,1]`); "sticky Retry-After" **fails** (`[1,2,2]`); "cap removed" **fails** case 2 by the 10 s timeout, not by a hang. |
+| C164-12 (Low) | **CLOSED** | 6bd133b | `NetworkManifestTest.java:458` reads `termination_action: "future"` and then `service_type: "a_future_service"` with a matching spec, and asserts `NO_CHANGE` plus 0 PUT / 0 POST after `apply`. `:479` asserts `ValidationError` from `apply` with `put.calls()==0`. Then `withServiceType(FRAMED_USER)` → 1 PUT whose body has `service_type == "framed_user"`. Mutants: "refusal also when not drifted" (`ManifestApi.java:650` `if (true)`) **fails** :458. "No `service_type` refusal" **fails** :425, :479 and :527. |
+| C164-17 (Info) | **CLOSED** | 66532fd | Same mapping as C164-04: a bodiless `429` gets `Retry-After` as the floor (`ErrorMapper.java:189-191`). The test is the last step of :262 (bodiless `429`, `Retry-After: 4` → wait 4). Mutant "a bodiless 429 falls through to `NetworkError`" **fails** (`[1,1,1,1]`). |
+| C164-19 (Info) | **CLOSED** | 6bd133b | `OauthNoSessionCredentialTest.java:167-168` asserts `axiam_access=` + the session token in the management write's `Cookie`. The login mock sets that cookie at :65. This is a direct assertion; no mutant was run. |
+| C164-22 (Info) | **CLOSED** | 6bd133b, 4d40fd8 | `ScimTargetResponse.java:55` now cites "§31.3 rule 4, contract 1.63", through the generator (`scripts/gen_management.py:1160`, `emit_raw_timestamp_accessors(fields, schema_name)`); a generator re-run gives no diff. `README.md:89` says "as §27.6.2 item 4 asks of an SDK that keeps the value". `CHANGELOG.md:37-43` (`### Changed`) records `devicePoll` on a 429: `NetworkError` → `OAuthProtocolError`. `CHANGELOG.md:72` retitles the phantom heading `[1.1.1] — contract 1.63 detail (recorded as 1.2.0 before release)` and adds a note that no 1.2.0 was published. That was one of the two options the review offered; it leaves two `[1.1.1]` headings (:52, :72), which is acceptable. |
+
+**Amended rules: probes on the new head** (ad-hoc `AddendumProbeTest`, recorded clock, interval 1, `expires_in` 600, deleted afterwards)
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| §14.2 rule 6 (5xx whatever its body) | `500 {"error":"server_error","error_description":"db"}` mid-loop | non-terminal; sleeps `[1,1]`, completes (pass) |
+| rule 6 | `503 {"error":"temporarily_unavailable"}` mid-loop | non-terminal; sleeps `[1,1]`, completes (pass) |
+| rule 6 / §16.2 (retried inside the poll) | single `devicePoll`: `500 server_error` ×2 then 200; `503` then 200 | **`NetworkError` after 1 request each.** No §16 retry inside the poll, although retry is on by default → C164-25 |
+| rule 9 (any 429 is the wait) | `429 {"error":"rate_limit_exceeded"}` + RA 2 | sleeps `[1,2]` (pass) |
+| rule 9 | `429 {"error":"rate_limit_exceeded","retry_after":7}` + RA 7 | sleeps `[1,7]`; the body's `retry_after` is ignored (pass) |
+| rule 9 | bodiless `429` + RA 3 | sleeps `[1,3]` (pass) |
+| rule 9 (429 never raises the interval) | `429 {"error":"slow_down"}` + RA 1, then pending | sleeps `[1,1,1]` (pass) |
+| rule 1 (a 400 still raises it) | `400 slow_down`, then pending | sleeps `[1,6,6]` (pass) |
+| single `device_poll` on a 429 | rate_limit RA 7 / `429 slow_down` / bodiless RA 4 | `OAuthProtocolError` `rate_limit_exceeded`, `retryAfterSeconds` 7 / 0 / 4, `errorDescription` null (pass) |
+| single `device_poll` on a 400 | `400 slow_down` | `OAuthProtocolError slow_down` (pass) |
+| §14.6 case 1 (waits ≥ RA, interval unchanged) | test :219 | `[1,2,1]`, server's exact body (pass, non-vacuous) |
+| §14.6 case 2 (cap at the deadline) | test :304 | `expired_token`, 3 requests, `[1]` (pass, non-vacuous) |
+| §14.6 case 3 (`429 slow_down` then 200) | test :262 | `[1,1,1,4]`; also covers a bodiless 429 (pass, non-vacuous) |
+| §14.6 500 mock body | test :323 | `500 {"error":"server_error","error_description":"internal"}` mid-poll completes. Mutant "dispatch `error` at any status" **fails** (pass) |
+| Retry-After in HTTP-date form (session's note) | `429` + `Retry-After: Fri, 31 Dec 2027 23:59:59 GMT`, then pending | read as absent (`ErrorMapper.java:196-206` parses delta-seconds only, as `StatusRetry.retryAfterMillis` does SDK-wide). The loop waits **exactly the interval**, `[1,1,1]`. It is never shorter than the interval and never terminal, but it can poll before the date. **Not a defect:** §14.2/§16 do not name the form, AXIAM sends delta-seconds only, and the interval floor still holds. At most Informational hardening (RFC 9110 allows the date form). |
+| very large Retry-After (new) | `Retry-After: 99999999999999999` / `9223372036854775807` | `deviceLogin` throws **`java.time.DateTimeException`** / **`ArithmeticException`**, not the typed `expired_token` → C164-30. `1000000000000` gives `expired_token` (pass). |
+
+**Replay after refresh:** **defect (pre-existing, not touched by this PR) → C164-26.**
+- The §9 reactive path is OkHttp's `Authenticator` (`AuthAuthenticator.java:106-108`). It returns `response.request().newBuilder().header("Authorization", "Bearer " + refreshed)`, replacing only the bearer.
+- The follow-up request is built in `RetryAndFollowUpInterceptor`, which runs *below* application interceptors. So `AuthInterceptor` (`AuthInterceptor.java:166-170`, the only place `X-CSRF-Token` is set) never runs again on the replay.
+- Cookies come out fresh, because `BridgeInterceptor` reloads them from the jar, which the refresh's `Set-Cookie` updated.
+- The CSRF header is copied from the original request, so it is **stale**.
+- Probe (login sets `axiam_csrf=CSRF-OLD`; a `POST /api/v1/users` gets 401; the refresh rotates the token to `CSRF-NEW` by cookie and by header, as `crates/axiam-api-rest/src/handlers/auth.rs` does, "Issue a new CSRF token on every refresh rotation"). The replay carries `Authorization` = the NEW access token and `Cookie: axiam_access=<new>; axiam_refresh=r2; axiam_csrf=CSRF-NEW`, with **`X-CSRF-Token: CSRF-OLD`**.
+- AXIAM's `CsrfMiddleware` (`middleware/csrf.rs`) validates any write that carries a session cookie, so it answers that replay **403 "CSRF validation failed"**.
+- The *next* write carries `CSRF-NEW` (the session captured it), and the proactive path (`AuthInterceptor.java:148-152`, which refreshes before the headers are built) is correct.
+- gRPC: `AuthClientInterceptor.start` re-reads the token on each retried call, and gRPC has no CSRF or cookies, so it is fine.
+
+**Version:** 1.1.2 is correct (`pom.xml:9`, `bom/pom.xml:9,66`). Nothing since the review is source-breaking: the new `deviceLogin` overload is package-private. The CHANGELOG records the fixes (C164-04/-05/-11/-22, rule 6) and the README contract sentence (`README.md:27`, `:89`) states contract 1.64 and the amendment. Nit in C164-32.
+
+**Run by the reviewer** (JDK 21.0.12, Maven 3.9.16 through `./mvnw`):
+- `./mvnw -B verify` on 4d40fd84b: **BUILD SUCCESS**, **1511 tests, 0 failures, 0 errors, 0 skipped**, all jacoco checks met (14:02 min). `AxiamClientDeviceFlowTest` 19/19, `NetworkManifestTest` 26/26, `OauthNoSessionCredentialTest` 3/3.
+- `./mvnw -B -o compile javadoc:javadoc`: SUCCESS, 0 warnings.
+- `./mvnw -B -o -f bom/pom.xml verify`: SUCCESS.
+- `scripts/tls-bypass-gate.sh`: exit 0.
+- `python3 scripts/gen_management.py`: no diff.
+- 10 mutants (`-Dtest=<class> -Djacoco.skip=true`). Caught: body code on 429; bodiless→NetworkError; on top; sticky RA; cap removed (the targeted case-2 run fails at its 10 s timeout); 500-dispatch; refuse-on-NoChange; no service_type refusal. **Survives:** sum-of-sleeps deadline (C164-05).
+- Note: in the full-class run of the "cap removed" mutant, an older device-flow test without a preemptive timeout hung (on the real clock), so that mutant was re-run on the 1.64 case-2 test alone.
+- Not run: the GPG/Sigstore verify jobs and `central-bundle-gate.sh` (they need an ephemeral key, OIDC or a deploy).
+- Build outputs (`target/`) deleted afterwards.
+
+**New findings:**
+
+- **C164-26 — Low (pre-existing; proposed Medium if the lead counts the reactive-401 path as common).**
+  - **Where:** `src/main/java/io/axiam/sdk/rest/AuthAuthenticator.java:106-108`, with `AuthInterceptor.java:166-170`.
+  - **Rule:** §9 rule 1 ("all waiting requests are retried with the new tokens") and §3 non-browser rule 2 (a state-changing request carries the *stored* token).
+  - **What happens:** after a 401 on a `POST`/`PUT`/`PATCH`/`DELETE` in a cookie session, the SDK refreshes. The replay then carries the new bearer and the rotated `axiam_csrf` cookie, but the old `X-CSRF-Token`, and AXIAM's CSRF middleware refuses it 403 (probe above).
+  - **Trigger:** the reactive path only. The proactive refresh 30 s before `exp` covers ordinary expiry; the reactive path runs on clock skew, a signing-key rotation or restart, or a token rejected early.
+  - **Fix:** in `authenticate()`, after the refresh, rebuild the headers from the session:
+    `Request.Builder b = response.request().newBuilder().header("Authorization", "Bearer " + refreshed.access()); String csrf = session.csrfToken(); if (csrf != null && response.request().header("X-CSRF-Token") != null) b.header("X-CSRF-Token", csrf); return b.build();`
+    The session already holds the rotated value, because the refresh went through `AuthInterceptor:198-201`.
+  - **Test:** login sets `axiam_csrf=A` / `X-CSRF-Token: A`; a management `POST` gets 401; the refresh answers `axiam_csrf=B` / `X-CSRF-Token: B`; assert the replayed request has `X-CSRF-Token == "B"` and a `Cookie` containing `axiam_csrf=B`.
+
+- **C164-25 — Low (pre-existing; the amendment states it).**
+  - **Where:** `src/main/java/io/axiam/sdk/AxiamClient.java:3449-3455` (`devicePoll`: one plain `executeFormPost`).
+  - **Rule:** §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced"), §16.2's table (`device_poll` on a 5xx or transport failure is eligible), and §16.1 (retry defaults to on).
+  - **What happens:** a single `devicePoll` answered `500 {"error":"server_error"}` or `503` raises `NetworkError` after 1 request (probe), although `retryEnabled` is on and `StatusRetry` already wraps `ciba_poll` (`:4682`). Inside `deviceLogin` the loop just takes its next interval, so the flow survives, but there are no 3 attempts per poll.
+  - **Fix:** wrap the POST in `StatusRetry.run(retryEnabled, telemetry, "device_poll", n -> …)` with the `ciba_poll` shape. Mark it transient only on `code >= 500` and on `IOException`, **not** via `retryableStatus` (which includes 429: the 429 must reach the loop unretried, rule 9), and use `retryAfterMillis(response)` as the floor.
+  - **Test:** `500 server_error`, `503`, then 200 → a single `devicePoll` returns the tokens after 3 requests; with retry disabled → `NetworkError` after 1; a 429 → 1 request.
+
+- **C164-30 — Low (new in this PR: a regression of the typed outcome; narrow).**
+  - **Where:** `src/main/java/io/axiam/sdk/AxiamClient.java:3487`, `:3493`, with `errors/ErrorMapper.java:196-206` (no upper clamp).
+  - **Rule:** §14.2 rule 4 and rule 9 ("a Retry-After past the deadline is capped … the typed `expired_token`"), §2 (typed errors).
+  - **What happens:** the clock-based check `clock.now().plus(Duration.ofSeconds(huge))` overflows `Instant`. `Retry-After: 99999999999999999` throws `DateTimeException`, and `9223372036854775807` throws `ArithmeticException`, out of `deviceLogin` (probe). On b4072a9f1 the same answer gave `expired_token`, because the `long` comparison `waitSeconds >= remainingSeconds` cannot overflow there. Only a broken or hostile intermediary sends such a value.
+  - **Fix:** clamp in `retryAfterSeconds`, e.g. `Math.min(Math.max(0, parsed), 86_400L)`, as `StatusRetry` caps its own value. Or compare durations: `if (wait.compareTo(Duration.between(clock.now(), deadline)) >= 0)`.
+  - **Test:** a 429 with `Retry-After: 9223372036854775807` → `OAuthProtocolError expired_token`, sleeps `[1]`, 3 requests.
+
+- **C164-32 — Informational.**
+  - **Where:** `CHANGELOG.md:16-18`.
+  - **What happens:** "the only API additions are `OAuthProtocolError.retryAfterSeconds()` and a three-argument constructor" leaves out the public `ErrorMapper.fromDevicePollResponse` (public method on a public class, `ErrorMapper.java:186`), which is also new in 1.1.2. It is not breaking.
+  - **Fix:** add it to that list (or tag it `@internal` in its Javadoc).
+
+---
+
+#### Addendum — kotlin — commit ecf58ce99 (PR #80), read after 25687d50a
+
+Five commits since the review (`git log --oneline 25687d50a..ecf58ce`): `8d2f14c` re-vendor CONTRACT.md from 21beda0;
+`4f466d2` fix(oidc) C164-04/-05/-17; `d44aa6e` test C164-13; `f2ae302` fix(manifest) C164-21; `ecf58ce` docs C164-22.
+Each commit's claim matches its diff. All five are SSH-signed (`%G?` = N here only because no allowedSignersFile is
+configured in this container). Files touched: `OidcSupport.kt`, `ManifestApi.kt`, three test classes, CHANGELOG, README, CONTRACT.md.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-04 (Low) | **CLOSED** | `4f466d2` | Status-first: `postToken(…, devicePoll = true)` (`oidc/OidcSupport.kt:1079`) reaches `mapOAuth2ErrorResponse`, where `if (devicePoll && response.code == 429)` (`:1985-1995`) maps **every** 429 on a poll to `OAuthProtocolError("rate_limit_exceeded", <description or "">)` with `retryAfter`, so the `slow_down` branch (`:1171-1174`) only ever sees a 400. Other endpoints keep the 1.63 path (`:1996-2004`). Test `OidcDeviceFlowTest.kt:290` (two `429 slow_down` RA 1, then 200 → `[5,5,5]`). Mutant MA (disable the branch) → this test and the C164-17 test both fail. Probe P4 `[5,5,5]`, P8 (`429 {"error":"invalid_grant"}`) waited, not terminal. |
+| C164-05 (Low) | **PARTLY** | `4f466d2` | The counter is gone: `val deadline = clock.now().plusSeconds(expiresIn)` (`:1135`), and the check is `!clock.now().plusSeconds(wait).isBefore(deadline)` (`:1149`), so request time counts. **But the deadline is taken after `params.onUserCode(authorization)` (`:1129`)**, not when `deviceAuthorize` returns (the index row's fix, and its "the `on_user_code` callback … never subtracted"). Probe P10: `onUserCode` takes 25 s, `expires_in` 30, interval 5 → **5 polls sent at t = 30…50**, all past the real deadline, then the local `expired_token`. Exact fix: move `:1133-1135` (the `deadline` line) above `params.onUserCode(authorization)` at `:1129`. Test to add: a clock whose offset `onUserCode` advances by 25 s with `expires_in = 30` → 0 polls, typed `expired_token`. The new test `OidcDeviceFlowTest.kt:316` (request time 4 s/poll, 2 polls) is non-vacuous: mutant MB (restore the counter) fails it. |
+| C164-13 (Low) | **CLOSED** | `d44aa6e` | `revocation_endpoint` relocated to `/idp/revoke` (`Oauth2NoSessionCredentialTest.kt:222`), revoke called through the client after a cookie login (`:263`); revoke is not a `withoutSession` op, so only the discovery wiring protects it. 3 relocated requests asserted credential-free; control `POST /api/v1/groups` carries `X-CSRF-Token csrf-abc` and a session credential. Mutant MC (drop `.also(::registerAdvertisedEndpoints)`, `OidcSupport.kt:159`) → the test fails (M4 survived at 25687d50a). The control's assertion is `Authorization != null \|\| Cookie != null` (weak but sufficient). |
+| C164-17 (Info) | **CLOSED** | `4f466d2` | Same branch `:1985-1995`: a bodiless/non-OAuth 429 becomes `OAuthProtocolError("rate_limit_exceeded", "")` with `retryAfter`. Test `OidcDeviceFlowTest.kt:305` (bodiless, RA 30 → `[5,30]`), killed by mutant MA. Probe P5 `[5,30]`. (Behaviour change for a single `devicePoll`, see C164-32.) |
+| C164-21 (Info) | **CLOSED** | `f2ae302` | `"$member " + JsonPrimitive(raw.take(MAX_QUOTED_VALUE))` (`management/ManifestApi.kt:585`; cap 64 at `:1149`), equivalent to the asked `Json.encodeToString(String.serializer(), …)`. Test `ManifestNetworkTest.kt:398`: raw `a"b<LF>c` → message contains `"a\"b\nc"` and no raw newline. Mutant MD (old hand-quoted line) fails it. The test is named "…and capped" but asserts no cap (the cap predates the PR); no `…` is appended on truncation. Neither matters. |
+| C164-22 (Info) | **CLOSED** | `ecf58ce` | `## [1.2.0]` is now `### Contract 1.63 notes (prepared as 1.2.0, released as 1.1.1)` under `[1.1.1]` (`CHANGELOG.md:102`), with the source-breaking-despite-patch line (`:104`); its subsections are demoted to `####`; "the 1.1.1 entry below" (`:64`). The auto-generated bullets stay above the notes, not folded in. That is cosmetic. |
+
+**Amended rules: probe results** (`ReviewerProbeTest`, run in the throwaway copy and then removed. Recorded clock, interval 5, default client so §16 retry is on.)
+
+| Rule / case | Input | Result | Verdict |
+|---|---|---|---|
+| Rule 9, server body | `429 {"error":"rate_limit_exceeded"}` RA 30, then 200 | sleeps `[5,30]`, 2 polls, tokens | pass |
+| Rule 9, `retry_after` variant | `{"error":"rate_limit_exceeded","retry_after":30}` RA 30 | `[5,30]`, tokens | pass |
+| Rule 9, bodiless | `429` no body, RA 30 | `[5,30]`, tokens | pass |
+| Rule 9 / §14.6 third case | `429 {"error":"slow_down"}` RA 1, pending, 200 | `[5,5,5]` (interval not raised) | pass |
+| Rule 1 (control) | `400 slow_down`, pending, 200 | `[5,10,10]` (raised, persists) | pass |
+| Rule 4 + RA past deadline | `expires_in` 20, RA 3600 | `[5]`, 1 poll, typed `expired_token` | pass |
+| Rule 6 / §14.6 500 body | `500 {"error":"server_error","error_description":"db"}`, then 200 | `[5,5]`, 2 polls, tokens (non-terminal) | pass on terminality. **No §16 retry inside the poll** (C164-25) |
+| Rule 6, 503 | `503 {"error":"temporarily_unavailable"}`, then 200 | `[5,5]`, tokens | pass (same C164-25 caveat) |
+| Rule 6, three 500s | 500×3, then 200 | `[5,5,5,5]`, 4 polls | each 500 costs a full interval. No in-attempt retry (C164-25) |
+| Single `devicePoll` | 429 rle RA 7 / 429 `slow_down` / bodiless 429 / 500 | `OAuthProtocolError(rate_limit_exceeded, 7s)` ×3, 1 request each / `NetworkError` after **1** request | 429: pass. 500: not §16-retried (C164-25) |
+
+The §14.6 tests in the SDK: the 500 case (`OidcDeviceFlowTest.kt:393`, body `server_error` + description) is present, and mutant MF (map the 500 through the any-status OAuth mapper) fails it. The 429 `slow_down` case is present (`:290`). The 1.64 case-1 mock `rateLimited()` (`:218-222`) still adds an `error_description`, which the amended §14.6 says the mock must not carry (C164-29). The code itself handles the bare body (probe P1).
+
+**Replay after refresh:** conforms. `postWithRefresh` (`AxiamClient.kt:2741-2756`) awaits `refreshGuard.refreshIfNeeded { session.doHttpRefresh() }` and only then calls `postJson(path, body)` again (`:2752`). That builds a **new** `Request` with no auth headers (`:2770-2778`), so `AuthHeaderInterceptor` (an application interceptor, `AuthHeaderInterceptor.kt:40-85`) reads `session.cachedAccessToken()` (the jar's live `axiam_access`, `SessionState.kt:150`) and `session.csrfToken()` at replay time. OkHttp's BridgeInterceptor then applies the jar's current cookies. The refresh response's `X-CSRF-Token` is captured by the same interceptor (`:83`) before the replay. Nothing is captured before the refresh and reused. Probe REPLAY: the first request carried the login JWT and `csrf-abc`. The replay carried `Bearer <fresh JWT>`, `X-CSRF-Token: csrf-new`, and a `Cookie` with the fresh `axiam_access` and `axiam_refresh=r2`. `ManagementTransport` has no reactive 401 replay, so it has no such path to get wrong. The PHP-style push-order bug is absent.
+
+**1.63 rules where the diff touched code:** the device poll keeps `withoutSession = true` (`OidcSupport.kt:1079`). `/oauth2/*` isolation is unchanged and is now also exercised through revoke. §6.1 rule 11 is untouched. The §27.6.2 refusal is still at `plan` with no non-GET request (`ManifestNetworkTest.kt:394`, unchanged, passing).
+
+**Version:** `gradle.properties:2` `version=1.1.2`, unchanged and right (nothing source-breaking since the review). CHANGELOG `[1.1.2]` records C164-04/-05/-13/-17/-21 and the amended vendoring (`21beda0`, sha `8b2cb9a3…7a9a`) at `:11-13`, `:41-50`, `:76-81`. README `:34` still says it conforms to **contract 1.64**, and `:44-49` states "the status decides" and "a 5xx is a transport failure whatever its body".
+
+**Run by the reviewer** (throwaway copy `/home/user/work/kotlin` from `git archive ecf58ce`; JDK 21, Gradle 8.10.2 wrapper; no Maven Central 429 this time):
+- `python3 scripts/gen_management.py --check` → `OK: 251 generated files are current (202 operations)`.
+- `bash scripts/tls-bypass-gate.sh` → exit 0.
+- `./gradlew test --no-daemon --console=plain` → **1294 tests, 1 failed**: `OidcRefreshTest > the refresh response's scope replaces the grant's` (`OidcRefreshTest.kt:138`, "expected null but was profile"). This code and test are not in the diff. The class then passed **3/3** runs on its own, so it is a load-dependent flake that predates the PR (C164-33). All other 1293 tests pass, including the 5 new ones.
+- Mutants, each run against its test class: MA (C164-04/-17 branch off) → 2 fail; MB (counter deadline restored) → 1 fail; MC (no discovery registration, the old M4) → 1 fail; MD (unescaped quote) → 1 fail; MF (500 dispatched on its OAuth body) → 1 fail. None survives.
+- Probes: 17 (above), then removed. Build outputs (`build/`, `.gradle/`) deleted; the SDK clone is unmodified.
+- Not run: `koverVerify`, `dokka`, lint (same as the review).
+
+**New findings:**
+- **C164-25 — Low (predates the PR; the amendment makes it explicit)** — `oidc/OidcSupport.kt:1070-1079` (`devicePoll` → `postToken` → `postOAuth2Form`, no `Retry.withRetry`). Rule: §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced … per poll attempt") and the §16.2 table, which lists `device_poll` on a 5xx/transport failure as eligible. Retry is on by default (`AxiamClient.kt:2961`), and `cibaPoll` uses it (`:1330-1340`). What happens: a single `devicePoll` surfaces `NetworkError` after **one** request on a `500 server_error` / `503` (probe S4). `deviceLogin` treats each 5xx as one lost interval (three 500s cost 15 s, probe P3b) instead of up to 3 attempts with backoff and `Retry-After` as the floor inside the attempt. The flow still survives, so impact is latency only. Fix: wrap the `postToken` call in `devicePoll` in `io.axiam.sdk.internal.Retry.withRetry(operation = "devicePoll", enabled = retryEnabled, telemetry = telemetry, random = jitter, retryable = { trace.lastStatus.let { it == null \|\| it >= 500 } })`, using the same `trace.lastStatus` pattern as `cibaPoll`. A poll 429 is already an `OAuthProtocolError` and is not retried, so there is no double wait. Test: single `devicePoll` with 500 `{"error":"server_error",…}`, 500, then 200 returns tokens after 3 requests, and with `retryDisabled()` it raises `NetworkError` after 1.
+- **C164-29 — Informational (test strength)** — `test/.../oidc/OidcDeviceFlowTest.kt:218-222`. Rule: §14.6 1.64 (amended), "the mock's body is the server's own, with no `error_description`". `rateLimited()` still sends `oauth2ErrorJson("rate_limit_exceeded", "too many requests")`. Fix: `.setBody("""{"error":"rate_limit_exceeded"}""")`.
+- **C164-32 — Informational (disclosure)** — `CHANGELOG.md:41-45` with `OidcSupport.kt:1985-1995`. A single `devicePoll` that gets a **bodiless or non-OAuth** `429` (a proxy's) now raises `OAuthProtocolError("rate_limit_exceeded", "")`, an `AuthError`, where 1.1.1 and 25687d50a raised `NetworkError`. A `429 {"error":"slow_down"}` now reads `error == "rate_limit_exceeded"`. This is right under rule 9, but a hand-rolled loop's `catch (e: NetworkError)` no longer catches the proxy's 429. The entry describes only the loop. Fix: add one sentence, e.g. "A single `devicePoll` now raises every `429` as `OAuthProtocolError(rate_limit_exceeded)`, including a bodiless one that 1.1.1 raised as `NetworkError`."
+- **C164-33 — Informational (predates the PR, flaky test)** — `test/.../oidc/OidcRefreshTest.kt:134-138`. It failed once under the full suite and passed 3/3 alone. It looks like the second `oidcRefresh` with the same refresh token lands in the single-flight's settled-slot window (`internal/SingleFlight.kt:112`) and gets the first call's `scope = "profile"`. It is not touched by this PR. Fix: give the second call a distinct refresh token (`OidcRefreshParams.of("rt2", …)`), or settle the flight explicitly before the second call.
+
+---
+
+#### Addendum — php — commit 70ce245e9 (PR #87), read after 3707a5dac
+
+Five commits: `9e92946` re-vendors CONTRACT.md from 21beda0; `4c99b22` makes the device-poll fixes (C164-03, -04, -05, -09, -17, -19); `2b4f1ad` fixes the REST items (C164-10, -23, -24); `e5b05f5` fixes C164-21; `70ce245` updates the docs (C164-22). I checked each commit message's finding claims against the diff, and they match. Mutants ran on a throwaway clone, `/home/user/work/php-add`. Each mutant was reverted afterwards, and `git status` was clean apart from the composer.json path-repository edit.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium) | CLOSED | 4c99b22 | `devicePoll()` calls `postToken(..., statusBeforeBody: true)` (`src/Oidc/OidcClient.php:842`). `postForm` maps any `>= 500` to `NetworkError::fromResponse` before the body is read (`:2564-2566`). Tests: `testA5xxWithAnOAuthBodyMidPollIsRetriedNotTerminal` (500 `server_error`, 503 `temporarily_unavailable`; sleeps `[5,5]`; `tests/OidcDeviceFlowTest.php:371`) and `testASingleDevicePollRaisesANetworkErrorForA5xxWhateverItsBody` (`:395`). Mutant: status check removed → 3 tests fail (killed). The old rule-6 test (`:570`) still uses body-less 500/503 mocks. The new test uses an OAuth body with an `error_description`, which meets the amended §14.6 wording. |
+| C164-04 (Low) | CLOSED | 4c99b22 | `OAuthProtocolError::$httpStatus` (`src/Core/OAuthProtocolError.php:37`) is set from the response status (`src/Core/ErrorMapper.php:98`). The loop tests `httpStatus === 429` before the code dispatch (`OidcClient.php:936`). `slow_down` raises the interval only otherwise (`:944-948`). Test: `testA429WhoseBodySaysSlowDownDoesNotRaiseTheInterval` checks sleeps `[5,5,5]` (`:403`). Mutant: drop the `httpStatus === 429` arm → that test fails (killed). |
+| C164-05 (Info) | CLOSED | 4c99b22 | The deadline now runs from `$startedAt = $now()`, with `$elapsed = max($sleptSeconds, $now() - $startedAt)` (`OidcClient.php:904`, `:916-917`). There is an optional trailing `$now` on `deviceLogin()` (`:886`, `src/AxiamClient.php:1732`). Test: `testTheDeadlineCountsTheTimeARequestTakes` (a fake clock with +40 s per request gives 3 polls; `:471`). Mutant `elapsed = slept` → that test fails (killed). |
+| C164-09 (Low) | CLOSED | 4c99b22 | `strtotime` is replaced by `parseHttpDate`, which accepts only IMF-fixdate, RFC 850 and asctime through `createFromFormat('!…')` and rejects any parse warnings (`src/Core/NetworkError.php:117-121`, `:133-145`). Tests: `tests/Contract164/RetryAfterParsingTest.php` (9 rejects, 3 date forms, delta, past date) and `testAMalformedRetryAfterIsIgnoredAndDoesNotEndTheFlow` (`[5,5]`; `OidcDeviceFlowTest.php:449`). Mutant: back to `strtotime` → 7 tests fail (killed). Probe: `Retry-After: 17.0` gives `[5,5]` and the flow completes. |
+| C164-10 (Low) | CLOSED, but one leg of the new test is vacuous (C164-33) | 2b4f1ad | `testAnAxiamClientReplaysAfterARefreshWithFreshCredentials` (`tests/Contract164/RetriedRequestHeadersTest.php:111`) drives a real `AxiamClient`: login, then a 401 on `groups()->create`, then the refresh, then the replay. **Mutant M6** (the 1.1.1 push order at `src/AxiamClient.php:472-473`, Auth first and Refresh second) → this test fails, and it is the only one that does (killed). The review's survivor is now killed. Its `Cookie` assertions are masked, though: see C164-33. |
+| C164-17 (Info) | CLOSED | 4c99b22 | In the `NetworkError` branch, `if ($e->retryAfterMs !== null) $waitSeconds = retryAfterRound(...)` (`OidcClient.php:958-960`). Test: `testABodilessOrForeignBody429StillHonoursRetryAfterAsAFloor` checks `[5,12,5]` (`:426`). Mutant: branch disabled → that test fails (killed). |
+| C164-19 (Info) | CLOSED | 4c99b22 | The cap case records its sleeps and asserts `[5]` (`OidcDeviceFlowTest.php:334-358`). **M4** (sleep the uncapped Retry-After, then raise) → that test fails (killed; it survived in the review). |
+| C164-21 (Info) | CLOSED | e5b05f5 | `json_encode(mb_substr($raw, 0, 64), UNESCAPED_SLASHES\|UNESCAPED_UNICODE\|INVALID_UTF8_SUBSTITUTE)` (`src/Management/Manifest/ManifestApi.php:233-237`). Test: `testTheQuotedValueIsEscapedAndCapped` (`tests/Contract163/OpenEnumRefusalTest.php:154`). Mutants "raw sprintf" and "no 64 cap" each fail it (killed). |
+| C164-22 (Info) | CLOSED | 70ce245 / 4c99b22 | `parseRetryAfterMs` is tagged `@internal` (`src/Core/NetworkError.php:105`). It is listed among the public additions with `httpStatus` and `$now` (`CHANGELOG.md:16-22`). The install snippets read `^1.1.2` (`README.md:27`, `:457`). |
+| C164-23 (Info) | CLOSED in code; untested | 2b4f1ad | The replay rebuilds `Cookie` from `$options['cookies']` only when that option is a `CookieJarInterface` (`src/Rest/RefreshMiddleware.php:80-84`). Guzzle merges the client's `cookies` config (the shared session jar, `AxiamClient.php:418`) into `$options`, so the normal path is unchanged (probed: the replay carries the rotated cookies). No test covers it: the mutant "always the session jar" leaves all 2056 tests green. The review asked for no test, so this is not a new finding. |
+| C164-24 (Info) | CLOSED | 2b4f1ad | `$isOAuth2Path = str_starts_with($path, $oauth2Prefix) \|\| str_starts_with($path, '/oauth2/')` (`src/Rest/AuthMiddleware.php:117-118`). The test row is flipped (`tests/Contract164/BasePathPrefixOAuth2Test.php:33`), and a federation-route row is added. Mutant: prefix only → that row fails (killed). |
+
+**Amended rules: probes** (`deviceLogin()`, interval 5, expires 600, AXIAM's exact bodies; recorded sleeps; the §16 retry switch on unless noted):
+
+| Rule / case | Probe | Result |
+|---|---|---|
+| 9: `429 {"error":"rate_limit_exceeded"}` + `Retry-After: 12` | slept `[5,12]`, 2 polls, completes | conforms |
+| 9: the same with `"retry_after":12` | `[5,12]`, completes | conforms |
+| 9: bodiless `429` + `Retry-After: 12` | `[5,12]`, completes | conforms (C164-17) |
+| 9 / §14.6 case 3: `429 {"error":"slow_down"}` (with RA 1, or none), then pending, then 200 | `[5,5,5]`; interval not raised | conforms |
+| 9: `429 {"error":"invalid_grant"}` + RA 3 | `[5,5]`, completes (the status decides) | conforms |
+| 5: `400 {"error":"slow_down"}` | `[5,10,10]`; the 400 still raises the interval | conforms |
+| 6 / §14.6 500 body: `500 {"error":"server_error","error_description":"db"}` | `[5,5]`, completes. Three 500s in a row: `[5,5,5,5]`, completes | non-terminal: conforms. **The poll is not §16-retried inside the attempt: the retry-on and retry-off runs are identical (C164-25)** |
+| 6: `503 {"error":"temporarily_unavailable"}` (+ variant with RA 9) | `[5,5]` / `[5,9]`, completes | conforms |
+| Single `devicePoll` | `429 rate_limit_exceeded` RA 7 → `OAuthProtocolError(rate_limit_exceeded)`, `retryAfterMs=7000`, `httpStatus=429`. Bodiless 429 → `NetworkError`, `retryAfterMs=7000`. `500 server_error` → `NetworkError` after **1 request** with retry on (C164-25) | conforms except C164-25 |
+| Terminal control: `400 invalid_grant` | `OAuthProtocolError(invalid_grant)` after 1 poll | conforms |
+
+**1.63 rules where the diff touched code.** `/oauth2/*` stripping still applies, now under the base prefix or at the root (`AuthMiddleware.php:118`, `:136-139`). The replay of an `/oauth2/*` request passes through Auth again and is stripped again. §6.1 rule 11: the `canRefresh()` guard is unchanged (`RefreshMiddleware.php:65`). §27.6.2: the refusal is still at `plan` with no write; only the message text changed (`OpenEnumRefusalTest` is green).
+
+Replay after refresh: **the bug the session reported is real and fixed.** In 1.1.1, `AxiamClient` did `$authzStack->push(new AuthMiddleware(...))` and then `->push(new RefreshMiddleware(...))`. Guzzle's `HandlerStack::resolve()` wraps the stack in reverse, so the **first** middleware pushed is outermost. That made Auth outer and Refresh inner. Refresh's captured `$handler` was then the bare transport. Its replay after the refresh sent the same `$request` object that Auth had already stamped, so it re-sent the refused attempt's `Authorization: Bearer <old>` and `X-CSRF-Token: <old>`. It also re-sent the stale `Cookie` header, because Guzzle's cookie middleware sits outside both and does not run again. The fix came in f469880, before the old head: Refresh is pushed first and Auth second (`src/AxiamClient.php:472-473`), so the replay re-enters Auth and picks up the fresh bearer and CSRF token from the Session. The replay also rebuilds `Cookie` from the jar (now the request's own jar, `src/Rest/RefreshMiddleware.php:80-84`). I probed the shipped client on a bare `MockHandler` transport (login, then a 401 on POST `/api/v1/groups`, then a refresh that rotates the cookies and CSRF, then the replay). The replay carries `Bearer <new>`, `csrf-new` and `axiam_access=<new>; axiam_refresh=r-new`. With M6 (the 1.1.1 order) it carries `Bearer <old>` and `csrf-old`. With the cookie rebuild removed it carries `axiam_access=<old>`. The new C164-10 test drives the real `AxiamClient` wiring: M6 fails it, and it is the only test M6 fails. Its Cookie leg is vacuous, though (C164-33).
+
+Version: 1.1.2 is still right (`## [1.1.2] - Unreleased`). Every addition is a trailing optional parameter or `@internal`, so nothing is source-breaking. The CHANGELOG records C164-03, -04, -05, -09, -10, -17, -19, -21, -23 and -24, the re-vendor from 21beda0 and the public additions. The README states contract 1.64 (`README.md:284`), adds rows for amended rules 6 and 9 (`:294-295`), and the install snippets read `^1.1.2`.
+
+Run by the reviewer (clone `/home/user/work/php-add` at 70ce245; PHP 8.3.6, Composer 2.8.12). The previous reviewer's lock was reused. phpstan/phpstan 2.3.1 came from a local `git clone --branch 2.3.1` used as a Composer `path` repository, installed with `composer update phpstan/phpstan --prefer-source`:
+- `composer validate --strict`: valid.
+- `vendor/bin/phpunit`: **OK, 2056 tests, 9923 assertions** (the review had 2032).
+- `vendor/bin/phpstan analyse --memory-limit=512M`: **No errors**. The CI step for the §27 examples (`--level=6`, 5 files): **No errors**.
+- `python3 scripts/gen_management.py --check`: "§27 surface is current (261 files)".
+- `php tools/docblock-coverage.php`: 2083/2083.
+- Mutants: 12 run, 11 killed (M03, M04, M17, M09, M05, M4/M19, M6, cookie-rebuild, M21 raw, M21 no cap, M24). 1 survived: C164-23 "always the session jar" (no test exists).
+- Not run: gRPC codegen (needs protoc) and `composer audit`. Build outputs are deleted (the clone with `vendor/`, and the phpstan clone).
+
+New findings:
+- **C164-25 — Low (pre-existing; the amended contract now states it plainly).** `src/Oidc/OidcClient.php:842` → `postToken`/`postForm` (`:2240-2250`, `:2555-2570`). This breaks §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced") and §16.2's table (`device_poll` on a 5xx or transport failure is ELIGIBLE, with a budget per poll attempt). The device poll is sent once with no `RetryPolicy`, whatever `retryEnabled` says. A single `devicePoll()` on `500 {"error":"server_error"}` surfaces `NetworkError` after one request with retry on (probed). `deviceLogin()` just waits the next interval: retry-on and retry-off probes give the same `[5,5]`, and three 500s cost three intervals. No grant is lost, so the impact is latency and conformance. **Fix:** wrap the device poll's send in `RetryPolicy::execute('device_poll', $this->retryEnabled, …)` as `cibaPollTracked` does (`:2135-2170`): `'http_errors' => false`; `$status >= 500` → throw `NetworkError::fromResponse`; any other non-2xx → `ErrorMapper::fromOAuth2Response`. Use `$retryable = fn () => $status === null \|\| $status >= 500`, which covers 5xx and transport failures only. Do **not** retry a 429 or 408 here: rule 9 makes the 429 the loop's wait, and §16.2 lists only the 5xx/transport case for this operation. **Test:** with retry on, queue `500 {"error":"server_error","error_description":"db"}` three times, then the tokens. Assert that `deviceLogin()` completes, that the recorded loop sleeps are `[5]` (one interval, the retries inside the attempt), and that 4 polls were sent. Assert also that a single `devicePoll()` with retry off sends 1 request.
+- **C164-33 — Informational (test strength).** `tests/Contract164/RetriedRequestHeadersTest.php:142`. The new shipped-wiring test passes `transportHandler: HandlerStack::create($mock)`. That nests a second Guzzle stack, whose own cookie middleware re-stamps `Cookie` from `$options['cookies']` innermost. So the test's three `Cookie` assertions pass even when `RefreshMiddleware`'s cookie rebuild is removed (mutant: the test stays green; on a bare `MockHandler` the replay then carries `axiam_access=<old>`). The `Authorization` and `X-CSRF-Token` assertions do bite: M6 fails them. The rebuild is still caught by the hand-built-stack test `testARetriedRequestCarriesTheRefreshedAccessTokenAndCsrfToken`. Production (`transportHandler` null) has no nested cookie middleware, so the rebuild is load-bearing there. **Fix:** pass the bare `$mock` (`transportHandler: $mock`) in that test so its Cookie leg also fails without the rebuild. Optionally add a C164-23 case: a request sent with `'cookies' => false` that is refused 401 is replayed with no `Cookie` header.
+
+---
+
+#### Addendum — swift — commit d8e48a073 (PR #78), read after 3180f7133
+
+Five commits: `6333c0a` re-vendors CONTRACT.md at 21beda0. `3d4817b` is the fix for C164-03, -04 and -17. `15e19c1` is the C164-14 test. `20a2ab2` is the CHANGELOG and `d8e48a0` the README. I checked each commit message against its diff, and every claim matches. There is no Swift toolchain here, so I reviewed by reading and traced the mutants by hand.
+
+| Finding | Status | Commit | Evidence (path:line) / test / mutant |
+|---|---|---|---|
+| C164-03 (Medium) | **CLOSED** for the rule-6 safety property. §16 is still not met; see C164-25. | `3d4817b` | `Sources/AxiamSDK/Oidc/DeviceGrant.swift:164`: `if response.status >= 500 { throw oidcMapError(response) }` runs before `oidcMapGrantError`. `oidcMapError` → `ErrorMapper.map` (`Errors.swift:228-238`) returns `.network(statusCode: 5xx)` whatever the body. The loop's guard at `:252-257` then `continue`s, and the interval is untouched. Tests: `Contract164DeviceGrantRateLimitTests.swift:203-219` sends pending, `500 {"error":"server_error","error_description":"db"}` twice, then 200, and expects 4 polls, sleeps `[1,1,1,1]` and tokens. `:221-236` sends a single `devicePoll` with `503 {"error":"temporarily_unavailable"}` and expects `.network` with `statusCode == 503`. Mutant (line 164 removed): `server_error` becomes `.auth` and reaches the `default:` arm at `:266-269`, so the loop throws and test `:203` fails. The 503 becomes `.auth(temporarily_unavailable)`, so test `:221` hits XCTFail. **Non-vacuous.** |
+| C164-04 (Low) | **CLOSED** | `3d4817b` | `DeviceGrant.swift:172-182`: any `429` throws `DevicePollRateLimited`. A 429 whose OAuth code is not `rate_limit_exceeded` is rewritten to `rate_limit_exceeded`, so it never reaches `case "slow_down"` (`:262-265`). A `400 slow_down` still raises the interval (`:183` → `:264`). Test `:170-185`: `429 {"error":"slow_down"}` + `Retry-After: 1`, then pending, then 200, expects 3 polls and sleeps `[1,1,1]`. Mutant (the pre-fix condition `oauthError == "rate_limit_exceeded"`): the sleeps become `[1,6,6]`, so the test **fails**. The test comment at `:173` says `[1, 1, 6]`, which is wrong (C164-33). Mutant (only the rewrite at `:173-178` removed): **survives**, because the loop still waits and only the single `devicePoll` would surface `slow_down`. No test covers that (C164-33). |
+| C164-14 (Low) | **CLOSED** | `15e19c1` | `Tests/AxiamSDKTests/Contract162Oauth2NoSessionCredentialTests.swift:156-161` is the fix exactly as the review wrote it. The mock answers `/api/v1/groups` (`:62`) and issues `device-bearer-tok` (`:60`). `credentialHeaders` (`AxiamClient.swift:1130-1132`) sends `Bearer …`. Mutant (no bearer adopted, or not sent): `auth` is nil, so the test **fails**. **Non-vacuous.** |
+| C164-17 (Info) | **CLOSED** | `3d4817b` | A bodiless 429 or a non-OAuth body fails the `OidcOAuth2ErrorWire` decode (`OidcInternals.swift:393-402`) and becomes `.network(429)`. It is still wrapped at `DeviceGrant.swift:172`, with `Retry.retryAfter(header)`. The loop waits `max(interval, RA)` (`:234`). Test `:187-199`: `429` + `Retry-After: 7` + an `<html>` body, then 200, expects sleeps `[1,7]`. Mutant (the pre-fix code): the sleeps become `[1,1]`, so the test **fails**. |
+| Review note: the `:232-233` comment claimed a §16 retry inside the poll | **Comment CLOSED, substance OPEN (C164-25)** | `3d4817b` | The comment at `DeviceGrant.swift:253-256` now says "The poll itself is a single request on the bare path, so the loop's next interval is the retry". That is true of the code: `oidcFormPost` → `umaSendAbsolute` (`OidcInternals.swift:180-195`, `AxiamClient.swift:1159-1171`) has no retry. The SDK now documents that it does not do what the contract requires. |
+
+**Amended rules.** I traced each probe by hand against the new head, at interval 1 with jitter seam 0.
+
+| Probe (AXIAM's exact body) | `deviceLogin` | single `devicePoll` | Verdict |
+|---|---|---|---|
+| `429 {"error":"rate_limit_exceeded"}` + RA 7 | waits `max(1,7)=7`, polls again, interval unchanged (existing test `[1,7,1]`) | `.auth`, `oauthError=rate_limit_exceeded`, `oauthErrorDescription=nil` | conforms |
+| `429 {"error":"rate_limit_exceeded","retry_after":7}` | same; the unknown member is ignored by `Decodable` and the header governs | same | conforms |
+| `500 {"error":"server_error","error_description":"db"}` | non-terminal, next poll one interval later, **no in-poll §16 retry** | `.network(statusCode 500)`, one request | rule 6's safety property conforms; §16 does not (C164-25) |
+| `503 {"error":"temporarily_unavailable"}` | same as the 500 | `.network(503)` (tested `:221`) | as above |
+| `429 {"error":"slow_down"}` + RA 1 | the wait, interval not raised (`[1,1,1]`) | `.auth(rate_limit_exceeded)` (rewritten) | conforms (§14.6 third case) |
+| bodiless `429` + RA 7 | waits 7 (`[1,7]`) | `.network(statusCode 429)` | conforms (the amended rule 9 requires `OAuthProtocolError` only for an OAuth body) |
+| `400 {"error":"slow_down"}` | interval +5, permanently (`:264`) | `.auth(slow_down)` | conforms |
+| RA past `expires_in` | typed `expired_token` before the sleep, nothing sent (`:236-241`, existing test) | n/a | conforms |
+
+**The session's question: rule 6 + §16.2. Is an in-poll §16 retry required, or does the next interval suffice?** The text supports the lead reviewer's reading, so I **confirm** it.
+- **§16 is MUST.** Its header reads "**Requirement level: MUST (v1.0).**" Its preamble says §14.2 "instruct[s] SDKs to retry under the SDK's existing bounded read-only retry policy", and §16 is that policy.
+- **Rule 6 is declarative, not permissive.** 5xx and transport failures "are retried under the bounded read-only retry policy of §16, then surfaced". It then defines that budget as "**per poll attempt** … separate from this grant's own `expires_in` polling loop: an exhausted retry budget ends that one poll, not the flow". That sentence only makes sense if a retry budget exists inside the poll, distinct from the loop.
+- **§16.2 lists `device_poll` as eligible.** The row is "`device_poll` on a 5xx or transport failure (§14.2)", annotated "The clause that referenced this policy", with the same per-poll-attempt budget. §16.1 makes 3 attempts, 200 ms base, 5 s cap, full jitter and a Retry-After floor binding. Its switch "MUST default … to **on**".
+- **§34.2 P11 (amended) assumes the same.** It speaks of "the requests it does retry (… `device_poll` on a `5xx` or transport failure, which §16.2's table lists)".
+- **Nothing in the contract exempts the bare `/oauth2/*` path.** The only named exemption from §16 is §20.2 rule 6, the UMA ticket.
+- **Conclusion.** With `retryEnabled` at its default `true`, a 5xx or transport failure on `device_poll`, including the single call, MUST be retried inside that poll (3 attempts, jittered backoff, Retry-After floor) before it surfaces. The loop's next interval meets rule 6's safety property ("must not lose a grant") but not §16.
+- **Two qualifications.** First, §16.2 makes the poll eligible only on 5xx and transport failures, so a 429 on the poll must **not** be retried in-poll. That would double-wait against rule 9's loop wait. Second, §16.7's required tests are about `check_access`. The contract mandates no device-poll wire-count test, so a missing test is not itself a breach.
+
+**What the new head does:** one request per poll. A 5xx or transport failure surfaces at once as `NetworkError`, and the loop re-polls after the full interval. No `retry` telemetry event is emitted. `retryEnabled` has no effect on the device poll. The comment at `DeviceGrant.swift:253-256` now states this openly. This has been the case since §16 landed: the old head had it too, under a comment that claimed the opposite. The SDK already has the right machinery, `bareSend(retry: .section16UnlessOAuthError)` (`HTTP/BareRequest.swift:43-124`), which `ciba_poll` uses (`Oidc/Ciba.swift:459-469`). The device poll does not use it.
+
+**Replay after refresh:** **Holds by reading; no push-order bug.** Swift has no middleware or interceptor chain. Each send builds its credential headers when it executes: `rawSend` (`AxiamClient.swift:1097-1124`) and `managementRawSend` (`:1369-1408`) both call `credentialHeaders(for:method:)` (`:1125-1146`). That function reads the current `cookieJar`, `csrfToken` and `deviceAccessToken`. `doRefresh` (`:663-674`) goes through `rawSend`, which stores the refresh response's `Set-Cookie` (`:1113-1116`) and `X-CSRF-Token` (`:1118-1120`) before returning. The replay after `refreshOnce()` therefore calls `rawSend`/`managementRawSend` again and gets the **fresh** cookie, CSRF and bearer. This holds in `authorizedPOST` (`:990-1000`), `retryingPOST` (`:1065-1081`) and the management loop (`Management/AxiamClient+Management.swift:105-120`). There are no stale captured headers. Test gap (Info, pre-existing, not numbered): `ManagementSemanticsTests.swift:518-531` asserts only the request paths and count. It does not assert that the replay carries a rotated cookie or CSRF.
+
+**Version:** 1.1.2 (`AxiamSDK.podspec:3`), a patch, which is right. No public signature changed. The single `devicePoll` now throws `.network` rather than `.auth(server_error)` on a 5xx with an OAuth body. Both are cases of the same `AxiamError`, and `CHANGELOG.md:29-42` records the change. The CHANGELOG records C164-03, -04, -14 and -17 and the re-vendor at 21beda0. README `:15` still says "conforms to contract 1.64", and the §14.2 bullet at `README.md:1105-1114` is updated. The README makes no in-poll §16 claim; its §16 list (`:879-883`) omits the device poll. The §16 row "✅ implemented" (`:147`) overstates because of C164-25.
+
+**Run by the reviewer:**
+- `python3 -I Scripts/gen_management.py --check` in the throwaway copy `/home/user/work/swift`: "§27 surface is current (3 files)", rc=0. I removed the copy afterwards.
+- `git log --format=%G?`: `N`, because there is no allowed-signers file. The signatures could not be verified.
+- **Not run:** `swift build` and `swift test` (no Swift toolchain). Every mutant above was traced by hand.
+
+**New findings:**
+- **C164-25 — Low (pre-existing; the amended text makes it explicit).**
+  - Where: `Sources/AxiamSDK/Oidc/DeviceGrant.swift:158` (the `oidcFormPost`) and `:253-256`.
+  - Rules: §14.2 rule 6 ("retried under the bounded read-only retry policy of §16, then surfaced … per poll attempt"); §16.2 (`device_poll` on 5xx/transport is eligible); §16.1 (switch defaults on); §16.5 (a `retry` event per retry).
+  - What happens: with `retryEnabled == true`, a 5xx or transport failure on the poll is never retried inside the attempt. The loop waits a full interval (≥ 5 s by default) instead of the 200/400 ms jittered backoff, and no `retry` telemetry is emitted. The single `devicePoll` surfaces the first 5xx. No grant is lost. The comment at `:253-256` documents the gap.
+  - Fix, code: send the poll through `bareSend(operation: "device_poll", pathTemplate: "/oauth2/token", method: .post, url: try oidcTenantScopedURL(endpoint, tenantID: tenantID), headers: [("Content-Type","application/x-www-form-urlencoded"),("Accept","application/json")], body: Data(Self.oidcFormEncode(form).utf8), retry: .section16TransportOnly)`.
+  - Fix, new retry case: add `BareRetry.section16TransportOnly`, which retries only when `response == nil || response.status >= 500`. A 429 must stay rule 9's loop wait (§16.2 lists only 5xx/transport), so `.section16UnlessOAuthError` is wrong here: it would retry a bodiless 429.
+  - Fix, deadline: §14.2 rule 4 means an in-poll wait must not carry the request past the deadline. Pass the loop's deadline into the retry, and surface the 5xx instead of sleeping when `now + wait >= deadline`. That mirrors §33.7 rule 5 / P10 for CIBA. The single `devicePoll` has no deadline and retries under §16 as is.
+  - Fix, comment: replace the comment at `:253-256` with "already went through the §16 bounded retry inside the poll; an exhausted budget ends that one poll, not the flow".
+  - Tests: (a) `500 {"error":"server_error","error_description":"db"}` ×3, then 200 → 4 wire requests; loop sleeps `[1, 0, 0, 1]` with jitter 0 (3 in-poll attempts then one loop interval); 2 `retry` events; tokens. (b) The same with `retryEnabled: false` → one request per poll; sleeps at the interval only. (c) `500` then `200` with jitter pinned to 1 → the in-poll wait is 0.2 s, and a `Retry-After: 2` on the 500 floors it to 2. (d) A bodiless `429` + RA 7 is still one request, then the loop's 7 s wait (no in-poll retry). Update `testA500WithTheServersOwnBodyMidPollIsNotTerminal`'s expected sleeps to `[1,1,0,0]` (pending, then the 500, 500, 200 retried inside the second poll: 4 requests, 2 loop polls).
+- **C164-33 — Informational (test strength / comment).**
+  - Where: `Tests/AxiamSDKTests/Contract164DeviceGrantRateLimitTests.swift:170-185`.
+  - What: the rewrite of a non-`rate_limit_exceeded` 429 code (`DeviceGrant.swift:173-178`) has no test. Removing it leaves every test green, while the single `devicePoll` on `429 slow_down` would surface `oauthError == "slow_down"`, which a caller's own loop reads as the polling signal. The comment at `:173` predicts `[1, 1, 6]` for the body-dispatch mutant; the real result is `[1, 6, 6]`.
+  - Fix: add a single-`devicePoll` case for `429 {"error":"slow_down"}` asserting `.auth` with `oauthError == "rate_limit_exceeded"`, and correct the comment to `[1, 6, 6]`.
+
+---
+

@@ -199,6 +199,12 @@ A provisioning token:
   find it if it is ever pasted somewhere it should not be;
 - expires. There is no never-expires option — the ceiling is
   `AXIAM__SCIM_TOKEN_MAX_LIFETIME_DAYS` (default 365).
+- is sent as `Authorization: Bearer axiam_scim_…` (the scheme in any case),
+  and **alone**: a request that also carries the `axiam_access` session
+  cookie is refused `401` as ambiguous, since the request row would name the
+  cookie's user while the token's principal was served. An IdP sends no
+  cookies. A refused token is recorded `authenticated: false` in the request
+  audit row (#801).
 
 This replaces the refresh-job workaround described below for new deployments.
 The access-token route still works and is documented because an existing

@@ -386,8 +386,8 @@ pub async fn sweep_rate_limit_buckets<C: Connection + Send + Sync + 'static>(
 /// device key's `dpop_jkt`; revoking left them in the table until the tenant
 /// was purged. The revocation runs first so a token redeemable in the window
 /// between the two statements is dead before its row goes, and both are
-/// idempotent — the recovery of a cut erasure (#737) re-enters this step and
-/// finds nothing to do.
+/// idempotent. An erasure cut before its point of no return re-runs it; one cut
+/// after it (the recovery of #737) needs no more, the rows being gone already.
 ///
 /// A free function, and public, for the reason [`run_erasure_pipeline`] is.
 ///
@@ -491,22 +491,54 @@ where
 }
 
 /// The `oauth2_refresh_token` sweep (#753): delete the rows whose token
-/// expired more than [`REFRESH_REPLAY_RETENTION`] before `now`, revoked or not.
+/// expired more than [`REFRESH_REPLAY_RETENTION`] before `now`, revoked or not,
+/// in bounded batches, and return how many.
 ///
 /// The cutoff is `expires_at`, never `revoked`: a rotated or revoked token is
 /// recognised as a replay by its row until it is deleted (T-254), so a revoked
-/// row whose expiry is still ahead stays. A public free function, for the
-/// reason [`run_erasure_pipeline`] is.
+/// row whose expiry is still ahead stays.
+///
+/// Runs at most [`REFRESH_SWEEP_MAX_BATCHES`] batches of
+/// [`REFRESH_SWEEP_BATCH`] rows, and stops between batches on a shutdown
+/// signal; the next tick continues (R112W1-02). The first run after the
+/// upgrade, which finds every row expired since the deployment began, thus
+/// takes as many ticks as it needs and never one statement over the whole
+/// backlog. Two replicas may run it at once: each batch is chosen and deleted
+/// by id, and a row the other replica removed first is not counted. A public
+/// free function, for the reason [`run_erasure_pipeline`] is.
 ///
 /// # Errors
 ///
-/// The datastore error of the delete.
+/// The repository's error from the batch that failed; batches already deleted
+/// stay deleted.
 pub async fn sweep_refresh_tokens<RT: axiam_core::repository::RefreshTokenRepository>(
     repo: &RT,
     now: chrono::DateTime<Utc>,
+    shutdown: &watch::Receiver<bool>,
 ) -> Result<u64, AxiamError> {
-    repo.delete_expired(now - REFRESH_REPLAY_RETENTION).await
+    let before = now - REFRESH_REPLAY_RETENTION;
+    let mut removed = 0_u64;
+    for _ in 0..REFRESH_SWEEP_MAX_BATCHES {
+        if *shutdown.borrow() {
+            break;
+        }
+        let batch = repo.delete_expired(before, REFRESH_SWEEP_BATCH).await?;
+        removed += batch;
+        if batch < u64::from(REFRESH_SWEEP_BATCH) {
+            break;
+        }
+    }
+    Ok(removed)
 }
+
+/// Rows one batch of the `oauth2_refresh_token` sweep deletes (R112W1-02).
+pub const REFRESH_SWEEP_BATCH: u32 = 500;
+
+/// Batches one run of the `oauth2_refresh_token` sweep may take: at most
+/// `BATCH * MAX_BATCHES` rows a tick, the rest at the next. Bounds the first
+/// run over a table that has never been swept, as
+/// [`CERTIFICATE_RETENTION_MAX_BATCHES`] does for certificates.
+pub const REFRESH_SWEEP_MAX_BATCHES: u32 = 10;
 
 /// How long a refresh-token row is kept past its `expires_at`:
 /// [`axiam_oauth2::token::REFRESH_REPLAY_RETENTION_SECS`].
@@ -3502,18 +3534,6 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         if self.stop_requested() {
             return;
         }
-        // #753: refresh-token rows a week past their expiry. DEBUG: such a
-        // row is one no token can redeem and no replay still needs.
-        Self::record(
-            &self.job_health,
-            "oauth2_refresh_token",
-            self.sweep_refresh_tokens().await,
-            tracing::Level::DEBUG,
-        );
-
-        if self.stop_requested() {
-            return;
-        }
         // #638: rate-limit buckets no limiter can still read. DEBUG: a
         // stale bucket is one whose window has long passed.
         Self::record(
@@ -3641,6 +3661,21 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             "certificate_retention",
             self.sweep_certificate_retention().await,
             tracing::Level::INFO,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // #753: refresh-token rows a week past their expiry. DEBUG: such a
+        // row is one no token can redeem and no replay still needs. Placed
+        // after `vault_revocation`, `tenant_purge` and
+        // `certificate_retention` and bounded to a few batches (R112W1-02),
+        // so the first run over a large backlog delays none of them.
+        Self::record(
+            &self.job_health,
+            "oauth2_refresh_token",
+            self.sweep_refresh_tokens().await,
+            tracing::Level::DEBUG,
         );
 
         if self.stop_requested() {
@@ -3796,7 +3831,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// Delete refresh-token rows past their expiry plus the replay-detection
     /// retention (#753): see [`sweep_refresh_tokens`].
     async fn sweep_refresh_tokens(&self) -> Result<u64, AxiamError> {
-        sweep_refresh_tokens(self.refresh_token_repo.as_ref(), Utc::now()).await
+        sweep_refresh_tokens(self.refresh_token_repo.as_ref(), Utc::now(), &self.shutdown).await
     }
 
     /// Mark and delete expired CIBA requests (G-7, T23.7.1).

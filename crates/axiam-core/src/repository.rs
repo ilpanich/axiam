@@ -2567,10 +2567,17 @@ pub trait RefreshTokenRepository: Send + Sync {
     /// row must outlive the token. The caller picks `before` as now minus the
     /// replay-detection retention.
     ///
-    /// Returns the number of rows deleted.
+    /// Deletes **at most `limit` rows**, so a first run over a table that has
+    /// never been swept (or a long outage of the sweep) is bounded; the caller
+    /// repeats while a call returns `limit`.
+    ///
+    /// Returns the number of rows this call deleted, counted from the
+    /// `DELETE` itself: a row another replica's overlapping batch removed
+    /// first is not counted.
     fn delete_expired(
         &self,
         before: DateTime<Utc>,
+        limit: u32,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

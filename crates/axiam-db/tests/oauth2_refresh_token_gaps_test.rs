@@ -271,7 +271,7 @@ async fn delete_expired_removes_rows_expired_before_the_cutoff_and_keeps_the_res
     )
     .await;
 
-    let deleted = repo.delete_expired(cutoff).await.unwrap();
+    let deleted = repo.delete_expired(cutoff, 500).await.unwrap();
     assert_eq!(deleted, 2, "only the two rows expired before the cutoff");
 
     for gone in [&long_expired, &long_expired_revoked] {
@@ -280,9 +280,9 @@ async fn delete_expired_removes_rows_expired_before_the_cutoff_and_keeps_the_res
     // The survivors are counted by the sweep itself: a second pass at the
     // same cutoff finds nothing more.
     assert!(repo.get_by_token_hash(tenant_id, &active).await.is_ok());
-    assert_eq!(repo.delete_expired(cutoff).await.unwrap(), 0);
+    assert_eq!(repo.delete_expired(cutoff, 500).await.unwrap(), 0);
     // A later cutoff reaches the in-window row, and still not the live ones.
-    assert_eq!(repo.delete_expired(Utc::now()).await.unwrap(), 1);
+    assert_eq!(repo.delete_expired(Utc::now(), 500).await.unwrap(), 1);
     assert!(repo.get_by_token_hash(tenant_id, &active).await.is_ok());
 }
 
@@ -302,7 +302,7 @@ async fn a_rotated_token_stays_a_detectable_replay_until_the_sweep_reaches_its_e
     .await;
     repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
 
-    assert_eq!(repo.delete_expired(cutoff).await.unwrap(), 0);
+    assert_eq!(repo.delete_expired(cutoff, 500).await.unwrap(), 0);
     assert!(
         repo.find_rotated(tenant_id, &rotated)
             .await
@@ -358,4 +358,36 @@ async fn delete_all_for_user_removes_every_row_of_that_user_only_and_is_idempote
         0
     );
     assert!(repo.get_by_token_hash(tenant_id, &others).await.is_ok());
+}
+
+#[tokio::test]
+async fn delete_expired_deletes_at_most_the_limit_and_counts_what_it_deleted() {
+    let (db, tenant_id, user_id) = setup().await;
+    let repo = SurrealRefreshTokenRepository::new(db);
+    let cutoff = Utc::now() - Duration::days(7);
+    for _ in 0..5 {
+        insert_token_expiring(
+            &repo,
+            tenant_id,
+            user_id,
+            "client-a",
+            cutoff - Duration::hours(1),
+        )
+        .await;
+    }
+    let live = insert_token_expiring(
+        &repo,
+        tenant_id,
+        user_id,
+        "client-a",
+        Utc::now() + Duration::days(1),
+    )
+    .await;
+
+    // R112W1-02: a bounded batch, counted from the DELETE itself.
+    assert_eq!(repo.delete_expired(cutoff, 2).await.unwrap(), 2);
+    assert_eq!(repo.delete_expired(cutoff, 2).await.unwrap(), 2);
+    assert_eq!(repo.delete_expired(cutoff, 2).await.unwrap(), 1);
+    assert_eq!(repo.delete_expired(cutoff, 2).await.unwrap(), 0);
+    assert!(repo.get_by_token_hash(tenant_id, &live).await.is_ok());
 }

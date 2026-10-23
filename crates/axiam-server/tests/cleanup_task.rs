@@ -4702,7 +4702,8 @@ use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::repository::RefreshTokenRepository as _;
 use axiam_db::SurrealRefreshTokenRepository;
 use axiam_server::cleanup::{
-    REFRESH_REPLAY_RETENTION, erase_oauth2_refresh_tokens, sweep_refresh_tokens,
+    REFRESH_REPLAY_RETENTION, REFRESH_SWEEP_BATCH, REFRESH_SWEEP_MAX_BATCHES,
+    erase_oauth2_refresh_tokens, sweep_refresh_tokens,
 };
 
 async fn issue_refresh_token(
@@ -4839,7 +4840,8 @@ async fn the_refresh_token_sweep_removes_only_rows_expired_past_the_retention() 
     repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
     assert_eq!(refresh_rows_total(&db).await, 5);
 
-    assert_eq!(sweep_refresh_tokens(&repo, now).await.unwrap(), 2);
+    let (_stop, never) = watch::channel(false);
+    assert_eq!(sweep_refresh_tokens(&repo, now, &never).await.unwrap(), 2);
     assert_eq!(refresh_rows_total(&db).await, 3);
     assert!(repo.get_by_token_hash(tenant_id, &live).await.is_ok());
     assert!(
@@ -4852,14 +4854,76 @@ async fn the_refresh_token_sweep_removes_only_rows_expired_past_the_retention() 
 
     // The next tick finds nothing more; the in-window row goes once the
     // retention has run out on it.
-    assert_eq!(sweep_refresh_tokens(&repo, now).await.unwrap(), 0);
+    assert_eq!(sweep_refresh_tokens(&repo, now, &never).await.unwrap(), 0);
     assert_eq!(
-        sweep_refresh_tokens(&repo, now + chrono::Duration::hours(2))
+        sweep_refresh_tokens(&repo, now + chrono::Duration::hours(2), &never)
             .await
             .unwrap(),
         1
     );
     assert_eq!(refresh_rows_total(&db).await, 2);
+}
+
+/// R112W1-02: the first run over a backlog — every row expired since the
+/// deployment began — is bounded. One tick deletes at most
+/// `BATCH * MAX_BATCHES` rows and leaves the rest to the next, never the whole
+/// backlog in one statement; a shutdown signal stops it between batches; a
+/// later tick finishes the job.
+#[tokio::test]
+async fn the_refresh_token_sweep_bounds_a_first_run_over_a_backlog() {
+    let db = setup_db().await;
+    let bound = u64::from(REFRESH_SWEEP_BATCH) * u64::from(REFRESH_SWEEP_MAX_BATCHES);
+    let backlog = bound + 700;
+    let expired = (Utc::now() - REFRESH_REPLAY_RETENTION - chrono::Duration::days(1)).to_rfc3339();
+    let live = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let mut inserted = 0_u64;
+    while inserted < backlog {
+        let end = (inserted + 2_000).min(backlog);
+        let rows: Vec<serde_json::Value> = (inserted..end)
+            .map(|k| serde_json::json!({ "hash": format!("backlog-{k}"), "at": expired }))
+            .collect();
+        db.query(
+            "FOR $r IN $rows { CREATE oauth2_refresh_token SET tenant_id = 't', \
+             token_hash = $r.hash, client_id = 'c', scopes = [], revoked = false, \
+             expires_at = <datetime>$r.at; }",
+        )
+        .bind(("rows", rows))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        inserted = end;
+    }
+    db.query(
+        "CREATE oauth2_refresh_token SET tenant_id = 't', token_hash = 'live', \
+         client_id = 'c', scopes = [], revoked = false, expires_at = <datetime>$at",
+    )
+    .bind(("at", live))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let now = Utc::now();
+
+    // A stopped process starts no batch.
+    let (_keep, stopped) = watch::channel(true);
+    assert_eq!(sweep_refresh_tokens(&repo, now, &stopped).await.unwrap(), 0);
+    assert_eq!(refresh_rows_total(&db).await, backlog + 1);
+
+    let (_stop, running) = watch::channel(false);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now, &running).await.unwrap(),
+        bound,
+        "one tick deletes at most BATCH * MAX_BATCHES rows"
+    );
+    assert_eq!(refresh_rows_total(&db).await, backlog + 1 - bound);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now, &running).await.unwrap(),
+        backlog - bound,
+        "the next tick takes the rest"
+    );
+    assert_eq!(refresh_rows_total(&db).await, 1, "the live row stays");
 }
 
 // ---------------------------------------------------------------------------

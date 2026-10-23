@@ -444,3 +444,42 @@ R112W1-07 (#792) is Informational and new. Plan §1.4 says a wave does not merge
 has an open finding, so it either goes through the sweep slot before the merge (a small Sonnet
 task: one bool and one test) or the orchestrator records it as carried to W9.1. Nothing else is
 open. #780 … #785 can close with the wave's merge; #792 stays open until it is fixed.
+
+---
+
+## Addendum 2 — R112W1-07 (2026-10-23)
+
+**Against:** `0f9eb86..79d17fe` (1 commit, 9 files, 88 lines added and 20 removed), signed
+(one `gpgsig` header).
+
+### Verdict
+
+| ID | Commit | Verdict | Evidence |
+|---|---|---|---|
+| R112W1-07 | `79d17fe` | **Closed** | The open question in #792 is settled: `unassign_from_user` on a missing edge committed and answered `Ok(())`, so the defect was a duplicate row, not a failed erasure. `RoleRepository::unassign_from_user` (and the inherent `unassign_from_user_claimed`) now answer `bool` from `LET $removed = (DELETE has_role … RETURN BEFORE); RETURN array::len($removed) > 0` inside the existing transaction. `remove_erased_users_roles` writes its `network_role.unassigned` row only on `true`. The hard-coded result slot (9) is safe: the claim and bump fragments in front of it are unconditional, so the statement count does not vary. Group unassignment keeps its `()` signature (`.map(\|_\| ())`). Every implementor of the trait is updated: `SurrealRoleRepository`, `token_exchange.rs`'s `StubRoles`, and the two `axiam-authz` test doubles; `grep 'impl.*RoleRepository for'` finds no other. Callers that ignore the value are unchanged in behaviour: a REST unassignment of a missing edge still answers as before. T-444 carries a dated 2026-10-23 #792 amendment, and the "change nothing" sentence now points to it; it is identical in both copies. Test: `two_concurrent_role_passes_over_one_network_role_write_one_row` (surrealkv, 16 rounds), 5 runs out of 5 passed here. |
+
+No new finding.
+
+### Checks run on `79d17fe` (each tool's own exit code)
+
+SAML on; debug info off; each `axiam-api-rest` binary run singly.
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-api-rest --lib` | 0 (308 passed) |
+| `cargo test -p axiam-api-rest --test <each of 112 files>`, singly | **112 × 0**: 1 746 passed, 0 failed, 9 ignored (including `rbac_test`, `rbac_handlers_gaps_test`, `token_exchange_test`, `network_gate_test`, `network_gate_enumeration_test`) |
+| `cargo test -p axiam-authz` | 0 (6 binaries, 205 passed) |
+| `cargo test -p axiam-db --lib role`; `--test` `role_permission_test`, `role_repository_gaps_test`, `network_role_group_rule_test` | 0 each (3; 21; 17; 5 passed) |
+| `cargo test -p axiam-server --no-default-features` | 0 (29 binaries, 357 passed) |
+| `cargo test -p axiam-core` | 0 (563 passed) |
+| `cargo test -p axiam-server --no-default-features --test cleanup_task -- two_concurrent_role_passes an_erasure_writes_one_unassigned_row`, 5 runs | 0 each (2 passed each) |
+| `cargo fmt -p axiam-core -p axiam-db -p axiam-server -p axiam-api-rest -p axiam-authz -- --check` | 0 |
+| T-444 copy comparison (decoded `Axiam.json`) | identical |
+
+The full `axiam-db` suite was not re-run here (the executor reports it green; the change touches
+only `role.rs`, whose binaries are above). No clippy, no CI on the branch.
+
+### May W1 merge?
+
+**Yes.** R112W1-01 … R112W1-07 are all closed, verified against the code and the tests. No
+finding of this review is open. #780 … #785 and #792 close with the wave's merge.

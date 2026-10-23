@@ -383,3 +383,64 @@ refresh sweep, the enumeration test or the stalled unit's scrub.
 | R112W1-04 | Informational | [#783](https://github.com/ilpanich/axiam/issues/783) |
 | R112W1-05 | Informational | [#784](https://github.com/ilpanich/axiam/issues/784) |
 | R112W1-06 | Informational | [#785](https://github.com/ilpanich/axiam/issues/785) |
+
+---
+
+## Addendum — the sweep (2026-10-23)
+
+**Against:** `7a3e5f2..ca37ec3` (6 commits, 18 files, 786 lines added and 198 removed):
+`7593223` (#780), `8ad70c8` (#781, #785 (b)), `d87f37b` (#782), `e9c0786` (#783, #785 (a)),
+`77e7037` (#785 (c)), `ca37ec3` (#784, Opus). Every commit carries one `gpgsig` header. Each
+commit was read against its finding, the timings of R112W1-02 and R112W1-03 were measured again
+with the same throwaway probe (release build, removed; the audit data now gives 30 % of the
+tenant's rows a nil actor, so the new fallback read pays its real cost), and the binaries below
+were run.
+
+### Verdict per finding
+
+| ID | Commit | Verdict | Evidence |
+|---|---|---|---|
+| R112W1-01 | `7593223` | **Closed** | The `EXEMPT` entry and the `PINNED` body name `remove_erased_users_roles` (its whitespace-free signature), with the reason updated ("the platform's own act, so the gate has no principal to decide on"). The stray-function test now copies that name and still proves a by-name exemption would have waved the copy through. `network_gate_enumeration_test` exits 0 (§ checks). |
+| R112W1-02 | `8ad70c8` | **Closed** | `delete_expired(before, limit)` chooses ids with `LIMIT`, deletes them `RETURN BEFORE` under `retry_on_write_conflict`, and counts what it removed. `sweep_refresh_tokens` runs at most 10 × 500 rows a tick, stops on the shutdown signal, and now runs after `vault_revocation`, `tenant_purge` and `certificate_retention`. Probe at 200 000 rows: one batch of 500 in 0.91 s (so at most about 9 s a tick), an idle tick in **0.19 s** (was 3.2 s). No index on `expires_at`, so the idle tick still scans the table; that is accepted in the code comment, it is the sibling token sweeps' shape, and it is now 17× cheaper than what R112W1-02 measured. `the_refresh_token_sweep_bounds_a_first_run_over_a_backlog` pins the bound. |
+| R112W1-03 | `d87f37b` | **Closed** | (a) `erasure_recorded` makes two reads on `idx_audit_tenant_actor`: the account as actor, then (only on a miss) the nil actor with the pseudonym. A miss (both reads, the usual recovery case) took **0.22 s** at 100 000 tenant rows, 30 % of them nil-actor, against 1.0 s for W1's `OR`. The fallback stays linear in the tenant's nil-actor rows. After #784 it finds only rows nilled before the fix, so it is a legacy path that costs one indexed range per owed erasure. (b) Query 2b chooses ids with `SELECT VALUE id`, then updates them: **0.79 s**, against 3.8 s for W1's `UPDATE … WHERE`. `pseudonymize_actor` as a whole took 4.5 s, against 8.0 s. `erasure_recorded_finds_the_record_by_actor_or_by_pseudonym_only` pins both reads. |
+| R112W1-04 | `e9c0786` | **Closed** | T-254 (line 1201) and the T-187 sentence (line 605) carry a dated amendment (2026-10-22, R112W1-04, #783) stating both lanes: `standard`, the row's expiry plus seven days; `fapi2`, seven days and sixty seconds after rotation; a later replay refused as before but unmarked and unaudited. `docs/deployment/README.md` says the same. Both lines are identical in the decoded `Axiam.json`. |
+| R112W1-05 | `ca37ec3` | **Closed** | All three writes are gone. (1) `erase_and_record` reads the account before the scrub and answers `Ok(false)`, with nothing written, once it is not `deletion_pending`. (2) `anonymize_user_marked` is one transaction whose `UPDATE` carries `deletion_pending = true` in its `WHERE`; the SAML statements and the marker are conditional on it matching; it answers a bool and is retried on write conflict. A miss releases the marker guard (which matches nothing) and returns `Ok(false)` before `account_purged`. (3) `pseudonymize_actor`'s query 1 excludes `action = 'gdpr.user_pseudonymized' AND metadata.pseudonym = $pseudonym`, conjunctive with `actor_id = $user_id`, so the actor index still serves it. A unit that stalls between the read and the scrub therefore scrubs nothing its successor recorded and stops at the anonymization. Tests: the extended `a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out` (one record, actor intact, one `account_purged`, marker not set again), `the_marked_anonymization_of_an_erased_account_writes_nothing`, `two_anonymizations_of_one_pending_account_sent_together_have_one_winner` (surrealkv), `pseudonymize_actor_leaves_the_erasures_own_record`. The orchestrator's departure is right: re-checking the claim stamp would add nothing the conditional anonymization does not already guarantee, and it would change two public signatures. The read is not a lock, but the write it guards is conditional. T-444's #784 amendment is identical in both copies. |
+| R112W1-06 | `e9c0786`, `8ad70c8`, `77e7037` | **Closed** | (a) The guide and `erase_oauth2_refresh_tokens`' doc now say step (a) precedes the point of no return and the recovery does not re-run it. (b) Folded into R112W1-02 (the count is the `DELETE`'s). (c) `cleanup_task.rs` gains `setup_serialising_db` (surrealkv in a temporary directory; `kv-surrealkv` and `tempfile` in `axiam-server`'s dev-dependencies), used by the two race tests. |
+
+### New finding
+
+| ID | Finding | Severity | Issue | Model for the fix |
+|---|---|---|---|---|
+| R112W1-07 | T-444's #784 amendment says the stalled unit's steps before the scrub "change nothing". One of them records. If a unit stalled past the lease resumes inside its successor's role pass (b3), both can read one assignment before either removes it. Then either both write `network_role.unassigned` (two rows for one removal), or the second call fails its erasure, depending on `unassign_from_user`'s no-match behaviour (not determined here). The window is narrow. Fix: write the row only when this call's unassignment removed the edge, or amend the sentence. | Informational | [#792](https://github.com/ilpanich/axiam/issues/792) | Sonnet 5.5 |
+
+### Checks run on `ca37ec3` (each tool's own exit code)
+
+Same environment as §10 (SAML on; debug info off; each `axiam-api-rest` binary run singly).
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-db` | 0 (87 binaries, 1 117 passed, 5 ignored) |
+| `cargo test -p axiam-server --no-default-features` | 0 (29 binaries, 356 passed) |
+| `cargo test -p axiam-api-rest --lib` | 0 (308 passed) |
+| `cargo test -p axiam-api-rest --test <each of 112 files>`, singly | **112 × 0**: 1 746 passed, 0 failed, 9 ignored (`network_gate_enumeration_test` 5 of 5) |
+| `cargo test -p axiam-core` / `-p axiam-oauth2` / `-p axiam-audit` | 0 / 0 / 0 (563; 839; 81 passed, 1 ignored) |
+| `cargo test -p axiam-server --no-default-features --test cleanup_task -- a_stalled_claimants_account two_sweeps_at_once two_recoveries_over_one_store`, 5 runs | 0 each (3 passed each; the last two on surrealkv) |
+| `cargo test -p axiam-db --test deletion_cancel_race_test -- two_anonymizations the_marked_anonymization` | 0 (2 passed) |
+| probe `zz_probe_r112w1` (release; deleted) | 0 (figures in the verdict table) |
+| `cargo fmt -p axiam-core -p axiam-db -p axiam-server -p axiam-api-rest -- --check` | 0 |
+| `bash scripts/check-doc-links.sh` | 0 (537 links) |
+| `python3 scripts/check-remediation-evidence.py` | 0 (5 verified, 0 failed, 32 skipped) |
+| threat-model copy comparison (T-102, T-187, T-254, T-336, T-444, T-470, T-472) | every paragraph present in the decoded `Axiam.json` |
+| `git cat-file -p <c> \| grep -c gpgsig`, six commits | 1 each |
+
+`axiam-pki` was not re-run: the sweep does not touch it. Clippy was not run (the sweep's
+executors report it clean). No CI has run on the branch.
+
+### May W1 merge?
+
+**Yes, from this review's side.** R112W1-01 … R112W1-06 are closed by the sweep, verified
+against the code, the tests and a re-run of the probes. The merge-blocking R112W1-01 is green.
+R112W1-07 (#792) is Informational and new. Plan §1.4 says a wave does not merge while its review
+has an open finding, so it either goes through the sweep slot before the merge (a small Sonnet
+task: one bool and one test) or the orchestrator records it as carried to W9.1. Nothing else is
+open. #780 … #785 can close with the wave's merge; #792 stays open until it is fixed.

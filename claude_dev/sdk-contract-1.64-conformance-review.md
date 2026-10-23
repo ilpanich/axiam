@@ -5516,3 +5516,145 @@ There are two commits. `2a464ae` adds the tests: +47 lines in `Tests/AxiamSDKTes
 
 ---
 
+### 7.5 Addendum round 6 (2026-10-23): the three round-6 heads
+
+**Scope.** As in §7.4: only the three round-6 diffs were read.
+
+| SDK | PR | Head | Commits read |
+|---|---|---|---|
+| Kotlin | #80 | `b8a70b4` | `c0ba2e7` tests, `b8a70b4` docs; read after `d9cd47a` |
+| PHP | #87 | `b61dc3938` | read after `12161d496` |
+| C++ | #80 | `de76426` | read after `007aa6b` |
+
+The other eight heads are unchanged and have nothing open: TypeScript `50d6f72`, Rust `c947a5e`, Python `9e69284`,
+C `832a421`, C# `fd1093b`, Go `2a0c273`, Java `97dcdf0`, Swift `7d28ce4`. All eleven match `git ls-remote`.
+`scripts/check-sdk-artifact-drift.py --local-root` reports **11 repos, 0 artifact problems**.
+
+#### 7.5.1 Verification
+
+| SDK | Finding | Verdict |
+|---|---|---|
+| kotlin | C164-56 | **Closed** (`c0ba2e7`). `DualStackWritesTest` adds the read-and-drop case on each sessionless write: `deleteClientRegistration` → 1 request (`:154`), `updateClientRegistration` → 1 (`:165`), `ssf.poll` → 3 (`:181`). M4, M5 and M6 (each body made plain again) each fail their own test, and the unmutated control passes. |
+| kotlin | C164-55, option (a) | **Closed** (`c0ba2e7`, `b8a70b4`). `readClientRegistration` is pinned at 3..4 sends with retry on and 1..2 with it off (`:197-215`); it measures 4 and 2. README §16 (`:2519-2524`) and the CHANGELOG `[1.1.2]` (`:125-130`) record OkHttp 4.12's replay of an idempotent `GET` on a stale pooled connection, with the bounds. OkHttp 5.x is named as a follow-up. No `src/main` change. `./gradlew test`: 1327 tests, 0 failed. |
+| php | C164-57 | **Closed** (`b61dc39`). Four tests in `tests/Contract164/CibaDeadlineBoundTest.php:234`, `:243`, `:256` and `:269` kill R2 (the body decides), R3 (the carry shortens the interval) and R5 (the 429 raises the interval). R1, R4, C6 and C7 still fail as well. The `src/` change is docblock only (`:2103-2106`, verified by the lead reviewer too) and now states the wait accurately. phpunit 2084 / 10009; phpstan clean. |
+| cplusplus | C164-58 | **Closed** (`de76426`). `std::clamp(expires_in, 0, 1e9)` sits at both sites (`src/oidc.cpp:1746`, `:2593`). `INT64_MIN`, `INT64_MAX` and −9e18 run clean under UBSan. A negative value behaves as 0: an immediate `expired_token`, with no sleep and no poll. The lower-clamp mutants L1 and L2 are killed at each site. Four exact-deadline tests kill B1–B4 (`>=` → `>`, at `:916`, `:1769`, `:2478`, `:2608`), each by its own test. The CHANGELOG wording is now accurate. ctest 1641 cases, 0 failed, normal and UBSan. SOVERSION 4 and 1.1.2 stand. |
+
+Every version is 1.1.2, and every CHANGELOG records round 6.
+
+#### 7.5.2 New items introduced by the round-6 diffs
+
+| ID | Severity | SDK | `path:line` | What | Fix |
+|---|---|---|---|---|---|
+| C164-59 | Info | kotlin | `README.md:2521`; `CHANGELOG.md:125` | Both new texts say the read "can reach the server **once more per §16 attempt**". Read literally, that allows 6 sends. The behaviour, and the bounds both texts go on to state (4 with retry on, 2 with it off), is one replay **in total**, on a stale pooled connection only. Verified by the lead reviewer. | In both places, replace "once more per §16 attempt" with "once more in total (OkHttp replays it once on a stale pooled connection)". |
+
+PHP and C++: none. **Follow-up** (outside the gate): unchanged from §7.4.4.
+
+#### 7.5.3 The W7 gate
+
+| SDK | Open |
+|---|---|
+| typescript, rust, python, c, cplusplus, csharp, go, java, php, swift | **none** |
+| kotlin | C164-59 (Info, a two-line wording fix) |
+
+**Can W7 merge? Not yet, by one Informational wording fix in Kotlin.** Every Medium, Low and Informational finding
+from rounds 0 to 5 is closed in all eleven SDKs. Once Kotlin replaces the two phrases, a read of that one-commit
+docs diff closes the gate. With no code change, no test run is needed: the reviewer checks the two lines and the
+CHANGELOG entry.
+
+The three round-6 addenda follow.
+
+---
+
+#### Addendum round 6 — kotlin — commit b8a70b4 (PR #80), read after d9cd47a
+
+Two commits (`git log --oneline d9cd47a..b8a70b4`): `c0ba2e7` test (C164-56, -55) and `b8a70b4` docs (README §16, CHANGELOG). Net diff: `DualStackWritesTest.kt` (+117/-16), `README.md` (+7), `CHANGELOG.md` (+10). **No `src/main` change** (`git diff --stat d9cd47a..HEAD -- src/main` is empty). The one-shot bodies are still at `ClientRegistrationSupport.kt:91` (`PUT`), `:101` (`DELETE`) and `SsfReceiver.kt:221` (`ssf.poll`).
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-56 (Low): read-and-drop P11 case on each sessionless write | **CLOSED** | `c0ba2e7` | New helper `pooledClientThatDrops()`: a dual-stack `Dns`, a login that leaves a pooled connection, then the server drops every request it reads (`DISCONNECT_AFTER_REQUEST`). Tests: `DualStackWritesTest.kt:154` `deleteClientRegistration` → exactly 1; `:165` `updateClientRegistration` → exactly 1; `:181` `ssf.poll` → exactly 3 (the §16 cap, nothing replayed on top). **Mutants** (throwaway copy, `--tests DualStackWritesTest`): **M4** (RFC 7592 `DELETE` → plain `.delete()`) → `:154` fails. **M5** (`PUT` → `.put(body)`) → `:165` fails. **M6** (`ssf.poll` → `.post(body)`) → `:181` fails. Each kills exactly one test (8 run, 1 failed). The unmutated control (M0) passes 8/8. |
+| C164-55 (Low), option (a): test | **CLOSED** | `c0ba2e7` | `DualStackWritesTest.kt:197-215`: `readClientRegistration` over a pooled connection that drops. It asserts `in 3..4` sends with retry on and `in 1..2` with `retryDisabled()`. Observed (stdout probe added to the copy): **4 and 2**. |
+| C164-55 (Low), option (a): README §16 and CHANGELOG | **CLOSED** (one wording nit, C164-59) | `b8a70b4` | `README.md:2519-2524`: "OkHttp 4.12 recovers an **idempotent read** on a stale pooled connection by itself. The RFC 7592 `readClientRegistration` is such a `GET` … at most 4 sends with retry on, 2 with `retryDisabled()`". It also says every write is one-shot and sent exactly once per attempt. `CHANGELOG.md:125-130` under `[1.1.2]`: "OkHttp 4.12 recovers the idempotent RFC 7592 `GET` once on a stale pooled connection … at most 4 sends with retry on (the §16 cap is 3 attempts) and at most 2 with `retryDisabled()`; round 4 gave 3 and 1". It names OkHttp 5.x as a follow-up. Round 6 is recorded at `:131-134`. Both texts name OkHttp's stale-pooled-connection replay of an idempotent `GET` and give the right bounds. |
+
+**Regression probes:** the diff touches only tests and text, so the device/CIBA deadline bound, W7.1c, rules 6/9, P11 on the management client and 1.63 isolation stand as in round 5. The full suite is green. The P11 counts the new tests assert (1 / 1 / 3) and the read count (4 / 2) match the round-5 probe table.
+
+**Answers:**
+- Read-and-drop cases with 1, 1 and 3 requests: **yes** (`:154`, `:165`, `:181`). M4, M5 and M6 each fail a test: **yes**.
+- Read pinned at 3..4 with retry on and 1..2 with it off: **yes** (`:197-215`). It observes 4 and 2.
+- README §16 and CHANGELOG name OkHttp's stale-pooled-connection replay of an idempotent `GET` and the bounds: **yes**.
+- No `src/main` change: **confirmed**.
+
+**Version:** 1.1.2 (`gradle.properties:2`, CHANGELOG `[1.1.2]`), still right. Round 6 is recorded.
+
+**Run by the reviewer:**
+- Throwaway copies `/home/user/work/kotlin-r6/{base,mut}` (`git archive b8a70b4`).
+- `./gradlew test --no-daemon` with 3 GB heaps: **BUILD SUCCESSFUL**, **1327 tests, 0 failed, 0 skipped** (6 min).
+- Mutants M0/M4/M5/M6 on `DualStackWritesTest`, made with `sed` on the `mut` copy and restored after each run.
+- Copies and logs deleted afterwards. The SDK clone is unchanged (`git status` clean).
+
+**New findings (introduced by the round-6 diff):**
+- **C164-59 (Info, text).** The README (`:2521`) and the CHANGELOG heading (`:125`) say the read can reach the server "**once more per §16 attempt**". That would allow up to 6 sends with retry on. The same sentence, the test and the probe all give at most 4: the one OkHttp replay happens on the stale pooled connection only. Suggested wording: "once more in total (on the stale pooled connection)". The bounds themselves are right. This does not block.
+
+**Follow-up (outside the W7 gate):** unchanged from §7.4.4. Management `GET`s show the same replay (4 / 2), and the README note names only `readClientRegistration`. Two `src/main` comments still mention `retryOnConnectionFailure(false)` (`ManagementTransport.kt:154`, `OneShotBody.kt:10`).
+
+---
+
+#### Addendum round 6 — php — commit b61dc3938 (PR #87), read after 12161d496
+
+There is one commit, `b61dc39`, and its message matches its diff. `git diff 12161d4..b61dc39` touches three files:
+- `tests/Contract164/CibaDeadlineBoundTest.php`: +4 tests (+46).
+- `src/Oidc/OidcClient.php`: +4/−2, all inside the `cibaAwait` docblock. Every changed line is a ` *` comment line, so no code changed.
+- `CHANGELOG.md`: +5.
+
+The mutants ran on a throwaway clone, `/home/user/work/php-r6`, which has since been deleted.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-57 (Info): three surviving mutants of the CIBA 429 branch; stale `cibaAwait` docblock | **CLOSED** | b61dc39 | **Tests** (`tests/Contract164/CibaDeadlineBoundTest.php`):<ul><li>`:234` `testA429RetryAfterBelowTheIntervalStillWaitsTheInterval`: interval 5, `429` + RA 2, then `200` gives `[5, 5]`.</li><li>`:243` `testTheCarryOf429IsConsumedOnceAndTheIntervalIsNotRaised`: 429 RA 12, then pending, then `200` gives `[5, 12, 5]`.</li><li>`:256` `testTheStatusDecidesNotTheBodyOfA429`: `429 {"error":"slow_down"}` + RA 3 gives `[5, 5]`.</li><li>`:269` `testASlowDownOn400StillRaisesTheInterval`: `400 slow_down` gives `[5, 10]`. This is the control case.</li></ul>**Mutants** (re-run, `scratchpad/php-r6-mut.sh`, log `php-r6-mut.log`):<ul><li>**R2** (the body decides): killed by `:256`.</li><li>**R3** (the 429 carry without the interval floor): killed by `:234` and `:256`.</li><li>**R5** (the 429 raises `$interval` permanently): killed by `:243`.</li><li>Re-checks: R1 (4 fail), R4, C6 and C7 are all still killed.</li></ul>**Docblock** (`src/Oidc/OidcClient.php:2103-2106`): it now says the loop "waits the interval, or the failure's `Retry-After` if longer (once; the interval is never raised, whatever a `429`'s body says), and polls again. A wait that would reach the deadline ends the flow with `expired_token`." This is the requested wording, plus the body clause, and it matches the code at `:2170-2177` and the pre-sleep deadline check. |
+
+**Regression probes:** none needed. The `src/` change is docblock only, so no executable line changed. The round-5 CIBA probes therefore still hold.
+
+**Answers to the prompt:**
+- The three new tests kill R2, R3 and R5. I re-ran each mutant, and each fails at least one of the new tests.
+- The `cibaAwait` docblock now states the wait.
+- The 6-line `OidcClient.php` change is docblock only.
+
+**Version:** 1.1.2 is still right. `CHANGELOG.md:10` reads `## [1.1.2] - Unreleased`, and `README.md:27` and `:457` read `^1.1.2`. `CHANGELOG.md:129-133` records C164-57.
+
+**Run by the reviewer** (clone at b61dc39; PHP 8.3, Composer 2.8):
+- **Install:** `composer install` used the earlier lock. phpstan/phpstan 2.3.1 came from a local `git clone --depth 1 --branch 2.3.1` (`6155239`) as a `path` repository. Both edits were local to the clone. Log: `scratchpad/php-r6-install.log`.
+- **`vendor/bin/phpunit`:** **OK, 2084 tests, 10009 assertions** (round 5: 2080 tests). The 13 Contract164 CIBA bound tests are green. Log: `php-r6-unit.log`.
+- **`vendor/bin/phpstan analyse --memory-limit=512M`:** **No errors**. Log: `php-r6-stan.log`.
+- **Cleanup:** the clone, `vendor/` and the phpstan clone are deleted. `/home/user/sdks/php` is untouched.
+
+**New findings (introduced by the round-6 diff):** none.
+
+**Follow-up (outside the W7 gate):** none new. The round-5 note (with less than 1 s left after an admitted wait, the wait is served and nothing is sent) stands.
+
+---
+
+#### Addendum round 6 — cplusplus — commit de76426 (PR #80), read after 007aa6b
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-58 (clamp) | CLOSED | de76426 | `src/oidc.cpp:1746` (device, ms) and `:2593` (CIBA, s→ns) now use `std::clamp<std::int64_t>(expires_in, 0, 1'000'000'000)`. Tests: `tests/test_oidc_grants.cpp` "hostile expires_in cannot overflow" (-9e18, -1, 0 → `expired_token`, 0 calls; +9e18 completes), `tests/test_ciba.cpp` same for CIBA (-9e18). Mutants L1/L2 (drop the lower clamp, i.e. back to `std::min`): each killed by its own test in the plain build (the wrapped deadline is far in the future, so the poll is served), and under UBSan (`oidc.cpp:1746: -9000000000000000000 * 1000`; `chrono.h:225: … * 1000000000`). |
+| C164-58 (`>=` re-checks) | CLOSED | de76426 | Four exact-deadline tests. B1 `oidc.cpp:916` (device §16), B2 `:1769` (device interval), B3 `:2478` (CIBA §16), B4 `:2608` (CIBA interval). Changing `>=` to `>` fails exactly one test each, and that test is the one named for the site: "…section 16 wait … EXACTLY …" (device), "…sleep that ends EXACTLY…, device interval wait", "…section 16 … EXACTLY …, CIBA", "…EXACTLY…, CIBA interval wait". |
+| C164-58 (CHANGELOG) | CLOSED | de76426 | `CHANGELOG.md:50-52` says "clamped to [0, about 31 years] … cannot overflow in either direction … a value <= 0 now expires at once, as a zero always did". This is accurate. Small negatives already expired at once before the fix; only a hugely negative value wrapped, which L1/L2 confirm. The claim at `:99-101` that the tests are "run under UBSan in the sanitizer leg; removing the lower clamp fails them" also holds: `sdk-ci-cpp.yml:72-97` runs `address,undefined` with `-fno-sanitize-recover=all`. |
+
+Regression probes (copy only, plain and UBSan builds): these are the deadline-bound probes for the expires_in clamp. Every case ran clean under `-fsanitize=undefined -fno-sanitize-recover`, with no diagnostics.
+- **Device, `expires_in` sent as JSON:** INT64_MIN and -1e15 give `expired_token` and send 0 polls. INT64_MAX, 1e9, 1e9+1 and 10 complete with 1 poll.
+- **CIBA:** INT64_MIN, -1 and 0 give `expired_token` and send 0 polls. INT64_MAX, 1e9 and 10 complete with 1 poll.
+- **0..1e9 is unchanged:** the clamp is the identity there, and the existing deadline and boundary tests all pass.
+- **A negative `expires_in` now behaves as 0:** the deadline is "now", so the first pre-sleep check raises `expired_token` without sleeping or sending. That is the sane outcome. A grant that reports no lifetime left is expired, and it matches what 0 and small negatives already did.
+
+Version: `project(axiam_cpp_sdk VERSION 1.1.2)` is still right. `AXIAM_SOVERSION 4` is unchanged and needs no bump: the diff touches only function bodies in `src/oidc.cpp`, tests and the CHANGELOG, with no public header.
+
+Run by the reviewer: a throwaway copy at `/home/user/work/cplusplus-r6` (deleted afterwards). The clone is untouched. Toolchain: gcc 13.3, Ninja, C++17, Debug.
+- Plain build (tests and examples): exit 0. `ctest` 1/1 passed; the binary reports 1641 test cases, 6207 checks, 0 failed (+6 vs round 5).
+- UBSan build: exit 0. `ctest` 1/1 passed; the binary reports 1641 / 6207 / 0 failed, with no runtime errors.
+- Mutants L1, L2, B1–B4: all killed, as in the table.
+
+New findings (introduced by the round-6 diff): none.
+
+Follow-up (outside the W7 gate): none new. The §7.4.4 C++ notes still stand: the µs gap, and `opt_int` UB on an out-of-range JSON double.
+
+---

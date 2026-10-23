@@ -451,3 +451,73 @@ Per plan §1.4 the wave's sweep slot takes them in order of severity (R112W2-01 
 and this review gains an addendum on the sweep's diff. #754 should not be closed by the wave's
 merge until R112W2-01 is fixed; #741, #751, #752, #731, #732, #733, #734, #735 and #758 (a), (c),
 (d), (g) are met by the wave as reviewed (#758 (c) subject to R112W2-02, #758 (d) to R112W2-03).
+
+---
+
+## Addendum — the sweep (2026-10-23)
+
+**Against:** `0362f76..047e930`, five commits, one per finding: `7fdd3d8` (#786), `defdb94`
+(#789), `2533242` (#788), `7beb01f` (#790), `047e930` (#787). 18 files, 748 lines added and 166
+removed. Every commit carries one `gpgsig` header. Each commit was read against its finding, and
+probes A and B and the R112W2-03 mutants were re-run on the sweep's head in a separate worktree,
+then discarded.
+
+**Result: all five findings are closed. No new finding. W2 is clear to merge** as far as this
+review is concerned.
+
+| ID | Fix | Verdict | Evidence |
+|---|---|---|---|
+| R112W2-01 (#786) | `RateLimitShared` in principal mode awaits `confirm_principal_session` before either layer charges. That asks the extractor's own `SessionValidator` about the same `(token tenant, session)` the extractor will ask about (both from `admissible_session` → `user_session_of`), and records `PrincipalSessionLive`. `verified_principal`, read by both layers, returns the principal only with that marker. | **Closed** | Probe B on the sweep's head: `stale=[401, 401, 401]`, `own_after=400` (was `429`). New `a_revoked_sessions_token_never_spends_its_users_bucket` and `…_is_limited_on_its_address` use the production composition, counter on and off. `rate_limit_principal_test` 22/22. |
+| R112W2-02 (#787) | `mark_refused` (verdict only) on every refusal of `AuthenticatedPrincipal` (sync and machine-branch DPoP), `AuthenticatedServiceAccount`, the UMA PAT, the SSF receiver and `CertificateBoundServiceAccount`. `refused` keeps setting `SessionCredentialRefused` as well. | **Closed** | Probe A: `/probe/principal → 401, authenticated: false` (was `true`). New unit tests cover every family and the DPoP replay on both machine extractors. `device_flow_test` adds probe A as a test. |
+| R112W2-03 (#788) | `parse_str_const` reads any visibility and an optional `'static`. | **Closed** | Mutants `pub const …_AUDIT_ACTION`, `pub(crate) const`, `&'static str` and `pub(in crate::models) const`, each with an invalid value: all exit **101**. A valid `pub(crate) const ZZ_ACTION: &str = "fine.action"`: exit 0. |
+| R112W2-04 (#789) | "The stamp starts with 1.1.2" sentence in the admin guide, T-118 (both copies), the AsyncAPI description and the badge's doc comment. The guide's inference is restricted to rows written after the upgrade. | **Closed** | Text read. The T-118 paragraph is verbatim in `Axiam.json` (script). |
+| R112W2-05 (#790) | `GrpcTrustedHopsKeyExtractor::extract` calls `select_client_ip` and records `discarded_hops` through `record_discarded_xff`. `trusted_hops_from_env` is removed for `configured_trusted_hops`. New gRPC test with `none`. | **Closed** | Behaviour identical to the old copy: a discard is still recorded exactly when the header is honoured and too short, and an unparseable entry still falls to the peer without a discard. `none_ignores_the_forwarded_header_and_agrees_with_the_rest_rule` passes. |
+
+### What was checked beyond the findings
+
+- **#786: the off switch.** `RateLimitSharedService::call` has no early return when the shared
+  counter is off: `off` is a disabled counter in `AppState`, and the layer still runs. So the
+  liveness check runs whatever `AXIAM__RATE_LIMIT__SHARED` says, and the governor never sees a
+  principal the check did not confirm.
+- **#786: placement.** On all five routes the governor is wrapped inside the
+  `keyed_on_principal` layer. `verified_principal` has no other caller in principal mode. The
+  marker is `pub(crate)` and has one writer. The extractor still makes its own session check and
+  never reads the marker, so the limiter's answer cannot admit anybody.
+- **#786: cost and farming.** The liveness read now precedes the charge. A request with an
+  admissible token costs one read (a cache hit with the I6 validity cache) before the extractor's
+  own. A stale token is now keyed on its address, where nothing is refunded. Each address therefore
+  gets `END_SESSION_PER_MIN` refusals and then `429`, under the 10× backstop: stricter than W2.3,
+  never looser. The remaining refund window is a session revoked between the two checks, one
+  request long, and the governor still counts it. A replayed DPoP proof is keyed on
+  `(address, principal)`. The extra read is no more than a device-grant token already causes per
+  address through the extractor's lookup, so it is not a finding.
+- **#787: no stale verdict.** No route composes extractors with `Either<…>` or a fallback that
+  could leave `Refused` beside an admission. A refusal ends the request, and `MaybeAuthenticatedUser`
+  continues anonymously, where `false` is right. `CertificateBoundServiceAccount`'s split into
+  `admit`/`bind` is a move of the same checks in the same order. Non-session extractors do not set
+  `SessionCredentialRefused`, as the commit says. That is correct: only the five principal-keyed
+  routes read it, and they take `AuthenticatedUser`.
+- **Threat model.** T-118 and T-474's new text is verbatim in `Axiam.json` (script; `2.43.0`).
+
+### Checks run (each tool's own exit code)
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-core --lib` | 0 (548 passed) |
+| `cargo test -p axiam-api-grpc --lib`, then each of the 10 binaries with `--features client` | 0 each (149 passed) |
+| `cargo test -p axiam-api-rest --lib` and `--test` each of `rate_limit_principal_test`, `rate_limit_keying_test`, `rate_limit_bucket_names_test`, `rate_limit_shared_store_test`, `rate_limit_client_identity_test`, `rate_limit_sustained_flood_test`, `device_flow_test`, `federation_test`, `auth_test`, `middleware_test`, `uma_test`, `ssf_test`, `ssf_shared_issuer_test`, `network_decide_test`, `audit_test`, `user_sessions_test`, `governor_sweep_test`, `oauth2_userinfo_post_test` (SAML on) | 0 each (697 passed, 1 ignored) |
+| `cargo test -p axiam-server --no-default-features --test audit_wraps_routes` | 0 |
+| `cargo fmt -p axiam-core -p axiam-api-rest -p axiam-api-grpc -- --check` | 0 |
+| `cargo clippy -p axiam-api-grpc --lib --tests -- -D warnings` | 0 |
+| Probes A and B (worktree, appended to `rate_limit_principal_test.rs`, `--no-default-features`) | 0 (both pass: the fixed behaviour) |
+| R112W2-03 mutants (worktree) | 101, 101, 101, 101; control 0 |
+| Threat-model copy comparison (script) | verbatim |
+
+The executors' own full `axiam-api-rest` runs are in the commit bodies: 112 binaries, 2 091 and
+2 074 passed. They were not repeated here beyond the 18 binaries above, which cover every file the
+sweep touched.
+
+### Issues
+
+#786, #787, #788, #789 and #790 can be closed by the wave's merge. With R112W2-01 closed, #754 is
+met in full, revoked-session token included. No new issue is filed.

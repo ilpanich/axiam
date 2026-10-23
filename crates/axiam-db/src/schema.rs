@@ -2788,7 +2788,7 @@ async fn acquire_lease<C: Connection>(
             Ok(_) => return Ok(()),
             Err(e) => e.to_string(),
         };
-        // A live row refuses the CREATE ("already exists"); a starter racing
+        // A live row refuses the CREATE (a unique violation); a starter racing
         // us to an empty or expired row loses a write conflict. Both mean
         // "someone else has it": look again later. Anything else is a fault.
         if !is_unique_violation(&e) && !is_write_conflict(&e) {

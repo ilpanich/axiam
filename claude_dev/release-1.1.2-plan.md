@@ -590,7 +590,7 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - W5.7 → #764 … #767 and, from its addendum, #774: all closed in the wave (two addenda, `5d40dad`, `86768f9`).
   - W3.6 → #768 … #773: all closed in the wave (addendum `79f7ae9`).
   - W4.5 → #775 … #779: closed in the wave (addendum `965ee35`); the addendum filed #791 (pre-existing D7), taken in the wave per §1.4 although the reviewer judged it non-blocking.
-  - W1.8 → #780 … #785: fixed in the sweep slot (Sonnet for #780 … #783 and #785, `7593223` … `77e7037`; Opus for #784, `ca37ec3`); the addendum filed #792 (Informational, Sonnet), taken in the wave per §1.4.
+  - W1.8 → #780 … #785: closed in the wave (addendum `0f9eb86`); the addendum filed #792 (Informational, Sonnet), closed in the wave (`79d17fe`, addendum 2 `4292298`).
   - W2.11 → #786 … #790: closed in the wave (Opus for #786, Sonnet for #787 … #790; addendum `f379f67`).
   No issue from outside the plan has been opened on the milestone, and none of the 29 needs the maintainer.
 - **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
@@ -599,11 +599,125 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   session, as §4 allows), W4.1 (Opus 5.5), W5.1 (Sonnet 5.5), W6.1 (Sonnet 5.5).
 - **SAGE** was not connected in the orchestrator's session; nothing came from it.
 
-### 12.1 W1 … 12.9 W9
+### 12.1 W1 — GDPR erasure, PKI (`claude/release-1.1.2-w1`)
 
-One subsection per wave, in 1.1.1's form: head, commits (task, hash, issue,
-model), where the tree overruled the plan, the F4's findings and the sweep
-slot's commits, re-sizes, what later waves must know (for W7.1, W8.3, W8.4).
+- **Head:** `4292298`. Merged into the plan branch at `f0f4740`.
+- **Commits:** W1.2 `cff763d` (#738, Opus 5.5); W1.1 `74a1457` (#737, Opus 5.5); W1.3 `a5b54f2` (#753); W1.4
+  `23f03a4` (#736); W1.5 `048146a` (#740); W1.6 `61615fb` (#758 e, f) — Sonnet 5.5 unless named. W1.7 (#739) needed
+  no commit: the orchestrator checked the tree (the `cleanup.rs` absolutes gone, `dead_letter.rs`'s awaiter text,
+  T-472's 2026-10-19 correction) and found every item already in `fc77c562f`.
+- **Tree over plan:** W1.2 stamps a user-row claim in `erasure_audit_pending` (no schema change) and classifies the
+  proof's unique violation as `AlreadyExists`. W1.3 found no cleanup table in the guide and wrote a new section; its
+  `RefreshTokenRepository` change reached `axiam-oauth2`'s mock. W1 sweep (b) did not thread the claim's stamp into
+  `erase_and_record` (two public signatures); a read of `deletion_pending`, a conditional anonymization and a scrub
+  that spares the erasure's own row close the window instead.
+- **F4 (W1.8, Opus 5.5, `7a3e5f2`):** R112W1-01 Low, blocks the merge (#780: the network-gate enumeration red after
+  W1.6, because two executors skipped full `axiam-api-rest` runs); -02 Low (#781, unbounded refresh-token `DELETE`);
+  -03 … -06 Informational (#782 … #785).
+- **Sweep:** (a) Sonnet 5.5 — `7593223` (#780), `8ad70c8` (#781, #785 b: 5 000 rows per tick, no index, no
+  migration), `d87f37b` (#782), `e9c0786` (#783, #785 a), `77e7037` (#785 c: race tests on `surrealkv`); (b) Opus 5.5,
+  run beside (a) — `ca37ec3` (#784). Addendum `0f9eb86` closed #780 … #785 (re-probed at 200 000 rows: the idle refresh sweep 0.19 s, was 3.2 s; an `erasure_recorded` miss 0.22 s, was 1.0 s; the grantee scrub 0.79 s, was 3.8 s) and filed #792 (Informational: two overlapping role passes could write a second `network_role.unassigned` row), taken in the wave per §1.4: (c) Sonnet 5.5 — `79d17fe` (`RoleRepository::unassign_from_user` answers whether it removed the edge, `DELETE … RETURN BEFORE`; the row is written only then; on no match the old call committed and answered `Ok(())`, so the defect was a duplicate row, not a failed erasure). Addendum 2 `4292298`: closed, none new; every `axiam-api-rest` binary run singly with SAML on.
+- **Re-sizes:** none; `RoleRepository::unassign_from_user` now returns `bool` (#792; the four implementors updated). After W1.3 and W1.6 every executor prompt demanded every `axiam-api-rest` binary.
+- **For later waves:** W7.1 — the SSF `account_purged` goes out once per erasure (after #784 also for a unit stalled
+  past the lease); the recovered `gdpr.user_pseudonymized` row carries `recovered: true`. W8.3 — T-444 carries four
+  dated amendments (#738, #737, #784, #792), T-187 and T-254 amended. W8.4 — refresh-token rows are deleted at erasure
+  and swept (5 000 per tick); a concurrent erasure records a network role's unassignment once; the v109 recovery note (W6).
+
+### 12.2 W2 — client address, rate limits, audit rows (`claude/release-1.1.2-w2`)
+
+- **Head:** `f379f67`. Merged at `5f3a2cb`.
+- **Commits:** W2.1 `802f15c` (#751); W2.2 `dd76988` (#752); W2.3 `ec6a779` (#754, Opus 5.5); W2.4 `d3f10b0` (#731);
+  W2.5 `763a655` (#732); W2.6 `1c6f7a6`, `e8f0628` (#733, #758 g); W2.7 `d74c95d` (#735); W2.8 `dfad1c2` (#741);
+  W2.9 `16e5f74`, `e2b1f53`, `aa2a35f` (#758 a, c, d); W2.10 `8839345` (#734) — Sonnet 5.5 unless named.
+- **Tree over plan:** W2.1's carrier helper lives in `axiam-auth::carrier` and takes raw header values (layering);
+  cookie first, an invalid cookie is not retried against the header. W2.3's rule is "what `AuthenticatedUser`
+  admits" (a client token with `sid` keys the principal; a device grant without one keys the address). **W2.8:** the
+  plan's key `metadata.source` is already written by four server writers (`directory.rs`, `sync.rs`,
+  `saml_admin.rs`, the reactor hooks); the executor stopped on it, and the orchestrator chose `metadata.ingested_via
+  = "amqp"` (unused in the tree) at 19:20 UTC. W7.1 (d) uses that name.
+- **F4 (W2.11, Opus 5.5, `1764494`, runs recorded in `0362f76`):** R112W2-01 Low (#786, a revoked session's token still
+  spent its user's bucket); -02 … -05 Informational (#787 … #790).
+- **Sweep:** (a) Opus 5.5 — `7fdd3d8` (#786: the limiter asks the extractor's `SessionValidator` before charging);
+  (b) Sonnet 5.5 — `defdb94` (#789), `2533242` (#788), `7beb01f` (#790), `047e930` (#787: every extractor leaves the
+  D-12 verdict; machine refusals earn no refund, which #787 did not ask for). Addendum `f379f67`: all closed, none new.
+- **Merge note:** `e2b1f53` added an assertion that printed the whole token-endpoint body
+  (`device_flow_test.rs`); the merge commit replaces it with a label, as #757 (W6.1) did everywhere else.
+- **For later waves:** W7.1 — the optional carrier-precedence sentence; `ingested_via` (§8). W8.3 — T-474 closed for
+  revoked sessions; D-12/T-118 speak of the session extractor only and could say every extractor. W8.4 — audit
+  `ip_address` semantics and `forwarded_for_claimed`; `TRUSTED_PROXIES=none`; `ingested_via` (rows before 1.1.2 carry
+  none); a revoked or expired session's token no longer spends its user's allowance (one session read per request on
+  five routes).
+
+### 12.3 W3 — migrations, admin client policy, spec (`claude/release-1.1.2-w3`)
+
+- **Head:** `79f7ae9`. Merged at `cca90ad`.
+- **Commits:** W3.1 `8f0be44` (#755) and W3.2 `0480d26` (#729), one Opus 5.5 session as §4 allows; W3.3 `c01ddec`
+  (#746); W3.4 `bf305bf` (#747); W3.5 `3ac0b9d` (#756) — Sonnet 5.5 unless named.
+- **Tree over plan:** **no v110** — the lease's holder and expiry live in `MIGRATION_TABLE_DDL` (setup DDL, `IF NOT
+  EXISTS`, before the lease). W3.2's refused set is wider than the plan's: every statement that is not a `DEFINE …
+  IF NOT EXISTS`. The guide gained a new "Schema migrations at startup" section. The spec digest ends at
+  `34127084…1dee`.
+- **F4 (W3.6, Opus 5.5, `90c6e72`):** six Informational, #768 … #773.
+- **Sweep:** (a) Sonnet 5.5 — `c0e4f6d` (#768), `1511e17` (#770), `d18bcc2` (#771), `dc91af1` (#772), `125ce20` (#773);
+  (b) Opus 5.5 — `6d674c6` (#769, four mutations caught, no defect; the commit carries no co-author trailer). Addendum
+  `79f7ae9`: all closed, none new.
+- **For later waves:** W7.1 (e) — the two 422 codes (`resource_exceeds_registration_policy`,
+  `redirect_exceeds_registration_policy`) on the admin client PUT, CIMD rows by the CIMD policy; (g) the declared
+  refusals. W8.4 — withdraw 1.1.1's "roll replicas one at a time" (#755), here and in `website/src/data.ts`; the
+  `startupProbe`; the refused-gap procedure.
+
+### 12.4 W4 — network gate, seeder, decision cache (`claude/release-1.1.2-w4`)
+
+- **Head:** `0a8063d`. Merged at `ae4d3d9`.
+- **Commits:** W4.1 `c3cc5fb` (#726, Opus 5.5); W4.2 `8394b35` (#727); W4.3 `c26591f` (#728); W4.4 `3ad1120`,
+  `2c7d77c` (#730) — Sonnet 5.5 unless named.
+- **F4 (W4.5, Opus 5.5, `8c5be33`):** R112W4-01 Low (#775); -02 … -05 Informational (#776 … #779). The W4.4 executor
+  had not run the `axiam-server` binaries; the reviewer did, and they passed.
+- **Sweep:** (a) Opus 5.5 — `128d376` (#775), `aa203d9` (#776); (b) Sonnet 5.5 — `89aacfc` (#777), `34cd965` (#778),
+  `5474a2d` (#779; `certificate_binding.bound` drops `before`). Addendum `965ee35` closed #775 … #779 and filed #791
+  (Informational, a pre-existing D7 insert race), taken in the wave per §1.4: (c) Opus 5.5 — `5eccf2e` (a
+  per-stripe invalidation generation and `insert_if_unchanged`). Final addendum `0a8063d`: all closed (the reviewer's
+  own 3 000-round race: 0 stale allows; 16 with the old insert), none new.
+- **For later waves:** W7.1 (f) — `network_role.deleted` joins §8's list. W8.3 — T-88, T-484 amended;
+  `website/src/threatModel*.ts` not regenerated by W4. W8.4 — the `overtaken` cache statistic; the D7 residual
+  (T-484: `roles::update` and routes outside the gate flush from the handler).
+
+### 12.5 W5 — RADIUS Live profile (`claude/release-1.1.2-w5`)
+
+- **Head:** `86768f9`. Merged at `61820b5`.
+- **Commits:** W5.1 `0c876d7` (#720); W5.2 `bcf4cbb` (#721); W5.3 `047e65d` (#722); W5.4 `ec21338` (#723); W5.5
+  `4a518e2` (#724, #758 b); W5.6 `df6ad20` (#725) — all Sonnet 5.5.
+- **F4 (W5.7, Opus 5.5, `33a3b80`):** R112W5-01 Low (#764); -02 … -04 Informational (#765 … #767).
+- **Sweep:** (a) Opus 5.5 — `cef83a1` (#764), `9c1b7e2` (#765), and `4870793`: the e2e on `9c1b7e2` failed because the
+  Live stack ran FreeRADIUS with `-X`, which serializes requests, so the rotation step was never concurrent; it now
+  runs `freeradius -f -xx -l stdout`, threaded. (b) Sonnet 5.5 — `7e1e05a` (#766), `13e16b3` (#767). Addendum `5d40dad`
+  closed #764 … #766 and filed #774; (c) Sonnet 5.5 — `71385db` (#767's rest), `1ffe247` (#774). Second addendum
+  `86768f9`: all closed, none new.
+- **Evidence:** `radius-e2e.yml` green on the head's code (run 39803272347 on `13e16b3`). A probe branch carrying the
+  1.1.1 recipe failed in `a_decision_per_authentication_places_revokes_and_quarantines` (run 39803266076), as it
+  should. That branch (`claude/release-1.1.2-w5-probe-old-recipe`) could not be deleted from the session (proxy
+  403); the maintainer deleted it.
+- **For later waves:** W8.4 — `fetch-crl.sh`'s lock-held exit 3; the threaded Live compose; the upgrade-note draft
+  `claude_dev/release-1.1.2-upgrade-notes.md`.
+
+### 12.6 W6 — CodeQL, bench, CI (`claude/release-1.1.2-w6`)
+
+- **Head:** `80c9f65`. Merged at `bbcf271`.
+- **Commits:** W6.1 `88fe987` (#757); W6.2 `8dab337`, `c403138` (#758 h, i); W6.3 `80c9f65` (#561 re-pinned: Keycloak
+  26.8.1, Zitadel v4.19.5, authentik 2026.8.5, 1.1.1 image; comment 6338344373) — all Sonnet 5.5. W6.4 (#513) needed
+  no commit: every item it lists was verified in the tree; comment 6338804651, the boxes ticked. #513 and #561 stay
+  open. W6b was not run (no `results/run6/`).
+- **Tree over plan:** W6.1 worked from the issue's list, not live alerts (no code-scanning reader in this session);
+  ten more `[0u8; 32]` PKI test keys outside that list are left for W8.1 to judge against CodeQL. W6.2's drift step is
+  in `ci.yml`, not docs-ci. quay.io was unreachable, so Keycloak 26.8.1 on quay is unverified.
+- **No F4** (§1.4: W6 has none).
+- **Merge note:** W6's #757 rule (no token, body or error text in assertion messages) is applied in the merge to
+  what other waves added in #757's files: two `err` bindings in `network_gate_test.rs` become `_err` behind labels,
+  and the W2 assertion above becomes a label. New `{body}` messages in other test files are left for W8.1.
+
+### 12.7 W7 … 12.9 W9
+
+One subsection per wave as it lands, in the form above.
 
 ---
 

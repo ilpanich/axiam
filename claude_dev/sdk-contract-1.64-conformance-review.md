@@ -3969,3 +3969,947 @@ Probe 2: a poll sent at deadline − 0.1 s is answered `500` with no Retry-After
 
 ---
 
+### 7.3 Addendum round 4 (2026-10-23): the round-4 heads
+
+**What was read.**
+
+The contract is unchanged: W7.1c `b3f8687`.
+
+| SDK | PR | Head |
+|---|---|---|
+| Kotlin | #80 | `51f4bd92a` |
+| Swift | #78 | `5265aed` |
+| C | #77 | `7b5bd2150` |
+| PHP | #87 | `d127d75` |
+| Java | #121 | `97dcdf0b2` |
+| TypeScript | #150 | `228d03e` |
+| C# | #111 | `aa403c8` |
+| Rust | #138 | `c947a5e` |
+| Python | #103 | `f9b68a28c` |
+| C++ | #80 | `3adf581` |
+| Go | #103 | `2a0c273ad` (unchanged since round 3, not re-read) |
+
+These are the heads the orchestrator named, and `git ls-remote` showed the same. The method is §7.2's:
+- each SDK's §7.2.3 items re-checked, with mutants where a toolchain existed (C# and Swift read only);
+- the deadline bound re-probed, device and CIBA;
+- the W7.1c shape re-probed.
+
+**Vendoring and drift.** All eleven heads vendor `b3f8687`. `scripts/check-sdk-artifact-drift.py --local-root`
+over the eleven heads reports **11 repos, 0 artifact problems**.
+
+**Process note.** During its run, the Java reviewer was flagged by the harness for an irreversible local deletion.
+The lead reviewer checked what it could have touched:
+- the platform worktree is clean at `b1446d2`;
+- all eleven SDK clones are clean at their round-4 heads;
+- every review report is present.
+
+The deletion was confined to throwaway build copies under `/home/user/work`. Nothing this review relies on was
+lost, and the Java findings below were re-checked against the clone.
+
+#### 7.3.1 Rulings on the orchestrator's points
+
+**1. C++ documented the CIBA in-poll wait / `CibaClock` mismatch instead of fixing it (C164-48 item 3).
+Acceptable.**
+- **In production the clocks agree.** With `CibaClock::system()`, or any caller clock that reads real
+  `steady_clock` time, the deadline check and the wait measure the same time.
+- **The mismatch is confined to virtual-clock tests.** With a virtual clock the in-poll waits do not advance it,
+  so a test sees more polls than a consistent clock gives. The note at `include/axiam/oidc.hpp:803-807` says so
+  accurately.
+- **A separate, smaller point (C164-54, Info).** The C++ reviewer found that every deadline check runs before the
+  sleep and is never repeated after it. An OS oversleep can therefore put a request a few milliseconds past the
+  deadline: 0.1 and 4.0 ms in 2 of 36 real-clock CIBA runs, all still ending in `expired_token`.
+  - The SDK never asks for a wait past the deadline, so P10's wording is met.
+  - The same check-before-sleep pattern is the norm across the eleven SDKs.
+  - A re-check after the sleep, before the send, is hardening, not conformance.
+
+**2. Kotlin's 60 s `Retry-After` clamp. Confirmed: not a finding.** §7.2.1 point 2 and C164-49 rule that
+§16.1's two rows disagree above the 5 s cap, and that the clamps stay as they are until 1.65. Kotlin's README
+(`:2517`), KDoc and CHANGELOG (`:82-84`) describe the clamp accurately.
+
+**3. PHP carries an unserved CIBA `Retry-After` into the next wait. Conforming.**
+- **Bounded:** the carried wait passes the same deadline check before every sleep. A wait that would reach the
+  deadline raises `expired_token` at once with nothing sent, the "raise at once" option of P10.
+- **Never shortens the interval:** the next wait is `max(interval, Retry-After)`, used once, and the interval
+  itself is untouched. Probed: `Retry-After: 2` waits 5 s; `12` waits 12 s; after a `slow_down` (interval 10),
+  `7` waits 10 s.
+- **It is §33.7 rule 5's reading:** `Retry-After` is a minimum wait, capped at the deadline. Rust (C164-41,
+  round 3) and Python (C164-48, this round) do the same.
+- **Two gaps:**
+  - No test pins "never shortens" (C164-54).
+  - The carry covers only `NetworkError` failures. AXIAM's own `429 {"error":"rate_limit_exceeded"}` on
+    `ciba_poll` still re-polls at the plain interval and ignores its `Retry-After`. This predates the PR
+    (**C164-52**).
+
+#### 7.3.2 New findings (C164-50 onward)
+
+| ID | Severity | SDK | `path:line` (round-4 head) | Rule | What | Fix |
+|---|---|---|---|---|---|---|
+| C164-50 | **Medium** | kotlin (pre-existing, outside the 1.64 diff; the same root cause as C164-44) | `ManagementTransport.writeHttp` (`:70-72`); `Sessionless.of` (`:49`) | §16.1; §34.2 P11 (a never-retried request is still delivered: the dedicated handler's job is no replay, not no route) | On OkHttp 4.12.0, the clients built with `retryOnConnectionFailure(false)` for never-retried requests also lose route fallback. Probed: a management `DELETE` on a host resolving to `[::1 \| 127.0.0.2, 127.0.0.1]` with an empty pool reaches the server **0** times, while a `GET` on the same client reaches it once. Every management write and every sessionless call fails on such a host until a pooled connection happens to exist. This is what a caller meets on an AAAA-unreachable network, as with C164-44. | Keep P11's dedicated, non-pooled handler, `Connection: close` and the always-present body. Set `retryOnConnectionFailure(true)` on it and send every never-retried request with a **one-shot** body (`OneShotBody`, as `0529cef` did for the polls): the route fallback comes back, and a sent body is still never replayed. Test, on each client: the C164-44 dual-stack `Dns` with the pool evicted, a management `DELETE` and a sessionless `POST`, each giving one server request; and P11's own test (read, then drop unanswered) still gives no second request. |
+| C164-51 | Low | c (a regression of round 4) | `src/oidc_ciba.c:540` | §16.1 (jittered backoff); §14.3 / §33.7 (return the token set) | The CIBA in-poll wait is rounded up to whole seconds even when the caller passes **no** clock, so a 100 ms backoff becomes 1 s and the jitter is defeated. Example: interval 28, `expires_in` 30, then `500`, `500`, `200`. Round 3 returned the tokens; round 4 ends in `expired_token`. The CHANGELOG does not record it. | Sleep the millisecond `delay` on `c->sleep_fn` unless the caller supplied a clock; round up only on the caller's whole-second clock. Verified in a copy, and `test_ciba` still passes. Test: the example above, with no clock → the tokens. |
+| C164-52 | Low | php (pre-existing) | `src/Oidc/OidcClient.php:2167-2169` | §33.7 rule 5 (a `429` on `ciba_poll` is waited out, `Retry-After` a minimum capped at the deadline); §16.1 | CIBA's `429 rate_limit_exceeded` ignores its `Retry-After`. With `Retry-After: 12`, the next poll goes at the interval (10 s) instead of 17 s. | Carry the 429's `Retry-After` with `retryAfterRound`, as the device loop does: the next wait is `max(interval, Retry-After)`, deadline-checked. Test: `cibaAwait`, interval 5, a `429` + `Retry-After: 12`, then `200` → a recorded wait of 12 s. |
+| C164-53 | Low | c, kotlin | C `tests/test_ciba.c` (every new case pins `Retry-After` with zero jitter); Kotlin `t04` (`cibaInitiate`'s one-shot body is unpinned) | §33.8 test 7 (P10, the jitter included); §33.8 test 4 / §33.7 rule 1 (`ciba_initiate` is never retried) | Required tests that do not pin the fix. **C:** with no jittered case, a "floor instead of ceil" mutant and a "count only `Retry-After`" mutant survive, and both send after the deadline in the probe. **Kotlin:** removing the one-shot body from `cibaInitiate` passes all 1314 tests. With it removed, a drop on a pooled connection makes 2 initiate requests and a `503` + `Retry-After: 0` makes 2. | **C:** a bare `500` to a CIBA poll one second before the deadline with jitter 0.5 → no request at or after the deadline. **Kotlin:** t04 cases on a pooled connection: a mid-response drop, and a `503` + `Retry-After: 0`, each giving exactly one `cibaInitiate` request. |
+| C164-54 | Info | typescript, python, cplusplus, csharp, php, kotlin, swift | per each SDK's round-4 addendum | test strength; text | <ul><li>**Text:** TypeScript's CHANGELOG calls the exported `RetryOptions.admit` "internal". Python's CIBA docstrings and CHANGELOG say "5xx" where the carry also covers a 429. Swift's `cibaAwait` doc says "waits the interval", and its README omits the CIBA bound. C++'s millisecond deadline is filed under *Tests*, not *Fixed*. C#'s commit message names the wrong guarded test.</li><li>**Surviving mutants:** Swift's 429 deferral and `>=`; C#'s `sleeps.Count`, the retry-event order and `>=`; PHP's "carry shortens the interval" and `<`/`<=`; Python's three CIBA carry mutants; Kotlin's dual-stack drop test, CIBA sleep-on-clock and boundary.</li><li>**Whole seconds and oversleep:** PHP's CIBA clock waits in whole seconds (`expired_token` 0.5 s late, nothing sent). C++ checks before the sleep and not after (§7.3.1 point 1).</li></ul> | Per each SDK's round-4 addendum under C164-54. |
+
+**Counts, round 4:** Medium 1 (C164-50) · Low 3 (C164-51, -52, -53) · Informational 1 (C164-54).
+
+#### 7.3.3 Per-SDK status, round 4
+
+| SDK | Head | Round-3 findings | New / remaining |
+|---|---|---|---|
+| typescript | `228d03e` | C164-45 (the jitter pinned; the round-3 survivors fail 7 and 2 tests), -48 (`admit` before the emit) **closed** | C164-54 |
+| rust | `c947a5e` | C164-48 **closed** (CHANGELOG only) | **none** |
+| python | `f9b68a28c` | C164-48 **closed** (the carry for device and CIBA, sync and async; never shortens; applies once) | C164-54 |
+| c | `7b5bd2150` | C164-43 (exact boundary pinned; caller clock used), -48 **closed** | C164-51, -53 |
+| cplusplus | `3adf581` | C164-48 **closed** (ms deadline; CIBA boundary; clock note; CHANGELOG) | C164-54 |
+| csharp | `aa403c8` | C164-46 (real-time responders; JWKS variant; rethrow test), -48 **closed** (read only) | C164-54 |
+| go | `2a0c273ad` | — | **none** |
+| java | `97dcdf0b2` | C164-43 (CIBA through the pacer; 0 requests at or after the deadline), -45 (M4 and M5 fail), -48 **closed**; `setPollJitterForTesting` is package-private; `Pacer` has been `internal` since `c34eb71`, not in v1.1.1 | **none** |
+| kotlin | `51f4bd92a` | **C164-44 closed** (one-shot body on the device poll, the CIBA poll and `cibaInitiate`; route fallback and no-replay both probed), C164-43 (CIBA bound), -48 **closed** | **C164-50 (Medium)**, C164-53, -54 |
+| php | `d127d75` | C164-43, -47 (waits really slept with a sleeper and no clock), -48 **closed** | C164-52, -54 |
+| swift | `5265aed` | C164-43 **closed** (read only; `CibaPollDeferred` is internal) | C164-54 |
+
+Every SDK is at 1.1.2, and no public API change was found. The device and CIBA deadline bounds now hold in all
+eleven SDKs, as does the W7.1c shape. Kotlin's `cibaInitiate` change also closes a pre-existing §33.7 rule 1
+hole: OkHttp no longer resends it on a `503` + `Retry-After: 0`.
+
+**Can W7 merge? No.** The merge condition is §1.4: no open finding of any severity.
+- **Rust, Go and Java** have nothing open.
+- **Kotlin** has **C164-50 (Medium)**. It predates the PR, but it is the same OkHttp 4.12 failure C164-44 fixed
+  for the polls, now on management writes and sessionless calls. It also has C164-53 and -54.
+- **C** has C164-51 (a round-4 regression) and C164-53.
+- **PHP** has C164-52 and -54.
+- **TypeScript, Python, C++, C# and Swift** have only C164-54 (Info).
+
+**A note for the orchestrator on convergence.**
+- **Rounds 1 to 4 have closed every Medium they found.** Each round's new Mediums came from the fix pass itself
+  (C164-44 from C164-39) or from probing the same mechanism wider (C164-26, C164-50).
+- **The Informational items each round adds** are mostly mutants that survive and text that drifts. Probing deeper
+  will keep producing them at roughly this rate.
+- §1.4 counts them, and this review records them. Whether a fifth round should wait on Informational test-strength
+  items alone is a decision for the orchestrator or the maintainer, not for the review.
+
+The ten round-4 addenda follow, with the reviewers' N-numbers mapped to the ids above. Kotlin's probe labels are
+written P-N1 … P-N11. §7.3.2 holds the binding severities: Kotlin's addendum calls C164-50 Low; it is Medium for
+the reason given there.
+
+---
+
+#### Addendum round 4 — typescript — commit 228d03ec3 (PR #150), read after df5ec4a4b
+
+There are two commits. `4dc688c` covers the tests for C164-45 and the `admit` hook plus tests for C164-48. `228d03e` covers the CHANGELOG. Each commit message matches its diff. For C164-45 the product logic did not change: the deadline predicate `clock.now() + ms >= deadline` is the same. For C164-48 the predicate moved from `sleepFn` into a new `admit` hook. The SDK clone was not modified. All work was done in `/home/user/work/typescript-r4`.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-45 (Low) the deadline test for the in-poll retry does not exercise the jittered wait; there is no CIBA twin | **CLOSED** | 4dc688c | **Device.** `test/node/deviceFlow.test.ts:868-910` adds the helper `bareFiveHundredNearDeadline` (a bare `500` with no `Retry-After`, and `vi.spyOn(Math,'random')` restored in `finally`). It has three cases. `:890`: `expires_in` 5.1, random 1 → `[5000]` + `expired_token`. `:897`: random 0.25 → `[5000, 5050]` + `expired_token`, so a retry before the deadline is allowed and the next wait is refused. `:904`: `expires_in` 5.2, random 1, so the 200 ms wait lands exactly on the deadline → `[5000]`. **CIBA twin.** `test/node/ciba.test.ts:446-465` is an `it.each` with the same three cases on `cibaAwait` (`[5]`, `[5, 5.05]`, `[5]`). **Mutants:** **M45raonly** (the round-3 "Retry-After-only deadline check": `admit` sees `(ra ?? 0)` instead of the full wait) is now **killed**. It fails all 3 device and all 3 CIBA jitter cases, plus `retry.test.ts` "admitted wait" because of the extra argument. In round 3 it survived 78/78. **M45gt** (`>=` → `>`) is now **killed**. It fails exactly the two boundary cases, `deviceFlow.test.ts:904` and the CIBA `expires_in 5.2` row. In round 3 it survived. |
+| C164-48 (Info) `retry` telemetry was emitted for a retry that is refused | **CLOSED** | 4dc688c | `src/rest/retry.ts:51-56` adds the optional `RetryOptions.admit?(delayMs)`. `:135` calls it after `delayMs()` and before `telemetry.emit` (`:138`) and `sleep` (`:145`). A throw from it leaves the `catch` and ends the call: nothing is emitted, slept or sent. `src/node/oidc.ts:698-713` `deadlineBoundedRetry` returns `{ admit, sleepFn }`. `admit` raises `expired_token` when `now + ms >= deadline`, and `sleepFn` only sleeps on the loop clock. Wiring: CIBA `:2467`, device `:2678`. The standalone `devicePoll`/`cibaPoll` pass neither. **Probes (virtual clock, telemetryHook):** **P13** (device, `expires_in` 30, 503 + RA 120): 1 request, **0** `retry` events (round 3 had 1), `expired_token`. **P13e** (CIBA, the same): 1 request, 0 events. **P13c** (`expires_in` 5.1, bare 500, random 0.25): requests `[5000, 5050]`, exactly one event `retry:a1:50`; the refused second wait announces nothing. **Normal path: P13b** (far deadline, two 500s then 200): 3 requests, exactly 2 events (`a1`, `a2`), tokens. **P13d** (standalone `devicePoll`, three 500s): 3 requests, 2 events, `NetworkError`. So there is exactly one event per retry that is sent, and none for a refused one. **Unit tests:** `test/rest/retry.test.ts:76-113`. The refused test checks: no emit, no sleep, 1 call, the error rethrown as-is. The admitted test checks: `admit(200)`, 1 emit, `sleep(200)`. **Mutants:** **M48emitfirst** (the round-3 order, admit after emit) fails `retry.test.ts` "a refused wait announces no retry event". **M48doubleemit** fails "an admitted wait is announced once". **M48noadmit** (the hook call dropped) fails 10 tests, device and CIBA included. |
+| C164-48 (Info) the deadline tests failed only by vitest's timeout | **CLOSED** | 4dc688c | `deviceFlow.test.ts:799-810` `recordLongTimers` and the inline twin in `ciba.test.ts:419-436` spy on `setTimeout`. Any timer of 60 s or more is recorded and run at 0 ms. They assert `long` equals `[]`. **M48dev** and **M48ciba** (the bound wiring dropped, the round-3 M36dev/M36ciba) now fail by assertion (`expected [ Array(10) ] to deeply equal []`) in 0.5-0.7 s, with 0 timeouts. **M48realsleep** (the wait admitted but served on the real `setTimeout`) fails the 0.25-jitter device and CIBA cases and the CIBA transport test. |
+| C164-48 (Info) the `>=` boundary was not pinned | **CLOSED** | 4dc688c | See M45gt above. It is killed by `deviceFlow.test.ts:904` and the CIBA 5.2 row. |
+
+**Deadline bound: still bounded, device and CIBA** (`/home/user/work/ts-r4-probes/zprobe4.test.ts`, log `/home/user/work/ts-r4-probe.log`).
+- **Device.** P7: `expires_in` 30, interval 5, 503 + RA 120 → 1 request at 5000 ms, `expired_token` at 5000. P7b: one 503 + RA 120, then 200 → `expired_token` at 5 s, no tokens late. P10: the poll at deadline − 0.1 s gets a bare 500, random = 1 → 1 request, `expired_token`. P10a: random 0.25 → `[5000, 5050]`. P10b: 200 unmocked runs, worst request at 5099.91 ms, 99 of 200 sent a legitimate pre-deadline retry. P12: a far deadline (600 s) still honours RA 120 (requests at 5, 125 and 245 s, then tokens).
+- **CIBA.** P9: `cibaAwait` with `expires_in` 30 and 503 + RA 120 → 1 request at 5 s, `expired_token`, nothing after `received_at + expires_in`. P9b: the bare 500 near the deadline with random 1 → 1 request. P9c: 503 + RA 120 once, then 200 → `expired_token` at 5 s.
+
+**W7.1c shape: holds.**
+- P1, two 500s then 200: 3 requests and the tokens.
+- P2, three 500s: 3 requests and a `NetworkError`.
+- P3, two transport failures then 200: 3 requests and the tokens.
+- P3b, three transport failures: 3 requests and a `NetworkError`.
+- P4, a 429: 1 request (`rate_limit_exceeded`). P4b, a 500 then a 429: 2 requests.
+- P5, retry off: 1 request for a 5xx and 1 for a transport failure.
+- P6: `deviceLogin` takes 3 requests in one interval. P8: a 408 makes 1 request.
+
+**Prompt questions.**
+- (C164-45) Do the round-3 "Retry-After-only deadline check" mutant and the `>=`→`>` mutant fail now? **Yes, both.** M45raonly fails 7 tests, covering device and CIBA. M45gt fails 2 tests, the device and the CIBA boundary case. Neither fails by timeout.
+- (C164-48) Is a `retry` event emitted for a retry that is not sent? **No.** P13 and P13e give 0 events, and P13c gives 1 event for 2 requests. Does the normal path still emit exactly one event per retry? **Yes.** P13b and P13d give 2 events for 3 requests, with attempts 1 and 2. The unit test pins one emit per admitted retry.
+
+**Version:** `package.json` is 1.1.2, which is right. `CHANGELOG [1.1.2]` records round 4: `CHANGELOG.md:38-40` covers C164-48 and `:67-72` covers C164-45/-48 tests. The README conformance sentence still says contract 1.64. Nothing is source-breaking. One thing is new in the public API: `RetryOptions.admit` is an optional member of a type exported from `.` and `./rest` (`src/rest/index.ts:16`; it is in the emitted `dist/client-*.d.ts:37`). It is additive, so it is not breaking. But the CHANGELOG calls it "an internal `admit` hook" (see C164-54).
+
+**Run by the reviewer** (`/home/user/work/typescript-r4` at 228d03e, Node 22, proxy variables unset):
+- `npm ci` OK.
+- `npx tsc --noEmit` exit 0.
+- `npx vitest run`: **119 files, 1778 passed, 3 skipped, 0 failed** (1771 in round 3, plus 7 net new tests).
+- `npm run docs`: 0 errors and the 3 known warnings.
+- `gen-management:check`: 32 files current, 202 ops.
+- `tsup` and `bundle-grep` OK.
+- 8 mutants (`/home/user/work/ts-r4-mut.sh`, patches in `/home/user/work/ts-r4-mutants/`, logs in `/home/user/work/ts-r4-mut-*.log`, summary in `ts-r4-mut-summary.log`): **8 of 8 killed**, 0 by timeout. They were M45raonly, M45gt, M48emitfirst, M48noadmit, M48dev, M48ciba, M48realsleep and M48doubleemit.
+- `node_modules` and `dist` were deleted, and the probe file was removed from the tree.
+
+**Round-1/2/3 checks where the diff touched them:** the diff touches only `withRetry`'s order and the deadline helper.
+- Rule 9: a 429 is still not retried inside the poll (P4, P4b).
+- Rule 6: a 5xx is non-terminal with a far deadline (P12, P13b).
+- The 401 refresh replay, the 1.63 isolation code and the §14.6 429 cases are untouched, so they were not re-probed.
+
+**New findings:**
+- **C164-54 — Info (text / public API record). `CHANGELOG.md:39`; `src/rest/retry.ts:51-56`.** The CHANGELOG calls `admit` "an internal `admit` hook". It is in fact a new optional member of the exported `RetryOptions` (`src/rest/index.ts:16`, emitted in the public `.d.ts`), next to the already-public test seams `sleepFn`/`randomFn`. It is additive and not source-breaking, but it is mis-described. **Exact fix:** do one of the following.
+  - Reword the CHANGELOG to "`RetryOptions` gains an optional `admit(delayMs)` hook, called before a retry is announced or served; throwing refuses the retry".
+  - Or mark the member `@internal` in its TSDoc (and, if wanted, enable `stripInternal`), so that "internal" is true.
+
+---
+
+#### Addendum round 4 — rust — commit c947a5ea4 (PR #138), read after 7fa30ce0
+
+`git log --oneline 7fa30ce0..HEAD`: one commit, `c947a5e docs(changelog): wrap the 1.1.2 intro and one bullet at about 100 columns (C164-48)`.
+`git diff --stat 7fa30ce0..HEAD`: `CHANGELOG.md | 10 ++++++----`, 1 file. No source, test, manifest or CI file changed.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-48 (Info, text): `CHANGELOG.md:15` was 154 characters | **CLOSED** | `c947a5e` | `CHANGELOG.md:15-16` now wrap at 99 and 59 columns ("stays 202 operations … (the gating" / "below only changes … so it is a patch."). The `management::error` bullet (`:42-43`) is wrapped too. In the 1.1.2 section (`:10-82`), the longest lines are now 101-102 columns (`:49`, `:54`, `:58`, `:78`, `:79`), which is "about 100" and matches the rest of the file. Text only, so there is no mutant to run. |
+
+Deadline bound: not re-probed. No code changed since round 3, where device (waits `[5,40,40,40]`, no poll at or after the deadline, typed `expired_token`) and the 500 at deadline−0.1 s (no retry) were probed and closed (C164-38, -41).
+W7.1c shape: not re-probed, for the same reason. The round-3 results stand.
+Rules 6/9, §14.6 429 cases, 1.63 isolation, replay after 401: untouched by the diff, so they were not re-probed.
+Version: `Cargo.toml:25` `version = "1.1.2"`. That is still right: a CHANGELOG-only change.
+CHANGELOG: round 4 is recorded under `### Internal` (`:72-73`, "CHANGELOG text (C164-48) …").
+Run by the reviewer: `git log`, `git diff --stat` and `git diff` over `7fa30ce0..HEAD`, plus an `awk` line-length scan of `CHANGELOG.md`. No build or test run was needed (no code changed), so there are no build outputs to delete.
+New findings: none.
+
+---
+
+#### Addendum round 4 — python — commit f9b68a28c (PR #103), read after 3715bba
+
+There is one commit over the round-3 head: `f9b68a2` "fix(retry): carry a 5xx's Retry-After across a declined retry; async CIBA clock test; README clamp (C164-48)". It touches `_client.py` and `_async_client.py` (+23/-2 each), `tests/test_device_flow.py` (+66), `tests/test_ciba.py` (+65), `README.md` (+4/-1) and `CHANGELOG.md` (+6). The commit message matches the diff. `_oidc.py`, `_retry.py`, `_errors.py` and `_ciba.py` are untouched.
+
+The design:
+- **Device** (`_client.py:2075-2084`, `_async_client.py:881-890`): the `"retry"` branch of `device_login` reads `getattr(exc, "retry_after_ms", None)` and, when set, calls `schedule.rate_limited(ra / 1000)`. That is the existing rule-9 one-shot floor: `PollSchedule.tick()` (`_oidc.py:373-381`, unchanged) waits `max(interval, floor)`, resets the floor, and returns `False` (so the loop raises `expired_token` with no request) when the wait reaches `remaining()`. This is the exact fix the round-3 addendum gave.
+- **CIBA** (`_client.py:2370-2396`, `_async_client.py:1068-1094`): a local `floor`. Each iteration computes `wait = max(interval, floor)`, resets `floor = 0.0`, checks `tick.now() + wait >= deadline` before sleeping, and sleeps `wait` on the injected clock. A non-terminal, non-`slow_down` failure that carries `retry_after_ms` sets `floor`. This is also the exact fix.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-48 (Info): a 5xx's `Retry-After` is dropped by the loop after a declined in-poll retry, device, sync and async | **CLOSED** | f9b68a2 | **Code:** `_client.py:2077-2083`, `_async_client.py:883-889`. **Tests:** `tests/test_device_flow.py:1212` (sync: `expires_in` 30, interval 5, every poll 503 + RA 120, so `sent == [5]` and `expired_token`), `:1230` (sync: RA 60 ×3 on a 600 s grant, so the next poll is ≥ 60 s after the last in-poll attempt), `:1254` (async twin of `:1212`). **Mutants** (throwaway copy):<ul><li>**M10** (sync carry removed): `:1212` and `:1230` fail.</li><li>**M10a** (async carry removed): `:1254` fails.</li><li>**M15** (`tick()` lets the floor *shorten* the interval: `floor or interval`): 3 existing device tests fail (`test_a_retry_after_shorter_than_the_interval_never_shortens_the_wait` among them), so "never shortens" is pinned on the device side.</li></ul> |
+| C164-48 (Info): the same, CIBA `ciba_await`, sync and async | **CLOSED** (code); the test is narrower than the device side, see C164-54 | f9b68a2 | **Code:** `_client.py:2370-2396`, `_async_client.py:1068-1094`. **Tests:** `tests/test_ciba.py:1082` (sync) and `:1101` (async): `expires_in` 30, interval 5, every poll 503 + RA 120, so exactly 1 request and `CibaExpiredTokenError`. **Mutants:**<ul><li>**M11** / **M11a** (carry removed, sync/async): `:1082` / `:1101` fail.</li><li>**M12** / **M12a** (`wait = floor or interval`, so a carried RA 1 shortens a 5 s interval): **survive** the SDK suite. They are killed by the reviewer's probe (`ra1<int`, `slow+ra2`).</li><li>**M13** / **M13a** (floor not reset, so it sticks): **survive** the SDK suite. They are killed by the reviewer's CIBA one-shot probe.</li></ul> |
+| C164-48 (Info): async CIBA in-poll §16 wait not pinned to the injected clock (round-3 M5a survived) | **CLOSED** | f9b68a2 | `tests/test_ciba.py:1058`: `AsyncAxiamClient`, `AsyncTestClock`, 503 + RA 7 then 200, so 2 requests and a ≥ 7 s wait in `clock.sleeps`. **Mutant M5a** (`sleep=None` at `_async_client.py:1081`) **now fails** at `:1058`. |
+| C164-48 (Info): README §16 does not state the 1 h clamp | **CLOSED** | f9b68a2 | `README.md:2676-2679`: "`Retry-After` honored as a **floor** -- up to one hour (`MAX_RETRY_AFTER_MS`); the 5 s cap applies to the computed backoff only, so three `503`s that each say `Retry-After: 3600` hold a `check_access` for about two hours." It adds that the device and CIBA loops bound every wait by `expires_in` and carry a 5xx's `Retry-After` into the next interval. This is the fix the review asked for, with the 2 h worst case stated. |
+
+**Deadline bound:** **bounded, sync = async, device and CIBA. The carried floor never shortens the interval and is one-shot.**
+
+Probe setup (`/home/user/work/python-r4-probe/test_r4_probe.py`, 44 cases, all as expected):
+- A fake `time.monotonic`, with `time.sleep`/`asyncio.sleep` advancing it.
+- `random.random` pinned to 1.0 (maximum jitter).
+- For CIBA, the test kit's `TestClock`/`AsyncTestClock`.
+
+| Probe (sync and async give the same result) | Requests at (s) | Result |
+|---|---|---|
+| device, `expires_in` 30, interval 5, every poll 503 `temporarily_unavailable` + RA 120, RTT 0 | 5 | `expired_token` at t = 5.0 (round 3: 5, 10, 15, 20, 25). Nothing is sent at or after 30. |
+| the same, each request takes 2.4 s | 5 | `expired_token` at t = 7.4. |
+| device, a poll at 29.9 (24.9 s `on_user_code`) answered 500 | 29.9 | No retry. `expired_token` at 29.9. |
+| device, RA 1 ×3 (exhausted in-poll), then 200; interval 5 | 5, 6, 7, **12** | The carried 1 s does not shorten the interval: next gap 5. |
+| device, RA 60 ×3, then 200 | 5, 65, 125, **185** | Next gap 60. |
+| device, `slow_down` (interval → 10), then RA 2 ×3, then 200 | 5, 15, 17, 19, **29** | Next gap 10, not 2. |
+| device, bare 500 ×3, then 200 | 5, 5.2, 5.6, 10.6 | Plain interval. |
+| device, RA 60 ×3, pending, pending, 200 | …185, 190, 195 | Gaps `[60, 5, 5]`: the floor is one-shot. |
+| device, 429 RA 30, pending, 200 | 5, 35, 40 | Rule 9 unchanged. |
+| CIBA `ciba_await`, `expires_in` 30, interval 5, every poll 503 + RA 120 | 5 | `CibaExpiredTokenError` at elapsed 5.0. No `ciba_poll` request after `received_at + 30`. |
+| CIBA, deadline 28.1, interval 7, pending ×3, then a 500 at 28.0 | 7, 14, 21, 28 | No retry. `CibaExpiredTokenError` at 28.0. |
+| CIBA, RA 20 on every poll, `expires_in` 30 | 5, 25 | In-poll retry at 25 (25 < 30). The next retry is declined, the carried 20 s reaches the deadline, and the grant ends at 25.0. |
+| CIBA, RA 1 ×3 / RA 60 ×3 / `slow_down` + RA 2 ×3, each then 200 | next gap 5 / 60 / 10 | Never shortens. |
+| CIBA, RA 60 ×3, pending, pending, 200 | gaps `[60, 5, 5]` | One-shot. |
+
+**W7.1c shape:** conforms, sync and async, through `device_poll`. The 12 probe cases are unchanged from round 3 (the diff does not touch the runner):
+
+| Case | Requests | Outcome |
+|---|---|---|
+| two 500s, then 200 | 3 | tokens |
+| three 500s | 3 | `NetworkError` |
+| `ConnectError` ×2, then 200 | 3 | tokens |
+| `ConnectError` ×3 | 3 | `NetworkError` |
+| 429 | 1 | `OAuthProtocolError` |
+| `retry_enabled=False`, a 500 | 1 | `NetworkError` |
+
+**Rules 6/9, the 429 cases, 1.63 isolation, replay after 401:**
+- **Device:** the 429 branch is untouched; the probe gives 5, 35, 40. Refresh/replay and isolation are not in the diff, and the full suite is green.
+- **CIBA:** the new `else` branch also catches the `"transient"` step for a `429 rate_limit_exceeded`, whose `OAuthProtocolError` carries `retry_after_ms` (`_errors.py:369-370`). So `ciba_await` now waits a 429's `Retry-After` as a floor. Probe with 429 RA 30, then 200, interval 5: requests at **5, 35** at f9b68a2, against **5, 10** at 3715bba (sync and async).
+- This brings the 429 in line with §33.7 rule 5 ("A `429` on `ciba_poll` is waited out the same way"). Before, `ciba_await` ignored it, and the round-3 review did not record that. It is not recorded in this round either, and no test pins it (C164-54).
+
+**Version:**
+- `pyproject.toml:7` and `__init__.py:109` both read 1.1.2, which is still right.
+- There is no new public API: the changes are inside `device_login`/`ciba_await`, and the signatures are unchanged.
+- The CHANGELOG `[1.1.2]` records round 4 at `CHANGELOG.md:66-71` (C164-48: the device and CIBA carry, the async CIBA clock test, the README clamp).
+
+**Run by the reviewer:**
+- Throwaway copy `/home/user/work/python-r4` (`git archive HEAD`), venv on Python 3.13.16, `pip install -e '.[dev,fastapi,django]'`.
+- `ruff check .`: all checks passed. `ruff format --check .`: 218 files already formatted.
+- `mypy --strict src`: no issues in 98 source files. `interrogate src`: 100%. `scripts/gen_management.py --check`: OK (32 files, 202 operations).
+- `pytest tests -q`: **2174 passed**, 7 warnings (4 min 10 s). That is 2168 + 6 new.
+- Probes: 44 cases (`/home/user/work/python-r4-probe/test_r4_probe.py`), plus the CIBA 429 old/new comparison (`test_ciba429.py`, run against `git archive 3715bba` as well).
+- Mutants (`/home/user/work/python-r4-probe/mut.py`, second copy): 12 variants, run against `test_device_flow.py`, `test_ciba.py` and `test_d5_conformance.py`.
+  - Killed by the suite: M10, M10a, M11, M11a, M5a, M15.
+  - Survived the suite: M12/M12a, M13/M13a, M14/M14a (C164-54). M12 and M13 are killed by the probes.
+- The venv, the mutant copy, the old-head copy and the caches were deleted afterwards. The SDK clone is unchanged (`git status` clean at f9b68a2).
+
+**New findings:**
+- **C164-54 — Info — CIBA carry broader than recorded, and the test is narrow.**
+  - **Where:** `src/axiam_sdk/_client.py:2391-2396` and `_async_client.py:1089-1094` (the `else` branch); docstring `_client.py:2346-2348`; `CHANGELOG.md:66-71`; `tests/test_ciba.py:1082`/`:1101`. Rule: §33.7 rule 5; §16.1.
+  - **What (1):** the branch also covers `step == "transient"` for a `429 rate_limit_exceeded`. So `ciba_await` now honours a 429's `Retry-After` as the next wait's floor (5, 35 against 5, 10 at 3715bba). That is a conformance improvement, but the CHANGELOG and the comments say "a `5xx`'s `Retry-After`" only. The `ciba_await` docstring still says the loop "waits the interval and polls again" after a transport failure, 5xx or 429. The `device_login` docstring `_client.py:2041-2042` ("the loop then tries again at its interval") is likewise stale for a 5xx that carries `Retry-After`.
+  - **What (2):** the CIBA tests cover only "RA reaches the deadline gives 1 request". Three mutants survive the suite: `wait = floor or interval` (a carried RA 1 shortens a 5 s interval), a floor that is never reset (sticky), and a carry limited to `NetworkError` (drops the 429 floor). The device side pins all three through `PollSchedule` tests.
+  - **Exact fix:**
+    - Add a CHANGELOG clause: "`ciba_await` also waits a `429`'s `Retry-After` (§33.7 rule 5), which it previously ignored."
+    - Amend the `ciba_await` docstring bullet to "waits the interval, or the failure's `Retry-After` when longer, and polls again", and the `device_login` docstring likewise.
+    - Add one sync test on `TestClock`: `[503 RA 1 ×3, 429 RA 30, pending, 200]`, interval 5, `expires_in` 3600. Assert `clock.sleeps` (≥ 1 s entries) equal `[5, 1, 1, 5, 30, 5]`. This kills all three mutants.
+  - Does not block.
+- Observation, not a finding (pre-existing, outside the diff): a `400 {"error":"slow_down"}` with **no** `error_description` is mapped to `NetworkError`, because `error_from_oauth2_response` requires the description unless `description_optional` is set (`_oidc.py:1185`, `_errors.py:366`). `device_login` then treats it as `"retry"` and does not raise the interval. The same applies to a bare `access_denied`, which `device_login` keeps polling until `expired_token`. AXIAM's token endpoint always sends `error_description` on a 400, and §2 defines `OAuth2ErrorResponse` with both fields, so this follows the contract as written. It is noted only for the ruling list, in case §14.2 rule 5 ("dispatch on `error` first") is meant to cover a description-less body.
+
+No Medium or Low findings.
+
+---
+
+#### Addendum round 4 — c — commit 7b5bd2150 (PR #77), read after db0d5c59e
+
+There is one commit over the round-3 head: `7b5bd21` "fix: the in-poll retry never waits past axiam_ciba_await's deadline (C164-43, C164-48)". It touches:
+- `src/oidc_ciba.c` (+14/-3): `ciba_poll_with` gains `clk` and `deadline`. It checks the deadline before each in-poll retry and sleeps on `clk`.
+- `include/axiam/ciba.h` (+3/-1): a comment in the `axiam_ciba_await` doc. No declaration changed.
+- `README.md`, `CHANGELOG.md`.
+- `tests/test_ciba.c` (+67): `answer_t` gains a `retry_after` field, and there is one new test with four parts.
+
+The clone `/home/user/sdks/c` was only read and is clean. All work was done in `/home/user/work/c-r4`. For comparison, the same probe was also built on `db0d5c59e` in a second throwaway clone, deleted afterwards.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-43 (Low): `axiam_ciba_await`'s in-poll §16 retry ignores the deadline (P10) | **CLOSED** in code; **PARTLY** in tests (see C164-53); the fix also brings a regression on the default clock (C164-51) | 7b5bd21 | **Code:** `src/oidc_ciba.c:535-541`. `wait_s = ceil(delay/1000)`, where `delay` is the full jittered backoff floored at `Retry-After`. Then `if (deadline && clk && clk->now(clk->ctx) + wait_s >= deadline) break;`. The 503/5xx then surfaces as transient, and the loop's top check (`:655`) raises `expired_token` with no request. `axiam_ciba_await` passes its `clk` and `deadline` (`:669`). `axiam_ciba_poll` passes `NULL, 0` (`:602`) and stays unbounded, as the fix allows. **Test:** `test_t07_a_retry_after_past_the_deadline_inside_a_poll_is_not_served` (`tests/test_ciba.c:701-760`) has four parts: RA 120 → 5 polls at 5-25 s, every request before `start + 30`, `expired_token`, and the injected clock never reaches 30; the RA 20 control → polls at 5 and 25 s only; **the exact boundary, RA 25** (a poll at 5 s plus a 25 s wait lands exactly on the deadline) → not served, 5 polls; and a bare `ciba_poll` still waits ≥ 240 s. **Mutants** (on `test_ciba`), killed: <ul><li>M43a, check removed: `:711` "Expected 5 Was 3".</li><li>**M43b, `>=` → `>`: `:740` (the boundary case).**</li><li>M43c, sleep on `c->sleep_fn` instead of `clk`: `:726`.</li><li>M43d, `ciba_await` passes deadline 0: `:711`.</li></ul>**Survived:** M43e (floor instead of ceil in the check) and M43f (the check uses only `Retry-After`, not the jittered backoff). Both send a request at or after the deadline (C164-53). |
+| C164-48 (Info, C part): README device-poll paragraph | **CLOSED** | 7b5bd21 | `README.md:47-48` now reads "…never ending the loop; that retry never waits past the `expires_in` deadline (nothing is sent after it), in `axiam_ciba_await()` as well (§34.2 P10)". That is the exact fix, extended to CIBA. The `ciba.h:235-237` doc and the CHANGELOG say the same. |
+
+**Deadline bound:**
+- **Device:** unchanged by this diff, and re-probed with `tests/probe_r3.c` on the new head:
+  - D1 (503 + RA 120) and D3 (RA 3600): 5 polls, the last at 25 s, then `expired_token`.
+  - E1, E2, E4 (a poll at 29.9 s answered 500, 503 + RA 120, or a transport failure): 1 request, no retry, `expired_token`.
+- **CIBA:** bounded. Reviewer probe `tests/probe_ciba_r4.c`. Its client clock is in milliseconds, its jitter is 0.5, and it has `expires_in` 30 and interval 5 unless noted.
+
+| Probe | Requests at | Result |
+|---|---|---|
+| C1: 503 + RA 120, default clock | 5, 10, 15, 20, 25 s | `expired_token` at 25 s; nothing at or after 30 s (round 3: 5, **125, 245 s**) |
+| C2: the same, injected clock | 5-25 s (ciba clock) | as C1 |
+| C3: 503 + RA 3600, default clock | 5-25 s | `expired_token` at 25 s |
+| C4: RA 20, injected | 5, 25 s | the retry that fits is sent; nothing after it |
+| C5: RA 25, exact boundary, injected | 5-25 s | not served; `expired_token` |
+| C5b: RA 24, one second under | 5, 29 s | served at 29 s; `expired_token` |
+| C6: 503 + RA 120, then 200 | 5, 10 s | tokens from the 10 s poll |
+| E1: interval 29, the poll leaves at 29.9 s (900 ms sleep overshoot), answered 500, default clock | 29.9 s | no retry; `expired_token` |
+| E2: as E1, transport failure | 29.9 s | no retry; `expired_token` |
+| E3: interval 29, injected integer clock (poll at 29), 500 | 29 s | no retry; `expired_token` |
+
+**Answer to the prompt's question: with a caller-supplied `axiam_ciba_clock_t`, do the CIBA retry waits now run on that clock? Yes.**
+- In C2, C4, W1a and W3b the client's `sleep_fn` is never called. The in-poll waits appear on the injected clock: `[5, 20]` in C4, `[2, 1, 1]` in W1a.
+- Because the public clock is in whole seconds (`void (*sleep)(void *ctx, long seconds)`), a sub-second backoff is rounded up to 1 s on it. That is inherent to the seconds-only type and conservative: never late, possibly a retry fewer near the deadline.
+- **The same rounding is now also applied when the caller passes no clock (C164-51).** That is not inherent.
+
+**W7.1c shape:**
+- **Device:** unchanged, re-probed with `probe_r3`:
+  - 500, 500, 200 → 3 requests at 0, 100, 300 ms, and tokens. In `device_login` (interval 2): 2300 ms.
+  - 500 ×3 → 3 requests, `AXIAM_ERR_NETWORK`, cause 500.
+  - transport failure ×2, then 200 → 3 requests, tokens.
+  - transport failure always → 3 requests.
+  - 429 → 1 request, `rate_limit_exceeded`.
+  - retry off → 1 request.
+- **Bare `axiam_ciba_poll`:** the same results: 3 requests at 0/100/300 ms and tokens; 3 requests and cause 500; 3 requests and tokens; 3 requests and cause 52; 1 request with 429 `rate_limit_exceeded`; 1 request with retry off.
+- **`axiam_ciba_await`:** 3 requests and tokens on both clocks. On the default clock, though, the waits are now `[2000, 1000, 1000]` ms, where round 3 had `[2000, 100, 200]` (C164-51).
+
+**Rules 6/9, the three §14.6 429 cases, 1.63 isolation, the replay after a 401 refresh:**
+- The diff touches none of them: no `oidc_post`/`oidc_post_ex`, no rule-6 or rule-9 dispatch, no `authz_post`, and no `/oauth2/*` isolation.
+- The existing tests pass. `test_oidc_grants` passes 34/34.
+
+**SOVERSION / public header:**
+- `include/axiam/ciba.h` changes only inside the `axiam_ciba_await` doc comment (`:235-237`), with no declaration, struct or enum change.
+- `ciba_poll_with` is `static`. `AXIAM_SOVERSION 2` (`CMakeLists.txt:134`) stays right, and `abi_soname` passes. No new public API.
+
+**Version:**
+- 1.1.2 is still right: CMake `VERSION` (`CMakeLists.txt:7`), `conanfile.py:9` and `ports/axiam-c-sdk/vcpkg.json:3`.
+- The CHANGELOG records round 4 under `[1.1.2]`: a Fixed entry for C164-43, naming its test and the pinned `>=` boundary, and the README note for C164-48.
+- It does not record the default-clock rounding (C164-51).
+
+**Run by the reviewer** (`/home/user/work/c-r4`; `build-asan/` was deleted afterwards):
+- **Build:** `-DCMAKE_BUILD_TYPE=Debug -DAXIAM_BUILD_TESTS=ON` with `-fsanitize=address,undefined -fno-sanitize-recover=all` on the C flags and on the exe and shared linker flags. 0 warnings.
+- **Suite:** `ctest -j1`, probes excluded: **81/81 passed**, ASan/UBSan clean (leak detection on), 16.5 s. `test_ciba` 20/20 (19 + 1 new); `test_oidc_grants` 34/34.
+- `scripts/gen_management.py --check`: clean.
+- **Mutants:** M43a-f on `src/oidc_ciba.c`, with `test_ciba` rebuilt for each and the source restored afterwards.
+- **Probes:** `tests/probe_ciba_r4.c` (C1-C6, E1-E5, CIBA W7.1c) and `tests/probe_r3.c` (device). The probe was also built on `db0d5c59e` for the C164-51 comparison.
+- **Fix validation:** the C164-51 fix below was applied to the copy. `test_ciba` 20/20, and C7, E5 and W1b were back to round-3 timing with C1 and E1 still bounded. Reverted afterwards.
+- **Not run:** the C-standard matrix, valgrind, Doxygen, the package recipes.
+
+**New findings:**
+- **C164-51 — Low** — `src/oidc_ciba.c:540-541` with `:616-619` (`client_sleep`) and `:648-649`.
+  - **Rule:** §16.1. The wait is `max(jittered_backoff, retry_after)` with FULL jitter. Also a regression from round 3 that the CHANGELOG does not record.
+  - **What:** when the caller passes no clock, `axiam_ciba_await` uses its own `{client_now, client_sleep}` clock, so `clk` is never NULL. The new `if (clk) clk->sleep(clk->ctx, wait_s)` therefore always sleeps the **rounded-up whole second**, through `client_sleep` → `c->sleep_fn(wait_s * 1000)`, and never the millisecond `delay`. On the default path every in-poll backoff below 1 s becomes exactly 1 s, and 1.0-1.9 s becomes 2 s. The jitter is quantised, so every client's first retry lands on the same 1 s step, which is the clustering full jitter exists to prevent. Probed against round 3 (jitter 0.5, default clock):
+    - 500, 500, 200 → waits `[2000, 1000, 1000]` ms, where round 3 had `[2000, 100, 200]`.
+    - E5 (interval 28, `expires_in` 30, 500, 500, 200): round 3 sent at 28.0, 28.1 and 28.3 s and **returned the tokens**. Now it sends at 28 and 29 s and ends `expired_token`: a grant that was recoverable is lost.
+    - The device poll (`oidc_post_ex`) keeps millisecond waits, so the two loops now differ.
+  - **Exact fix:**
+    - Sleep on the injected clock only when the caller supplied one. For example, forward-declare `static void client_sleep(void *, long);` before `ciba_poll_with` and write `if (clk && clk->sleep != client_sleep) clk->sleep(clk->ctx, wait_s); else c->sleep_fn(c->sleep_ctx, delay);`. Alternatively, pass an `injected` flag from `axiam_ciba_await`.
+    - Keep `wait_s` (ceil) in the deadline check on both paths.
+    - Validated on the copy: C7, E5 and W1b are back to round-3 timing, C1 and E1 are still bounded, and `test_ciba` passes 20/20.
+    - **Test:** `axiam_ciba_await` with `clock` NULL, `c->sleep_fn` recording ms, jitter 0.5, interval 2, `500, 500, 200` → recorded sleeps `[2000, 100, 200]` and tokens. The current suite passes with and without the fix.
+- **C164-53 — Low** — `tests/test_ciba.c:701-760`.
+  - **Rule:** §34.2 P10 / §33.8 test 7. The bound includes the jittered backoff and the whole-second rounding (the C164-45 pattern; C's device test kills the same mutants with its deadline − 1 s, jitter 0.5 case).
+  - **What:** every part of the new test uses `Retry-After` with `no_jitter`, so `delay == Retry-After` exactly. Two mutants survive the suite, and both send after the deadline in the probe:
+    - M43e, `delay / 1000` (floor) in the check;
+    - M43f, the check counts only `Retry-After`.
+
+    In both, E3 (a poll at 29 on the injected clock answered 500) is retried at **30 s**, and E1 (a poll at 29.9 s on the default clock) is retried at **31.8 s**.
+  - **Exact fix:** add the jitter/rounding case to the test. Use `expires_in` 30, interval 29 on `TEST_CLOCK`, a bare `500` with no `Retry-After`, and `c->jitter_fn` returning 0.5 (a 100 ms backoff). Assert exactly 1 `/oauth2/token` request, none at or after `start + 30`, and `expired_token`. This kills M43e and M43f.
+
+---
+
+#### Addendum round 4 — cplusplus — commit 3adf58166 (PR #80), read after 611c4e91b
+
+The prompt gave `611c4e9ed`, but no object by that name exists in the clone. The round-3 head is `611c4e91b993…`, so this addendum reads from `611c4e9`.
+
+**Commit read.** `git log 611c4e9..HEAD` shows a single commit, `3adf581` "fix(device,ciba): exact-millisecond deadline, boundary tests, CHANGELOG intro (C164-48)". It changes 8 files, +104/−41, and its message matches the diff. It carries an SSH signature, which could not be verified here because no allowedSignersFile is configured. `path:line` refers to 3adf581.
+
+**Source changes.**
+- `src/oidc.cpp`: the device in-poll check (`:908`) and the `device_login` deadline and loop (`:1736-1767`) now work in milliseconds.
+- `src/client_impl.hpp:174-184`: `now_seconds_fn` (`std::time`) is replaced by `now_ms_fn` (`steady_clock`, ms).
+- `src/client.cpp:1167`: the seam setter.
+
+**Public headers.** Both changes are comments or a parameter name only:
+- `include/axiam/client.hpp:1361-1364`: the `_set_clock_test_seam` parameter is renamed to `now_milliseconds` and the docs now say ms on a monotonic origin. The type is unchanged.
+- `include/axiam/oidc.hpp:803-807`: a doc paragraph on `CibaAwaitOptions::clock`.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-48 (Info) device deadline on a whole-second clock; a grant can end about 1 s early | **CLOSED** | 3adf581 | **Code.**<ul><li>`deadline = now_ms_fn() + expires_in*1000` (`src/oidc.cpp:1736`).</li><li>Loop check `now_ms_fn() + wait_ms >= deadline` (`:1752`).</li><li>In-poll check `now_ms_fn() + delay.count() >= *deadline` (`:908`). The `ceil`-to-seconds is gone.</li><li>The rule-9 floor is kept in ms (`:1767`).</li><li>The loop and the retry still read one clock (`now_ms_fn`), which is now monotonic (`steady_clock`), so a wall-clock step cannot move the deadline either.</li></ul>**Test.** `tests/test_oidc_grants.cpp:662`. A poll at 5 s of a 6 s grant:<ul><li>500 + RA 1 → refused (1 call, `expired_token`).</li><li>500 with no RA → the 100 ms backoff is served and the grant completes (2 calls).</li></ul>**Mutants** (each alone, rebuilt, full binary):<ul><li>M7dev (`:908` `>=`→`>`): killed (`:675`).</li><li>M9round (restore the whole-second ceil of `delay`): killed.</li><li>M10loopsec (deadline floored to seconds, minus 1 s): killed (`:679`).</li></ul>**Real-clock probe** (default seam, real sleeps, exp 2 / int 1, 500 then 200): **tokens after 2 calls at 1.101 s**. Round 3 gave `expired_token` at 1.00 s. |
+| C164-48 (Info) no CIBA boundary test; M8 survived | **CLOSED** | 3adf581 | **Test.** `tests/test_ciba.cpp:575`. 500 + RA 1 at t = 5 s:<ul><li>a 6 s grant → `expired_token`, 1 call;</li><li>a 7 s grant → 2 calls and tokens.</li></ul>**M8** (`src/oidc.cpp:2452` `>=`→`>`) is now **killed** (`test_ciba.cpp:588-589`). The round-3 test `:561` (503 + RA 120) still passes. |
+| C164-48 (Info) CIBA in-poll wait sleeps on `impl.sleeper`, not on the injected `CibaClock` | **CLOSED as documented** (the fix allowed "route … or document") | 3adf581 | `include/axiam/oidc.hpp:803-807`: `clock` governs the interval waits and the deadline. The §16 wait inside a poll "is checked against `clock.now()` but slept on the client's own sleeper, so a virtual clock must be advanced by that sleeper too (Client::_set_retry_test_seams); with the system clock the two agree". This is accurate. The code is unchanged (`src/oidc.cpp:2452`, `:2460`). See the ruling input below. |
+| C164-48 (Info) CHANGELOG 1.1.2 intro ("two behaviours", "two public types") | **CLOSED** | 3adf581 | `CHANGELOG.md:16-22` now names the test-only member function (no layout change). It points to *Changed* for `plan` and the device status handling, and to *Fixed* for the transport retry and the in-poll deadline cap. *Added* `:78` gives the seam's unit as ms. *Tests* `:85-89` records round 4. One nit is listed under C164-54. |
+
+`Deadline bound:` **bounded, for device and CIBA.**
+- **Device**, on a virtual ms clock that the recorded sleeper advances, interval 5, `expires_in` 30. Request times are in ms from the start:
+  - 503 `temporarily_unavailable` + RA 120: requests at **5000** only, then `expired_token`. 1 sleep.
+  - RA 10: requests at 5000, 15000 and 25000, then `expired_token`.
+  - 503 with no RA, or transport failure on every poll: 15 requests at 5000/5100/5300, 10300/…, up to 26500, then `expired_token`.
+  - **Nothing is sent at or after 30000.**
+- **Device, poll sent at deadline − 0.1 s** (exp 6, the first send pushed to 5900), answered 500:
+  - Jitter 1.0 or 0.5 (backoff 200 or 100 ms): 1 request, then `expired_token`, no retry.
+  - Jitter 0 (0 ms backoff): the retry goes out at 5900, inside the grant, and returns tokens. This is permitted.
+- **CIBA**, fake `CibaClock`:
+  - `test_ciba.cpp:561`: 503 + RA 120 → 1 request, then `expired_token`.
+  - `:575`: the exact `>=` boundary is now pinned, and M8 is killed.
+  - The CIBA code is unchanged since round 3. The round-3 probes still apply (deadline − 0.1 s / 500 → 1 request).
+
+`W7.1c shape:` **conforms.** Re-probed on a bare `device_poll`:
+
+| Case | Requests | Result |
+|---|---|---|
+| Two 500s, then 200 | 3 | tokens |
+| Three 500s | 3 | `NetworkError (HTTP 500)` |
+| Transport failure ×2, then 200 | 3 | tokens |
+| Transport failure ×3 | 3 | `NetworkError: connection refused` |
+| 429 | 1 | `OAuthProtocolError rate_limit_exceeded` |
+| Retry off | 1 | — |
+
+Rules 6/9, the §14.6 429 cases, 1.63 isolation and the post-401 replay are untouched by this diff. Only the rule-9 floor's unit changed, from s to ms. Their tests pass, including the rule-9 `device_login` waits.
+
+**Ruling input: the CIBA in-poll wait and an injected `CibaClock`.**
+1. **Is the check computed on the same clock that measures the wait?**
+   - With the default `CibaClock::system()`, **yes**. The check is `clock->now()` = `steady_clock::now()` (`oidc.cpp:2295`). The default `impl.sleeper` is `std::this_thread::sleep_for` (`client_impl.hpp:171`), which libstdc++ measures on `steady_clock`.
+   - The same holds for any caller clock whose `now` is real `steady_clock` time. `received_at` is itself `steady_clock::now()` (`oidc.cpp:2523`), so a caller clock must be on that timeline anyway.
+   - **With a virtual or otherwise non-real `CibaClock`, no.** The in-poll waits do not advance it, so each wait is checked against a `now()` frozen at the poll's start, not against the cumulative waits.
+   - Probe: exp 30 / int 5 / 503 + RA 15, fake `CibaClock`, in-poll sleeper recorded but not advancing it:
+     - **7 `ciba_poll` requests**, against **2** on a coherent clock.
+     - The first poll made 3 attempts, all at virtual t = 5. On the sleeper's own timeline the 3rd attempt is at 5 + 15 + 15 = 35 s, past the 30 s deadline.
+   - So the injected-clock mismatch is **a divergence only in virtual-clock tests**, or for a production caller who injects a clock that is not real time. When both clocks are real it does not arise.
+2. **Can a `ciba_poll` request go out at or after the deadline in production (both clocks real)?** **Yes, by milliseconds, but not because of the clock mismatch.**
+   - **Cause:** the check runs *before* the sleep (`now + delay >= deadline`), and nothing is re-checked after it. `sleep_for` may oversleep by scheduler latency, so when `now + delay` falls within that latency of the deadline, the retry goes out late.
+   - **Probe:** real `CibaClock::system()`, real sleeper, exp 3 / int 1, 503 + RA 1. The deadline was shifted by 20 µs … 2 ms across 36 runs, so the third attempt is admitted just inside it.
+     - 7 runs admitted the third attempt.
+     - **2 of them sent it after `received_at + expires_in`: +0.098 ms and +4.037 ms.**
+     - Every run still ended `expired_token`.
+   - **Scope:** the same check-then-sleep shape is in the device in-poll check (`:908`), the device loop (`:1752`) and the CIBA interval loop (`:2571`). It is generic and predates round 3. The SDK never *requests* a wait past the deadline, which is the letter of §34.2 P10.
+   - Fix: C164-54.
+
+`Version:` `project(... VERSION 1.1.2)` (`CMakeLists.txt:6`) and `AXIAM_SOVERSION 4` (`:116`) are still right.
+- **SOVERSION:** the public-header changes are a doc comment and a parameter name only. The mangled symbol is unchanged (`nm -DC`: `T axiam::Client::_set_clock_test_seam(std::function<long ()>)`), and there is no layout change: `now_ms_fn` lives in the private `Client::Impl`. No further bump is needed.
+- **The seam's unit changed** from seconds to milliseconds with the same type. That is a silent semantic change for a seam caller, but the seam was added in this same unshipped 1.1.2 (the last tag is `v1.1.1`), is documented as test-only, and nothing in `src/` calls it. It is not source-breaking.
+- **CHANGELOG** records round 4 (`:16-22`, `:78`, `:85-89`).
+
+`Run by the reviewer:` throwaway copy `/home/user/work/cplusplus-r4`, deleted afterwards along with my `cpp-r4-*` logs. Nothing else under `/home/user/work` was touched, and the clone is clean. Toolchain: gcc 13.3, Ninja, `-DCMAKE_CXX_STANDARD=17`, Debug.
+- `python3 scripts/gen_management.py --check`: "§27 surface is current (7 files)", exit 0.
+- Static build `-DAXIAM_BUILD_TESTS=ON -DAXIAM_BUILD_EXAMPLES=ON`: exit 0 (121 steps). `ctest`: 1/1 passed. The binary reports **1631 test cases, 6182 checks, 0 failed** (round 3: 1630 / 6177).
+- Shared build `-DBUILD_SHARED_LIBS=ON`: exit 0. `ctest`: 2/2 passed (`axiam_cpp_tests`, `abi_soname`). `libaxiam_cpp.so.1.1.2`, SONAME `libaxiam_cpp.so.4`.
+- Mutants M8ciba, M7dev, M9round and M10loopsec: each applied alone, rebuilt, and the full binary run. All four were killed (1 failure each, in the named test).
+- Probes: CIBA real-clock boundary sweep, CIBA virtual-clock divergence, device deadline D1–D7, the W7.1c shape, and the device real clock. All were in the throwaway copy and then reverted.
+
+`New findings:`
+- **C164-54 — Info** — `src/oidc.cpp:2452`/`:2460` (CIBA in-poll), `:2571`/`:2577` (CIBA interval), `:908` (device in-poll), `:1752`/`:1758` (device loop). Rule: §34.2 P10 / §14.2 rule 4 / §33.7 rule 4 (posture; the letter is met).
+  - **What:** every deadline check runs before the sleep and is never repeated after it. An OS oversleep can push the request past `received_at + expires_in` (or the device deadline) by milliseconds. Measured: 2 of 36 real-clock CIBA runs were late, by +0.098 ms and +4.037 ms.
+  - **This is not the injected-clock issue,** and it predates round 3.
+  - **Exact fix (optional):** after each sleep and before the request is built, re-check the same clock and raise the same typed `expired_token` without sending:
+    - `if (clock != nullptr && deadline && clock->now() >= *deadline)` after `impl.sleeper(delay)`;
+    - `if (clock.now() >= deadline)` after `clock.sleep(...)`;
+    - `if (p_->now_ms_fn() >= deadline)` after `p_->sleeper(...)`, and the same after the in-poll `impl.sleeper`.
+- **C164-54 — Info (text)** — `CHANGELOG.md:85-89`. The C164-48 entry is filed under *Tests*. It is also a behaviour change: a device grant no longer ends up to about 1 s early, and a last-second retry that lands inside the grant is now served. The new intro (`:18-22`) says behaviour changes are under *Changed* and *Fixed*. **Fix:** move the first clause ("the device grant's deadline is now kept in milliseconds … refused when it lands on it") to a *Fixed* bullet, and leave the boundary tests and the `CibaAwaitOptions::clock` note under *Tests*.
+- Observation, not a finding: `expires_in * 1000` (`:1736`) is signed overflow above about 9.2e15 s, and `seconds(expires_in)` → ns at `:2565` (pre-existing) overflows above about 9.2e9 s. Only a hostile server can reach either; clamp if desired.
+
+---
+
+#### Addendum round 4 — csharp — commit aa403c8 (PR #111), read after 4af5be9
+
+There is one commit, `aa403c8` ("fix: 1.64 review addendum round 3 - C164-46, C164-48"). It changes 5 files (+184/−16): `AxiamClient.OidcDeviceExchangeLogout.cs`, `Core/RetryPolicy.cs`, CHANGELOG, README, and `Contract164DevicePollRateLimitTests.cs` (+3 tests, 1 test helper `SlowBody`, `SetUpSlowServer`, `Intervals`). The commit message matches the diff, with one inaccurate sentence about a mutant (C164-54).
+
+**Read only.** There is no .NET toolchain, so nothing was built, run or mutated. Each mutant the commit lists was judged by tracing the named test against the code at `aa403c8` and, for the C164-46 reverts, against the round-2 loop at `42369a4` (the real-clock `pollCts.CancelAfter(deadline − now)`).
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-46 (Low), the C164-40 test cannot fail on the bug | **CLOSED** | aa403c8 | **Test 1** `A200ThatArrivesAfterTheDeadlineStillReturnsTheTokens` (`Contract164DevicePollRateLimitTests.cs:419`). `SetUpSlowServer` (`:390-411`) uses `expires_in` 6 and interval 5, so the poll is sent at fake t=5 with 1 s left. The 200's headers come at once, and its `SlowBody` (`:46-90`) takes 1.5 s of **real** time in `ReadAsync(Memory, ct)` and honours the token. The body is buffered inside `HttpClient.SendAsync` (default `ResponseContentRead`) under the token `PostOAuth2FormAsync` received (`AxiamClient.Oidc.cs:1287`). **Revert by reading (restore the round-2 deadline CTS):** `CancelAfter(1 s real)` cancels the read at 1 s. `HttpClient` rethrows an OCE carrying the caller's (linked) token, so the `ex.CancellationToken != cancellationToken` filter at `AxiamClient.Oidc.cs:1293` does not turn it into a `NetworkError`. It escapes `RetryPolicy` (it is not a `NetworkError`), and the loop maps it to `expired_token`, so **the test fails**. At aa403c8 the read keeps the caller's token, the tokens are returned, and the fake clock is at t=7 > 6 (`:438`). A weaker mutant, a CTS on `DevicePollTime`, is also killed, because `FakeTime` overrides only `GetUtcNow`, so its timer is still the real one. **Test 2** `AnIdTokenWhoseJwksArrivesAfterTheDeadlineIsStillVerifiedAndReturned` (`:444`). The 200 carries a signed `id_token`, and the `/oauth2/jwks` responder does `Thread.Sleep(1500)`. `RoutingHandler`'s `Task.Run(…, ct)` (`Fixtures/RoutingHandler.cs:47`) does not interrupt a running responder, so the response returns at 1.5 s. **Under the revert,** the linked token is already cancelled, so `GetFromJsonAsync` (`Auth/JwksVerifier.cs:806`) throws an OCE while reading the buffered body. Two outcomes are possible. With the rethrow (`:445`) present, the OCE goes to `DeviceLoginAsync` and becomes `expired_token`. With it removed (the 42369a4 verifier), the result is `InvalidSignature` and the caller gets an `AuthError`. Either way the token set is not returned, so **the test fails**. At aa403c8 the JWKS fetch runs on the caller's token and `set.IdToken` is verified. The commit's mutant claim ("restoring the deadline-linked cancellation token fails both deadline tests") **holds by reading**. **Test 3**, the verifier rethrow (round-3 answer (b), now pinned): `ACallersCancellationDuringIdTokenVerificationIsNotAnInvalidSignature` (`:475`). The JWKS responder cancels the caller's CTS and then answers. The OCE from `GetFromJsonAsync` carries the caller's token, so the rethrow guard is true and `ThrowsAnyAsync<OperationCanceledException>` passes. **Mutant: remove the rethrow.** The bare `catch` gives `InvalidSignature`, then an `AuthError`, so **the test is killed**, as the commit says. |
+| C164-48 (Info), in-poll §16 wait on the real clock | **CLOSED** (one residual pin, C164-54) | aa403c8 | `AxiamClient.OidcDeviceExchangeLogout.cs:255-264`: `delay: deadline is null ? null : DevicePollDelay`, so `DeviceLoginAsync`'s waits use the loop's sleeper, and a single `DevicePollAsync` keeps `Task.Delay`. The deadline check moves into `beforeWait` on `DevicePollTime`, so the same clock checks and sleeps. **Mutant "drop the bound" (`beforeWait` null or no-op)** on `ARetryAfterPastTheDeadlineInsideThePollIsNotServed` (`:505`): at t=5 the request is answered 503 and the 120 s wait is served on the **fake** sleeper. Request #2 goes at t=125, and request #3 at t=245. Then `polls()==3`, `sleeps==[5,120,120]`, and the poll starts are ≥ 30. So **the test is killed in milliseconds**, which was the point of the fix. W7.1c `DeviceLoginAsync` sub-tests now record the 1–2 ms jitter waits. They are filtered by `Intervals()` (`:147-149`, waits ≥ 1 s), which applies the review's "filter sub-second waits" option at `:265` and `:297`. **Mutant "DeviceLoginAsync passes `deadline: null`"** (both hooks off) is still killed only after about 20 min of real `Task.Delay(120 s)`. This is not the case the review asked about, but the commit's account of it is wrong (C164-54). |
+| C164-48 (Info), `RetryEvent` emitted before the deadline decision | **CLOSED** in code; unpinned (C164-54) | aa403c8 | `RetryPolicy.cs:207,232,236`. `beforeWait?.Invoke(wait)` runs after `DelayFor` and **before** `telemetry.Emit(new RetryEvent…)`, so a refused wait is never announced. This matches the review's fix ("throw before `Emit`"). `beforeWait` defaults to null, so every other caller (`ciba_poll`, REST, D5 telemetry tests) is unchanged. |
+| C164-48 (Info), garbled `README.md:58` | **CLOSED** | aa403c8 | It now reads "Contract 1.64 (§34.8) changes these behaviours: any `429` on a device-code poll is not terminal, and `DeviceLoginAsync` waits its `Retry-After` out (a minimum, capped at the `expires_in` deadline), counts it as one interval and does not raise the interval (§14.2 rule 9); a `5xx` on the poll is a transport failure whatever its body and is retried inside the poll under §16, never on a `429` (§14.2 rule 6); the `plan` refusal …". That is the review's exact fix, apart from "never on a `429`" where the review had "never a `429`", which reads better. Not raised: the 1.63 sentence before it still says "changes one behaviour" and lists two. That wording predates this change and was not flagged; it is cosmetic. |
+| C164-48 (Info), CHANGELOG missing the verifier rethrow | **CLOSED** | aa403c8 | `CHANGELOG.md:47-52` "Round 4 (C164-46, C164-48)": "A caller's cancellation during `id_token` or `logout_token` signature verification now propagates as an `OperationCanceledException` in every grant, instead of being reported as an invalid signature (tested)." The bullet also records the sleeper/clock change, the veto before telemetry, and the real-time C164-40 tests. |
+
+**Deadline bound:** **conforms by reading**, unchanged in effect from round 3. Only the sleeper changed.
+
+Probe: `expires_in` 30, interval 5, every poll `503 {"error":"temporarily_unavailable"}` + `Retry-After: 120`.
+- t=5: request #1 is answered 503, and `DelayFor` gives 120 s.
+- `beforeWait` sees 5 + 120 ≥ 30 and throws `expired_token` before any `RetryEvent` is emitted and before any sleep.
+- The error is terminal in the loop (its `HttpStatus` is null and its `Error` is not pending, slow_down or 429).
+- Result: **1 request, `expired_token` at fake t=5, nothing sent at or after t=30.**
+
+Poll sent at deadline − 0.1 s and answered 500:
+- If the jitter wait (≤ 200 ms by default) is ≥ the time left, the result is `expired_token` at once.
+- If it is smaller, the retry is sent before the deadline, after a `DevicePollDelay` on the same clock that checked it.
+- A 500 arriving at or after the deadline always raises, because `now + wait ≥ deadline`.
+
+No request is sent at or after the deadline. A single `DevicePollAsync` still has no deadline and is unbounded under §16, as allowed.
+
+**CIBA:** not touched. `ciba_poll` passes neither hook. The prompt claims no CIBA bound for C#.
+
+**W7.1c shape** (by reading; the retry runner changed only by the null-default `beforeWait`):
+
+| Case | Test | Result |
+|---|---|---|
+| two 500s, then 200 | `:290` | 3 requests and tokens; `Intervals` gives `[5]` |
+| three 500s | `:305` | 3 requests, then `NetworkError` 500; single poll, real 1–2 ms `Task.Delay` |
+| transport failure ×2, then 200 | `:318` | 3 requests |
+| three transport failures | — | 3 requests, then `NetworkError` (status null) on the same path |
+| 429 | `:337` | 1 request |
+| retry off | `:273` | 1 request per poll |
+
+Rules 6 and 9, the three §14.6 429 cases, 1.63 isolation and the replay after a 401 refresh: the loop's catches, `PostOAuth2FormAsync` and `MapDevicePollErrorAsync` are not touched. The 429 deadline test `:199` only gains a `WaitAsync(10 s)` guard.
+
+**Answers to the prompt's specific questions:**
+- **The C164-40 test now fails on the round-2 head's behaviour:** yes, both variants.
+  - The real-time slow body (`:419`) is cancelled at 1 s real and gives `expired_token`.
+  - The `id_token` + slow JWKS variant (`:444`) gives `expired_token` or `AuthError`.
+  - Both return tokens at aa403c8.
+- **The PR's listed mutants:**
+  - "Restore the deadline-linked token" fails both deadline tests: **confirmed by reading.**
+  - "Remove the verifier rethrow" fails the cancellation test: **confirmed by reading.**
+  - "Drop the bound": with the fix, it now fails `:505` in milliseconds: **confirmed.**
+  - "Null deadline" fails "by its 10 s WaitAsync": **not as stated** (C164-54).
+- **Retry telemetry before the deadline decision:** fixed (veto before `Emit`), but no test pins the order (C164-54).
+- **README:58:** fixed with the requested text.
+- **CHANGELOG verifier rethrow:** recorded, for every grant.
+- **Real-clock deadline tests:** the in-poll waits are now on the injected sleeper, so the dropped-bound mutant fails fast. The real-clock elements left are deliberate: the two C164-46 tests, which must cross a real timer.
+
+**Version:** 1.1.2 is still right; both csproj files say 1.1.2. No public API is added: `beforeWait` is a parameter of an `internal` method, and `DevicePollDelay` and `DevicePollTime` are internal. Nothing is source- or binary-breaking. The CHANGELOG records round 4 (`CHANGELOG.md:47-52`).
+
+**Run by the reviewer:**
+- No `dotnet` is available, so there was no build, no `dotnet test`, and no mutant was executed. No work directory was created and there is nothing to delete.
+- Read: `git log` and `git diff 4af5be9..HEAD` in full.
+- Read for context: `RetryPolicy.ExecuteAsync`; `PostOAuth2FormAsync` (`AxiamClient.Oidc.cs:1267-1297`); `JwksVerifier.VerifyOidcIdTokenSignatureAsync`/`EnsureFreshAsync`; `RoutingHandler`; `OidcTestKit` (jwks_uri `/oauth2/jwks`); the 42369a4 loop and its `pollCts`; `OidcDeviceFlowTests` (its only `DevicePollDelay` user is the pending-only test, which is unaffected).
+- Mutants judged by reading:
+  - Killed: deadline CTS restored (killed by `:419` and `:444`); the weaker CTS on `DevicePollTime` (killed by `:419`); rethrow removed (killed by `:475`); bound dropped (killed fast by `:505`).
+  - Killed slowly (≈20 min): `deadline: null`.
+  - Survive: in-poll sleeper reverted to `Task.Delay` (C164-54); `beforeWait` moved after `Emit` (C164-54); `>=` → `>` in `beforeWait` (C164-54).
+
+**New findings:**
+- **C164-54 — Info (test strength).**
+  - Where: `tests/Axiam.Sdk.Tests/Contract164DevicePollRateLimitTests.cs:147-149` (`Intervals`) and `:290`; code at `AxiamClient.OidcDeviceExchangeLogout.cs:257`.
+  - What: no test pins that `DeviceLoginAsync`'s in-poll waits go through `DevicePollDelay`. A mutant `delay: null` (real `Task.Delay`, bound kept) passes every test:
+    - `Intervals()` drops the sub-second waits.
+    - `:505` refuses the 120 s before sleeping.
+
+    The fix C164-48 asked for can therefore regress silently. The dropped-bound test then fails fast only while both halves of the fix stay in place.
+  - Exact fix: in `APollRetriesA5xxInsideTheAttemptUnderSection16` (`:290`), also assert `Assert.Equal(3, sleeps.Count)` and `Assert.All(sleeps.Skip(1), s => Assert.True(s < TimeSpan.FromSeconds(1)))`. That is the interval plus two recorded §16 waits.
+- **C164-54 — Info (text, commit message only).**
+  - Where: commit `aa403c8` message, "Plan vs tree" paragraph.
+  - What: it says the null-deadline mutant "makes the Retry-After test wait on the real clock; the test then fails by its 10 s WaitAsync". The `WaitAsync(10 s)` was added to the **429** test `:199`, whose path the null-deadline mutant does not change: the loop's own check still uses `deadline`. The test the mutant affects, `:505`, has no `WaitAsync`. It runs about 20 min (5 loop iterations × two real 120 s waits) before failing on `polls()`, which fits the "did not return within 280 s" they saw.
+  - Exact fix: add `.WaitAsync(TimeSpan.FromSeconds(10))` to the `DeviceLoginAsync` call at `:518` as well, so that mutant reports in 10 s. Also correct the sentence if the message is amended. This does not block.
+- **C164-54 — Info (test strength; §16.5 accuracy, and the class of the TS/C++ `>=` item).**
+  - Where: `Core/RetryPolicy.cs:232,236`; `AxiamClient.OidcDeviceExchangeLogout.cs:260`; test `:505`.
+  - What: two mutants survive.
+    - Swapping `beforeWait` and `telemetry.Emit`, which brings back a `RetryEvent` for a retry never sent: no device test observes telemetry.
+    - `>=` → `>` in the veto: the probe's 120 s is far from the boundary.
+  - Exact fix:
+    - In `:505`, subscribe to the client's telemetry and assert that no `RetryEvent` with operation `device_poll` was emitted.
+    - Optionally add a boundary case: `expires_in` 6, interval 5, a 503 with `Retry-After: 1`. Fake now + 1 s == deadline, so the expected result is `expired_token` and 1 request.
+
+---
+
+#### Addendum round 4 — java — commit 97dcdf0b2 (PR #121), read after 40fd50203
+
+There are two commits (`git log --oneline 40fd50203..97dcdf0`):
+- `f0b8d6f` fix(oauth): bound the CIBA in-poll retry by the deadline; pin the jitter and the boundary. It touches `AxiamClient.java`, `internal/Retry.java`, `AxiamClientDeviceFlowTest.java` and `CibaTest.java`.
+- `97dcdf0` docs: the CHANGELOG for round 4 (C164-43, -45, -48).
+
+Each commit's claim matches its diff. The SDK clone was not modified: `git status` is clean and there is no `target/`. The suite ran in `/home/user/work/java-r4`. Probes and mutants ran in `/home/user/work/java-r4-mut`. Both copies and all logs were deleted afterwards. The probe class `R4ProbeTest.java`, the mutant script `java-r4-mut.sh` and its output `mutants.out` are kept in the review session's scratchpad under `addenda4/java-probes/` (not committed).
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-43 (Low), CIBA P10 | **CLOSED** | f0b8d6f | **Code:**<ul><li>`cibaRedeem` (`AxiamClient.java:4765-4766`) now takes a `Retry.Pacer` and passes it to `StatusRetry.run(…, "ciba_poll", pacer, …)` (`:4774`).</li><li>`cibaAwait` passes `pollPacer(waitOn, deadline)` (`:4893`), where `deadline = receivedAt + expiresIn` (`:4875`). The bare `cibaPoll` passes `pollPacer(null, null)` (`:4729`): it admits every retry and sleeps on `Thread.sleep`, which the fix allows.</li><li>`pollPacer` (`:3443-3481`) is the shared factory the review asked for (the device poll uses it at `:3521`). It admits a retry only when `clock.now().plusMillis(delay).isBefore(deadline)` (`:3468`), where `delay` is the full wait: jittered backoff floored at `Retry-After` (`Retry.java:209`, `:262-268`). It sleeps on the loop's clock (`:3473`).</li><li>A refused retry rethrows the transient error. `cibaAwait` catches it as `CibaTransientFailure`, continues, and its own check (`:4878`) raises `expired_token`.</li></ul>**Tests:**<ul><li>`CibaTest.t07pInPollRetryNeverSendsAtOrAfterTheDeadline` (`CibaTest.java:475`): `TestClock`, `expires_in` 12, interval 5, every poll `503` + `Retry-After: 120` → requests `[5, 10]` and `expired_token`. This is §33.8 test 7's P10 half.</li><li>`t07q` (`:512`) and `t07r` (`:517`): see C164-45.</li></ul>**Mutants that fail:**<ul><li>M12: `cibaAwait` passes `pollPacer(null, null)`. Three CIBA tests fail: `t07p` gives `[5,5,5,10,10,10]`, and `t07q`/`t07r` give 3 calls instead of 1.</li><li>M1 (the check ignores the wait) fails `t07p`/`q`/`r`.</li><li>M2 (admit every retry) fails `t07p`/`q`/`r`.</li><li>M3 (the pacer sleeps on `Thread.sleep`) fails `t07p` (`[5,5,5,10]`).</li></ul> |
+| C164-45 (Info/Low), test strength | **CLOSED** | f0b8d6f | **Strict boundary (the M5 mutant):** `theInPollRetryNeverSendsAtOrAfterTheDeadline` (`AxiamClientDeviceFlowTest.java:571`) now uses the review's `expires_in` 30. It expects requests `[5,10,15,20,25]` and sleeps `[5,5,5,5,5]`; the retry due exactly at 30 s is refused.<br>**Jitter pinned (the M4 mutant):**<ul><li>The helper `pollJustBeforeTheDeadlineWithJitter` (`:644`) sets up a poll at 11.9 s against a 12 s deadline, answered with a bare `500` (no `Retry-After`). The jitter is pinned through `client.setPollJitterForTesting(Random)`, whose `nextDouble` is fixed, so the first backoff is `value × 200 ms`.</li><li>Three cases use it: `0.999999` (199 ms, no retry, `:680`), `0.5` (exactly 100 ms, so the retry falls on the deadline and is not sent, `:685`), and `0.0` (the retry fits and is sent, giving tokens and sleeps `[2, 0]`, `:690`).</li><li>CIBA twins: `t07q` (`CibaTest.java:512`, 0.999999) and `t07r` (`:517`, 0.5), each asserting one token request and `expired_token`.</li><li>The seam: `Retry.Pacer.random()` (`Retry.java:89`, a default method returning `SecureRandom`) feeds `withRetry` (`:170`). Both of `pollPacer`'s pacers return the client's `pollJitter` field (`AxiamClient.java:3431`).</li></ul>**Mutants that now fail:**<ul><li>**M4 (the deadline check sees only the `Retry-After` floor)**, `Retry.java:209` → `pacer.admits(e instanceof RetryAfterHint h ? h.retryAfterMillis() : 0)`. It fails 4 tests: device `:680` and `:685` (by the 10 s preemptive timeout, because the unqueued retry blocks), and CIBA `t07q`/`t07r` (2 calls instead of 1). It survived in round 3.</li><li>**M5 (admit a retry exactly at the deadline)**, `:3468` → `!…isAfter(deadline)`. It fails device `:571` (`[…,25,30]`), device `:685` and CIBA `t07r`. It survived in round 3.</li><li>M14 (the seam ignored: `withRetry` uses `new SecureRandom()` instead of `pacer.random()`) fails 3 device tests. The seam is therefore load-bearing. The CIBA `q`/`r` tests happened to pass in that run, which is expected: with a random jitter each passes with probability about 0.5.</li></ul> |
+| C164-48 (Info), Java items | **CLOSED** | f0b8d6f, 97dcdf0 | **(a)** The 6-argument `Retry.withRetry(int, IntFunction, Predicate, TelemetryDispatcher, String, Pacer)` is now package-private (`Retry.java:167`). Its only caller is `StatusRetry.java:120`, in the same package. `verify` and javadoc are green.<br>**(b)** The CHANGELOG (`CHANGELOG.md:17-19`) no longer lists `Retry.Pacer` as an API addition. It says that "the `Retry.Pacer` interface and a `StatusRetry.run` overload live in the non-API `io.axiam.sdk.internal` package", which matches `internal/package-info.java` ("NOT part of the SDK's public API surface"). |
+
+**Deadline bound** (probes `R4ProbeTest` on 97dcdf0):
+- **Device: bounded.** Recorded clock, interval 5, every poll `503 {"error":"temporarily_unavailable"}` + `Retry-After: 120`:
+  - `expires_in` 30 → requests at 5, 10, 15, 20, 25 s; `expired_token` at 25 s.
+  - `expires_in` 21 → `[5,10,15,20]`, `expired_token` at 20 s.
+  - `expires_in` 12 → `[5,10]`.
+- **Device, deadline − 0.1 s, bare `500`:** 100 runs with the real jitter. A retry was sent in 58 runs, each one before 12 s (that conforms). 0 requests went at or after 12 s, and every run ended in `expired_token`. With the jitter pinned to its maximum, no retry is sent (the test at `:680`).
+- **CIBA: bounded now** (it was not bounded in round 3).
+  - Recorded clock, `cibaAwait`, the same `503` + RA 120:
+    - `expires_in` 30 → `[5,10,15,20,25]`, `expired_token` at 25 s.
+    - `expires_in` 21 → `[5,10,15,20]`, `expired_token` at 20 s.
+    - `expires_in` 12 → `[5,10]`.
+  - **Real clock** (the round-3 probe, repeated):
+    - `expires_in` 21 → requests at 5.003, 10.004, 15.005 and 20.007 s; `expired_token` at 20.008 s. In round 3 there were requests at 25 and 30 s.
+    - `expires_in` 30 → requests at 5.0, 10.0, 15.0, 20.0 and 25.014 s; `expired_token` at 25.015 s. In round 3 the last request was at 30.03 s.
+  - No `ciba_poll` request goes at or after `received_at + expires_in`.
+  - CIBA at deadline − 0.1 s with a bare `500`, 100 runs: a retry was sent in 52 runs, each one before 12 s. 0 requests went at or after 12 s, and every run ended in `expired_token`.
+
+**W7.1c shape** (single `devicePoll`): unchanged and conforming.
+
+| Case | Requests | Result |
+|---|---|---|
+| Two 500s, then 200 | 3 | tokens |
+| Three 500s | 3 | `NetworkError` |
+| Two drops (`DISCONNECT_AFTER_REQUEST`), then 200 | 3 | tokens |
+| Three drops | 3 | `NetworkError` |
+| 429 | 1 | `rate_limit_exceeded` |
+| Retry off, a 500 | 1 | — |
+| Retry off, a drop | 1 | — |
+
+`deviceLogin` with two 500s then 200 sends its requests at 5.000, 5.104 and 5.456 s, all within one interval (clock sleeps `[5000, 104, 352]` ms).
+
+Rules 6 and 9, the three §14.6 429 cases, 1.63 isolation and the replay after a 401 refresh are untouched by the diff. They are green in the suite and were not re-probed.
+
+**The prompt's questions:**
+- **Is `setPollJitterForTesting` public API?** **No.**
+  - It is package-private (`AxiamClient.java:3433`, no modifier) on the public final class `io.axiam.sdk.AxiamClient`, so no consumer outside the package `io.axiam.sdk` can reach it.
+  - The SDK has no `module-info` (`pom.xml:266`, Automatic-Module-Name only), so a consumer could declare a class in that package on the classpath and call it. That is the usual split-package caveat, not an API.
+  - The backing field `pollJitter` is private and volatile (`:3431`), and its default is a `SecureRandom`, so production jitter is unchanged.
+- **Is it documented as test-only?** **Yes, by name and Javadoc:** the field's comment reads "a test pins it (package-private)". The method has no Javadoc of its own; none is needed for a package-private member, and the javadoc build is clean.
+- **Is it in the CHANGELOG?** **Not by name.** The round-4 test bullet (`CHANGELOG.md:66-69`) mentions "an injected jitter source". That is enough, because the method is not public API.
+- **`Pacer.random()`:** a new default method (`Retry.java:89`) on `Retry.Pacer`. It is in the `internal` package, and `Pacer` itself is new in this PR, so adding it breaks nothing.
+- **Is moving `Pacer` source-breaking relative to 1.1.1?** **No.** In fact `Pacer` never moved.
+  - `git show v1.1.1:src/main/java/io/axiam/sdk/internal/Retry.java` has no `Pacer`. `git log -S'interface Pacer'` gives only `c34eb71` (round 3, after `v1.1.1`).
+  - It has lived in `io.axiam.sdk.internal.Retry` since round 3. Round 4 changed only the CHANGELOG's wording about it.
+  - The same holds for the 6-argument `withRetry(…, Pacer)` that is now package-private: it is absent from v1.1.1. v1.1.1's `StatusRetry` has only the 4-argument `run`.
+  - Nothing that 1.1.1 exposed has been removed or narrowed, so the change is neither source- nor binary-breaking.
+
+**Version:**
+- 1.1.2 is still right: `pom.xml:9` reads `1.1.2`, and nothing is breaking.
+- `CHANGELOG.md` `[1.1.2]` records round 4:
+  - `:23-25`: the Fixed entry for C164-43.
+  - `:66-69`: the test entry for C164-45 and C164-48 (the jitter seam, the strict boundary, `expires_in` 30, the CIBA P10 case, and `withRetry(…, Pacer)` made package-private).
+  - `:17-19`: the corrected API-addition sentence.
+
+**Run by the reviewer** (JDK 21, `./mvnw -B -o`):
+- `verify` on 97dcdf0: **BUILD SUCCESS, 1531 tests, 0 failures, 0 errors, 0 skipped** (round 3 had 1525; the 6 new tests account for the difference). All jacoco coverage checks were met. It took 9:44 min.
+- Probes `R4ProbeTest` (P1–P4, P6, P7): all ran.
+- Mutants were run against `AxiamClientDeviceFlowTest` and `CibaTest` together, with `-Djacoco.skip`. M0 (the baseline) is green with 59 tests.
+  - **All 9 real mutants are killed:** M1, M2, M3, M4, M5, M12, M13 (`deviceLogin` passes `pollPacer(null, null)`: 5 device tests fail) and M14.
+  - **None survive.**
+- Not run: the GPG and Sigstore jobs.
+- Build outputs and both copies were deleted.
+
+**New findings:** none.
+- Note, not a finding: the CIBA tests have no "a retry that fits is still sent" twin of the device test `:690`. That test would kill a "never retry" mutant. The pacer is the shared `pollPacer`, so the device test `:690` already kills that mutant for both polls. The gap is cosmetic.
+
+---
+
+#### Addendum round 4 — kotlin — commit 51f4bd92a (PR #80), read after c392bf9
+
+There are two commits (`git log --oneline c392bf9..51f4bd9`):
+- `0529cef` fix(oidc) C164-44, C164-43, C164-48
+- `51f4bd9` docs: the CHANGELOG
+
+Files in the net diff:
+- `internal/Retry.kt`: a new `sleep` parameter on the internal `withRetry`
+- `oidc/OidcSupport.kt`
+- `CibaTest.kt`, `OidcDeviceFlowTest.kt`
+- `CHANGELOG.md`
+
+`noRetryHttpClient` is gone. The new `OneShotBody` is a `private class`. `cibaPollTracked` gains two defaulted private parameters. No public signature changed.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-44 (Medium) | **CLOSED** | `0529cef` | **Code.** `OneShotBody` (`oidc/OidcSupport.kt:1244-1249`, `isOneShot() = true`) wraps the device poll body (`:1971`, used only when `devicePoll`), the CIBA poll body (`:1370`) and the `cibaInitiate` body (`:1306`). All three requests go through the shared `httpClient` (`:1974`, `:1395`, `:1309`), which has `retryOnConnectionFailure(true)`. **Tests.** `OidcDeviceFlowTest.kt:522` and `CibaTest.kt:394` (t08d) use a custom `Dns` that resolves `localhost` to `[127.0.0.2, 127.0.0.1]`, with the mock on 127.0.0.1 and `connectionPool.evictAll()` first: tokens, and 1 token request. The exact-count tests are back on `localhost` (`OidcDeviceFlowTest.kt:446`, `:456`, `:468`; t08c `CibaTest.kt:384`). **Mutants.** MD (device poll back on a `retryOnConnectionFailure(false)` client) → 2 fail (`:522`, `:536`). ME (the same for CIBA) → t08d fails. MA (device body not one-shot) → 2 fail (`:456`, `:468`). MB (CIBA body not one-shot) → t08c fails. MAll (`isOneShot = false`) → 3 fail. **MC (the `cibaInitiate` body not one-shot) → 0 fail: see C164-53.** |
+| C164-43 (Low) | **CLOSED** | `0529cef` | **Code.** `cibaAwait` passes `deadline = receivedAt + expiresIn` (`:1430`) and its clock to `cibaPollTracked` (`:1447-1451`). The poll's `withRetry` refuses a wait with `now + wait >= deadline` (`:1385`) and sleeps on the injected clock (`:1386`). The public `cibaPoll` passes `null`. **Tests.** t08e (`CibaTest.kt:417`): `expires_in` 30, interval 5, every poll `503` + `Retry-After: 120` → `expired_token`, every `at` < 30 s, 5 polls, wall time < 20 s. t08f (`:432`): a `500` answered at 5.95 s of 6 s with jitter 1.0 → 1 request. **Mutants.** MF (`mayWait` always true) → t08e and t08f fail. MJ (`cibaAwait` passes no deadline) → both fail. MK (`isBefore` → `!isAfter`, which admits a retry that ends exactly at the deadline) **survives**: the `>=` boundary is unpinned. That is Info, the same item C164-48 names for TypeScript and C++ CIBA. |
+| C164-48 (Info): in-poll waits on the real clock | **CLOSED** device; **PARTLY** CIBA (code fixed, no test) | `0529cef` | The new `sleep` hook (`internal/Retry.kt:99`, `:134`) is wired to `clock.sleep` for the device poll (`:1106`) and the CIBA poll (`:1386`). Device test: `OidcDeviceFlowTest.kt:551` asserts the recorded sleeps `[5, 20, 20, 20]`. Mutant MH (device sleep → `delay`) → that test fails. **MG (CIBA sleep → `delay`) survives.** No CIBA test asserts an in-poll wait on `TestClock`, which now drops sub-second waits from `sleeps` (`CibaTest.kt:159`). |
+| C164-48 (Info): a 5xx's `Retry-After` dropped for the next interval | **CLOSED** (device, as named) | `0529cef` | `:1224`: after an exhausted or declined in-poll retry, `rateLimitedWaitSeconds = max(interval, ceil(retryAfter))`. The loop's deadline check (`:1182`) then caps the wait, as rule 9 does for a 429. Test: `:551` (the fourth sleep is 20, not 5). Mutant MI (no carry) → 2 fail (`:551`, and `:482`, whose request count changed from 5 to 1). `cibaAwait` does not carry it: probe C1 polls every 5 s against `Retry-After: 120`. The round-3 item named only `deviceLogin`, and it was optional, so this is not reopened. |
+| C164-48 (Info): the 60 s clamp | **not a finding** (ruling §7.2.1 point 2, C164-49 for 1.65); **documentation accurate** | `51f4bd9` | The clamp is stated in three places, each matching the code (`errors/ErrorMapper.kt:38`, `:54`): <ul><li>README `:2517`: "a `429` or `5xx` answer's header, clamped at 60 s".</li><li>The `MAX_RETRY_AFTER` KDoc (`ErrorMapper.kt:37`).</li><li>CHANGELOG `:59-65` (round 3) and `:82-84`: "kept … a longer value is waited at 60 s rather than refusing the retry".</li></ul>The 429 wait of rule 9 is not clamped (`:2055`, `:2063` use the raw `retryAfterOf`), and the README makes no claim that it is. Nit, not a finding: the README's device section (`:45-50`, `:855-866`) does not mention the new 5xx carry. The CHANGELOG does. |
+
+**Deadline bound** (a probe class run in the throwaway copy; the clock is `HybridClock`: recorded sleeps plus real elapsed time):
+
+*Device*
+- **D1, the brief's case.** `expires_in` 30, interval 5, every poll `503 {"error":"temporarily_unavailable"}` + `Retry-After: 120`.
+  - `expired_token` after **1 request**, at 5108 ms. The wall time was 155 ms.
+  - The carried 60 s floor (120 clamped) passes the deadline, so the loop raises at once. §14.6 and §33.7 rule 5 allow "at once".
+  - Nothing was sent at or after 30 000 ms. **Holds.**
+- **D1b, the same with no `Retry-After`.** 15 requests (3 per interval), the last at 26 950 ms, then `expired_token`.
+- **D2, a poll answered `500` at 5.95 s of a 6 s grant, jitter 1.0.** 1 request, then `expired_token`. No retry.
+
+*CIBA*
+- **C1, `cibaAwait`.** `expires_in` 30, interval 5, `receivedAt` = start, every poll `503` + `Retry-After: 120`.
+  - `expired_token` after **5 polls**, at ms `[5284, 10347, 15351, 20406, 25453]`. The wall time was 720 ms.
+  - No `ciba_poll` request was sent after `received_at + 30 s`. Round 3 sent requests at 65 s and 125 s. **Holds.**
+- **C2.** `expires_in` 10, `Retry-After: 3`: polls at `[5016, 8084]`, both before the deadline.
+- **C3, a poll at deadline − 0.05 s, jitter 1.0.** 1 request.
+- **C3c, a poll at 5.80 s, jitter 0.** The retry went out at 5850 ms, before the deadline. This conforms: a wait that ends before the deadline may be sent.
+- **C4, every poll `503` with no `Retry-After`.** 15 requests, all before 27 500 ms.
+
+**W7.1c shape** (one `devicePoll`, client on `http://localhost`, mock on 127.0.0.1):
+
+| Probe | Result |
+|---|---|
+| W1: two 500s (`server_error` body), then 200 | tokens, 3 requests |
+| W2: three 500s | `NetworkError`, 3 requests |
+| W3: drop twice, then 200 | tokens, 3 requests |
+| W4: drop three times | `NetworkError`, 3 requests |
+| W5: 429 | `OAuthProtocolError(rate_limit_exceeded)`, 1 request |
+| W6: retry off, 500 | `NetworkError`, 1 request |
+| W7: retry off, drop | `NetworkError`, 1 request |
+| W8 (extra): `503` + `Retry-After: 0`, three times | `NetworkError`, **3** requests |
+
+On W8, round 3's poll (a plain body on the no-resend client, reproduced as a mutant) made **6**. On OkHttp 4.12, `followUpRequest` resends a `503` with `Retry-After: 0` once, and `retryOnConnectionFailure` does not govern that path. The one-shot body stops that resend as well. This was a pre-existing §16.1 cap violation, closed as a side effect.
+
+**The prompt's specific questions**
+
+*1. Dual-stack re-probe.* Custom `Dns` returning `[127.0.0.2 | ::1, 127.0.0.1]`, server on 127.0.0.1 only, pool evicted after discovery:
+
+| Probe | Result |
+|---|---|
+| P-N1/P-N1b: `devicePoll` → 200 | tokens, **1** server request, one attempt (both first addresses) |
+| P-N2/P-N2b: `cibaPoll` → 200 | tokens, 1 request |
+| P-N3/P-N3b: `cibaInitiate` → 200 | the response, 1 request |
+| P-N10: `deviceLogin` end to end, `Connection: close` on the authorization response and the `authorization_pending`, pool evicted in the callback | tokens after 2 polls |
+| P-N11: `cibaAwait`, the same | tokens |
+
+Round 3's code, as mutant MAdev2: P-N1, P-N4 and P-N7 got **0** server requests, and P-N10 ended in `expired_token`.
+
+*2. A drop in mid-response is not replayed, so the §16 cap of 3 holds.*
+
+| Probe | Result |
+|---|---|
+| P-N4: `devicePoll`, dual-stack, three drops | 3 requests |
+| P-N5: `cibaPoll`, the same | 3 requests |
+| W4: device, `localhost` with a pooled connection | 3 requests (mutant MA: **4**) |
+| W7: retry off | 1 request (MA: 2) |
+| P-N7/P-N7c: `503` + `Retry-After: 0` ×3 | 3 requests (MA: 6) |
+
+*3. `cibaInitiate`: never retried, and the one-shot body is right.*
+- `cibaInitiate` is **never retried** (§33.7 rule 1). It is not inside `withRetry`: one direct `httpClient.newCall` (`:1306-1312`).
+- A one-shot body is the correct tool here. OkHttp refuses every resend of a request whose body is one-shot:
+  - the post-send replay in `recover()`;
+  - the `408` follow-up;
+  - the `503` + `Retry-After: 0` follow-up;
+  - a `307`/`308` re-POST.
+- It still takes the next route on a connect failure, where nothing was written, so that is not a second request.
+
+| Probe | HEAD | MC (plain body, retrying client) | MC2 (round 3: plain body, no-resend client) |
+|---|---|---|---|
+| P-N6b: drop on a pooled connection | **1** | **2** | 1 |
+| P-N8: `503` + `Retry-After: 0` | **1** | **2** | **2** (a pre-existing rule 1 breach, now closed) |
+| P-N8b: `408` | 1 | 2 | 1 |
+| P-N3: dual-stack 200 | 1 | 1 | **0** |
+
+The code is right, but no test pins it. See C164-53.
+
+**Rules 6/9, the §14.6 429 cases, 1.63 isolation, the replay after a 401.**
+- The round-4 diff touches the device loop's `NetworkError` branch only by adding the carry (`:1224`). That is non-terminal as before.
+- The 429 branch, `withoutSession`, the network interceptor that strips credentials, and `postWithRefresh` are unchanged.
+- The device poll now uses `httpClient` itself rather than a `newBuilder()` copy, with the same interceptors, so the 1.62/1.63 isolation holds.
+- Rule 9, the three §14.6 429 tests and the isolation tests pass in the full run. W5 shows a 429 is one request.
+
+**Version:** `gradle.properties:2` `version=1.1.2` is right: no public API changed (`OneShotBody` is private; `Retry.withRetry` is internal). The CHANGELOG `[1.1.2]` records round 4:
+- the one-shot body, and why `retryOnConnectionFailure(false)` was wrong (`:70-77`);
+- the CIBA P10 bound (`:78-81`);
+- the clock, the 5xx carry and the clamp (`:82-84`);
+- the tests (`:116-121`).
+
+**Run by the reviewer** (throwaway copies `/home/user/work/kotlin-r4` and `-r4m` from `git archive 51f4bd9`; JDK 21, Gradle wrapper):
+- `python3 scripts/gen_management.py --check` → `OK: 251 generated files are current (202 operations)`.
+- `./gradlew test` (no daemon, `-Dorg.gradle.jvmargs=-Xmx3g -Pkotlin.daemon.jvmargs=-Xmx3g`) → **BUILD SUCCESSFUL in 10m 37s: 1314 tests, 0 failures, 0 errors, 0 skipped, 88 classes.** That is 1308 from round 3 plus 6 new.
+- Mutants (each run against `OidcDeviceFlowTest` and `CibaTest`; the unmutated baseline passed):
+
+  | Mutant | Failing tests |
+  |---|---|
+  | MAll | 3 |
+  | MA | 2 |
+  | MB | 1 |
+  | **MC** | **0** |
+  | MD | 2 |
+  | ME | 1 |
+  | MF | 2 |
+  | **MK** | **0** |
+  | **MG** | **0** |
+  | MH | 1 |
+  | MI | 2 |
+  | MJ | 2 |
+
+- Probes D1, D1b, D2, C1–C4, P-N1–P-N11, W1–W8 and M1–M3 were in `ReviewerProbeR4Test`. They ran at HEAD and under MA, MC, MC2 and MAdev2.
+- The copies, the probe class, the logs and all build outputs were deleted. The SDK clone is unmodified (`git status` clean).
+- Not run: `koverVerify`, `dokka`, lint.
+
+**New findings:**
+- **C164-50 — Low (pre-existing, outside this PR's diff; same root cause as C164-44)**
+  - **Location:** `internal/ManagementTransport.kt:70-72` (`writeHttp = http.newBuilder().retryOnConnectionFailure(false)`, used for every POST/PUT/PATCH/DELETE, `:195`) and `internal/Sessionless.kt:49` (RFC 7592 client registration, `ClientRegistrationSupport.kt:58`; SSF, `SsfReceiver.kt:98`).
+    - Both date from `3af8083` (2026-10-09) and the `Sessionless` helper, before PR #80's range.
+  - **Rule:** §27.4 rule 8 / §34.2 P11 forbid a resend, not route fallback. As with C164-44, a refused first address must not cost the call.
+  - **What happens:** on OkHttp 4.12 the setting also disables connect-route fallback.
+    - Probe M1/M1b: signed in, then `connectionPool.evictAll()`, `groups.delete(id)` with `localhost` → `[127.0.0.2 | ::1, 127.0.0.1]` gives `NetworkError("Failed to connect to /127.0.0.2…")` / "IPv6 protocol family unavailable", with **0 server requests**.
+    - Control M2: `groups.get` on the same client reaches the server.
+    - Control M3: `groups.delete` with a single-address `localhost` succeeds.
+    - So every management write, and every Sessionless call, fails on such a host whenever the pool holds no live connection.
+  - The round-4 CHANGELOG (`:73-77`) states exactly why the setting is wrong, but leaves it on these two transports.
+  - **Exact fix:**
+    - `writeHttp`: use `http` with the write body wrapped in the same one-shot `RequestBody` (move `OneShotBody` to `internal/`).
+    - `Sessionless.of`: drop `.retryOnConnectionFailure(false)` and send its bodies one-shot. Its GET reads are §16-retried and want fallback too.
+    - Test: the C164-44 dual-stack `Dns`, signed in, pool evicted. A management `DELETE` → 1 server request. A write answered `DISCONNECT_AFTER_REQUEST` on a pooled connection → still 1.
+    - Record it in the CHANGELOG.
+  - It is not on the §16 path this PR changed. The orchestrator may track it outside W7.
+- **C164-53 — Low (incomplete required test; §33.8 test 4 / §33.7 rule 1)**
+  - **Location:** `CibaTest.kt:265` (t04).
+  - **What happens:** mutant MC removes the one-shot body from `cibaInitiate` (`OidcSupport.kt:1306`) and passes all 1314 tests. t04's "dropped connection" is a listener that accepts and hangs up on a **fresh** connection, which OkHttp 4.12 does not replay anyway.
+    - Under MC, the replays a caller meets come back: a drop on a pooled connection (P-N6b) → **2** initiate requests, `503` + `Retry-After: 0` (N8) → **2**, `408` (N8b) → **2**. Each is a second stored request, and possibly a second prompt to a person.
+  - **Exact fix:** extend t04 against the mock's own `/oauth2/bc-authorize`, after `oidcDiscover()` so that the connection is pooled:
+    - (a) `DISCONNECT_AFTER_REQUEST` → `NetworkError`, exactly 1 initiate;
+    - (b) `503` + `Retry-After: 0` → exactly 1;
+    - (c) `408` → exactly 1;
+    - optionally (d) the dual-stack `Dns` with the pool evicted → 200 with 1 initiate.
+- **C164-54 — Info (test strength and text)**
+  - **Tests that do not kill their mutants:**
+    - (a) `OidcDeviceFlowTest.kt:536` ("a drop after the request was sent is not replayed even with route fallback") passes under MA. On a fresh connection after eviction, OkHttp 4.12 does not replay a plain body either (probe N4 under MA: 3). The property is pinned by `:456`/`:468` on a pooled connection. Make `:536` drop on a pooled connection: skip the eviction, or warm the pool with a `200` poll first.
+    - (b) MG (CIBA in-poll sleep back on `delay`) survives. Add a CIBA twin of `:551`: `503` + `Retry-After: 2` twice, then `200`, under `cibaAwait` with `TestClock` → the clock advances by those waits.
+    - (c) MK (the `>=` boundary) survives on both polls. Add a case whose wait ends exactly at the deadline (jitter pinned) → no retry.
+  - **Text:**
+    - (d) CHANGELOG `:76-77` says a one-shot body "refuses only the replay of a request that was written". On OkHttp 4.12 it also stops the `503` + `Retry-After: 0` and `408` follow-ups (a cap and rule 1 fix worth stating) and stops following a `307`/`308` on the poll and on `cibaInitiate`.
+    - Probe P-N9: a `307` on the device poll is now a `NetworkError` (MA follows it: tokens). A token endpoint that redirects a POST is not a supported deployment, and refusing to re-send credentials to a `Location` is the safer posture.
+
+---
+
+#### Addendum round 4 — php — commit d127d75ee (PR #87), read after 41cf943fd
+
+There are two commits. `2bb3b4a` is the code and test fix (C164-43, C164-47). `d127d75` holds the README and CHANGELOG text (C164-48). Each commit message matches its diff. The diff touches `src/Oidc/OidcClient.php` (`deviceLogin`'s in-poll sleeper, `cibaAwait`, `cibaPollTracked`), `tests/Contract164/CibaDeadlineBoundTest.php` (new), `tests/OidcDeviceFlowTest.php` (+1 test), `README.md` and `CHANGELOG.md`. Nothing else changed: `devicePollWithin`, the device 429 handling, the middlewares, `AxiamClient` and the generated surface are untouched. Mutants and probes ran on a throwaway clone, `/home/user/work/php-r4`, which has since been deleted.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-43 (Low): `cibaPollTracked`'s §16 retry is not bounded by `cibaAwait`'s deadline (§34.2 P10, §33.7 rule 5, §33.8 test 7) | **CLOSED** | 2bb3b4a | **Code.**<ul><li>`cibaAwait` passes `static fn (): float => $deadline - $clock->now()` and a sleeper on its `CibaClock`, `$clock->sleep((int) ceil($ms / 1000.0))` (`src/Oidc/OidcClient.php:2161-2165`).</li><li>The predicate is the device poll's: `max(Retry-After, RetryPolicy::backoffMs(n)) / 1000 < remaining()` (`:2304-2306`).</li><li>The attempt guard sends nothing for `n > 1` once `remaining() <= 0` and rethrows the previous `NetworkError` (`:2314-2317`).</li><li>The sleeper is passed as `RetryPolicy::execute`'s `$sleep` (`:2345`).</li><li>A bare `cibaPoll()` passes `null`/`null` and stays unbounded (probe: `503` RA 1 ×3 → 3 requests at 0, 1.0 and 2.0 s on a real `usleep`, then `NetworkError`).</li><li>New in the fix: an unserved `Retry-After` is carried into the loop's next wait, `retryAfterRound($interval, …)` (`:2178-2181`, `:2139`; see the ruling below).</li></ul>**Tests** (`tests/Contract164/CibaDeadlineBoundTest.php`, fake `CibaTestClock`): `testEveryPollAnsweredWithARetryAfterPastTheDeadline…` (RA 120 → sent `[1005.0]`, sleeps `[5]`, `expired_token`, clock ≤ 1030); `testARetryAfterInsideTheDeadlineIsServedOnTheClock…` (RA 20 → sent `[1005, 1025]`, sleeps `[5, 20]`); `testAPollThatFailsJustBeforeTheDeadlineIsNotRetried` (a `500 {"error":"server_error"}` back at deadline − 0.001 s → 2 requests, `expired_token`).<br>**Mutants:**<ul><li>**C1** (`cibaAwait` passes no `$remaining`): all 3 fail.</li><li>**C2** (the in-poll waits on a real `usleep`, not the clock): the RA 20 test fails.</li><li>**C5** (no `Retry-After` carry): the RA 120 test fails, because a second poll at 10 s runs the mock queue dry.</li><li>**C3+C4** (predicate on `Retry-After` alone, guard removed): the jitter test fails (5 of 5 runs).</li><li>Survivors: **C3** alone (predicate on `Retry-After` alone) and **C4** alone (guard removed). Each is equivalent while the other half stays, as in round 3's M2: the whole-second clock serves a jittered wait as 1 s, so the guard catches it.</li><li>Survivors: **C6** (the carry may shorten the interval) and **C7** (`<` → `<=`): both unpinned, see C164-54.</li></ul> |
+| C164-47 (Low): with `$sleep` injected and no `$retrySleep`, the in-poll waits are counted but not slept | **CLOSED** | 2bb3b4a | `$inPollSleep` is now always set (`src/Oidc/OidcClient.php:1016-1023`). It calls `$retrySleep($ms)` when one is given, otherwise `usleep(round($ms * 1000))`, and in both cases adds `$ms / 1000` to `$sleptSeconds`. The dead `$sleeperInjected` is gone. Docblock `:979-982` updated. **Test:** `tests/OidcDeviceFlowTest.php:541` `testAnInjectedSleeperDoesNotSkipTheRetryAfterFloorInsideThePoll`: no-op `$sleep`, no clock, `503` RA 1 then `200` → tokens, and ≥ 1.0 s of real time between the two requests. **Mutants:** **D1** (the `usleep` branch removed, which is the round-3 behaviour) fails that test. **D2** (the wait not counted) fails `:574`. **Probe** (sleep only, real clock, `503` RA 20 ×3): the retry goes out at real t = 20.001 s (round 3: 0 ms), and the next retry is declined (20 + 20 ≥ 30) → `expired_token`, 2 requests, nothing at or after 30 s. With sleep and a fake `$now` (no `$retrySleep`), the RA 20 retry is really slept: 20.04 s wall. The fake clock does not move, but `$sleptSeconds` keeps the bound. |
+| C164-48 (Info), PHP items: README `$retrySleep`/`$now`; README P10 row overstates the `CibaClock` | **CLOSED** | d127d75 | `README.md:807-812` names `$sleep` (seconds), `$now` (clock) and `$retrySleep` (ms). It says in-poll retries never go out after `expires_in`, and that without `$retrySleep` the waits really sleep. `README.md:332` (P10 row) now reads "…which also supplies the waits, the §16 retry waits inside a poll included: a retry whose longest wait would reach the deadline is not sent". That is now true (C2 kills). `CHANGELOG.md:118` records it. Cosmetic: `README.md:810` is 133 columns against about 100 around it. |
+
+**Deadline bound: bounded, device and CIBA.** All runs go through the public `deviceLogin()` / `cibaAwait()`. Logs: `scratchpad/php-r4-probe.log`, `php-r4-probe2.log`.
+- **Device, expires_in 30, interval 5, every poll `503 {"error":"temporarily_unavailable"}` + RA 120:** 1 request at 5.0 s, no in-poll wait, `expired_token` at 5.0 s. This holds in all three modes: all hooks injected, sleep + now, and sleep only on the real clock. **A poll sent at 29.9 s whose `500` returns at 29.999 s:** no retry, `expired_token`. The same holds when it returns at 30.3 s. **The round-2 latency set** (pending ×4 at 0.999 s each, then `500, 500, 200`): polls at 5, 10.999, 16.998, 22.997 and 28.996 s, the `500` is not retried, `expired_token`.
+- **CIBA, expires_in 30, interval 5, every poll `503` + RA 120:** 1 request at 5.0 s, `expired_token` at 5.0 s. No `ciba_poll` request at or after `received_at + 30`. **RA 20:** sent at 5 and 25 s, loop sleeps `[5, 20]`, `expired_token` at 25 s. Round 3 sent a third request at 45 s. **RA 12:** sent at 5, 17 and 29 s, `expired_token` at 29 s. **A poll at 29.9 s answered `500`** (back at 29.9 or 29.999 s): not retried, `expired_token`.
+- **One edge (C164-54):** a `500` to a poll sent at 29.5 s (0.5 s left, more than the 0.2 s backoff ceiling) is admitted for retry. The whole-second `CibaClock` serves the jitter as 1 s, so the clock ends at 30.501. The guard then sends nothing, and `expired_token` is raised 0.5 s after the deadline. No request goes after the deadline, but the wait itself overruns it.
+
+**W7.1c shape: conforms; the device numbers match round 3.**
+- **Single `devicePoll`:** `500, 500, 200` → 3 requests, tokens. `500` ×3 → 3 requests, `NetworkError`. `reset, reset, 200` → 3, tokens. `reset` ×3 → 3, `NetworkError`. A `429` (`rate_limit_exceeded` RA 1, or bodiless RA 1) → 1 request, carrying RA 1000 ms. Retry off → 1. `deviceLogin`: `500, 500, 200` → 3 polls in one interval, `[5]`.
+- **CIBA (`cibaAwait`):** `500, 500, 200` → 3 requests, sleeps `[5, 1, 1]`, tokens. `500` ×3 then `200` → 4 requests, `[5, 1, 1, 5]`. Reset ×2 / ×3 give the same shape (3 / 4 requests). `500` then `200` with retry off → `[5, 5]`, tokens.
+- **Rules 6/9, the three §14.6 `429` cases, 1.63 isolation and the replay after a 401 refresh:** the round-4 diff does not touch them. Their tests are in the green suite.
+
+**Ruling input: carrying an unserved CIBA `Retry-After` into the next wait (beyond §7.2.2's text). Conforming.**
+- **What it does:** when a `NetworkError` (transport failure, 5xx, 408 or bodiless 429) leaves `cibaPollTracked` carrying a `Retry-After`, the loop's next round waits `retryAfterRound($interval, RA) = max($interval, ceil(RA s))` once, then goes back to the interval (`:2139-2140`, `:2178-2181`, `:1098-1101`). This covers a `Retry-After` the poll's §16 retry declined at the deadline, the third attempt's `Retry-After` (which the cap leaves unserved), and retry off. `$interval` is not changed.
+- **Bounded by the deadline: yes.** The carried wait goes through the same pre-sleep check as every round, `now + roundSeconds >= deadline` → the local `expired_token` at once, with no sleep and no request (`:2144-2150`). That is the "raises it at once" branch P10 and §33.7 rule 5 allow. Probes: RA 120 → `expired_token` at 5 s; RA 20 declined at 25 s → `expired_token` at 25 s; retry off, RA 25 at 5 s → `expired_token` at 5 s. Retry off, RA 19 → the next poll at 24 s, inside the deadline.
+- **Never shortens the interval: yes.** Retry off, RA 2 → the next poll at 10 s, which is the interval. After a `slow_down` (interval 10), RA 7 → `[5, 10, 10]`. RA 12 → `[5, 12]`. The carry is consumed once; the interval stays as it was. Neither of the two properties is pinned by a test (mutant C6 survives, C164-54).
+- **Matches §33.7 rule 5:**
+  - "Retry-After a minimum wait capped at the deadline": the carry makes the server's `Retry-After` a floor across the loop boundary as well, never a ceiling. Without it, a declined RA 120 would be followed by polls at 10, 15, 20 and 25 s, each sooner than the server said (§16.1 "retrying sooner is not permitted"). The commit says exactly this.
+  - "Counts as one interval, never a reason to poll faster afterwards": the carried wait takes the place of one interval and is reset after use.
+  - It mirrors the device loop's `NetworkError` branch (`:1084-1088`), which the review accepted under §14.2 rule 9 / §16.1.
+- **Gap (pre-existing, not introduced by the carry; C164-52):** the carry applies only to the `NetworkError` branch. A `429 {"error":"rate_limit_exceeded"}`, which is AXIAM's own body, is an `OAuthProtocolError` that `cibaAwait` simply `continue`s at the interval (`:2167-2169`). Its `Retry-After` is ignored, so a 429 is not "waited out" on the server's wire. Probe: `429 {rate_limit_exceeded}` RA 12 then `200` → polls at 5 and 10 s (7 s early). A bodiless 429 with RA 12 → 5 and 17 s.
+
+**Version:** 1.1.2 is still right (`CHANGELOG.md:10` `## [1.1.2] - Unreleased`; install snippets `^1.1.2`, `README.md:27`, `:457`). No public signature changed this round: `cibaPollTracked`'s two new parameters are private and trailing. The behaviour change for callers who inject only `$sleep` (in-poll waits are now really slept) is recorded at `CHANGELOG.md:46-50`. The CHANGELOG records round 4: C164-43 at `:39-45`, C164-47 at `:46-50` and C164-48 at `:117-118`.
+
+**Run by the reviewer** (clone `/home/user/work/php-r4` at d127d75; PHP 8.3, Composer 2.8):
+- **Install:** the round-1 `composer.lock` (`/home/user/work/php/composer.lock`) was reused. phpstan/phpstan 2.3.1 came from a local `git clone --depth 1 --branch 2.3.1` (`6155239`) used as a Composer `path` repository (log `scratchpad/php-r4-install.log`).
+- **Checks:**
+  - `vendor/bin/phpunit`: **OK, 2074 tests, 9980 assertions** (round 3 had 2070; +3 CIBA, +1 device).
+  - `vendor/bin/phpstan analyse --memory-limit=512M`: **No errors**.
+  - `python3 scripts/gen_management.py --check`: "§27 surface is current (261 files)".
+  - `php tools/docblock-coverage.php`: 2083/2083 documented.
+- **Mutants:** 9 single mutants plus the C3+C4 combination (`scratchpad/php-r4-mut.sh`, `php-r4-mut.log`). Killed by assertion: C1, C2, C5, C3+C4, D1 and D2. Survived: C3 and C4 (each equivalent while the other half stands), C6 and C7 (C164-54).
+- **Probes:** `scratchpad/php-r4-probes/probe.php`, which is the round-3 device set plus a new CIBA, carry and 429 set.
+- **Not run:** gRPC codegen (needs protoc) and `composer audit`.
+- **Cleanup:** the clone with `vendor/` and the phpstan clone are deleted. `/home/user/sdks/php` is untouched and clean at d127d75.
+
+**New findings:**
+- **C164-52 — Low (pre-existing; outside the round-4 items, but it is the 429 half of the rule the ruling cites).** `src/Oidc/OidcClient.php:2167-2169` (`cibaAwait`'s `rate_limit_exceeded` branch). Rule: §33.7 rule 5 ("a `429` on `ciba_poll` is waited out … `Retry-After` is a minimum wait"), §16.1 (floor).
+  - **What:** AXIAM's real `429 {"error":"rate_limit_exceeded"}` + `Retry-After` maps to `OAuthProtocolError`, which carries `retryAfterMs`. The loop continues at the plain interval, so it polls before the server's `Retry-After` (probe: RA 12 → the next poll at 10 s, not 17 s). The new carry fixes the bodiless 429 and not this one, so the two 429 shapes now behave differently. The device loop handles both (`:1063-1070`). It is the same gap the review recorded for Go as C164-23.
+  - **Exact fix:** in that branch, `if ($e->error === 'rate_limit_exceeded' || $e->httpStatus === 429) { $waitSeconds = self::retryAfterRound($interval, $e->retryAfterMs); continue; }`. Keep `authorization_pending` as a plain `continue`. Do not raise the interval.
+  - **Test:** on `CibaTestClock`, `429 {"error":"rate_limit_exceeded"}` + RA 12, then `200` → sleeps `[5, 12]`, tokens. With expires_in 15, RA 12 → `expired_token` at 5 s and 1 request.
+- **C164-54 — Info (P10 letter; whole-second clock).** `src/Oidc/OidcClient.php:2161-2165` with `:2304-2306`. Rule: §34.2 P10 ("MUST NOT wait past the deadline … the wait capped at the deadline").
+  - **What:** the predicate admits a retry when the backoff ceiling (0.2 s) is less than the time left, but the `CibaClock` sleeper rounds the jittered wait up to 1 s. The wait can therefore end up to 1 s past the deadline. The guard sends nothing, and `expired_token` comes late by that much. Probe: a `500` at 29.5 s gives the clock at 30.501 and then `expired_token`; 2 requests, none after 30.
+  - **Note:** round 3's suggested fix described this rounding as allowed, so it is recorded only as Info.
+  - **Exact fix:** compare in whole seconds, the unit the clock actually serves. Pass `static fn (): float => floor($deadline - $clock->now())` as `$remaining`, so a retry is admitted only when `ceil(wait) <= floor(left)`. A borderline retry then raises `expired_token` at once, which also conforms. The guard's `<= 0` test is unchanged.
+  - **Test:** pending with 19.5 s of latency, then `500` → 2 requests, `expired_token`, `$clock->now <= 1030`.
+- **C164-54 — Info (test strength).** `tests/Contract164/CibaDeadlineBoundTest.php`.
+  - **What:** neither property of the new carry is pinned. Mutant C6 (`$waitSeconds = ceil(RA)` with no interval floor) survives, and so does C7 (`<` → `<=` in the CIBA predicate).
+  - **Exact fix:** add (a) retry off, `503` RA 2 then `200` → sleeps `[5, 5]` (the interval is never shortened), and (b) retry off, `503` RA 12 then `200` → sleeps `[5, 12]`. For the boundary, (c) `503` RA 25 with interval 5 and expires_in 30 → 1 request, `expired_token` at 5 s.
+- **Cosmetic, not numbered:** `README.md:810` is 133 columns; wrap it at about 100.
+
+---
+
+#### Addendum round 4 — swift — commit 5265aed (PR #78), read after a362452
+
+Two commits. `0ecf6c9` holds the code and tests; `5265aed` updates the CHANGELOG. Each message matches its diff. No Swift toolchain here, so this is a reading review, and every mutant was traced by hand. Paths are under `/home/user/sdks/swift`. `C` = `Sources/AxiamSDK/Oidc/Ciba.swift`, `B` = `Sources/AxiamSDK/HTTP/BareRequest.swift`, `T` = `Tests/AxiamSDKTests/CibaTests.swift`.
+
+| Finding | Status | Commit | Evidence / test / mutant |
+|---|---|---|---|
+| C164-43 (Low): CIBA in-poll §16 retry not bounded by `received_at + expires_in` (§33.7 rule 5, §34.2 P10, §33.8 test 7) | **CLOSED** | `0ecf6c9` | **Code.** `bareSend` gains `now: @Sendable () -> Date = { Date() }`, and its deadline guard reads `now()` (`B:56`, `B:104`). `cibaPollOnce` gains `deadline:`/`now:` (default `nil` / `Date()`) and passes them to `bareSend` (`C:461-462`, `C:485-486`). `cibaAwait` passes `deadline: deadline, now: { clock.now() }` (`C:561-563`), so the guard and the loop read the same injected clock. A `5xx` or `429` left after §16 is thrown as `CibaPollDeferred(error:, retryAfter:)` (`C:494-497`). The loop floors its next wait at `max(interval, RA)` and raises `expired_token` at once if that wait would reach the deadline (`C:546-558`, `C:567-576`). A bare `cibaPoll` unwraps the type to the same `AxiamError` as before (`C:434-437`).<br>**Tests.**<ul><li>`testT07BNoRetryWaitCarriesARequestPastTheDeadline` (`T:392`): `expiresIn` 30, interval 5, every poll `503` + RA 120 → `isExpiredToken`, request stamps `[5]`, clock sleeps `[5]`, no `retry` event. This is §33.8 test 7's P10 half.</li><li>`testT07BA503RetryAfterIsTheFloorOfTheLoopsNextWait` (`T:418`): `503` + RA 20 ×3, then tokens, 600 s → 4 requests, sleeps `[5,20]`.</li><li>`testABareCibaPollKeepsItsBoundedBudgetAndHasNoDeadline` (`T:437`): 3 requests, then `NetworkError(503)`.</li></ul>**Mutants (traced):**<ul><li>M1, `cibaAwait` passes no deadline: the in-poll retries run on the no-op seam, so the stamps are `[5,5,5]` and `retry` events appear. **`T:392` fails.**</li><li>M2, `now:` left at `Date()`: before 2027-01-15 the real clock is earlier than `TestCibaClock.start`, so the guard never fires → **`T:392` fails**. After that date the guard always fires, so the RA-20 case is one request per poll (polls at 5/25/45/65 s, sleeps `[5,20,20,20]`) → **`T:418` fails**. Killed in either era, but only by the two tests together.</li><li>M3, the loop ignores `retryAfter`: `T:392` polls at `[5,10,15,20,25]`, and `T:418` sleeps `[5,5]`. **Both fail.**</li><li>M4, `cibaPoll` loses its `CibaPollDeferred` unwrap: a non-`AxiamError` escapes,, so **`T:437` throws** (its `catch` takes only `AxiamError`). **Killed.**</li><li>M5, drop `\|\| status == 429` from the deferral: **survives** (C164-54).</li><li>M6, guard `>=` → `>`: **survives**, because no case sits on the boundary (C164-54).</li></ul>**Existing tests re-traced under the new code:** T05, T06, T07, T08 (pending, then 500 retried in-poll at jitter 0, then 429 `rate_limit_exceeded` deferred with RA nil → transient, then tokens: 4 requests), and the post-200 test and `T:530`. All unchanged. |
+
+**Ruling: is `CibaPollDeferred` public?**
+- **No.** It is `struct CibaPollDeferred: Error` with no modifier (`C:444`), nested in `extension AxiamClient {` (`C:312`), which carries no `public`. So it is **internal**, and its doc says "Internal".
+- Grep: the only references are its throw (`C:495`) and its two catches (`C:434`, `C:567`). It never escapes `cibaPoll` or `cibaAwait`.
+- `cibaPollOnce` and `bareSend` are internal, and their new parameters have defaults. **No public signature changes, and nothing is source-breaking**, as the CHANGELOG says.
+- `CibaClock` is `Sendable` (`C:286`), so the `@Sendable { clock.now() }` closure is valid under Swift 5.9 strict checking.
+
+**Deadline bound:**
+- **CIBA probe, re-traced on `TestCibaClock`.** `cibaAwait` with `expiresIn` 30 and interval 5; every `ciba_poll` answered `503 {"error":"temporarily_unavailable"}` + `Retry-After: 120`.
+  - t=0: the wait is `max(5,0)` = 5, and 0+5 < 30, so the loop sleeps 5.
+  - t=5: request 1 → 503. The in-poll wait is `max(0.2·j, 120)` = 120, and `clock.now()` (5) + 120 ≥ 30, so the wait is refused: no sleep, no `retry` event, and the 503 is returned. It is deferred with RA 120, and `cibaStep` classes it transient.
+  - t=5: the loop's wait is `max(5,120)` = 120, and 5+120 ≥ 30, so the loop raises `AuthError(expired_token)` at once.
+  - **Result: 1 request, none at or after `received_at + 30`, and `expired_token` at about 5 s.** Round 3 sent requests at 125 s and 245 s. `T:392` pins exactly this.
+- **Poll at deadline − 0.1 s answered `500`, no RA (CIBA, traced).**
+  - The in-poll wait is ≤ 0.2 s (jittered). Either it ends before the deadline and the retry leaves before the deadline, which conforms, or the guard refuses it.
+  - When it is refused, the loop's next wait is the interval, which reaches the deadline, so `expired_token` is raised.
+  - **No request after the deadline.**
+- **A bodiless `429` + RA 120 under `cibaAwait`:** it takes the same refused path, then `NetworkError(429)` → transient. RA 120 is floored, so `expired_token` is raised at once. Bounded.
+- **Device:** not touched by this diff. Round 3's trace still holds: 1 request at 5 s, then `expired_token`, none at or after 30 s. The shared guard's only change is `Date()` → `now()`, and the device poll passes no `now`, so it defaults to `Date()`, which is unchanged.
+
+**W7.1c shape:** the device path is untouched (`DeviceGrant.swift` is not in the diff). Round 3's traces still hold:
+- Two 500s → 3 requests and the tokens.
+- Three 500s → 3 requests and `.network`.
+- Two transport failures, then 200 → 3 requests.
+- Three transport failures → 3 requests.
+- A 429 → 1 request.
+- Retry off → 1 request.
+- **Complete.**
+
+**Rules 6 and 9, the three §14.6 429 cases, 1.63 isolation, and the replay after a 401 refresh:**
+- The diff touches none of the device path, the headers, or the refresh. `bareSend` changes only which clock the guard reads.
+- The CIBA §34.2 P8 posture is unchanged: a 5xx is still a `NetworkError` whatever its body, and T08 still passes by trace.
+
+**Version:**
+- 1.1.2 (`AxiamSDK.podspec:3`) is still right: no public signature changed, and the change is a patch-level behaviour fix.
+- The CHANGELOG records round 4 under `[1.1.2]` (`CHANGELOG.md:59-65`, "C164-43 … No public signature changes").
+
+**Run by the reviewer:**
+- `python3 -I Scripts/gen_management.py --check` in the throwaway copy `/home/user/work/swift-r4`: "§27 surface is current (3 files)", rc=0. I deleted the copy afterwards.
+- `git log --format=%G?`: `N` for both commits. There is no allowed-signers file, so the signatures could not be verified.
+- **Not run:** `swift build` and `swift test` (no toolchain). By reading, every helper the new tests use exists:
+  - `TestCibaClock.sleeps`/`elapsed`/`start` (`T:877-900`);
+  - `RoutedTransport(stamp:)` and `Reply.json(_:object:headers:)` (the last reply repeats);
+  - `EventRecorder.hook`/`kinds`;
+  - `makeClient(…, recorder:)` (new parameter, `T:45`, wired to `telemetryHook`).
+
+**New findings:**
+- **C164-54 — Info — `C:517-519` (the `cibaAwait` doc comment), `README.md:2532-2537`. Rule: text.** The doc still says a 5xx/429 that outlived §16 means "the loop waits the interval and polls again". The loop now waits `max(interval, Retry-After)` and raises `expired_token` at once if that wait reaches the deadline. The README's CIBA paragraph states neither the P10 bound nor the floor; only the CHANGELOG does. **Fix:** in both places, say "waits the interval or the answer's `Retry-After`, whichever is longer; a §16 wait or a loop wait that would reach `receivedAt + expiresIn` is not taken, and `expired_token` is raised at once (§34.2 P10)".
+- **C164-54 — Info — `T:392-451`. Rule: test strength (as C164-48).** Two mutants survive:
+  - Dropping `|| response.status == 429` from the deferral (`C:494`) is untested. A `429 rate_limit_exceeded` + `Retry-After` would no longer floor the loop's wait.
+  - `B:104`'s `>=` → `>` is unpinned for CIBA.
+
+  The in-poll waits also still sleep on the `_sleep` seam (real `Task.sleep`) rather than the injected `CibaClock`. Only the guard reads the injected clock. P10's "the waits SHOULD come from the injected clock" is therefore met only for the loop's waits. This posture conforms and is the same as Kotlin/C++ in C164-48.
+
+  **Fix (optional):** add a `cibaAwait` case with `429 {"error":"rate_limit_exceeded"}` + `Retry-After: 20` → sleeps `[5,20]`, and a boundary case where `clock.now() + RA == deadline` (e.g. `expiresIn` 25, RA 20 → 1 request, `expired_token`).
+- No Low or Medium findings.
+
+---
+

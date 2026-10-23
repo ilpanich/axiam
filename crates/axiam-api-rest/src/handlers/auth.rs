@@ -450,6 +450,7 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     request_body = LoginRequest,
     responses(
         (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
+        (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
         (status = 200, description = "Login successful", body = LoginSuccessResponse),
         (status = 202, description = "MFA challenge required", body = MfaRequiredResponse),
         (status = 403, description = "MFA setup required", body = MfaSetupRequiredResponse),
@@ -1405,6 +1406,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
         (status = 204, description = "Password changed; other sessions revoked"),
         (status = 401, description = "Wrong current password or unauthenticated"),
         (status = 422, description = "New password violates policy"),
+        (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
         (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
     ),
     security(("bearer" = []))

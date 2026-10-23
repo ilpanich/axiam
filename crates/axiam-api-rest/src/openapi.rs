@@ -1348,6 +1348,29 @@ mod declared_refusal_tests {
         assert_declares("503", UNAVAILABLE);
     }
 
+    /// R112-10 (#803): the token operation also answers `401`, `429` and `500`.
+    #[test]
+    fn token_declares_401_429_and_500() {
+        for status in ["401", "429", "500"] {
+            assert_declares(status, &[("post", "/oauth2/token")]);
+        }
+    }
+
+    /// `429`: the per-resource-server bucket of `/uma2/perm` and the governor
+    /// in front of the three hash-gated routes.
+    #[test]
+    fn uma_perm_and_hash_gated_routes_declare_429() {
+        assert_declares(
+            "429",
+            &[
+                ("post", "/uma2/perm"),
+                ("post", "/api/v1/auth/login"),
+                ("post", "/api/v1/auth/password/change"),
+                ("post", "/api/v1/auth/reset/confirm"),
+            ],
+        );
+    }
+
     #[test]
     fn role_and_permission_writes_declare_409_stale_version() {
         assert_declares("409", STALE);

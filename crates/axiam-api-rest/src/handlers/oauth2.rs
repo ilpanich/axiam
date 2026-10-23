@@ -2105,6 +2105,12 @@ pub async fn authorize<C: Connection + Clone>(
          body = TokenResponse),
         (status = 400, description = "OAuth2 error",
          body = OAuth2ErrorResponse),
+        (status = 401, description = "`invalid_client`: client authentication failed; carries a `WWW-Authenticate` challenge",
+         body = OAuth2ErrorResponse),
+        (status = 429, description = "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+         body = OAuth2ErrorResponse),
+        (status = 500, description = "`server_error`: an internal failure; the body always carries `error_description`",
+         body = OAuth2ErrorResponse),
     ),
 )]
 pub async fn token<C: Connection + Clone>(

@@ -2547,3 +2547,81 @@ async fn a_refused_device_token_is_recorded_unauthenticated_at_the_verify_page()
     assert_eq!(admitted.metadata["authenticated"], true);
     assert_eq!(admitted.actor_id, f.user_id);
 }
+
+/// #787, probe A: the verdict is the extractor's on the principal route too.
+/// One validly signed token whose session id is not a UUID is refused `401` by
+/// `AuthenticatedUser` and by `AuthenticatedPrincipal` alike, and both request
+/// rows say `authenticated: false`. Before, only the first did.
+#[actix_web::test]
+async fn a_refused_token_is_recorded_unauthenticated_on_the_user_and_principal_routes() {
+    use axiam_api_rest::extractors::auth::{AuthenticatedPrincipal, AuthenticatedUser};
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    async fn probe_user(_caller: AuthenticatedUser) -> actix_web::HttpResponse {
+        actix_web::HttpResponse::Ok().finish()
+    }
+    async fn probe_principal(_caller: AuthenticatedPrincipal) -> actix_web::HttpResponse {
+        actix_web::HttpResponse::Ok().finish()
+    }
+
+    let f = setup().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(f.auth.clone()))
+            .wrap(axiam_audit::middleware::AuditMiddleware::spawn(
+                SurrealAuditLogRepository::new(f.db.clone()),
+            ))
+            .route("/probe/user", web::get().to(probe_user))
+            .route("/probe/principal", web::get().to(probe_principal)),
+    )
+    .await;
+    let token = issue_access_token(
+        f.user_id,
+        f.tenant_id,
+        f.org_id,
+        &[],
+        &f.auth,
+        "not-a-uuid".to_owned(),
+        AUD_USER,
+    )
+    .unwrap();
+    for path in ["/probe/user", "/probe/principal"] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(path)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 401, "{path}");
+    }
+
+    let repo = SurrealAuditLogRepository::new(f.db.clone());
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = repo
+            .list(
+                f.tenant_id,
+                AuditLogFilter::default(),
+                Pagination::default(),
+            )
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|e| e.action.starts_with("GET /probe/"))
+            .collect();
+        if rows.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.metadata["http_status"], 401, "{row:?}");
+        assert_eq!(row.metadata["authenticated"], false, "{}", row.action);
+    }
+}

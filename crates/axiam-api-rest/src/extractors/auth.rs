@@ -61,11 +61,22 @@ pub struct SessionCredentialRefused;
 
 /// Record [`SessionCredentialRefused`] on `req` and hand the refusal back.
 fn refused(req: &HttpRequest, refusal: AxiamApiError) -> AxiamApiError {
-    let mut extensions = req.extensions_mut();
-    extensions.insert(SessionCredentialRefused);
+    req.extensions_mut().insert(SessionCredentialRefused);
+    mark_refused(req, refusal)
+}
+
+/// Record the D-12 verdict ([`axiam_auth::carrier::AuthVerdict::Refused`]) on
+/// `req` and hand the refusal back: the audit middleware's `authenticated` is
+/// then `false` for a validly signed token an extractor refused (#787).
+///
+/// The verdict only. [`SessionCredentialRefused`] is the session family's
+/// separate claim on the shared rate-limit counter's refund, and an extractor
+/// outside that family (a machine token's, the UMA PAT's, the SSF receiver's)
+/// does not make it, so its refusals are charged exactly as before.
+pub(crate) fn mark_refused(req: &HttpRequest, refusal: AxiamApiError) -> AxiamApiError {
     // The audit middleware's `authenticated` (D-12, #758 (c)).
-    extensions.insert(axiam_auth::carrier::AuthVerdict::Refused);
-    drop(extensions);
+    req.extensions_mut()
+        .insert(axiam_auth::carrier::AuthVerdict::Refused);
     refusal
 }
 
@@ -745,14 +756,17 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
         // `validate_presented_token` — so leaving this one synchronous would
         // have left every m2m route as the replayable way in, which is the
         // shape of gap this change exists to close.
-        let account = extract_service_account(req);
+        let account = extract_service_account(req).map_err(|e| mark_refused(req, e));
+        let request = req.clone();
         let dpop = req.extensions().get::<PendingDpopProof>().cloned();
         let replay_guard = req
             .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
             .map(|d| d.get_ref().clone());
         Box::pin(async move {
             let account = account?;
-            record_verified_proof(dpop, replay_guard).await?;
+            record_verified_proof(dpop, replay_guard)
+                .await
+                .map_err(|e| mark_refused(&request, e))?;
             Ok(account)
         })
     }
@@ -1621,7 +1635,8 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        let start = extract_principal(req);
+        let start = extract_principal(req).map_err(|e| mark_refused(req, e));
+        let request = req.clone();
         // Read after `extract_principal` has run, which is the order the user
         // extractor establishes: the DPoP stash does not exist before it.
         let handles = RequestScopeHandles::read(req);
@@ -1638,7 +1653,9 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
                     // RFC 9449 §11.1: a machine token can carry `cnf` exactly
                     // as a user token can, and a proof single-use on one route
                     // and replayable on another is not single-use.
-                    record_verified_proof(handles.dpop, handles.replay_guard).await?;
+                    record_verified_proof(handles.dpop, handles.replay_guard)
+                        .await
+                        .map_err(|e| mark_refused(&request, e))?;
                     // No session check: a service-account token has no session
                     // row. Revoking a machine is disabling the account, which
                     // the token-issuing paths check.
@@ -2256,5 +2273,173 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 .is_err(),
             "a tenant that does not exist must be refused"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #787 — every extractor leaves the D-12 verdict on a refusal
+    // -----------------------------------------------------------------------
+
+    /// A replay guard that has seen every proof before.
+    struct AlwaysReplayed;
+
+    impl DpopReplayGuard for AlwaysReplayed {
+        fn record_proof<'a>(
+            &'a self,
+            _tenant_id: Uuid,
+            _jkt: &'a str,
+            _jti: &'a str,
+            _expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), AxiamError>> + Send + 'a>> {
+            Box::pin(async { Err(AxiamError::ReplayDetected) })
+        }
+    }
+
+    fn verdict_of(req: &HttpRequest) -> Option<axiam_auth::carrier::AuthVerdict> {
+        req.extensions()
+            .get::<axiam_auth::carrier::AuthVerdict>()
+            .copied()
+    }
+
+    fn bearer_request(config: &AuthConfig, token: &str) -> TestRequest {
+        TestRequest::default()
+            .app_data(web::Data::new(config.clone()))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+    }
+
+    fn service_account_token(config: &AuthConfig) -> String {
+        axiam_auth::token::issue_service_account_client_credentials_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            config,
+        )
+        .unwrap()
+    }
+
+    /// Runs `E`'s extraction of a validly signed token it must refuse and
+    /// asserts the refusal left [`AuthVerdict::Refused`](axiam_auth::carrier::AuthVerdict).
+    async fn assert_refusal_leaves_the_verdict<E>(family: &str, config: &AuthConfig, token: &str)
+    where
+        E: actix_web::FromRequest,
+        E::Error: std::fmt::Debug,
+    {
+        let req = bearer_request(config, token).to_http_request();
+        let refused = E::extract(&req).await;
+        assert!(refused.is_err(), "{family}: the token must be refused");
+        assert_eq!(
+            verdict_of(&req),
+            Some(axiam_auth::carrier::AuthVerdict::Refused),
+            "{family}: a refused credential must leave the verdict"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn every_extractor_family_leaves_the_verdict_on_a_validly_signed_refusal() {
+        let config = test_auth_config();
+        // A user token whose session id is not a UUID (probe A), a user token
+        // on machine routes, and a client token without the routes' scopes.
+        let bad_session = make_user_token(&config, Some("not-a-uuid".into()));
+        let user = make_user_token(&config, None);
+        let client = make_m2m_token(&config);
+
+        assert_refusal_leaves_the_verdict::<AuthenticatedUser>("user", &config, &bad_session).await;
+        assert_refusal_leaves_the_verdict::<AuthenticatedPrincipal>(
+            "principal, user branch",
+            &config,
+            &bad_session,
+        )
+        .await;
+        // A machine-audience token that is not a service account's.
+        assert_refusal_leaves_the_verdict::<AuthenticatedPrincipal>(
+            "principal, machine branch",
+            &config,
+            &client,
+        )
+        .await;
+        assert_refusal_leaves_the_verdict::<AuthenticatedServiceAccount>(
+            "service account",
+            &config,
+            &user,
+        )
+        .await;
+        assert_refusal_leaves_the_verdict::<crate::handlers::uma::ProtectionApiToken>(
+            "UMA PAT", &config, &user,
+        )
+        .await;
+        assert_refusal_leaves_the_verdict::<crate::handlers::ssf::SsfReceiverToken>(
+            "SSF receiver",
+            &config,
+            &client,
+        )
+        .await;
+        // The account extractor admits a machine token; the certificate
+        // binding then refuses it (no `cnf`).
+        assert_refusal_leaves_the_verdict::<
+            crate::handlers::network_decide::CertificateBoundServiceAccount,
+        >(
+            "certificate-bound service account",
+            &config,
+            &service_account_token(&config),
+        )
+        .await;
+    }
+
+    /// The machine branch's DPoP replay check (RFC 9449 §11.1) is a refusal of
+    /// the credential too, on both machine extractors.
+    #[actix_rt::test]
+    async fn a_replayed_dpop_proof_on_a_machine_token_leaves_the_verdict() {
+        let config = test_auth_config();
+        let token = service_account_token(&config);
+        let guard: Arc<dyn DpopReplayGuard> = Arc::new(AlwaysReplayed);
+        for family in ["principal", "service account"] {
+            let req = bearer_request(&config, &token)
+                .app_data(web::Data::new(guard.clone()))
+                .to_http_request();
+            req.extensions_mut().insert(PendingDpopProof {
+                tenant_id: Uuid::new_v4(),
+                proof: axiam_oauth2::dpop::VerifiedDpopProof {
+                    jkt: "jkt".into(),
+                    jti: "jti".into(),
+                    iat: chrono::Utc::now().timestamp(),
+                },
+            });
+            let refused = if family == "principal" {
+                <AuthenticatedPrincipal as actix_web::FromRequest>::extract(&req)
+                    .await
+                    .err()
+            } else {
+                <AuthenticatedServiceAccount as actix_web::FromRequest>::extract(&req)
+                    .await
+                    .err()
+            };
+            assert!(refused.is_some(), "{family}: the replay must be refused");
+            assert_eq!(
+                verdict_of(&req),
+                Some(axiam_auth::carrier::AuthVerdict::Refused),
+                "{family}"
+            );
+        }
+    }
+
+    /// An admitted machine token leaves no refusal, and the verdict-only mark
+    /// does not touch the rate-limit refund the session family claims.
+    #[actix_rt::test]
+    async fn a_machine_refusal_is_not_a_session_credential_refusal() {
+        let config = test_auth_config();
+        let req = bearer_request(&config, &make_user_token(&config, None)).to_http_request();
+        assert!(
+            <AuthenticatedServiceAccount as actix_web::FromRequest>::extract(&req)
+                .await
+                .is_err()
+        );
+        assert!(req.extensions().get::<SessionCredentialRefused>().is_none());
+        let ok = bearer_request(&config, &service_account_token(&config)).to_http_request();
+        assert!(
+            <AuthenticatedServiceAccount as actix_web::FromRequest>::extract(&ok)
+                .await
+                .is_ok()
+        );
+        assert_eq!(verdict_of(&ok), None);
     }
 }

@@ -55,7 +55,9 @@ impl actix_web::FromRequest for ProtectionApiToken {
         req: &actix_web::HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
-        std::future::ready(extract_pat(req))
+        std::future::ready(
+            extract_pat(req).map_err(|e| crate::extractors::auth::mark_refused(req, e)),
+        )
     }
 }
 

@@ -414,6 +414,8 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // (c) ip_address → NULL
         // (d) known PII metadata keys redacted to "[redacted]"
         // (e) resource_id → nil UUID in entries where resource_id == user_id
+        // (f) metadata.grantee.id → nil UUID in `network_role.assigned` /
+        //     `.unassigned` rows naming the user as grantee (#758 (e))
         //
         // NOTE: In SurrealDB in-memory engine (used by tests) the $auth context is not
         // set, so the permission check may be bypassed. The application-layer guard
@@ -437,12 +439,18 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         };
 
         // Query 1: scrub actor fields + metadata PII on all entries for this actor.
+        // Not the erasure's own record (#784): it names the erased account as
+        // its actor on purpose, is written after the scrub, and carries only
+        // the pseudonym — a unit stalled past its claim's lease that scrubs
+        // after another unit recorded the erasure must not nil it. Matched by
+        // the pseudonym too, a keyed HMAC no other writer of the trail holds.
         let q1_sql = format!(
             "UPDATE audit_log SET \
              actor_id = $nil_uuid, \
              metadata.actor_pseudonym = $pseudonym, \
              ip_address = NONE{} \
-             WHERE tenant_id = $tenant_id AND actor_id = $user_id",
+             WHERE tenant_id = $tenant_id AND actor_id = $user_id \
+             AND NOT (action = 'gdpr.user_pseudonymized' AND metadata.pseudonym = $pseudonym)",
             pii_set
         );
         let _ = self
@@ -465,6 +473,36 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             .query(
                 "UPDATE audit_log SET resource_id = $nil_uuid \
                  WHERE tenant_id = $tenant_id AND resource_id = $user_id",
+            )
+            .bind(("nil_uuid", nil_uuid.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("user_id", user_id_str.clone()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // Query 2b: the grantee of a `network_role.assigned` / `.unassigned`
+        // row is the subject, whichever actor wrote it (an administrator, or the
+        // erasure itself). Cleared to the nil UUID like the other identifiers;
+        // idempotent, since the match is on the user's id, which a cleared row
+        // no longer carries.
+        //
+        // No index serves the grantee, so the rows are chosen first by the
+        // cheap predicates (a plain `SELECT VALUE id` that tests the action
+        // before it reaches into `metadata`) and the `UPDATE` then writes only
+        // the chosen ids; the same predicates in the `UPDATE`'s own `WHERE`
+        // took 4.3 s per erasure at 100 000 rows in the tenant (R112W1-03).
+        let _ = self
+            .db
+            .current()
+            .query(
+                "LET $rows = (SELECT VALUE id FROM audit_log \
+                     WHERE tenant_id = $tenant_id \
+                     AND action IN ['network_role.assigned', 'network_role.unassigned'] \
+                     AND metadata.grantee.kind = 'user' \
+                     AND metadata.grantee.id = $user_id); \
+                 UPDATE $rows SET metadata.grantee.id = $nil_uuid",
             )
             .bind(("nil_uuid", nil_uuid.clone()))
             .bind(("tenant_id", tenant_id_str.clone()))

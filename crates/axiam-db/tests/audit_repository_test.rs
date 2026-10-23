@@ -10,7 +10,8 @@ use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, TenantRepository,
 };
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealAccountDeletionRepository, SurrealAuditLogRepository, SurrealOrganizationRepository,
+    SurrealTenantRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -397,4 +398,182 @@ async fn pseudonymize_actor_scrubs_pii_and_relinks_resource() {
     // The "about" entry's actor is untouched, but its resource_id is nulled.
     assert_eq!(about_after.actor_id, other_actor);
     assert_eq!(about_after.resource_id, Some(Uuid::nil()));
+}
+
+/// #758 (e): the grantee of a `network_role.assigned` / `.unassigned` row is
+/// the erased subject whoever wrote the row; its id is cleared, a stranger's
+/// is not, and a second run changes nothing.
+#[tokio::test]
+async fn pseudonymize_actor_clears_the_grantee_id_of_network_role_rows() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let (user_id, stranger, admin) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let row = |action: &str, grantee: Uuid, kind: &str| {
+        let mut e = entry(tenant_id, admin, action, AuditOutcome::Success, None);
+        e.metadata = Some(serde_json::json!({
+            "role": "net-admin",
+            "grantee": { "kind": kind, "id": grantee },
+            "node": "none",
+        }));
+        e
+    };
+    let mut ids = Vec::new();
+    for e in [
+        row("network_role.assigned", user_id, "user"),
+        row("network_role.unassigned", user_id, "user"),
+        row("network_role.assigned", stranger, "user"),
+        // A service account that happens to share the id is not the subject.
+        row("network_role.assigned", user_id, "service_account"),
+    ] {
+        ids.push(repo.append(e).await.unwrap().id);
+    }
+
+    for _ in 0..2 {
+        repo.pseudonymize_actor(tenant_id, user_id, "DELETED_USER_deadbeef")
+            .await
+            .unwrap();
+        let rows = repo.get_by_ids(tenant_id, &ids).await.unwrap();
+        let grantee = |i: usize| {
+            let r = rows.iter().find(|r| r.id == ids[i]).unwrap();
+            r.metadata["grantee"]["id"].clone()
+        };
+        let nil = serde_json::json!(Uuid::nil());
+        assert_eq!(grantee(0), nil);
+        assert_eq!(grantee(1), nil);
+        assert_eq!(grantee(2), serde_json::json!(stranger));
+        assert_eq!(grantee(3), serde_json::json!(user_id));
+        // The rest of the row is left as it was.
+        let kept = rows.iter().find(|r| r.id == ids[0]).unwrap();
+        assert_eq!(kept.metadata["role"], "net-admin");
+        assert_eq!(kept.metadata["grantee"]["kind"], "user");
+        assert_eq!(kept.actor_id, admin);
+    }
+}
+
+/// R112W1-03: `erasure_recorded` reads the record by its actor (the account)
+/// and, failing that, by the nil actor a scrub leaves with the pseudonym
+/// still in the metadata; another account's record, the same account's other
+/// actions and another tenant's trail are not it.
+#[tokio::test]
+async fn erasure_recorded_finds_the_record_by_actor_or_by_pseudonym_only() {
+    const ACTION: &str = "gdpr.user_pseudonymized";
+    let (db, tenant_id) = setup().await;
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let deletions = SurrealAccountDeletionRepository::new(db);
+    let (by_actor, by_pseudonym, never) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let record = |actor: Uuid, action: &str, pseudonym: &str| {
+        let mut e = entry(tenant_id, actor, action, AuditOutcome::Success, None);
+        e.metadata = Some(serde_json::json!({ "pseudonym": pseudonym }));
+        e
+    };
+    // Written for the account, and the one a stalled unit's scrub left with
+    // the nil actor.
+    audit
+        .append(record(by_actor, ACTION, "DELETED_USER_aaaa"))
+        .await
+        .unwrap();
+    audit
+        .append(record(Uuid::nil(), ACTION, "DELETED_USER_bbbb"))
+        .await
+        .unwrap();
+    // The account's row of another action is not its record.
+    audit
+        .append(record(never, "auth.login", "DELETED_USER_cccc"))
+        .await
+        .unwrap();
+
+    let found = |user: Uuid, pseudonym: &'static str, action: &'static str| {
+        let deletions = &deletions;
+        async move {
+            deletions
+                .erasure_recorded(tenant_id, user, pseudonym, action)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(found(by_actor, "DELETED_USER_aaaa", ACTION).await);
+    assert!(
+        found(by_actor, "a pseudonym nobody carries", ACTION).await,
+        "the actor alone names it"
+    );
+    assert!(found(by_pseudonym, "DELETED_USER_bbbb", ACTION).await);
+    assert!(!found(by_pseudonym, "DELETED_USER_other", ACTION).await);
+    assert!(!found(never, "DELETED_USER_cccc", ACTION).await);
+    assert!(!found(never, "DELETED_USER_zzzz", ACTION).await);
+    // Another tenant's trail holds none of them.
+    assert!(
+        !deletions
+            .erasure_recorded(Uuid::new_v4(), by_actor, "DELETED_USER_aaaa", ACTION)
+            .await
+            .unwrap()
+    );
+}
+
+/// #784: the scrub leaves the erasure's own record alone. A unit stalled past
+/// its claim's lease that scrubs after its successor erased and recorded the
+/// account used to nil that record's actor for good. The record is matched by
+/// its action and its pseudonym: a `gdpr.user_pseudonymized` row naming another
+/// pseudonym — no erasure's record of this account — is scrubbed as any other.
+#[tokio::test]
+async fn pseudonymize_actor_leaves_the_erasures_own_record() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let user_id = Uuid::new_v4();
+    let pseudonym = "DELETED_USER_record000001";
+    let record = |pseudonym: &str| CreateAuditLogEntry {
+        tenant_id,
+        actor_id: user_id,
+        actor_type: ActorType::System,
+        action: "gdpr.user_pseudonymized".into(),
+        resource_id: None,
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: Some(serde_json::json!({
+            "pseudonym": pseudonym,
+            "certificates_revoked": 0,
+        })),
+    };
+    let login = repo
+        .append(entry(
+            tenant_id,
+            user_id,
+            "user.login",
+            AuditOutcome::Success,
+            None,
+        ))
+        .await
+        .unwrap()
+        .id;
+    let own = repo.append(record(pseudonym)).await.unwrap().id;
+    let other = repo
+        .append(record("DELETED_USER_other0000001"))
+        .await
+        .unwrap()
+        .id;
+
+    repo.pseudonymize_actor(tenant_id, user_id, pseudonym)
+        .await
+        .unwrap();
+    let rows = repo
+        .get_by_ids(tenant_id, &[login, own, other])
+        .await
+        .unwrap();
+    let row = |id: Uuid| rows.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(
+        row(login).actor_id,
+        Uuid::nil(),
+        "the account's own row is scrubbed"
+    );
+    assert_eq!(
+        row(own).actor_id,
+        user_id,
+        "the erasure's record keeps its actor"
+    );
+    assert_eq!(row(own).metadata["pseudonym"], pseudonym);
+    assert!(row(own).metadata.get("actor_pseudonym").is_none());
+    assert_eq!(
+        row(other).actor_id,
+        Uuid::nil(),
+        "another pseudonym's row is not the record"
+    );
 }

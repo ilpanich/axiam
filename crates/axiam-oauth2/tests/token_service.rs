@@ -635,7 +635,10 @@ impl RefreshTokenRepository for MockRefreshRepo {
     async fn revoke_all_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
         unimplemented!()
     }
-    async fn delete_expired(&self) -> AxiamResult<u64> {
+    async fn delete_all_for_user(&self, _: Uuid, _: Uuid) -> AxiamResult<u64> {
+        Ok(0)
+    }
+    async fn delete_expired(&self, _: chrono::DateTime<chrono::Utc>, _: u32) -> AxiamResult<u64> {
         Ok(0)
     }
 }

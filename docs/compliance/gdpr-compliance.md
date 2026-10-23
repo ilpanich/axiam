@@ -116,7 +116,14 @@ short-lived security/token material deliberately excluded by design
 `federation_login_state`, `account_deletion`, `export_job`,
 `erasure_proof`) — consistent with the same "no live credential/token
 material in the export" principle already applied to sessions and WebAuthn
-above. `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
+above. "Short-lived" describes the token, not the row, and the row names the
+user, the client and (since v109) the device key's thumbprint, so it is not kept
+for the life of the tenant: an erasure **deletes** the user's `oauth2_refresh_token`
+rows (revoking them first; Art. 17, #753), and the cleanup task's
+`oauth2_refresh_token` job **sweeps** every other row once its expiry is more
+than seven days past — the window in which a replay of a rotated token is still
+detected (T-254). (Corrected 2026-10-22, #753: before 1.1.2 the erasure revoked
+the rows and nothing deleted them.) `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
 confirms no repository file has been added since Phase 25 other than
 `rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). **No
 user-owned table is missing from the export blob.**
@@ -164,7 +171,11 @@ invoked as a deliberate additional step rather than an always-on default.
   deleted user was the actor: `actor_id` becomes the **nil UUID**, an
   `actor_pseudonym` metadata field is set to the pseudonym, the original
   user UUID no longer appears anywhere in the row, and `ip_address` is
-  nulled.
+  nulled. The one row that names the erased account by id is the erasure's
+  own record, `gdpr.user_pseudonymized`, written after the scrub with the
+  anonymized row's id as its actor and only the pseudonym and a certificate
+  count in its metadata; the scrub never rewrites it, so a unit that runs late
+  cannot strip the record of the account it is about (#784, 1.1.2).
 - An `erasure_proof` row (pseudonym, tenant_id, user_id, erased_at) is
   written durably, backed by a **`UNIQUE` index on `erasure_proof.user_id`**
   for idempotent-retry safety (Phase 25).
@@ -204,7 +215,7 @@ itself. An unbound certificate of the account outside the bounds stays active
 and is an administrator's to revoke by id. It runs first
 because that convention reads the names the anonymization overwrites; it is
 fail-closed, so a failure leaves the account due and the next sweep retries.
-A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure. The recovery of an erasure cut past its point of no return (the next start's sweep) writes `gdpr.user_pseudonymized` and completes the request but writes no erasure proof and does not repeat this pass; that gap is open as #737, for 1.1.2.
+A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure. The recovery of an erasure cut past its point of no return (the next start's sweep, #689) writes the erasure proof unless the account has one, repeats this pass, and only then writes `gdpr.user_pseudonymized` and completes the request; a failure of the proof or of the pass leaves the erasure to the next sweep, so no request is completed without its proof (#737, 1.1.2; until then the recovery wrote neither).
 The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
 its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
 from the `vault_revocation` sweep — under the same security retention the tenant deletion below records

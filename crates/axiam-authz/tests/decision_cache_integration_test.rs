@@ -150,7 +150,7 @@ impl RoleRepository for MockRoleRepo {
         _u: Uuid,
         _r: Uuid,
         _res: Option<Uuid>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
         unimplemented!()
     }
     async fn get_user_roles(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<Role>> {

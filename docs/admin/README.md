@@ -565,7 +565,7 @@ gate cleared and that landed is a `success` row, written once, after the write:
 | Action | Written when | Members of the row |
 |---|---|---|
 | `network_role.assigned` | a role carrying a `network:` permission is assigned to a user, service account or group | role id and name, grantee (kind, id), node (`none` for the tenant), `inherit`, the role's `network:` permissions (action, effect, scopes) |
-| `network_role.unassigned` | such a role is unassigned | role id and name, grantee, node, the role's `network:` permissions |
+| `network_role.unassigned` | such a role is unassigned — by an administrator, or by the erasure of the grantee's account, which writes one row per network role it removes (system actor; a *network role* is one carrying at least one `network:` grant, allow or deny; the row adds `reason: "account_erasure"`, and the grantee id is cleared when the account is anonymized, like every `network_role.assigned` row naming it) | role id and name, grantee, node, the role's `network:` permissions |
 | `network_role.granted` | a `network:` permission is granted to a role | role id and name, the permission (action, id, effect, scopes) |
 | `network_role.revoked` | a `network:` permission is revoked from a role | role id and name, the permission (action, id, the effect that was removed) |
 | `certificate_binding.bound` | a certificate is bound to a service account | certificate id, service account id — never the certificate itself |

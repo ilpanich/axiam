@@ -1278,6 +1278,7 @@ dependencies = [
  "sha2 0.11.1",
  "surrealdb",
  "surrealdb-types",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-rustls",

@@ -39,6 +39,25 @@ async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     db
 }
 
+/// A migrated `surrealkv` datastore in a fresh temporary directory, the engine
+/// production runs, for a test whose assertion is "exactly one concurrent
+/// caller wins". `kv-mem` admits two winners to a guarded write in about 2 % of
+/// contended rounds (`axiam-db`'s `tests/common/mod.rs` measured it and says
+/// why), so a race test on it measures an engine AXIAM never deploys. The
+/// directory is removed when the returned guard drops, so it is held for the
+/// test's whole life.
+async fn setup_serialising_db() -> (Surreal<surrealdb::engine::local::Db>, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("temp dir for the surrealkv datastore");
+    let path = dir.path().join("axiam-test.db");
+    let db =
+        Surreal::new::<surrealdb::engine::local::SurrealKv>(path.to_string_lossy().into_owned())
+            .await
+            .expect("open surrealkv datastore");
+    db.use_ns("test").use_db("test").await.expect("use ns/db");
+    run_migrations(&db).await.expect("migrations");
+    (db, dir)
+}
+
 // ---------------------------------------------------------------------------
 // saml_assertion_replay sweep
 // ---------------------------------------------------------------------------
@@ -3875,6 +3894,20 @@ fn record_lease() -> chrono::TimeDelta {
     chrono::TimeDelta::from_std(PENDING_RECORD_LEASE).unwrap()
 }
 
+/// One GDPR sweep's recovery step over `db` ([`record_owed_erasures`]), as a
+/// replica runs it.
+async fn record_owed(db: &Surreal<surrealdb::engine::local::Db>) -> Result<u64, AxiamError> {
+    record_owed_erasures(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &SurrealErasureProofRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &SurrealAccountDeletionRepository::new(db.clone()),
+        record_lease(),
+        &never_stopping(),
+    )
+    .await
+}
+
 /// The `tenant_purge_pending` markers standing for `tenant`.
 async fn purge_markers_of(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> usize {
     let mut result = db
@@ -4122,14 +4155,9 @@ async fn two_sweeps_finding_one_pending_purge_record_it_once() {
 /// briefly for the cut unit's spawned release; then once more, which records
 /// nothing.
 async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::Db>, user: &User) {
-    let (audit, deletions) = (
-        SurrealAuditLogRepository::new(db.clone()),
-        SurrealAccountDeletionRepository::new(db.clone()),
-    );
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
     for _ in 0..50 {
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .expect("the next start's sweep");
+        record_owed(db).await.expect("the next start's sweep");
         if !pseudonymized_rows(db, user.tenant_id).await.is_empty()
             && !erasure_marker_set(db, user.id).await
         {
@@ -4137,12 +4165,7 @@ async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::D
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(record_owed(db).await.unwrap(), 0);
     assert_eq!(
         pseudonymized_rows(db, user.tenant_id).await.len(),
         1,
@@ -4159,6 +4182,11 @@ async fn next_start_records_the_erasure(db: &Surreal<surrealdb::engine::local::D
             .unwrap()
             .is_none(),
         "the deletion request, if any, is completed"
+    );
+    assert_eq!(
+        erasure_proof_count(db, user.tenant_id, user.id).await,
+        1,
+        "#737: the erasure and its proof stand, the proof once"
     );
 }
 
@@ -4183,14 +4211,8 @@ async fn an_erasure_cut_past_its_point_of_no_return_is_recorded_by_the_next_star
     let tick = erasure_tick(&db, &user, &work);
     wait_until_entered(&mut entered).await;
     assert!(erasure_marker_set(&db, user.id).await, "the marker stands");
-    let (audit, deletions) = (
-        SurrealAuditLogRepository::new(db.clone()),
-        SurrealAccountDeletionRepository::new(db.clone()),
-    );
     assert_eq!(
-        record_owed_erasures(&audit, &deletions, record_lease(), &never_stopping())
-            .await
-            .unwrap(),
+        record_owed(&db).await.unwrap(),
         0,
         "while the unit holds the marker, another replica's sweep records nothing"
     );
@@ -4228,6 +4250,165 @@ async fn an_erasure_without_a_request_cut_past_its_point_of_no_return_is_recorde
     assert!(erasure_marker_set(&db, user.id).await);
 
     next_start_records_the_erasure(&db, &user).await;
+}
+
+/// A `User` certificate bound to `user_id`, active for a month.
+fn bound_certificate(
+    tenant_id: Uuid,
+    user_id: Uuid,
+    fingerprint: &str,
+) -> axiam_core::models::certificate::StoreCertificate {
+    use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
+    StoreCertificate {
+        tenant_id,
+        issuer_ca_id: Uuid::new_v4(),
+        subject: "device".into(),
+        public_cert_pem: "not-a-parsed-certificate".into(),
+        fingerprint: fingerprint.into(),
+        cert_type: CertificateType::User,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        not_before: Utc::now() - chrono::Duration::minutes(1),
+        not_after: Utc::now() + chrono::Duration::days(30),
+        metadata: serde_json::json!({}),
+        user_id: Some(user_id),
+    }
+}
+
+/// #737 (R111W1-03): an erasure held between its anonymization — its point of
+/// no return — and its erasure proof, while an issuance that raced the
+/// erasure binds a certificate to the account, then cut at the teardown's
+/// bound. Before the fix the next start recorded the erasure and completed the
+/// request with no proof behind it, never ran the second revocation, and —
+/// the marker's guard being armed only after the proof — waited out the
+/// one-hour lease first. Now the guard is armed from the stamp the unit chose
+/// before the anonymization, so the cut releases the marker, and the next
+/// start's sweep, at once, writes the proof, revokes the certificate, writes
+/// the record and completes the request, each once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_cut_before_its_proof_is_proven_revoked_and_recorded_by_the_next_start_at_once()
+{
+    use axiam_core::models::certificate::CertificateStatus;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "cut_before_proof").await;
+    let certs = Arc::new(SurrealCertificateRepository::new(db.clone()));
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (entered_tx, mut entered) = watch::channel(false);
+    let issued = Arc::new(std::sync::Mutex::new(None));
+    let hold: UnitStepForTests = {
+        let (certs, issued, user_id) = (Arc::clone(&certs), Arc::clone(&issued), user.id);
+        Arc::new(move |step| {
+            let (certs, issued, entered) =
+                (Arc::clone(&certs), Arc::clone(&issued), entered_tx.clone());
+            Box::pin(async move {
+                if step == UnitStep::ErasureProofOwed(user_id) {
+                    let late = certs
+                        .create(bound_certificate(tenant_id, user_id, "fp-737-late"))
+                        .await
+                        .unwrap();
+                    *issued.lock().unwrap() = Some(late.id);
+                    entered.send_replace(true);
+                    std::future::pending::<()>().await;
+                }
+            })
+        })
+    };
+    let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold));
+    let tick = erasure_tick(&db, &user, &work);
+    wait_until_entered(&mut entered).await;
+    let late = issued
+        .lock()
+        .unwrap()
+        .expect("the hook issued a certificate");
+    assert_eq!(
+        SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .email,
+        "hashed_held_email",
+        "the account is anonymized: past the point of no return"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+    assert!(erasure_marker_set(&db, user.id).await, "the marker stands");
+    assert_eq!(
+        record_owed(&db).await.unwrap(),
+        0,
+        "while the unit holds the marker, another replica's sweep finishes nothing"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+
+    stop_tx.send_replace(true);
+    assert!(
+        !join_like_the_teardown(tick, &work, Duration::from_millis(300)).await,
+        "the unit was cut where it was held"
+    );
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+    assert_eq!(
+        certs.get_by_id(tenant_id, late).await.unwrap().status,
+        CertificateStatus::Active,
+        "the cut unit never ran its second revocation"
+    );
+
+    // At once: within the few hundred milliseconds the guard's spawned release
+    // takes to land, never the hour of the lease.
+    let started = std::time::Instant::now();
+    next_start_records_the_erasure(&db, &user).await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let row = &pseudonymized_rows(&db, tenant_id).await[0];
+    assert_eq!(row.metadata["recovered"], true);
+    assert!(row.metadata["certificates_revoked"].is_null());
+    assert_eq!(
+        certs.get_by_id(tenant_id, late).await.unwrap().status,
+        CertificateStatus::Revoked,
+        "the recovery's second revocation revokes the late bound certificate"
+    );
+}
+
+/// #737 (R111W1-03 (a)): an erasure whose proof fails to write, past its point
+/// of no return, fails its tick and releases its marker, awaited; the next
+/// sweep writes the proof and the record at once, and completes the request.
+/// Before the fix the request was completed by the next sweep past the lease,
+/// with no proof ever written.
+#[tokio::test]
+async fn an_erasure_whose_proof_fails_is_proven_and_recorded_by_the_next_sweep_at_once() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "proof_fails").await;
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
+
+    let failed = erase_and_record(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &FailingErasureProofRepo,
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &deletions,
+        None,
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: "DELETED_USER_proof00000001",
+            email_hash: "hashed_proof_fails",
+            certificates_revoked: 0,
+        },
+        &never_stopping(),
+    )
+    .await;
+    assert!(failed.is_err(), "a failed proof fails the tick");
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 0);
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    assert_eq!(
+        record_owed(&db).await.unwrap(),
+        1,
+        "the marker was released, not left to its lease"
+    );
+    next_start_records_the_erasure(&db, &user).await;
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await[0].metadata["pseudonym"],
+        "DELETED_USER_proof00000001"
+    );
 }
 
 /// #689: an erasure cut after its record and before it settled is not recorded
@@ -4296,4 +4477,767 @@ async fn a_pending_request_whose_account_is_anonymized_is_completed_and_recorded
         pseudonymized_rows(&db, tenant_id).await[0].metadata["pseudonym"],
         "DELETED_USER_pre0000000001"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #738 (R111W1-04) — two replicas' sweeps never run one erasure twice
+// ---------------------------------------------------------------------------
+
+use axiam_server::cleanup::{ERASURE_CLAIM_LEASE, purge_under_claim};
+
+fn erasure_claim_lease() -> chrono::TimeDelta {
+    chrono::TimeDelta::from_std(ERASURE_CLAIM_LEASE).unwrap()
+}
+
+/// One replica's GDPR sweep over the due accounts, as
+/// `CleanupTask::sweep_pending_purges` runs it: the accounts due at its `now`,
+/// each erased as a unit of its `work` under an exclusive claim. The unit's
+/// steps before the anonymization — the revocations of (a)…(b4) — are left
+/// out; the claim is taken before them, so they change nothing here. An error
+/// of any unit fails this sweep, which the real one only logs, so that "no
+/// error" is asserted, not assumed.
+async fn replica_sweep(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    sink: &Arc<RecordingPurgeSink>,
+    work: &AuditedWork,
+) -> Result<u64, AxiamError> {
+    let now = Utc::now();
+    let due = SurrealUserRepository::new(db.clone())
+        .find_due_for_purge(now)
+        .await?;
+    let mut purged = 0;
+    for user in due {
+        let (db, sink, unit_work) = (db.clone(), Arc::clone(sink), work.clone());
+        let (tenant_id, user_id) = (user.tenant_id, user.id);
+        let outcome = work
+            .run(async move {
+                let deletions = SurrealAccountDeletionRepository::new(db.clone());
+                let (audit, proofs, users, certs) = (
+                    SurrealAuditLogRepository::new(db.clone()),
+                    SurrealErasureProofRepository::new(db.clone()),
+                    SurrealUserRepository::new(db.clone()),
+                    SurrealCertificateRepository::new(db.clone()),
+                );
+                let pseudonym = format!("DELETED_USER_{}", user_id.simple());
+                // Per account: the address column is unique per tenant.
+                let email_hash = format!("hashed_{}", user_id.simple());
+                purge_under_claim(
+                    &deletions,
+                    tenant_id,
+                    user_id,
+                    now,
+                    erasure_claim_lease(),
+                    erase_and_record(
+                        &audit,
+                        &proofs,
+                        &users,
+                        &certs,
+                        &deletions,
+                        Some(sink.as_ref() as &dyn SsfSystemAccountSink),
+                        ErasureSubject {
+                            tenant_id,
+                            user_id,
+                            pseudonym: &pseudonym,
+                            email_hash: &email_hash,
+                            certificates_revoked: 0,
+                        },
+                        &unit_work,
+                    ),
+                )
+                .await
+            })
+            .await
+            .expect("the unit ran to its end");
+        if outcome? {
+            purged += 1;
+        }
+    }
+    Ok(purged)
+}
+
+/// The `account_purged` reports the sink received for `user`.
+fn reports_for(sink: &RecordingPurgeSink, user: Uuid) -> usize {
+    sink.purged
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, id, _, _)| *id == user)
+        .count()
+}
+
+/// #738: every replica runs the GDPR sweep. Two sweeps over one store, run at
+/// once against one due account — one with its deletion request, one without
+/// (claimed by the stamp on its user row) — erase each once: one unit erases,
+/// the other skips without an error, and the SSF sink sees one
+/// `account_purged` per account. Then, to make the overlap certain rather than
+/// likely, replica A is held after its claim and before the anonymization
+/// while replica B sweeps: B skips the account, and A erases it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sweeps_at_once_erase_one_due_account_once_and_neither_fails() {
+    // The engine production runs: `kv-mem` may admit two winners (R112W1-06 c).
+    let (db, _dir) = setup_serialising_db().await;
+    let tenant_id = Uuid::new_v4();
+    let with_request = erasure_due_with_its_request(&db, tenant_id, "race_738_req").await;
+    let without_request = user_due_for_erasure(&db, tenant_id, "race_738_bare").await;
+    let sink = Arc::new(RecordingPurgeSink::default());
+    let (a, b) = (never_stopping(), never_stopping());
+
+    let (one, other) = tokio::join!(replica_sweep(&db, &sink, &a), replica_sweep(&db, &sink, &b));
+    let (one, other) = (
+        one.expect("replica A's sweep reports no error"),
+        other.expect("replica B's sweep reports no error"),
+    );
+    assert_eq!(one + other, 2, "each account is erased by one replica");
+    for user in [&with_request, &without_request] {
+        assert_eq!(reports_for(&sink, user.id), 1, "one account_purged");
+        assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    }
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 2);
+    assert!(
+        SurrealAccountDeletionRepository::new(db.clone())
+            .find_pending_by_user_id(tenant_id, with_request.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the request is completed"
+    );
+
+    // The overlap, held open: A has claimed and not yet anonymized.
+    let held = erasure_due_with_its_request(&db, tenant_id, "held_738").await;
+    let (entered_tx, mut entered) = watch::channel(false);
+    let go = Arc::new(Notify::new());
+    let holding = never_stopping().with_step_for_tests(Some(hold_at(
+        UnitStep::ErasurePrepared(held.id),
+        entered_tx,
+        Arc::clone(&go),
+    )));
+    let replica_a = {
+        let (db, sink, holding) = (db.clone(), Arc::clone(&sink), holding.clone());
+        tokio::spawn(async move { replica_sweep(&db, &sink, &holding).await })
+    };
+    wait_until_entered(&mut entered).await;
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping())
+            .await
+            .expect("replica B's sweep reports no error"),
+        0,
+        "B skips the account A holds"
+    );
+    assert_eq!(reports_for(&sink, held.id), 0);
+    go.notify_one();
+    assert_eq!(replica_a.await.unwrap().expect("replica A's sweep"), 1);
+    assert_eq!(reports_for(&sink, held.id), 1);
+    assert_eq!(erasure_proof_count(&db, tenant_id, held.id).await, 1);
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 3);
+}
+
+/// #738: a claimant that stalls — a replica that died holding the claim, or a
+/// unit held past the lease — keeps the account from the other replicas for
+/// the lease only. Inside it, a sweep skips the account; past it, a sweep takes
+/// it over and erases it, once. A stalled unit that then wakes and runs its
+/// erasure finds the account no longer deletion-pending and stops before its
+/// scrub (#784): not an error, and nothing written — the other unit's record
+/// keeps the account as its actor, the account is not anonymized again (no
+/// marker set, the row untouched), and the SSF sink sees one `account_purged`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "stalled_738").await;
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
+    let sink = Arc::new(RecordingPurgeSink::default());
+
+    // The stalled replica's claim.
+    assert_eq!(
+        deletions
+            .claim_for_purge(tenant_id, user.id, Utc::now(), erasure_claim_lease())
+            .await
+            .unwrap(),
+        axiam_db::repository::PurgeClaimOutcome::Claimed
+    );
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping()).await.unwrap(),
+        0,
+        "inside the lease the account is skipped"
+    );
+    assert_eq!(reports_for(&sink, user.id), 0);
+
+    // The lease runs out (the claim is dated back past it).
+    db.query("UPDATE account_deletion SET purge_claimed_at = $at WHERE user_id = $u")
+        .bind(("u", user.id.to_string()))
+        .bind((
+            "at",
+            Utc::now() - erasure_claim_lease() - chrono::TimeDelta::minutes(1),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        replica_sweep(&db, &sink, &never_stopping()).await.unwrap(),
+        1,
+        "past the lease the account is taken over and erased"
+    );
+    assert_eq!(reports_for(&sink, user.id), 1);
+    let erased = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user.id)
+        .await
+        .unwrap();
+    assert!(
+        !erasure_marker_set(&db, user.id).await,
+        "the record is settled"
+    );
+
+    // The stalled unit wakes and runs its erasure regardless.
+    let woke = erase_and_record(
+        &SurrealAuditLogRepository::new(db.clone()),
+        &SurrealErasureProofRepository::new(db.clone()),
+        &SurrealUserRepository::new(db.clone()),
+        &SurrealCertificateRepository::new(db.clone()),
+        &deletions,
+        Some(sink.as_ref() as &dyn SsfSystemAccountSink),
+        ErasureSubject {
+            tenant_id,
+            user_id: user.id,
+            pseudonym: &format!("DELETED_USER_{}", user.id.simple()),
+            email_hash: &format!("hashed_{}", user.id.simple()),
+            certificates_revoked: 0,
+        },
+        &never_stopping(),
+    )
+    .await
+    .expect("an account another unit erased is not an error");
+    assert!(!woke, "the stalled unit records nothing");
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    let records = pseudonymized_rows(&db, tenant_id).await;
+    assert_eq!(records.len(), 1, "gdpr.user_pseudonymized exists once");
+    // #784: the stalled unit's scrub used to nil the record's actor for good.
+    assert_eq!(
+        records[0].actor_id, user.id,
+        "the record still names the erased account as its actor"
+    );
+    assert_eq!(reports_for(&sink, user.id), 1, "one account_purged");
+    // #784: nor is the account anonymized again — no marker set (its release
+    // would have left the epoch there), the row as the erasure left it.
+    assert!(
+        !erasure_marker_set(&db, user.id).await,
+        "no marker set again"
+    );
+    assert_eq!(
+        SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .updated_at,
+        erased.updated_at,
+        "the erased row is not written again"
+    );
+    assert_eq!(record_owed(&db).await.unwrap(), 0);
+    assert!(!erasure_marker_set(&db, user.id).await);
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    assert_eq!(pseudonymized_rows(&db, tenant_id).await.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// #753 — the OAuth2 refresh-token rows: deleted at erasure, swept after the
+// replay-detection retention
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::oauth2_client::CreateRefreshToken;
+use axiam_core::repository::RefreshTokenRepository as _;
+use axiam_db::SurrealRefreshTokenRepository;
+use axiam_server::cleanup::{
+    REFRESH_REPLAY_RETENTION, REFRESH_SWEEP_BATCH, REFRESH_SWEEP_MAX_BATCHES,
+    erase_oauth2_refresh_tokens, sweep_refresh_tokens,
+};
+
+async fn issue_refresh_token(
+    repo: &SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    expires_at: chrono::DateTime<Utc>,
+) -> String {
+    let hash = Uuid::new_v4().to_string();
+    repo.create(CreateRefreshToken {
+        tenant_id,
+        user_id: Some(user_id),
+        token_hash: hash.clone(),
+        client_id: "client-a".into(),
+        scopes: vec!["openid".into()],
+        session_id: None,
+        requested_userinfo_claims: Vec::new(),
+        expires_at,
+        resource: None,
+        auth_time: None,
+        acr: None,
+        amr: Vec::new(),
+        dpop_jkt: Some("thumbprint-of-the-device-key".into()),
+    })
+    .await
+    .unwrap();
+    hash
+}
+
+#[derive(SurrealValue)]
+struct RowCount {
+    total: u64,
+}
+
+async fn refresh_rows_naming(db: &Surreal<surrealdb::engine::local::Db>, user: Uuid) -> u64 {
+    let mut res = db
+        .query("SELECT count() AS total FROM oauth2_refresh_token WHERE user_id = $u GROUP ALL")
+        .bind(("u", user.to_string()))
+        .await
+        .unwrap();
+    let rows: Vec<RowCount> = res.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+async fn refresh_rows_total(db: &Surreal<surrealdb::engine::local::Db>) -> u64 {
+    let mut res = db
+        .query("SELECT count() AS total FROM oauth2_refresh_token GROUP ALL")
+        .await
+        .unwrap();
+    let rows: Vec<RowCount> = res.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+/// R111-03: after an erasure no `oauth2_refresh_token` row names the user —
+/// revoked, rotated or live — and another user's rows are untouched. The step
+/// is re-entered by the recovery of a cut erasure (#737), so a second run
+/// deletes nothing and fails nothing.
+#[tokio::test]
+async fn an_erasure_leaves_no_refresh_token_row_naming_the_user_and_can_be_re_entered() {
+    let db = setup_db().await;
+    let (tenant_id, user_id, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let later = Utc::now() + chrono::Duration::days(1);
+
+    let revoked = issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    repo.revoke(tenant_id, &revoked).await.unwrap();
+    let rotated = issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
+    issue_refresh_token(&repo, tenant_id, user_id, later).await;
+    issue_refresh_token(&repo, tenant_id, other, later).await;
+    assert_eq!(refresh_rows_naming(&db, user_id).await, 3);
+
+    let deleted = erase_oauth2_refresh_tokens(&repo, tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+    assert_eq!(refresh_rows_naming(&db, user_id).await, 0);
+    assert_eq!(refresh_rows_naming(&db, other).await, 1);
+    assert!(
+        repo.find_rotated(tenant_id, &rotated)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    assert_eq!(
+        erase_oauth2_refresh_tokens(&repo, tenant_id, user_id)
+            .await
+            .unwrap(),
+        0,
+        "a re-run finds nothing and does not fail"
+    );
+    assert_eq!(refresh_rows_naming(&db, other).await, 1);
+}
+
+/// R111-03: a tick removes a token expired past the replay-detection
+/// retention, and keeps a live one, one expired inside the retention, and a
+/// revoked/rotated one whose expiry is still ahead — its replay must stay
+/// detectable (T-254).
+#[tokio::test]
+async fn the_refresh_token_sweep_removes_only_rows_expired_past_the_retention() {
+    let db = setup_db().await;
+    let (tenant_id, user_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let now = Utc::now();
+
+    let _past_window = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION - chrono::Duration::hours(1),
+    )
+    .await;
+    // Revoked as well: revocation does not shorten the retention.
+    let past_window_revoked = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION - chrono::Duration::hours(1),
+    )
+    .await;
+    repo.revoke(tenant_id, &past_window_revoked).await.unwrap();
+    let _inside_window = issue_refresh_token(
+        &repo,
+        tenant_id,
+        user_id,
+        now - REFRESH_REPLAY_RETENTION + chrono::Duration::hours(1),
+    )
+    .await;
+    let live =
+        issue_refresh_token(&repo, tenant_id, user_id, now + chrono::Duration::days(1)).await;
+    let rotated =
+        issue_refresh_token(&repo, tenant_id, user_id, now + chrono::Duration::days(1)).await;
+    repo.revoke_rotated(tenant_id, &rotated).await.unwrap();
+    assert_eq!(refresh_rows_total(&db).await, 5);
+
+    let (_stop, never) = watch::channel(false);
+    assert_eq!(sweep_refresh_tokens(&repo, now, &never).await.unwrap(), 2);
+    assert_eq!(refresh_rows_total(&db).await, 3);
+    assert!(repo.get_by_token_hash(tenant_id, &live).await.is_ok());
+    assert!(
+        repo.find_rotated(tenant_id, &rotated)
+            .await
+            .unwrap()
+            .is_some(),
+        "a rotated token's replay is still detectable"
+    );
+
+    // The next tick finds nothing more; the in-window row goes once the
+    // retention has run out on it.
+    assert_eq!(sweep_refresh_tokens(&repo, now, &never).await.unwrap(), 0);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now + chrono::Duration::hours(2), &never)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(refresh_rows_total(&db).await, 2);
+}
+
+/// R112W1-02: the first run over a backlog — every row expired since the
+/// deployment began — is bounded. One tick deletes at most
+/// `BATCH * MAX_BATCHES` rows and leaves the rest to the next, never the whole
+/// backlog in one statement; a shutdown signal stops it between batches; a
+/// later tick finishes the job.
+#[tokio::test]
+async fn the_refresh_token_sweep_bounds_a_first_run_over_a_backlog() {
+    let db = setup_db().await;
+    let bound = u64::from(REFRESH_SWEEP_BATCH) * u64::from(REFRESH_SWEEP_MAX_BATCHES);
+    let backlog = bound + 700;
+    let expired = (Utc::now() - REFRESH_REPLAY_RETENTION - chrono::Duration::days(1)).to_rfc3339();
+    let live = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let mut inserted = 0_u64;
+    while inserted < backlog {
+        let end = (inserted + 2_000).min(backlog);
+        let rows: Vec<serde_json::Value> = (inserted..end)
+            .map(|k| serde_json::json!({ "hash": format!("backlog-{k}"), "at": expired }))
+            .collect();
+        db.query(
+            "FOR $r IN $rows { CREATE oauth2_refresh_token SET tenant_id = 't', \
+             token_hash = $r.hash, client_id = 'c', scopes = [], revoked = false, \
+             expires_at = <datetime>$r.at; }",
+        )
+        .bind(("rows", rows))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        inserted = end;
+    }
+    db.query(
+        "CREATE oauth2_refresh_token SET tenant_id = 't', token_hash = 'live', \
+         client_id = 'c', scopes = [], revoked = false, expires_at = <datetime>$at",
+    )
+    .bind(("at", live))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let repo = SurrealRefreshTokenRepository::new(db.clone());
+    let now = Utc::now();
+
+    // A stopped process starts no batch.
+    let (_keep, stopped) = watch::channel(true);
+    assert_eq!(sweep_refresh_tokens(&repo, now, &stopped).await.unwrap(), 0);
+    assert_eq!(refresh_rows_total(&db).await, backlog + 1);
+
+    let (_stop, running) = watch::channel(false);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now, &running).await.unwrap(),
+        bound,
+        "one tick deletes at most BATCH * MAX_BATCHES rows"
+    );
+    assert_eq!(refresh_rows_total(&db).await, backlog + 1 - bound);
+    assert_eq!(
+        sweep_refresh_tokens(&repo, now, &running).await.unwrap(),
+        backlog - bound,
+        "the next tick takes the rest"
+    );
+    assert_eq!(refresh_rows_total(&db).await, 1, "the live row stays");
+}
+
+// ---------------------------------------------------------------------------
+// #758 (e) — the erasure's role pass writes `network_role.unassigned` rows,
+// and no `network_role.*` row keeps the subject's id
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
+use axiam_core::repository::{PermissionRepository as _, RoleRepository as _};
+use axiam_db::{SurrealPermissionRepository, SurrealRoleRepository};
+use axiam_server::cleanup::remove_erased_users_roles;
+
+async fn role_granting(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    name: &str,
+    action: &str,
+) -> Uuid {
+    let role = SurrealRoleRepository::new(db.clone())
+        .create(CreateRole {
+            tenant_id,
+            name: name.into(),
+            description: String::new(),
+            is_global: false,
+        })
+        .await
+        .expect("role");
+    let perms = SurrealPermissionRepository::new(db.clone());
+    let permission = perms
+        .create(CreatePermission {
+            tenant_id,
+            action: action.into(),
+            description: String::new(),
+        })
+        .await
+        .expect("permission");
+    perms
+        .grant_to_role(tenant_id, role.id, permission.id)
+        .await
+        .expect("grant");
+    role.id
+}
+
+async fn rows_of(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    action: &str,
+) -> Vec<AuditLogEntry> {
+    SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(action.into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 50,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_row_keeps_the_subject()
+ {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = user_due_for_erasure(&db, tenant_id, "network_holder").await;
+    let (roles, audit) = (
+        SurrealRoleRepository::new(db.clone()),
+        SurrealAuditLogRepository::new(db.clone()),
+    );
+    let network_a = role_granting(&db, tenant_id, "net-a", "network:join").await;
+    let network_b = role_granting(&db, tenant_id, "net-b", "NETWORK:admin").await;
+    let plain = role_granting(&db, tenant_id, "docs", "documents:read").await;
+    for role in [network_a, network_b, plain] {
+        roles
+            .assign_to_user(tenant_id, user.id, role, AssignmentScope::global())
+            .await
+            .expect("assign");
+    }
+    // An administrator's earlier assignment row names the subject as grantee.
+    audit
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::new_v4(),
+            actor_type: ActorType::User,
+            action: "network_role.assigned".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: Some(serde_json::json!({
+                "role_id": network_a,
+                "grantee": { "kind": "user", "id": user.id },
+            })),
+        })
+        .await
+        .unwrap();
+
+    let written = remove_erased_users_roles(
+        &roles,
+        &SurrealPermissionRepository::new(db.clone()),
+        &audit,
+        tenant_id,
+        user.id,
+    )
+    .await
+    .expect("role pass");
+    assert_eq!(
+        written, 2,
+        "one row per network role removed, none for the plain one"
+    );
+    assert!(
+        roles
+            .get_user_role_assignments(tenant_id, user.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "every assignment is gone"
+    );
+    let unassigned = rows_of(&db, tenant_id, "network_role.unassigned").await;
+    assert_eq!(unassigned.len(), 2);
+    let mut names: Vec<_> = unassigned
+        .iter()
+        .map(|r| r.metadata["role"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["net-a", "net-b"]);
+    for row in &unassigned {
+        assert_eq!(row.actor_type, ActorType::System);
+        assert_eq!(row.actor_id, Uuid::nil());
+        assert_eq!(row.metadata["grantee"]["kind"], "user");
+        assert_eq!(row.metadata["node"], "none");
+        assert!(!row.metadata["permissions"].as_array().unwrap().is_empty());
+    }
+
+    // A re-entered erasure finds nothing left and writes nothing.
+    let again = remove_erased_users_roles(
+        &roles,
+        &SurrealPermissionRepository::new(db.clone()),
+        &audit,
+        tenant_id,
+        user.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, 0);
+    assert_eq!(
+        rows_of(&db, tenant_id, "network_role.unassigned")
+            .await
+            .len(),
+        2
+    );
+
+    audit
+        .pseudonymize_actor(tenant_id, user.id, "DELETED_USER_net00000001")
+        .await
+        .unwrap();
+    for action in ["network_role.assigned", "network_role.unassigned"] {
+        let rows = rows_of(&db, tenant_id, action).await;
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert!(
+                !row.metadata.to_string().contains(&user.id.to_string()),
+                "{action} row still names the erased user: {}",
+                row.metadata
+            );
+            assert_eq!(
+                row.metadata["grantee"]["id"],
+                serde_json::json!(Uuid::nil())
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #792 — two units in the role pass record one unassignment, not two
+// ---------------------------------------------------------------------------
+
+/// A unit stalled past `ERASURE_CLAIM_LEASE` and its successor can both read
+/// an assignment; the second one's unassignment removes nothing. It must write
+/// no second `network_role.unassigned` row and must not fail. Several rounds,
+/// each over a fresh account, because whether the two reads precede the two
+/// deletes is the scheduler's; on the code before #792 a round that overlaps
+/// writes two rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_role_passes_over_one_network_role_write_one_row() {
+    let (db, _dir) = setup_serialising_db().await;
+    let tenant_id = Uuid::new_v4();
+    let network = role_granting(&db, tenant_id, "net", "network:join").await;
+    for round in 0..16 {
+        let user = user_due_for_erasure(&db, tenant_id, &format!("racer{round}")).await;
+        SurrealRoleRepository::new(db.clone())
+            .assign_to_user(tenant_id, user.id, network, AssignmentScope::global())
+            .await
+            .expect("assign");
+        let pass = || {
+            let db = db.clone();
+            tokio::spawn(async move {
+                remove_erased_users_roles(
+                    &SurrealRoleRepository::new(db.clone()),
+                    &SurrealPermissionRepository::new(db.clone()),
+                    &SurrealAuditLogRepository::new(db),
+                    tenant_id,
+                    user.id,
+                )
+                .await
+            })
+        };
+        let (a, b) = (pass(), pass());
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        let (a, b) = (a.expect("first pass"), b.expect("second pass"));
+        assert_eq!(a + b, 1, "round {round}: one pass recorded the removal");
+        let rows = rows_of(&db, tenant_id, "network_role.unassigned").await;
+        assert_eq!(rows.len(), round + 1, "round {round}: one new row");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #758 (f) — two recoveries over one store record each owed erasure once
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_recoveries_over_one_store_record_an_owed_erasure_once() {
+    // The engine production runs: `kv-mem` may admit two winners (R112W1-06 c).
+    let (db, _dir) = setup_serialising_db().await;
+    let tenant_id = Uuid::new_v4();
+    // An erasure cut past its point of no return (the helper's pseudonym is
+    // fixed, so one account per store).
+    let user = erasure_due_with_its_request(&db, tenant_id, "owed_one").await;
+    {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (entered_tx, mut entered) = watch::channel(false);
+        let work = AuditedWork::new(stop_rx).with_step_for_tests(Some(hold_at(
+            UnitStep::ErasureAnonymized(user.id),
+            entered_tx,
+            Arc::new(Notify::new()),
+        )));
+        let tick = erasure_tick(&db, &user, &work);
+        wait_until_entered(&mut entered).await;
+        stop_tx.send_replace(true);
+        assert!(!join_like_the_teardown(tick, &work, Duration::from_millis(300)).await);
+    }
+    assert!(pseudonymized_rows(&db, tenant_id).await.is_empty());
+
+    // Two replicas' recoveries at once, repeated while the cut units' spawned
+    // releases land; the owed erasures are recorded exactly once between them.
+    let mut recorded = 0;
+    for _ in 0..50 {
+        let (a, b) = tokio::join!(record_owed(&db), record_owed(&db));
+        recorded += a.expect("replica A") + b.expect("replica B");
+        if recorded >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (a, b) = tokio::join!(record_owed(&db), record_owed(&db));
+    recorded += a.unwrap() + b.unwrap();
+    assert_eq!(recorded, 1, "the owed erasure is recorded once");
+    assert_eq!(
+        pseudonymized_rows(&db, tenant_id).await.len(),
+        1,
+        "one gdpr.user_pseudonymized row"
+    );
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    assert!(!erasure_marker_set(&db, user.id).await);
 }

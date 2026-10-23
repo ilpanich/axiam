@@ -739,11 +739,17 @@ async fn cancel_after_the_purge_claimed_the_request_is_conflict_and_changes_noth
         .await
         .unwrap();
     // The sweep, on a replica whose `now` is past the deadline.
-    assert!(
+    assert_eq!(
         deletion_repo
-            .claim_for_purge(f.tenant_id, f.user_id, Utc::now() + Duration::days(31))
+            .claim_for_purge(
+                f.tenant_id,
+                f.user_id,
+                Utc::now() + Duration::days(31),
+                Duration::hours(1),
+            )
             .await
-            .unwrap()
+            .unwrap(),
+        axiam_db::repository::PurgeClaimOutcome::Claimed
     );
 
     let auth = test_auth_config();

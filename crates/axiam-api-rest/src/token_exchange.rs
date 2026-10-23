@@ -317,7 +317,7 @@ mod tests {
             unimplemented!()
         }
         unreachable_method!(assign_to_user(Uuid, Uuid, Uuid, AssignmentScope) -> ());
-        unreachable_method!(unassign_from_user(Uuid, Uuid, Uuid, Option<Uuid>) -> ());
+        unreachable_method!(unassign_from_user(Uuid, Uuid, Uuid, Option<Uuid>) -> bool);
         unreachable_method!(get_user_roles(Uuid, Uuid) -> Vec<Role>);
         unreachable_method!(assign_to_group(Uuid, Uuid, Uuid, AssignmentScope) -> ());
         unreachable_method!(unassign_from_group(Uuid, Uuid, Uuid, Option<Uuid>) -> ());

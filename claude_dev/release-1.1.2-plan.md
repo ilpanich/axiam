@@ -175,6 +175,7 @@ unless its condition is met before W8.4 writes the PR body.
 | 789 | R112W2-04: "a row without `ingested_via` was written by the server" is false before 1.1.2 | Informational | W2 | sweep | S | Sonnet 5.5 |
 | 790 | R112W2-05: the gRPC address rule is a hand-copied twin; no gRPC test of `none` | Informational | W2 | sweep | S | Sonnet 5.5 |
 | 791 | R112W4-06: the decision cache can insert a decision computed before a revocation's flush (pre-existing D7) | Informational | W4 | sweep | M | **Opus 5.5** |
+| 792 | R112W1-07: a stalled unit's role pass overlapping its successor's can write a second `network_role.unassigned` row | Informational | W1 | sweep | S | Sonnet 5.5 |
 | new | every issue filed while the plan runs (§1.4) | any | its wave / W9 | — | by §1.1 | by §1.1 |
 
 ### 1.1 How the model is chosen
@@ -289,7 +290,7 @@ the recovery that W1.1 completes, and W1.6's concurrency test needs both.
 | W1.7 | **#739**, verify and close (§0.1). (a) the two `cleanup.rs` sentences and the `AuditedWork` doc worded as #688 does; (b) T-472's "#714 amendment" tail and the orphan-marker sentence corrected, dated, both copies; (c) the `append_off_thread` doc says the join-error branch is logged by the awaiter, or the panic is caught inside the closure (default: the sentence, D-11). Edit only what still differs from the issue's wording. | `cleanup.rs`; STRIDE T-472 (both copies); `crates/axiam-audit/src/dead_letter.rs` | none (text); `check-remediation-evidence.py`; `check-doc-links.sh` | S | Sonnet 5.5 |
 | W1.8 | — | F4 review of the W1 diff → `claude_dev/security-review-release-1.1.2-w1-<date>.md`. Medium and higher fixed first; Low and Informational filed on `1.1.x` **and fixed in the wave's sweep slot** (§1.4); the review gains an addendum on the sweep's diff. | | | — | **Opus 5.5** |
 
-Closes: #736, #737, #738, #739, #740, #753, and #758 (with W2, W5, W6, W8.3); from the W1.8 review (§1.4): #780, #781, #782, #783, #784, #785.
+Closes: #736, #737, #738, #739, #740, #753, and #758 (with W2, W5, W6, W8.3); from the W1.8 review (§1.4): #780, #781, #782, #783, #784, #785, and from its addendum #792.
 
 ---
 
@@ -589,9 +590,9 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - W5.7 → #764 … #767 and, from its addendum, #774: all closed in the wave (two addenda, `5d40dad`, `86768f9`).
   - W3.6 → #768 … #773: all closed in the wave (addendum `79f7ae9`).
   - W4.5 → #775 … #779: closed in the wave (addendum `965ee35`); the addendum filed #791 (pre-existing D7), taken in the wave per §1.4 although the reviewer judged it non-blocking.
-  - W1.8 → #780 … #785: in the sweep slot (Sonnet for #780 … #783 and #785, then Opus for #784); #780 blocks W1's merge.
-  - W2.11 → #786 … #790 (22:01 UTC): in the sweep slot (Opus for #786, then Sonnet for #787 … #790).
-  No issue from outside the plan has been opened on the milestone, and none of the 28 needs the maintainer.
+  - W1.8 → #780 … #785: fixed in the sweep slot (Sonnet for #780 … #783 and #785, `7593223` … `77e7037`; Opus for #784, `ca37ec3`); the addendum filed #792 (Informational, Sonnet), taken in the wave per §1.4.
+  - W2.11 → #786 … #790: closed in the wave (Opus for #786, Sonnet for #787 … #790; addendum `f379f67`).
+  No issue from outside the plan has been opened on the milestone, and none of the 29 needs the maintainer.
 - **Execution:** each task is one Claude Code cloud session, started by the orchestrator with `create_session`
   at the row's model. Each pushes to its wave branch, and the orchestrator reads its report and the branch. The
   first sessions, all started 09:12–09:14 UTC: W1.2 (Opus 5.5), W2.1 (Sonnet 5.5), W3.1 + W3.2 (one Opus 5.5

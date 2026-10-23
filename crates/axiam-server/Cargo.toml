@@ -105,7 +105,8 @@ axiam-core = { workspace = true }
 axiam-db = { workspace = true }
 axiam-auth = { workspace = true }
 axiam-federation = { workspace = true }
-surrealdb = { workspace = true, features = ["kv-mem"] }
+surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
+tempfile = "3"
 surrealdb-types = "3"
 tokio-test = { workspace = true }
 base64 = { workspace = true }

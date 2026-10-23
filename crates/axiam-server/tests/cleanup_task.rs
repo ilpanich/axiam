@@ -39,6 +39,25 @@ async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
     db
 }
 
+/// A migrated `surrealkv` datastore in a fresh temporary directory, the engine
+/// production runs, for a test whose assertion is "exactly one concurrent
+/// caller wins". `kv-mem` admits two winners to a guarded write in about 2 % of
+/// contended rounds (`axiam-db`'s `tests/common/mod.rs` measured it and says
+/// why), so a race test on it measures an engine AXIAM never deploys. The
+/// directory is removed when the returned guard drops, so it is held for the
+/// test's whole life.
+async fn setup_serialising_db() -> (Surreal<surrealdb::engine::local::Db>, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("temp dir for the surrealkv datastore");
+    let path = dir.path().join("axiam-test.db");
+    let db =
+        Surreal::new::<surrealdb::engine::local::SurrealKv>(path.to_string_lossy().into_owned())
+            .await
+            .expect("open surrealkv datastore");
+    db.use_ns("test").use_db("test").await.expect("use ns/db");
+    run_migrations(&db).await.expect("migrations");
+    (db, dir)
+}
+
 // ---------------------------------------------------------------------------
 // saml_assertion_replay sweep
 // ---------------------------------------------------------------------------
@@ -4555,7 +4574,8 @@ fn reports_for(sink: &RecordingPurgeSink, user: Uuid) -> usize {
 /// while replica B sweeps: B skips the account, and A erases it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_sweeps_at_once_erase_one_due_account_once_and_neither_fails() {
-    let db = setup_db().await;
+    // The engine production runs: `kv-mem` may admit two winners (R112W1-06 c).
+    let (db, _dir) = setup_serialising_db().await;
     let tenant_id = Uuid::new_v4();
     let with_request = erasure_due_with_its_request(&db, tenant_id, "race_738_req").await;
     let without_request = user_due_for_erasure(&db, tenant_id, "race_738_bare").await;
@@ -5110,7 +5130,8 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_recoveries_over_one_store_record_an_owed_erasure_once() {
-    let db = setup_db().await;
+    // The engine production runs: `kv-mem` may admit two winners (R112W1-06 c).
+    let (db, _dir) = setup_serialising_db().await;
     let tenant_id = Uuid::new_v4();
     // An erasure cut past its point of no return (the helper's pseudonym is
     // fixed, so one account per store).

@@ -507,10 +507,11 @@ It runs one at a time per URL. The whole run, from reading the stored tag to
 writing it, holds a lock in `ca_path` (`flock` on `.fetch-crl.*.lock` where
 `flock` exists; otherwise a directory of that name plus `.d`, which a later run
 breaks when its owner is gone or it is older than 120 seconds). A run that finds
-the lock held prints that, exits **0** and touches nothing: it is not a failure,
-so a timer that overlaps its own previous run, a manual run beside the cron entry
-or a Kubernetes CronJob left at `concurrencyPolicy: Allow` raises no alert. Without
-the lock, two runs that fetch different lists can leave the older one in place
+the lock held prints that and touches nothing: it is not a failure (it exits **0**,
+or **3** when the installed list is near its end, below), so a timer that overlaps
+its own previous run, a manual run beside the cron entry or a Kubernetes CronJob
+left at `concurrencyPolicy: Allow` raises no alert while the list is healthy, and
+exits 3 (the same alert as an unrefreshed list) when it is not. Without the lock, two runs that fetch different lists can leave the older one in place
 under the newer one's tag, and a revocation then waits until AXIAM's list next
 changes, up to half its lifetime, with a file fresh enough to silence the
 exit-status alert below (R110W5-02). The lock file stays in `ca_path`; OpenSSL never
@@ -545,7 +546,8 @@ would have had (a refusal's reason is still on stderr). AXIAM re-signs at half t
 lifetime, so a healthy list never gets there; a fetch that no longer moves, or a
 server that keeps answering `304` to an old list, does, with at least a quarter of
 the lifetime still to act in ([below](#the-revocation-lag)). A run that finds the
-lock held exits `0` and checks nothing (R110W5-07).
+lock held still reads the installed list's age, which needs no lock, and exits `3`
+if the list is near its end, else `0`; it fetches and writes nothing (R111W5-02).
 
 The cron interval does not need to be less than the list's refresh epoch: AXIAM
 re-signs at most every half `nextUpdate` interval and answers a repeat request
@@ -712,6 +714,20 @@ decision **once** more; a token fetched in that same authentication is not retri
 A second `401`, a `403` and every other failure are an Access-Reject as before, so
 a rotation costs one extra login rather than up to half a token's life
 (7.5 minutes by default) of refused authentications ([#707](https://github.com/ilpanich/axiam/issues/707); T-486).
+Under load the same holds per thread: several authentications that read the old
+token at once each get the `401`, and each logs in again. The drop is read-only
+(`Cache-Read-Only`), so a thread that finds the entry already dropped does not
+create one holding the refused token, and the store after the new login uses a
+negative TTL, which replaces whatever entry is there with this request's token
+instead of merging another thread's over it ([#720](https://github.com/ilpanich/axiam/issues/720)).
+The read is one read-only call too, not a status probe followed by a second call
+that would insert this request's empty value had another thread dropped the entry
+in between, and the first login's store takes the same negative TTL, so a request
+that fetched a token decides with that token. No call on the cache can create an
+entry that does not hold a token a request fetched
+([#764](https://github.com/ilpanich/axiam/issues/764)); the shape of each call is
+checked by `docker/radius/tests/check-token-cache.py`, and what each shape does in
+the pinned image by `docker/radius/tests/token-cache-test.sh`.
 
 ### The FreeRADIUS configuration
 
@@ -720,7 +736,10 @@ and the files of section 3 stay, and
 [`docker-compose.radius-live.yml`](../../docker/docker-compose.radius-live.yml)
 **overrides** the one service (`docker compose -f docker-compose.radius.yml -f
 docker-compose.radius-live.yml up`). It names no image: the digest is pinned once, in
-the base file.
+the base file. It also sets the command to `freeradius -f -xx -l stdout`: the debug
+level and log lines of the base file's `-X`, but with the thread pool, since `-X`
+includes `-s` and serves one request at a time. If you copy the override, keep that
+in mind; production runs without debug output, as the logs note below says.
 
 | File ([`docker/radius/raddb/live/`](../../docker/radius/raddb/live/)) | What it does |
 |---|---|

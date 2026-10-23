@@ -318,6 +318,33 @@ newcap; ctl file "$T/bad.der" etag '"x"'; run
 t "07: nothing installed yet, and a refusal: exit 1 (no list to age)" '[ $rc -eq 1 ]'
 newcap; serve 20 '"t20"'; run; printf 'garbage\n' >"$(installed)"; ctl file "$T/bad.der" etag '"x"'; run
 t "07: an unreadable installed list does not turn a refusal into exit 3" '[ $rc -eq 1 ]'
+# A run that finds the lock held still reads the installed list's age (R111W5-02):
+# the check is read-only, so it needs no lock. "Nothing touched": the same files with
+# the same contents in capath, and no request made.
+snap() { (cd "$CAPATH" && for f in $(ls -A | sort); do [ -f "$f" ] && printf '%s %s\n' "$f" "$(sha "$f")"; done; ls -A | sort); }
+hold_flock() { : >>"$(statefile).lock"; flock "$(statefile).lock" sleep 5 & holder=$!; sleep 1; }
+release_flock() { kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; }
+newcap; serve 20 '"t20"'; run; before=$(snap); hold_flock; run
+t "07/lock-held (flock): a list near its end -> exit 3, lock named, nothing touched, no request" '[ $rc -eq 3 ] && msg | grep -qi "holds the lock" && msg | grep -q "less than a quarter" && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
+release_flock
+newcap; serve 22 '"t22"'; run; before=$(snap); hold_flock; run
+t "07/lock-held (flock): an expired list -> exit 3, nothing touched" '[ $rc -eq 3 ] && msg | grep -q "expired" && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
+release_flock
+newcap; serve 21 '"t21"'; run; before=$(snap); hold_flock; run
+t "07/lock-held (flock): a healthy list -> exit 0, nothing touched" '[ $rc -eq 0 ] && msg | grep -qi "holds the lock" && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
+release_flock
+newcap; hold_flock; serve 20 '"t20"'; run
+t "07/lock-held (flock): no installed list to age -> exit 0, nothing installed" '[ $rc -eq 0 ] && [ ! -e "$(installed)" ] && [ "$(reqs)" = 0 ]'
+release_flock
+newcap; serve 20 '"t20"'; run; mkdir "$(statefile).lock.d"; printf '%s\n%s\n' "$$" "$(date +%s)" >"$(statefile).lock.d/owner"; before=$(snap)
+: >"$T/req.log"
+env PATH="$NOFLOCK_PATH" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+t "07/lock-held (mkdir): a list near its end -> exit 3, lock left alone, nothing touched, no request" '[ $rc -eq 3 ] && msg | grep -qi "holds the lock" && [ -d "$(statefile).lock.d" ] && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
+rm -rf "$(statefile).lock.d"
+newcap; serve 21 '"t21"'; run; mkdir "$(statefile).lock.d"; printf '%s\n%s\n' "$$" "$(date +%s)" >"$(statefile).lock.d/owner"; before=$(snap)
+: >"$T/req.log"
+env PATH="$NOFLOCK_PATH" HOME="$T/home" FETCH_CRL_ALLOW_HTTP=1 "$SH" "$SCRIPT" "$URL" "$CA" "$CAPATH" >"$T/out" 2>"$T/err"; rc=$?
+t "07/lock-held (mkdir): a healthy list -> exit 0, lock left alone, nothing touched, no request" '[ $rc -eq 0 ] && msg | grep -qi "holds the lock" && [ -d "$(statefile).lock.d" ] && [ "$(snap)" = "$before" ] && [ "$(reqs)" = 0 ]'
 
 # ---- R110W5-08 -----------------------------------------------------------------
 echo "-- R110W5-08"

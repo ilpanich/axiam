@@ -5247,7 +5247,7 @@ DEFINE INDEX IF NOT EXISTS idx_ca_certificate_parent_serial ON TABLE ca_certific
 ";
 
 // -----------------------------------------------------------------------
-// Schema v100 — network segments, reply profiles and the session cap (#563, D4)
+// Schema v100 — network segments, reply profiles and the session cap (#563, the Live profile)
 // -----------------------------------------------------------------------
 //
 // `claude_dev/radius-reply-profile-design.md` §3.5 and §4. Three new
@@ -7565,7 +7565,7 @@ mod tests {
              the `webauthn_assertion` replay kind and `webauthn_credential.sign_count`; \
              v101 was #701 (R110W6-04 — `role.grant_epoch` and \
              `role.holder_epoch`, which every role write the network gate decides moves and \
-             compares, so the gate's reads and the write act as one transaction); v100 was #563 (D4 — `network_segment`, `reply_profile` and \
+             compares, so the gate's reads and the write act as one transaction); v100 was #563 (the Live profile — `network_segment`, `reply_profile` and \
              `network_policy`, the reserved-subtree segments, their typed reply profiles and the \
              tenant's `Session-Timeout` cap); v99 was #653 — `certificate.serial` and \
              `ca_certificate.serial`, each with a UNIQUE index under the issuer, so a serial is \

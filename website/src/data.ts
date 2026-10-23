@@ -522,7 +522,7 @@ export const POSTS: Post[] = [
       { type: "h", text: "Upgrading" },
       {
         type: "p",
-        text: "Read the `[1.1.1]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v107 to v109, additively; roll replicas one at a time. Set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` if a proxy sits in front of AXIAM or native TLS is on. The organization scope's `super-admin` loses the network permissions at the first boot. Public DPoP-bound clients sign in again once. The FreeRADIUS recipe's profiles are now Static and Live, with renamed files, and `fetch-crl.sh` exits 3 on a list near expiry.",
+        text: "Read the `[1.1.1]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves from v107 to v109, additively. (Update, 1.1.2: the “roll replicas one at a time” advice that stood here is withdrawn; 1.1.2 takes a real migration lease, see the `[1.1.2]` section of the CHANGELOG.) Set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` if a proxy sits in front of AXIAM or native TLS is on. The organization scope's `super-admin` loses the network permissions at the first boot. Public DPoP-bound clients sign in again once. The FreeRADIUS recipe's profiles are now Static and Live, with renamed files, and `fetch-crl.sh` exits 3 on a list near expiry.",
       },
       { type: "h", text: "What is not in 1.1.1" },
       {

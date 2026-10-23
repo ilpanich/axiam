@@ -3226,6 +3226,19 @@ typed `expired_token` outcome of rule 4, at once or after serving the capped wai
 A third case (*contract 1.64 (amended)*): a `429` whose body says `slow_down`, then `200`, does
 not raise the interval.
 
+**The device poll is §16-retried inside the attempt** (*contract 1.64 (amended)*; C164-35; §14.2
+rule 6, [§16.1](#§161-the-policy-normative--every-value-here-is-binding),
+[§16.2](#§162-what-is-eligible-normative)), against a mocked server with retry enabled (the default):
+the mock answers a `device_poll` with `500 {"error":"server_error","error_description":…}` twice
+and then `200` with the tokens. Assert that a single `device_poll` makes **three requests** (the
+attempt cap of §16.1 is 3 in total) and returns the token set, and that `device_login` completes
+within one interval with those three requests, so a `5xx` is retried within the poll under §16
+before the loop takes its next interval. A third `500` in a row exhausts the cap: the poll has made
+three requests, and `device_poll` surfaces the failure (and `device_login` takes its next interval,
+rule 6). The same holds for a transport failure. A `429` is **not** retried inside the poll: the
+mock answers `429` and the poll makes one request, the wait being the loop's (rule 9). With retry
+disabled, a `5xx` makes one request per poll.
+
 **Contract 1.62, no session or adopted credential on `/oauth2/*`** (maintainer, 2026-10-16;
 [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3, last paragraph), against a mocked
 server: **adopt a credential** (a device login, [§6.1](#§61-client-certificate-authentication-mtls)
@@ -4313,7 +4326,7 @@ recorded here until one exists.
   the administrator's client `PUT` (§28.12.2 rule 7, §27.4 rule 7 (v)), `network_role.deleted`
   (§8), the refusals the spec now declares (§2), `uma_request_ticket` for another server's set
   (§20.2 rule 9, §20.4), the token carrier order (§6.1 rule 11). Amended 2026-10-23 (W7.1b), none
-  breaking: wording of §14.2 rules 6 and 9, §14.6, §34.2 P11 and §34.8 (c) (see §34.8).
+  breaking: wording of §14.2 rules 6 and 9, §14.6 (including its in-attempt retry test), §34.2 P11 and §34.8 (c) (see §34.8).
 - **2026-10-20 (1.1.1 release, contract 1.63)** — **no new operation; two rules every SDK ports and
   a third that an audit-message helper may; wire-additive, no wire break.** Recorded in **§34.7**, marked *contract
   1.63* inline where each rule lives. SDK work: no session cookie and no `X-CSRF-Token` on any
@@ -13873,6 +13886,12 @@ slow_down` open, so one sentence is added: the status decides, any `429` on a po
 only the `400` raises the interval; the §14.6 test gains a `429 slow_down` case. (4) **C# and P11,
 checked** — §16.2's table lists `device_poll` on a `5xx` or transport failure as retried and P11's list
 of retried requests did not; P11 now names it. No wire change, no new operation.
+
+Amended again 2026-10-23 (W7.1c; #750, #760), no version change and nothing breaking, marked
+*contract 1.64 (amended)* inline: **C164-35** — [§14.6](#§146-required-tests) gains the in-attempt
+retry test: a `5xx` or transport failure on the device poll is §16-retried within the poll (at most
+three attempts in total, so two failures and a `200` make three requests), a `429` is not. No rule of §14.2,
+§16.1 or §16.2 changes; the test makes visible what rule 6 already requires (C164-25).
 
 - **(a) The recovered `gdpr.user_pseudonymized` row (informative; no SDK change; #760 Q1).**
   [§27.11](#§2711-model-additions-contract-131) rule 5: the erasure "carries the count, or `null`

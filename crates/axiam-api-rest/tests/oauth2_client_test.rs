@@ -2335,10 +2335,10 @@ async fn admin_put_of_a_resource_outside_the_tenant_list_is_422_on_dcr_and_cimd_
             id,
             serde_json::json!({ "allowed_resources": ["https://evil.example/api"] })
         );
-        assert_eq!(status, 422, "{managed_by}: {body}");
+        assert_eq!(status, 422, "{managed_by}: status");
         assert_eq!(
             body["error"], "resource_exceeds_registration_policy",
-            "{body}"
+            "error code"
         );
         assert_eq!(
             stored_row(&db, tenant_id, &id).await.allowed_resources,
@@ -2347,33 +2347,33 @@ async fn admin_put_of_a_resource_outside_the_tenant_list_is_422_on_dcr_and_cimd_
         );
 
         // Held value: re-sending it adds nothing, though the list no longer has it.
-        let (status, body) = put_client!(
+        let (status, _body) = put_client!(
             app,
             token,
             id,
             serde_json::json!({ "allowed_resources": ["https://held.example/api"] })
         );
-        assert_eq!(status, 200, "{managed_by}: {body}");
+        assert_eq!(status, 200, "{managed_by}: status");
 
         // Inside the tenant's list is an ordinary edit.
-        let (status, body) = put_client!(
+        let (status, _body) = put_client!(
             app,
             token,
             id,
             serde_json::json!({ "allowed_resources": ["https://api.allowed.test/mcp"] })
         );
-        assert_eq!(status, 200, "{managed_by}: {body}");
+        assert_eq!(status, 200, "{managed_by}: status");
     }
 
     // The control: the same body on an administrator's own client.
     let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id,
         serde_json::json!({ "allowed_resources": ["https://evil.example/api"] })
     );
-    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(status, 200, "an admin row is not bounded");
     assert_eq!(
         stored_row(&db, tenant_id, &id).await.allowed_resources,
         vec!["https://evil.example/api".to_owned()]
@@ -2405,15 +2405,15 @@ async fn admin_put_of_a_redirect_host_outside_the_tenant_list_is_422_on_dcr_rows
             id,
             serde_json::json!({ "redirect_uris": [held, "https://evil.example/cb"] })
         );
-        assert_eq!(status, 422, "{managed_by}: {body}");
+        assert_eq!(status, 422, "{managed_by}: status");
         assert_eq!(
             body["error"], "redirect_exceeds_registration_policy",
-            "{body}"
+            "error code"
         );
         let message = body["message"].as_str().unwrap();
         assert!(
             message.contains("evil.example") && !message.contains("app.example.com"),
-            "only the new host is named: {body}"
+            "only the new host is named"
         );
         assert_eq!(
             stored_row(&db, tenant_id, &id).await.redirect_uris,
@@ -2422,16 +2422,16 @@ async fn admin_put_of_a_redirect_host_outside_the_tenant_list_is_422_on_dcr_rows
         );
 
         // Held URI: the whole record posted back still saves.
-        let (status, body) = put_client!(
+        let (status, _body) = put_client!(
             app,
             token,
             id,
             serde_json::json!({ "redirect_uris": [held] })
         );
-        assert_eq!(status, 200, "{managed_by}: {body}");
+        assert_eq!(status, 200, "{managed_by}: status");
 
         // An allowed host, and loopback, are ordinary edits.
-        let (status, body) = put_client!(
+        let (status, _body) = put_client!(
             app,
             token,
             id,
@@ -2439,18 +2439,18 @@ async fn admin_put_of_a_redirect_host_outside_the_tenant_list_is_422_on_dcr_rows
                 "redirect_uris": ["https://app.allowed.test/cb", "http://127.0.0.1:9000/cb"]
             })
         );
-        assert_eq!(status, 200, "{managed_by}: {body}");
+        assert_eq!(status, 200, "{managed_by}: status");
     }
 
     // The control: an administrator's own client is not bounded.
     let id = seed_managed_client(&db, tenant_id, ManagedBy::Admin, &["openid"]).await;
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id,
         serde_json::json!({ "redirect_uris": ["https://evil.example/cb"] })
     );
-    assert_eq!(status, 200, "an admin row is not bounded: {body}");
+    assert_eq!(status, 200, "an admin row is not bounded");
     assert_eq!(
         stored_row(&db, tenant_id, &id).await.redirect_uris,
         vec!["https://evil.example/cb".to_owned()]
@@ -2523,10 +2523,10 @@ async fn admin_put_of_a_redirect_on_a_cimd_row_follows_the_cimd_policy() {
         id.clone(),
         serde_json::json!({ "redirect_uris": ["https://x.partner.example/cb"] })
     );
-    assert_eq!(status, 422, "{body}");
+    assert_eq!(status, 422, "status");
     assert_eq!(
         body["error"], "redirect_exceeds_registration_policy",
-        "{body}"
+        "error code"
     );
     assert_eq!(
         stored_row(&db, tenant_id, &id).await.redirect_uris,
@@ -2537,58 +2537,58 @@ async fn admin_put_of_a_redirect_on_a_cimd_row_follows_the_cimd_policy() {
     // Same host as the client_id, trusted: admitted although the DCR list is
     // empty (the over-refusal the review found).
     set_policy(vec![], vec!["*.vendor.example".into()], true).await;
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id.clone(),
         serde_json::json!({ "redirect_uris": ["https://mcp.vendor.example/cb2"] })
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "status");
 
     // Another trusted host is refused while restrict_same_domain is on, and
     // admitted once it is off.
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id.clone(),
         serde_json::json!({ "redirect_uris": ["https://app.vendor.example/cb"] })
     );
-    assert_eq!(status, 422, "{body}");
+    assert_eq!(status, 422, "status");
     set_policy(vec![], vec!["*.vendor.example".into()], false).await;
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id.clone(),
         serde_json::json!({ "redirect_uris": ["https://app.vendor.example/cb"] })
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "status");
 
     // Scheme and fragment are refused too, by the handler's own shape check
     // before the policy is read (`400`); the policy function repeats them so a
     // document and an edit cannot disagree (unit-tested in `cimd.rs`).
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id,
         serde_json::json!({ "redirect_uris": ["http://app.vendor.example/cb"] })
     );
-    assert_eq!(status, 400, "{body}");
-    let (status, body) = put_client!(
+    assert_eq!(status, 400, "status");
+    let (status, _body) = put_client!(
         app,
         token,
         id,
         serde_json::json!({ "redirect_uris": ["https://app.vendor.example/cb#f"] })
     );
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 400, "status");
 
     // Loopback is always allowed, and a held URI is never re-checked.
-    let (status, body) = put_client!(
+    let (status, _body) = put_client!(
         app,
         token,
         id,
         serde_json::json!({ "redirect_uris": ["http://127.0.0.1:9000/cb"] })
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "status");
 }
 
 /// R112-07 (#800) — the two logout members of a `dcr` or `cimd` row are bounded

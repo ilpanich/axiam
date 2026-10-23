@@ -277,45 +277,61 @@ impl FromRequest for CertificateBoundServiceAccount {
     fn from_request(req: &HttpRequest, payload: &mut actix_web::dev::Payload) -> Self::Future {
         let account = AuthenticatedServiceAccount::from_request(req, payload);
         let req = req.clone();
-        Box::pin(async move {
-            let account = account.await?;
-            let claims = &account.claims.0;
-            if claims.sub_kind != SubjectKind::ServiceAccount {
-                return Err(unauthenticated(
-                    "the network decision route is a service account's; this machine token \
+        Box::pin(async move { Self::admit(&req, account.await?) })
+    }
+}
+
+impl CertificateBoundServiceAccount {
+    /// What follows the machine-token extraction, every refusal of it leaving
+    /// the D-12 verdict (#787).
+    fn admit(
+        req: &HttpRequest,
+        account: AuthenticatedServiceAccount,
+    ) -> Result<Self, AxiamApiError> {
+        Self::bind(req, account)
+            .map_err(|refusal| crate::extractors::auth::mark_refused(req, refusal))
+    }
+
+    fn bind(
+        req: &HttpRequest,
+        account: AuthenticatedServiceAccount,
+    ) -> Result<Self, AxiamApiError> {
+        let claims = &account.claims.0;
+        if claims.sub_kind != SubjectKind::ServiceAccount {
+            return Err(unauthenticated(
+                "the network decision route is a service account's; this machine token \
                      is not one",
-                ));
-            }
-            let subject = Uuid::parse_str(&account.subject)
-                .map_err(|_| unauthenticated("invalid sub claim"))?;
-            // A bearer token, or one bound only by DPoP, is not what T-468
-            // asks for: the binding must be to the caller's own certificate.
-            let Some(bound_to) = claims
-                .cnf
-                .as_ref()
-                .and_then(|cnf| cnf.certificate_thumbprint())
-            else {
-                return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
-            };
-            // The extractor has already refused a bound token whose certificate
-            // is not on this connection (`enforce_sender_constraint`); this
-            // restates it here, where the rest of the rule needs the
-            // certificate itself.
-            let Some(verified) = req.conn_data::<VerifiedClientCert>() else {
-                return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
-            };
-            verified
-                .check_usable_for_device_auth()
-                .map_err(AxiamApiError::from)?;
-            if axiam_oauth2::mtls::thumbprint_s256(&verified.der) != bound_to {
-                return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
-            }
-            let der = verified.der.clone();
-            Ok(Self {
-                account,
-                subject,
-                der,
-            })
+            ));
+        }
+        let subject =
+            Uuid::parse_str(&account.subject).map_err(|_| unauthenticated("invalid sub claim"))?;
+        // A bearer token, or one bound only by DPoP, is not what T-468
+        // asks for: the binding must be to the caller's own certificate.
+        let Some(bound_to) = claims
+            .cnf
+            .as_ref()
+            .and_then(|cnf| cnf.certificate_thumbprint())
+        else {
+            return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+        };
+        // The extractor has already refused a bound token whose certificate
+        // is not on this connection (`enforce_sender_constraint`); this
+        // restates it here, where the rest of the rule needs the
+        // certificate itself.
+        let Some(verified) = req.conn_data::<VerifiedClientCert>() else {
+            return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+        };
+        verified
+            .check_usable_for_device_auth()
+            .map_err(AxiamApiError::from)?;
+        if axiam_oauth2::mtls::thumbprint_s256(&verified.der) != bound_to {
+            return Err(unauthenticated(CERTIFICATE_BOUND_REFUSAL));
+        }
+        let der = verified.der.clone();
+        Ok(Self {
+            account,
+            subject,
+            der,
         })
     }
 }

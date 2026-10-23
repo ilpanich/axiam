@@ -66,6 +66,33 @@ function DcrEventBadge() {
   );
 }
 
+// ─── #741 — provenance of an ingested row ──────────────────────────────────
+
+/**
+ * The AMQP consumer stamps `metadata.ingested_via = "amqp"` on every row it
+ * persists, after the producer's own metadata, so a producer cannot clear or
+ * change it. The server's own rows never carry the key. A row with the badge
+ * was reported by a holder of the tenant's signing subkey, not observed by the
+ * server — the forgery residual `docs/admin/README.md` describes. The stamp
+ * starts with 1.1.2: a row ingested before the upgrade has no badge although
+ * it arrived over AMQP, so no badge means server-written only for rows
+ * written after the upgrade.
+ */
+function isIngestedViaAmqp(metadata: AuditLog["metadata"]): boolean {
+  return metadata?.ingested_via === "amqp";
+}
+
+function IngestedBadge() {
+  return (
+    <span
+      title="Reported by an external producer over AMQP; not observed by the server"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30"
+    >
+      AMQP
+    </span>
+  );
+}
+
 // ─── Details expander ─────────────────────────────────────────────────────────
 
 function DetailsExpander({
@@ -430,6 +457,7 @@ export function AuditLogsPage() {
             {row.action}
           </span>
           {isDcrAuditAction(row.action) && <DcrEventBadge />}
+          {isIngestedViaAmqp(row.metadata) && <IngestedBadge />}
         </div>
       ),
     },

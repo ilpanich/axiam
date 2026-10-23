@@ -10,7 +10,7 @@ use std::time::Duration;
 use actix_web::cookie::Cookie;
 use actix_web::dev::Service as _;
 use actix_web::{App, HttpMessage, HttpResponse, test, web};
-use axiam_audit::middleware::AuditMiddleware;
+use axiam_audit::middleware::{AuditMiddleware, ClientIpRule};
 use axiam_audit::service::AuditService;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
@@ -18,6 +18,7 @@ use axiam_auth::token::{
     issue_service_account_token, validate_access_token,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::forwarded_for::TrustedProxies;
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use chrono::Utc;
@@ -304,6 +305,59 @@ async fn middleware_records_client_ip() {
     assert_eq!(entries[0].ip_address.as_deref(), Some("203.0.113.7"));
 }
 
+/// Record one request carrying `X-Forwarded-For: xff` from `peer` under
+/// `10.0.0.0/8` as the trusted proxies (#752, T-212). The rule is injected, not
+/// read from the process environment.
+async fn audit_one_forwarded(peer: &str, xff: &str, hops: usize) -> CreateAuditLogEntry {
+    let repo = RecordingRepo::new();
+    let rule = ClientIpRule {
+        trusted_hops: hops,
+        trusted_proxies: TrustedProxies::parse("10.0.0.0/8").unwrap(),
+    };
+    let mw = AuditMiddleware::spawn(repo.clone()).with_client_ip_rule(rule);
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/ip",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+    let req = test::TestRequest::get()
+        .uri("/api/ip")
+        .insert_header(("X-Forwarded-For", xff))
+        .peer_addr(peer.parse().unwrap())
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    repo.snapshot().remove(0)
+}
+
+#[actix_web::test]
+async fn a_peer_outside_the_trusted_proxies_is_recorded_as_itself_with_the_claim_beside_it() {
+    let row = audit_one_forwarded("203.0.113.7:5555", "1.2.3.4", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(
+        row.metadata.unwrap()["forwarded_for_claimed"],
+        serde_json::json!("1.2.3.4")
+    );
+}
+
+#[actix_web::test]
+async fn a_listed_peer_is_recorded_as_the_rightmost_untrusted_hop() {
+    // client-written `9.9.9.9`, then the address the proxy saw, `198.51.100.5`.
+    let row = audit_one_forwarded("10.1.2.3:5555", "9.9.9.9, 198.51.100.5", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("198.51.100.5"));
+    assert_eq!(
+        row.metadata.unwrap()["forwarded_for_claimed"],
+        serde_json::json!("9.9.9.9")
+    );
+}
+
+#[actix_web::test]
+async fn no_claim_is_recorded_when_the_leftmost_entry_is_the_recorded_address() {
+    let row = audit_one_forwarded("10.1.2.3:5555", "198.51.100.5", 0).await;
+    assert_eq!(row.ip_address.as_deref(), Some("198.51.100.5"));
+    assert!(row.metadata.unwrap().get("forwarded_for_claimed").is_none());
+}
+
 /// T-110. The third of the three minimisations the GDPR document names —
 /// "no request metadata" — is already true of the request-audit middleware,
 /// and this is what keeps it true.
@@ -471,6 +525,62 @@ async fn middleware_authenticates_via_bearer_header() {
     assert_eq!(e.actor_id, user_id);
     assert_eq!(e.tenant_id, tenant_id);
     assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+}
+
+/// D-12 (#758 (c)): where the session extractor ran, its verdict is the row's
+/// `authenticated`. `axiam-audit` cannot reach the real extractor, so the
+/// handler leaves the verdict the extractor would (the real one is exercised by
+/// `device_flow_test.rs`); a route that never ran it keeps the signature check.
+async fn audit_with_verdict(
+    verdict: Option<axiam_auth::carrier::AuthVerdict>,
+    status: actix_web::http::StatusCode,
+) -> CreateAuditLogEntry {
+    use actix_web::HttpMessage;
+    use actix_web::HttpRequest;
+    let cfg = test_auth_config();
+    let token = mint_token(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), &cfg);
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+        "/api/secure",
+        web::get().to(move |req: HttpRequest| async move {
+            if let Some(v) = verdict {
+                req.extensions_mut().insert(v);
+            }
+            HttpResponse::build(status).finish()
+        }),
+    ))
+    .await;
+    let req = test::TestRequest::get()
+        .uri("/api/secure")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    repo.snapshot().remove(0)
+}
+
+#[actix_web::test]
+async fn a_token_the_extractor_refused_is_recorded_unauthenticated_with_its_outcome() {
+    use actix_web::http::StatusCode;
+    use axiam_auth::carrier::AuthVerdict;
+    let e = audit_with_verdict(Some(AuthVerdict::Refused), StatusCode::FORBIDDEN).await;
+    assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], false);
+    assert_eq!(e.metadata.as_ref().unwrap()["http_status"], 403);
+    assert_eq!(e.outcome, AuditOutcome::Denied);
+    // The actor is still the token's subject: the signature verified.
+    assert_eq!(e.actor_type, ActorType::User);
+    assert!(!e.actor_id.is_nil());
+}
+
+#[actix_web::test]
+async fn an_admitted_token_and_a_route_without_the_extractor_stay_authenticated() {
+    use actix_web::http::StatusCode;
+    use axiam_auth::carrier::AuthVerdict;
+    for verdict in [Some(AuthVerdict::Admitted), None] {
+        let e = audit_with_verdict(verdict, StatusCode::OK).await;
+        assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+    }
 }
 
 #[actix_web::test]
@@ -718,6 +828,48 @@ async fn middleware_authenticates_via_dpop_scheme() {
         assert_eq!(e.tenant_id, tenant_id, "{scheme}");
         assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
     }
+}
+
+/// A valid `axiam_access` cookie plus an `Authorization` header that is not the
+/// cookie's token: the request row must still name the cookie's user (#751).
+async fn assert_cookie_wins_over_header(header: &str) {
+    let cfg = test_auth_config();
+    let user_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let token = mint_token(user_id, tenant_id, Uuid::new_v4(), &cfg);
+
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let app = test::init_service(App::new().app_data(web::Data::new(cfg)).wrap(mw).route(
+        "/api/secure",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/api/secure")
+        .insert_header(("Authorization", header))
+        .cookie(Cookie::new("axiam_access", token))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    wait_for_entries(&repo, 1).await;
+    let e = &repo.snapshot()[0];
+    assert_eq!(e.actor_type, ActorType::User);
+    assert_eq!(e.actor_id, user_id);
+    assert_eq!(e.tenant_id, tenant_id);
+    assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], true);
+}
+
+#[actix_web::test]
+async fn middleware_cookie_survives_a_basic_authorization_header() {
+    assert_cookie_wins_over_header("Basic eDp5").await;
+}
+
+#[actix_web::test]
+async fn middleware_cookie_survives_an_invalid_bearer_header() {
+    assert_cookie_wins_over_header("Bearer not-a-real-jwt").await;
 }
 
 #[actix_web::test]

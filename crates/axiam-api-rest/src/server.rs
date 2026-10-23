@@ -159,6 +159,12 @@ fn build_client_aware_governor(
 /// `extractors::rate_limit::bucket_key_part` from the identity the audit
 /// middleware verified, so the route keys the same way whether the shared
 /// counter is on or off (`AXIAM__RATE_LIMIT__SHARED`).
+///
+/// It has no refund, so it relies on the shared layer outside it to have
+/// confirmed the token's session live before it charges (#786,
+/// `extractors::rate_limit::confirm_principal_session`); without that verdict
+/// it keys on the address. Always wrap it **before** (inside) the
+/// `keyed_on_principal` shared layer.
 fn build_principal_governor(
     requests_per_min: u32,
 ) -> Governor<ClientAwareKeyExtractor, NoOpMiddleware> {
@@ -1519,7 +1525,10 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // verify is keyed on its address. Both layers key alike:
             // `build_principal_governor` and `keyed_on_principal`, through one
             // key function; neither verifies a signature (the audit middleware
-            // already did, and they read its result).
+            // already did, and they read its result). #786: the shared layer
+            // also asks the session store whether the token's session is live
+            // before either layer charges, and both key a revoked or expired
+            // session's token on its address — the governor has no refund.
             //
             // R110W2-01: that key dropped every per-address bound for a caller
             // with a valid token (one address holding K principals got K x the

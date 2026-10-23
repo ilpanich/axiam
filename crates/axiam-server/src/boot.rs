@@ -340,6 +340,102 @@ impl Default for AppConfig {
     }
 }
 
+/// Everything [`compose_app`] reads, owned once and cloned per worker.
+///
+/// A struct rather than a long argument list so that the composition the
+/// listener runs and the one `tests/audit_wraps_routes.rs` runs are the same
+/// function over different values.
+#[derive(Clone)]
+pub struct AppDeps<C: Connection + Clone + 'static> {
+    /// The request-audit middleware that wraps the whole `App`.
+    pub audit_middleware: AuditMiddleware,
+    /// `AXIAM__SERVER__CORS_ALLOWED_ORIGINS`.
+    pub cors_allowed_origins: Vec<String>,
+    /// The authorisation checker the RBAC-protected handlers read.
+    pub rest_authz: Arc<dyn axiam_api_rest::authz::AuthzChecker>,
+    /// Token verification configuration.
+    pub auth_config: AuthConfig,
+    /// Whether a session is still live.
+    pub session_validator: Arc<dyn axiam_api_rest::SessionValidator>,
+    /// DPoP proof replay guard.
+    pub dpop_replay_guard: Arc<dyn axiam_api_rest::DpopReplayGuard>,
+    /// Resolves the tenants a principal may act in.
+    pub tenant_scope_resolver: Arc<dyn axiam_api_rest::TenantScopeResolver>,
+    /// Resolves the reach of a principal.
+    pub principal_reach_resolver: Arc<dyn axiam_api_rest::PrincipalReachResolver>,
+    /// Resolves SCIM bearer tokens.
+    pub scim_token_resolver: Arc<dyn axiam_api_rest::ScimTokenResolver>,
+    /// The single `AppState<C>` composition root.
+    pub app_state: AppState<C>,
+    /// The resolved rate-limit configuration.
+    pub rate_limit: RateLimitConfig,
+    /// Which optional route groups are mounted.
+    pub route_options: RouteOptions,
+}
+
+/// The `App` the REST listener serves, factored out of [`serve`] unchanged so
+/// a test can compose the same wraps and routes (#733).
+pub fn compose_app<C>(
+    deps: AppDeps<C>,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+>
+where
+    C: Connection + Clone + 'static,
+{
+    App::new()
+        .wrap(SecurityHeadersMiddleware)
+        // F4 P23W3-03 (T-325): the default builder's field set, with query
+        // values (a SAML handle, `RelayState`, `state`, a reset token) and
+        // `{token}` path segments redacted from `http.target`.
+        .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
+        .wrap(deps.audit_middleware)
+        .wrap(build_cors(&deps.cors_allowed_origins))
+        // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
+        // web::Data<Arc<dyn AuthzChecker>>, matching the AuthzData type alias used
+        // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
+        // register it as web::Data<dyn AuthzChecker>, causing "Requested application
+        // data is not configured correctly" 500s on every admin endpoint.
+        //
+        // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
+        // AppState<C> alongside the single AppState registration below — see
+        // `axiam_api_rest::state` module docs for the full rationale (Rust
+        // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
+        // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
+        // `AuthConfig`/`SessionValidator` without knowing `C`, and
+        // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
+        // App — independently looks up `web::Data<AuthConfig>`).
+        .app_data(web::Data::new(deps.rest_authz))
+        .app_data(web::Data::new(deps.auth_config))
+        .app_data(web::Data::new(deps.session_validator))
+        .app_data(web::Data::new(deps.dpop_replay_guard))
+        .app_data(web::Data::new(deps.tenant_scope_resolver))
+        .app_data(web::Data::new(deps.principal_reach_resolver))
+        .app_data(web::Data::new(deps.scim_token_resolver))
+        // QUAL-01: single composition root — every other REST handler
+        // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
+        // lives on this one AppState<C> value (see above).
+        .app_data(web::Data::new(deps.app_state))
+        .configure(health_routes::<C>)
+        .configure(|cfg| {
+            register_api_v1_routes_with::<C>(cfg, &deps.rate_limit, deps.route_options)
+        })
+        // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
+        // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
+        // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
+        // posture log line) actually govern the provisioning surface.
+        .configure(|cfg| {
+            axiam_scim::scim_routes_with_rate_limits::<C>(cfg, &deps.rate_limit)
+        })
+        .configure(openapi_routes)
+}
+
 /// How [`serve`] is embedded, beyond the configuration. The default is what
 /// `main` uses.
 pub struct ServeOptions {
@@ -1595,26 +1691,10 @@ where
     // from ingress-nginx to this native TLS listener — so on a native TLS
     // listener it is said once, here: that is the listener a client with no
     // proxy in front (the FreeRADIUS recipe's mutual TLS) reaches directly.
-    let trusted_proxies = axiam_core::forwarded_for::TrustedProxies::from_env()
-        .unwrap_or_else(|e| panic!("invalid rate-limit configuration: {e}"));
-    if let Some(warning) = trusted_proxies.boot_warning(config.server.tls.enabled) {
-        tracing::warn!(
-            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
-            "{warning}"
-        );
-    } else if !trusted_proxies.is_empty() {
-        let networks: Vec<String> = trusted_proxies
-            .networks()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        tracing::info!(
-            trusted_proxies = %networks.join(","),
-            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
-             peers; every other request is keyed on its own address. Both listeners \
-             read the same list."
-        );
-    }
+    let trusted_proxies =
+        trusted_proxies_for_boot(|name| std::env::var(name)).unwrap_or_else(|e| panic!("{e}"));
+    // The WARN / INFO for this list is emitted below, once the gRPC listener's
+    // TLS is resolved: it names whichever listener(s) terminate TLS here.
 
     // §4 item 1 (security-analysis-2026-08-02): the bucket key for
     // `/oauth2/{token,introspect,revoke}` is derived from the raw form body
@@ -2656,6 +2736,38 @@ where
         None => axiam_api_grpc::GrpcTls::Plaintext,
     };
 
+    // #731 (R111W2-01, T-212): the empty-list WARN, decided on both listeners'
+    // native TLS. Here rather than beside the parse because the gRPC settings
+    // resolve here (they need the reload interval, read from the config far
+    // below the parse), and a bad list still stops the boot at the parse.
+    if let Some(warning) = trusted_proxies.boot_warning_for(
+        config.server.tls.enabled,
+        matches!(grpc_tls, axiam_api_grpc::GrpcTls::Rustls(_)),
+    ) {
+        tracing::warn!(
+            variable = axiam_core::forwarded_for::TRUSTED_PROXIES_VAR,
+            "{warning}"
+        );
+    } else if trusted_proxies.is_none() {
+        tracing::info!(
+            "Rate-limit client-IP derivation: {} is `none`; X-Forwarded-For is read from \
+             no peer and every request is keyed on its own address, on both listeners.",
+            axiam_core::forwarded_for::TRUSTED_PROXIES_VAR
+        );
+    } else if !trusted_proxies.is_empty() {
+        let networks: Vec<String> = trusted_proxies
+            .networks()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::info!(
+            trusted_proxies = %networks.join(","),
+            "Rate-limit client-IP derivation: X-Forwarded-For is read only from these \
+             peers; every other request is keyed on its own address. Both listeners \
+             read the same list."
+        );
+    }
+
     // Resolved by the teardown once the REST listener has stopped (P23W5-A11);
     // dropping the sender, on an early return, resolves it too.
     let (grpc_stop, grpc_stopped) = tokio::sync::oneshot::channel::<()>();
@@ -3139,53 +3251,22 @@ where
     }
     let app_state = app_state;
 
+    let deps = AppDeps {
+        audit_middleware: audit_middleware.clone(),
+        cors_allowed_origins: server_config.cors_allowed_origins.clone(),
+        rest_authz,
+        auth_config,
+        session_validator,
+        dpop_replay_guard,
+        tenant_scope_resolver,
+        principal_reach_resolver,
+        scim_token_resolver,
+        app_state,
+        rate_limit: rate_limit_cfg,
+        route_options,
+    };
     let http_server = HttpServer::new(move || {
-        let rl = rate_limit_cfg.clone();
-        App::new()
-            .wrap(SecurityHeadersMiddleware)
-            // F4 P23W3-03 (T-325): the default builder's field set, with query
-            // values (a SAML handle, `RelayState`, `state`, a reset token) and
-            // `{token}` path segments redacted from `http.target`.
-            .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
-            .wrap(audit_middleware.clone())
-            .wrap(build_cors(&server_config.cors_allowed_origins))
-            // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
-            // web::Data<Arc<dyn AuthzChecker>>, matching the AuthzData type alias used
-            // by every RBAC-protected handler. web::Data::from would unwrap the Arc and
-            // register it as web::Data<dyn AuthzChecker>, causing "Requested application
-            // data is not configured correctly" 500s on every admin endpoint.
-            //
-            // QUAL-01: this is 1 of 3 dependencies that stay registered OUTSIDE
-            // AppState<C> alongside the single AppState registration below — see
-            // `axiam_api_rest::state` module docs for the full rationale (Rust
-            // generics/dyn-safety: 118 handler call sites use `AuthzData` directly,
-            // `AuthenticatedUser`'s non-generic `FromRequest` impl needs
-            // `AuthConfig`/`SessionValidator` without knowing `C`, and
-            // `axiam-audit::AuditMiddleware` — a different crate wrapping the whole
-            // App — independently looks up `web::Data<AuthConfig>`).
-            .app_data(web::Data::new(rest_authz.clone()))
-            .app_data(web::Data::new(auth_config.clone()))
-            .app_data(web::Data::new(session_validator.clone()))
-            .app_data(web::Data::new(dpop_replay_guard.clone()))
-            .app_data(web::Data::new(tenant_scope_resolver.clone()))
-            .app_data(web::Data::new(principal_reach_resolver.clone()))
-            .app_data(web::Data::new(scim_token_resolver.clone()))
-            // QUAL-01: single composition root — every other REST handler
-            // dependency (repos, services, the 4 hoisted QUAL-07 singletons)
-            // lives on this one AppState<C> value (see above).
-            .app_data(web::Data::new(app_state.clone()))
-            .configure(health_routes::<C>)
-            .configure(|cfg| {
-                register_api_v1_routes_with::<C>(cfg, &rl, route_options)
-            })
-            // R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.
-            // R5.2: hand it the SAME resolved RateLimitConfig the /api/v1
-            // wiring gets, so `AXIAM__RATE_LIMIT__SCIM_PER_MIN` (and the
-            // posture log line) actually govern the provisioning surface.
-            .configure(|cfg| {
-                axiam_scim::scim_routes_with_rate_limits::<C>(cfg, &rl)
-            })
-            .configure(openapi_routes)
+        compose_app(deps.clone())
     })
     // D3 native mTLS: lift the rustls-VERIFIED client certificate off the TLS
     // connection into the per-connection extensions so cert-auth handlers read
@@ -3632,9 +3713,40 @@ const _: () =
 const _: () =
     assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < LEASE_LOSS_STOP.outbound.as_millis());
 
+/// The rate-limit trusted-proxy list as the boot reads it, or the message it
+/// stops on (R111W2-02, #732): an unset variable is the empty list; a value
+/// that does not parse, or is not UTF-8, refuses to start rather than read as
+/// empty and honour every peer's `X-Forwarded-For`.
+fn trusted_proxies_for_boot(
+    lookup: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> Result<axiam_core::forwarded_for::TrustedProxies, String> {
+    axiam_core::forwarded_for::TrustedProxies::from_lookup(lookup)
+        .map_err(|e| format!("invalid rate-limit configuration: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn a_non_utf8_trusted_proxies_value_stops_the_boot() {
+        use std::os::unix::ffi::OsStringExt;
+        let refused = super::trusted_proxies_for_boot(|_| {
+            Err(std::env::VarError::NotUnicode(
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
+            ))
+        })
+        .expect_err("boot must refuse");
+        assert!(
+            refused.starts_with("invalid rate-limit configuration"),
+            "{refused}"
+        );
+        assert!(refused.contains("TRUSTED_PROXIES"), "{refused}");
+        let unparsable = super::trusted_proxies_for_boot(|_| Ok("nope".into()));
+        assert!(unparsable.is_err());
+        let absent = super::trusted_proxies_for_boot(|_| Err(std::env::VarError::NotPresent));
+        assert!(absent.expect("absent is empty").is_empty());
+    }
 
     /// Builds the configuration the way `load_config` does, from an injected
     /// environment instead of the process's.

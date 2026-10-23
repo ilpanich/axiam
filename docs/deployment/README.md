@@ -886,7 +886,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
-| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on logs one `WARN` at boot saying so. An entry that does not parse stops the boot. Both listeners (REST and gRPC) read it. See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
+| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. **`none`** (case-insensitive, the whole value): no proxy sits in front, so no peer's header is read and every request is keyed on its peer on both listeners, audit rows included; it draws no boot `WARN`, and `none` beside other entries stops the boot. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on (either listener) logs one `WARN` at boot saying so. An entry that does not parse, or a value that is not valid UTF-8, stops the boot (#732; the bytes are not echoed). Both listeners (REST and gRPC) read it. **Audit rows follow the same rule** (#752): the request row's `ip_address`, the `ip_address` of the handlers' own rows and the `http.client_ip` log field are the address the limiters key on — the peer unless it is listed, then the rightmost untrusted hop — and the request row's `metadata.forwarded_for_claimed` keeps the leftmost `X-Forwarded-For` entry as the caller wrote it when that differs. See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, device login, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
@@ -933,7 +933,7 @@ the socket peer. Therefore:
 
 | Topology | Header the server sees | Value |
 |---|---|---|
-| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; list the proxies in `TRUSTED_PROXIES` — see below |
+| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; set `TRUSTED_PROXIES=none` (no proxy is trusted; every request is keyed on its peer) — see below |
 | `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
 | Compose/Pi — Caddy → server | `<client>` | **`0`** |
 | Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
@@ -958,13 +958,22 @@ controller's pods, Caddy's container network): their requests are keyed under
 `TRUSTED_HOPS` exactly as before, and a request from any other peer is keyed on
 that peer, whatever it wrote — so the direct client chooses nothing.
 
+With **no proxy at all** — a direct connection, or a layer-4 pass-through —
+there is nothing to list: set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES=none`. No
+peer's header is read, every request is keyed on its own address on the REST
+and the gRPC listener, and audit rows record that address (the claimed header
+still lands in `forwarded_for_claimed`). Unlike the empty default it states the
+topology, so the boot `WARN` is not emitted. (Before 1.1.2 the only way to say
+this was a placeholder entry no peer matches.)
+
 Left empty (the default), every peer's header is read, which is what the server
 did before the setting existed. It stays the default because the server cannot
 tell a re-encrypting proxy from a direct client without it: the shipped
 Kubernetes topology runs native TLS behind ingress-nginx, and keying every
 native-TLS peer on itself would collapse its clients into the ingress's bucket.
-A server with native TLS on and the list empty therefore logs one `WARN` at
-boot naming the variable. Even with the list set, do not expose the listener to
+A server with native TLS on — the REST listener, the gRPC listener, or both —
+and the list empty therefore logs one `WARN` at boot naming the variable and
+each listener that terminates TLS. Even with the list set, do not expose the listener to
 the internet without the appending proxy: a client that reaches it directly is
 limited per address, not per proxy-reported client, and every route is served
 there. Where a client must reach it directly — the FreeRADIUS recipe's Live

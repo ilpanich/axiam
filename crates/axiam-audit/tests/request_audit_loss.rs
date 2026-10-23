@@ -628,8 +628,17 @@ async fn a_long_path_and_address_are_truncated_in_the_line() {
     let row = decode_line(text.trim_end()).unwrap().entry;
     assert!(row.action.len() <= MAX_ACTION_BYTES);
     assert!(row.action.starts_with("GET /aaaa") && row.action.ends_with("...[truncated]"));
-    let ip = row.ip_address.expect("the forwarded address is kept, cut");
-    assert!(ip.len() <= MAX_ADDRESS_BYTES && ip.ends_with("...[truncated]"));
+    // #752: an unparseable header is no address; the row keeps the peer (none
+    // here) and the caller's claim, cut to an address's length.
+    assert!(
+        row.ip_address
+            .is_none_or(|ip| ip.len() <= MAX_ADDRESS_BYTES)
+    );
+    let claimed = row.metadata.expect("metadata")["forwarded_for_claimed"]
+        .as_str()
+        .expect("the claim is kept, cut")
+        .to_owned();
+    assert_eq!(claimed.len(), 45);
     let _ = std::fs::remove_file(&path);
 }
 

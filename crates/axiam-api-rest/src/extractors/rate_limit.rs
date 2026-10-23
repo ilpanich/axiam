@@ -66,14 +66,18 @@ use actix_web::HttpMessage;
 use actix_web::HttpResponse;
 use actix_web::dev::ServiceRequest;
 use actix_web::http::header::{ContentType, HeaderMap, RETRY_AFTER};
+use actix_web::web;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use axiam_auth::config::AuthConfig;
 use axiam_auth::token::CachedUserIdentity;
-use axiam_core::forwarded_for::TrustedProxies;
+use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
 use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
+use crate::extractors::auth::{SessionValidator, admissible_session};
+use crate::middleware::tenant_path::TenantPathBinding;
 
 /// Extracts client IP from X-Forwarded-For header, falls back to peer address.
 ///
@@ -137,18 +141,7 @@ impl XForwardedForKeyExtractor {
     }
 }
 
-/// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`, or `0` when it is unset or unparseable.
-///
-/// The one reading of the variable every REST limiter keyed on the client's
-/// address uses: the route governors (`server.rs`), the shared counter
-/// (`middleware::rate_limit_shared`). Read per call, as the shared counter has
-/// always read it, so they cannot disagree about which address a request is.
-pub fn configured_trusted_hops() -> usize {
-    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
+pub use axiam_core::forwarded_for::configured_trusted_hops;
 
 /// The address a per-address rate limit keys a request on (SEC-048, T-212).
 ///
@@ -174,34 +167,15 @@ fn select_rate_limit_ip(
     trusted_hops: usize,
     trusted_proxies: &TrustedProxies,
 ) -> (Option<IpAddr>, Option<usize>) {
-    let peer = peer.map(|addr| addr.ip());
-    // #711: a peer the list does not name is not a proxy, so whatever it wrote
-    // is its own choice. Not an R-4 discard: `trusted_hops` is not wrong.
-    if !trusted_proxies.honours_forwarded_for(peer) {
-        return (peer, None);
-    }
-    let mut discarded_hops = None;
-    if let Some(forwarded_for) = headers.get("X-Forwarded-For")
-        && let Ok(val) = forwarded_for.to_str()
-    {
-        let hops: Vec<&str> = val.split(',').map(str::trim).collect();
-        // Select the rightmost-untrusted hop.
-        // hops = [client, proxy1, ..., trusted_proxy]
-        // trusted_hops=1 → index = len - 1 - 1 = len - 2
-        if trusted_hops < hops.len() {
-            let idx = hops.len() - 1 - trusted_hops;
-            if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                return (Some(ip), None);
-            }
-        } else {
-            // Fewer hops than trusted_hops requires: the header cannot be
-            // trusted at all (an attacker could otherwise rotate it to get a
-            // fresh bucket per request via the old `hops[0]` fallback —
-            // SECHRD-03). Fall through to the peer instead of indexing into it.
-            discarded_hops = Some(hops.len());
-        }
-    }
-    (peer, discarded_hops)
+    // The rule lives in `axiam_core::forwarded_for`, shared with the audit rows
+    // and the log fields (#752), so they cannot disagree about the address.
+    let selected = select_client_ip(
+        headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()),
+        peer.map(|addr| addr.ip()),
+        trusted_hops,
+        trusted_proxies,
+    );
+    (selected.ip, selected.discarded_hops)
 }
 
 impl KeyExtractor for XForwardedForKeyExtractor {
@@ -346,7 +320,72 @@ pub struct RateLimitPrincipal {
     pub sender_constrained: bool,
 }
 
-/// The verified principal of this request, or `None` when no token verified.
+/// Left in a request's extensions by [`confirm_principal_session`] when the
+/// session the request's token names is live (#786, R112W2-01) — the one fact
+/// about admission [`verified_principal`] cannot read from the token itself.
+///
+/// It is a rate-limit key input and nothing else: the session extractor never
+/// reads it and makes its own check, so the limiter's verdict cannot admit
+/// anybody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrincipalSessionLive;
+
+/// The principal and session of a verified token the session extractor could
+/// admit, as far as that is decidable without the datastore.
+fn admissible_principal(req: &ServiceRequest) -> Option<(RateLimitPrincipal, Uuid)> {
+    let config = req.app_data::<web::Data<AuthConfig>>()?;
+    let extensions = req.extensions();
+    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
+    let path_tenant = extensions
+        .get::<TenantPathBinding>()
+        .map(|binding| binding.tenant_id);
+    let session = admissible_session(cached, config, path_tenant)?;
+    let principal = RateLimitPrincipal {
+        tenant_id: cached.tenant_id,
+        subject: cached.user_id,
+        sender_constrained: cached.claims.0.cnf.is_some(),
+    };
+    Some((principal, session))
+}
+
+/// Ask the session store whether the session behind this request's token is
+/// live, and record [`PrincipalSessionLive`] when it is — the asynchronous
+/// half of [`verified_principal`], run by the principal-keyed shared layer
+/// (`RateLimitShared::keyed_on_principal`) before either limiter charges
+/// (#786, R112W2-01).
+///
+/// The same [`SessionValidator`], with the same `(tenant, session)`, that
+/// [`AuthenticatedUser`](crate::extractors::auth::AuthenticatedUser) asks after
+/// the limiters. With no validator registered the extractor checks no session,
+/// so neither does this: the session counts as live. A token
+/// [`admissible_principal`] already declines costs no read.
+///
+/// The shared layer runs whether `AXIAM__RATE_LIMIT__SHARED` is on or off (off,
+/// its counter allows everything), and sits outside the in-process governor on
+/// each of the five routes, so the governor never charges a principal whose
+/// session this has not confirmed.
+pub async fn confirm_principal_session(req: &ServiceRequest) {
+    let Some((principal, session)) = admissible_principal(req) else {
+        return;
+    };
+    let validator = req
+        .app_data::<web::Data<Arc<dyn SessionValidator>>>()
+        .map(|d| d.get_ref().clone());
+    let live = match validator {
+        Some(validator) => {
+            validator
+                .is_session_active(principal.tenant_id, session)
+                .await
+        }
+        None => true,
+    };
+    if live {
+        req.extensions_mut().insert(PrincipalSessionLive);
+    }
+}
+
+/// The verified principal of this request, or `None` when no token verified
+/// or the token is one the session extractor would refuse.
 ///
 /// **Reads, never verifies.** `None` covers "no token", "a token that did not
 /// verify" (forged, expired, another issuer's) and "no audit middleware in this
@@ -355,14 +394,28 @@ pub struct RateLimitPrincipal {
 /// #633. A caller cannot reach this with a claim it wrote itself: request
 /// extensions are written by server code only, and the one writer of this
 /// extension inserts it after `validate_access_token` succeeded.
+///
+/// #754 (R111-04): a verified signature is not enough. A token
+/// [`AuthenticatedUser`](crate::extractors::auth::AuthenticatedUser) refuses —
+/// a device-grant token, a resource-audience token a relying party holds —
+/// must not spend the principal's allowance, or whoever holds one can drain
+/// it from many addresses. So the principal is returned only for a token
+/// [`admissible_session`] passes (no `AuthConfig` in scope: the extractor
+/// would refuse every token, and so the address).
+///
+/// #786 (R112W2-01): nor for a token whose session is revoked or expired. That
+/// needs the datastore, so [`confirm_principal_session`] asks it first and this
+/// returns the principal only when it found the session live
+/// ([`PrincipalSessionLive`]). The in-process governor beneath has no refund,
+/// so the key has to be right before it charges: a stale token is keyed on its
+/// address, in both layers. Without that check in the composition (a governor
+/// with no principal-keyed shared layer outside it) every request is keyed on
+/// its address.
 pub fn verified_principal(req: &ServiceRequest) -> Option<RateLimitPrincipal> {
-    let extensions = req.extensions();
-    let cached = extensions.get::<Arc<CachedUserIdentity>>()?;
-    Some(RateLimitPrincipal {
-        tenant_id: cached.tenant_id,
-        subject: cached.user_id,
-        sender_constrained: cached.claims.0.cnf.is_some(),
-    })
+    if !req.extensions().contains::<PrincipalSessionLive>() {
+        return None;
+    }
+    admissible_principal(req).map(|(principal, _)| principal)
 }
 
 /// The identity part of a bucket key — `{endpoint}:{this}` in the shared

@@ -176,7 +176,7 @@ impl RootSpanBuilder for RedactingRootSpanBuilder {
             http.flavor = %http_flavor(request.version()),
             http.scheme = %connection_info.scheme(),
             http.host = %connection_info.host(),
-            http.client_ip = %connection_info.realip_remote_addr().unwrap_or(""),
+            http.client_ip = %crate::extractors::client_info::client_ip(request.request()).unwrap_or_default(),
             http.user_agent = %user_agent,
             http.target = %target,
             http.status_code = tracing::field::Empty,

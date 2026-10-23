@@ -7,6 +7,273 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - Unreleased
+
+1.1.2 follows 1.1.1 and closes the sixty-three issues the 1.1.1 reviews, the
+maintainer's contract answers and the 1.1.2 wave reviews filed (#720 … #741,
+#746, #747, #750 … #758, #760 and #764 … #792) with nine waves: the erasure path,
+PKI and Vault (W1); rate limiting, audit attribution and the boot (W2); the
+schema runner, OAuth2 clients and the spec (W3); network policy (W4); the
+FreeRADIUS recipe (W5); CI and tooling (W6); SDK contract 1.64 (W7); release
+readiness (W8); the sweep (W9). It adds no route and no migration (the schema
+stays at v109). Each wave ended in a security review of its own diff, and every
+Low and Informational finding of those reviews was fixed in its wave. Every
+closed issue has one entry below, ending in its number. Issues #513
+(OpenID Basic OP and FAPI 2.0 certification submissions) and #561 (benchmark
+run 6) stay open: both wait on the maintainer's runs and submissions.
+
+#### Upgrading to 1.1.2 — read before you upgrade
+
+- **There is no migration, and the "roll replicas one at a time" note of 1.1.1 is
+  withdrawn.** The runner now takes a real lease: the row `_migration_lock:startup`
+  holds a `holder` and an `expires` on the datastore's clock (five minutes,
+  refreshed every minute while it migrates). A replica that finds a live lease
+  waits and logs `Another instance holds the migration lease; waiting for it`;
+  the lease's holder deletes only its own row, and a migration another replica
+  recorded first is read as "applied by another instance" and the boot
+  continues. A rolling update or a scale-out from zero needs no special
+  ordering. The lease's two fields are part of the setup DDL
+  (`MIGRATION_TABLE_DDL`, `IF NOT EXISTS`), so no v110 was taken. **Give a
+  starting replica time to wait:** the HTTP listener, and `/health` with it,
+  is bound after the migrations, so a replica waiting for the lease answers no
+  probe. The shipped `k8s/server/deployment.yml` gains a `startupProbe` on
+  `/health` (10 s period, 60 failures); an orchestrator of your own needs the
+  same allowance, or its liveness probe kills the waiting replica. A 1.1.1
+  replica still running during the roll ignores the lease; that costs nothing
+  from 1.1.1 to 1.1.2, which adds no migration (#755, #770, #769, #773).
+- **The runner refuses an out-of-order application of a non-additive
+  migration.** A migration missing below the newest one recorded (a datastore
+  that ran a branch build) is still applied late with a `WARN`, but only if
+  every statement is a `DEFINE … IF NOT EXISTS`; otherwise the replica stops
+  with a boot error naming the version (`Migration vN '…' is not recorded but
+  vM is, and vN is not additive …`) and has changed nothing. A released build
+  never leaves such a gap. The procedure is in the deployment guide,
+  "Recovering from a refused migration gap" (#729, #771).
+- **`AXIAM__RATE_LIMIT__TRUSTED_PROXIES=none`** (case-insensitive, the whole
+  value) now means "no proxy sits in front": no peer's `X-Forwarded-For` is
+  read, every request is keyed on its peer on both listeners, and the boot logs
+  no `WARN`. `none` beside other entries stops the boot. An empty value keeps
+  its 1.1.1 meaning (every peer's header is read) and logs one `WARN` when
+  either the REST or the gRPC listener has native TLS on. A value that is not
+  valid UTF-8 stops the boot instead of being read as empty (#758, #731, #732,
+  #790).
+- **Audit rows' `ip_address` is now derived by the limiters' rule.** The
+  request row's `ip_address`, the `ip_address` of the handlers' own rows and
+  the `http.client_ip` log field are the transport peer unless it is listed in
+  `TRUSTED_PROXIES`, then the rightmost untrusted hop; they no longer follow
+  the leftmost `X-Forwarded-For` entry. The request row gains
+  `metadata.forwarded_for_claimed`, the leftmost entry as the caller wrote it,
+  when it differs. A query or an alert that read `ip_address` as the claimed
+  address must read `forwarded_for_claimed` (#752).
+- **AMQP-ingested audit rows carry `metadata.ingested_via = "amqp"`,** set by the
+  server after the message's metadata is merged, so a producer's own
+  `ingested_via` is overwritten; the server's own rows carry none. The console
+  shows it and the export carries it. **Rows ingested before 1.1.2 carry
+  none**, so the absence of the key does not prove a server wrote an older row
+  (#741, #789).
+- **An erased user's refresh-token rows are deleted at erasure,** after their
+  revocation and in the same unit, and the cleanup task's `oauth2_refresh_token`
+  job deletes every row expired more than seven days ago, revoked or not, at
+  most 5 000 per tick. The first run after the upgrade works through the backlog
+  over as many ticks as it needs. The replay record of a rotated token
+  (`oauth2.refresh_token_replayed`, T-254) lasts as long as its row (#753,
+  #781, #783).
+- **Two new `422` codes on the admin client `PUT`.** On a client whose
+  `managed_by` is `dcr` or `cimd`, `422 resource_exceeds_registration_policy`
+  refuses an `allowed_resources` entry outside the tenant's
+  `external_client_allowed_resources`, and `422
+  redirect_exceeds_registration_policy` refuses a redirect host outside the
+  registration policy (DCR's `dcr_allowed_redirect_hosts`, CIMD's own policy).
+  A value the row already holds still saves. A console or script that widened
+  such a client must narrow its request (#746, #768).
+- **A role delete that releases a `network:` grant writes one
+  `network_role.deleted` audit row,** with the role's id and name and its
+  `network:` permissions (action, effect) as the gate read them. Delete a role
+  with no `network:` grant and no row is written. An alert on
+  `network_role.*` should include it (#727).
+- **Upgrading from 1.1.0 directly.** 1.1.1 renamed the FreeRADIUS recipe's
+  profiles (D3 is now **Static**, D4 is now **Live**), and the rename moved
+  files and variable names. An operator who goes from 1.1.0 straight to 1.1.2
+  replaces the recipe as one set:
+
+  | 1.1.0 | 1.1.1 and later |
+  |---|---|
+  | `docker/docker-compose.radius-d4.yml` | `docker/docker-compose.radius-live.yml` |
+  | `docker/radius/raddb/d4/` | `docker/radius/raddb/live/` |
+  | `raddb/d4/axiam-d4.sh` | `raddb/live/axiam-live.sh` |
+  | the modules file `raddb/d4/axiam_d4` | the modules file `raddb/live/axiam_live` |
+  | `AXIAM_D4_URL`, `AXIAM_D4_SITE` | `AXIAM_LIVE_URL`, `AXIAM_LIVE_SITE` |
+  | `/var/run/axiam-d4` | `/var/run/axiam-live` |
+  | `$-INCLUDE /etc/freeradius/axiam-d4/verify.conf` in `raddb/eap` | `$-INCLUDE /etc/freeradius/axiam-live/verify.conf` |
+
+  **The rename fails closed:** a mixed set (an `eap` file from one release beside
+  a `raddb/live/` set from another, or an unrenamed `AXIAM_D4_URL`) makes
+  FreeRADIUS reject every device and never admit one on a stale file. That is an
+  outage, not an exposure. Replace the whole `docker/radius/raddb/` set and the
+  compose override together, rename the two variables, mount
+  `/var/run/axiam-live` where `/var/run/axiam-d4` was, and restart FreeRADIUS. A
+  deployment that runs only the Static profile needs no change beyond taking
+  the new `raddb` set whole. Also: `docker/radius/fetch-crl.sh` exits **3** when
+  the installed list has less than a quarter of its lifetime left or has expired
+  and, since 1.1.2, when it finds the lock held; alert on any non-zero exit. The
+  Live compose override now starts FreeRADIUS as `freeradius -f -xx -l stdout`
+  (it was `-X`, which serves one request at a time) (#725, #721, #765).
+
+### Security
+
+- **A junk `Authorization` header no longer detaches a cookie request from its
+  user in the request row.** One carrier rule (the `axiam_access` cookie first,
+  then `Authorization`) serves the audit middleware and the extractor (#751).
+- **The principal rate-limit key trusts only a token the session extractor
+  admits,** and the shared counter refunds its charge on `401` and `403` (#754).
+  **A revoked session's token no longer spends its user's allowance** on the
+  in-process governor; the limiter asks the session validator before charging
+  (#786).
+- **The request row's `authenticated` flag follows the extractor's verdict,** for
+  every extractor; a token the extractor refused is recorded `authenticated:
+  false` with the outcome (#787).
+- **A GDPR erasure is claimed exclusively, with a lease,** so two replicas no
+  longer run one erasure at once (#738). **An erasure cut between its
+  anonymization and its record is recovered with its proof and the second
+  certificate revocation** (#737). **A unit stalled past its lease no longer
+  scrubs or re-anonymizes the erased account** (#784), and **a stalled unit's
+  role pass no longer writes a second `network_role.unassigned` row** (#792).
+- **The erasure pseudonymizes `grantee.id` in `network_role.*` rows** and writes
+  one `network_role.unassigned` row per assignment it removes (#758).
+- **The Vault-reason sanitiser masks a token that follows an escape sequence**
+  (`\n`, `\t`, `\r`, `\"`, `\uXXXX`, `%XX`) (#740).
+- **A cleared network write's success row survives a client that goes away:** the
+  write and its append run as one spawned task the handler awaits (#726). **A
+  revocation's decision-cache flush and stale-claim row no longer ride the
+  handler's future** (#775), **an orderly stop waits for a cleared write's
+  spawned task** (#776), and **the decision cache refuses an insert computed
+  before a revocation's flush** (a per-stripe invalidation generation) (#791).
+- **Deleting a role that carries a `network:` deny leaves a row** (see the
+  upgrade note) (#727).
+- **The boot reconcile skips the network half for a tenant whose kind it
+  failed to read,** with one `warn`, instead of revoking from it (#728); **the
+  organization-level actions are skipped for that tenant too** (#777).
+- **The Live recipe's token cache can no longer be re-poisoned by a refused
+  token** (`Cache-Read-Only := yes` beside `Cache-TTL := 0`; the retry stores
+  with a negative TTL) (#720), **and its read no longer inserts the `-`
+  sentinel** (#764).
+
+### Changed
+
+- **The migration lease and the non-additive refusal** (see the upgrade notes)
+  (#755, #729).
+- **`TRUSTED_PROXIES=none`, rule-derived audit IPs and the AMQP provenance mark**
+  (see the upgrade notes) (#758, #752, #741).
+- **The two `422` codes on the admin client `PUT`** (see the upgrade notes)
+  (#746). **A CIMD client's redirects are bounded by the CIMD policy, not the DCR
+  host list** (#768).
+- **SDK contract 1.64** (§34.8): the recovered `gdpr.user_pseudonymized` row may
+  carry `certificates_revoked: null` with `recovered: true`; a `429
+  rate_limit_exceeded` on a device poll is not terminal (the loop waits
+  `Retry-After`, counts it as one interval and polls again), and a `5xx` is
+  not terminal either; C163-10's wording is relaxed (the refusal names the member
+  and the value where the SDK keeps it); `ingested_via` joins §8;
+  `network_role.deleted` joins §8's informative list; the two `422` codes join
+  §27.4 rule 7; `/uma2/perm` mints a ticket only for a set the PAT's own client
+  registered (§20 rule 9). It adds no operation. **All eleven SDKs re-sync and port
+  the device-poll rule in one round** (`ilpanich/axiam-typescript-sdk#150`,
+  `axiam-rust-sdk#138`, `axiam-python-sdk#103`, `axiam-c-sdk#77`,
+  `axiam-cplusplus-sdk#80`, `axiam-csharp-sdk#111`, `axiam-go-sdk#103`,
+  `axiam-java-sdk#121`, `axiam-kotlin-sdk#80`, `axiam-php-sdk#87`,
+  `axiam-swift-sdk#78`, closing their issues `…#148`, `rust#137`, `python#102`,
+  `c#76`, `cplusplus#78`, `csharp#110`, `go#102`, `java#120`, `kotlin#79`,
+  `php#86`, `swift#77`) (#750, #760).
+- **The spec declares four refusals it already returned:** `422
+  reserved_metadata_key`, `409 already_exists`, `503 service_unavailable` and
+  `409 conflict` / `stale_version`; a unit test lists the operations that must
+  declare each (#756), **and the password-hash gate's `503` on password change and
+  reset confirm** (#772).
+- **The Live compose override starts FreeRADIUS threaded** (`-f -xx -l stdout`)
+  (#765).
+
+### Fixed
+
+- **The CRL cache serves its own list while the datastore clock leads the
+  replica:** `current()` follows the clock instead of refusing a list dated ahead
+  of it (#736).
+- **The refresh-token sweep is bounded** (5 000 rows per tick, no unbounded
+  `DELETE` over full scans) (#781), **and the two new `audit_log` reads on the
+  erasure path no longer scan the tenant's trail** (#782).
+- **The network-gate enumeration test is green again** after the erasure's
+  unassignment moved out of the pinned unit (#780).
+- **`fetch-crl.sh` run with the lock held still runs the age check** and exits 3
+  near expiry (#721).
+- **The gRPC listener's native TLS is counted in the empty-`TRUSTED_PROXIES`
+  `WARN`** (#731). **A segment named after a uniqueness index is a
+  `duplicate_name`,** not a `duplicate_vlan` or `stale_version` (#778).
+- **`certificate_binding.bound` records the nodes the gate checked** and, since
+  the route refuses a bound certificate, no `before`; **the assignment row's
+  `node` is the gate's node** (`/network`'s id for a tenant-wide assignment)
+  (#730). **The success row's `before` is dropped** and the stale text around it
+  corrected (#779).
+- **The k8s liveness probe no longer kills a replica waiting on the migration
+  lease** (#770).
+
+### Documentation
+
+- **Threat model:** the entries the waves amended are reconciled by W8.3 (T-102,
+  T-118, T-187, T-212, T-233, T-336, T-424, T-428, T-444, T-447, T-457, T-462,
+  T-470, T-472, T-474, T-477, T-483, T-484, T-486 and SEC-087).
+- **T-212 and T-428 no longer name the removed public-client bucket** (#734).
+- **T-254 states the replay-record bound after #753:** the record stops a week after the row's expiry (#783).
+- **T-462 is amended for exit 3 and `Cache-Control: no-cache`,** and the
+  fail-closed rename note is written (see the upgrade notes) (#725).
+- **The FreeRADIUS recipe's text agrees with its code:** the 401 retry's comment
+  and tests say what they show (#722); the lock-held alert, T-486's wording and
+  the upgrade note's module name (#766); rename leftovers and the history
+  note (#724).
+- **Text behind the code after W1:** the `cleanup.rs` comments, T-472 and the
+  dead-letter join-error line already read as the issue words them; verified and
+  closed (#739).
+- **Text and hygiene after W3:** the schema-doc sentence, the `oauth2_clients.rs`
+  comment, the device-flow guide, T-447, T-424's clustered-skew sentence (#747).
+- **Text and hygiene after the 1.1.1 merges:** `TRUSTED_PROXIES` "honour nobody",
+  the `authenticated` flag, the action-grammar pin, the erasure-row items, the
+  gRPC sweep pin, the `D3`/`D4` current-text sites, the `bench-quick` and
+  `apiIndex.ts` guards, and the v109 development-datastore note (#758).
+- **Text and hygiene after W3's sweep:** the lease clock on a cluster, the
+  `EXPLAIN` pin and the 1.1.1 replica during the roll (#773).
+- **Text and hygiene after W1:** the recovery does not re-run step (a),
+  `delete_expired`'s count, the race tests (#785).
+- **Hygiene after W5:** the schema test message, the `mkdir` lock-held case, a
+  long header line (#767).
+- **The `D4` comments in the network model and its test are corrected** and the
+  commit-history note added to `docker/radius/README.md` (#724).
+- **The Live recipe's text agrees with its code:** the lock-held alert, T-486's
+  wording and the upgrade note's module name (#766); the 401 retry's comment and
+  the e2e's assertions say what they show (#722).
+- **The deployment guide has a section on schema migrations at startup** and a
+  procedure for a refused gap (#771).
+
+### Tests and CI
+
+- **A behavioural test of the audit wrap on the federation routes,** and a gRPC
+  sweep test (#733). **The bucket-name scan reads `increment_by` keys** (#735).
+  **The action-grammar pin sees `pub(crate)` and `&'static str` constants** (#788).
+- **The e2e filter covers the listener and the `cnf` check** (#723); **the Live
+  e2e runs its rotation step concurrently** (#765); **`check-token-cache.py` sees
+  the action-block and optional call forms** (#774).
+- **Test messages no longer interpolate a token, a body or an error,** and the
+  PKI tests use a per-process random key (#757).
+- **`bench-quick` validates `quickvus`;** `apiIndex.ts` is regenerated and
+  diffed by CI (#758).
+- **The migration lease's refresh and own-row release are tested** with four
+  mutations caught (#769). **The v109 `EXPLAIN` pin** (#747).
+- **A GDPR recovery concurrency test** (#758).
+- **The gRPC key extractor's address rule and a `TRUSTED_PROXIES=none` test on
+  the gRPC listener** (#790).
+
+### Still open
+
+- **#513** (certification submissions) and **#561** (benchmark run 6) are the
+  maintainer's: fresh conformance runs, the submissions, the run on the
+  benchmark host. They carry the `1.1.x` milestone and are not closed by 1.1.2.
+
 ## [1.1.1] - 2026-10-20
 
 1.1.1 follows 1.1.0 and closes the fifty-four issues its reviews filed (#664 …

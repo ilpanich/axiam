@@ -4635,9 +4635,10 @@ async fn two_sweeps_at_once_erase_one_due_account_once_and_neither_fails() {
 /// unit held past the lease — keeps the account from the other replicas for
 /// the lease only. Inside it, a sweep skips the account; past it, a sweep takes
 /// it over and erases it, once. A stalled unit that then wakes and runs its
-/// erasure meets the proof the other wrote and stops there: the proof's unique
-/// violation reads as "another unit erased it", not as an error, and nothing is
-/// written twice.
+/// erasure finds the account no longer deletion-pending and stops before its
+/// scrub (#784): not an error, and nothing written — the other unit's record
+/// keeps the account as its actor, the account is not anonymized again (no
+/// marker set, the row untouched), and the SSF sink sees one `account_purged`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
     let db = setup_db().await;
@@ -4678,6 +4679,14 @@ async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
         "past the lease the account is taken over and erased"
     );
     assert_eq!(reports_for(&sink, user.id), 1);
+    let erased = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user.id)
+        .await
+        .unwrap();
+    assert!(
+        !erasure_marker_set(&db, user.id).await,
+        "the record is settled"
+    );
 
     // The stalled unit wakes and runs its erasure regardless.
     let woke = erase_and_record(
@@ -4686,7 +4695,7 @@ async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
         &SurrealUserRepository::new(db.clone()),
         &SurrealCertificateRepository::new(db.clone()),
         &deletions,
-        None,
+        Some(sink.as_ref() as &dyn SsfSystemAccountSink),
         ErasureSubject {
             tenant_id,
             user_id: user.id,
@@ -4697,16 +4706,32 @@ async fn a_stalled_claimants_account_is_taken_over_once_its_lease_runs_out() {
         &never_stopping(),
     )
     .await
-    .expect("another unit's proof is not an error");
+    .expect("an account another unit erased is not an error");
     assert!(!woke, "the stalled unit records nothing");
     assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    let records = pseudonymized_rows(&db, tenant_id).await;
+    assert_eq!(records.len(), 1, "gdpr.user_pseudonymized exists once");
+    // #784: the stalled unit's scrub used to nil the record's actor for good.
     assert_eq!(
-        pseudonymized_rows(&db, tenant_id).await.len(),
-        1,
-        "gdpr.user_pseudonymized exists once"
+        records[0].actor_id, user.id,
+        "the record still names the erased account as its actor"
     );
-    // #737: its anonymization set the marker again, and it released it; the
-    // next sweep finds the proof and the record there and only clears it.
+    assert_eq!(reports_for(&sink, user.id), 1, "one account_purged");
+    // #784: nor is the account anonymized again — no marker set (its release
+    // would have left the epoch there), the row as the erasure left it.
+    assert!(
+        !erasure_marker_set(&db, user.id).await,
+        "no marker set again"
+    );
+    assert_eq!(
+        SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .unwrap()
+            .updated_at,
+        erased.updated_at,
+        "the erased row is not written again"
+    );
     assert_eq!(record_owed(&db).await.unwrap(), 0);
     assert!(!erasure_marker_set(&db, user.id).await);
     assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);

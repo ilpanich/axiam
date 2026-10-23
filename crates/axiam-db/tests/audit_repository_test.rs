@@ -508,3 +508,72 @@ async fn erasure_recorded_finds_the_record_by_actor_or_by_pseudonym_only() {
             .unwrap()
     );
 }
+
+/// #784: the scrub leaves the erasure's own record alone. A unit stalled past
+/// its claim's lease that scrubs after its successor erased and recorded the
+/// account used to nil that record's actor for good. The record is matched by
+/// its action and its pseudonym: a `gdpr.user_pseudonymized` row naming another
+/// pseudonym — no erasure's record of this account — is scrubbed as any other.
+#[tokio::test]
+async fn pseudonymize_actor_leaves_the_erasures_own_record() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let user_id = Uuid::new_v4();
+    let pseudonym = "DELETED_USER_record000001";
+    let record = |pseudonym: &str| CreateAuditLogEntry {
+        tenant_id,
+        actor_id: user_id,
+        actor_type: ActorType::System,
+        action: "gdpr.user_pseudonymized".into(),
+        resource_id: None,
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: Some(serde_json::json!({
+            "pseudonym": pseudonym,
+            "certificates_revoked": 0,
+        })),
+    };
+    let login = repo
+        .append(entry(
+            tenant_id,
+            user_id,
+            "user.login",
+            AuditOutcome::Success,
+            None,
+        ))
+        .await
+        .unwrap()
+        .id;
+    let own = repo.append(record(pseudonym)).await.unwrap().id;
+    let other = repo
+        .append(record("DELETED_USER_other0000001"))
+        .await
+        .unwrap()
+        .id;
+
+    repo.pseudonymize_actor(tenant_id, user_id, pseudonym)
+        .await
+        .unwrap();
+    let rows = repo
+        .get_by_ids(tenant_id, &[login, own, other])
+        .await
+        .unwrap();
+    let row = |id: Uuid| rows.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(
+        row(login).actor_id,
+        Uuid::nil(),
+        "the account's own row is scrubbed"
+    );
+    assert_eq!(
+        row(own).actor_id,
+        user_id,
+        "the erasure's record keeps its actor"
+    );
+    assert_eq!(row(own).metadata["pseudonym"], pseudonym);
+    assert!(row(own).metadata.get("actor_pseudonym").is_none());
+    assert_eq!(
+        row(other).actor_id,
+        Uuid::nil(),
+        "another pseudonym's row is not the record"
+    );
+}

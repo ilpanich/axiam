@@ -171,7 +171,11 @@ invoked as a deliberate additional step rather than an always-on default.
   deleted user was the actor: `actor_id` becomes the **nil UUID**, an
   `actor_pseudonym` metadata field is set to the pseudonym, the original
   user UUID no longer appears anywhere in the row, and `ip_address` is
-  nulled.
+  nulled. The one row that names the erased account by id is the erasure's
+  own record, `gdpr.user_pseudonymized`, written after the scrub with the
+  anonymized row's id as its actor and only the pseudonym and a certificate
+  count in its metadata; the scrub never rewrites it, so a unit that runs late
+  cannot strip the record of the account it is about (#784, 1.1.2).
 - An `erasure_proof` row (pseudonym, tenant_id, user_id, erased_at) is
   written durably, backed by a **`UNIQUE` index on `erasure_proof.user_id`**
   for idempotent-retry safety (Phase 25).

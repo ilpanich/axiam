@@ -2010,13 +2010,20 @@ finished rather than wait for it:
   `SIGKILL`, or a unit cut at the stop's bound — leaves it to the one-hour
   lease, after which any replica's sweep takes it over. A released claim still
   refuses a cancel: the steps before the anonymization revoke what a cancel
-  does not restore. A unit that stalled past the lease and then runs on meets
-  the proof its successor wrote and stops there, recording nothing; the log
-  says `another unit erased it`. That case alone sends `account_purged` a
-  second time. (Corrected 2026-10-22, #738: before 1.1.2 two sweeps that read
-  one due account both ran its erasure; the record stayed single, but the SSF
-  notification went out twice and the later unit failed its tick on the
-  proof.)
+  does not restore. A unit that stalled past the lease and then runs on finds
+  the account no longer deletion-pending and stops before its audit scrub,
+  writing nothing; the log says `another unit erased it`. One that stalls
+  between that read and the scrub runs the scrub — which never touches the
+  erasure's own `gdpr.user_pseudonymized` row — and stops at the
+  anonymization, which writes only a deletion-pending account, before
+  `account_purged`; the log says `erased by another unit`. Either way the
+  account is anonymized once and `account_purged` goes out once. (Corrected
+  2026-10-22, #738: before 1.1.2 two sweeps that read one due account both ran
+  its erasure; the record stayed single, but the SSF notification went out
+  twice and the later unit failed its tick on the proof. Corrected 2026-10-23,
+  #784: until then a unit stalled past the lease re-ran the scrub, which nilled
+  the actor of its successor's record, anonymized the account again and sent
+  `account_purged` a second time.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for

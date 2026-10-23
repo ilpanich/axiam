@@ -427,11 +427,17 @@ pub trait UserRepository: Send + Sync {
     /// from a read-back after it: every release and settle is conditional on
     /// the stamp, so a guard whose write never landed changes nothing.
     ///
-    /// The default is [`Self::anonymize_user`] and ignores the stamp: it is
-    /// for an implementation that keeps no record marker (every test double).
-    /// One that keeps a marker overrides it — without that, a guard armed from
-    /// the stamp would never match its marker, which would then wait out the
-    /// record lease.
+    /// Unlike [`Self::anonymize_user`], it writes only an account that is
+    /// still deletion-pending, with the condition in the write (#784), and
+    /// answers whether it did: `false` means another unit erased the account
+    /// first — one that took over the claim of a unit stalled past its lease —
+    /// and nothing was written.
+    ///
+    /// The default is [`Self::anonymize_user`], ignores the stamp and answers
+    /// `true`: it is for an implementation that keeps no record marker (every
+    /// test double). One that keeps a marker overrides it — without that, a
+    /// guard armed from the stamp would never match its marker, which would
+    /// then wait out the record lease.
     fn anonymize_user_marked(
         &self,
         tenant_id: Uuid,
@@ -439,9 +445,10 @@ pub trait UserRepository: Send + Sync {
         email_hash: &str,
         pseudonym: &str,
         record_stamp: DateTime<Utc>,
-    ) -> impl Future<Output = AxiamResult<()>> + Send {
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
         let _ = record_stamp;
-        self.anonymize_user(tenant_id, user_id, email_hash, pseudonym)
+        let anonymized = self.anonymize_user(tenant_id, user_id, email_hash, pseudonym);
+        async move { anonymized.await.map(|()| true) }
     }
 
     /// Make `user_id` a directory account (G-3): the **only** writer of
@@ -1586,6 +1593,12 @@ pub trait AuditLogRepository: Send + Sync {
     /// - `ip_address` → NULL
     /// - known PII metadata keys (`email`, `username`, `name`, etc.) → `[redacted]`
     /// - `resource_id` → nil UUID where it equals `user_id`
+    ///
+    /// Except the erasure's own record (#784): a `gdpr.user_pseudonymized` row
+    /// whose `metadata.pseudonym` is `pseudonym` names the erased account as
+    /// its actor on purpose, and carries no PII. A unit stalled past its
+    /// claim's lease that scrubs after another erased and recorded the account
+    /// leaves that row as it is.
     ///
     /// Returns the count of updated rows.
     fn pseudonymize_actor(

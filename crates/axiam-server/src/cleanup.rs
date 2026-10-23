@@ -2397,19 +2397,25 @@ pub struct ErasureSubject<'a> {
 /// audit row whatever the stop says, and answers `Ok(true)`. A free function,
 /// and public, for the reason [`run_erasure_pipeline`] is one.
 ///
-/// `Ok(false)` too when the erasure proof turns out to exist already (#738):
-/// another unit erased the account after taking this one's claim over, and
-/// records it; this call records nothing, and releases the marker its own
-/// anonymization set again, which the next sweep settles without a second
-/// record.
+/// `Ok(false)` too, with nothing written, when another unit erased the account
+/// after taking this one's claim over past its lease (#738, #784): the account
+/// is read again before the scrub and left alone once it is no longer
+/// deletion-pending, and the anonymization writes only a deletion-pending
+/// account, so a unit that stalls after that read stops at the anonymization,
+/// before the SSF report — its scrub having passed over the other unit's
+/// record, which the scrub never touches. And `Ok(false)` when the erasure
+/// proof turns out to exist already: the next sweep wrote it for this unit,
+/// stalled past the record lease after its anonymization; this call records
+/// nothing, and releases its marker, which that sweep settles.
 ///
 /// # Errors
 ///
-/// Those of the scrub and the anonymization, before anything is recorded; and
-/// a proof that failed to write, past the point of no return, with the marker
-/// released so that the next sweep writes the proof and the record. The
-/// completion and the audit row are not fallible here: a failed completion is
-/// logged, and a failed audit write is dead-lettered (SECHRD-12).
+/// Those of the account's read, the scrub and the anonymization, before
+/// anything is recorded; and a proof that failed to write, past the point of
+/// no return, with the marker released so that the next sweep writes the
+/// proof and the record. The completion and the audit row are not fallible
+/// here: a failed completion is logged, and a failed audit write is
+/// dead-lettered (SECHRD-12).
 pub async fn erase_and_record<A, EP, U, CR, C>(
     audit_repo: &A,
     erasure_proof_repo: &EP,
@@ -2435,9 +2441,27 @@ where
         certificates_revoked,
     } = subject;
     work.step(UnitStep::ErasurePrepared(user_id)).await;
+    // #784: the account is read again right before the scrub, and an account
+    // no longer deletion-pending is left alone — another unit erased it after
+    // taking this unit's claim over, past its lease, or its deletion is done.
+    // Its trail holds that unit's record, which the scrub would otherwise run
+    // over. A read, so a unit that stalls between it and the scrub still gets
+    // there: the scrub then leaves the record alone, and the anonymization
+    // below matches nothing.
+    let account = user_repo.get_by_id(tenant_id, user_id).await?;
+    if !account.deletion_pending {
+        tracing::info!(
+            %tenant_id,
+            %user_id,
+            "cleanup: the account is no longer deletion-pending; another unit erased it"
+        );
+        return Ok(false);
+    }
     // G-5 (D-52): the account as it is, read before anything is written — the
     // erasure replaces the address the report's subject is resolved from.
-    let report = account_for_report(user_repo, sink, tenant_id, user_id).await;
+    let report = sink
+        .filter(|sink| sink.is_active())
+        .map(|sink| (sink, account));
 
     // (d) Pseudonymize the audit actor references: FATAL (SECHRD-06 / D-03a,
     // T-25-13) — no PII-bearing step is ever silently skipped. Idempotent and
@@ -2472,16 +2496,31 @@ where
     };
     // (e) Anonymize the user row in place: the point of no return. It is the
     // only step that clears `deletion_pending`, so a failure here leaves the
-    // account due for a retry.
-    if let Err(e) = user_repo
+    // account due for a retry. #784: it writes only a deletion-pending
+    // account, so of a stalled unit and its successor one anonymizes, and
+    // the other stops here, before the SSF report, with no marker of its own.
+    match user_repo
         .anonymize_user_marked(tenant_id, user_id, email_hash, pseudonym, stamp)
         .await
     {
-        // The transaction may have committed before the error reached us:
-        // release a marker stamped with ours, if there is one, so the next
-        // sweep finishes the erasure at once. Nothing matches otherwise.
-        record.release().await;
-        return Err(e);
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "cleanup: the account was erased by another unit before this one's anonymization"
+            );
+            // Nothing carries this unit's stamp; the release matches nothing.
+            record.release().await;
+            return Ok(false);
+        }
+        Err(e) => {
+            // The transaction may have committed before the error reached us:
+            // release a marker stamped with ours, if there is one, so the next
+            // sweep finishes the erasure at once. Nothing matches otherwise.
+            record.release().await;
+            return Err(e);
+        }
     }
 
     // G-5 (D-52): the account is gone; tell the receivers what it was.
@@ -2502,18 +2541,17 @@ where
     .await
     {
         Ok(()) => {}
-        // #738: the proof is unique per account, and only an erasure past its
-        // anonymization writes one, so a proof already there means another
-        // unit erased the account — one that took this unit's claim over after
-        // its lease. That unit records the erasure; this one has nothing left
-        // to do and is not a failure of the tick. Its own anonymization set the
-        // marker again: released, the next sweep finds the record written and
-        // clears it.
+        // #738: the proof is unique per account, and only this unit's
+        // anonymization (#784: the only one) or the recovery of it writes one,
+        // so a proof already there means this unit stalled past the record
+        // lease and the next sweep wrote the proof for it. That sweep records
+        // the erasure; this unit has nothing left to do and is not a failure
+        // of the tick. Its marker, released, is settled with the record.
         Err(e) if is_existing_proof(&e) => {
             tracing::info!(
                 %tenant_id,
                 %user_id,
-                "cleanup: the account's erasure proof exists already; another unit erased it"
+                "cleanup: the account's erasure proof exists already; a sweep recovered the erasure"
             );
             record.release().await;
             return Ok(false);
@@ -2629,10 +2667,11 @@ const ERASURE_PROOF_ENTITY: &str = "erasure_proof";
 ///    own pass;
 /// 3. the `gdpr.user_pseudonymized` row, unless the tenant's trail already
 ///    holds one for the account (a unit cut after its record and before the
-///    clearing), matched by its actor or by its pseudonym — a unit that
-///    stalled past its claim's lease runs its audit scrub over the row
-///    another unit wrote and nils its actor: an account is erased once, so
-///    that row is this erasure's. It
+///    clearing), matched by its actor or by its pseudonym — before 1.1.2
+///    (#784) a unit that stalled past its claim's lease ran its audit scrub
+///    over the row another unit wrote and nilled its actor, which the scrub
+///    no longer does: an account is erased once, so that row is this
+///    erasure's. It
 ///    carries the pseudonym the anonymization wrote, `certificates_revoked` as
 ///    `null` — the unit's count lived only in the cut unit, and the second
 ///    pass's alone would understate it — and `recovered: true`.

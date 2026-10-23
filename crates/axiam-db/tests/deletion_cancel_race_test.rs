@@ -432,3 +432,94 @@ async fn an_erasure_without_a_request_is_claimed_on_the_user_row() {
         "an erased account is not claimed again"
     );
 }
+
+/// #784: the erasure's anonymization writes only a deletion-pending account. A
+/// unit stalled past its claim's lease that reaches it after its successor
+/// erased the account matches nothing: `false`, and the row — its pseudonym,
+/// its record marker, its `updated_at` — is left as the successor wrote it.
+#[tokio::test]
+async fn the_marked_anonymization_of_an_erased_account_writes_nothing() {
+    let db = common::serialising_db().await;
+    let (tenant, user, _) = pending_deletion(&db, 0).await;
+    let users = SurrealUserRepository::new(db.handle());
+    let first = Utc::now();
+    assert!(
+        users
+            .anonymize_user_marked(tenant, user, "hashed_a", "DELETED_USER_first000001", first)
+            .await
+            .unwrap(),
+        "the successor anonymizes the pending account"
+    );
+    let erased = users.get_by_id(tenant, user).await.unwrap();
+    assert_eq!(user_stamp(&db, user).await, Some(first));
+
+    assert!(
+        !users
+            .anonymize_user_marked(
+                tenant,
+                user,
+                "hashed_b",
+                "DELETED_USER_stalled00001",
+                first + Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        "the stalled unit's anonymization matches nothing"
+    );
+    let after = users.get_by_id(tenant, user).await.unwrap();
+    assert_eq!(after.username, "DELETED_USER_first000001");
+    assert_eq!(after.email, "hashed_a");
+    assert_eq!(after.updated_at, erased.updated_at);
+    assert_eq!(
+        user_stamp(&db, user).await,
+        Some(first),
+        "no marker set again"
+    );
+}
+
+/// #784: a unit stalled past its claim's lease and its successor that reach the
+/// anonymization of one pending account together anonymize it once: one call
+/// answers `true`, the other `false`, and the record marker is the winner's.
+/// On `surrealkv` (`tests/common`): the assertion is "exactly one wins".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_anonymizations_of_one_pending_account_sent_together_have_one_winner() {
+    let db = common::serialising_db().await;
+    for round in 0..ROUNDS {
+        let (tenant, user, _) = pending_deletion(&db, 100 + round).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let base = Utc::now();
+        let racers: Vec<_> = (0..2)
+            .map(|i| {
+                let (barrier, users) = (barrier.clone(), SurrealUserRepository::new(db.handle()));
+                let stamp = base + Duration::seconds(i);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let won = users
+                        .anonymize_user_marked(
+                            tenant,
+                            user,
+                            &format!("hashed_{round}_{i}"),
+                            &format!("DELETED_USER_r{round:03}u{i}"),
+                            stamp,
+                        )
+                        .await
+                        .unwrap();
+                    (won, stamp)
+                })
+            })
+            .collect();
+        let mut winners = Vec::new();
+        for racer in racers {
+            let (won, stamp) = racer.await.unwrap();
+            if won {
+                winners.push(stamp);
+            }
+        }
+        assert_eq!(winners.len(), 1, "round {round}: exactly one anonymizes");
+        assert_eq!(
+            user_stamp(&db, user).await,
+            Some(winners[0]),
+            "round {round}: the marker is the winner's"
+        );
+    }
+}

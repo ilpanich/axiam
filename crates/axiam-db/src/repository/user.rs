@@ -1597,14 +1597,21 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         email_hash: &str,
         pseudonym: &str,
     ) -> AxiamResult<()> {
-        self.anonymize_user_marked(tenant_id, user_id, email_hash, pseudonym, Utc::now())
+        self.anonymize(tenant_id, user_id, email_hash, pseudonym, Utc::now(), false)
             .await
+            .map(|_| ())
     }
 
     /// [`Self::anonymize_user`], with `erasure_audit_pending` set to
     /// `record_stamp` (#737): the erasure arms its guard on the marker from
     /// that stamp before this write, so a cut anywhere from here on releases
     /// the marker and the next sweep records the erasure at once.
+    ///
+    /// Only while the account is still deletion-pending (#784): the condition
+    /// is in the write, so of two units that both reach it — one stalled past
+    /// its claim's lease, one that took the claim over — one anonymizes and the
+    /// other matches nothing, writes nothing (no marker, no SAML statement) and
+    /// gets `false`.
     async fn anonymize_user_marked(
         &self,
         tenant_id: Uuid,
@@ -1612,7 +1619,33 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         email_hash: &str,
         pseudonym: &str,
         record_stamp: DateTime<Utc>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
+        self.anonymize(
+            tenant_id,
+            user_id,
+            email_hash,
+            pseudonym,
+            record_stamp,
+            true,
+        )
+        .await
+    }
+}
+
+impl<C: Connection> SurrealUserRepository<C> {
+    /// The anonymization of [`UserRepository::anonymize_user`] and
+    /// [`UserRepository::anonymize_user_marked`]: `true` when it wrote the
+    /// row. With `only_pending` it writes only a row still deletion-pending,
+    /// and the SAML statements run only when it did.
+    async fn anonymize(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+        record_stamp: DateTime<Utc>,
+        only_pending: bool,
+    ) -> AxiamResult<bool> {
         // password_hash is TYPE string (not nullable) — use empty string as
         // tombstone value. Argon2 output is never empty, so login is permanently
         // blocked without needing to make the column nullable.
@@ -1629,34 +1662,52 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // ended. Erasure that left them would be retention.
         let statement = format!(
             "BEGIN TRANSACTION; \
-             UPDATE type::record('user', $id) SET {}, \
+             LET $erased = (UPDATE type::record('user', $id) SET {}, \
              deletion_pending = false, \
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
              erasure_audit_pending = $record_stamp, \
              updated_at = time::now() \
-             WHERE tenant_id = $tenant_id; \
-             {SAML_ERASURE_STATEMENTS} \
+             WHERE tenant_id = $tenant_id AND ($only_pending = false OR deletion_pending = true) \
+             RETURN VALUE meta::id(id)); \
+             IF $only_pending = false OR array::len($erased) > 0 {{ {SAML_ERASURE_STATEMENTS} }}; \
+             RETURN array::len($erased) > 0; \
              COMMIT TRANSACTION",
             axiam_core::personal_data::shared_erasure_fragment()
         );
+        // Result slots: BEGIN (0), the LET (1), the IF (2), the RETURN (3).
+        const OUTCOME_SLOT: usize = 3;
 
-        self.db
-            .current()
-            .query(statement)
-            .bind(("id", user_id.to_string()))
-            .bind(("email_replacement", email_hash.to_string()))
-            .bind(("pseudonym", pseudonym.to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("record_stamp", record_stamp))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
-        // G-6 (D-57, D-58): the deliverer sees `Anonymized` and sends the
-        // downstream `DELETE`, whatever the target's deprovision policy says.
-        self.notify_user_changed(tenant_id, user_id).await;
-        Ok(())
+        // A unit and its successor that both reach the write conflict on the
+        // user row: the loser is retried on a fresh snapshot, where it finds
+        // the account no longer pending.
+        let erased = crate::helpers::retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(statement.as_str())
+                .bind(("id", user_id.to_string()))
+                .bind(("email_replacement", email_hash.to_string()))
+                .bind(("pseudonym", pseudonym.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("record_stamp", record_stamp))
+                .bind(("only_pending", only_pending))
+                .await
+                .map_err(DbError::from)?;
+            if let Some(text) = tx_error_text(result.take_errors()) {
+                return Err(classify_write_error(text, "user"));
+            }
+            let erased: Option<bool> = result.take(OUTCOME_SLOT).map_err(DbError::from)?;
+            Ok::<_, DbError>(erased.unwrap_or(false))
+        })
+        .await?;
+        if erased {
+            // G-6 (D-57, D-58): the deliverer sees `Anonymized` and sends the
+            // downstream `DELETE`, whatever the target's deprovision policy
+            // says.
+            self.notify_user_changed(tenant_id, user_id).await;
+        }
+        Ok(erased)
     }
 }
 

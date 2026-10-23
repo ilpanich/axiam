@@ -439,12 +439,18 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         };
 
         // Query 1: scrub actor fields + metadata PII on all entries for this actor.
+        // Not the erasure's own record (#784): it names the erased account as
+        // its actor on purpose, is written after the scrub, and carries only
+        // the pseudonym — a unit stalled past its claim's lease that scrubs
+        // after another unit recorded the erasure must not nil it. Matched by
+        // the pseudonym too, a keyed HMAC no other writer of the trail holds.
         let q1_sql = format!(
             "UPDATE audit_log SET \
              actor_id = $nil_uuid, \
              metadata.actor_pseudonym = $pseudonym, \
              ip_address = NONE{} \
-             WHERE tenant_id = $tenant_id AND actor_id = $user_id",
+             WHERE tenant_id = $tenant_id AND actor_id = $user_id \
+             AND NOT (action = 'gdpr.user_pseudonymized' AND metadata.pseudonym = $pseudonym)",
             pii_set
         );
         let _ = self

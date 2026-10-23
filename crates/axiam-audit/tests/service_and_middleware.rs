@@ -371,45 +371,68 @@ async fn no_claim_is_recorded_when_the_leftmost_entry_is_the_recorded_address() 
 /// Deliberately an **exact** key-set assertion rather than a set of
 /// absence checks: absence checks only catch the fields whoever wrote them
 /// thought of.
+///
+/// One key is added when, and only when, the caller's leftmost
+/// `X-Forwarded-For` entry differs from the recorded address:
+/// `forwarded_for_claimed` (#752, D-5). It is a client address, which the
+/// erasure scrub and minimisation must know about (#794), so the key set is
+/// pinned with the header as well as without it.
 #[tokio::test]
 async fn the_request_audit_middleware_collects_only_the_outcome() {
-    let repo = RecordingRepo::new();
-    let mw = AuditMiddleware::spawn(repo.clone());
+    for (forwarded_for, expected) in [
+        (None, vec!["authenticated", "http_status"]),
+        (
+            Some("198.51.100.23"),
+            vec!["authenticated", "forwarded_for_claimed", "http_status"],
+        ),
+    ] {
+        let repo = RecordingRepo::new();
+        // The peer is not a listed proxy, so it is the recorded address and a
+        // header's leftmost entry is a differing claim.
+        let rule = ClientIpRule {
+            trusted_hops: 0,
+            trusted_proxies: TrustedProxies::parse("10.0.0.0/8").unwrap(),
+        };
+        let mw = AuditMiddleware::spawn(repo.clone()).with_client_ip_rule(rule);
 
-    let app = test::init_service(App::new().wrap(mw).route(
-        "/api/metadata",
-        web::get().to(|| async { HttpResponse::Ok().finish() }),
-    ))
-    .await;
+        let app = test::init_service(App::new().wrap(mw).route(
+            "/api/metadata",
+            web::get().to(|| async { HttpResponse::Ok().finish() }),
+        ))
+        .await;
 
-    let req = test::TestRequest::get()
-        .uri("/api/metadata?secret_query_param=value")
-        .insert_header(("User-Agent", "Mozilla/5.0 (X11; Linux) Firefox/128.0"))
-        .insert_header(("X-Something-Personal", "a name"))
-        .peer_addr("203.0.113.7:5555".parse().unwrap())
-        .to_request();
-    let _ = test::call_service(&app, req).await;
+        let mut req = test::TestRequest::get()
+            .uri("/api/metadata?secret_query_param=value")
+            .insert_header(("User-Agent", "Mozilla/5.0 (X11; Linux) Firefox/128.0"))
+            .insert_header(("X-Something-Personal", "a name"))
+            .peer_addr("203.0.113.7:5555".parse().unwrap());
+        if let Some(xff) = forwarded_for {
+            req = req.insert_header(("X-Forwarded-For", xff));
+        }
+        let _ = test::call_service(&app, req.to_request()).await;
 
-    wait_for_entries(&repo, 1).await;
-    let entries = repo.snapshot();
-    let metadata = entries[0]
-        .metadata
-        .as_ref()
-        .expect("the middleware always writes metadata");
-    let mut keys: Vec<&str> = metadata
-        .as_object()
-        .expect("metadata is an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(
-        keys,
-        vec!["authenticated", "http_status"],
-        "the request-audit middleware must collect the outcome and nothing \
-         else; a header, a query parameter or a body excerpt added here goes \
-         into an append-only table and stays for the retention window"
-    );
+        wait_for_entries(&repo, 1).await;
+        let entries = repo.snapshot();
+        assert_eq!(entries[0].ip_address.as_deref(), Some("203.0.113.7"));
+        let metadata = entries[0]
+            .metadata
+            .as_ref()
+            .expect("the middleware always writes metadata");
+        let mut keys: Vec<&str> = metadata
+            .as_object()
+            .expect("metadata is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys, expected,
+            "the request-audit middleware must collect the outcome (and a \
+             differing forwarded claim) and nothing else; a header, a query \
+             parameter or a body excerpt added here goes into an append-only \
+             table and stays for the retention window"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

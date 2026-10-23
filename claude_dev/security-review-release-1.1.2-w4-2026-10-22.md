@@ -506,3 +506,51 @@ re-run, and the full `axiam-api-rest` suite (112 binaries) was not run.
 R112W4-01 … -05 are **closed**. The one new finding, R112W4-06, is Informational,
 pre-existing, and outside W4's diff. **W4 may merge.** R112W4-06 belongs in the 1.1.x sweep,
 next to D7, and does not block this wave.
+
+---
+
+## Addendum — the sweep, part c (R112W4-06, 2026-10-23)
+
+**Against:** `965ee35..5eccf2e` (1 commit, signed: "fix(authz): a decision overtaken by an
+invalidation is not cached", #791).
+
+**Verdict: R112W4-06 (#791) is closed.**
+
+- **The design holds.** Each of the 16 stripes has a generation. `invalidate_tenant` bumps its
+  own stripe. `invalidate_subject` and `invalidate_all` bump every stripe, each one under that
+  stripe's lock, in the same critical section as the removal. `check_access` and the cached
+  batch path read the generation **before** they evaluate, and insert through
+  `insert_if_unchanged`, which compares the generation under the same lock. Under that lock
+  every insert falls either before a flush (and the flush removes it) or after the bump (and it
+  is refused). The revoking write's flush runs after its commit (#775's order), so an
+  evaluation that read the store before the commit has a generation older than the bump.
+- **Every path that clears the cache bumps the generation.** Broadcasts arrive through
+  `InvalidationEvent::apply`, which calls the same `invalidate_*` methods. `set_trusted` swaps
+  the flag and then calls `invalidate_all`. An evaluation begun while the cache was untrusted
+  is therefore refused once trust returns, or cleared if its insert lands between the swap and
+  the bump. No production caller of the unconditional `insert` remains; only unit tests use it.
+- **Accepted cost.** Refusals are per stripe, so a flush can also refuse in-flight inserts of
+  unrelated keys. Those keys are simply evaluated again on their next miss. The doc states
+  this, and the new `overtaken` stat counts it.
+- **I tried the race myself.** A scratch test (appended to `decision_cache.rs` and reverted;
+  the tree is clean) ran 3 000 rounds. In each round, four evaluator threads read the
+  generation, then a "store" flag, yielded, and inserted what they had read, while a revoker
+  cleared the flag and then flushed (subject and tenant flushes alternating). With
+  `insert_if_unchanged`: **0** stale allows, and 27 inserts refused as overtaken. **Control**
+  with the old unconditional `insert`: **16** stale allows, and the test fails. So the probe
+  detects the race, and the fix closes it.
+- **Text.** The T-88 amendment is dated, and its line appears verbatim in `Axiam.json`.
+
+**Checks** (debug info off; each tool's own exit code):
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-authz` | 0 (6 binaries, 214 passed; the three `r112w4_06_*` engine tests among them) |
+| `cargo test -p axiam-amqp --test cache_invalidation_test` | 0 (35 passed) |
+| `cargo test -p axiam-api-rest` (SAML on) `--test network_gate_test --test role_permission_test --test audit_test` | 0 (44 passed; `r112w4_01_*` ×2 among them) |
+| `cargo test -p axiam-server --no-default-features --tests` | 0 (28 binaries, 348 passed) |
+| `cargo clippy -p axiam-authz --lib --tests -- -D warnings`; `cargo fmt --all -- --check` | 0; 0 |
+
+**New findings:** none.
+
+**W4 may merge:** R112W4-01 … -06 are all closed, and no finding of this review is open.

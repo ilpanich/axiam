@@ -3098,7 +3098,11 @@ and terminal:
    authentication is not an expired session, and retrying cannot fix it.
 6. **`5xx` and transport failures remain §2 `NetworkError`** and are **not** terminal —
    they are retried under the bounded read-only retry policy of
-   [§16](#§16-retry-policy-d5), then surfaced. A server restart mid-flow must not lose a
+   [§16](#§16-retry-policy-d5), then surfaced. **A `5xx` is a transport failure whatever its
+   body (*contract 1.64 (amended)*; C164-16):** the status is read before the body, as
+   [§34.2](#§342-clarifications-normative-from-159) P8 says for `ciba_poll`, and AXIAM's own token
+   endpoint answers an internal failure `500 {"error":"server_error"}`, which does not end the flow
+   although rule 5 would dispatch an `error` member at any other status. A server restart mid-flow must not lose a
    grant the user has already approved. Per §16.2 that budget is **per poll attempt** and is
    separate from this grant's own `expires_in` polling loop: an exhausted retry budget ends
    that one poll, not the flow.
@@ -3141,7 +3145,10 @@ and terminal:
    **not** raise the interval for it, and polls again. It mirrors
    [§33.7](#§337-retry-and-polling-normative) rule 5 for CIBA. The single `device_poll` call still
    raises the `OAuthProtocolError` of the paragraph above; it is the loop (`device_login`, and any
-   SDK loop around `device_poll`) that waits.
+   SDK loop around `device_poll`) that waits. **The status decides, not the body (*contract 1.64
+   (amended)*; C164-04):** any `429` on a poll is this wait, whatever its body names, and a `429`
+   whose body says `slow_down` (as a server before 1.1.2 or an intermediary may send) does not
+   raise the interval; rule 5's dispatch on `error` applies to the `400`.
 
 ### §14.3 `device_login` — the composed helper
 
@@ -3200,19 +3207,24 @@ displaying is the caller's job.
 Interval honoured from the response; `slow_down` raises the interval and the raised interval
 persists across subsequent polls; `authorization_pending` loops rather than raising;
 `access_denied` and `expired_token` raise **distinct** errors; polling stops at `expires_in`;
-a `500` mid-poll is retried rather than treated as terminal; `device_login` surfaces the user
+a `500` mid-poll is retried rather than treated as terminal (*contract 1.64 (amended)*: the mock
+answers `500 {"error":"server_error","error_description":…}`, the body the server sends, and not a
+bodiless `500`); `device_login` surfaces the user
 code before its first poll (assert ordering, not just presence); a successful `device_login`
 returns a token set carrying the access token.
 
 **Contract 1.64, a `429` on a poll is waited out** (#760 Q2; §14.2 rule 9, last paragraph), against
 a mocked server: the mock answers one poll with `429 {"error":"rate_limit_exceeded"}` and a
-`Retry-After`, then `200` with the tokens. Assert that the loop **waits at least the
+`Retry-After`, then `200` with the tokens (*contract 1.64 (amended)*: the mock's body is the
+server's own, with no `error_description`). Assert that the loop **waits at least the
 `Retry-After`** (a fake clock or a recorded sleep, not a wall-clock sleep), **polls again** and
 completes with the token set, and that **the interval is unchanged**: the poll after the `429` is
 scheduled at the interval the loop held before it, not five seconds longer. A second case: a
 `Retry-After` past the `expires_in` deadline is capped at the deadline and the loop raises the
 typed `expired_token` outcome of rule 4, at once or after serving the capped wait (as
 [§33.7](#§337-retry-and-polling-normative) rule 5 allows), and sends nothing after the deadline.
+A third case (*contract 1.64 (amended)*): a `429` whose body says `slow_down`, then `200`, does
+not raise the interval.
 
 **Contract 1.62, no session or adopted credential on `/oauth2/*`** (maintainer, 2026-10-16;
 [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3, last paragraph), against a mocked
@@ -4300,7 +4312,8 @@ recorded here until one exists.
   rows (§8), `422 resource_exceeds_registration_policy` and `redirect_exceeds_registration_policy` on
   the administrator's client `PUT` (§28.12.2 rule 7, §27.4 rule 7 (v)), `network_role.deleted`
   (§8), the refusals the spec now declares (§2), `uma_request_ticket` for another server's set
-  (§20.2 rule 9, §20.4), the token carrier order (§6.1 rule 11).
+  (§20.2 rule 9, §20.4), the token carrier order (§6.1 rule 11). Amended 2026-10-23 (W7.1b), none
+  breaking: wording of §14.2 rules 6 and 9, §14.6, §34.2 P11 and §34.8 (c) (see §34.8).
 - **2026-10-20 (1.1.1 release, contract 1.63)** — **no new operation; two rules every SDK ports and
   a third that an audit-message helper may; wire-additive, no wire break.** Recorded in **§34.7**, marked *contract
   1.63* inline where each rule lives. SDK work: no session cookie and no `X-CSRF-Token` on any
@@ -13157,7 +13170,8 @@ is all three of: a dedicated, non-pooled handler for those requests, `Connection
 and content on every one of them (an empty body where the operation has none). A
 **never-retried** request is every request other than `GET`, `HEAD`, `OPTIONS` and `TRACE` that
 the SDK does not itself retry under §16; an SDK MAY also give the requests it does retry
-(`ssf.poll`, `ciba_poll`) a fresh connection, which is stricter and conforms. The §9
+(`ssf.poll`, `ciba_poll`, and `device_poll` on a `5xx` or transport failure, which
+[§16.2](#§162-what-is-eligible-normative)'s table lists; *contract 1.64 (amended)*) a fresh connection, which is stricter and conforms. The §9
 refresh-then-resend of a request after a `401` is the SDK's own documented behaviour, not a
 re-send by another route, and is outside P11 (the endpoints exempt from §9, named above, never
 enter it). Test: a server that reads a write and drops the connection unanswered receives that
@@ -13846,6 +13860,20 @@ other work (the GDPR erasure and the CRL, the client-address and rate-limit rule
 network gate's cache, the RADIUS Live recipe, CodeQL, CI) changes no SDK-visible rule that is not
 listed here.
 
+Amended 2026-10-23 (W7.1b; the 1.64 conformance review, `claude_dev/sdk-contract-1.64-conformance-review.md`;
+#750, #760), no version change and nothing breaking, each change marked *contract 1.64 (amended)* inline:
+(1) **C164-16** — [§14.2](#§142-polling-normative--the-part-implementations-get-wrong) rule 6 says a
+`5xx` on the device poll is a transport failure whatever its body (status before body, as §34.2 P8
+says for `ciba_poll`), and [§14.6](#§146-required-tests) tests it with `500
+{"error":"server_error",…}`; the 429 test's mock carries the server's own body. (2) **C164-18** —
+(c) below no longer puts Swift among the SDKs that cannot name the value: TypeScript, Python, Go, Rust
+and Swift keep it, C++, C#, Java, Kotlin and PHP keep it since 1.1.2 (D-15), only C does not. (3)
+**C164-04, checked** — rule 9 keyed the wait on the body `rate_limit_exceeded` and left a `429
+slow_down` open, so one sentence is added: the status decides, any `429` on a poll is the wait, and
+only the `400` raises the interval; the §14.6 test gains a `429 slow_down` case. (4) **C# and P11,
+checked** — §16.2's table lists `device_poll` on a `5xx` or transport failure as retried and P11's list
+of retried requests did not; P11 now names it. No wire change, no new operation.
+
 - **(a) The recovered `gdpr.user_pseudonymized` row (informative; no SDK change; #760 Q1).**
   [§27.11](#§2711-model-additions-contract-131) rule 5: the erasure "carries the count, or `null`
   with `recovered: true` when the row was written by the start-up recovery and the count is not
@@ -13866,9 +13894,10 @@ listed here.
   [§27.6.2](#§2762-the-network-namespace-in-a-manifest-contract-162) item 4, the [§27.9](#§279-required-tests) bullet and §34.6 (ab):
   "naming the member, and the value where the SDK's decoded type keeps it (an SDK whose open
   enumeration decodes to a text-less `Unknown` names the member and says the value is unknown)".
-  The safety property is unchanged: refuse at `plan`, nothing written. TypeScript, Python, Go and
-  Rust keep the text and name both; C, C++, C#, Java, Kotlin, PHP and Swift name the member and say the
-  value is unknown. **C163-11 is not repeated**: 1.63's correction took it (§34.7, §14.6).
+  The safety property is unchanged: refuse at `plan`, nothing written. TypeScript, Python, Go,
+  Rust and Swift keep the text and name both; C++, C#, Java, Kotlin and PHP keep it through a
+  non-breaking internal addition in 1.1.2 (D-15) and name both; only C names the member and says the
+  value is unknown (*contract 1.64 (amended)*; C164-18). **C163-11 is not repeated**: 1.63's correction took it (§34.7, §14.6).
 - **(d) Ingested audit rows carry `metadata.ingested_via = "amqp"` (informative; no SDK change;
   #741).** [§8](#actions-the-audit-ingestion-refuses-contract-162-extended-in-163): the key is set by
   the server after the producer's metadata is merged, so a producer-supplied `ingested_via` is

@@ -961,7 +961,7 @@ exercised), more than one site, a NAS that retransmits, and anything about speed
 - **The mapping**, when AXIAM's dictionary or the shape of its answer changes:
   AXIAM's change comes with a new `axiam-radius-reply/N` and this file changes with
   it.
-- **Logs**: `-X` prints each request and response body, fingerprints included.
+- **Logs**: `-X` prints each request and response body, fingerprints included. At debug level (`-X`, or `-xx` as the e2e override `docker/docker-compose.radius-live.yml` runs it) the log also holds the **Live access token** (as a `Bearer` credential and in the `/auth/device` response body) and that body itself. Treat such a log as a credential: production runs without debug, and a debug log is never attached to a ticket or a CI report unredacted.
   Production runs `freeradius -f -l stdout` and treats the logs as personal data,
   as before.
 - **Sessions**: `Session-Timeout`, and CoA if you need a session ended, not

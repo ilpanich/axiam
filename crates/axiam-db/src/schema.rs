@@ -2507,35 +2507,57 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 // Additive migrations (#729)
 // -----------------------------------------------------------------------
 
-/// The statements of a migration as SurrealDB parses them: `--` comment lines
-/// dropped, split at every `;` that is outside a string literal and outside
-/// a `{ … }`, `( … )` or `[ … ]` group, each trimmed, empty ones dropped.
+/// The statements of a migration as SurrealDB parses them: comments dropped
+/// (`--`, `//` and `#` to the end of the line, `/* … */`, none of them inside
+/// a string literal), a backslash inside a string escaping the next character,
+/// split at every `;` that is outside a string literal and outside a
+/// `{ … }`, `( … )` or `[ … ]` group, each trimmed, empty ones dropped.
 fn migration_statements(sql: &str) -> Vec<String> {
-    let code: String = sql
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("--"))
-        .collect::<Vec<_>>()
-        .join("\n");
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
     let mut depth = 0u32;
-    for c in code.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None => match c {
-                '\'' | '"' | '`' => quote = Some(c),
-                '{' | '(' | '[' => depth += 1,
-                '}' | ')' | ']' => depth = depth.saturating_sub(1),
-                ';' if depth == 0 => {
-                    statements.push(std::mem::take(&mut current));
-                    continue;
-                }
-                _ => {}
-            },
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            current.push(c);
+            if c == '\\' {
+                current.extend(chars.next());
+            } else if c == q {
+                quote = None;
+            }
+            continue;
         }
-        current.push(c);
+        match c {
+            '#' => skip_line(&mut chars),
+            '-' if chars.peek() == Some(&'-') => skip_line(&mut chars),
+            '/' if chars.peek() == Some(&'/') => skip_line(&mut chars),
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                // A comment separates tokens, as whitespace does.
+                current.push(' ');
+            }
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            ';' if depth == 0 => statements.push(std::mem::take(&mut current)),
+            _ => {
+                match c {
+                    '{' | '(' | '[' => depth += 1,
+                    '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                current.push(c);
+            }
+        }
     }
     statements.push(current);
     statements
@@ -2543,6 +2565,11 @@ fn migration_statements(sql: &str) -> Vec<String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Consume up to, not including, the next newline (the comment's end).
+fn skip_line(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.next_if(|&n| n != '\n').is_some() {}
 }
 
 /// Whether a migration only **adds** schema: every statement is
@@ -7904,6 +7931,33 @@ mod tests {
         );
         // The #704 case stays applicable late.
         assert!(is_additive(SCHEMA_V99));
+    }
+
+    /// R112-06 (#799): a trailing comment holding an apostrophe, or a
+    /// backslash-escaped quote, must not desynchronise the quote state and
+    /// swallow a following non-additive statement.
+    #[test]
+    fn the_additive_rule_is_comment_and_escape_aware() {
+        for sql in [
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string -- don't\n;UPDATE t SET a = 1; -- '",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string // it's\n;REMOVE TABLE x; // '",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string # isn't\n;DELETE t; # '",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string DEFAULT 'it\\'s'; UPDATE t SET a = 1;",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string /* it's */; UPDATE t SET a = 1;",
+        ] {
+            assert!(!is_additive(sql), "{sql:?} must not read as additive");
+        }
+        // Benign: trailing comments of every kind, an escaped quote and comment
+        // markers inside literals are read as what they are.
+        assert!(is_additive(
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string; -- it's fine\n\
+             DEFINE FIELD IF NOT EXISTS b ON t TYPE string DEFAULT 'it\\'s -- // # /*'; // done\n\
+             DEFINE INDEX IF NOT EXISTS i ON t COLUMNS a; /* it's */ # end"
+        ));
+        assert_eq!(
+            migration_statements("A 'x\\';y' ; B -- c; d\n; C /* ; */ D"),
+            ["A 'x\\';y'", "B", "C   D"]
+        );
     }
 
     #[test]

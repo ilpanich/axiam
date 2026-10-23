@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.2",
-    "x-axiam-spec-digest": "sha256:9960bbbb2b21983a589238240941c4bfe9496425f01ce470ca12c6afd9c8919d"
+    "x-axiam-spec-digest": "sha256:f5613aea9e1fbfcbeab5cf63df3ba4b940e8a1778b1674347eec3cd1c1983f0d"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -1332,6 +1332,9 @@
               }
             }
           },
+          "429": {
+            "description": "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"
+          },
           "503": {
             "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
           }
@@ -1718,6 +1721,9 @@
           "422": {
             "description": "New password violates policy"
           },
+          "429": {
+            "description": "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"
+          },
           "503": {
             "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
           }
@@ -1837,6 +1843,9 @@
           },
           "400": {
             "description": "Invalid token or password policy violation"
+          },
+          "429": {
+            "description": "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"
           },
           "503": {
             "description": "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"
@@ -6145,7 +6154,7 @@
             "description": "The client was written by another request after this one read it; the patch was validated against the row it read, so nothing is written. Read the client again and retry."
           },
           "422": {
-            "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`), a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`), an allowed_resources entry outside the tenant's external_client_allowed_resources (`resource_exceeds_registration_policy`), or a redirect URI its registration would refuse: a host outside dcr_allowed_redirect_hosts for a dcr client, or one the tenant's CIMD policy (cimd.trusted_redirect_domains, restrict_same_domain, https or loopback, no fragment) does not admit for a cimd client (`redirect_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope, grant, resource or redirect URI the row already holds is not counted. An administrator-managed client is not bounded."
+            "description": "The client is managed_by dcr or cimd and the request adds a scope outside the tenant's effective dcr_allowed_scopes (`scope_exceeds_ceiling`), a grant its registration endpoint would refuse (`grant_exceeds_registration_policy`), an allowed_resources entry outside the tenant's external_client_allowed_resources (`resource_exceeds_registration_policy`), or a redirect URI (`redirect_uris`, `post_logout_redirect_uris` or `backchannel_logout_uri`) its registration would refuse: a host outside dcr_allowed_redirect_hosts for a dcr client, or one the tenant's CIMD policy (cimd.trusted_redirect_domains, restrict_same_domain, https or loopback, no fragment) does not admit for a cimd client (`redirect_exceeds_registration_policy`); the message names each, and the client is unchanged. A scope, grant, resource, redirect URI or logout URI the row already holds is not counted. An administrator-managed client is not bounded."
           }
         },
         "security": [
@@ -15769,6 +15778,36 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "`invalid_client`: client authentication failed; carries a `WWW-Authenticate` challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`server_error`: an internal failure; the body always carries `error_description`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -16438,13 +16477,16 @@
             }
           },
           "400": {
-            "description": "Malformed request or undeclared scope"
+            "description": "Malformed request, undeclared scope, or a resource set this client did not register (the same answer as an unknown id)"
           },
           "401": {
             "description": "Missing or invalid PAT"
           },
           "403": {
             "description": "Token lacks the uma_protection scope"
+          },
+          "429": {
+            "description": "`rate_limit_exceeded`: the per-resource-server bucket is spent; honour `Retry-After`"
           }
         },
         "security": [

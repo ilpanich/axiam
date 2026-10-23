@@ -2105,6 +2105,12 @@ pub async fn authorize<C: Connection + Clone>(
          body = TokenResponse),
         (status = 400, description = "OAuth2 error",
          body = OAuth2ErrorResponse),
+        (status = 401, description = "`invalid_client`: client authentication failed; carries a `WWW-Authenticate` challenge",
+         body = OAuth2ErrorResponse),
+        (status = 429, description = "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+         body = OAuth2ErrorResponse),
+        (status = 500, description = "`server_error`: an internal failure; the body always carries `error_description`",
+         body = OAuth2ErrorResponse),
     ),
 )]
 pub async fn token<C: Connection + Clone>(
@@ -2801,9 +2807,10 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
 ///    transport peer address, which a caller cannot forge. The
 ///    `X-Forwarded-For`-derived value goes to metadata under a name that says
 ///    it is untrusted: on an authenticated path behind a trusted proxy the
-///    forwarded value is the useful one, but here anyone can assert it, and an
-///    operator who blocks a forged IP has been made to act against the wrong
-///    host.
+///    forwarded value is the useful one, but here anyone can assert it (when
+///    `TRUSTED_PROXIES` is empty, every peer's `X-Forwarded-For` is read; with
+///    it set, only a listed proxy's line is honoured), and an operator who
+///    blocks a forged IP has been made to act against the wrong host.
 pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
     tenant_repo: &SurrealTenantRepository<C>,
     audit_repo: &SurrealAuditLogRepository<C>,

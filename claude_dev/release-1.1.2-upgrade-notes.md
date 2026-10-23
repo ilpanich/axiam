@@ -54,3 +54,5 @@ The Live compose override now starts FreeRADIUS as `freeradius -f -xx -l stdout`
 `-X`, which serves one request at a time): same debug output, with the thread pool. An
 operator who copied the override's `command` gets threaded authentication from the new
 file; one who runs without debug output is unaffected.
+
+**Mixed-version rolls and the erasure claim.** A 1.1.1 replica's non-exclusive `claim_tx` ignores the exclusive claim 1.1.2 takes on an erasure. During a mixed-version roll one erasure can therefore still run twice (#738's 1.1.1 behaviour: one erasure record, a doubled SSF `account_purged` notification), bounded by the rollout window; once every replica runs 1.1.2 the claim is exclusive.

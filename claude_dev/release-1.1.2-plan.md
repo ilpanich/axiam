@@ -641,7 +641,9 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   (b) Sonnet 5.5 — `defdb94` (#789), `2533242` (#788), `7beb01f` (#790), `047e930` (#787: every extractor leaves the
   D-12 verdict; machine refusals earn no refund, which #787 did not ask for). Addendum `f379f67`: all closed, none new.
 - **Merge note:** `e2b1f53` added an assertion that printed the whole token-endpoint body
-  (`device_flow_test.rs`); the merge commit replaces it with a label, as #757 (W6.1) did everywhere else.
+  (`device_flow_test.rs`). The W2 merge `5f3a2cb` did not replace it (`git show --remerge-diff 5f3a2cb` is empty);
+  the label (`device_flow_test.rs:2511`) came with W6's merge `bbcf271` (§12.6), as #757 (W6.1) did everywhere else
+  (corrected 2026-10-23, R112-13 e).
 - **For later waves:** W7.1 — the optional carrier-precedence sentence; `ingested_via` (§8). W8.3 — T-474 closed for
   revoked sessions; D-12/T-118 speak of the session extractor only and could say every extractor. W8.4 — audit
   `ip_address` semantics and `forwarded_for_claimed`; `TRUSTED_PROXIES=none`; `ingested_via` (rows before 1.1.2 carry
@@ -713,7 +715,8 @@ wave's next commit, or recorded in §12 as "answered after the fact".
 - **No F4** (§1.4: W6 has none).
 - **Merge note:** W6's #757 rule (no token, body or error text in assertion messages) is applied in the merge to
   what other waves added in #757's files: two `err` bindings in `network_gate_test.rs` become `_err` behind labels,
-  and the W2 assertion above becomes a label. New `{body}` messages in other test files are left for W8.1.
+  three `{text}` messages in `network_gate_test.rs` (around `:2106-2116`) are removed, and the W2 assertion of §12.2
+  becomes a label (`device_flow_test.rs:2511`; the merge `bbcf271`, not W2's, made that change). New `{body}` messages in other test files are left for W8.1.
 
 ### 12.7 W7 — contract 1.64, version 1.1.2, eleven SDKs (`claude/release-1.1.2-w7`)
 

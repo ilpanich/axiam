@@ -399,11 +399,11 @@ impl Stack {
             .args(["logs", "--since", &epoch.to_string(), CONTAINER])
             .output()
             .expect("docker logs");
-        format!(
+        redact_secrets(&format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
-        )
+        ))
     }
 
     fn log_tail(&self) -> String {
@@ -411,12 +411,68 @@ impl Stack {
             .args(["logs", "--tail", "200", CONTAINER])
             .output()
             .expect("docker logs");
-        format!(
+        redact_secrets(&format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
-        )
+        ))
     }
+}
+
+/// What a FreeRADIUS debug log (`-xx`) may carry that must never reach a test
+/// report: the Live access token, as a `Bearer` credential, as the
+/// `access_token` member of the `/auth/device` response body, or in an EXPAND
+/// line that quotes either. Everything else in the log is kept.
+fn redact_secrets(log: &str) -> String {
+    fn is_token_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || "-._~+/=".contains(c)
+    }
+    // Replace the run of token characters that follows each `marker` (after the
+    // separators `skip`) with a fixed placeholder.
+    fn redact_after(text: &str, marker: &str, skip: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(marker) {
+            let after = at + marker.len();
+            out.push_str(&rest[..after]);
+            let tail = &rest[after..];
+            let sep = tail.len() - tail.trim_start_matches(|c| skip.contains(c)).len();
+            out.push_str(&tail[..sep]);
+            let tail = &tail[sep..];
+            let len = tail.len() - tail.trim_start_matches(is_token_char).len();
+            if len > 0 {
+                out.push_str("[redacted]");
+            }
+            rest = &tail[len..];
+        }
+        out.push_str(rest);
+        out
+    }
+    redact_after(&redact_after(log, "Bearer", " "), "access_token", " \\\":=")
+}
+
+#[::core::prelude::v1::test]
+fn the_log_redaction_hides_the_token_and_keeps_the_rest() {
+    let token = "eyJhbGciOiJFZERTQSJ9.payload-part_1.sig+nature/2=";
+    for line in [
+        format!("Authorization: Bearer {token}"),
+        format!(r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":900}}"#),
+        format!(r#"(0) EXPAND {{\"access_token\":\"{token}\"}}"#),
+        format!("access_token = {token}"),
+    ] {
+        let redacted = redact_secrets(&line);
+        assert!(
+            !redacted.contains("eyJ") && !redacted.contains("payload-part"),
+            "line leaked"
+        );
+        assert!(redacted.contains("[redacted]"), "line was not redacted");
+    }
+    assert_eq!(
+        redact_secrets(r#"{"access_token":"abc","token_type":"Bearer","expires_in":900}"#),
+        r#"{"access_token":"[redacted]","token_type":"Bearer","expires_in":900}"#
+    );
+    let plain = "(0) eap_tls: Peer certificate fingerprint ab:cd\nAuth-Type = Accept";
+    assert_eq!(redact_secrets(plain), plain);
 }
 
 impl Drop for Stack {

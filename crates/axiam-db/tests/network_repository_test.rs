@@ -878,7 +878,10 @@ async fn a_segment_named_like_a_throw_marker_is_refused_as_a_name() {
     let mut s = corp(tenant);
     s.path = "/network/zones/hq/axiam:network_segment_version_stale".into();
     let err = segments(&db).create(s).await.unwrap_err();
-    assert!(matches!(err, AxiamError::Validation { .. }), "{err:?}");
+    assert!(
+        matches!(err, AxiamError::Validation { .. }),
+        "a throw-marker lookalike is refused as a name"
+    );
 }
 
 /// R112W4-04: names and site keys admit `_`, and the clash text echoes both, so
@@ -908,7 +911,7 @@ async fn a_name_clash_is_a_name_clash_whatever_the_values_spell() {
         let err = segments(&db).create(again).await.unwrap_err();
         assert!(
             matches!(err, AxiamError::Network(NetworkConflict::DuplicateName)),
-            "{site}/{name}: {err:?}"
+            "{site}/{name}"
         );
     }
 }

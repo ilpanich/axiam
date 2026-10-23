@@ -82,6 +82,21 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 10
+          # #770 (R112W3-03): the server binds HTTP only after the startup schema
+          # migrations, and a replica that finds a live migration lease waits for
+          # it, up to five minutes behind a dead holder (docs/deployment/README.md,
+          # "Schema migrations at startup"). Until this probe succeeds the
+          # liveness probe does not run, so a waiting or migrating replica is not
+          # killed into CrashLoopBackOff. 10 s x 60 = 10 minutes: the lease's
+          # five minutes, a migration that runs for a while, and a margin. Raise
+          # failureThreshold for a datastore whose migrations take longer.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8090
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /health

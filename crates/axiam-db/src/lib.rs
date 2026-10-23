@@ -79,7 +79,10 @@ pub use repository::{
 /// because it replaces the former `axiam_db::hash_client_secret` free
 /// function — which could hash without a key and is therefore gone.
 pub use axiam_auth::client_secret::{self, ClientSecretHasher, ClientSecretVerdict};
-pub use schema::{run_migrations, schema_v1};
+pub use schema::{
+    MigrationLease, PendingMigrations, run_migrations, run_migrations_under_lease,
+    run_migrations_with_lease, schema_v1,
+};
 pub use seeder::{
     ReconcileOutcome, SeedRolesResult, SeederStateRow, SetupTokenRemint,
     mint_bootstrap_setup_token_if_needed, reconcile_default_role_grants,

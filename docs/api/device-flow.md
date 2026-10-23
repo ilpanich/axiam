@@ -139,7 +139,8 @@ They are **authenticated and CSRF-protected**, which is why they live under
 - **Only a console sign-in may call them.** An access token AXIAM minted for
   an OAuth2 client — through the code, refresh, CIBA or device grant — names
   the user too, but it is answered `403` on both endpoints, before its session
-  is checked and before the code is looked up:
+  is checked and before the code is looked up (a device token issued for another
+  `resource` is refused `401` by the audience check first):
 
   ```json
   {"error": "authorization_denied", "message": "Authorization denied: a console sign-in is required; this token was minted for an OAuth2 client"}
@@ -180,7 +181,8 @@ What that means at AXIAM's own routes:
   answers it `401`, as it always has. It is a token for the resource servers
   the device was granted, not a console sign-in.
 - The two approval endpoints above answer it `403 authorization_denied`, for
-  what it is (a client's token), before the session is checked.
+  what it is (a client's token), before the session is checked (a device token
+  issued for another `resource` is refused `401` by the audience check first).
 - Introspection and revocation do not read the claim: introspection answers
   as it did (its response does not echo an access token's `client_id`), and
   revocation acts on the refresh token, which its client revokes as before.

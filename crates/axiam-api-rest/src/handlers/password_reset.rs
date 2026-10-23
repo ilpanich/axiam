@@ -292,6 +292,7 @@ pub async fn request_reset<C: Connection + Clone>(
     responses(
         (status = 200, description = "Password reset successfully"),
         (status = 400, description = "Invalid token or password policy violation"),
+        (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
     )
 )]
 pub async fn confirm_reset<C: Connection + Clone>(

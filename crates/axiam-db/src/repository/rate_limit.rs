@@ -19,6 +19,16 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{classify_write_error, retry_on_write_conflict};
 
+/// The selection of `SurrealRateLimitBucketRepository::delete_stale_once`:
+/// the ids of up to `$limit` buckets last touched more than `$retention`
+/// seconds ago. `x3_wave2_query_plan_test` appends ` EXPLAIN` to this very text
+/// and asserts that the v109 index serves it, so the sweep and its plan pin
+/// cannot drift apart (#773, R112W3-06 (b)).
+#[doc(hidden)]
+pub const RATE_LIMIT_BUCKET_SWEEP_SELECTION: &str = "SELECT VALUE id FROM rate_limit_bucket \
+     WHERE updated_at < time::now() - duration::from_secs($retention) \
+     LIMIT $limit";
+
 /// Row shape returned by the windowed-CAS `UPSERT ... RETURN AFTER` query —
 /// only `count` is needed by the caller.
 #[derive(Debug, SurrealValue)]
@@ -253,12 +263,12 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
             .db
             .current()
             .query(
-                "LET $ids = (SELECT VALUE id FROM rate_limit_bucket \
-                     WHERE updated_at < time::now() - duration::from_secs($retention) \
-                     LIMIT $limit); \
-                 LET $removed = (DELETE $ids WHERE updated_at < time::now() - duration::from_secs($retention) \
-                     RETURN BEFORE); \
-                 SELECT meta::id(id) AS record_id FROM $removed",
+                format!(
+                    "LET $ids = ({RATE_LIMIT_BUCKET_SWEEP_SELECTION}); \
+                     LET $removed = (DELETE $ids WHERE updated_at < time::now() - duration::from_secs($retention) \
+                         RETURN BEFORE); \
+                     SELECT meta::id(id) AS record_id FROM $removed"
+                ),
             )
             .bind(("retention", i64::try_from(retention.as_secs()).unwrap_or(i64::MAX)))
             .bind(("limit", i64::from(limit)))

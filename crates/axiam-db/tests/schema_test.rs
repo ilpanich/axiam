@@ -1,7 +1,13 @@
 //! Integration tests for schema initialization using in-memory SurrealDB.
 
-use surrealdb::Surreal;
+mod common;
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axiam_db::MigrationLease;
 use surrealdb::engine::local::Mem;
+use surrealdb::{Connection, Surreal};
 
 #[tokio::test]
 async fn schema_migration_applies_successfully() {
@@ -213,4 +219,513 @@ async fn a_version_below_the_highest_recorded_is_still_applied() {
         info.contains("idx_certificate_issuer_serial"),
         "v99 must have applied: idx_certificate_issuer_serial is missing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #755 (R111-05) — the startup lease on `_migration_lock:startup`
+// ---------------------------------------------------------------------------
+
+/// Lease timings for tests: a TTL long enough that no test outlives it by
+/// accident, and a poll short enough that a waiter notices a release at once.
+const FAST: MigrationLease = MigrationLease {
+    ttl: Duration::from_secs(30),
+    refresh_every: Duration::from_millis(200),
+    poll_every: Duration::from_millis(20),
+};
+
+/// The highest listed migration, read from a fully migrated datastore.
+async fn newest_version<C: Connection>(db: &Surreal<C>) -> u32 {
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let versions: Vec<u32> = result.take(0).unwrap();
+    versions
+        .into_iter()
+        .max()
+        .expect("a migrated datastore records versions")
+}
+
+/// How many `_migration` rows record `version`.
+async fn records_of<C: Connection>(db: &Surreal<C>, version: u32) -> usize {
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration WHERE version = $v")
+        .bind(("v", version))
+        .await
+        .unwrap();
+    result.take::<Vec<u32>>(0).unwrap().len()
+}
+
+/// The lease row's holder, if there is a row.
+async fn lease_holder<C: Connection>(db: &Surreal<C>) -> Option<Option<String>> {
+    let mut result = db
+        .query("SELECT VALUE holder FROM _migration_lock:`startup`")
+        .await
+        .unwrap();
+    result
+        .take::<Vec<Option<String>>>(0)
+        .unwrap()
+        .into_iter()
+        .next()
+}
+
+/// Forget the newest version's record, so that it is pending again. Every
+/// migration above the newest released one is additive, so re-applying its
+/// DDL over the objects it already defined is a no-op.
+async fn make_newest_pending<C: Connection>(db: &Surreal<C>) -> u32 {
+    let newest = newest_version(db).await;
+    db.query("DELETE _migration WHERE version = $v")
+        .bind(("v", newest))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(records_of(db, newest).await, 0);
+    newest
+}
+
+/// When a starter entered and left the critical section, read inside the
+/// lease through [`axiam_db::run_migrations_under_lease`].
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    entered: Instant,
+    left: Instant,
+}
+
+/// Run the migrations under `lease`, holding the lease for `hold` before
+/// migrating, and return when the critical section was entered and left.
+async fn run_holding<C: Connection>(
+    db: &Surreal<C>,
+    lease: MigrationLease,
+    hold: Duration,
+) -> (Result<(), axiam_db::DbError>, Option<Held>) {
+    let held = Arc::new(Mutex::new(None));
+    let record = held.clone();
+    let outcome = axiam_db::run_migrations_under_lease(db, lease, |migrate| async move {
+        let entered = Instant::now();
+        tokio::time::sleep(hold).await;
+        let outcome = migrate.await;
+        *record.lock().unwrap() = Some(Held {
+            entered,
+            left: Instant::now(),
+        });
+        outcome
+    })
+    .await;
+    let held = *held.lock().unwrap();
+    (outcome, held)
+}
+
+/// The lease row's holder and whether it is live, read from the datastore's
+/// clock.
+async fn lease_row<C: Connection>(db: &Surreal<C>) -> Option<(Option<String>, bool)> {
+    let holder = lease_holder(db).await?;
+    let mut result = db
+        .query(
+            "SELECT VALUE expires != NONE AND expires > time::now() \
+             FROM _migration_lock:`startup`",
+        )
+        .await
+        .unwrap();
+    let live: Vec<bool> = result.take(0).unwrap();
+    Some((holder, live.into_iter().next().unwrap_or(false)))
+}
+
+/// The lease row's `expires`, as SurrealQL renders it.
+async fn lease_expires<C: Connection>(db: &Surreal<C>) -> Option<String> {
+    let mut result = db
+        .query("SELECT VALUE <string> expires FROM _migration_lock:`startup`")
+        .await
+        .unwrap();
+    result
+        .take::<Vec<Option<String>>>(0)
+        .unwrap()
+        .into_iter()
+        .next()
+        .flatten()
+}
+
+/// The issue's test: two replicas start together against one datastore with
+/// a migration pending. Both boots succeed and the version is recorded once —
+/// which the tolerance alone would also give (see the next test) — and, what
+/// only the lease gives, **their critical sections do not overlap**: each
+/// holds the lease 150 ms before migrating, so without exclusion both would be
+/// inside at once. On `surrealkv`, the engine production runs, because the
+/// assertion is about concurrent writers (see `tests/common`).
+#[tokio::test]
+async fn two_concurrent_starters_both_succeed_and_record_the_version_once() {
+    let db = common::serialising_db().await;
+    let pending = make_newest_pending(&db).await;
+    let hold = Duration::from_millis(150);
+
+    let (a, b) = (db.handle(), db.handle());
+    let ((first, first_held), (second, second_held)) =
+        tokio::join!(run_holding(&a, FAST, hold), run_holding(&b, FAST, hold));
+    first.expect("the first starter boots");
+    second.expect("the second starter boots");
+
+    let (first_held, second_held) = (first_held.unwrap(), second_held.unwrap());
+    let (earlier, later) = if first_held.entered <= second_held.entered {
+        (first_held, second_held)
+    } else {
+        (second_held, first_held)
+    };
+    assert!(
+        later.entered >= earlier.left,
+        "the critical sections overlap: {earlier:?} and {later:?}"
+    );
+
+    assert_eq!(records_of(&*db, pending).await, 1, "recorded exactly once");
+    assert_eq!(lease_holder(&*db).await, None, "the lease is released");
+}
+
+/// The refresh runs: a holder whose migration outlasts its TTL three times
+/// over keeps its row, because it pushes `expires` forward every
+/// `refresh_every`. A waiter that arrives after the first TTL has passed
+/// finds the row still live and waits for the holder to finish; without the
+/// refresh it would take the row over and enter beside the holder.
+#[tokio::test]
+async fn a_holder_that_outlasts_the_ttl_keeps_its_lease() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let lease = MigrationLease {
+        ttl: Duration::from_millis(500),
+        refresh_every: Duration::from_millis(100),
+        poll_every: Duration::from_millis(20),
+    };
+    let holder = {
+        let db = db.clone();
+        tokio::spawn(async move { run_holding(&db, lease, Duration::from_millis(1500)).await })
+    };
+
+    // Wait for the holder to take the lease, then sit out more than a TTL.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lease_row(&db).await.is_none() {
+        assert!(Instant::now() < deadline, "the holder never took the lease");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (first_holder, _) = lease_row(&db).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    assert_eq!(
+        lease_row(&db).await,
+        Some((first_holder, true)),
+        "past one TTL the holder's row is still its own and still live"
+    );
+
+    let (waiter, waiter_held) = run_holding(&db, lease, Duration::ZERO).await;
+    waiter.expect("the waiter boots");
+    let (holder, holder_held) = holder.await.unwrap();
+    holder.expect("the holder boots");
+    let (holder_held, waiter_held) = (holder_held.unwrap(), waiter_held.unwrap());
+    assert!(
+        waiter_held.entered >= holder_held.left,
+        "the waiter entered while the holder held a refreshed lease: \
+         {holder_held:?} and {waiter_held:?}"
+    );
+    assert_eq!(lease_holder(&db).await, None, "the lease is released");
+}
+
+/// A holder that stalls past its TTL without refreshing (its refresh is
+/// slower than its TTL here) loses the lease: a second starter replaces the
+/// expired row with its own, and the takeover is observable from inside the
+/// second starter's critical section. The first holder's refresh then finds
+/// the row is not its own and leaves it alone (its `expires` is unchanged),
+/// and the first holder's release does not delete its successor's row.
+#[tokio::test]
+async fn a_takeover_is_observable_and_the_old_holders_release_spares_it() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    // A: a 300 ms lease refreshed only at 600 ms, held for 900 ms — so it
+    // expires, is taken over, and A's refresh and release both run while
+    // the successor holds the row.
+    let stalled = MigrationLease {
+        ttl: Duration::from_millis(300),
+        refresh_every: Duration::from_millis(600),
+        poll_every: Duration::from_millis(20),
+    };
+    let a_holder = Arc::new(Mutex::new(None));
+    let a = {
+        let db = db.clone();
+        let seen = a_holder.clone();
+        tokio::spawn(async move {
+            axiam_db::run_migrations_under_lease(&db, stalled, |migrate| {
+                let db = db.clone();
+                async move {
+                    *seen.lock().unwrap() = lease_holder(&db).await.flatten();
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                    migrate.await
+                }
+            })
+            .await
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while a_holder.lock().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "A never took the lease");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let a_holder = a_holder.lock().unwrap().clone().unwrap();
+
+    // B: a live 30 s lease that does not refresh itself within the test, so
+    // any change to its `expires` is A's doing. Inside its critical section B
+    // records the row it holds, then stays there until A has refreshed,
+    // released and returned.
+    let quiet = MigrationLease {
+        refresh_every: Duration::from_secs(20),
+        ..FAST
+    };
+    let (a_done_tx, a_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let (b_in_tx, b_in_rx) = tokio::sync::oneshot::channel();
+    let b = {
+        let db = db.clone();
+        tokio::spawn(async move {
+            axiam_db::run_migrations_under_lease(&db, quiet, |migrate| {
+                let db = db.clone();
+                async move {
+                    let row = (lease_row(&db).await, lease_expires(&db).await);
+                    b_in_tx.send(row).unwrap();
+                    a_done_rx.await.unwrap();
+                    migrate.await
+                }
+            })
+            .await
+        })
+    };
+
+    let (b_row, b_expires) = tokio::time::timeout(Duration::from_secs(5), b_in_rx)
+        .await
+        .expect("B takes over the expired lease")
+        .unwrap();
+    let (b_holder, live) = b_row.expect("B holds a row");
+    let b_holder = b_holder.expect("B's row names its holder");
+    assert_ne!(b_holder, a_holder, "the expired row was replaced");
+    assert!(live, "B's row is live");
+
+    // A's refresh (at 600 ms) finds the row is not its own; A migrates,
+    // releases and boots.
+    a.await.unwrap().expect("A boots without the lease");
+    assert_eq!(
+        lease_row(&db).await,
+        Some((Some(b_holder.clone()), true)),
+        "A's release left B's row in place"
+    );
+    assert_eq!(
+        lease_expires(&db).await,
+        b_expires,
+        "A's refresh did not touch B's row"
+    );
+
+    a_done_tx.send(()).unwrap();
+    b.await.unwrap().expect("B boots");
+    assert_eq!(lease_holder(&db).await, None, "B released its own lease");
+}
+
+/// The fallback behind the lease: with a lease that expires as soon as it is
+/// written, two starters migrate at the same time — the case of a holder that
+/// stalls past its TTL. The loser of each version's unique index reads the
+/// winner's record and continues, so both still boot, nothing is recorded
+/// twice, and every listed version is recorded.
+#[tokio::test]
+async fn starters_without_mutual_exclusion_tolerate_each_others_record() {
+    let db = common::serialising_db().await;
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let mut all: Vec<u32> = result.take(0).unwrap();
+    all.sort_unstable();
+    // Every version from 100 up pending: additive migrations above the
+    // highest recorded, so both starters apply them in order, together.
+    db.query("DELETE _migration WHERE version >= 100")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let no_exclusion = MigrationLease {
+        ttl: Duration::from_millis(1),
+        refresh_every: Duration::from_secs(3600),
+        poll_every: Duration::from_millis(5),
+    };
+    let (a, b) = (db.handle(), db.handle());
+    let (first, second) = tokio::join!(
+        axiam_db::run_migrations_with_lease(&a, no_exclusion),
+        axiam_db::run_migrations_with_lease(&b, no_exclusion),
+    );
+    first.expect("the first starter boots");
+    second.expect("the second starter boots");
+
+    let mut result = db
+        .query("SELECT VALUE version FROM _migration")
+        .await
+        .unwrap();
+    let mut after: Vec<u32> = result.take(0).unwrap();
+    after.sort_unstable();
+    assert_eq!(after, all, "every version recorded, none twice");
+}
+
+/// A holder that died leaves a lease that expires; the next starter takes it
+/// over, migrates, and releases it.
+#[tokio::test]
+async fn an_expired_lease_is_taken_over() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let pending = make_newest_pending(&db).await;
+
+    db.query(
+        "CREATE _migration_lock:`startup` SET holder = 'dead-replica', \
+         expires = time::now() - 1s",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        axiam_db::run_migrations_with_lease(&db, FAST),
+    )
+    .await
+    .expect("an expired lease is not waited on")
+    .expect("the starter boots");
+
+    assert_eq!(records_of(&db, pending).await, 1);
+    assert_eq!(lease_holder(&db).await, None, "the lease is released");
+}
+
+/// The row a 1.1.1 binary leaves when it dies mid-migration: `locked_at` only,
+/// no holder, no expiry. It is stale, not a lease, and is taken over.
+#[tokio::test]
+async fn a_lock_row_left_by_a_1_1_1_binary_is_taken_over() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    db.query("UPSERT _migration_lock:`startup` SET locked_at = time::now()")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        axiam_db::run_migrations_with_lease(&db, FAST),
+    )
+    .await
+    .expect("a 1.1.1 lock row is not waited on")
+    .expect("the starter boots");
+    assert_eq!(lease_holder(&db).await, None, "the lease is released");
+}
+
+/// A live lease is waited on: the starter applies nothing while another
+/// instance holds it, and proceeds as soon as that instance releases it. The
+/// held lease is minutes from expiry, so "has not finished" is not a race
+/// against the clock.
+#[tokio::test]
+async fn a_live_lease_is_waited_on() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let pending = make_newest_pending(&db).await;
+
+    db.query(
+        "CREATE _migration_lock:`startup` SET holder = 'other-replica', \
+         expires = time::now() + 5m",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let starter = {
+        let db = db.clone();
+        tokio::spawn(async move { axiam_db::run_migrations_with_lease(&db, FAST).await })
+    };
+
+    // Many polls' worth of waiting: the starter is still blocked, and has
+    // applied nothing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!starter.is_finished(), "a live lease must be waited on");
+    assert_eq!(
+        records_of(&db, pending).await,
+        0,
+        "nothing applied while waiting"
+    );
+    assert_eq!(
+        lease_holder(&db).await,
+        Some(Some("other-replica".to_owned())),
+        "the other instance's lease is untouched"
+    );
+
+    // The other instance finishes and releases its lease.
+    db.query("DELETE _migration_lock:`startup`")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), starter)
+        .await
+        .expect("the starter proceeds once the lease is released")
+        .unwrap()
+        .expect("the starter boots");
+    assert_eq!(records_of(&db, pending).await, 1);
+    assert_eq!(lease_holder(&db).await, None, "the lease is released");
+}
+
+// ---------------------------------------------------------------------------
+// #729 (R111W4-05) — a gap below a non-additive migration is a boot error
+// ---------------------------------------------------------------------------
+
+/// v43 is an `UPDATE` backfill (`email_config.enabled_override = enabled`).
+/// Recorded v44 … without v43, the runner must not run it late — it would
+/// overwrite every tenant's explicit override — and refuses the boot instead,
+/// naming the version. Nothing is applied, and the lease is released.
+#[tokio::test]
+async fn a_gap_below_a_non_additive_migration_is_a_boot_error() {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let newest = newest_version(&db).await;
+
+    db.query("DELETE _migration WHERE version = 43")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let refused = axiam_db::run_migrations_with_lease(&db, FAST)
+        .await
+        .expect_err("a non-additive migration below the highest recorded must not apply");
+    let message = refused.to_string();
+    assert!(
+        message.contains("Migration v43 'email_config_tenant_override_tristate'"),
+        "the boot error names the version: {message}"
+    );
+    assert!(message.contains("not additive"), "and says why: {message}");
+    assert!(
+        message.contains("docs/deployment/README.md#recovering-from-a-refused-migration-gap"),
+        "and points at the procedure: {message}"
+    );
+
+    assert_eq!(records_of(&db, 43).await, 0, "v43 was not applied");
+    assert_eq!(
+        records_of(&db, newest).await,
+        1,
+        "the record is otherwise intact"
+    );
+    assert_eq!(
+        lease_holder(&db).await,
+        None,
+        "the lease is released on refusal"
+    );
+
+    // A second start refuses the same way: the refusal is not a one-off.
+    assert!(axiam_db::run_migrations(&db).await.is_err());
 }

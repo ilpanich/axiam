@@ -78,6 +78,8 @@ pub struct CreateCaCertificateRequest {
     params(("org_id" = Uuid, Path, description = "Organization ID")),
     request_body = CreateCaCertificateRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "CA certificate generated",
          body = GeneratedCaCertificate),
     ),
@@ -192,6 +194,7 @@ impl std::fmt::Debug for ImportCaCertificateRequest {
     params(("org_id" = Uuid, Path, description = "Organization ID")),
     request_body = ImportCaCertificateRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
         (status = 201, description = "CA certificate imported", body = CaCertificate),
         (status = 400, description = "Not a CA certificate, already expired, or the \
                                       supplied key does not match it"),
@@ -754,6 +757,8 @@ impl std::fmt::Debug for SignIntermediateCsrRequest {
     ),
     request_body = CreateIntermediateCaRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "Tenant signing CA created",
          body = GeneratedCaCertificate),
         (status = 400, description = "The parent CA is revoked, expired, holds no key, \
@@ -820,6 +825,8 @@ pub async fn generate_intermediate<C: Connection + Clone>(
     ),
     request_body = SignIntermediateCsrRequest,
     responses(
+        (status = 409, description = "`already_exists`: a certificate with this issuer and serial number is already stored"),
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "CSR signed as a tenant signing CA", body = CaCertificate),
         (status = 400, description = "The request is not a valid PKCS#10 CSR, its signature \
                                       does not verify, or the parent CA cannot sign"),

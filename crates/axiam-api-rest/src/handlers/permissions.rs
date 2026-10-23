@@ -274,6 +274,7 @@ pub async fn delete<C: Connection + Clone>(
     params(("role_id" = Uuid, Path, description = "Role ID")),
     request_body = GrantPermissionRequest,
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Permission granted to role"),
     ),
     security(("bearer" = []), ("service_account" = []))
@@ -478,6 +479,7 @@ async fn resolve_grant_scopes<C: Connection + Clone>(
         ("permission_id" = Uuid, Path, description = "Permission ID"),
     ),
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Permission revoked from role"),
     ),
     security(("bearer" = []), ("service_account" = []))

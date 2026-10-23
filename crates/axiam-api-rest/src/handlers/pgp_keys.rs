@@ -35,6 +35,7 @@ pub struct CreatePgpKeyRequest {
     tag = "pgp-keys",
     request_body = CreatePgpKeyRequest,
     responses(
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 201, description = "PGP key generated",
          body = GeneratedPgpKey),
     ),
@@ -147,6 +148,7 @@ pub async fn revoke<C: Connection + Clone>(
     tag = "pgp-keys",
     request_body = SignAuditBatchRequest,
     responses(
+        (status = 503, description = "`service_unavailable`: no crypto permit was free within the bounded wait; nothing was written. Retry later; the answer carries no `reason_code`"),
         (status = 200, description = "Audit batch signed",
          body = SignedAuditBatch),
     ),

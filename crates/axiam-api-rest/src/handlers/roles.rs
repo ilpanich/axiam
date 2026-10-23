@@ -325,6 +325,7 @@ pub async fn get<C: Connection + Clone>(
     params(("role_id" = Uuid, Path, description = "Role ID")),
     request_body = UpdateRole,
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 200, description = "Role updated", body = Role),
         (status = 404, description = "Role not found"),
     ),
@@ -377,6 +378,7 @@ pub async fn update<C: Connection + Clone>(
     tag = "roles",
     params(("role_id" = Uuid, Path, description = "Role ID")),
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role deleted"),
         (status = 404, description = "Role not found"),
     ),
@@ -573,6 +575,7 @@ async fn validate_inherit<C: Connection + Clone>(
     params(("role_id" = Uuid, Path, description = "Role ID")),
     request_body = AssignRoleToUserRequest,
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role assigned to user"),
     ),
     security(("bearer" = []), ("service_account" = []))
@@ -682,6 +685,7 @@ pub async fn assign_to_user<C: Connection + Clone>(
         UnassignQuery,
     ),
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role unassigned from user"),
     ),
     security(("bearer" = []), ("service_account" = []))
@@ -755,6 +759,7 @@ pub async fn unassign_from_user<C: Connection + Clone>(
     params(("role_id" = Uuid, Path, description = "Role ID")),
     request_body = AssignRoleToServiceAccountRequest,
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role assigned to service account"),
         (status = 404, description = "Role or service account not found in this tenant"),
     ),
@@ -862,6 +867,7 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
         UnassignQuery,
     ),
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role unassigned from service account"),
     ),
     security(("bearer" = []), ("service_account" = []))
@@ -1004,6 +1010,7 @@ pub async fn list_service_account_roles<C: Connection + Clone>(
     params(("role_id" = Uuid, Path, description = "Role ID")),
     request_body = AssignRoleToGroupRequest,
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role assigned to group"),
     ),
     security(("bearer" = []), ("service_account" = []))
@@ -1109,6 +1116,7 @@ pub async fn assign_to_group<C: Connection + Clone>(
         UnassignQuery,
     ),
     responses(
+        (status = 409, description = "`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale", body = crate::handlers::network::NetworkConflictResponse),
         (status = 204, description = "Role unassigned from group"),
     ),
     security(("bearer" = []), ("service_account" = []))

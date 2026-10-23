@@ -226,6 +226,88 @@ dependency bump that makes the name available.
 |---|---|
 | `AXIAM__DB__ALLOW_MEMORY_ENGINE` | **Development only.** `true` lets the server start against a positively-identified `memory` datastore instead of refusing. Never set it in a deployment; single-use redemption is not guaranteed when it is honoured. Unset (the default) fails closed. |
 
+## Schema migrations at startup
+
+Every replica runs the schema migrations when it starts, before it serves a
+request. Replicas started together do not migrate at the same time: the first
+takes a **lease** on the datastore (the row `_migration_lock:startup`, five
+minutes on the datastore's clock, refreshed every minute while it migrates)
+and the others wait, logging `Another instance holds the migration lease;
+waiting for it`, then find the migrations recorded and start. A rolling update
+or a scale-out from zero needs no special ordering (#755), **provided the
+orchestrator gives a starting replica time to wait**: the HTTP listener, and
+with it `/health`, is bound only after the migrations, so a replica that is
+waiting for the lease, or migrating, answers no probe. In the logs such a
+replica shows the `waiting for it` line above and nothing more, up to five
+minutes behind a dead holder and longer behind a long migration. The shipped
+`k8s/server/deployment.yml` therefore carries a `startupProbe` on `/health`
+(10 s period, 60 failures, ten minutes) that holds the liveness probe back until
+the server is up; without it, the liveness probe (30 s delay, three failures)
+kills the waiting replica after about 90 s and it restarts into
+`CrashLoopBackOff` until the row expires. Another orchestrator needs the same
+allowance, and a datastore whose migrations run longer than ten minutes needs
+the shipped `failureThreshold` raised.
+
+- A replica that dies while migrating leaves its lease behind; the next
+  replica takes it over once it has expired, at most five minutes later. Each
+  migration is one transaction, so nothing is half applied. The same holds for
+  a `SIGTERM` (or a kill) that reaches a replica while it holds the lease: no
+  signal handler runs before the HTTP server exists, so the row is left behind
+  and expires like a dead holder's.
+- "The datastore's clock" is one clock for the shipped single-node SurrealDB.
+  A clustered SurrealDB evaluates `time::now()` on whichever node runs each
+  statement, so the lease excludes only while the skew between nodes stays under
+  about four minutes (its lifetime less one refresh); past that, the tolerance
+  below still keeps the outcome correct.
+- A replica that stalls past the lease's lifetime without dying can overlap
+  with its successor. The runner tolerates that case too: a migration the
+  other replica recorded first is logged as applied by another instance, and
+  the boot continues.
+- The lease row left by a 1.1.1 or older binary (no holder, no expiry) is read
+  as stale and replaced. A 1.1.1
+  replica still running during a rolling update ignores the lease and removes the
+  row when it finishes, even a 1.1.2 holder's. That costs nothing from 1.1.1 to
+  1.1.2, which adds no migration; a 1.1.2 holder whose lease disappears logs it
+  and carries on.
+- A migration missing **below** the newest one recorded — a datastore that
+  ran a branch build — is applied late, with a `WARN`, only if it is
+  additive (every statement a `DEFINE … IF NOT EXISTS`). Otherwise the replica
+  refuses to start with an error naming the version, because a backfill, a
+  `REMOVE` or an older `OVERWRITE` run after its successors would undo them;
+  resolve that gap by hand (#729; the procedure is
+  [below](#recovering-from-a-refused-migration-gap)). A released build never
+  leaves such a gap.
+
+### Recovering from a refused migration gap
+
+The boot error reads `Migration vN 'name' is not recorded but vM is, and vN is
+not additive …`. The replica has changed nothing and released its lease; no
+other migration was applied. Work through these in order:
+
+1. **Inspect.** `SELECT version, name, applied_at FROM _migration ORDER BY
+   version;` shows what the datastore recorded; compare it with the binary's
+   list (the `SCHEMA_V*` constants and `MIGRATIONS` in
+   `crates/axiam-db/src/schema.rs`). vN is the version the error names; the
+   datastore ran a branch build that skipped it. Read vN's statements.
+2. **If vN's effect is already in place** (a later migration redefined or
+   overwrote the same objects, or its backfill's target rows have since been
+   changed by the application or by a later migration), do not run it. Record
+   it, so the runner stops asking, and decide separately whether any data needs
+   repairing:
+   `CREATE _migration SET version = N, name = '<name from the error>';`
+   (`applied_at` defaults to now; the table's only other fields are `version`
+   and `name`, as `MIGRATION_TABLE_DDL` defines them).
+3. **If vN's effect is missing** and its statements are safe to run now (they
+   define an object nothing else defines, or backfill rows nothing has touched
+   since), run vN's statements by hand in one transaction together with the
+   `CREATE _migration` above, so that a failure records nothing.
+4. **Otherwise, restore** the backup taken before the branch build, and start
+   the release binary against it. Never run a backfill or a `REMOVE` over data
+   written after its successors: that is what the refusal protects.
+
+Start the replicas again afterwards; the runner finds every version recorded and
+boots. If you cannot tell which case applies, take step 4 and ask.
+
 ## Required secrets & environment
 
 All AXIAM configuration keys use a **double underscore** after the `AXIAM`

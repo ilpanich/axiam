@@ -10,7 +10,8 @@ use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, TenantRepository,
 };
 use axiam_db::repository::{
-    SurrealAuditLogRepository, SurrealOrganizationRepository, SurrealTenantRepository,
+    SurrealAccountDeletionRepository, SurrealAuditLogRepository, SurrealOrganizationRepository,
+    SurrealTenantRepository,
 };
 use chrono::{Duration, Utc};
 use surrealdb::Surreal;
@@ -447,4 +448,63 @@ async fn pseudonymize_actor_clears_the_grantee_id_of_network_role_rows() {
         assert_eq!(kept.metadata["grantee"]["kind"], "user");
         assert_eq!(kept.actor_id, admin);
     }
+}
+
+/// R112W1-03: `erasure_recorded` reads the record by its actor (the account)
+/// and, failing that, by the nil actor a scrub leaves with the pseudonym
+/// still in the metadata; another account's record, the same account's other
+/// actions and another tenant's trail are not it.
+#[tokio::test]
+async fn erasure_recorded_finds_the_record_by_actor_or_by_pseudonym_only() {
+    const ACTION: &str = "gdpr.user_pseudonymized";
+    let (db, tenant_id) = setup().await;
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let deletions = SurrealAccountDeletionRepository::new(db);
+    let (by_actor, by_pseudonym, never) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let record = |actor: Uuid, action: &str, pseudonym: &str| {
+        let mut e = entry(tenant_id, actor, action, AuditOutcome::Success, None);
+        e.metadata = Some(serde_json::json!({ "pseudonym": pseudonym }));
+        e
+    };
+    // Written for the account, and the one a stalled unit's scrub left with
+    // the nil actor.
+    audit
+        .append(record(by_actor, ACTION, "DELETED_USER_aaaa"))
+        .await
+        .unwrap();
+    audit
+        .append(record(Uuid::nil(), ACTION, "DELETED_USER_bbbb"))
+        .await
+        .unwrap();
+    // The account's row of another action is not its record.
+    audit
+        .append(record(never, "auth.login", "DELETED_USER_cccc"))
+        .await
+        .unwrap();
+
+    let found = |user: Uuid, pseudonym: &'static str, action: &'static str| {
+        let deletions = &deletions;
+        async move {
+            deletions
+                .erasure_recorded(tenant_id, user, pseudonym, action)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(found(by_actor, "DELETED_USER_aaaa", ACTION).await);
+    assert!(
+        found(by_actor, "a pseudonym nobody carries", ACTION).await,
+        "the actor alone names it"
+    );
+    assert!(found(by_pseudonym, "DELETED_USER_bbbb", ACTION).await);
+    assert!(!found(by_pseudonym, "DELETED_USER_other", ACTION).await);
+    assert!(!found(never, "DELETED_USER_cccc", ACTION).await);
+    assert!(!found(never, "DELETED_USER_zzzz", ACTION).await);
+    // Another tenant's trail holds none of them.
+    assert!(
+        !deletions
+            .erasure_recorded(Uuid::new_v4(), by_actor, "DELETED_USER_aaaa", ACTION)
+            .await
+            .unwrap()
+    );
 }

@@ -843,25 +843,46 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         pseudonym: &str,
         action: &str,
     ) -> AxiamResult<bool> {
-        let mut result = self
-            .db
-            .current()
-            .query(
+        // Two reads, each on `idx_audit_tenant_actor` (the tenant and one
+        // actor): the first is 1.1.1's form, the account as the row's actor;
+        // the second the row a stalled unit's scrub left, whose actor is the
+        // nil UUID and which only the pseudonym still names. Written as one
+        // `actor_id = … OR metadata.pseudonym = …` the planner read the whole
+        // tenant's trail (R112W1-03: 0.8–1.1 s per owed erasure at 100 000
+        // rows, against 2 ms for the first form alone). The second read runs
+        // only when the first found nothing, and scans the nil actor's rows
+        // rather than the tenant's.
+        let tenant = tenant_id.to_string();
+        for (actor_id, pseudonym_only) in [(user_id, false), (Uuid::nil(), true)] {
+            let sql = if pseudonym_only {
                 "SELECT count() AS total FROM audit_log \
-                 WHERE tenant_id = $tenant_id AND action = $action \
-                   AND (actor_id = $user_id OR metadata.pseudonym = $pseudonym) \
-                 GROUP ALL",
-            )
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .bind(("pseudonym", pseudonym.to_string()))
-            .bind(("action", action.to_string()))
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(DbError::from)?;
-        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        Ok(rows.first().is_some_and(|r| r.total > 0))
+                 WHERE tenant_id = $tenant_id AND actor_id = $actor_id \
+                   AND action = $action AND metadata.pseudonym = $pseudonym \
+                 GROUP ALL"
+            } else {
+                "SELECT count() AS total FROM audit_log \
+                 WHERE tenant_id = $tenant_id AND actor_id = $actor_id \
+                   AND action = $action \
+                 GROUP ALL"
+            };
+            let mut result = self
+                .db
+                .current()
+                .query(sql)
+                .bind(("tenant_id", tenant.clone()))
+                .bind(("actor_id", actor_id.to_string()))
+                .bind(("pseudonym", pseudonym.to_string()))
+                .bind(("action", action.to_string()))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(DbError::from)?;
+            let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+            if rows.first().is_some_and(|r| r.total > 0) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

@@ -481,15 +481,22 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // erasure itself). Cleared to the nil UUID like the other identifiers;
         // idempotent, since the match is on the user's id, which a cleared row
         // no longer carries.
+        //
+        // No index serves the grantee, so the rows are chosen first by the
+        // cheap predicates (a plain `SELECT VALUE id` that tests the action
+        // before it reaches into `metadata`) and the `UPDATE` then writes only
+        // the chosen ids; the same predicates in the `UPDATE`'s own `WHERE`
+        // took 4.3 s per erasure at 100 000 rows in the tenant (R112W1-03).
         let _ = self
             .db
             .current()
             .query(
-                "UPDATE audit_log SET metadata.grantee.id = $nil_uuid \
-                 WHERE tenant_id = $tenant_id \
-                 AND action IN ['network_role.assigned', 'network_role.unassigned'] \
-                 AND metadata.grantee.kind = 'user' \
-                 AND metadata.grantee.id = $user_id",
+                "LET $rows = (SELECT VALUE id FROM audit_log \
+                     WHERE tenant_id = $tenant_id \
+                     AND action IN ['network_role.assigned', 'network_role.unassigned'] \
+                     AND metadata.grantee.kind = 'user' \
+                     AND metadata.grantee.id = $user_id); \
+                 UPDATE $rows SET metadata.grantee.id = $nil_uuid",
             )
             .bind(("nil_uuid", nil_uuid.clone()))
             .bind(("tenant_id", tenant_id_str.clone()))

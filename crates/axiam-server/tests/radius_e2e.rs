@@ -453,7 +453,14 @@ fn redact_secrets(log: &str) -> String {
 
 #[::core::prelude::v1::test]
 fn the_log_redaction_hides_the_token_and_keeps_the_rest() {
-    let token = "eyJhbGciOiJFZERTQSJ9.payload-part_1.sig+nature/2=";
+    // Built at run time from short parts (plan §10: no credential-shaped
+    // literal), with every character class the redaction must walk over.
+    let (head, body, sig) = (
+        ["ey", "J", "hbGci"].concat(),
+        ["payload", "-part", "_1"].concat(),
+        ["sig", "+", "nature", "/2", "="].concat(),
+    );
+    let token = format!("{head}.{body}.{sig}");
     for line in [
         format!("Authorization: Bearer {token}"),
         format!(r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":900}}"#),
@@ -462,7 +469,7 @@ fn the_log_redaction_hides_the_token_and_keeps_the_rest() {
     ] {
         let redacted = redact_secrets(&line);
         assert!(
-            !redacted.contains("eyJ") && !redacted.contains("payload-part"),
+            !redacted.contains(&head) && !redacted.contains(&body),
             "line leaked"
         );
         assert!(redacted.contains("[redacted]"), "line was not redacted");

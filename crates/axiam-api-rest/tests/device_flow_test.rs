@@ -496,7 +496,7 @@ async fn an_approved_grant_mints_tokens_exactly_once() {
 
     let body_str = poll_body(&f.client_id, &device_code);
     let (status, body) = post_token!(app, f.tenant_id, body_str);
-    assert_eq!(status, 200, "approved poll returned {body:?}");
+    assert_eq!(status, 200, "approved poll returned");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
     assert!(!body["refresh_token"].as_str().unwrap().is_empty());
     assert_eq!(body["token_type"], "Bearer");
@@ -565,10 +565,13 @@ where
 
     let body_str = poll_body(&f.client_id, &device_code);
     let (status, body) = post_token!(app, f.tenant_id, body_str);
-    assert_eq!(status, 400, "poll after the change returned {body:?}");
-    assert_eq!(body["error"], "invalid_grant", "{body:?}");
-    assert!(body.get("access_token").is_none(), "minted: {body:?}");
-    assert!(body.get("refresh_token").is_none(), "minted: {body:?}");
+    assert_eq!(status, 400, "poll after the change returned");
+    assert_eq!(
+        body["error"], "invalid_grant",
+        "unexpected answer (body withheld)"
+    );
+    assert!(body.get("access_token").is_none(), "a token was minted");
+    assert!(body.get("refresh_token").is_none(), "a token was minted");
     assert_eq!(
         refresh_token_rows(&f).await,
         0,
@@ -702,7 +705,7 @@ async fn a_basic_client_without_a_body_client_id_gets_a_user_code() {
         "scope=openid",
         [basic(&client_id, &secret)]
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert!(!body["user_code"].as_str().unwrap().is_empty());
 
     // A wrong secret is still the one refusal.
@@ -716,7 +719,7 @@ async fn a_basic_client_without_a_body_client_id_gets_a_user_code() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
 
     // Two claims of identity are refused, not arbitrated.
@@ -730,7 +733,7 @@ async fn a_basic_client_without_a_body_client_id_gets_a_user_code() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_request")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
 }
 
@@ -807,12 +810,12 @@ async fn a_poll_without_a_client_id_is_invalid_request_and_spends_nothing() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_request")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 
-    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    let (status, _body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 }
 
 /// A confidential client's device grant needs the client's secret at both
@@ -847,7 +850,7 @@ async fn a_confidential_clients_device_grant_needs_its_secret_at_the_poll() {
         assert_eq!(
             (status, body["error"].as_str()),
             (401, Some("invalid_client")),
-            "{body}"
+            "unexpected answer (body withheld)"
         );
     }
     let (status, body) = post_form_with!(
@@ -857,7 +860,7 @@ async fn a_confidential_clients_device_grant_needs_its_secret_at_the_poll() {
         format!("client_id={client_id}&scope=openid&client_secret={secret}"),
         []
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let device_code = body["device_code"].as_str().unwrap().to_owned();
     let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
     assert!(
@@ -877,8 +880,8 @@ async fn a_confidential_clients_device_grant_needs_its_secret_at_the_poll() {
         unknown_client,
     ] {
         let (status, body) = post_token!(app, f.tenant_id, body);
-        assert_eq!(status, 401, "{body}");
-        assert!(body.get("access_token").is_none(), "{body}");
+        assert_eq!(status, 401, "unexpected answer (body withheld)");
+        assert!(body.get("access_token").is_none(), "a token was minted");
         refusals.push(body);
     }
     assert_eq!(
@@ -893,7 +896,7 @@ async fn a_confidential_clients_device_grant_needs_its_secret_at_the_poll() {
         f.tenant_id,
         poll_body(&client_id, &device_code) + &format!("&client_secret={secret}")
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
 }
 
@@ -926,7 +929,7 @@ async fn a_foreign_client_id_is_invalid_grant_and_leaves_the_grant_untouched() {
         assert_eq!(
             (status, body["error"].as_str()),
             (400, Some("invalid_grant")),
-            "{state:?}: {body}"
+            "{state:?}"
         );
         assert_eq!(
             body["error_description"], "unknown device code",
@@ -935,9 +938,9 @@ async fn a_foreign_client_id_is_invalid_grant_and_leaves_the_grant_untouched() {
         assert_untouched(&f, &device_code, state).await;
 
         if state == DeviceGrantStatus::Approved {
-            let (status, body) =
+            let (status, _body) =
                 post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-            assert_eq!(status, 200, "the device's own poll: {body}");
+            assert_eq!(status, 200, "the device's own poll");
         }
     }
 }
@@ -969,7 +972,7 @@ async fn removing_the_grant_type_refuses_an_already_approved_grant() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_eq!(
         stored_grant(&f, &device_code).await.status,
@@ -978,8 +981,8 @@ async fn removing_the_grant_type_refuses_an_already_approved_grant() {
     assert_eq!(refresh_token_rows(&f).await, 0);
 
     set_grants(vec![DEVICE_CODE_GRANT_TYPE]).await;
-    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    let (status, _body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 }
 
 /// A tombstoned tenant's client gets no user code and its approved grant does
@@ -1006,15 +1009,15 @@ async fn a_tombstoned_tenants_device_client_is_refused_at_both_endpoints() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
-    assert!(body.get("access_token").is_none(), "{body}");
+    assert!(body.get("access_token").is_none(), "a token was minted");
 }
 
 /// #641 (W3.7, c): tombstoning a tenant deletes its `device_grant` rows in the
@@ -1071,7 +1074,7 @@ async fn tombstoning_a_tenant_deletes_its_device_grants_and_no_other_tenants() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
 }
 
@@ -1094,7 +1097,7 @@ async fn a_public_device_client_presenting_a_secret_is_refused() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     let (status, body) = post_token!(
         app,
@@ -1104,7 +1107,7 @@ async fn a_public_device_client_presenting_a_secret_is_refused() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 }
@@ -1170,7 +1173,7 @@ async fn a_dpop_bound_clients_device_token_carries_cnf_jkt() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 
@@ -1182,8 +1185,11 @@ async fn a_dpop_bound_clients_device_token_carries_cnf_jkt() {
         poll_body(&client_id, &device_code),
         [("DPoP", dpop_proof(&key))]
     );
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["token_type"], "DPoP", "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
+    assert_eq!(
+        body["token_type"], "DPoP",
+        "unexpected answer (body withheld)"
+    );
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert_eq!(
         claims["cnf"]["jkt"].as_str(),
@@ -1200,7 +1206,7 @@ async fn an_unbound_clients_device_token_stays_a_bearer_token() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert_eq!(body["token_type"], "Bearer");
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert!(claims.get("cnf").is_none(), "{claims}");
@@ -1215,7 +1221,7 @@ async fn a_device_grant_token_names_its_client_and_no_session() {
     let app = test_app!(f);
     let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert_eq!(
         claims["client_id"].as_str(),
@@ -1262,7 +1268,7 @@ async fn a_device_grant_token_is_refused_403_at_the_device_routes_and_401_elsewh
     let app = test_app_with_session_check!(f);
     let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let device_token = body["access_token"].as_str().unwrap().to_owned();
     let (pending_code, user_code) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
 
@@ -1277,7 +1283,10 @@ async fn a_device_grant_token_is_refused_403_at_the_device_routes_and_401_elsewh
     .await;
     assert_eq!(resp.status().as_u16(), 403);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["error"], "authorization_denied", "{body}");
+    assert_eq!(
+        body["error"], "authorization_denied",
+        "unexpected answer (body withheld)"
+    );
 
     let resp = test::call_service(
         &app,
@@ -1293,7 +1302,10 @@ async fn a_device_grant_token_is_refused_403_at_the_device_routes_and_401_elsewh
     .await;
     assert_eq!(resp.status().as_u16(), 403);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["error"], "authorization_denied", "{body}");
+    assert_eq!(
+        body["error"], "authorization_denied",
+        "unexpected answer (body withheld)"
+    );
     assert_eq!(
         stored_grant(&f, &pending_code).await.status,
         DeviceGrantStatus::Pending,
@@ -1345,7 +1357,7 @@ async fn poll_with_key(
         poll_body(client_id, &device_code) + extra,
         [("DPoP", dpop_proof(key))]
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     body
 }
 
@@ -1384,7 +1396,7 @@ async fn a_public_dpop_clients_refresh_token_is_bound_to_its_key() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
-        "another key refreshed the token: {body}"
+        "another key refreshed the token"
     );
 
     let (status, body) = post_form_with!(
@@ -1394,7 +1406,7 @@ async fn a_public_dpop_clients_refresh_token_is_bound_to_its_key() {
         refresh_body(&client_id, &refresh, ""),
         [("DPoP", dpop_proof(&device_key))]
     );
-    assert_eq!(status, 200, "the refused attempt spent the token: {body}");
+    assert_eq!(status, 200, "the refused attempt spent the token");
     assert_eq!(body["token_type"], "DPoP");
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert_eq!(claims["cnf"]["jkt"].as_str(), Some(device_key.jkt.as_str()));
@@ -1410,16 +1422,16 @@ async fn a_public_dpop_clients_refresh_token_is_bound_to_its_key() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
-        "the successor lost the binding: {body}"
+        "the successor lost the binding"
     );
-    let (status, body) = post_form_with!(
+    let (status, _body) = post_form_with!(
         app,
         "/oauth2/token",
         f.tenant_id,
         refresh_body(&client_id, &successor, ""),
         [("DPoP", dpop_proof(&device_key))]
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
 }
 
 /// #681 (ii) — a refresh token bound to no key (written before v109, or while
@@ -1474,7 +1486,7 @@ async fn a_public_dpop_clients_unbound_refresh_token_is_refused() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
 }
 
@@ -1511,7 +1523,7 @@ async fn a_confidential_or_bearer_clients_refresh_is_unchanged() {
         ),
         [("DPoP", dpop_proof(&other_key))]
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert_eq!(claims["cnf"]["jkt"].as_str(), Some(other_key.jkt.as_str()));
 
@@ -1526,13 +1538,13 @@ async fn a_confidential_or_bearer_clients_refresh_is_unchanged() {
     let (device_code, _) =
         seed_grant_for(&f, &bearer_id, DeviceGrantStatus::Approved, 600, 0).await;
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&bearer_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let (status, body) = post_token!(
         app,
         f.tenant_id,
         refresh_body(&bearer_id, body["refresh_token"].as_str().unwrap(), "")
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert_eq!(body["token_type"], "Bearer");
 }
 
@@ -1610,7 +1622,7 @@ async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     let (status, body) = post_form_with!(
         app,
@@ -1622,7 +1634,7 @@ async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
         ),
         []
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let device_code = body["device_code"].as_str().unwrap().to_owned();
     let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
     let repo = SurrealDeviceGrantRepository::new(f.db.clone());
@@ -1641,7 +1653,7 @@ async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_dpop_proof")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 
@@ -1654,7 +1666,7 @@ async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
         poll_body(&client_id, &device_code) + &client_assertion(&signing, &client_id),
         [("DPoP", dpop_proof(&key))]
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert_eq!(body["token_type"], "DPoP");
     let claims = decode_unverified(body["access_token"].as_str().unwrap());
     assert_eq!(
@@ -1687,7 +1699,7 @@ async fn a_fapi2_device_client_must_meet_the_profile_at_the_poll() {
     assert_eq!(
         (status, body["error"].as_str()),
         (401, Some("invalid_client")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 }
@@ -2091,13 +2103,13 @@ async fn a_credential_less_flood_from_one_address_meets_rate_limit_exceeded() {
         assert_ne!(
             body["error"].as_str(),
             Some("slow_down"),
-            "a public client's token request is never answered slow_down by a bucket: {body}"
+            "a public client's token request is never answered slow_down by a bucket"
         );
         if status == 429 {
             limited = Some(body);
             break;
         }
-        assert_eq!(status, 400, "the grant refuses the guessed code: {body}");
+        assert_eq!(status, 400, "the grant refuses the guessed code");
     }
     let body = limited.expect("the route limiter never refused the flood");
     assert_eq!(body["error"].as_str(), Some("rate_limit_exceeded"));
@@ -2254,7 +2266,7 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
         f.tenant_id,
         poll_body(&client_id, &approved) + &secret_param
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let confidential_era = body["refresh_token"].as_str().unwrap().to_owned();
     let (status, body) = post_token!(
         app,
@@ -2286,9 +2298,12 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
         before.id,
         serde_json::json!({ "token_endpoint_auth_method": "none" })
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert_eq!(body["token_endpoint_auth_method"], "none");
-    assert!(body.get("client_secret").is_none(), "{body}");
+    assert!(
+        body.get("client_secret").is_none(),
+        "the client secret was echoed"
+    );
     let after = stored_client(&f, &client_id).await;
     assert!(after.token_endpoint_auth_method.is_public());
     assert_eq!(
@@ -2325,7 +2340,7 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
     assert_eq!(
         (status, body["error"].as_str()),
         (400, Some("invalid_grant")),
-        "{body}"
+        "unexpected answer (body withheld)"
     );
     assert!(
         SurrealDeviceGrantRepository::new(f.db.clone())
@@ -2343,7 +2358,7 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
         format!("client_id={client_id}&scope=openid"),
         []
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     let device_code = body["device_code"].as_str().unwrap().to_owned();
     let user_code = normalize_user_code(body["user_code"].as_str().unwrap());
     assert!(
@@ -2367,7 +2382,7 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
     assert_untouched(&f, &device_code, DeviceGrantStatus::Approved).await;
 
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
 
     // A refresh token issued after the conversion refreshes on `client_id`.
@@ -2376,7 +2391,7 @@ async fn a_confidential_device_client_converts_to_public_and_its_flow_needs_only
         f.tenant_id,
         refresh_body(&client_id, body["refresh_token"].as_str().unwrap(), "")
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "unexpected answer (body withheld)");
     assert!(!body["access_token"].as_str().unwrap().is_empty());
 }
 
@@ -2446,11 +2461,11 @@ async fn every_other_change_across_the_public_line_is_still_refused() {
     for (client_id, patch) in cases {
         let before = stored_client(&f, &client_id).await;
         let (status, body) = put_client!(app, f, before.id, patch.clone());
-        assert_eq!(status, 400, "{client_id} {patch}: {body}");
+        assert_eq!(status, 400, "{client_id} {patch}");
         assert!(
             body.to_string()
                 .contains("token_endpoint_auth_method cannot be changed"),
-            "refused by the public-line rule, not another: {body}"
+            "refused by the public-line rule, not another"
         );
         let after = stored_client(&f, &client_id).await;
         assert_eq!(
@@ -2493,7 +2508,7 @@ async fn a_refused_device_token_is_recorded_unauthenticated_at_the_verify_page()
     .await;
     let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
     let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "device token poll refused");
     let device_token = body["access_token"].as_str().unwrap().to_owned();
     let console = mint_token(&f);
     let (_, user_code) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;

@@ -5658,3 +5658,48 @@ New findings (introduced by the round-6 diff): none.
 Follow-up (outside the W7 gate): none new. The §7.4.4 C++ notes still stand: the µs gap, and `opt_int` UB on an out-of-range JSON double.
 
 ---
+
+#### 7.5.4 Closing note (2026-10-23): C164-59, and the W7 gate
+
+**C164-59 is closed at Kotlin `0672643`.** The commit is docs only and signed. The lead reviewer read the diff
+(`b8a70b4..0672643`, `CHANGELOG.md` and `README.md` only):
+- README §16 (`:2521`) and the CHANGELOG entry (`:125`) now say "once more in total (OkHttp replays it once on a
+  stale pooled connection)";
+- the bounds (4 with retry on, 2 with `retryDisabled()`) are unchanged;
+- a "Round 7 — C164-59" line records the change.
+
+No code changed, so no test run was needed.
+
+**Final heads** (all on `claude/contract-1.64`, all matching `git ls-remote`):
+
+| SDK | PR | Head |
+|---|---|---|
+| TypeScript | #150 | `50d6f72` |
+| Rust | #138 | `c947a5e` |
+| Python | #103 | `9e69284` |
+| C | #77 | `832a421` |
+| C++ | #80 | `de76426` |
+| C# | #111 | `fd1093b` |
+| Go | #103 | `2a0c273` |
+| Java | #121 | `97dcdf0` |
+| Kotlin | #80 | `0672643` |
+| PHP | #87 | `b61dc39` |
+| Swift | #78 | `7d28ce4` |
+
+All eleven vendor `CONTRACT.md` byte-identical to W7.1c `b3f8687` (sha256 `a221f1bf…de39`), and `openapi.json`,
+`management-registry.json` and `proto/` from `fb92ec4`. `scripts/check-sdk-artifact-drift.py --local-root` over
+these heads reports **11 repos, 0 artifact problems**.
+
+**W7 has no open finding.** C164-01 … C164-59 are closed in every SDK they name. That includes the contract-text
+findings C164-16 and C164-18 (W7.1b) and C164-35 (W7.1c); C164-34 was unused. Two items are recorded for contract
+1.65 and do not gate W7:
+- **C164-42:** the P10 sentence for `device_poll`;
+- **C164-49:** §16.1's delay cap against the `Retry-After` floor.
+
+The follow-up list of §7.4.4 stays outside the gate, together with OkHttp 5.x for Kotlin (C164-55 (b)). Rust's
+CodeQL alert #128 is a confirmed false positive (§7.2.1 point 6), awaiting the maintainer's dismissal.
+
+**Not verified throughout this review:**
+- C# and Swift were never built or run here; there is no toolchain for either.
+- SDK CI was read only through the orchestrator's reports.
+- The SDK issues' comments could not be read.

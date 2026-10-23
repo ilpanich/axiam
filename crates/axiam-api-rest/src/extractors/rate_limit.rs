@@ -72,7 +72,7 @@ use std::sync::Arc;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::CachedUserIdentity;
-use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
+use axiam_core::forwarded_for::{TrustedProxies, forwarded_for_header, select_client_ip};
 use uuid::Uuid;
 
 use crate::config::rate_limit::RateLimitKeyMode;
@@ -169,8 +169,11 @@ fn select_rate_limit_ip(
 ) -> (Option<IpAddr>, Option<usize>) {
     // The rule lives in `axiam_core::forwarded_for`, shared with the audit rows
     // and the log fields (#752), so they cannot disagree about the address.
+    // Every field line, not the first (#796).
+    let forwarded_for =
+        forwarded_for_header(headers.get_all("X-Forwarded-For").map(|v| v.as_bytes()));
     let selected = select_client_ip(
-        headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()),
+        forwarded_for.as_deref(),
         peer.map(|addr| addr.ip()),
         trusted_hops,
         trusted_proxies,

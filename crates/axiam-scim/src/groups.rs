@@ -137,6 +137,22 @@ async fn scim_members<C: Connection + Clone>(
         .collect())
 }
 
+/// D7: a membership write changes the member's inherited roles in either
+/// direction (under deny-override an *add* to a group that holds a deny role
+/// narrows access too), so the member's cached decisions are flushed, locally
+/// and, when the broadcast is on, on every replica, as the native group routes
+/// do (`handlers::groups`). A broadcast that cannot be confirmed fails the
+/// request (`503`), the native posture; the write itself has landed and a
+/// retry is idempotent (#798).
+async fn flush_member(authz: &AuthzData, tenant_id: Uuid, member: Uuid) -> Result<(), ScimError> {
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_subject(tenant_id, member)
+        .await?;
+    Ok(())
+}
+
 fn build_scim_metadata(external_id: &Option<String>) -> Value {
     let mut metadata = json!({});
     if let Some(ext) = external_id {
@@ -273,6 +289,7 @@ pub async fn create<C: Connection + Clone>(
             .group_repo
             .add_member(user.tenant_id(), member.value, created.id)
             .await?;
+        flush_member(&authz, user.tenant_id(), member.value).await?;
     }
 
     let members = scim_members(&state, user.tenant_id(), created.id).await?;
@@ -345,12 +362,14 @@ pub async fn replace<C: Connection + Clone>(
             .group_repo
             .add_member(user.tenant_id(), *to_add, id)
             .await?;
+        flush_member(&authz, user.tenant_id(), *to_add).await?;
     }
     for to_remove in current_member_ids.difference(&requested_ids) {
         state
             .group_repo
             .remove_member(user.tenant_id(), *to_remove, id)
             .await?;
+        flush_member(&authz, user.tenant_id(), *to_remove).await?;
     }
 
     let members = scim_members(&state, user.tenant_id(), id).await?;
@@ -408,12 +427,14 @@ pub async fn patch<C: Connection + Clone>(
                     .group_repo
                     .add_member(user.tenant_id(), *member_id, id)
                     .await?;
+                flush_member(&authz, user.tenant_id(), *member_id).await?;
             }
             MemberAction::Remove(member_id) => {
                 state
                     .group_repo
                     .remove_member(user.tenant_id(), *member_id, id)
                     .await?;
+                flush_member(&authz, user.tenant_id(), *member_id).await?;
             }
             MemberAction::RemoveAll => {
                 let existing = state
@@ -433,6 +454,7 @@ pub async fn patch<C: Connection + Clone>(
                         .group_repo
                         .remove_member(user.tenant_id(), member.id, id)
                         .await?;
+                    flush_member(&authz, user.tenant_id(), member.id).await?;
                 }
             }
         }
@@ -459,5 +481,13 @@ pub async fn delete<C: Connection + Clone>(
     // native `/api/v1/groups/{id}` handler needed the same fix, and the third
     // and fourth copies arrive with the next two resource types.
     state.group_repo.delete(user.tenant_id(), id).await?;
+    // D7 (#798): deleting a group drops every member's inherited roles, and
+    // the member set is gone with it, so the tenant is flushed, as the native
+    // `DELETE /api/v1/groups/{id}` does.
+    authz
+        .get_ref()
+        .as_ref()
+        .invalidate_tenant(user.tenant_id())
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

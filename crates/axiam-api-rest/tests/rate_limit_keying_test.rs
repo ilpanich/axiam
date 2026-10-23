@@ -571,6 +571,62 @@ async fn with_the_list_empty_every_peers_header_is_read_as_before() {
     assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
 }
 
+/// #796 (R112-03): a listed proxy that adds its own `X-Forwarded-For` line
+/// (HAProxy's `option forwardfor`) rather than appending to the client's is
+/// read through that line. Two lines from a listed peer key on the last line's
+/// rightmost entry: two clients that forge the same first line are keyed apart
+/// by what the proxy saw, and one client that rotates its forged line keeps
+/// its one bucket.
+#[actix_web::test]
+async fn two_forwarded_for_lines_from_a_listed_peer_key_on_the_last_line() {
+    use actix_governor::{Governor, GovernorConfigBuilder};
+    use actix_web::{App, HttpResponse, test, web};
+
+    let proxies = TrustedProxies::parse("203.0.113.0/24").unwrap();
+    let extractor = XForwardedForKeyExtractor::with_trusted_hops(0).with_trusted_proxies(proxies);
+
+    let req = TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .append_header(("X-Forwarded-For", "6.6.6.6"))
+        .append_header(("X-Forwarded-For", "198.51.100.23"))
+        .to_srv_request();
+    assert_eq!(
+        extractor.extract(&req).expect("key extraction succeeds"),
+        "198.51.100.23".parse::<IpAddr>().unwrap(),
+        "the client's forged first line chose the key through a listed proxy"
+    );
+
+    let config = GovernorConfigBuilder::default()
+        .requests_per_minute(1)
+        .burst_size(1)
+        .key_extractor(extractor)
+        .finish()
+        .expect("valid governor config");
+    let app = test::init_service(
+        App::new().service(
+            web::resource("/api/v1/auth/login")
+                .wrap(Governor::new(&config))
+                .route(web::post().to(HttpResponse::Ok)),
+        ),
+    )
+    .await;
+    let login = |forged: &'static str, seen: &'static str| {
+        test::TestRequest::post()
+            .uri("/api/v1/auth/login")
+            .peer_addr(TEST_PEER.parse().unwrap())
+            .append_header(("X-Forwarded-For", forged))
+            .append_header(("X-Forwarded-For", seen))
+            .to_request()
+    };
+    // Two clients, one forged line: keyed apart by the proxy's line.
+    let a = test::call_service(&app, login("6.6.6.6", "198.51.100.1")).await;
+    let b = test::call_service(&app, login("6.6.6.6", "198.51.100.2")).await;
+    assert_eq!((a.status(), b.status()), (StatusCode::OK, StatusCode::OK));
+    // One client rotating its forged line: one bucket.
+    let again = test::call_service(&app, login("7.7.7.7", "198.51.100.1")).await;
+    assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// D-3 (#758 (a)): `none` honours nobody, so two logins from one peer that
 /// write different `X-Forwarded-For` values share the peer's one bucket.
 #[actix_web::test]

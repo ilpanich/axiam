@@ -98,10 +98,29 @@
 //! it can still be in flight. Nothing knows when that is, so the map could not
 //! be pruned safely. Per stripe costs one atomic per stripe and one load per
 //! miss. The price is precision: an invalidation also refuses the in-flight
-//! inserts of unrelated keys in the stripes it clears (one stripe for a tenant
-//! flush, all of them for a subject flush). Those decisions are evaluated
-//! again on their next miss, so the cost is cache efficiency, and only for
-//! evaluations that straddle an administrative mutation.
+//! inserts of unrelated keys in the stripes it clears (all of them, for a
+//! subject flush and, since #797, for a tenant flush). Those decisions are
+//! evaluated again on their next miss, so the cost is cache efficiency, and
+//! only for evaluations that straddle an administrative mutation.
+//!
+//! # A tenant flush and organization-level principals (R112-04, #797)
+//!
+//! Shards are keyed by the tenant a decision is *about*. An organization-level
+//! principal (`SubjectScope::Organization { tenant_id: O }`) holds its roles in
+//! the organization tenant O, but its decisions about a member tenant X live in
+//! shard X. A mutation in O that changes what such a principal may do (a grant
+//! revoked from an O role, a role deleted or updated, a group's role removed)
+//! flushes tenant O, and dropping shard O alone left those X decisions in place,
+//! served until the TTL; bumping stripe(O)'s generation alone let an evaluation
+//! about X that read O's grants before the revocation insert after it.
+//!
+//! [`DecisionCache::invalidate_tenant`] therefore also drops, in every stripe,
+//! the entries whose subject scope is `Organization { tenant_id }` of the
+//! flushed tenant (each shard indexes them by that tenant, as it indexes keys by
+//! subject), and bumps every stripe's generation, as
+//! [`DecisionCache::invalidate_subject`] does for the same reason. The cache
+//! does not know which tenants are organization tenants, so every tenant flush
+//! pays the sweep: sixteen locks and one index lookup per shard.
 //!
 //! # SCOPE OF "IMMEDIATE": process-local by default, cross-replica when enabled
 //!
@@ -357,6 +376,11 @@ struct TenantShard {
     /// subject_id → its keys. Makes `invalidate_subject` proportional to the
     /// subject's own entries instead of the whole shard.
     by_subject: HashMap<Uuid, HashSet<Arc<SubKey>>>,
+    /// organization tenant → the keys of organization-level principals whose
+    /// grants live there (`SubjectScope::Organization { tenant_id }`). Makes
+    /// the organization sweep of [`DecisionCache::invalidate_tenant`]
+    /// proportional to those keys instead of the whole shard (#797).
+    by_org: HashMap<Uuid, HashSet<Arc<SubKey>>>,
     next_seq: u64,
 }
 
@@ -389,6 +413,18 @@ impl TenantShard {
             set.remove(key);
             if set.is_empty() {
                 self.by_subject.remove(&key.subject_id);
+            }
+        }
+        self.unindex_org(key);
+    }
+
+    fn unindex_org(&mut self, key: &Arc<SubKey>) {
+        if let SubjectScope::Organization { tenant_id } = key.subject_scope
+            && let Some(set) = self.by_org.get_mut(&tenant_id)
+        {
+            set.remove(key);
+            if set.is_empty() {
+                self.by_org.remove(&tenant_id);
             }
         }
     }
@@ -424,6 +460,12 @@ impl TenantShard {
             .entry(arc.subject_id)
             .or_default()
             .insert(Arc::clone(&arc));
+        if let SubjectScope::Organization { tenant_id } = arc.subject_scope {
+            self.by_org
+                .entry(tenant_id)
+                .or_default()
+                .insert(Arc::clone(&arc));
+        }
         self.order.push_back((seq, arc));
 
         // Enforce the per-tenant size cap: pop FIFO, skipping superseded slots,
@@ -482,7 +524,24 @@ impl TenantShard {
         if let Some(keys) = self.by_subject.remove(&subject_id) {
             for key in keys {
                 self.entries.remove(&*key);
+                self.unindex_org(&key);
                 // FIFO slots become superseded; compaction reclaims them.
+            }
+        }
+    }
+
+    /// Drop every entry of an organization-level principal whose grants live
+    /// in `org_tenant_id` (#797). O(those entries).
+    fn invalidate_organization_scope(&mut self, org_tenant_id: Uuid) {
+        if let Some(keys) = self.by_org.remove(&org_tenant_id) {
+            for key in keys {
+                self.entries.remove(&*key);
+                if let Some(set) = self.by_subject.get_mut(&key.subject_id) {
+                    set.remove(&key);
+                    if set.is_empty() {
+                        self.by_subject.remove(&key.subject_id);
+                    }
+                }
             }
         }
     }
@@ -717,13 +776,24 @@ impl DecisionCache {
     /// delete, role/permission update, group-role unassignment, resource
     /// reparent/delete).
     ///
-    /// Bumps the generation of the tenant's stripe, so an evaluation already
-    /// in flight cannot insert behind the flush.
+    /// Also drops, in every stripe, the decisions of organization-level
+    /// principals whose grants live in `tenant_id`: those decisions are about
+    /// other tenants and sit in their shards (#797, module docs).
+    ///
+    /// Bumps **every** stripe's generation, so an evaluation already in flight
+    /// cannot insert behind the flush, whichever tenant it is about.
     pub fn invalidate_tenant(&self, tenant_id: Uuid) {
-        let index = self.stripe_index(tenant_id);
-        let mut stripe = self.lock_stripe(index);
-        stripe.remove(&tenant_id);
-        self.bump(index);
+        let own = self.stripe_index(tenant_id);
+        for index in 0..self.stripes.len() {
+            let mut guard = self.lock_stripe(index);
+            if index == own {
+                guard.remove(&tenant_id);
+            }
+            for shard in guard.values_mut() {
+                shard.invalidate_organization_scope(tenant_id);
+            }
+            self.bump(index);
+        }
     }
 
     /// Drop every cached decision for a single subject within a tenant. The
@@ -1482,22 +1552,134 @@ mod tests {
         assert_eq!(cache.get(&r), Some(AccessDecision::Allow));
     }
 
+    /// #797 changed this from "its stripe only": an evaluation about any
+    /// tenant may be an organization-level principal's whose grants the flush
+    /// changed, so every stripe's in-flight inserts are refused. What is
+    /// *removed* stays precise: another tenant's cached entries survive.
     #[test]
-    fn a_tenant_flush_refuses_inserts_of_its_stripe_only() {
+    fn a_tenant_flush_refuses_in_flight_inserts_in_every_stripe() {
         let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
         let (t1, t2) = tenants_in_different_stripes(&cache);
         let r1 = req(t1, Uuid::new_v4(), Uuid::new_v4(), "read");
         let r2 = req(t2, Uuid::new_v4(), Uuid::new_v4(), "read");
+        let cached = req(t2, Uuid::new_v4(), Uuid::new_v4(), "read");
+        cache.insert(&cached, AccessDecision::Allow);
 
         let (g1, g2) = (cache.generation(t1), cache.generation(t2));
         cache.invalidate_tenant(t1);
         assert!(!cache.insert_if_unchanged(&r1, AccessDecision::Allow, g1));
-        assert!(
-            cache.insert_if_unchanged(&r2, AccessDecision::Allow, g2),
-            "a flush of another stripe's tenant must not refuse this insert"
-        );
+        assert!(!cache.insert_if_unchanged(&r2, AccessDecision::Allow, g2));
         assert!(cache.get(&r1).is_none());
-        assert!(cache.get(&r2).is_some());
+        assert!(cache.get(&r2).is_none());
+        assert_eq!(
+            cache.get(&cached),
+            Some(AccessDecision::Allow),
+            "a tenant-scoped decision about another tenant is not dropped"
+        );
+
+        // Evaluations that start after the flush cache normally.
+        let g2 = cache.generation(t2);
+        assert!(cache.insert_if_unchanged(&r2, AccessDecision::Allow, g2));
+    }
+
+    // -- R112-04 (#797): a tenant flush and organization-level principals ----
+
+    fn org_req(tenant: Uuid, org_tenant: Uuid, subject: Uuid, action: &str) -> AccessRequest {
+        AccessRequest {
+            subject_scope: SubjectScope::Organization {
+                tenant_id: org_tenant,
+            },
+            ..req(tenant, subject, Uuid::new_v4(), action)
+        }
+    }
+
+    /// The probe of R112-04: an organization principal's allow about member
+    /// tenant X, whose grants live in the organization tenant O (another
+    /// stripe), is dropped by a flush of O, and an insert read before it is
+    /// refused.
+    #[test]
+    fn a_flush_of_the_organization_tenant_drops_its_principals_decisions_elsewhere() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let (x, o) = tenants_in_different_stripes(&cache);
+        let admin = Uuid::new_v4();
+        let r = org_req(x, o, admin, "read");
+
+        cache.insert(&r, AccessDecision::Allow);
+        cache.invalidate_tenant(o);
+        assert!(
+            cache.get(&r).is_none(),
+            "the cached allow survived the flush"
+        );
+        assert_eq!(cache.tenant_len(x), 0);
+
+        let generation = cache.generation(x); // evaluation about X starts
+        cache.invalidate_tenant(o); // a revocation in O lands
+        assert!(
+            !cache.insert_if_unchanged(&r, AccessDecision::Allow, generation),
+            "a decision read before the O flush must not be inserted after it"
+        );
+        assert!(cache.get(&r).is_none());
+    }
+
+    /// The sweep is precise: it drops only the decisions of principals whose
+    /// grants live in the flushed tenant, and keeps the indexes consistent so
+    /// a later subject flush and a re-insert behave.
+    #[test]
+    fn the_organization_sweep_drops_only_that_organizations_principals() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let (x, o) = tenants_in_different_stripes(&cache);
+        let other_org = Uuid::new_v4();
+        let (admin, stranger, local) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mine = org_req(x, o, admin, "read");
+        let mine_too = org_req(x, o, admin, "write");
+        let theirs = org_req(x, other_org, stranger, "read");
+        let tenant_scoped = req(x, local, Uuid::new_v4(), "read");
+        for r in [&mine, &mine_too, &theirs, &tenant_scoped] {
+            cache.insert(r, AccessDecision::Allow);
+        }
+
+        cache.invalidate_tenant(o);
+        assert!(cache.get(&mine).is_none());
+        assert!(cache.get(&mine_too).is_none());
+        assert_eq!(cache.get(&theirs), Some(AccessDecision::Allow));
+        assert_eq!(cache.get(&tenant_scoped), Some(AccessDecision::Allow));
+        assert_eq!(cache.tenant_len(x), 2);
+
+        // A subject flush of the surviving organization principal still
+        // finds its entry, and a fresh insert of the swept one is served.
+        cache.invalidate_subject(x, stranger);
+        assert!(cache.get(&theirs).is_none());
+        cache.insert(&mine, AccessDecision::Allow);
+        assert_eq!(cache.get(&mine), Some(AccessDecision::Allow));
+        cache.invalidate_tenant(o);
+        assert!(cache.get(&mine).is_none());
+        assert_eq!(cache.tenant_len(x), 1);
+    }
+
+    /// A key dropped by the subject flush leaves the organization index too,
+    /// so a later organization sweep finds nothing stale to trip over, and an
+    /// evicted key (the size cap) is unindexed the same way.
+    #[test]
+    fn the_organization_index_follows_subject_flushes_and_eviction() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 1));
+        let (x, o) = tenants_in_different_stripes(&cache);
+        let admin = Uuid::new_v4();
+        let first = org_req(x, o, admin, "read");
+        cache.insert(&first, AccessDecision::Allow);
+        cache.invalidate_subject(x, admin);
+        cache.invalidate_tenant(o);
+        assert!(cache.is_empty());
+
+        // The cap is one entry: the second insert evicts the first.
+        let second = org_req(x, o, admin, "write");
+        cache.insert(&first, AccessDecision::Allow);
+        cache.insert(&second, AccessDecision::Allow);
+        assert_eq!(cache.tenant_len(x), 1);
+        cache.invalidate_tenant(o);
+        assert!(cache.is_empty());
+        let stripe = cache.stripe(x);
+        let shard = stripe.get(&x).expect("the shard outlives its entries");
+        assert!(shard.by_org.is_empty() && shard.by_subject.is_empty());
     }
 
     #[test]

@@ -314,6 +314,44 @@ pub fn select_client_ip(
     }
 }
 
+/// Every `X-Forwarded-For` field line of a request, as the one list RFC 9110
+/// §5.3 says they are: the lines joined with `,` in the order received.
+///
+/// Callers pass every value (`HeaderMap::get_all`, actix and `http`/tonic
+/// alike), never only the first. A proxy that adds its own line rather than
+/// appending to the client's (HAProxy's `option forwardfor`) puts the address
+/// it saw in the **last** line; reading the first line alone would select from
+/// what the client wrote, through a listed proxy (#796, R112-03).
+///
+/// `None` when there is no line, and when any line is not visible ASCII (the
+/// rule `HeaderValue::to_str` applies): a header that cannot be read whole is
+/// treated as absent, so the transport peer is used, rather than read in part.
+#[must_use]
+pub fn forwarded_for_header<'a, I>(lines: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut joined: Option<String> = None;
+    for line in lines {
+        if !line
+            .iter()
+            .all(|&b| b == b'\t' || (b' '..=b'~').contains(&b))
+        {
+            return None;
+        }
+        // Checked above: every byte is ASCII.
+        let line = std::str::from_utf8(line).ok()?;
+        match joined.as_mut() {
+            Some(list) => {
+                list.push(',');
+                list.push_str(line);
+            }
+            None => joined = Some(line.to_owned()),
+        }
+    }
+    joined
+}
+
 /// The leftmost `X-Forwarded-For` entry as the caller asserted it, when it
 /// differs from `recorded` (the address [`select_client_ip`] chose). `None`
 /// when the header is absent, empty, or names the recorded address. Cut to
@@ -343,6 +381,42 @@ mod tests {
 
     fn ip(literal: &str) -> IpAddr {
         literal.parse().expect("literal parses")
+    }
+
+    /// #796: repeated field lines are one list, in order; a line that is not
+    /// visible ASCII makes the whole header absent.
+    #[test]
+    fn every_forwarded_for_line_is_read_as_one_list() {
+        let lines: [&[u8]; 2] = [b"6.6.6.6", b"198.51.100.5"];
+        let joined = forwarded_for_header(lines);
+        assert_eq!(joined.as_deref(), Some("6.6.6.6,198.51.100.5"));
+
+        let one: [&[u8]; 1] = [b"1.2.3.4, 5.6.7.8"];
+        assert_eq!(
+            forwarded_for_header(one).as_deref(),
+            Some("1.2.3.4, 5.6.7.8")
+        );
+        assert_eq!(forwarded_for_header(std::iter::empty::<&[u8]>()), None);
+
+        let bad: [&[u8]; 2] = [b"6.6.6.6", b"198.51.100.5\xff"];
+        assert_eq!(forwarded_for_header(bad), None);
+        let control: [&[u8]; 1] = [b"1.2.3.4\x01"];
+        assert_eq!(forwarded_for_header(control), None);
+    }
+
+    /// The probe of R112-03: behind a listed proxy that adds its own line, the
+    /// client's forged line is no longer what the rule selects from.
+    #[test]
+    fn the_rule_selects_from_the_proxys_line_when_it_adds_one() {
+        let proxies = TrustedProxies::parse("10.0.0.0/8").unwrap();
+        let lines: [&[u8]; 2] = [b"6.6.6.6", b"198.51.100.5"];
+        let header = forwarded_for_header(lines);
+        let selected = select_client_ip(header.as_deref(), Some(ip("10.0.0.9")), 0, &proxies);
+        assert_eq!(selected.ip, Some(ip("198.51.100.5")));
+        assert_eq!(
+            forwarded_for_claimed(header.as_deref(), selected.ip).as_deref(),
+            Some("6.6.6.6")
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! reasonable User-Agent fits in 512.
 
 use actix_web::HttpRequest;
-use axiam_core::forwarded_for::{TrustedProxies, select_client_ip};
+use axiam_core::forwarded_for::{TrustedProxies, forwarded_for_header, select_client_ip};
 
 /// Maximum length for an IP address string (IPv6 with zone ID = 45 chars).
 pub const MAX_IP_LEN: usize = 45;
@@ -42,12 +42,14 @@ pub fn client_ip_with(
     trusted_hops: usize,
     trusted_proxies: &TrustedProxies,
 ) -> Option<String> {
-    let forwarded_for = req
-        .headers()
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok());
+    // Every field line, not the first (#796).
+    let forwarded_for = forwarded_for_header(
+        req.headers()
+            .get_all("X-Forwarded-For")
+            .map(|v| v.as_bytes()),
+    );
     select_client_ip(
-        forwarded_for,
+        forwarded_for.as_deref(),
         req.peer_addr().map(|addr| addr.ip()),
         trusted_hops,
         trusted_proxies,
@@ -102,6 +104,35 @@ mod tests {
         assert_eq!(
             client_ip_with(&req, 0, &proxies()).as_deref(),
             Some("203.0.113.7")
+        );
+    }
+
+    /// #796: RFC 9110 joins repeated field lines. A listed proxy that adds
+    /// its own line (HAProxy's `option forwardfor`) is read through that
+    /// line, not through the client's forged first one.
+    #[test]
+    fn every_forwarded_for_line_is_read() {
+        let req = TestRequest::get()
+            .peer_addr("10.0.0.9:1".parse().unwrap())
+            .append_header(("X-Forwarded-For", "6.6.6.6"))
+            .append_header(("X-Forwarded-For", "198.51.100.5"))
+            .to_http_request();
+        assert_eq!(
+            client_ip_with(&req, 0, &proxies()).as_deref(),
+            Some("198.51.100.5")
+        );
+        // A line that is not visible ASCII makes the header absent: the peer.
+        let req = TestRequest::get()
+            .peer_addr("10.0.0.9:1".parse().unwrap())
+            .append_header(("X-Forwarded-For", "198.51.100.5"))
+            .append_header((
+                "X-Forwarded-For",
+                actix_web::http::header::HeaderValue::from_bytes(b"6.6.6.6\xff").unwrap(),
+            ))
+            .to_http_request();
+        assert_eq!(
+            client_ip_with(&req, 0, &proxies()).as_deref(),
+            Some("10.0.0.9")
         );
     }
 

@@ -70,7 +70,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axiam_core::forwarded_for::{TrustedProxies, configured_trusted_hops, select_client_ip};
+use axiam_core::forwarded_for::{
+    TrustedProxies, configured_trusted_hops, forwarded_for_header, select_client_ip,
+};
 use axiam_db::SharedRateLimitCounter;
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
@@ -210,13 +212,16 @@ impl KeyExtractor for GrpcTrustedHopsKeyExtractor {
         // The REST limiters' rule, the same function: the header is read only
         // from a peer `trusted_proxies` honours (#711, `none` honours nobody),
         // and a header too short to reach past `trusted_hops` is discarded
-        // (SECHRD-03) and counted (R-4).
-        let forwarded_for = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok());
+        // (SECHRD-03) and counted (R-4). Every field line is read, not the
+        // first (#796).
+        let forwarded_for = forwarded_for_header(
+            req.headers()
+                .get_all("x-forwarded-for")
+                .iter()
+                .map(|value| value.as_bytes()),
+        );
         let selected = select_client_ip(
-            forwarded_for,
+            forwarded_for.as_deref(),
             peer,
             self.trusted_hops,
             &self.trusted_proxies,
@@ -1062,6 +1067,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #796: a listed proxy that adds its own `x-forwarded-for` line (rather
+    /// than appending to the client's) is read through that line; the
+    /// client's forged first line does not choose the key.
+    #[test]
+    fn every_forwarded_for_line_is_read_from_a_listed_proxy() {
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let extractor = GrpcTrustedHopsKeyExtractor::new(0)
+            .with_trusted_proxies(TrustedProxies::parse("10.0.0.0/8").unwrap());
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6")
+            .header("x-forwarded-for", "198.51.100.5")
+            .body(())
+            .unwrap();
+        req.extensions_mut().insert(TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(peer),
+        });
+        let expected: std::net::IpAddr = "198.51.100.5".parse().unwrap();
+        assert_eq!(extractor.extract(&req).unwrap(), expected);
     }
 
     /// [`WINDOW_SECS`] and the shared counter's configured window are one

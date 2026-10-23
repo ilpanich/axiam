@@ -177,7 +177,10 @@ invoked as a deliberate additional step rather than an always-on default.
   deleted user was the actor: `actor_id` becomes the **nil UUID**, an
   `actor_pseudonym` metadata field is set to the pseudonym, the original
   user UUID no longer appears anywhere in the row, and `ip_address` is
-  nulled. The one row that names the erased account by id is the erasure's
+  nulled, together with the request row's second client address,
+  `metadata.forwarded_for_claimed` (the caller's leftmost `X-Forwarded-For`
+  entry, recorded since 1.1.2 when it differs from `ip_address`; #752, #794).
+  The one row that names the erased account by id is the erasure's
   own record, `gdpr.user_pseudonymized`, written after the scrub with the
   anonymized row's id as its actor and only the pseudonym and a certificate
   count in its metadata; the scrub never rewrites it, so a unit that runs late
@@ -435,12 +438,13 @@ only deletion path). Collection was not configurable at all, which is the
 remaining half of Art. 5(1)(c): a deployment whose lawful basis does not support
 holding a full client address for two years had nothing to turn off.
 
-With minimisation on, two fields are reduced **before** the append:
+With minimisation on, three fields are reduced **before** the append:
 
 | Field | Minimised to | Why this granularity |
 |---|---|---|
 | `ip_address` | `/24` (IPv4) or `/48` (IPv6) prefix | Keeps the network an action came from and drops the part that identifies a subscriber line or a device |
 | `metadata.user_agent` | a coarse family (`Firefox`, `curl`, `other`) | A full user-agent string is a fingerprint; the family is what an investigation reads |
+| `metadata.forwarded_for_claimed` | the same prefix as `ip_address` | The request row's claimed address (#752) is a client address too (#794) |
 
 An address that does not parse is dropped rather than written through: a value
 that cannot be parsed cannot be shown to have been minimised.
@@ -452,9 +456,12 @@ that cannot be parsed cannot be shown to have been minimised.
    (T-241), the provider and external subject on a JIT provision (T-161) are
    accountability evidence other controls depend on. Dropping them would weaken
    three controls to narrow one, and none of them is request metadata. The
-   request-audit middleware itself collects `http_status` and `authenticated`
-   and nothing else, pinned exactly by
-   `the_request_audit_middleware_collects_only_the_outcome`.
+   request-audit middleware itself collects `http_status` and `authenticated`,
+   plus `forwarded_for_claimed` when the caller's leftmost `X-Forwarded-For`
+   entry differs from the recorded address (#752), and nothing else, pinned
+   exactly, with and without the header, by
+   `the_request_audit_middleware_collects_only_the_outcome`. That one key is an
+   address, so it is minimised and erased like `ip_address` (#794).
 2. **Deployment-wide, not per tenant.** Audit is an accountability control the
    deployment relies on *including against a tenant administrator*. A per-tenant
    switch would let a tenant weaken the evidence used to investigate that
@@ -466,8 +473,9 @@ that cannot be parsed cannot be shown to have been minimised.
    startup, exactly as retention is.
 
 **Erasure and export keep working, and the reason is worth stating.** The Art.
-17 scrub (`pseudonymize_actor`, §2) clears `ip_address` outright, so a truncated
-value is erased by the same statement as a whole one. The Art. 15 export's
+17 scrub (`pseudonymize_actor`, §2) clears `ip_address` and
+`metadata.forwarded_for_claimed` outright, so a truncated value is erased by the
+same statement as a whole one. The Art. 15 export's
 `audit_entries` section (§1) reads `action`, `outcome`, `timestamp` and
 `resource_id` — never the address — so a data subject's inventory is identical
 whether or not the deployment minimises.
@@ -482,6 +490,9 @@ whether or not the deployment minimises.
   differs is the one it never reads.
 - `structured_accountability_metadata_survives_minimisation` and the truncation
   unit tests, including the fail-closed case for an unparseable address.
+- `minimisation_on_truncates_the_claimed_forwarded_address` and
+  `pseudonymize_actor_removes_the_claimed_forwarded_address` (#794) — the
+  request row's claimed address is truncated and erased like `ip_address`.
 
 ---
 
@@ -678,6 +689,12 @@ endpoint.
 - **No production code was modified by this verification pass** — all four
   evidence tests already existed and already passed prior to this plan; this
   document is the net-new artifact.
+- **Amended 2026-10-23 (release 1.1.2, R112-01, #794).** §2 and §2a named
+  `ip_address` as the audit row's only client address and said the request
+  middleware collected `http_status` and `authenticated` "and nothing else".
+  Since #752 (1.1.2, W2.2) the request row also carries
+  `metadata.forwarded_for_claimed`; the erasure scrub now clears it and
+  minimisation truncates it, and both sections say so.
 - **Milestone:** `1.0.0` — this document will be re-verified (re-run
   tests, re-check the repository cross-check) at the next milestone that
   touches GDPR export/erasure/consent behavior.

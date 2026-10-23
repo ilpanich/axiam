@@ -439,6 +439,9 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         };
 
         // Query 1: scrub actor fields + metadata PII on all entries for this actor.
+        // `metadata.forwarded_for_claimed` is the request row's second client
+        // address (the caller's leftmost `X-Forwarded-For` entry, #752), so it
+        // goes with `ip_address` (#794).
         // Not the erasure's own record (#784): it names the erased account as
         // its actor on purpose, is written after the scrub, and carries only
         // the pseudonym — a unit stalled past its claim's lease that scrubs
@@ -448,7 +451,8 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             "UPDATE audit_log SET \
              actor_id = $nil_uuid, \
              metadata.actor_pseudonym = $pseudonym, \
-             ip_address = NONE{} \
+             ip_address = NONE, \
+             metadata.forwarded_for_claimed = NONE{} \
              WHERE tenant_id = $tenant_id AND actor_id = $user_id \
              AND NOT (action = 'gdpr.user_pseudonymized' AND metadata.pseudonym = $pseudonym)",
             pii_set

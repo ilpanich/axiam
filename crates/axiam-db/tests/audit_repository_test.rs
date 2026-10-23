@@ -400,6 +400,49 @@ async fn pseudonymize_actor_scrubs_pii_and_relinks_resource() {
     assert_eq!(about_after.resource_id, Some(Uuid::nil()));
 }
 
+/// #794: the request row's claimed client address (`forwarded_for_claimed`,
+/// #752) is personal data like `ip_address`, so the scrub removes it from the
+/// erased user's rows, and only from theirs.
+#[tokio::test]
+async fn pseudonymize_actor_removes_the_claimed_forwarded_address() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let (user_id, other) = (Uuid::new_v4(), Uuid::new_v4());
+    let row = |actor: Uuid| {
+        let mut e = entry(
+            tenant_id,
+            actor,
+            "GET /api/v1/users",
+            AuditOutcome::Success,
+            None,
+        );
+        e.metadata = Some(serde_json::json!({
+            "http_status": 200,
+            "authenticated": true,
+            "forwarded_for_claimed": "198.51.100.23",
+        }));
+        e
+    };
+    let mine = repo.append(row(user_id)).await.unwrap().id;
+    let theirs = repo.append(row(other)).await.unwrap().id;
+
+    repo.pseudonymize_actor(tenant_id, user_id, "DELETED_USER_deadbeef")
+        .await
+        .unwrap();
+
+    let rows = repo.get_by_ids(tenant_id, &[mine, theirs]).await.unwrap();
+    let mine = rows.iter().find(|r| r.id == mine).unwrap();
+    let theirs = rows.iter().find(|r| r.id == theirs).unwrap();
+    assert!(mine.ip_address.is_none());
+    assert!(
+        mine.metadata.get("forwarded_for_claimed").is_none(),
+        "the erased user's claimed address must not survive the scrub"
+    );
+    assert_eq!(mine.metadata["http_status"], 200);
+    assert_eq!(theirs.metadata["forwarded_for_claimed"], "198.51.100.23");
+    assert_eq!(theirs.ip_address.as_deref(), Some("203.0.113.5"));
+}
+
 /// #758 (e): the grantee of a `network_role.assigned` / `.unassigned` row is
 /// the erased subject whoever wrote the row; its id is cleared, a stranger's
 /// is not, and a second run changes nothing.

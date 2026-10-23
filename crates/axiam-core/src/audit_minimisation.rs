@@ -23,6 +23,9 @@
 //! - a `user_agent` member of `metadata`, where a producer sets one, is reduced
 //!   to a coarse family. A full user-agent string is a fingerprint; the family
 //!   is the part an investigation actually reads.
+//! - the request row's `metadata.forwarded_for_claimed` (the leftmost
+//!   `X-Forwarded-For` entry, kept when it differs from `ip_address`; #752) is
+//!   an address too, and is truncated like `ip_address` (#794).
 //!
 //! **It does not strip the structured metadata domain producers write**, and
 //! that limit is the design rather than an omission.
@@ -32,8 +35,10 @@
 //! (T-161). Those are accountability evidence that other threats' mitigations
 //! depend on. Dropping them would weaken three controls to narrow one, and
 //! none of them is request metadata: the request-audit middleware collects
-//! `http_status` and `authenticated` and nothing else, which is pinned by its
-//! own test rather than left to habit.
+//! `http_status` and `authenticated`, plus `forwarded_for_claimed` when the
+//! caller's leftmost `X-Forwarded-For` entry differs from the recorded
+//! address, and nothing else, which is pinned by its own test rather than left
+//! to habit.
 //!
 //! # Why deployment-wide and not per tenant
 //!
@@ -82,11 +87,23 @@ impl AuditMinimisation {
             return;
         }
         entry.ip_address = entry.ip_address.as_deref().and_then(truncate_ip);
-        if let Some(serde_json::Value::Object(map)) = entry.metadata.as_mut()
-            && let Some(agent) = map.get("user_agent").and_then(serde_json::Value::as_str)
-        {
+        let Some(serde_json::Value::Object(map)) = entry.metadata.as_mut() else {
+            return;
+        };
+        if let Some(agent) = map.get("user_agent").and_then(serde_json::Value::as_str) {
             let family = user_agent_family(agent).to_owned();
             map.insert("user_agent".into(), serde_json::Value::String(family));
+        }
+        // The request row's claimed client address (#752) is an address like
+        // `ip_address` and is reduced the same way; one that does not parse,
+        // or is not a string, is dropped rather than written through (#794).
+        if let Some(claimed) = map.remove("forwarded_for_claimed")
+            && let Some(prefix) = claimed.as_str().and_then(truncate_ip)
+        {
+            map.insert(
+                "forwarded_for_claimed".into(),
+                serde_json::Value::String(prefix),
+            );
         }
     }
 }
@@ -280,6 +297,56 @@ mod tests {
         assert_eq!(e.metadata.as_ref().unwrap()["user_agent"], "Firefox");
         // And leaves the structured accountability metadata exactly alone.
         assert_eq!(e.metadata.as_ref().unwrap()["http_status"], 200);
+    }
+
+    /// The request row's claimed address is personal data like `ip_address`
+    /// (#794): truncated to the same prefix, and dropped when it cannot be
+    /// shown to have been minimised.
+    #[test]
+    fn minimisation_on_truncates_the_claimed_forwarded_address() {
+        let mut e = entry(
+            Some("203.0.113.42"),
+            Some(serde_json::json!({
+                "http_status": 200,
+                "authenticated": true,
+                "forwarded_for_claimed": "198.51.100.23",
+            })),
+        );
+        AuditMinimisation::new(true).apply(&mut e);
+        let meta = e.metadata.as_ref().unwrap();
+        assert_eq!(meta["forwarded_for_claimed"], "198.51.100.0/24");
+        assert_eq!(meta["http_status"], 200);
+        assert_eq!(meta["authenticated"], true);
+
+        for bad in [
+            serde_json::json!("unknown"),
+            serde_json::json!(""),
+            serde_json::json!(42),
+        ] {
+            let mut e = entry(
+                None,
+                Some(serde_json::json!({ "forwarded_for_claimed": bad.clone() })),
+            );
+            AuditMinimisation::new(true).apply(&mut e);
+            assert!(
+                e.metadata
+                    .as_ref()
+                    .unwrap()
+                    .get("forwarded_for_claimed")
+                    .is_none(),
+                "an unparseable claim ({bad}) must be dropped, not passed through"
+            );
+        }
+
+        let mut off = entry(
+            None,
+            Some(serde_json::json!({ "forwarded_for_claimed": "198.51.100.23" })),
+        );
+        AuditMinimisation::default().apply(&mut off);
+        assert_eq!(
+            off.metadata.unwrap()["forwarded_for_claimed"],
+            "198.51.100.23"
+        );
     }
 
     /// **I4 twin.** Off is the default, and off must be indistinguishable from

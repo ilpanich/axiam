@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::forwarded_for::{
-    TrustedProxies, configured_trusted_hops, forwarded_for_claimed, select_client_ip,
+    TrustedProxies, configured_trusted_hops, forwarded_for_claimed, forwarded_for_header,
+    select_client_ip,
 };
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
@@ -549,11 +550,14 @@ where
         let method = req.method().to_string();
         // #752: the address the rate limiters key the request on, not the
         // first `X-Forwarded-For` entry; what the caller wrote, when it
-        // differs, is kept beside it as `forwarded_for_claimed`.
-        let forwarded_for = req
-            .headers()
-            .get("X-Forwarded-For")
-            .and_then(|v| v.to_str().ok());
+        // differs, is kept beside it as `forwarded_for_claimed`. Every field
+        // line is read, not the first (#796).
+        let forwarded_for = forwarded_for_header(
+            req.headers()
+                .get_all("X-Forwarded-For")
+                .map(|v| v.as_bytes()),
+        );
+        let forwarded_for = forwarded_for.as_deref();
         let selected = select_client_ip(
             forwarded_for,
             req.peer_addr().map(|addr| addr.ip()),

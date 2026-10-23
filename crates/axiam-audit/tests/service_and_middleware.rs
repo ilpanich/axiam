@@ -351,6 +351,38 @@ async fn a_listed_peer_is_recorded_as_the_rightmost_untrusted_hop() {
     );
 }
 
+/// #796: a listed proxy that adds its own `X-Forwarded-For` line is read
+/// through it. The row records the proxy's line, and the client's first line
+/// is the claim beside it.
+#[actix_web::test]
+async fn every_forwarded_for_line_is_read_for_the_row() {
+    let repo = RecordingRepo::new();
+    let rule = ClientIpRule {
+        trusted_hops: 0,
+        trusted_proxies: TrustedProxies::parse("10.0.0.0/8").unwrap(),
+    };
+    let mw = AuditMiddleware::spawn(repo.clone()).with_client_ip_rule(rule);
+    let app = test::init_service(App::new().wrap(mw).route(
+        "/api/ip",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+    let req = test::TestRequest::get()
+        .uri("/api/ip")
+        .append_header(("X-Forwarded-For", "6.6.6.6"))
+        .append_header(("X-Forwarded-For", "198.51.100.5"))
+        .peer_addr("10.1.2.3:5555".parse().unwrap())
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    let row = repo.snapshot().remove(0);
+    assert_eq!(row.ip_address.as_deref(), Some("198.51.100.5"));
+    assert_eq!(
+        row.metadata.unwrap()["forwarded_for_claimed"],
+        serde_json::json!("6.6.6.6")
+    );
+}
+
 #[actix_web::test]
 async fn no_claim_is_recorded_when_the_leftmost_entry_is_the_recorded_address() {
     let row = audit_one_forwarded("10.1.2.3:5555", "198.51.100.5", 0).await;

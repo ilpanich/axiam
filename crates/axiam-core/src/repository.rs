@@ -676,14 +676,21 @@ pub trait RoleRepository: Send + Sync {
         scope: AssignmentScope,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Remove a role assignment from a user.
+    /// Remove a role assignment from a user, and answer whether this call
+    /// removed the edge.
+    ///
+    /// `Ok(false)` means no edge matched — it was never there, or a concurrent
+    /// unassignment removed it first. That is not an error: the end state is
+    /// the one the caller asked for. A caller that records the removal (the
+    /// erasure's `network_role.unassigned` row) writes only on `true`, so two
+    /// units racing over one edge record it once.
     fn unassign_from_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// Get all roles assigned to a user (direct + via group membership).
     fn get_user_roles(

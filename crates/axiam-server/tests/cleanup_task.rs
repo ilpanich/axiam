@@ -5150,6 +5150,49 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
 }
 
 // ---------------------------------------------------------------------------
+// #792 — two units in the role pass record one unassignment, not two
+// ---------------------------------------------------------------------------
+
+/// A unit stalled past `ERASURE_CLAIM_LEASE` and its successor can both read
+/// an assignment; the second one's unassignment removes nothing. It must write
+/// no second `network_role.unassigned` row and must not fail. Several rounds,
+/// each over a fresh account, because whether the two reads precede the two
+/// deletes is the scheduler's; on the code before #792 a round that overlaps
+/// writes two rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_role_passes_over_one_network_role_write_one_row() {
+    let (db, _dir) = setup_serialising_db().await;
+    let tenant_id = Uuid::new_v4();
+    let network = role_granting(&db, tenant_id, "net", "network:join").await;
+    for round in 0..16 {
+        let user = user_due_for_erasure(&db, tenant_id, &format!("racer{round}")).await;
+        SurrealRoleRepository::new(db.clone())
+            .assign_to_user(tenant_id, user.id, network, AssignmentScope::global())
+            .await
+            .expect("assign");
+        let pass = || {
+            let db = db.clone();
+            tokio::spawn(async move {
+                remove_erased_users_roles(
+                    &SurrealRoleRepository::new(db.clone()),
+                    &SurrealPermissionRepository::new(db.clone()),
+                    &SurrealAuditLogRepository::new(db),
+                    tenant_id,
+                    user.id,
+                )
+                .await
+            })
+        };
+        let (a, b) = (pass(), pass());
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        let (a, b) = (a.expect("first pass"), b.expect("second pass"));
+        assert_eq!(a + b, 1, "round {round}: one pass recorded the removal");
+        let rows = rows_of(&db, tenant_id, "network_role.unassigned").await;
+        assert_eq!(rows.len(), round + 1, "round {round}: one new row");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #758 (f) — two recoveries over one store record each owed erasure once
 // ---------------------------------------------------------------------------
 

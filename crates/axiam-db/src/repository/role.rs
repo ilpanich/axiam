@@ -655,7 +655,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
         role_id: Uuid,
         resource_id: Option<Uuid>,
         claim: Option<RoleClaim>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
         self.unrelate_subject_from_role(
             "user",
             "user",
@@ -716,6 +716,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
             claim.as_ref(),
         )
         .await
+        .map(|_| ())
     }
 
     /// [`RoleRepository::assign_to_group`], claiming `claim`. Rule 2 is
@@ -768,6 +769,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
             claim.as_ref(),
         )
         .await
+        .map(|_| ())
     }
 
     /// Shared body of `get_role_user_assignments` / `get_role_group_assignments`.
@@ -973,7 +975,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
         role_id: Uuid,
         resource_id: Option<Uuid>,
         claim: Option<&RoleClaim>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
         let subject_id_str = subject_id.to_string();
         let role_id_str = role_id.to_string();
         let resource_id_str = resource_id.map(|r| r.to_string());
@@ -1001,12 +1003,17 @@ impl<C: Connection> SurrealRoleRepository<C> {
                  THROW 'cross-tenant edge denied'; \
              }}; \
              {claim_check}{bump}\
-             DELETE has_role WHERE \
+             LET $removed = (DELETE has_role WHERE \
              in = {subject_table}:`{subject_id_str}` AND \
              out = role:`{role_id_str}` AND \
-             {scope_clause}; \
+             {scope_clause} RETURN BEFORE); \
+             RETURN array::len($removed) > 0; \
              COMMIT TRANSACTION"
         );
+        // Result slots: BEGIN (0), the two tenant LETs (1, 2), the IF (3), the
+        // claim's LET and IF (4, 5), the bump's LET and UPDATE (6, 7), the
+        // DELETE's LET (8), the RETURN (9). Pinned by the tests that read it.
+        const OUTCOME_SLOT: usize = 9;
         let (claimed, claim_grants, claim_holders) = claim_binds(claim);
         let cross_tenant = format!("cross-tenant {subject_label} role unassignment denied");
 
@@ -1022,17 +1029,22 @@ impl<C: Connection> SurrealRoleRepository<C> {
                 .bind(("claim_holders", claim_holders))
                 .await
                 .map_err(DbError::from)?;
-            role_tx_outcome(
+            let refusal = role_tx_outcome(
                 result.take_errors(),
                 "role_assignment",
                 &role_id_str,
                 &cross_tenant,
-            )
+            )?;
+            if refusal.is_some() {
+                return Ok::<_, DbError>((refusal, false));
+            }
+            let removed: Option<bool> = result.take(OUTCOME_SLOT).map_err(DbError::from)?;
+            Ok((None, removed.unwrap_or(false)))
         })
         .await;
         match outcome.map_err(AxiamError::from)? {
-            None => Ok(()),
-            Some(refusal) => Err(refusal),
+            (None, removed) => Ok(removed),
+            (Some(refusal), _) => Err(refusal),
         }
     }
 
@@ -1240,7 +1252,7 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         user_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
         self.unassign_from_user_claimed(tenant_id, user_id, role_id, resource_id, None)
             .await
     }

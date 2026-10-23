@@ -420,8 +420,10 @@ pub async fn erase_oauth2_refresh_tokens<RT: axiam_core::repository::RefreshToke
 /// by `pseudonymize_actor` when the account is anonymized, so no row names
 /// the erased subject.
 ///
-/// Each row is written after its unassignment landed, like the gate's; a
-/// re-entered erasure finds no assignment left and writes none. A public free
+/// Each row is written after its unassignment landed, like the gate's, and only
+/// when that unassignment is the one that removed the edge (#792): a re-entered
+/// erasure finds no assignment left and writes none, and of two units that both
+/// read one assignment (a stalled unit and its successor) one writes the row. A public free
 /// function, for the reason [`run_erasure_pipeline`] is.
 ///
 /// # Errors
@@ -458,10 +460,14 @@ where
                 })
             })
             .collect();
-        role_repo
+        // Only the unit whose unassignment removed the edge records it: a
+        // unit stalled past the claim's lease and its successor can both have
+        // read this assignment, and the second one's unassignment matches
+        // nothing (`false`, not an error).
+        let removed = role_repo
             .unassign_from_user(tenant_id, user_id, a.role.id, a.resource_id)
             .await?;
-        if network_permissions.is_empty() {
+        if !removed || network_permissions.is_empty() {
             continue;
         }
         write_audit_with_dead_letter(

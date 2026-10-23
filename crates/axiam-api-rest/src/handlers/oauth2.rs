@@ -2807,9 +2807,10 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
 ///    transport peer address, which a caller cannot forge. The
 ///    `X-Forwarded-For`-derived value goes to metadata under a name that says
 ///    it is untrusted: on an authenticated path behind a trusted proxy the
-///    forwarded value is the useful one, but here anyone can assert it, and an
-///    operator who blocks a forged IP has been made to act against the wrong
-///    host.
+///    forwarded value is the useful one, but here anyone can assert it (when
+///    `TRUSTED_PROXIES` is empty, every peer's `X-Forwarded-For` is read; with
+///    it set, only a listed proxy's line is honoured), and an operator who
+///    blocks a forged IP has been made to act against the wrong host.
 pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
     tenant_repo: &SurrealTenantRepository<C>,
     audit_repo: &SurrealAuditLogRepository<C>,

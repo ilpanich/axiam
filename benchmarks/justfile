@@ -1319,16 +1319,16 @@ bench-quick:
     # Same anchor as run-benchmark.sh and sdk-bench.
     export BENCH_CERTS_DIR="${BENCH_CERTS_DIR:-$PWD/profiles/certs}"
 
-    OUT="${BENCH_RESULTS_DIR:-$PWD/results}/quick"
-    mkdir -p "$OUT"
-    TARGET=axiam
-    PROFILE=p3-mtls
-
     # Validated before anything is touched: a bad value would otherwise reach k6
     # as BENCH_VUS and surface minutes in, as a scenario error that never names it.
     case "{{quickvus}}" in
       ''|*[!0-9]*|0|0[0-9]*) echo "[bench-quick] quickvus must be a positive integer, got '{{quickvus}}'" >&2; exit 1 ;;
     esac
+
+    OUT="${BENCH_RESULTS_DIR:-$PWD/results}/quick"
+    mkdir -p "$OUT"
+    TARGET=axiam
+    PROFILE=p3-mtls
 
     command -v k6 >/dev/null || { echo "[bench-quick] k6 is not installed" >&2; exit 1; }
     command -v jq >/dev/null || { echo "[bench-quick] jq is required" >&2; exit 1; }

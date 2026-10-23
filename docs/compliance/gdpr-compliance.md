@@ -124,9 +124,15 @@ rows (revoking them first; Art. 17, #753), and the cleanup task's
 than seven days past — the window in which a replay of a rotated token is still
 detected (T-254). (Corrected 2026-10-22, #753: before 1.1.2 the erasure revoked
 the rows and nothing deleted them.) `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
-confirms no repository file has been added since Phase 25 other than
-`rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). **No
-user-owned table is missing from the export blob.**
+confirmed, **at Phase 25**, that no repository file had been added since other
+than `rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). That
+sentence is dated: repository files have been added since (`network.rs`,
+`ciba_request.rs`, `ssf_*.rs`, `opaque_*.rs`, `directory_*.rs`, `scim_*.rs`,
+`erasure_proof.rs` among them), so the D-04 classification below holds as of
+Phase 25 and is **not re-derived for them here** (amended 2026-10-23, R112-13,
+#806; the erasure and export coverage of the newer tables is described in the
+sections that introduced each). **No user-owned table was missing from the
+export blob at Phase 25.**
 
 ### Encryption at rest and the optional PGP layer
 

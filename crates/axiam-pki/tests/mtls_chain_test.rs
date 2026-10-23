@@ -9,6 +9,8 @@
 //!   2. Reject: self-signed leaf with a matching stored fingerprint (forged) → chain error
 //!   3. Reject: issuer CA not found (no-CA case) → fails closed
 
+mod support;
+
 use axiam_core::models::certificate::{
     CertificateType, CreateCaCertificate, CreateCertificate, KeyAlgorithm, StoreCertificate,
 };
@@ -39,8 +41,7 @@ use surrealdb::engine::local::Mem;
 #[allow(dead_code)]
 fn test_ca_custodians() -> std::sync::Arc<axiam_pki::CaKeyCustodians> {
     std::sync::Arc::new(
-        axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-            .expect("test CA key custodians"),
+        axiam_pki::custodians_from_env(Some(support::test_key())).expect("test CA key custodians"),
     )
 }
 
@@ -55,7 +56,7 @@ async fn setup_db() -> Surreal<TestDb> {
 
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(support::test_key()),
         ..Default::default()
     }
 }

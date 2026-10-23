@@ -12,6 +12,8 @@
 //! does it — the custodian under test is the real `VaultCaKeyStore` talking
 //! real HTTP, only the far end is a fake.
 
+mod support;
+
 use std::sync::Arc;
 
 use axiam_core::ca_keys::CaKeyCustody;
@@ -31,7 +33,6 @@ type TestDb = surrealdb::engine::local::Db;
 
 const TOKEN: &str = "hvs.test-only-not-a-real-token"; // gitleaks:allow
 const PREFIX: &str = "axiam/ca-keys";
-const KEY: [u8; 32] = [0u8; 32]; // gitleaks:allow
 
 async fn setup_db() -> Surreal<TestDb> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -42,7 +43,7 @@ async fn setup_db() -> Surreal<TestDb> {
 
 fn pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: Some(KEY),
+        encryption_key: Some(support::test_key()),
         ..Default::default()
     }
 }
@@ -63,7 +64,7 @@ fn vault_store(server: &MockServer) -> VaultCaKeyStore {
 fn custodians(server: Option<&MockServer>, default: CaKeyCustody) -> Arc<CaKeyCustodians> {
     Arc::new(
         CaKeyCustodians::new(
-            Some(DatabaseCaKeyStore::new(KEY)),
+            Some(DatabaseCaKeyStore::new(support::test_key())),
             server.map(vault_store),
             None,
             Some(default),
@@ -207,7 +208,7 @@ async fn a_release_failure_still_completes_the_migration() {
             .await
             .unwrap()
             .certificate;
-        let store = DatabaseCaKeyStore::new(KEY);
+        let store = DatabaseCaKeyStore::new(support::test_key());
         let key_ref = CaService::<SurrealCaCertificateRepository<TestDb>>::key_ref(&seed);
         use axiam_core::ca_keys::CaKeyStore as _;
         store
@@ -245,7 +246,7 @@ async fn a_release_failure_still_completes_the_migration() {
     // key Vault handed over. A migration that stored something unreadable
     // there would satisfy the assertion above and still have destroyed the CA.
     use axiam_core::ca_keys::CaKeyStore as _;
-    let recovered = DatabaseCaKeyStore::new(KEY)
+    let recovered = DatabaseCaKeyStore::new(support::test_key())
         .load(
             &CaService::<SurrealCaCertificateRepository<TestDb>>::key_ref(&migrated),
             migrated.encrypted_private_key.as_deref(),

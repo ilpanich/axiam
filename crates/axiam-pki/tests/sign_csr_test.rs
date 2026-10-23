@@ -6,6 +6,8 @@
 //! way to mint a CA, a certificate for a name you do not hold, or one over a
 //! 2048-bit key recorded as 4096.
 
+mod support;
+
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
     CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate,
@@ -28,14 +30,13 @@ type TestDb = surrealdb::engine::local::Db;
 
 fn custodians() -> std::sync::Arc<axiam_pki::CaKeyCustodians> {
     std::sync::Arc::new(
-        axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-            .expect("test CA key custodians"),
+        axiam_pki::custodians_from_env(Some(support::test_key())).expect("test CA key custodians"),
     )
 }
 
 fn pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(support::test_key()),
         ..Default::default()
     }
 }

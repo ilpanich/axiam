@@ -76,6 +76,14 @@ on:
       - "crates/axiam-server/src/tls.rs"
       - "crates/axiam-api-rest/src/extractors/auth.rs"
       - "crates/axiam-auth/src/token.rs"
+      # The carrier rule (cookie first, then Bearer or DPoP) that `extractors/auth.rs` calls
+      # in `parse_validated_claims`, so every Live decision passes through it (R112-11).
+      - "crates/axiam-auth/src/carrier.rs"
+      # The decision's client address and the limiter in front of it (`network_decide.rs`
+      # `client_ip`; the shared counter when it is on).
+      - "crates/axiam-api-rest/src/extractors/client_info.rs"
+      - "crates/axiam-core/src/forwarded_for.rs"
+      - "crates/axiam-api-rest/src/middleware/rate_limit_shared.rs"
       - "crates/axiam-api-rest/src/network_decide_guard.rs"
       - "crates/axiam-api-rest/src/network_gate.rs"
       - "docker/radius/**"

@@ -2063,9 +2063,22 @@ revocation: a rotated token is recognised as a replay by its row (T-254), so a
 revoked or rotated row whose expiry is still ahead is kept, and a token that
 lapsed a week ago can no longer be redeemed or tell the session anything it
 does not already carry. The table is therefore bounded by the refresh-token
-lifetime plus a week. A GDPR erasure deletes the user's rows outright, after
-revoking them, as erasure step (a); the step is idempotent, so the recovery of
-a cut erasure re-runs it harmlessly. (Corrected 2026-10-22, #753: before 1.1.2
+lifetime plus a week. A run deletes at most 5 000 rows (10 batches of 500) and
+the next tick continues, so the first run after an upgrade, which finds every row
+expired since the deployment began, takes as many ticks as the backlog needs and
+delays no other job; it runs after `vault_revocation`, `tenant_purge` and
+`certificate_retention` in the tick (R112W1-02, #781). That week is also the bound on what is **recorded**
+(R112W1-04, #783): a replay of a rotated token is audited as
+`oauth2.refresh_token_replayed` only while its row exists, so on a `standard`
+client until the row's expiry (issuance plus the refresh lifetime, 30 days by
+default) plus seven days, and on a `fapi2` client, whose rotated row is
+retired after the 60-second grace, for seven days and sixty seconds after
+rotation. A later replay is refused exactly as before (`invalid_grant`) but
+leaves no session marker and no audit row (T-254). A GDPR erasure deletes the user's rows outright, after
+revoking them, as erasure step (a), before the point of no return, so an erasure
+that was cut after the anonymization has them gone already and its recovery
+(which redoes the proof, the second revocation and the record, not step (a))
+needs no more. The step itself is idempotent. (Corrected 2026-10-22, #753: before 1.1.2
 the erasure revoked a user's rows and nothing deleted any, so they stayed, with
 `user_id`, `client_id`, the scopes and the DPoP key thumbprint, until the tenant
 was purged.)

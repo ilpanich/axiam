@@ -144,6 +144,51 @@ mod tests {
         }
     }
 
+    /// Parses a `[vis] const NAME: &str = …` declaration line into
+    /// `(NAME, text after the '=')`. `vis` is any visibility (`pub`,
+    /// `pub(crate)`, `pub(super)`, `pub(in path)`, or none) and the type may
+    /// carry a lifetime (`&'static str`); any other declaration gives `None`.
+    fn parse_str_const(line: &str) -> Option<(&str, &str)> {
+        let mut rest = line.trim_start();
+        if let Some(after_pub) = rest.strip_prefix("pub") {
+            rest = match after_pub.trim_start().strip_prefix('(') {
+                Some(restriction) => restriction.split_once(')')?.1,
+                None => after_pub,
+            };
+        }
+        let decl = rest.trim_start().strip_prefix("const ")?;
+        let (name, tail) = decl.split_once(':')?;
+        let (ty, value) = tail.split_once('=')?;
+        let ty = ty.trim().strip_prefix('&')?.trim_start();
+        let ty = ty.strip_prefix("'static").map_or(ty, str::trim_start);
+        (ty == "str").then_some((name.trim(), value))
+    }
+
+    #[test]
+    fn parse_str_const_reads_every_visibility_and_the_static_type() {
+        for decl in [
+            "pub const A_ACTION: &str = \"x\";",
+            "const A_ACTION: &str = \"x\";",
+            "pub(crate) const A_ACTION: &str = \"x\";",
+            "pub(super) const A_ACTION: &str = \"x\";",
+            "pub(in crate::models) const A_ACTION: &str = \"x\";",
+            "    pub const A_ACTION: &'static str = \"x\";",
+            "pub const A_ACTION: &  'static  str = \"x\";",
+        ] {
+            let (name, value) = parse_str_const(decl).unwrap_or_else(|| panic!("{decl}"));
+            assert_eq!(name, "A_ACTION", "{decl}");
+            assert_eq!(value.trim(), "\"x\";", "{decl}");
+        }
+        for decl in [
+            "pub const A_ACTION: u32 = 1;",
+            "pub const A_ACTION: &[&str] = &[];",
+            "pub fn a_action() {}",
+            "public_const X: &str = \"x\";",
+        ] {
+            assert!(parse_str_const(decl).is_none(), "{decl}");
+        }
+    }
+
     /// Every `const NAME: &str = "literal";` in the workspace's `crates/*/src`
     /// whose name [`names_an_audit_action`], as `(file, NAME, literal)`.
     ///
@@ -167,14 +212,7 @@ mod tests {
             let text = std::fs::read_to_string(&file).expect("utf-8 source");
             let lines: Vec<&str> = text.lines().collect();
             for (i, line) in lines.iter().enumerate() {
-                let Some(decl) = line
-                    .trim_start()
-                    .strip_prefix("pub const ")
-                    .or_else(|| line.trim_start().strip_prefix("const "))
-                else {
-                    continue;
-                };
-                let Some((name, rest)) = decl.split_once(": &str =") else {
+                let Some((name, rest)) = parse_str_const(line) else {
                     continue;
                 };
                 if !names_an_audit_action(name) {

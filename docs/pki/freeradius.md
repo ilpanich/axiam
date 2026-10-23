@@ -1065,7 +1065,7 @@ the mechanism above, not measured.
 ## Which threat-model entries this covers
 
 The threat model ([STRIDE model, §5.10](../../claude_dev/threat-model-stride.md),
-model 2.43.0) holds the RADIUS entries the declined native front end was written
+model 2.44.0) holds the RADIUS entries the declined native front end was written
 for, and since 1.1.0 the entries of the Live profile. For the **Static profile**, four
 are mitigated by this recipe: **T-449** (`Message-Authenticator` required),
 **T-456** (EAP-TLS only, TLS 1.3 only) and **T-459** (one tenant's signing CA as

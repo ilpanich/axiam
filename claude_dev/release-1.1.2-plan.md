@@ -715,7 +715,61 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   what other waves added in #757's files: two `err` bindings in `network_gate_test.rs` become `_err` behind labels,
   and the W2 assertion above becomes a label. New `{body}` messages in other test files are left for W8.1.
 
-### 12.7 W7 … 12.9 W9
+### 12.7 W7 — contract 1.64, version 1.1.2, eleven SDKs (`claude/release-1.1.2-w7`)
+
+- **Head:** `d940d91`. Merged at `9779a10`.
+- **Platform commits:**
+  - W7.1 `5d97d85`: contract 1.64, §34.8. Anchors in `52ada3c`.
+  - W8.4a `fb92ec4`: version 1.1.2. spec_digest `9960bbbb…`.
+  - W7.1b `21beda0`:
+    - rule 6: a 5xx is not terminal;
+    - rule 9: the status decides;
+    - P11 lists `device_poll`;
+    - §34.8(c) covers Swift.
+  - W7.1c `b3f8687`: the §14.6 in-attempt retry test (two 500s then 200; §16.1 caps attempts at 3).
+    CONTRACT.md sha256 `a221f1bf…0de39`, the vendored source for all eleven SDKs.
+  - W7.13 review `56c55ed` (C164-01 … -24). Addenda:
+    - round 1 `4c8f59f`;
+    - round 2 `c0e65ff` (C164-36 … -42);
+    - round 3 `b1446d2` (C164-43 … -49);
+    - round 4 `471fcc2` (C164-50 … -54);
+    - round 5 `d80c032` (C164-55 … -58, plus the §7.4.4 follow-up list);
+    - round 6 `51438f9`, closing note `d940d91` (C164-59, Kotlin round 7).
+- **SDK PRs:** one draft PR per repository on `claude/contract-1.64`. Each closes its issue. CI is green on every final head except Rust's CodeQL; see below.
+
+  | SDK | PR | Final head |
+  |---|---|---|
+  | TypeScript | #150 | `50d6f72` |
+  | Rust | #138 | `c947a5e` |
+  | Python | #103 | `9e69284` |
+  | C | #77 | `832a421` |
+  | C++ | #80 | `de76426` |
+  | C# | #111 | `fd1093b` |
+  | Go | #103 | `2a0c273` |
+  | Java | #121 | `97dcdf0` |
+  | Kotlin | #80 | `0672643` |
+  | PHP | #87 | `b61dc39` |
+  | Swift | #78 | `7d28ce4` |
+
+- **Tree over plan:**
+  - **The contract was amended twice inside W7 (W7.1b, W7.1c) instead of deferring to 1.65.** §1.4 does not let a wave merge with an open finding, and these were contract-text findings.
+  - **Seven fix rounds, not one (the seventh was one Kotlin wording fix, C164-59).** Each closed every Medium it found. The new Mediums came from the fixes themselves:
+    - C164-44 and C164-50: Kotlin's `retryOnConnectionFailure(false)` also disables route fallback on OkHttp 4.12. The fix is the ordinary client plus a one-shot body.
+  - **Scoping decision (orchestrator, round 5).** The Info test-strength items kept appearing at a steady rate, so from round 5 the review read only each round's diffs. Older observations went to a follow-up list outside the W7 gate (§7.4.4 of the review).
+  - **C164-55, option (a).** Kotlin documents and pins OkHttp 4.12's single transport recovery of an idempotent read: ≤ 4 sends with retry on, ≤ 2 with it off. Moving to OkHttp 5.x is a follow-up.
+- **Outside the gate:**
+  - **Go CI:** the govulncheck floor moved from 1.26.9 to 1.26.10 (GO-2026-6809). The user approved it. The orchestrator pushed `9d7460a` because the session's classifier refused it.
+  - **Rust CodeQL alert #128** (`rust/cleartext-logging`, `device.rs:517-519`): ruled a false positive by the orchestrator and confirmed by the review. The sink is the request builder itself. It awaits the maintainer's dismissal.
+  - **Retry-After clamps** differ (Java 5 s, Kotlin 60 s, others 1 h). §16.1 contradicts itself, so this goes to 1.65 as C164-49, together with C164-42 (the P10 sentence for `device_poll`).
+  - **Rust feature combinations** other than the defaults are a follow-up outside #137.
+  - **C++** keeps 1.1.2 and SOVERSION 4. Its new test seam `_set_clock_test_seam` changes no layout.
+- **Follow-ups:**
+  - the review's §7.4.4 list;
+  - OkHttp 5.x for Kotlin;
+  - the CIBA retry in SDKs not re-probed (Rust, Go, C#);
+  - C164-42 and C164-49 for contract 1.65.
+
+### 12.8 W8 … 12.9 W9
 
 One subsection per wave as it lands, in the form above.
 

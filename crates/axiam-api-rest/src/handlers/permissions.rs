@@ -303,21 +303,14 @@ pub async fn grant_to_role<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .permission_repo
-        .grant_to_role_claimed(
-            principal.tenant_id,
-            role_id,
-            req.permission_id,
-            req.scope_ids,
-            req.effect,
-            cleared.role_claim(),
-        )
-        .await
-    {
-        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
-    }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
+    let repo = state.permission_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let permission_id = req.permission_id;
+    let granted_scopes = req.scope_ids;
+    let effect = req.effect;
+    let claim = cleared.role_claim();
+    // R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+    // task, which a client that goes away does not cancel.
     // D7: an ALLOW grant widens access (safe direction) for every subject
     // holding the role (set unknown here) — flush the tenant so the new grant
     // is visible immediately.
@@ -326,11 +319,29 @@ pub async fn grant_to_role<C: Connection + Clone>(
     // cache is a security problem rather than an inconvenience. The same
     // tenant flush covers it, on the same event path and with the same
     // measured 262 ms contract — a deny rule is a grant, not a special case.
-    authz
-        .get_ref()
-        .as_ref()
-        .invalidate_tenant(principal.tenant_id)
-        .await?;
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        authz.get_ref(),
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        network_gate::CacheFlush::Tenant,
+        async move {
+            repo.grant_to_role_claimed(
+                tenant_id,
+                role_id,
+                permission_id,
+                granted_scopes,
+                effect,
+                claim,
+            )
+            .await
+        },
+    )
+    .await
+    {
+        return network_gate::refused_in_task(error);
+    }
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -502,26 +513,31 @@ pub async fn revoke_from_role<C: Connection + Clone>(
     };
     let cleared =
         network_gate::authorize(&principal, authz.get_ref().as_ref(), &state, write).await?;
-    if let Err(error) = state
-        .permission_repo
-        .revoke_from_role_claimed(
-            principal.tenant_id,
-            p.role_id,
-            p.permission_id,
-            cleared.role_claim(),
-        )
-        .await
-    {
-        return network_gate::refused_after_clearance(&principal, &state, write, error).await;
-    }
-    network_gate::record_cleared(&principal, &state, write, &cleared).await;
+    let repo = state.permission_repo.clone();
+    let tenant_id = principal.tenant_id;
+    let role_id = p.role_id;
+    let permission_id = p.permission_id;
+    let claim = cleared.role_claim();
+    // R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+    // task, which a client that goes away does not cancel.
     // D7 (REVOCATION — security critical): revoking a grant removes access for
     // every subject holding this role. The subject set isn't known here without
     // a query, so flush the whole tenant — this must never leave a stale allow.
-    authz
-        .get_ref()
-        .as_ref()
-        .invalidate_tenant(principal.tenant_id)
-        .await?;
+    if let Err(error) = network_gate::write_and_record(
+        &state,
+        authz.get_ref(),
+        &network_gate::GateActor::principal(&principal),
+        write,
+        &cleared,
+        network_gate::CacheFlush::Tenant,
+        async move {
+            repo.revoke_from_role_claimed(tenant_id, role_id, permission_id, claim)
+                .await
+        },
+    )
+    .await
+    {
+        return network_gate::refused_in_task(error);
+    }
     Ok(HttpResponse::NoContent().finish())
 }

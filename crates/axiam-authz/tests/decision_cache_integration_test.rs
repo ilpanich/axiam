@@ -95,12 +95,36 @@ impl Counters {
 struct MockRoleRepo {
     counter: Arc<AtomicUsize>,
     by_subject: Arc<Mutex<HashMap<Uuid, Vec<RoleAssignment>>>>,
+    /// When armed, the next assignment read takes its snapshot, signals the
+    /// first sender and waits on the receiver before returning it: an
+    /// evaluation held between reading the store and inserting its decision.
+    hold: Arc<Mutex<Option<Hold>>>,
 }
+
+type Hold = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 
 impl MockRoleRepo {
     /// Simulate the DB effect of unassigning every role from `subject`.
     fn revoke_all_roles(&self, subject: Uuid) {
         self.by_subject.lock().unwrap().remove(&subject);
+    }
+
+    /// Hold the next assignment read after its snapshot. Returns the
+    /// receiver that fires once the read has happened, and the sender that
+    /// lets the evaluation go on.
+    fn hold_next_read(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.hold.lock().unwrap() = Some((read_tx, release_rx));
+        (read_rx, release_tx)
     }
 }
 
@@ -111,13 +135,19 @@ impl RoleRepository for MockRoleRepo {
         user_id: Uuid,
     ) -> AxiamResult<Vec<RoleAssignment>> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        Ok(self
+        let snapshot = self
             .by_subject
             .lock()
             .unwrap()
             .get(&user_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        let hold = self.hold.lock().unwrap().take();
+        if let Some((read, release)) = hold {
+            read.send(()).unwrap();
+            release.await.unwrap();
+        }
+        Ok(snapshot)
     }
 
     async fn create(&self, _input: CreateRole) -> AxiamResult<Role> {
@@ -405,6 +435,7 @@ fn build_engine(
     let role_repo = MockRoleRepo {
         counter: counters.role_assignments.clone(),
         by_subject: Arc::new(Mutex::new(by_subject)),
+        hold: Arc::default(),
     };
 
     let mut by_role = HashMap::new();
@@ -754,6 +785,139 @@ async fn coalesced_batch_with_cache_serves_hits_and_backfills_misses() {
         Counters::get(&counters.grants),
         grants_before_second,
         "the backfilled miss is now served from cache"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R112W4-06 (#791) — an invalidation landing during an evaluation
+//
+// The evaluation reads the store before the revocation commits and is held
+// there; the revocation commits and its flush lands; the evaluation is then
+// let go. Its allow is returned (it answers a check asked before the
+// revocation) but must not be cached, or it would be served until the TTL.
+// ---------------------------------------------------------------------------
+
+/// Run `request` with its assignment read held, and while it is held commit a
+/// revocation of `subject` and run `flush`. Returns the held check's answer.
+async fn check_overtaken_by<F, Fut>(
+    engine: &MockEngine,
+    repo: &MockRoleRepo,
+    request: &AccessRequest,
+    flush: F,
+) -> AccessDecision
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (read, release) = repo.hold_next_read();
+    let subject = request.subject_id;
+    let revoke = async move {
+        read.await.unwrap(); // the evaluation has read the pre-revocation store
+        repo.revoke_all_roles(subject); // the revocation commits
+        flush().await; // and its flush lands, before the evaluation inserts
+        release.send(()).unwrap();
+    };
+    let (decision, ()) = tokio::join!(engine.check_access(request), revoke);
+    decision.unwrap()
+}
+
+#[tokio::test]
+async fn r112w4_06_a_subject_flush_during_evaluation_keeps_the_stale_allow_out() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+    let request = req(tenant, subject, resource, "read");
+
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        engine.invalidate_subject(tenant, subject).await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        held,
+        AccessDecision::Allow,
+        "it read the pre-revocation store"
+    );
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "the stale allow was not cached"
+    );
+    assert_eq!(cache.snapshot().overtaken, 1);
+
+    // The next request re-evaluates and sees the revocation.
+    let reads = Counters::get(&counters.role_assignments);
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into())
+    );
+    assert_eq!(Counters::get(&counters.role_assignments), reads + 1);
+}
+
+#[tokio::test]
+async fn r112w4_06_a_tenant_flush_received_by_broadcast_during_evaluation_keeps_the_stale_allow_out()
+ {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+    let request = req(tenant, subject, resource, "read");
+
+    // The flush arrives from another replica: the consumer applies it to the
+    // cache directly, never through this engine.
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        InvalidationEvent::Tenant { tenant_id: tenant }.apply(&cache);
+    })
+    .await;
+    assert_eq!(held, AccessDecision::Allow);
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "the stale allow was not cached"
+    );
+
+    let reads = Counters::get(&counters.role_assignments);
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into())
+    );
+    assert_eq!(Counters::get(&counters.role_assignments), reads + 1);
+}
+
+#[tokio::test]
+async fn r112w4_06_a_coalesced_batch_overtaken_by_a_flush_caches_none_of_it() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine
+        .with_batch_config(BatchStrategy::Coalesced, 16)
+        .with_decision_cache(Arc::clone(&cache));
+    let batch = vec![
+        req(tenant, subject, resource, "read"),
+        req(tenant, subject, resource, "delete"),
+    ];
+
+    let (read, release) = repo.hold_next_read();
+    let revoke = async {
+        read.await.unwrap();
+        repo.revoke_all_roles(subject);
+        engine.invalidate_tenant(tenant).await.unwrap();
+        release.send(()).unwrap();
+    };
+    let (decisions, ()) = tokio::join!(engine.check_access_batch(&batch), revoke);
+    assert_eq!(decisions.unwrap()[0], AccessDecision::Allow);
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "no decision of the batch was cached"
+    );
+
+    assert_eq!(
+        engine.check_access_batch(&batch).await.unwrap(),
+        vec![
+            AccessDecision::Deny("no roles assigned".into()),
+            AccessDecision::Deny("no roles assigned".into()),
+        ]
     );
 }
 

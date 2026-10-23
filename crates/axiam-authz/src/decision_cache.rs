@@ -70,6 +70,39 @@
 //! evaluation. The short default TTL is the belt to the invalidation hooks'
 //! braces.
 //!
+//! # An evaluation overtaken by an invalidation (R112W4-06, #791)
+//!
+//! A miss is evaluated against the store and inserted afterwards. A check that
+//! read the grants *before* a revocation committed could insert its allow
+//! *after* the revocation's flush (and, on another replica, after the
+//! broadcast arrived), and that allow would then be served until the TTL. The
+//! invalidation was not missed but overtaken, so the fallback above was the
+//! only bound.
+//!
+//! Each stripe therefore carries an **invalidation generation**. Every
+//! invalidation, local or received by broadcast, bumps the generation of each
+//! stripe it clears, under that stripe's lock, together with the removal. The
+//! engine reads the generation ([`DecisionCache::generation`]) *before* it
+//! evaluates and inserts through [`DecisionCache::insert_if_unchanged`], which
+//! compares it under the same lock and drops the decision if it moved. Under
+//! the lock an insert is either ordered before the flush (which removes it) or
+//! after the bump (which refuses it). An evaluation that saw the store before
+//! the revocation read the generation earlier still, because the flush follows
+//! the commit. A dropped decision is still returned to its caller (it answered
+//! a question asked before the revocation); it is just not remembered, and is
+//! counted in [`DecisionCacheStats::overtaken`].
+//!
+//! Why per stripe, not per subject and per tenant: a subject's entries live in
+//! every shard it was asked about, so a per-subject generation would need a
+//! map of every subject ever invalidated, kept until no evaluation that read
+//! it can still be in flight. Nothing knows when that is, so the map could not
+//! be pruned safely. Per stripe costs one atomic per stripe and one load per
+//! miss. The price is precision: an invalidation also refuses the in-flight
+//! inserts of unrelated keys in the stripes it clears (one stripe for a tenant
+//! flush, all of them for a subject flush). Those decisions are evaluated
+//! again on their next miss, so the cost is cache efficiency, and only for
+//! evaluations that straddle an administrative mutation.
+//!
 //! # SCOPE OF "IMMEDIATE": process-local by default, cross-replica when enabled
 //!
 //! `axiam-server` builds **one in-process** `Arc<DecisionCache>` and shares it
@@ -187,6 +220,17 @@ use uuid::Uuid;
 
 use crate::types::{AccessDecision, AccessRequest, SubjectScope};
 
+/// The invalidation generation of the stripe owning one tenant, read before
+/// an evaluation and handed back to [`DecisionCache::insert_if_unchanged`].
+///
+/// See the module docs ("An evaluation overtaken by an invalidation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a generation only protects the insert it is handed to"]
+pub struct CacheGeneration {
+    tenant_id: Uuid,
+    value: u64,
+}
+
 /// Number of independent tenant-map mutexes. Fixed (not CPU-derived) so the
 /// structure is deterministic across hosts and reproducible in benchmarks.
 const STRIPE_COUNT: usize = 16;
@@ -293,6 +337,10 @@ pub struct DecisionCacheStats {
     /// Whether the cache is currently trusted (i.e. actually serving). Always
     /// `true` when cross-replica invalidation is disabled.
     pub trusted: bool,
+    /// Cumulative decisions not inserted because an invalidation landed
+    /// between the generation read and the insert (R112W4-06). Each one would
+    /// otherwise have been a possibly stale entry served until the TTL.
+    pub overtaken: u64,
 }
 
 /// Per-tenant shard: the entry map, the FIFO order queue used for the size-cap
@@ -450,9 +498,13 @@ pub struct DecisionCache {
     /// Tenants split over independent mutexes; a tenant always lives in
     /// `stripes[stripe_index(tenant_id)]`.
     stripes: Vec<Mutex<HashMap<Uuid, TenantShard>>>,
+    /// Invalidation generation of each stripe, same index as `stripes`. Bumped
+    /// only while that stripe's lock is held; see [`Self::generation`].
+    generations: Vec<AtomicU64>,
     hits: AtomicU64,
     misses: AtomicU64,
     bypassed: AtomicU64,
+    overtaken: AtomicU64,
     /// Whether this replica may serve from the cache at all. See
     /// [`Self::set_trusted`]; always `true` unless cross-replica invalidation
     /// is enabled and its consumer is disconnected.
@@ -473,9 +525,11 @@ impl DecisionCache {
             stripes: (0..STRIPE_COUNT)
                 .map(|_| Mutex::new(HashMap::new()))
                 .collect(),
+            generations: (0..STRIPE_COUNT).map(|_| AtomicU64::new(0)).collect(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             bypassed: AtomicU64::new(0),
+            overtaken: AtomicU64::new(0),
             trusted: AtomicBool::new(true),
         }
     }
@@ -541,9 +595,31 @@ impl DecisionCache {
     }
 
     fn stripe(&self, tenant_id: Uuid) -> std::sync::MutexGuard<'_, HashMap<Uuid, TenantShard>> {
-        self.stripes[self.stripe_index(tenant_id)]
+        self.lock_stripe(self.stripe_index(tenant_id))
+    }
+
+    fn lock_stripe(&self, index: usize) -> std::sync::MutexGuard<'_, HashMap<Uuid, TenantShard>> {
+        self.stripes[index]
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Bump a stripe's generation. The caller holds that stripe's lock and has
+    /// just cleared what it invalidates, so an insert compared under the same
+    /// lock is ordered either before the clear or after the bump.
+    fn bump(&self, index: usize) {
+        self.generations[index].fetch_add(1, Ordering::Release);
+    }
+
+    /// The invalidation generation for `tenant_id`, to be read **before**
+    /// evaluating a miss and handed to [`Self::insert_if_unchanged`].
+    ///
+    /// One atomic load, no lock.
+    pub fn generation(&self, tenant_id: Uuid) -> CacheGeneration {
+        CacheGeneration {
+            tenant_id,
+            value: self.generations[self.stripe_index(tenant_id)].load(Ordering::Acquire),
+        }
     }
 
     /// Look up a cached decision for `request`. Returns `None` on a miss or an
@@ -574,7 +650,49 @@ impl DecisionCache {
         decision
     }
 
-    /// Insert (or refresh) the decision for `request`, stamping it `now`.
+    /// Insert `decision` for `request` only if no invalidation has touched the
+    /// tenant's stripe since `generation` was read. Returns whether it was
+    /// inserted.
+    ///
+    /// This is the insert for a decision evaluated against the store: read
+    /// [`Self::generation`] first, evaluate, then call this. The comparison
+    /// runs under the stripe's lock, the same lock every invalidation bumps
+    /// the generation under, so a decision computed before a revocation's
+    /// flush can never be inserted after it (R112W4-06; module docs).
+    ///
+    /// Also refused, without counting as overtaken, while the cache is
+    /// untrusted, and when `generation` was read for another tenant.
+    pub fn insert_if_unchanged(
+        &self,
+        request: &AccessRequest,
+        decision: AccessDecision,
+        generation: CacheGeneration,
+    ) -> bool {
+        if !self.is_trusted() || generation.tenant_id != request.tenant_id {
+            return false;
+        }
+        let key = SubKey::from_request(request);
+        let now = Instant::now();
+        let index = self.stripe_index(request.tenant_id);
+        let mut stripe = self.lock_stripe(index);
+        if self.generations[index].load(Ordering::Acquire) != generation.value {
+            self.overtaken.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        stripe
+            .entry(request.tenant_id)
+            .or_default()
+            .insert(&key, decision, now, &self.config);
+        true
+    }
+
+    /// Insert (or refresh) the decision for `request`, stamping it `now`,
+    /// **unconditionally**.
+    ///
+    /// For a decision that was not just evaluated against the store (tests,
+    /// warm-up). A caller that evaluates a miss uses [`Self::generation`] and
+    /// [`Self::insert_if_unchanged`] instead, or an invalidation landing during
+    /// its evaluation can be overtaken.
     ///
     /// Discarded while the cache is **untrusted** (see [`Self::set_trusted`]),
     /// so an outage cannot accumulate entries whose freshness nobody can
@@ -598,9 +716,14 @@ impl DecisionCache {
     /// set is not known without a DB query (grant revoke, role/permission
     /// delete, role/permission update, group-role unassignment, resource
     /// reparent/delete).
+    ///
+    /// Bumps the generation of the tenant's stripe, so an evaluation already
+    /// in flight cannot insert behind the flush.
     pub fn invalidate_tenant(&self, tenant_id: Uuid) {
-        let mut stripe = self.stripe(tenant_id);
+        let index = self.stripe_index(tenant_id);
+        let mut stripe = self.lock_stripe(index);
         stripe.remove(&tenant_id);
+        self.bump(index);
     }
 
     /// Drop every cached decision for a single subject within a tenant. The
@@ -633,19 +756,27 @@ impl DecisionCache {
         // and it still says which tenant the mutation happened in, which is
         // worth keeping legible at those call sites even though the sweep no
         // longer needs it.
-        for stripe in &self.stripes {
-            let mut guard = stripe.lock().unwrap_or_else(|p| p.into_inner());
+        //
+        // Every stripe's generation is bumped for the same reason: the
+        // subject's in-flight evaluations can be about any tenant.
+        for index in 0..self.stripes.len() {
+            let mut guard = self.lock_stripe(index);
             for shard in guard.values_mut() {
                 shard.invalidate_subject(subject_id);
             }
+            self.bump(index);
         }
     }
 
     /// Drop the entire cache (all tenants). Provided for completeness /
     /// administrative flush; not on any hot path.
+    ///
+    /// Bumps every generation, which is also what keeps an evaluation begun
+    /// while the cache was untrusted from being inserted once trust returns.
     pub fn invalidate_all(&self) {
-        for stripe in &self.stripes {
-            stripe.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        for index in 0..self.stripes.len() {
+            self.lock_stripe(index).clear();
+            self.bump(index);
         }
     }
 
@@ -683,6 +814,7 @@ impl DecisionCache {
             queue_slots,
             bypassed: self.bypassed.load(Ordering::Relaxed),
             trusted: self.is_trusted(),
+            overtaken: self.overtaken.load(Ordering::Relaxed),
         }
     }
 
@@ -1314,5 +1446,90 @@ mod tests {
         cache.invalidate_subject(t, Uuid::new_v4());
         cache.invalidate_all();
         assert!(cache.is_empty());
+    }
+
+    // -- R112W4-06 (#791): an invalidation overtaking an evaluation ---------
+
+    /// Two tenants whose shards live in different stripes.
+    fn tenants_in_different_stripes(cache: &DecisionCache) -> (Uuid, Uuid) {
+        let a = Uuid::new_v4();
+        loop {
+            let b = Uuid::new_v4();
+            if cache.stripe_index(a) != cache.stripe_index(b) {
+                return (a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn a_subject_flush_refuses_an_insert_read_before_it() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let (t, s) = (Uuid::new_v4(), Uuid::new_v4());
+        let r = req(t, s, Uuid::new_v4(), "read");
+
+        let generation = cache.generation(t); // evaluation starts
+        cache.invalidate_subject(t, s); // the revocation's flush lands
+        assert!(
+            !cache.insert_if_unchanged(&r, AccessDecision::Allow, generation),
+            "a decision read before the flush must not be inserted after it"
+        );
+        assert!(cache.get(&r).is_none());
+        assert_eq!(cache.snapshot().overtaken, 1);
+
+        // The next evaluation reads the new generation and caches normally.
+        let generation = cache.generation(t);
+        assert!(cache.insert_if_unchanged(&r, AccessDecision::Allow, generation));
+        assert_eq!(cache.get(&r), Some(AccessDecision::Allow));
+    }
+
+    #[test]
+    fn a_tenant_flush_refuses_inserts_of_its_stripe_only() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let (t1, t2) = tenants_in_different_stripes(&cache);
+        let r1 = req(t1, Uuid::new_v4(), Uuid::new_v4(), "read");
+        let r2 = req(t2, Uuid::new_v4(), Uuid::new_v4(), "read");
+
+        let (g1, g2) = (cache.generation(t1), cache.generation(t2));
+        cache.invalidate_tenant(t1);
+        assert!(!cache.insert_if_unchanged(&r1, AccessDecision::Allow, g1));
+        assert!(
+            cache.insert_if_unchanged(&r2, AccessDecision::Allow, g2),
+            "a flush of another stripe's tenant must not refuse this insert"
+        );
+        assert!(cache.get(&r1).is_none());
+        assert!(cache.get(&r2).is_some());
+    }
+
+    #[test]
+    fn an_unrelated_insert_after_the_flush_is_not_refused() {
+        // The generation only refuses inserts whose read preceded the bump.
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let t = Uuid::new_v4();
+        cache.invalidate_tenant(t);
+        let r = req(t, Uuid::new_v4(), Uuid::new_v4(), "read");
+        let generation = cache.generation(t);
+        assert!(cache.insert_if_unchanged(&r, AccessDecision::Allow, generation));
+        assert_eq!(cache.snapshot().overtaken, 0);
+    }
+
+    #[test]
+    fn a_generation_read_for_another_tenant_is_refused() {
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        let r = req(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "read");
+        let other = cache.generation(Uuid::new_v4());
+        assert!(!cache.insert_if_unchanged(&r, AccessDecision::Allow, other));
+        assert!(cache.get(&r).is_none());
+    }
+
+    #[test]
+    fn an_evaluation_begun_while_untrusted_is_not_inserted_once_trusted() {
+        // It may have read the store while a broadcast went unheard.
+        let cache = DecisionCache::new(cfg(Duration::from_secs(60), 100));
+        cache.set_trusted(false);
+        let r = req(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "read");
+        let generation = cache.generation(r.tenant_id);
+        cache.set_trusted(true);
+        assert!(!cache.insert_if_unchanged(&r, AccessDecision::Allow, generation));
+        assert!(cache.get(&r).is_none());
     }
 }

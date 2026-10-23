@@ -474,19 +474,22 @@ where
     pub async fn check_access(&self, request: &AccessRequest) -> AxiamResult<AccessDecision> {
         // D7 fast path: when a decision cache is attached (feature-flagged),
         // a fresh cached decision skips the DB round-trips entirely. When no
-        // cache is attached this whole block is absent and the call is
-        // identical to a build without the cache.
-        if let Some(cache) = self.decision_cache.as_ref()
-            && let Some(decision) = cache.get(request)
-        {
+        // cache is attached the call returns here and is identical to a
+        // build without the cache.
+        let Some(cache) = self.decision_cache.as_ref() else {
+            return self.evaluate(request).await;
+        };
+        if let Some(decision) = cache.get(request) {
             return Ok(decision);
         }
+        // Read before evaluating, so a revocation whose flush lands while
+        // this evaluation reads the pre-revocation store refuses the insert
+        // below (R112W4-06; `decision_cache` module docs).
+        let generation = cache.generation(request.tenant_id);
         let decision = self.evaluate(request).await?;
-        if let Some(cache) = self.decision_cache.as_ref() {
-            // Cache the FULL decision (allow *or* deny-with-reason), so a hit
-            // is byte-identical to a miss.
-            cache.insert(request, decision.clone());
-        }
+        // Cache the FULL decision (allow *or* deny-with-reason), so a hit is
+        // byte-identical to a miss.
+        cache.insert_if_unchanged(request, decision.clone(), generation);
         Ok(decision)
     }
 
@@ -788,10 +791,16 @@ where
         if !miss_indices.is_empty() {
             let miss_requests: Vec<AccessRequest> =
                 miss_indices.iter().map(|&i| requests[i].clone()).collect();
+            // One generation per miss, read before the batch evaluates (as in
+            // `check_access`).
+            let generations: Vec<_> = miss_requests
+                .iter()
+                .map(|r| cache.generation(r.tenant_id))
+                .collect();
             let miss_decisions = self.evaluate_batch(&miss_requests).await?;
             for (slot, &i) in miss_indices.iter().enumerate() {
                 let decision = miss_decisions[slot].clone();
-                cache.insert(&requests[i], decision.clone());
+                cache.insert_if_unchanged(&requests[i], decision.clone(), generations[slot]);
                 results[i] = Some(decision);
             }
         }

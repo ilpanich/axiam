@@ -53,6 +53,12 @@
 //! `axiam-api-rest` pins every call site of them to a function that calls this
 //! one first, or to a named exemption with its reason.
 //!
+//! A network-sensitive clearance of a role or binding write also carries what
+//! the decision read — [`GateClearance::role`] (the role's name and its
+//! `network:` grants), [`GateClearance::node`], [`GateClearance::permission`],
+//! [`GateClearance::cleared_binding`] — so that the caller's success row is
+//! built from what was decided on, not from reads after the write (R111W4-02).
+//!
 //! # The one exemption from "you delegate only what you hold"
 //!
 //! [`EXEMPTION_ORGANIZATION_BOOTSTRAP`]: an **organization-level** writer may
@@ -151,6 +157,8 @@ pub const AUDIT_ROLE_UNASSIGNED: &str = "network_role.unassigned";
 pub const AUDIT_ROLE_GRANTED: &str = "network_role.granted";
 /// A `network:` permission revoked from a role (cleared and landed).
 pub const AUDIT_ROLE_REVOKED: &str = "network_role.revoked";
+/// A role carrying `network:` grants deleted (cleared and landed; R111W4-03).
+pub const AUDIT_ROLE_DELETED: &str = "network_role.deleted";
 /// A certificate bound to a service account (cleared and landed).
 pub const AUDIT_BINDING_BOUND: &str = "certificate_binding.bound";
 
@@ -650,6 +658,13 @@ pub enum NetworkWrite<'a> {
 // ---------------------------------------------------------------------------
 
 /// A write the function allows.
+///
+/// Besides the proof that the gate ran, a network-sensitive clearance carries
+/// what the decision **read** — the role, its `network:` grants, the node, the
+/// permission, the binding — so that the success row of the write (T-484) is
+/// built from what was decided on, before the write, and not from reads made
+/// after it (R111W4-02, #726): a role deleted or regranted between the write
+/// and its row can no longer drop or falsify the row.
 #[derive(Debug)]
 #[must_use = "a clearance is the proof the gate ran; drop it only after the write"]
 pub struct GateClearance {
@@ -658,6 +673,34 @@ pub struct GateClearance {
     role_claim: Option<RoleClaim>,
     revoked_effect: Option<Option<PermissionEffect>>,
     exemption: Option<&'static str>,
+    role: Option<ClearedRole>,
+    node: Option<Uuid>,
+    permission: Option<Permission>,
+    binding: Option<ClearedBinding>,
+}
+
+/// The role a cleared write names, as the decision read it.
+#[derive(Debug, Clone)]
+pub struct ClearedRole {
+    /// The role's id.
+    pub id: Uuid,
+    /// The role's name when it was read.
+    pub name: String,
+    /// The role's grants in the `network:` namespace when it was read, in the
+    /// store's order. For a grant or revoke, the grants **before** the write.
+    pub network_grants: Vec<PermissionGrant>,
+}
+
+/// A certificate binding, as the decision read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearedBinding {
+    /// The service account the certificate was bound to before the write
+    /// (the account it is taken from on a re-bind); `None` when unbound.
+    pub before: Option<Uuid>,
+    /// The nodes at which the decision required the binder to hold
+    /// `network:grant`: every node where the account holds an effective
+    /// `network:join` allow, in ascending order. Empty when it holds none.
+    pub nodes: Vec<Uuid>,
 }
 
 impl GateClearance {
@@ -668,17 +711,51 @@ impl GateClearance {
             role_claim: None,
             revoked_effect: None,
             exemption: None,
+            role: None,
+            node: None,
+            permission: None,
+            binding: None,
         }
     }
 
     fn with_token(token: NetworkWriteClearance) -> Self {
         Self {
-            network_sensitive: true,
             token: Some(token),
-            role_claim: None,
-            revoked_effect: None,
-            exemption: None,
+            ..Self::plain(true)
         }
+    }
+
+    /// Record the role the decision read, and its `network:` grants among
+    /// `grants`.
+    fn reading_role(mut self, role: &Role, grants: &[PermissionGrant]) -> Self {
+        self.role = Some(ClearedRole {
+            id: role.id,
+            name: role.name.clone(),
+            network_grants: grants
+                .iter()
+                .filter(|g| is_network_action(&g.permission.action))
+                .cloned()
+                .collect(),
+        });
+        self
+    }
+
+    /// Record the node an assignment confers its grants at.
+    fn at_node(mut self, node: Uuid) -> Self {
+        self.node = Some(node);
+        self
+    }
+
+    /// Record the permission a grant or revoke names.
+    fn naming(mut self, permission: Permission) -> Self {
+        self.permission = Some(permission);
+        self
+    }
+
+    /// Record what a binding decision read.
+    fn binding(mut self, binding: ClearedBinding) -> Self {
+        self.binding = Some(binding);
+        self
     }
 
     /// Mark the clearance as given under a named exemption.
@@ -738,6 +815,37 @@ impl GateClearance {
     #[must_use]
     pub fn revoked_effect(&self) -> Option<Option<PermissionEffect>> {
         self.revoked_effect
+    }
+
+    /// The role the write names, as the decision read it: its name and its
+    /// `network:` grants. `Some` on every network-sensitive role write (an
+    /// assignment, unassignment, update or delete, a grant or revoke of a
+    /// `network:` permission) whose role is the tenant's; `None` otherwise.
+    #[must_use]
+    pub fn role(&self) -> Option<&ClearedRole> {
+        self.role.as_ref()
+    }
+
+    /// For a network-sensitive assignment or unassignment, the node the
+    /// decision checked: the resource it names, or the tenant's `/network`
+    /// root for a tenant-wide assignment or a global role. `None` otherwise.
+    #[must_use]
+    pub fn node(&self) -> Option<Uuid> {
+        self.node
+    }
+
+    /// For a network-sensitive grant or revoke, the permission it names, as
+    /// the decision read it. `None` otherwise.
+    #[must_use]
+    pub fn permission(&self) -> Option<&Permission> {
+        self.permission.as_ref()
+    }
+
+    /// For a certificate binding, what the decision read: the account the
+    /// certificate was bound to and the nodes it checked. `None` otherwise.
+    #[must_use]
+    pub fn cleared_binding(&self) -> Option<&ClearedBinding> {
+        self.binding.as_ref()
     }
 
     /// The clearance a segment or profile repository write demands; `None`
@@ -1755,12 +1863,15 @@ where
             ))));
         }
 
+        // What the success row is built from (R111W4-02).
+        let cleared = GateClearance::plain(true)
+            .reading_role(&role, &role_grants)
+            .at_node(node);
+
         // The organization bootstrap (module documentation): the one write
         // cleared without the writer holding what the role confers.
         if self.is_organization_bootstrap(&role, &role_grants, grantee, resource_id) {
-            return Ok(Ok(
-                GateClearance::plain(true).exempt(EXEMPTION_ORGANIZATION_BOOTSTRAP)
-            ));
+            return Ok(Ok(cleared.exempt(EXEMPTION_ORGANIZATION_BOOTSTRAP)));
         }
 
         // §5.3: joining (allow or deny) needs network:grant at N; every meta
@@ -1777,7 +1888,7 @@ where
         if let Some(r) = self.require_all(&needed, node, "5.3:assign", audit).await? {
             return Ok(Err(with_values(r)));
         }
-        Ok(Ok(GateClearance::plain(true)))
+        Ok(Ok(cleared))
     }
 
     async fn role_unassign(
@@ -1789,14 +1900,15 @@ where
         let Some(role) = self.found(self.store.role(self.tenant(), role_id).await)? else {
             return Ok(Ok(GateClearance::plain(false)));
         };
-        let grants = NetworkGrants::of(&self.store.role_grants(self.tenant(), role_id).await?);
+        let role_grants = self.store.role_grants(self.tenant(), role_id).await?;
+        let grants = NetworkGrants::of(&role_grants);
         if !grants.any {
             return Ok(Ok(GateClearance::plain(false)));
         }
+        let node = self.assignment_node(&role, resource_id);
         // Removing a deny widens access (a quarantine released): it takes
         // network:grant where the deny was. Removing an allow only narrows.
         if grants.any_deny {
-            let node = self.assignment_node(&role, resource_id);
             let with_values = |mut r: GateRefusal| {
                 let (kind, who) = grantee.describe();
                 r.before = vec![
@@ -1830,7 +1942,9 @@ where
                 return Ok(Err(with_values(r)));
             }
         }
-        Ok(Ok(GateClearance::plain(true)))
+        Ok(Ok(GateClearance::plain(true)
+            .reading_role(&role, &role_grants)
+            .at_node(node)))
     }
 
     async fn role_update(
@@ -1841,7 +1955,8 @@ where
         let Some(role) = self.found(self.store.role(self.tenant(), role_id).await)? else {
             return Ok(Ok(GateClearance::plain(false)));
         };
-        let grants = NetworkGrants::of(&self.store.role_grants(self.tenant(), role_id).await?);
+        let role_grants = self.store.role_grants(self.tenant(), role_id).await?;
+        let grants = NetworkGrants::of(&role_grants);
         if !grants.any {
             return Ok(Ok(GateClearance::plain(false)));
         }
@@ -1861,14 +1976,17 @@ where
             r.after = vec![("is_global", "true".into())];
             return Ok(Err(r));
         }
-        Ok(Ok(GateClearance::plain(true)))
+        Ok(Ok(
+            GateClearance::plain(true).reading_role(&role, &role_grants)
+        ))
     }
 
     async fn role_delete(&self, role_id: Uuid) -> AxiamResult<GateVerdict> {
         let Some(role) = self.found(self.store.role(self.tenant(), role_id).await)? else {
             return Ok(Ok(GateClearance::plain(false)));
         };
-        let grants = NetworkGrants::of(&self.store.role_grants(self.tenant(), role_id).await?);
+        let role_grants = self.store.role_grants(self.tenant(), role_id).await?;
+        let grants = NetworkGrants::of(&role_grants);
         if !grants.any {
             return Ok(Ok(GateClearance::plain(false)));
         }
@@ -1904,7 +2022,9 @@ where
                 return Ok(Err(with_values(r)));
             }
         }
-        Ok(Ok(GateClearance::plain(true)))
+        Ok(Ok(
+            GateClearance::plain(true).reading_role(&role, &role_grants)
+        ))
     }
 
     // -- grants on a role (§5.3 row 5, §4.2) ---------------------------------
@@ -2030,7 +2150,8 @@ where
         {
             return Ok(Err(with_values(r)));
         }
-        Ok(Ok(GateClearance::plain(true)))
+        let cleared = GateClearance::plain(true).reading_role(&role, &current);
+        Ok(Ok(cleared.naming(permission)))
     }
 
     async fn permission_revoke(
@@ -2046,11 +2167,12 @@ where
         if !is_network_action(&permission.action) {
             return Ok(Ok(GateClearance::plain(false)));
         }
-        let current = self
-            .store
-            .role_grants(self.tenant(), role_id)
-            .await?
-            .into_iter()
+        // Read for the success row only (R111W4-02): a role that is not the
+        // tenant's is decided as before — the repository refuses the write.
+        let role = self.found(self.store.role(self.tenant(), role_id).await)?;
+        let role_grants = self.store.role_grants(self.tenant(), role_id).await?;
+        let current = role_grants
+            .iter()
             .find(|g| g.permission.id == permission_id)
             .map(|g| g.effect);
         let with_values = |mut r: GateRefusal| {
@@ -2093,7 +2215,11 @@ where
         }
         // The delete is conditional on the grant read here (R110W6-04): a deny
         // written since would otherwise be deleted by a revoke H6 never saw.
-        Ok(Ok(GateClearance::plain(true).revoking(current)))
+        let mut cleared = GateClearance::plain(true).revoking(current);
+        if let Some(role) = &role {
+            cleared = cleared.reading_role(role, &role_grants);
+        }
+        Ok(Ok(cleared.naming(permission)))
     }
 
     // -- the reserved namespace ----------------------------------------------
@@ -2218,6 +2344,7 @@ where
                 nodes.insert(self.assignment_node(&a.role, a.resource_id));
             }
         }
+        let mut checked = Vec::new();
         for node in nodes {
             // Read with the engine's own evaluation: an allow a deny already
             // beats at the node is not one the binder must hold. Sound because
@@ -2236,8 +2363,12 @@ where
             {
                 return Ok(Err(with_values(r)));
             }
+            checked.push(node);
         }
-        Ok(Ok(GateClearance::plain(true)))
+        Ok(Ok(GateClearance::plain(true).binding(ClearedBinding {
+            before,
+            nodes: checked,
+        })))
     }
 
     // -- generic resources (§4.1) --------------------------------------------

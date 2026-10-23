@@ -87,7 +87,10 @@ const POLICY_ENTITY: &str = "network_policy";
 
 // The messages the write transactions `THROW`. `refusal_of` turns each into its
 // typed `NetworkConflict` on the way out, so the caller sees a typed refusal
-// rather than an opaque database error.
+// rather than an opaque database error. It reads one back only in the form the
+// engine renders a `THROW` — `An error occurred: <marker>`, then the end of the
+// error or `;` — never as a substring, so a value a user can put in a field the
+// engine echoes (a segment named like a marker) is not taken for one (#730 d).
 const STALE_SEGMENT: &str = "axiam:network_segment_version_stale";
 const STALE_PROFILE: &str = "axiam:reply_profile_version_stale";
 const STRANDS_PROFILE: &str = "axiam:segment_update_strands_profile";
@@ -117,7 +120,8 @@ fn conflict(reason: NetworkConflict) -> TxFail {
 /// the `THROW` markers (and the uniqueness indexes) written by this module are
 /// read back.
 fn refusal_of(combined: &str) -> Option<NetworkConflict> {
-    let hit = |marker: &str| combined.contains(marker);
+    let hit = |marker: &str| thrown(combined, marker);
+    let index = violated_index(combined);
     Some(if hit(STALE_SEGMENT) {
         NetworkConflict::StaleSegment
     } else if hit(STALE_PROFILE) {
@@ -133,15 +137,36 @@ fn refusal_of(combined: &str) -> Option<NetworkConflict> {
         NetworkConflict::HasChildren
     } else if hit(SITE_GONE) {
         NetworkConflict::SiteGone
-    } else if hit(IDX_VLAN) {
+    } else if index == Some(IDX_VLAN) {
         NetworkConflict::DuplicateVlan
-    } else if hit(IDX_RANK) {
+    } else if index == Some(IDX_RANK) {
         NetworkConflict::DuplicateRank
-    } else if hit(IDX_NAME) {
+    } else if index == Some(IDX_NAME) {
         NetworkConflict::DuplicateName
     } else {
         return None;
     })
+}
+
+/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
+/// of it: `An error occurred: <marker>`, ended by the end of the text or `;`.
+fn thrown(combined: &str, marker: &str) -> bool {
+    let head = format!("An error occurred: {marker}");
+    combined
+        .match_indices(&head)
+        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
+}
+
+/// The name of the unique index a clash reports, read where SurrealDB 3.x puts
+/// it: ``Database index `<name>` already contains [<values>]…``. Only the first
+/// such head counts: everything after `already contains` echoes the clashing
+/// values (site key, name), which may themselves spell an index's name
+/// (R112W4-04).
+fn violated_index(combined: &str) -> Option<&str> {
+    const HEAD: &str = "Database index `";
+    let rest = &combined[combined.find(HEAD)? + HEAD.len()..];
+    let (name, tail) = rest.split_once('`')?;
+    tail.starts_with(" already contains").then_some(name)
 }
 
 /// Turn a transaction's statement errors into the right answer.
@@ -1198,13 +1223,60 @@ mod tests {
             ),
             (HAS_CHILDREN, NetworkConflict::HasChildren),
             (SITE_GONE, NetworkConflict::SiteGone),
-            (IDX_VLAN, NetworkConflict::DuplicateVlan),
-            (IDX_RANK, NetworkConflict::DuplicateRank),
-            (IDX_NAME, NetworkConflict::DuplicateName),
         ] {
             let text = format!("An error occurred: {marker}; the rest of the transaction");
             assert_eq!(refusal_of(&text), Some(want), "{marker}");
         }
         assert_eq!(refusal_of("something the engine said"), None);
+    }
+
+    #[test]
+    fn every_uniqueness_index_reads_back_as_its_typed_refusal() {
+        for (index, want) in [
+            (IDX_VLAN, NetworkConflict::DuplicateVlan),
+            (IDX_RANK, NetworkConflict::DuplicateRank),
+            (IDX_NAME, NetworkConflict::DuplicateName),
+        ] {
+            let text = format!(
+                "Database index `{index}` already contains [t, s, 'x'], with record `network_segment:y`"
+            );
+            assert_eq!(refusal_of(&text), Some(want), "{index}");
+        }
+    }
+
+    /// R112W4-04: the clash text echoes the site key and the name, and both
+    /// admit `_`, so a value can spell another index's name.
+    #[test]
+    fn an_index_name_echoed_inside_a_value_does_not_name_the_clash() {
+        for (echoed, want) in [
+            (IDX_VLAN, NetworkConflict::DuplicateName),
+            (IDX_RANK, NetworkConflict::DuplicateName),
+        ] {
+            let text = format!(
+                "Database index `{IDX_NAME}` already contains ['t', '{echoed}', '{echoed}'], \
+                 with record `network_segment:x`"
+            );
+            assert_eq!(refusal_of(&text), Some(want), "{echoed}");
+        }
+        let vlan_clash = format!(
+            "Database index `{IDX_VLAN}` already contains ['t', 's', 10, '{IDX_RANK}'], with record `network_segment:x`"
+        );
+        assert_eq!(
+            refusal_of(&vlan_clash),
+            Some(NetworkConflict::DuplicateVlan)
+        );
+        // Only the engine's own position counts: no head, no index.
+        assert_eq!(refusal_of(&format!("value {IDX_VLAN} seen")), None);
+    }
+
+    #[test]
+    fn a_marker_echoed_inside_a_value_is_not_a_throw() {
+        // The duplicate-name text echoes the user's value; a name spelt like a
+        // marker must stay a `duplicate_name` (#730 d).
+        let text = format!(
+            "Database index `{IDX_NAME}` already contains ['site', '{STALE_SEGMENT}'], \
+             with record `network_segment:x`"
+        );
+        assert_eq!(refusal_of(&text), Some(NetworkConflict::DuplicateName));
     }
 }

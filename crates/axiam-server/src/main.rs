@@ -644,7 +644,10 @@ async fn main() -> std::io::Result<()> {
                 // role currently has. An operator whose tenant administrator
                 // has been minting CA material since before B-04 was fixed
                 // will start seeing 403s, and this line is where they find out
-                // why (see `ReconcileOutcome`).
+                // why (see `ReconcileOutcome`). Two counters, one line each:
+                // organization-level actions and `network:` permissions are
+                // taken away for different reasons. A tenant whose kind could
+                // not be read is skipped in both halves and counts in neither.
                 if reconciled.revoked > 0 {
                     tracing::warn!(
                         tenant = %tenant.id,
@@ -653,6 +656,17 @@ async fn main() -> std::io::Result<()> {
                          default roles — organization-level actions (CA material, tenant and \
                          organization lifecycle) belong to the organization scope only",
                         reconciled.revoked
+                    );
+                }
+                if reconciled.network_revoked > 0 {
+                    tracing::warn!(
+                        tenant = %tenant.id,
+                        network_revoked = reconciled.network_revoked,
+                        "Revoked {} network: permission grant(s) from this scope's default roles \
+                         — a seeded role holds only the network: actions the seeding rule gives \
+                         it (the organization scope's super-admin holds none); each revocation \
+                         left a network_role.permission_revoked_by_reconcile audit row",
+                        reconciled.network_revoked
                     );
                 }
                 seeded_count += 1;

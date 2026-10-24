@@ -5,6 +5,8 @@
 //! under the issuing CA's own public key, so these tests check the bytes a
 //! relying party would fetch rather than the service's account of them.
 
+mod support;
+
 use std::sync::Arc;
 
 use axiam_core::error::AxiamError;
@@ -45,11 +47,10 @@ impl Fixture {
         db.use_ns("test").use_db("test").await.unwrap();
         axiam_db::run_migrations(&db).await.unwrap();
         let custodians = Arc::new(
-            axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-                .expect("custodians"),
+            axiam_pki::custodians_from_env(Some(support::test_key())).expect("custodians"),
         );
         let config = PkiConfig {
-            encryption_key: Some([0u8; 32]), // gitleaks:allow
+            encryption_key: Some(support::test_key()),
             ..Default::default()
         };
         let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
@@ -871,7 +872,7 @@ async fn a_cached_list_answers_while_another_cas_re_sign_is_in_flight() {
     .unwrap();
     let custodians = Arc::new(
         CaKeyCustodians::new(
-            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(DatabaseCaKeyStore::new(support::test_key())),
             Some(
                 VaultCaKeyStore::new(VaultCaKeyConfig {
                     address: vault.address(),
@@ -1253,6 +1254,49 @@ async fn current_at_signs_a_past_instant_at_that_instant() {
     assert_eq!(again.this_update, named.this_update);
 }
 
+/// #736 — `thisUpdate` follows the datastore-clocked revocation date, which may
+/// lead the replica's clock. A request asked as of the clock is still served
+/// the list it cached: it needs no permit, so a saturated gate does not turn it
+/// into a `503`.
+#[tokio::test]
+async fn a_list_dated_ahead_of_the_clock_is_still_served_from_the_cache() {
+    let f = Fixture::new().await;
+    let ca = f.root(KeyAlgorithm::Ed25519, 365).await;
+    let leaf = f.leaf(ca.certificate.id, "device-revoked-ahead").await;
+    f.certs.revoke(f.tenant, leaf.id).await.unwrap();
+    f.db.query("UPDATE certificate SET revoked_at = $t WHERE fingerprint = $fp")
+        .bind(("t", Utc::now() + Duration::seconds(20)))
+        .bind(("fp", leaf.fingerprint.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let crls = f
+        .crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS)
+        .with_permit_wait(std::time::Duration::from_millis(50));
+
+    let first = crls.current(f.org, ca.certificate.id).await.unwrap();
+    assert!(
+        first.this_update > Utc::now(),
+        "the list is dated ahead of the replica's clock"
+    );
+
+    let permits = u32::try_from(f.semaphore.available_permits()).unwrap();
+    let held = f
+        .semaphore
+        .clone()
+        .acquire_many_owned(permits)
+        .await
+        .unwrap();
+    let during = crls
+        .current(f.org, ca.certificate.id)
+        .await
+        .expect("the cached list needs no permit");
+    assert_eq!(during.der, first.der);
+    assert_eq!(during.etag, first.etag);
+    drop(held);
+}
+
 /// #615, the issue's test: a revocation dated past the end of the epoch — the
 /// datastore's clock ahead of the replica's — beside an entry that expires at
 /// the boundary. The list signed before the boundary states its epoch's last
@@ -1394,7 +1438,7 @@ async fn crls_with_a_held_custodian(
     .unwrap();
     let custodians = Arc::new(
         CaKeyCustodians::new(
-            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(DatabaseCaKeyStore::new(support::test_key())),
             Some(
                 VaultCaKeyStore::new(VaultCaKeyConfig {
                     address: vault.address(),

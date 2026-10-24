@@ -27,7 +27,14 @@ fn parse_opt_session(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
             .map_err(|e| DbError::Migration(format!("invalid session UUID: {e}"))),
     }
 }
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{retry_on_write_conflict, take_first_or_not_found};
+
+/// One row `delete_expired` removed; only its number is read.
+#[derive(Debug, SurrealValue)]
+struct RemovedRow {
+    #[allow(dead_code)]
+    record_id: String,
+}
 
 #[derive(Debug, SurrealValue)]
 struct RefreshTokenRow {
@@ -545,31 +552,66 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
-    async fn delete_expired(&self) -> AxiamResult<u64> {
+    async fn delete_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        // Art. 17: the rows carry `user_id`, `client_id`, the scopes and the
+        // DPoP thumbprint. One statement, so the count is the rows this call
+        // removed, and a second call (the erasure re-entered) removes none.
         let mut result = self
             .db
             .current()
             .query(
-                "SELECT count() AS total FROM oauth2_refresh_token \
-                 WHERE expires_at < time::now() OR revoked = true \
-                 GROUP ALL",
+                "DELETE oauth2_refresh_token \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                 RETURN BEFORE",
             )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
-        let count_rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
-        let count = count_rows.first().map(|r| r.total).unwrap_or(0);
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
 
-        self.db
-            .current()
-            .query(
-                "DELETE FROM oauth2_refresh_token \
-                 WHERE expires_at < time::now() OR revoked = true",
-            )
-            .await
-            .map_err(DbError::from)?;
-
-        Ok(count)
+    async fn delete_expired(&self, before: DateTime<Utc>, limit: u32) -> AxiamResult<u64> {
+        // Keyed on `expires_at` alone, revoked or not: a rotated or logged-out
+        // token stays readable by `find_rotated` until its expiry has passed
+        // by the caller's retention, which is what keeps a replay of it
+        // detectable (T-254). No index on `expires_at` (it would take a
+        // migration): a call is one scan that stops at `limit` rows, and the
+        // sweep's batch bound keeps a tick from running more than a few.
+        //
+        // The batch is chosen first and deleted by id, so `LIMIT` bounds the
+        // write, as in the certificate retention sweep. Counted from what
+        // `DELETE … RETURN BEFORE` returns, i.e. what this call removed: a
+        // replica that lost the race for a row deletes nothing and counts
+        // nothing. Two replicas choosing overlapping batches conflict on the
+        // rows they both delete and the datastore aborts one transaction
+        // having committed nothing; replaying it re-chooses its batch from
+        // what is left, so a conflict is retried rather than failing the
+        // sweep.
+        let removed = retry_on_write_conflict(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "LET $doomed = (SELECT VALUE id FROM oauth2_refresh_token \
+                         WHERE expires_at < $before LIMIT $limit); \
+                     LET $removed = (DELETE $doomed RETURN BEFORE); \
+                     SELECT meta::id(id) AS record_id FROM $removed",
+                )
+                .bind(("before", before))
+                .bind(("limit", limit))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(DbError::from)?;
+            // LET, LET, SELECT.
+            let rows: Vec<RemovedRow> = result.take(2).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows.len() as u64)
+        })
+        .await?;
+        Ok(removed)
     }
 }
 

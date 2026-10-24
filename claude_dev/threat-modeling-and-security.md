@@ -14,8 +14,9 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-10-19 (the `1.1.1` release branch, model
-> 2.43.0 — the 1.1.1 release's waves and the reconciliation pass recorded below,
+> **Status: source current as of 2026-10-23 (the `1.1.2` release branch, model
+> 2.44.0 — the 1.1.2 release's waves and its reconciliation pass, on top of the
+> `1.1.1` release's model (2.43.0, 2026-10-19: the waves and the reconciliation pass recorded below),
 > on top of the 1.1.0 release's six waves (model 2.42.0, 2026-10-16), among them
 > the Live profile of the RADIUS recipe (formerly D4), and the 1.0.1 release's four waves
 > and its RADIUS recipe (model 2.41.0, 2026-10-14), Phase 23, the competitor-gap
@@ -2073,7 +2074,7 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.43.0, all
+authorization, PKI — carry **four** open items at model 2.44.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -3896,7 +3897,7 @@ by who does it.
 Everything in this document was last re-derived from source at the
 **`1.0.1`** release branch (model 2.41.0) on 2026-10-14, and reconciled with the
 **`1.1.0`** release branch's model (2.42.0) on 2026-10-16, and with the
-**`1.1.1`** release branch's model (2.43.0) on 2026-10-19; the handoff block at
+**`1.1.1`** release branch's model (2.43.0) on 2026-10-19, and with the **`1.1.2`** release branch's model (2.44.0) on 2026-10-23 (no status changed); the handoff block at
 the top of this file says what each pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

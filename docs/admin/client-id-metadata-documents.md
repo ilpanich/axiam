@@ -243,6 +243,17 @@ audiences. The refusal is enforced twice: once in the resolver, where it is
 logged with the client's provenance, and once in the repository, whose refresh
 statement will only ever match a `cimd` row.
 
+### An administrator's edit of a CIMD row follows the same redirect rule
+
+`PUT /api/v1/oauth2-clients/{id}` on a `managed_by: cimd` row checks each *new*
+`redirect_uris` entry with the function that validates the document
+(`cimd::redirect_uri_refusal`): `https` or loopback, no fragment, a host in
+`cimd.trusted_redirect_domains`, and the `client_id`'s own host while
+`cimd.restrict_same_domain` is on. A refusal is `422
+redirect_exceeds_registration_policy`; a URI the row already holds is never
+re-checked (#768). `dcr_allowed_redirect_hosts` does not apply to a CIMD row.
+The next fetch of the document replaces the edit anyway.
+
 ---
 
 ## The two profiles

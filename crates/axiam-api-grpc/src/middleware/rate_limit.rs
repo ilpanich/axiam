@@ -70,7 +70,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axiam_core::forwarded_for::TrustedProxies;
+use axiam_core::forwarded_for::{
+    TrustedProxies, configured_trusted_hops, forwarded_for_header, select_client_ip,
+};
 use axiam_db::SharedRateLimitCounter;
 use axiam_db::repository::SurrealRateLimitBucketRepository;
 use chrono::{DateTime, Utc};
@@ -87,26 +89,6 @@ use tower_governor::{
     governor::{Governor, GovernorConfigBuilder},
     key_extractor::KeyExtractor,
 };
-
-// ---------------------------------------------------------------------------
-// Custom trusted_hops-aware KeyExtractor (Task 1 — replaces SmartIpKeyExtractor)
-// ---------------------------------------------------------------------------
-
-/// Reads the SAME `AXIAM__RATE_LIMIT__TRUSTED_HOPS` env var the REST shared
-/// pre-check (`axiam-api-rest::middleware::rate_limit_shared::trusted_hops`)
-/// and `server.rs::build_governor` use, so the gRPC key and the REST key are
-/// derived identically from the same deployment-topology configuration.
-///
-/// `pub(crate)` so `server.rs::start_grpc_server` can pass the SAME value to
-/// both [`build_grpc_governor_layer`] (via this function internally) and
-/// [`GrpcSharedRateLimitLayer::new`] — the key-extraction logic in the
-/// shared-store pre-check and the in-memory governor MUST stay in lockstep.
-pub(crate) fn trusted_hops_from_env() -> usize {
-    std::env::var("AXIAM__RATE_LIMIT__TRUSTED_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
 
 // ---------------------------------------------------------------------------
 // R-4 — visibility for a `TRUSTED_HOPS` misconfiguration (narrows T-212/T-233)
@@ -218,7 +200,7 @@ impl GrpcTrustedHopsKeyExtractor {
     /// limiters read: `AXIAM__RATE_LIMIT__TRUSTED_HOPS` and
     /// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`.
     pub fn configured() -> Self {
-        Self::new(trusted_hops_from_env()).with_trusted_proxies(TrustedProxies::configured())
+        Self::new(configured_trusted_hops()).with_trusted_proxies(TrustedProxies::configured())
     }
 }
 
@@ -227,35 +209,27 @@ impl KeyExtractor for GrpcTrustedHopsKeyExtractor {
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
         let peer = grpc_peer_addr(req).map(|addr| addr.ip());
-        // #711: a peer the list does not name is not a proxy; what it wrote is
-        // its own choice. Not an R-4 discard: `trusted_hops` is not wrong.
-        if self.trusted_proxies.honours_forwarded_for(peer)
-            && let Some(forwarded_for) = req.headers().get("x-forwarded-for")
-            && let Ok(val) = forwarded_for.to_str()
-        {
-            let hops: Vec<&str> = val.split(',').map(str::trim).collect();
-            // Select the rightmost-untrusted hop (parity with REST).
-            if self.trusted_hops < hops.len() {
-                let idx = hops.len() - 1 - self.trusted_hops;
-                if let Ok(ip) = hops[idx].parse::<IpAddr>() {
-                    return Ok(ip);
-                }
-            }
-            // Fewer hops than trusted_hops requires: the header cannot be
-            // trusted. Fall through to the verified peer address below
-            // instead of indexing into XFF (SECHRD-03 — no `hops[0]`
-            // fallback that would let a rotating XFF mint a fresh bucket).
-            //
-            // R-4: no longer silently. Under a `trusted_hops` one too high this
-            // fires on every request and every client shares one bucket keyed on
-            // the proxy — the failure T-212 describes, which went unnoticed
-            // precisely because nothing said so.
-            if self.trusted_hops >= hops.len() {
-                record_discarded_xff(hops.len(), self.trusted_hops);
-            }
+        // The REST limiters' rule, the same function: the header is read only
+        // from a peer `trusted_proxies` honours (#711, `none` honours nobody),
+        // and a header too short to reach past `trusted_hops` is discarded
+        // (SECHRD-03) and counted (R-4). Every field line is read, not the
+        // first (#796).
+        let forwarded_for = forwarded_for_header(
+            req.headers()
+                .get_all("x-forwarded-for")
+                .iter()
+                .map(|value| value.as_bytes()),
+        );
+        let selected = select_client_ip(
+            forwarded_for.as_deref(),
+            peer,
+            self.trusted_hops,
+            &self.trusted_proxies,
+        );
+        if let Some(hops_seen) = selected.discarded_hops {
+            record_discarded_xff(hops_seen, self.trusted_hops);
         }
-
-        peer.ok_or(GovernorError::UnableToExtractKey)
+        selected.ip.ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -1064,6 +1038,56 @@ mod tests {
             remote_addr: Some(peer),
         });
         req
+    }
+
+    /// #790: `AXIAM__RATE_LIMIT__TRUSTED_PROXIES=none` honours no peer's header
+    /// on the gRPC listener either: the key is the peer whatever
+    /// `X-Forwarded-For` says, at any `trusted_hops`, and it is the address the
+    /// REST rule (`select_client_ip`) picks for the same inputs.
+    #[test]
+    fn none_ignores_the_forwarded_header_and_agrees_with_the_rest_rule() {
+        let peer: SocketAddr = "203.0.113.42:1234".parse().unwrap();
+        let nobody = TrustedProxies::parse("none").unwrap();
+        assert!(nobody.is_none());
+        for hops in [0, 1, 2] {
+            let extractor =
+                GrpcTrustedHopsKeyExtractor::new(hops).with_trusted_proxies(nobody.clone());
+            for xff in [
+                "198.51.100.1",
+                "198.51.100.1, 198.51.100.2",
+                "10.0.0.1, 1.2.3.4, 5.6.7.8",
+            ] {
+                let key = extractor
+                    .extract(&req_with_xff_and_peer(Some(xff), peer))
+                    .unwrap();
+                assert_eq!(key, peer.ip(), "hops {hops}, header {xff}");
+                assert_eq!(
+                    select_client_ip(Some(xff), Some(peer.ip()), hops, &nobody).ip,
+                    Some(key)
+                );
+            }
+        }
+    }
+
+    /// #796: a listed proxy that adds its own `x-forwarded-for` line (rather
+    /// than appending to the client's) is read through that line; the
+    /// client's forged first line does not choose the key.
+    #[test]
+    fn every_forwarded_for_line_is_read_from_a_listed_proxy() {
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let extractor = GrpcTrustedHopsKeyExtractor::new(0)
+            .with_trusted_proxies(TrustedProxies::parse("10.0.0.0/8").unwrap());
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6")
+            .header("x-forwarded-for", "198.51.100.5")
+            .body(())
+            .unwrap();
+        req.extensions_mut().insert(TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(peer),
+        });
+        let expected: std::net::IpAddr = "198.51.100.5".parse().unwrap();
+        assert_eq!(extractor.extract(&req).unwrap(), expected);
     }
 
     /// [`WINDOW_SECS`] and the shared counter's configured window are one

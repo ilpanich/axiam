@@ -31,11 +31,12 @@ server check-eap-tls {
 		# exist as false, whichever way it reads: "if (&X !~ /re/) { reject }"
 		# does NOT reject when X is missing. Every attribute a check reads is
 		# therefore given a value that matches nothing first, so a step that
-		# fails to set one leaves it failing its check.
+		# fails to set one leaves it failing its check. The token's is `!`, which
+		# its check refuses: `-` is a token character (#764).
 		update control {
 			Tmp-String-0 := "-"
 			Tmp-String-1 := "-"
-			Tmp-String-2 := "-"
+			Tmp-String-2 := "!"
 			Tmp-String-3 := "-"
 			Tmp-String-4 := "-"
 			Tmp-String-5 := "-"
@@ -57,8 +58,16 @@ server check-eap-tls {
 		}
 
 		# 2. This server's own token: from the cache, else from AXIAM.
+		#    Every call on axiam_token_cache is either read-only or a store with
+		#    a negative TTL, so none can create an entry that does not hold a
+		#    token this request fetched (#764). The read is ONE read-only call:
+		#    rlm_cache (3.2.8, rlm_cache.c:485-493, 520-534) merges a live entry
+		#    and answers `ok`, and on an absent one answers `notfound` and
+		#    inserts nothing. A status probe followed by a plain call would
+		#    leave a window between the two in which another thread's drop
+		#    makes the plain call insert this request's sentinel.
 		update control {
-			Cache-Status-Only := yes
+			Cache-Read-Only := yes
 		}
 		axiam_token_cache
 		if (notfound) {
@@ -84,12 +93,13 @@ server check-eap-tls {
 			if (&control:Tmp-String-4 !~ /"expires_in"\s*:\s*([1-9][0-9]{2,5})/) {
 				reject
 			}
+			#    A negative TTL expires whatever entry another thread stored
+			#    meanwhile and inserts THIS request's token, so the token this
+			#    authentication decides with when Tmp-Integer-1 is 1 is the one
+			#    it fetched; a positive one would merge the other entry over it.
 			update control {
-				Cache-TTL := "%{expr:%{1} / 2}"
+				Cache-TTL := "%{expr:0 - %{1} / 2}"
 			}
-			axiam_token_cache
-		}
-		else {
 			axiam_token_cache
 		}
 		if (&control:Tmp-String-2 !~ /^[A-Za-z0-9._~+\/=-]+$/) {
@@ -100,10 +110,12 @@ server check-eap-tls {
 		update control {
 			REST-HTTP-Header := "Authorization: Bearer %{control:Tmp-String-2}"
 		}
-		#    rlm_rest answers a 401 with `invalid`, which ends a post-auth section
-		#    at once; priority 1 lets this section carry on and look at the status.
-		#    Every other result keeps its own action, so a 403 or a 5xx still ends
-		#    the section as before.
+		#    In post-auth rlm_rest answers EVERY 4xx with `invalid`, which ends a
+		#    section at once; priority 1 lets this section carry on and look at the
+		#    status. So every 4xx (a 400, 403 or 404 as much as a 401) continues
+		#    below, and anything but a 401 is rejected by the status test there. A
+		#    5xx or a transport failure keeps its own action and still ends the
+		#    section as before.
 		axiam_decide {
 			invalid = 1
 		}
@@ -125,8 +137,13 @@ server check-eap-tls {
 			if (&control:Tmp-String-5 !~ /^401$/) {
 				reject
 			}
+			#    Cache-TTL 0 expires the entry; on an ABSENT entry rlm_cache
+			#    (3.2.8) would instead insert this request's refused token, so the
+			#    drop is read-only: a thread that finds the entry already dropped
+			#    by another creates nothing (#720).
 			update control {
 				Cache-Status-Only !* ANY
+				Cache-Read-Only := yes
 				Cache-TTL := 0
 			}
 			axiam_token_cache
@@ -134,7 +151,7 @@ server check-eap-tls {
 				reject
 			}
 			update control {
-				Tmp-String-2 := "-"
+				Tmp-String-2 := "!"
 			}
 			axiam_token
 			if (!(ok || updated)) {
@@ -156,8 +173,12 @@ server check-eap-tls {
 			if (&control:Tmp-String-4 !~ /"expires_in"\s*:\s*([1-9][0-9]{2,5})/) {
 				reject
 			}
+			#    A negative TTL expires whatever entry is there and inserts THIS
+			#    request's token. A positive one would merge a concurrent thread's
+			#    (refused) entry over the token just fetched (#720).
 			update control {
-				Cache-TTL := "%{expr:%{1} / 2}"
+				Cache-Read-Only !* ANY
+				Cache-TTL := "%{expr:0 - %{1} / 2}"
 			}
 			axiam_token_cache
 			if (&control:Tmp-String-2 !~ /^[A-Za-z0-9._~+\/=-]+$/) {

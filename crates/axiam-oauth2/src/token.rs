@@ -96,6 +96,19 @@ pub use crate::fapi::FAPI2_REFRESH_ROTATION_GRACE_SECS as REFRESH_ROTATION_GRACE
 /// and `outcome` follows the request.
 pub const REFRESH_REPLAY_AUDIT_ACTION: &str = "oauth2.refresh_token_replayed";
 
+/// How long a refresh-token row outlives its own `expires_at` (T-254, #753).
+///
+/// A replay is recognised by the row, not by a clock: `find_rotated` reads a
+/// rotated token's row whatever its `revoked` and `expires_at`, so the sweep
+/// must never remove a row whose token is still redeemable *or* whose replay
+/// still tells the operator something. A rotated token is dead the moment it is
+/// rotated (or, on a `fapi2` client, sixty seconds later), so the evidence is
+/// the audited `oauth2.refresh_token_replayed` row, and a presentation
+/// of a token that expired a week ago adds nothing to the verdict the session
+/// already carries. Seven days past expiry keeps every row a live or just-lapsed
+/// token can name, and bounds the table by the token lifetime plus a week.
+pub const REFRESH_REPLAY_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------

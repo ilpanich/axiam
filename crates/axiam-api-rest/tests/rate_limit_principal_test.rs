@@ -27,23 +27,41 @@
 //!   counter on or off, while fewer principals than that each keep their own
 //!   allowance.
 //!
+//! - #754 (R111-04): only a token the session extractor would admit spends the
+//!   principal's bucket. A device-grant token and a resource-audience token
+//!   for a user are keyed on their address, so whoever holds one cannot drain
+//!   that user's allowance from many addresses; a token refused only after the
+//!   datastore read (a session revoked while the request was in flight) and a
+//!   client's token at a console-only route (`403`) are refunded by the shared
+//!   counter; and neither a handler's own `401` nor an address-keyed refusal is
+//!   refunded, so the refund cannot be farmed.
+//! - #786 (R112W2-01): a token whose session is already revoked is keyed on its
+//!   address in both layers — the limiter asks the session store before either
+//!   charges — so in the production composition, with the in-process governor
+//!   (which has no refund) present and the shared counter on or off, it cannot
+//!   spend its user's allowance, and it is still limited on its address.
+//!
 //! The requests are ones the handler refuses (`400` for an empty
 //! `redirect_uri`, `401` for a token that does not verify) without touching
 //! the network, so what is measured is the limiter.
 
+use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use actix_web::middleware::Condition;
 use actix_web::{App, HttpResponse, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::middleware::rate_limit_shared::RateLimitShared;
-use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
+use axiam_api_rest::{AuthenticatedUser, ConsoleSignIn, SessionValidator, register_api_v1_routes};
 use axiam_audit::middleware::AuditMiddleware;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    AUD_USER, CnfClaim, issue_access_token, issue_access_token_bound, validate_access_token,
+    AUD_USER, AccessTokenSpec, CnfClaim, issue_access_token, issue_access_token_bound,
+    validate_access_token,
 };
 use axiam_db::repository::{SurrealAuditLogRepository, SurrealRateLimitBucketRepository};
 use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
@@ -154,6 +172,65 @@ impl Principal {
         .unwrap()
     }
 
+    /// A console sign-in's token for `session`: no `client_id`, the session in
+    /// `jti`, as the login path mints it.
+    fn session_token(&self, auth: &AuthConfig, session: Uuid) -> String {
+        AccessTokenSpec::user(
+            self.user_id,
+            self.tenant_id,
+            self.org_id,
+            session.to_string(),
+        )
+        .issue(auth)
+        .unwrap()
+    }
+
+    /// A device-grant token (#681): the device's `client_id`, no `sid`, a
+    /// fresh `jti` — it names no session.
+    fn device_token(&self, auth: &AuthConfig) -> String {
+        AccessTokenSpec::user(
+            self.user_id,
+            self.tenant_id,
+            self.org_id,
+            Uuid::new_v4().to_string(),
+        )
+        .client_id(Some("device-client"))
+        .issue(auth)
+        .unwrap()
+    }
+
+    /// An authorization-code token a relying party holds: its `client_id`
+    /// and the user's `session` in `sid`. `AuthenticatedUser` admits it;
+    /// `ConsoleSignIn` refuses it `403`.
+    fn client_token(&self, auth: &AuthConfig, session: Uuid) -> String {
+        AccessTokenSpec::user(
+            self.user_id,
+            self.tenant_id,
+            self.org_id,
+            Uuid::new_v4().to_string(),
+        )
+        .client_id(Some("relying-party"))
+        .session(Some(session))
+        .issue(auth)
+        .unwrap()
+    }
+
+    /// The same, minted for a resource server (RFC 8707): its audience is the
+    /// resource, not `axiam:user`, and AXIAM's own routes refuse it.
+    fn resource_token(&self, auth: &AuthConfig, session: Uuid) -> String {
+        AccessTokenSpec::user(
+            self.user_id,
+            self.tenant_id,
+            self.org_id,
+            Uuid::new_v4().to_string(),
+        )
+        .aud("https://api.example.test/")
+        .client_id(Some("relying-party"))
+        .session(Some(session))
+        .issue(auth)
+        .unwrap()
+    }
+
     /// The same claims, expired an hour ago (past the decoder's 60 s leeway)
     /// and signed with the real key: a token that once verified.
     fn expired_token(&self, auth: &AuthConfig) -> String {
@@ -211,11 +288,57 @@ fn disabled_counter() -> SharedRateLimitCounter {
     })
 }
 
+/// The sessions a test declares live; every other session id is revoked or
+/// never existed, which is what the server's validator answers for both.
+struct LiveSessions(HashSet<Uuid>);
+
+impl SessionValidator for LiveSessions {
+    fn is_session_active<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let live = self.0.contains(&session_id);
+        Box::pin(async move { live })
+    }
+}
+
+fn live_sessions(sessions: &[Uuid]) -> Arc<dyn SessionValidator> {
+    Arc::new(LiveSessions(sessions.iter().copied().collect()))
+}
+
+/// `session` is revoked while every request is in flight: the limiter's
+/// liveness check (each request's first question) finds it live, the
+/// extractor's (its second) finds it gone. Every other session is live.
+struct RevokedInFlight {
+    session: Uuid,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl SessionValidator for RevokedInFlight {
+    fn is_session_active<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let live = session_id != self.session
+            || self
+                .asked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .is_multiple_of(2);
+        Box::pin(async move { live })
+    }
+}
+
 /// The production composition: the audit middleware (when `$audit`) around
 /// `register_api_v1_routes`, with `end_session_per_min = PER_MIN` and the
 /// shared counter `$counter`.
 macro_rules! routes_app {
     ($db:expr, $auth:expr, $counter:expr, audit: $audit:expr) => {{
+        routes_app!($db, $auth, $counter, audit: $audit, sessions: None)
+    }};
+    ($db:expr, $auth:expr, $counter:expr, audit: $audit:expr, sessions: $sessions:expr) => {{
+        let sessions: Option<Arc<dyn SessionValidator>> = $sessions;
         let mut state = AppState::for_test($db.clone(), $auth.clone());
         state.shared_rate_limit = $counter;
         let rate_limit = RateLimitConfig {
@@ -226,6 +349,11 @@ macro_rules! routes_app {
             App::new()
                 .app_data(web::Data::new($auth.clone()))
                 .app_data(web::Data::new(state))
+                .configure(|cfg| {
+                    if let Some(sessions) = sessions {
+                        cfg.app_data(web::Data::new(sessions));
+                    }
+                })
                 .wrap(Condition::new(
                     $audit,
                     AuditMiddleware::spawn(SurrealAuditLogRepository::new($db.clone())),
@@ -763,4 +891,385 @@ async fn every_authenticated_federation_flow_route_carries_the_backstop() {
         assert_backstop_bounds_one_address(&app, &auth, route, peer(150), peer(151 + n as u8))
             .await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// #754 (R111-04) — which tokens may spend a principal's bucket
+// ---------------------------------------------------------------------------
+
+/// #754: a device-grant token for user X — validly signed, refused `401` by
+/// the session extractor because it names no session — is keyed on its
+/// address. Sent `PER_MIN + 1` times from as many addresses it is refused
+/// `401` every time (never `429`: no address spends more than one), and X's
+/// own session token then has its whole allowance. Keyed on X, the last of
+/// those requests and all of X's would have met X's spent bucket.
+#[actix_rt::test]
+async fn a_device_grant_token_never_spends_its_users_bucket() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let session = Uuid::new_v4();
+    let app = routes_app!(
+        db, auth, enabled_counter(&db), audit: true,
+        sessions: Some(live_sessions(&[session]))
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let device = x.device_token(&auth);
+
+    for i in 0..=PER_MIN {
+        let got = status(&app, oidc_authorize(&device, peer(160 + i as u8))).await;
+        assert_eq!(
+            got, 401,
+            "the device token's request {i} is refused, not limited"
+        );
+    }
+
+    let own = x.session_token(&auth, session);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(170 + i as u8))).await;
+        assert_eq!(got, 400, "X's own request {i} is served");
+    }
+    assert_eq!(
+        status(&app, oidc_authorize(&own, peer(179))).await,
+        429,
+        "and X's allowance is X's, whole and still bounded"
+    );
+}
+
+/// #754: the same for a resource-audience token a relying party holds for X
+/// (RFC 8707) — a live session in `sid`, but an audience AXIAM's own routes
+/// refuse — with the shared counter on, and with it off, where the in-process
+/// governor alone keys (it has no refund, so the key is all that protects X).
+#[actix_rt::test]
+async fn a_resource_audience_token_never_spends_its_users_bucket() {
+    for counter_on in [true, false] {
+        let db = fresh_db().await;
+        let auth = auth_config();
+        let session = Uuid::new_v4();
+        let counter = if counter_on {
+            enabled_counter(&db)
+        } else {
+            disabled_counter()
+        };
+        let app = routes_app!(
+            db, auth, counter, audit: true,
+            sessions: Some(live_sessions(&[session]))
+        );
+        let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+        let resource = x.resource_token(&auth, session);
+
+        for i in 0..=PER_MIN {
+            let got = status(&app, oidc_authorize(&resource, peer(180 + i as u8))).await;
+            assert_eq!(
+                got, 401,
+                "shared counter on: {counter_on}; the resource token's request {i} is refused"
+            );
+        }
+        let own = x.session_token(&auth, session);
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize(&own, peer(190 + i as u8))).await;
+            assert_eq!(got, 400, "shared counter on: {counter_on}; X's request {i}");
+        }
+    }
+}
+
+/// #754: a relying party's authorization-code token with a live session is
+/// one `AuthenticatedUser` admits, so it is X acting through the relying party
+/// and spends X's bucket — the relay #633 keys on the principal for.
+#[actix_rt::test]
+async fn a_client_token_with_a_live_session_spends_its_users_bucket() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let session = Uuid::new_v4();
+    let app = routes_app!(
+        db, auth, enabled_counter(&db), audit: true,
+        sessions: Some(live_sessions(&[session]))
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let relayed = x.client_token(&auth, session);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&relayed, peer(200 + i as u8))).await;
+        assert_eq!(got, 400, "the relying party's request {i} for X is served");
+    }
+    assert_eq!(
+        status(
+            &app,
+            oidc_authorize(&x.session_token(&auth, session), peer(209))
+        )
+        .await,
+        429,
+        "X and the relying party acting for X share X's allowance"
+    );
+}
+
+/// #786 (R112W2-01), the review's probe B: the production composition, with
+/// the in-process governor — which has no refund — beneath the shared counter,
+/// on and off. `PER_MIN + 1` requests with X's revoked session's token, each
+/// from its own address, are refused `401`; X's live session then has its whole
+/// allowance, and is limited on it. Keyed on X, the governor would have
+/// refused X after the stale token's `PER_MIN`th request.
+#[actix_rt::test]
+async fn a_revoked_sessions_token_never_spends_its_users_bucket() {
+    for counter_on in [true, false] {
+        let db = fresh_db().await;
+        let auth = auth_config();
+        let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+        let counter = if counter_on {
+            enabled_counter(&db)
+        } else {
+            disabled_counter()
+        };
+        let app = routes_app!(
+            db, auth, counter, audit: true,
+            sessions: Some(live_sessions(&[live]))
+        );
+        let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+        let stale = x.session_token(&auth, revoked);
+
+        for i in 0..=PER_MIN {
+            let got = status(&app, oidc_authorize(&stale, peer(100 + i as u8))).await;
+            assert_eq!(
+                got, 401,
+                "shared counter on: {counter_on}; the revoked session's request {i} is refused, \
+                 not limited"
+            );
+        }
+        let own = x.session_token(&auth, live);
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize(&own, peer(110 + i as u8))).await;
+            assert_eq!(
+                got, 400,
+                "shared counter on: {counter_on}; X's live session's request {i} is served"
+            );
+        }
+        assert_eq!(
+            status(&app, oidc_authorize(&own, peer(119))).await,
+            429,
+            "shared counter on: {counter_on}; X's allowance is X's, whole and still bounded"
+        );
+    }
+}
+
+/// #786: the farming bound. A revoked session's token is keyed on its address,
+/// where nothing is refunded, so one address gets `PER_MIN` refusals and then
+/// `429` — with the shared counter on (whose address charge is kept) and off
+/// (the governor alone) — and X's live session is untouched by it.
+#[actix_rt::test]
+async fn a_revoked_sessions_token_is_limited_on_its_address() {
+    for counter_on in [true, false] {
+        let db = fresh_db().await;
+        let auth = auth_config();
+        let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+        let counter = if counter_on {
+            enabled_counter(&db)
+        } else {
+            disabled_counter()
+        };
+        let app = routes_app!(
+            db, auth, counter, audit: true,
+            sessions: Some(live_sessions(&[live]))
+        );
+        let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+        let stale = x.session_token(&auth, revoked);
+
+        for i in 0..PER_MIN {
+            let got = status(&app, oidc_authorize(&stale, peer(120))).await;
+            assert_eq!(
+                got, 401,
+                "shared counter on: {counter_on}; the revoked session's refusal {i}"
+            );
+        }
+        assert_eq!(
+            status(&app, oidc_authorize(&stale, peer(120))).await,
+            429,
+            "shared counter on: {counter_on}; the address's allowance ends"
+        );
+        assert_eq!(
+            status(
+                &app,
+                oidc_authorize(&x.session_token(&auth, live), peer(121))
+            )
+            .await,
+            400,
+            "shared counter on: {counter_on}; X's live session is served"
+        );
+    }
+}
+
+/// The shared counter alone on one principal-keyed resource, whose handler is
+/// `handler` — so what is observed is the shared layer's charge and refund,
+/// with no governor beside it.
+macro_rules! shared_only_app {
+    ($db:expr, $auth:expr, $sessions:expr, $bucket:expr, $handler:expr) => {{
+        let mut state = AppState::for_test($db.clone(), $auth.clone());
+        state.shared_rate_limit = enabled_counter(&$db);
+        let rate_limit = RateLimitConfig {
+            end_session_per_min: PER_MIN,
+            ..RateLimitConfig::default()
+        };
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new($sessions))
+                .wrap(AuditMiddleware::spawn(SurrealAuditLogRepository::new(
+                    $db.clone(),
+                )))
+                .service(
+                    web::resource("/api/v1/federation/oidc/authorize")
+                        .wrap(
+                            RateLimitShared::<TestDb>::browser_preset($bucket, &rate_limit)
+                                .keyed_on_principal(),
+                        )
+                        .route(web::post().to($handler)),
+                ),
+        )
+        .await
+    }};
+}
+
+/// #754, as amended by #786: X's revoked session's token is keyed on its
+/// address by the shared counter alone too (the liveness check is the shared
+/// layer's). Three allowances' worth from many addresses are all refused `401`,
+/// none `429`, and X's live session then has the whole allowance.
+#[actix_rt::test]
+async fn the_shared_counter_alone_keys_a_revoked_sessions_token_on_its_address() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+    let app = shared_only_app!(
+        db,
+        auth,
+        live_sessions(&[live]),
+        "refund_401_principal_test",
+        |_: AuthenticatedUser| async { HttpResponse::BadRequest().finish() }
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let stale = x.session_token(&auth, revoked);
+
+    for i in 0..PER_MIN * 3 {
+        let got = status(&app, oidc_authorize(&stale, peer(210 + i as u8))).await;
+        assert_eq!(
+            got, 401,
+            "the revoked session's request {i} is refused on its own address"
+        );
+    }
+    let own = x.session_token(&auth, live);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(230))).await;
+        assert_eq!(got, 400, "X's live session's request {i} is served");
+    }
+    assert_eq!(status(&app, oidc_authorize(&own, peer(230))).await, 429);
+}
+
+/// #754: the refund on `401`. A session revoked between the limiter's liveness
+/// check and the extractor's is keyed on X, and the extractor's `401` is
+/// refunded: three allowances' worth from many addresses are all refused
+/// `401`, none `429`, and X's live session then has the whole allowance.
+#[actix_rt::test]
+async fn the_shared_counter_refunds_a_session_revoked_in_flight() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let (live, revoked) = (Uuid::new_v4(), Uuid::new_v4());
+    let sessions: Arc<dyn SessionValidator> = Arc::new(RevokedInFlight {
+        session: revoked,
+        asked: Default::default(),
+    });
+    let app = shared_only_app!(
+        db,
+        auth,
+        sessions,
+        "refund_in_flight_principal_test",
+        |_: AuthenticatedUser| async { HttpResponse::BadRequest().finish() }
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let stale = x.session_token(&auth, revoked);
+
+    for i in 0..PER_MIN * 3 {
+        let got = status(&app, oidc_authorize(&stale, peer(220 + i as u8))).await;
+        assert_eq!(
+            got, 401,
+            "the in-flight revocation's request {i} is refused and refunded"
+        );
+    }
+    let own = x.session_token(&auth, live);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(235))).await;
+        assert_eq!(got, 400, "X's live session's request {i} is served");
+    }
+    assert_eq!(status(&app, oidc_authorize(&own, peer(235))).await, 429);
+}
+
+/// #754: the refund on `403` — a relying party's token at a console-only route
+/// (`ConsoleSignIn`, T-447) is refused for what it is, and the charge to X's
+/// bucket is refunded; X's console sign-in then has the whole allowance.
+#[actix_rt::test]
+async fn the_shared_counter_refunds_a_console_only_routes_403() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let session = Uuid::new_v4();
+    let app = shared_only_app!(
+        db,
+        auth,
+        live_sessions(&[session]),
+        "refund_403_principal_test",
+        |_: ConsoleSignIn| async { HttpResponse::BadRequest().finish() }
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+    let relayed = x.client_token(&auth, session);
+
+    for i in 0..PER_MIN * 3 {
+        let got = status(&app, oidc_authorize(&relayed, peer(240))).await;
+        assert_eq!(
+            got, 403,
+            "the client token's request {i} is refused and refunded"
+        );
+    }
+    let own = x.session_token(&auth, session);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(241))).await;
+        assert_eq!(got, 400, "X's console request {i} is served");
+    }
+    assert_eq!(status(&app, oidc_authorize(&own, peer(241))).await, 429);
+}
+
+/// #754: the refund cannot be farmed. A `401` the handler returns — the
+/// request reached what the bucket protects — is never refunded, even to an
+/// admitted principal; and a refusal charged to an address (a device-grant
+/// token, keyed there) is never refunded either. Each meets `429` on its
+/// allowance's next request.
+#[actix_rt::test]
+async fn the_refund_is_bound_to_the_extractors_refusal_of_a_principal() {
+    let db = fresh_db().await;
+    let auth = auth_config();
+    let session = Uuid::new_v4();
+    let app = shared_only_app!(
+        db,
+        auth,
+        live_sessions(&[session]),
+        "refund_bound_principal_test",
+        |_: AuthenticatedUser| async { HttpResponse::Unauthorized().finish() }
+    );
+    let x = Principal::new(Uuid::new_v4(), Uuid::new_v4());
+
+    let own = x.session_token(&auth, session);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&own, peer(250 + i as u8))).await;
+        assert_eq!(got, 401, "the handler's own refusal {i}");
+    }
+    assert_eq!(
+        status(&app, oidc_authorize(&own, peer(254))).await,
+        429,
+        "a handler's 401 is charged: the principal's allowance ends"
+    );
+
+    let device = x.device_token(&auth);
+    for i in 0..PER_MIN {
+        let got = status(&app, oidc_authorize(&device, peer(255))).await;
+        assert_eq!(got, 401, "the device token's refusal {i}, on its address");
+    }
+    assert_eq!(
+        status(&app, oidc_authorize(&device, peer(255))).await,
+        429,
+        "an address-keyed refusal is charged: the address's allowance ends"
+    );
 }

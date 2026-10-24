@@ -35,6 +35,45 @@ fn parse_outcome(s: &str) -> Option<AuditOutcome> {
     }
 }
 
+/// The metadata key the consumer stamps on every row it ingests (#741).
+///
+/// Server-owned: written after the producer's metadata is merged, so a
+/// producer-supplied value is overwritten. The server's own writers never set
+/// it. (`metadata.source` is not usable for this: the directory, SCIM and SAML
+/// admin writers already use it for other meanings.)
+pub const INGESTED_VIA_KEY: &str = "ingested_via";
+
+/// The value of [`INGESTED_VIA_KEY`] on a row ingested over AMQP.
+pub const INGESTED_VIA_AMQP: &str = "amqp";
+
+/// Key under which a producer's metadata is kept when it is not a JSON object
+/// and so has no place to carry the stamp beside it.
+pub const PRODUCER_METADATA_KEY: &str = "producer_metadata";
+
+/// Merge the provenance stamp into a producer's metadata.
+///
+/// An object keeps its keys and gains `ingested_via: "amqp"`, overwriting any
+/// the producer supplied. Absent metadata or `null` becomes `{ingested_via}`.
+/// Any other JSON value (array, string, number, bool) is kept, not dropped,
+/// under `producer_metadata` beside the stamp.
+fn stamp_ingested(metadata: Option<serde_json::Value>) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let mut map = match metadata {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(m)) => m,
+        Some(other) => {
+            let mut m = Map::new();
+            m.insert(PRODUCER_METADATA_KEY.into(), other);
+            m
+        }
+    };
+    map.insert(
+        INGESTED_VIA_KEY.into(),
+        Value::String(INGESTED_VIA_AMQP.into()),
+    );
+    Value::Object(map)
+}
+
 /// Outcome of processing a single AMQP audit-event delivery.
 ///
 /// Return type of the broker-free [`process_audit_event`] seam. The pure
@@ -216,7 +255,8 @@ where
         resource_id: msg.resource_id,
         outcome,
         ip_address: msg.ip_address,
-        metadata: msg.metadata,
+        // #741: stamped after the producer's metadata, so it cannot override.
+        metadata: Some(stamp_ingested(msg.metadata)),
     };
 
     if let Err(e) = audit_repo.append(entry).await {
@@ -315,4 +355,33 @@ pub async fn start_audit_consumer<A, N>(
     }
 
     warn!("Audit event AMQP consumer stream ended");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_stamp_overwrites_a_producer_supplied_key() {
+        let out = stamp_ingested(Some(json!({"ingested_via": "server", "k": 1})));
+        assert_eq!(out, json!({"ingested_via": "amqp", "k": 1}));
+    }
+
+    #[test]
+    fn absent_and_null_metadata_become_the_stamp_alone() {
+        assert_eq!(stamp_ingested(None), json!({"ingested_via": "amqp"}));
+        assert_eq!(
+            stamp_ingested(Some(json!(null))),
+            json!({"ingested_via": "amqp"})
+        );
+    }
+
+    #[test]
+    fn non_object_metadata_is_kept_under_producer_metadata() {
+        assert_eq!(
+            stamp_ingested(Some(json!([1, 2]))),
+            json!({"producer_metadata": [1, 2], "ingested_via": "amqp"})
+        );
+    }
 }

@@ -40,6 +40,29 @@ use crate::helpers::{CountRow, paginate, take_first_or_not_found};
 // Row structs
 // ---------------------------------------------------------------------------
 
+/// Query 2b of `pseudonymize_actor` (#808): one `SELECT` over the four
+/// network-role actions, then one `UPDATE` that clears, per row, the field its
+/// action names. The `IF` per field leaves every other field as it was.
+const ERASE_GRANTEE_SQL: &str = "\
+    LET $rows = (SELECT VALUE id FROM audit_log \
+        WHERE tenant_id = $tenant_id \
+        AND action IN ['network_role.assigned', 'network_role.unassigned', \
+                       'network_role.assign_refused', 'network_role.unassign_refused'] \
+        AND ((action IN ['network_role.assigned', 'network_role.unassigned'] \
+              AND metadata.grantee.kind = 'user' AND metadata.grantee.id = $user_id) \
+             OR (action IN ['network_role.assign_refused', 'network_role.unassign_refused'] \
+                 AND (metadata.after.user = $user_id OR metadata.before.user = $user_id)))); \
+    UPDATE $rows SET \
+        metadata.grantee.id = IF action IN ['network_role.assigned', 'network_role.unassigned'] \
+            AND metadata.grantee.kind = 'user' AND metadata.grantee.id = $user_id \
+            THEN $nil_uuid ELSE metadata.grantee.id END, \
+        metadata.after.user = IF action IN ['network_role.assign_refused', \
+                'network_role.unassign_refused'] AND metadata.after.user = $user_id \
+            THEN $nil_uuid ELSE metadata.after.user END, \
+        metadata.before.user = IF action IN ['network_role.assign_refused', \
+                'network_role.unassign_refused'] AND metadata.before.user = $user_id \
+            THEN $nil_uuid ELSE metadata.before.user END";
+
 #[derive(Debug, SurrealValue)]
 struct AuditLogRow {
     tenant_id: String,
@@ -414,6 +437,8 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // (c) ip_address → NULL
         // (d) known PII metadata keys redacted to "[redacted]"
         // (e) resource_id → nil UUID in entries where resource_id == user_id
+        // (f) metadata.grantee.id → nil UUID in `network_role.assigned` /
+        //     `.unassigned` rows naming the user as grantee (#758 (e))
         //
         // NOTE: In SurrealDB in-memory engine (used by tests) the $auth context is not
         // set, so the permission check may be bypassed. The application-layer guard
@@ -437,12 +462,22 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         };
 
         // Query 1: scrub actor fields + metadata PII on all entries for this actor.
+        // `metadata.forwarded_for_claimed` is the request row's second client
+        // address (the caller's leftmost `X-Forwarded-For` entry, #752), so it
+        // goes with `ip_address` (#794).
+        // Not the erasure's own record (#784): it names the erased account as
+        // its actor on purpose, is written after the scrub, and carries only
+        // the pseudonym — a unit stalled past its claim's lease that scrubs
+        // after another unit recorded the erasure must not nil it. Matched by
+        // the pseudonym too, a keyed HMAC no other writer of the trail holds.
         let q1_sql = format!(
             "UPDATE audit_log SET \
              actor_id = $nil_uuid, \
              metadata.actor_pseudonym = $pseudonym, \
-             ip_address = NONE{} \
-             WHERE tenant_id = $tenant_id AND actor_id = $user_id",
+             ip_address = NONE, \
+             metadata.forwarded_for_claimed = NONE{} \
+             WHERE tenant_id = $tenant_id AND actor_id = $user_id \
+             AND NOT (action = 'gdpr.user_pseudonymized' AND metadata.pseudonym = $pseudonym)",
             pii_set
         );
         let _ = self
@@ -466,6 +501,42 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
                 "UPDATE audit_log SET resource_id = $nil_uuid \
                  WHERE tenant_id = $tenant_id AND resource_id = $user_id",
             )
+            .bind(("nil_uuid", nil_uuid.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
+            .bind(("user_id", user_id_str.clone()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        // Query 2b: the grantee of a `network_role.assigned` / `.unassigned`
+        // row (and of a refused one, below) is the subject, whichever actor wrote it (an administrator, or the
+        // erasure itself). Cleared to the nil UUID like the other identifiers;
+        // idempotent, since the match is on the user's id, which a cleared row
+        // no longer carries.
+        //
+        // No index serves the grantee, so the rows are chosen first by the
+        // cheap predicates (a plain `SELECT VALUE id` that tests the action
+        // before it reaches into `metadata`) and the `UPDATE` then writes only
+        // the chosen ids; the same predicates in the `UPDATE`'s own `WHERE`
+        // took 4.3 s per erasure at 100 000 rows in the tenant (R112W1-03).
+        //
+        // The gate's refusal rows (`network_role.assign_refused` /
+        // `.unassign_refused`) name a user grantee by the `(kind, id)` pair of
+        // the refused write: `metadata.after.user` for an assignment, and
+        // `metadata.before.user` for an unassignment (the gate's and the
+        // stale-claim refusal alike). That id is cleared the same way (#802,
+        // R112-09 (a)). A service account's or a group's key is not `user`,
+        // so it is not matched.
+        //
+        // One `SELECT` reads the trail for all four actions (#808, R112-15:
+        // three of them read the tenant's whole prefix three times), and one
+        // `UPDATE` clears each field only where its own action and predicate
+        // hold, so a row is changed exactly as the three statements did.
+        let _ = self
+            .db
+            .current()
+            .query(ERASE_GRANTEE_SQL)
             .bind(("nil_uuid", nil_uuid.clone()))
             .bind(("tenant_id", tenant_id_str.clone()))
             .bind(("user_id", user_id_str.clone()))
@@ -580,6 +651,14 @@ mod tests {
     use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
     use surrealdb::Surreal;
     use surrealdb::engine::local::Mem;
+
+    /// #808 (R112-15): query 2b reads the trail once (one `SELECT`) and writes
+    /// it once (one `UPDATE`), however many network-role actions it covers.
+    #[test]
+    fn erasure_query_2b_issues_one_select_and_one_update() {
+        assert_eq!(ERASE_GRANTEE_SQL.matches("SELECT").count(), 1);
+        assert_eq!(ERASE_GRANTEE_SQL.matches("UPDATE").count(), 1);
+    }
 
     async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
         let db = Surreal::new::<Mem>(()).await.unwrap();

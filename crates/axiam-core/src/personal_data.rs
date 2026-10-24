@@ -299,11 +299,16 @@ pub const USER_COLUMNS: &[UserColumn] = &[
         erasure: None,
         export: None,
         note: "#689: path-specific workflow state. The Art. 17 pipeline's \
-               anonymization sets it to its own time, and the erasure clears \
-               it once `gdpr.user_pseudonymized` is written; while it is set, \
-               the next GDPR sweep writes that record. A time and nothing \
-               else, about the erasure rather than the subject; the tombstone \
-               never sets it and the export does not carry it.",
+               anonymization sets it to a stamp the erasure chose (#737), and \
+               the erasure clears it once `gdpr.user_pseudonymized` is \
+               written; while it is set on an anonymized row, the next GDPR \
+               sweep writes the erasure proof if it is missing and that \
+               record. \
+               #738: before the anonymization, on an account deletion-pending \
+               without a deletion request, it holds the purge sweep's claim \
+               on the erasure instead. A time and nothing else, about the \
+               erasure rather than the subject; the tombstone never sets it \
+               and the export does not carry it.",
     },
 ];
 

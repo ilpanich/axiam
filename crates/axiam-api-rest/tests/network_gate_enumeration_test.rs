@@ -135,22 +135,28 @@ const EXEMPT: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/axiam-server/src/cleanup.rs",
-        "prepare",
-        "erasure purge of a user's edges (`purge_single_user_inner`'s preparation step \
-         since #624); as for users::delete",
+        "remove_erased_users_roles",
+        "erasure purge of a user's role assignments (the preparation step of \
+         `ErasureUnit::prepare` since #624, moved into this function by #758 so the \
+         erasure can record the network roles it removes); as for users::delete, and \
+         the platform's own act, so the gate has no principal to decide on",
     ),
 ];
 
-/// Exemptions that name a function common enough to recur (`prepare`), pinned
-/// to the body they were granted for. `(path suffix, function, the start of
-/// the function's whitespace-free text)`. A second function of that name in
-/// the same file is a different function and is scanned (#715 (e)).
+/// Exemptions pinned to the body they were granted for. `(path suffix,
+/// function, the start of the function's whitespace-free text)`. A second
+/// function of that name in the same file is a different function and is
+/// scanned (#715 (e)). The erasure's exemption was `prepare`, a name common
+/// enough to recur; since #758 it is `remove_erased_users_roles`, pinned all
+/// the same so that a copy of the name is not waved through.
 const PINNED: &[(&str, &str, &str)] = &[(
     "crates/axiam-server/src/cleanup.rs",
-    "prepare",
-    // `ErasureUnit::prepare`: its signature and first statement.
-    "asyncfnprepare(&self,user:&axiam_core::models::user::User)->Result<u64,AxiamError>{\
-     let(user_id,tenant_id)=(user.id,user.tenant_id);",
+    "remove_erased_users_roles",
+    // Its signature, whitespace removed.
+    // `flush` since #802.
+    "pubasyncfnremove_erased_users_roles<R,P,A>(role_repo:&R,permission_repo:&P,\
+     audit_repo:&A,flush:Option<&SubjectFlush>,tenant_id:Uuid,user_id:Uuid,)\
+     ->Result<u64,AxiamError>",
 )];
 
 fn workspace_root() -> PathBuf {
@@ -495,42 +501,42 @@ fn only_the_gate_mints_a_clearance() {
     );
 }
 
-/// #715 (e): the `cleanup.rs` exemption is `ErasureUnit::prepare`'s alone. A
-/// second `fn prepare` in the file, calling a guarded write, is scanned and
-/// flagged, where an exemption by name would have let it through.
+/// #715 (e): the `cleanup.rs` exemption is `remove_erased_users_roles`'s alone.
+/// A second function of that name in the file, calling a guarded write, is
+/// scanned and flagged, where an exemption by name would have let it through.
 #[test]
-fn a_second_prepare_in_cleanup_is_not_exempt() {
+fn a_second_erasure_role_remover_in_cleanup_is_not_exempt() {
+    const NAME: &str = "remove_erased_users_roles";
     let real = production_sources()
         .into_iter()
         .find(|(file, _)| file.ends_with("crates/axiam-server/src/cleanup.rs"))
         .expect("cleanup.rs is a production source");
     let synthetic = format!(
-        "{}\nfn prepare(repo: &R, id: Uuid) {{\n    // The scan's window reaches 80 characters back, so the body is padded.\n    let padding = \"a body at least eighty characters long, as a real function's is\";\n    repo.assign_to_user(id, padding);\n}}\n",
+        "{}\nfn {NAME}(repo: &R, id: Uuid) {{\n    // The scan's window reaches 80 characters back, so the body is padded.\n    let padding = \"a body at least eighty characters long, as a real function's is\";\n    repo.assign_to_user(id, padding);\n}}\n",
         real.1
     );
     let found = sites_in(vec![(real.0.clone(), synthetic)]);
-    let prepares: Vec<&Site> = found
+    let removers: Vec<&Site> = found
         .iter()
-        .filter(|s| s.function == "prepare" && !s.gated)
+        .filter(|s| s.function == NAME && !s.gated)
         .collect();
-    let (pinned, stray): (Vec<_>, Vec<_>) = prepares
+    let (pinned, stray): (Vec<_>, Vec<_>) = removers
         .iter()
         .partition(|s| s.body.starts_with(PINNED[0].2));
-    assert!(!pinned.is_empty(), "ErasureUnit::prepare is still found");
-    assert_eq!(
-        stray.len(),
-        1,
-        "the synthetic prepare is found: {prepares:?}"
+    assert!(!pinned.is_empty(), "the real function is still found");
+    assert_eq!(stray.len(), 1, "the synthetic copy is found: {removers:?}");
+    // With an exemption by file and name the stray one passed unflagged.
+    let old = |s: &Site| s.file.ends_with("cleanup.rs") && s.function == NAME;
+    assert!(
+        old(stray[0]),
+        "the unpinned exemption would have covered it"
     );
-    // With the old exemption (file and name) the stray one passed unflagged.
-    let old = |s: &Site| s.file.ends_with("cleanup.rs") && s.function == "prepare";
-    assert!(old(stray[0]), "the old exemption would have covered it");
     assert!(
         exemption(stray[0]).is_none(),
         "the pinned exemption does not"
     );
     assert!(
         pinned.iter().all(|s| exemption(s).is_some()),
-        "ErasureUnit::prepare itself stays exempt"
+        "the real function itself stays exempt"
     );
 }

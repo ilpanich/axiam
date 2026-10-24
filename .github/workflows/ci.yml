@@ -316,10 +316,17 @@ jobs:
       #     ships in the binary; the remaining exposure is the build host, and only if the
       #     upstream zip were compromised. Full note in deny.toml. Tracking: ilpanich/axiam#719.
       #     Drop all three when utoipa-swagger-ui moves to zip >=9.
+      #
+      #   RUSTSEC-2026-0387 — crypto-bigint 0.5.5 timing variability. No release on >=0.7.6:
+      #     elliptic-curve 0.13 and cx448 0.1.1 (pgp 0.21.0, jsonwebtoken 11, p256/p384, voprf)
+      #     hold it. Ignored ONLY because the one secret-key path, the Sign in with Apple
+      #     client-secret ES256 reachable from the public OIDC callback, now signs with ring
+      #     (crates/axiam-federation/src/apple.rs). Every other use is public-key only. Full
+      #     reachability note in deny.toml. Drop when elliptic-curve 0.13 leaves the graph.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0387
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched
@@ -731,6 +738,17 @@ jobs:
       - name: Website build
         working-directory: website
         run: npm run build
+      # The generated page index is committed, so it can silently go stale when
+      # sdks/openapi.json changes. Regenerate and fail on a diff, as
+      # sdk-openapi-drift.yml does for the spec itself.
+      - name: Website API index is up to date
+        working-directory: website
+        run: |
+          npm run gen:api-index
+          git diff --exit-code -- src/apiIndex.ts || {
+            echo "::error::website/src/apiIndex.ts is stale; run 'npm run gen:api-index' in website/ and commit it"
+            exit 1
+          }
 
   bench-harness:
     name: Bench Harness Self-Tests

@@ -7,6 +7,8 @@
 //! a chain that actually reaches the anchor. Each of those is a property a
 //! relying party checks and the UI cannot show.
 
+mod support;
+
 use axiam_core::models::certificate::{
     CertificateStatus, CreateCaCertificate, CreateIntermediateCa, KeyAlgorithm, SignIntermediateCsr,
 };
@@ -29,12 +31,12 @@ async fn setup() -> TestService {
     CaService::new(
         SurrealCaCertificateRepository::new(db),
         PkiConfig {
-            encryption_key: Some([0u8; 32]), // gitleaks:allow
+            encryption_key: Some(support::test_key()),
             ..Default::default()
         },
         std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         std::sync::Arc::new(
-            axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
+            axiam_pki::custodians_from_env(Some(support::test_key()))
                 .expect("test CA key custodians"),
         ),
     )

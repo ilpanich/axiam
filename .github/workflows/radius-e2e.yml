@@ -70,6 +70,22 @@ on:
       - "crates/axiam-db/src/repository/network.rs"
       - "crates/axiam-api-rest/src/handlers/network.rs"
       - "crates/axiam-authz/src/engine.rs"
+      # The caller's identity and the gate in front of the decision (#723): the TLS terminator
+      # that hands over the peer certificate, the bearer extractor and the token it verifies,
+      # and the guard and gate that refuse a call before the decision runs.
+      - "crates/axiam-server/src/tls.rs"
+      - "crates/axiam-api-rest/src/extractors/auth.rs"
+      - "crates/axiam-auth/src/token.rs"
+      # The carrier rule (cookie first, then Bearer or DPoP) that `extractors/auth.rs` calls
+      # in `parse_validated_claims`, so every Live decision passes through it (R112-11).
+      - "crates/axiam-auth/src/carrier.rs"
+      # The decision's client address and the limiter in front of it (`network_decide.rs`
+      # `client_ip`; the shared counter when it is on).
+      - "crates/axiam-api-rest/src/extractors/client_info.rs"
+      - "crates/axiam-core/src/forwarded_for.rs"
+      - "crates/axiam-api-rest/src/middleware/rate_limit_shared.rs"
+      - "crates/axiam-api-rest/src/network_decide_guard.rs"
+      - "crates/axiam-api-rest/src/network_gate.rs"
       - "docker/radius/**"
       - "docker/docker-compose.radius.yml"
       - "scripts/check-radius-vendors-nothing.py"
@@ -121,6 +137,13 @@ jobs:
             docker/radius/tests/fetch-crl-test.sh "$shell"
           done
 
+      # The shape of every call the Live recipe makes on its token cache (R112W5-01, #764):
+      # read-only, or a store with a negative TTL of a token the request fetched. No docker.
+      - name: Live token cache, the calls' shape
+        run: |
+          python3 docker/radius/tests/check-token-cache.py --self-test
+          python3 docker/radius/tests/check-token-cache.py
+
       # The image is named once, in the compose file, by digest; pull exactly that,
       # with a retry, since Docker Hub rate-limits anonymous pulls.
       - name: Pull the pinned FreeRADIUS image
@@ -132,6 +155,11 @@ jobs:
             echo "pull failed (attempt $attempt)"; sleep $((attempt * 15))
           done
           exit 1
+
+      # What those shapes do in the pinned image (rlm_cache 3.2.8): the interleavings of
+      # R111W5-01 and R112W5-01 played call by call in one request, so deterministically.
+      - name: Live token cache cases
+        run: docker/radius/tests/token-cache-test.sh
 
       # The test mints the run's CA material, issues everything from AXIAM,
       # brings docker/docker-compose.radius.yml up itself (the trust material does

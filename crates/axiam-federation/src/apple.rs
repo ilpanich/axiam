@@ -23,10 +23,29 @@
 //! A config with no `apple_team_id`/`apple_key_id` keeps the stored secret and
 //! sends it verbatim, which is the escape hatch for an operator who prefers to
 //! manage the JWT themselves.
+//!
+//! # Why the signature is `ring`'s and not `jsonwebtoken`'s
+//!
+//! This is the one place AXIAM performs an ECDSA *secret-key* operation, and an
+//! unauthenticated caller can make it happen: every OIDC callback for an Apple
+//! config mints a secret before the code exchange. `jsonwebtoken`'s
+//! `rust_crypto` backend signs ES256 with `p256` 0.13, whose scalar arithmetic
+//! (`add_mod`, `sub_mod`, `sbb`, `mul_wide`) is `crypto-bigint` 0.5.5 —
+//! RUSTSEC-2026-0387, timing variability in operations meant to be constant
+//! time, fixed only in 0.7.6, which no `p256` 0.13 release can take. So the JWS
+//! is assembled here and signed by `ring`'s P-256 (already the TLS stack's
+//! provider), which owes nothing to `crypto-bigint`. The advisory's `deny.toml`
+//! entry rests on this: do not route this signature back through
+//! `jsonwebtoken::encode`.
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, Header};
+use ring::rand::SystemRandom;
+use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use crate::error::FederationError;
 
@@ -93,18 +112,54 @@ pub fn mint_client_secret(
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(key_id.to_string());
 
-    // `from_ec_pem` accepts both SEC1 and PKCS#8; Apple issues PKCS#8. A wrong
-    // key type fails here rather than producing a JWT Apple rejects for
-    // reasons the operator cannot see.
-    let key = EncodingKey::from_ec_pem(private_key_pem.as_bytes()).map_err(|e| {
+    let signing_input = format!(
+        "{}.{}",
+        b64_json(&header, "header")?,
+        b64_json(&claims, "claims")?
+    );
+    let signature = sign_es256(signing_input.as_bytes(), private_key_pem)?;
+    Ok(format!(
+        "{signing_input}.{}",
+        URL_SAFE_NO_PAD.encode(signature)
+    ))
+}
+
+fn b64_json<T: Serialize>(part: &T, what: &str) -> Result<String, FederationError> {
+    let json = serde_json::to_vec(part).map_err(|e| {
         FederationError::ConfigInvalid(format!(
-            "the Apple signing key is not a usable EC private key: {e}"
+            "failed to encode the Apple client secret {what}: {e}"
         ))
     })?;
+    Ok(URL_SAFE_NO_PAD.encode(json))
+}
 
-    jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
-        FederationError::ConfigInvalid(format!("failed to sign the Apple client secret: {e}"))
-    })
+/// ES256 over `message` with the `.p8` key, as the JWS `r || s` octets.
+///
+/// Only PKCS#8 (`PRIVATE KEY`) is accepted — what Apple issues. A wrong key
+/// type fails here rather than producing a JWT Apple rejects for reasons the
+/// operator cannot see.
+fn sign_es256(message: &[u8], private_key_pem: &str) -> Result<Vec<u8>, FederationError> {
+    let unusable = |why: String| {
+        FederationError::ConfigInvalid(format!(
+            "the Apple signing key is not a usable EC private key: {why}"
+        ))
+    };
+    let pem = ::pem::parse(private_key_pem).map_err(|e| unusable(e.to_string()))?;
+    if pem.tag() != "PRIVATE KEY" {
+        return Err(unusable(format!(
+            "expected a PKCS#8 PRIVATE KEY PEM (Apple's .p8), got {}",
+            pem.tag()
+        )));
+    }
+    let der = Zeroizing::new(pem.into_contents());
+
+    let rng = SystemRandom::new();
+    let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &rng)
+        .map_err(|e| unusable(e.to_string()))?;
+    let signature = key.sign(&rng, message).map_err(|_| {
+        FederationError::ConfigInvalid("failed to sign the Apple client secret".into())
+    })?;
+    Ok(signature.as_ref().to_vec())
 }
 
 #[cfg(test)]
@@ -153,12 +208,10 @@ mod tests {
     /// The property that makes storing the JWT unnecessary: every call stamps
     /// the current time, so the secret in flight is always minutes old.
     ///
-    /// Deliberately not `assert_ne!(a, b)` on two same-second mints:
-    /// `jsonwebtoken`'s `rust_crypto` backend signs ES256 deterministically
-    /// (RFC 6979), so two mints of identical claims are byte-identical. That is
-    /// fine — Apple verifies a signature, not its novelty — but it means token
-    /// inequality would be asserting the signature backend rather than the
-    /// freshness this test is about.
+    /// Deliberately not `assert_ne!(a, b)` on two same-second mints: token
+    /// inequality would be asserting the signature backend (see
+    /// `the_signature_is_rings_not_rust_cryptos`) rather than the freshness
+    /// this test is about.
     #[test]
     fn each_mint_stamps_the_current_time() {
         let (private_pem, public_pem) = ec_keypair();
@@ -203,5 +256,50 @@ mod tests {
             err.to_string().contains("EC private key"),
             "the message must point at the key, not at Apple: {err}"
         );
+    }
+
+    /// Pins the RUSTSEC-2026-0387 mitigation. `jsonwebtoken`'s `rust_crypto`
+    /// backend (`p256` on `crypto-bigint` 0.5.5) signs ES256 deterministically
+    /// per RFC 6979, so the same message under the same key always yields the
+    /// same bytes; `ring` mixes fresh randomness into every nonce. Two distinct
+    /// signatures that both verify therefore show the secret key is not being
+    /// handled by the affected backend.
+    #[test]
+    fn the_signature_is_rings_not_rust_cryptos() {
+        let (private_pem, public_pem) = ec_keypair();
+        let split = |t: &str| {
+            let (input, sig) = t.rsplit_once('.').unwrap();
+            (input.to_string(), sig.to_string())
+        };
+        // Two mints in the same second carry identical header and claims; retry
+        // on the rare pair that straddles a second boundary.
+        let (a, b) = (0..5)
+            .map(|_| {
+                let mint =
+                    || mint_client_secret("ABCDE12345", "KEYID67890", "svc", &private_pem).unwrap();
+                (mint(), mint())
+            })
+            .find(|(a, b)| split(a).0 == split(b).0)
+            .expect("two mints within one second");
+        assert_ne!(
+            split(&a).1,
+            split(&b).1,
+            "a deterministic (RFC 6979) signer is back on this path"
+        );
+
+        let key = DecodingKey::from_ec_pem(public_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::ES256);
+        validation.set_audience(&[APPLE_AUDIENCE]);
+        validation.set_issuer(&["ABCDE12345"]);
+        for token in [a, b] {
+            decode::<serde_json::Value>(&token, &key, &validation).expect("must verify");
+        }
+    }
+
+    #[test]
+    fn a_sec1_key_is_refused_with_a_message_naming_pkcs8() {
+        let sec1 = "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n";
+        let err = mint_client_secret("ABCDE12345", "KEYID67890", "svc", sec1).unwrap_err();
+        assert!(err.to_string().contains("PKCS#8"), "{err}");
     }
 }

@@ -95,12 +95,36 @@ impl Counters {
 struct MockRoleRepo {
     counter: Arc<AtomicUsize>,
     by_subject: Arc<Mutex<HashMap<Uuid, Vec<RoleAssignment>>>>,
+    /// When armed, the next assignment read takes its snapshot, signals the
+    /// first sender and waits on the receiver before returning it: an
+    /// evaluation held between reading the store and inserting its decision.
+    hold: Arc<Mutex<Option<Hold>>>,
 }
+
+type Hold = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 
 impl MockRoleRepo {
     /// Simulate the DB effect of unassigning every role from `subject`.
     fn revoke_all_roles(&self, subject: Uuid) {
         self.by_subject.lock().unwrap().remove(&subject);
+    }
+
+    /// Hold the next assignment read after its snapshot. Returns the
+    /// receiver that fires once the read has happened, and the sender that
+    /// lets the evaluation go on.
+    fn hold_next_read(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (read_tx, read_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.hold.lock().unwrap() = Some((read_tx, release_rx));
+        (read_rx, release_tx)
     }
 }
 
@@ -111,13 +135,19 @@ impl RoleRepository for MockRoleRepo {
         user_id: Uuid,
     ) -> AxiamResult<Vec<RoleAssignment>> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        Ok(self
+        let snapshot = self
             .by_subject
             .lock()
             .unwrap()
             .get(&user_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        let hold = self.hold.lock().unwrap().take();
+        if let Some((read, release)) = hold {
+            read.send(()).unwrap();
+            release.await.unwrap();
+        }
+        Ok(snapshot)
     }
 
     async fn create(&self, _input: CreateRole) -> AxiamResult<Role> {
@@ -150,7 +180,7 @@ impl RoleRepository for MockRoleRepo {
         _u: Uuid,
         _r: Uuid,
         _res: Option<Uuid>,
-    ) -> AxiamResult<()> {
+    ) -> AxiamResult<bool> {
         unimplemented!()
     }
     async fn get_user_roles(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<Role>> {
@@ -405,6 +435,7 @@ fn build_engine(
     let role_repo = MockRoleRepo {
         counter: counters.role_assignments.clone(),
         by_subject: Arc::new(Mutex::new(by_subject)),
+        hold: Arc::default(),
     };
 
     let mut by_role = HashMap::new();
@@ -754,6 +785,265 @@ async fn coalesced_batch_with_cache_serves_hits_and_backfills_misses() {
         Counters::get(&counters.grants),
         grants_before_second,
         "the backfilled miss is now served from cache"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R112W4-06 (#791) — an invalidation landing during an evaluation
+//
+// The evaluation reads the store before the revocation commits and is held
+// there; the revocation commits and its flush lands; the evaluation is then
+// let go. Its allow is returned (it answers a check asked before the
+// revocation) but must not be cached, or it would be served until the TTL.
+// ---------------------------------------------------------------------------
+
+/// Run `request` with its assignment read held, and while it is held commit a
+/// revocation of `subject` and run `flush`. Returns the held check's answer.
+async fn check_overtaken_by<F, Fut>(
+    engine: &MockEngine,
+    repo: &MockRoleRepo,
+    request: &AccessRequest,
+    flush: F,
+) -> AccessDecision
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (read, release) = repo.hold_next_read();
+    let subject = request.subject_id;
+    let revoke = async move {
+        read.await.unwrap(); // the evaluation has read the pre-revocation store
+        repo.revoke_all_roles(subject); // the revocation commits
+        flush().await; // and its flush lands, before the evaluation inserts
+        release.send(()).unwrap();
+    };
+    let (decision, ()) = tokio::join!(engine.check_access(request), revoke);
+    decision.unwrap()
+}
+
+#[tokio::test]
+async fn r112w4_06_a_subject_flush_during_evaluation_keeps_the_stale_allow_out() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+    let request = req(tenant, subject, resource, "read");
+
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        engine.invalidate_subject(tenant, subject).await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        held,
+        AccessDecision::Allow,
+        "it read the pre-revocation store"
+    );
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "the stale allow was not cached"
+    );
+    assert_eq!(cache.snapshot().overtaken, 1);
+
+    // The next request re-evaluates and sees the revocation.
+    let reads = Counters::get(&counters.role_assignments);
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into())
+    );
+    assert_eq!(Counters::get(&counters.role_assignments), reads + 1);
+}
+
+#[tokio::test]
+async fn r112w4_06_a_tenant_flush_received_by_broadcast_during_evaluation_keeps_the_stale_allow_out()
+ {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+    let request = req(tenant, subject, resource, "read");
+
+    // The flush arrives from another replica: the consumer applies it to the
+    // cache directly, never through this engine.
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        InvalidationEvent::Tenant { tenant_id: tenant }.apply(&cache);
+    })
+    .await;
+    assert_eq!(held, AccessDecision::Allow);
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "the stale allow was not cached"
+    );
+
+    let reads = Counters::get(&counters.role_assignments);
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny("no roles assigned".into())
+    );
+    assert_eq!(Counters::get(&counters.role_assignments), reads + 1);
+}
+
+// ---------------------------------------------------------------------------
+// R112-04 (#797): an organization-level principal's decisions about a member
+// tenant X live in shard X, while its grants live in the organization tenant
+// O. A revocation in O flushes tenant O, and that flush must reach them.
+// ---------------------------------------------------------------------------
+
+/// A member tenant X and an organization tenant O whose shards fall in
+/// different stripes: the cache folds a tenant id's two halves and takes the
+/// result modulo the stripe count, and these differ only in their low bits.
+fn member_and_org_tenants() -> (Uuid, Uuid) {
+    (
+        Uuid::from_u128(0x0123_4567_89ab_cdef_0000_0000_0000_0001),
+        Uuid::from_u128(0x0123_4567_89ab_cdef_0000_0000_0000_0002),
+    )
+}
+
+/// An engine where `admin` is an organization-level principal of `org`
+/// holding a **global** role, assigned globally (the only kind that crosses
+/// into a member tenant), that grants `action`, and the request it asks about
+/// `member`.
+fn org_admin_engine(
+    member: Uuid,
+    org: Uuid,
+    admin: Uuid,
+    action: &str,
+) -> (MockEngine, MockRoleRepo, Counters, AccessRequest) {
+    let resource = Uuid::new_v4();
+    let (engine, repo, counters) = build_engine(org, admin, resource, action);
+    // `global_role_ids`: only a global role, assigned with no resource,
+    // crosses the boundary into a member tenant.
+    for assignment in repo.by_subject.lock().unwrap().get_mut(&admin).unwrap() {
+        assignment.resource_id = None;
+        assignment.role.is_global = true;
+    }
+    let request = AccessRequest {
+        subject_scope: SubjectScope::Organization { tenant_id: org },
+        ..req(member, admin, resource, action)
+    };
+    (engine, repo, counters, request)
+}
+
+#[tokio::test]
+async fn r112_04_a_revocation_in_the_organization_tenant_reaches_a_member_tenants_cached_allow() {
+    let (member, org) = member_and_org_tenants();
+    let admin = Uuid::new_v4();
+    let (engine, repo, counters, request) = org_admin_engine(member, org, admin, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+
+    assert_eq!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Allow
+    );
+    assert_eq!(
+        cache.tenant_len(member),
+        1,
+        "the allow is cached in X's shard"
+    );
+
+    // The grant is revoked in O; the handler flushes tenant O.
+    repo.revoke_all_roles(admin);
+    engine.invalidate_tenant(org).await.unwrap();
+
+    assert_eq!(cache.tenant_len(member), 0);
+    let reads = Counters::get(&counters.role_assignments);
+    assert!(
+        matches!(
+            engine.check_access(&request).await.unwrap(),
+            AccessDecision::Deny(_)
+        ),
+        "the revoked organization admin was served the cached allow"
+    );
+    assert_eq!(
+        Counters::get(&counters.role_assignments),
+        reads + 1,
+        "the next check was evaluated, not served"
+    );
+}
+
+/// The #791 race on the same path: the evaluation about X reads O's grants
+/// before the revocation commits, the flush of O lands, and only then does the
+/// evaluation insert. `insert_if_unchanged` must refuse it although X and O
+/// are in different stripes.
+#[tokio::test]
+async fn r112_04_an_organization_flush_during_evaluation_keeps_the_stale_allow_out() {
+    let (member, org) = member_and_org_tenants();
+    let admin = Uuid::new_v4();
+    let (engine, repo, counters, request) = org_admin_engine(member, org, admin, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        engine.invalidate_tenant(org).await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        held,
+        AccessDecision::Allow,
+        "it read the pre-revocation store"
+    );
+    assert_eq!(
+        cache.tenant_len(member),
+        0,
+        "the stale allow was not cached"
+    );
+    assert_eq!(cache.snapshot().overtaken, 1);
+
+    let reads = Counters::get(&counters.role_assignments);
+    assert!(matches!(
+        engine.check_access(&request).await.unwrap(),
+        AccessDecision::Deny(_)
+    ));
+    assert_eq!(Counters::get(&counters.role_assignments), reads + 1);
+
+    // The same race with the flush received by broadcast from another replica.
+    let (engine, repo, _counters, request) = org_admin_engine(member, org, admin, "write");
+    let cache = self::cache(Duration::from_secs(60));
+    let engine = engine.with_decision_cache(Arc::clone(&cache));
+    let held = check_overtaken_by(&engine, &repo, &request, || async {
+        InvalidationEvent::Tenant { tenant_id: org }.apply(&cache);
+    })
+    .await;
+    assert_eq!(held, AccessDecision::Allow);
+    assert_eq!(cache.tenant_len(member), 0);
+}
+
+#[tokio::test]
+async fn r112w4_06_a_coalesced_batch_overtaken_by_a_flush_caches_none_of_it() {
+    let (tenant, subject, resource) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (engine, repo, _counters) = build_engine(tenant, subject, resource, "read");
+    let cache = cache(Duration::from_secs(60));
+    let engine = engine
+        .with_batch_config(BatchStrategy::Coalesced, 16)
+        .with_decision_cache(Arc::clone(&cache));
+    let batch = vec![
+        req(tenant, subject, resource, "read"),
+        req(tenant, subject, resource, "delete"),
+    ];
+
+    let (read, release) = repo.hold_next_read();
+    let revoke = async {
+        read.await.unwrap();
+        repo.revoke_all_roles(subject);
+        engine.invalidate_tenant(tenant).await.unwrap();
+        release.send(()).unwrap();
+    };
+    let (decisions, ()) = tokio::join!(engine.check_access_batch(&batch), revoke);
+    assert_eq!(decisions.unwrap()[0], AccessDecision::Allow);
+    assert_eq!(
+        cache.tenant_len(tenant),
+        0,
+        "no decision of the batch was cached"
+    );
+
+    assert_eq!(
+        engine.check_access_batch(&batch).await.unwrap(),
+        vec![
+            AccessDecision::Deny("no roles assigned".into()),
+            AccessDecision::Deny("no roles assigned".into()),
+        ]
     );
 }
 

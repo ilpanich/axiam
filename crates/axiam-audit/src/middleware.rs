@@ -14,6 +14,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
+use axiam_core::forwarded_for::{
+    TrustedProxies, configured_trusted_hops, forwarded_for_claimed, forwarded_for_header,
+    select_client_ip,
+};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use chrono::{DateTime, Utc};
@@ -164,6 +168,7 @@ pub struct AuditMiddleware {
     shutting_down: Arc<AtomicBool>,
     loss: RequestAuditLoss,
     notifications_dropped: Arc<AtomicU64>,
+    client_ip_rule: ClientIpRule,
 }
 
 /// The audit worker's way to the sink: the sink's queue, and the count of rows
@@ -244,7 +249,16 @@ impl AuditMiddleware {
             shutting_down,
             loss,
             notifications_dropped,
+            client_ip_rule: ClientIpRule::configured(),
         }
+    }
+
+    /// This middleware, recording request rows under `rule` instead of the
+    /// one the environment configures. The seam tests inject.
+    #[must_use]
+    pub fn with_client_ip_rule(mut self, rule: ClientIpRule) -> Self {
+        self.client_ip_rule = rule;
+        self
     }
 
     /// Hand `entry` to the audit worker without waiting, from code that is not
@@ -476,7 +490,29 @@ where
             service,
             tx: self.tx.clone(),
             loss: self.loss.clone(),
+            client_ip_rule: self.client_ip_rule.clone(),
         }))
+    }
+}
+
+/// The rule that picks the address a request row records (#752): the
+/// limiters' `TRUSTED_HOPS` and `TRUSTED_PROXIES`.
+#[derive(Debug, Clone, Default)]
+pub struct ClientIpRule {
+    /// `AXIAM__RATE_LIMIT__TRUSTED_HOPS`.
+    pub trusted_hops: usize,
+    /// `AXIAM__RATE_LIMIT__TRUSTED_PROXIES`.
+    pub trusted_proxies: TrustedProxies,
+}
+
+impl ClientIpRule {
+    /// The rule the environment configures, as every limiter reads it.
+    #[must_use]
+    pub fn configured() -> Self {
+        Self {
+            trusted_hops: configured_trusted_hops(),
+            trusted_proxies: TrustedProxies::configured(),
+        }
     }
 }
 
@@ -484,6 +520,7 @@ pub struct AuditMiddlewareService<S> {
     service: S,
     tx: mpsc::Sender<Queued>,
     loss: RequestAuditLoss,
+    client_ip_rule: ClientIpRule,
 }
 
 impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
@@ -511,10 +548,24 @@ where
         }
 
         let method = req.method().to_string();
-        let ip_address = req
-            .connection_info()
-            .realip_remote_addr()
-            .map(|s| s.to_owned());
+        // #752: the address the rate limiters key the request on, not the
+        // first `X-Forwarded-For` entry; what the caller wrote, when it
+        // differs, is kept beside it as `forwarded_for_claimed`. Every field
+        // line is read, not the first (#796).
+        let forwarded_for = forwarded_for_header(
+            req.headers()
+                .get_all("X-Forwarded-For")
+                .map(|v| v.as_bytes()),
+        );
+        let forwarded_for = forwarded_for.as_deref();
+        let selected = select_client_ip(
+            forwarded_for,
+            req.peer_addr().map(|addr| addr.ip()),
+            self.client_ip_rule.trusted_hops,
+            &self.client_ip_rule.trusted_proxies,
+        );
+        let ip_address = selected.ip.map(|ip| ip.to_string());
+        let claimed = forwarded_for_claimed(forwarded_for, selected.ip);
 
         // Extract cached claims from extensions (set by middleware or
         // extractor) or try to validate the JWT now and cache the result.
@@ -529,19 +580,20 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution) = match fut.await {
+            let (status, result, attribution, verdict) = match fut.await {
                 Ok(res) => {
                     let s = res.status().as_u16();
-                    let attribution = res
-                        .request()
-                        .extensions()
-                        .get::<AuditAttribution>()
+                    let extensions = res.request().extensions();
+                    let attribution = extensions.get::<AuditAttribution>().copied();
+                    let verdict = extensions
+                        .get::<axiam_auth::carrier::AuthVerdict>()
                         .copied();
-                    (s, Ok(res), attribution)
+                    drop(extensions);
+                    (s, Ok(res), attribution, verdict)
                 }
                 Err(err) => {
                     let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None)
+                    (s, Err(err), None, None)
                 }
             };
 
@@ -556,7 +608,16 @@ where
             // The verified token first: it is proof, where an attribution is a
             // handler's assertion. They agree in practice; where they cannot
             // both exist, whichever is present is used.
-            let authenticated = user_info.is_some();
+            // `authenticated` is the session extractor's verdict where it ran
+            // (D-12, #758 (c)): a token whose signature verified but which the
+            // extractor refused (`403` at the device-verification page for a
+            // client-minted token, a revoked session) is `false`, with the
+            // outcome in `http_status` and `outcome`. On a route that never
+            // ran the extractor there is no verdict and it stays what it was:
+            // whether the middleware itself verified a token's signature and
+            // expiry. The actor is still the token's subject either way.
+            let authenticated =
+                user_info.is_some() && verdict != Some(axiam_auth::carrier::AuthVerdict::Refused);
             let (actor_id, tenant_id, org_id, actor_type) = match user_info {
                 Some((uid, tid, oid, kind)) => (uid, tid, oid, kind),
                 None => match attribution {
@@ -568,6 +629,13 @@ where
             // When the event happened: the response is complete. Carried to the
             // worker, so the dead-letter line keeps it (#595).
             let occurred_at = Utc::now();
+            let mut metadata = serde_json::json!({
+                "http_status": status,
+                "authenticated": authenticated,
+            });
+            if let Some(claimed) = claimed {
+                metadata["forwarded_for_claimed"] = serde_json::Value::String(claimed);
+            }
             let mut entry = CreateAuditLogEntry {
                 tenant_id,
                 actor_id,
@@ -576,10 +644,7 @@ where
                 resource_id: None,
                 outcome,
                 ip_address,
-                metadata: Some(serde_json::json!({
-                    "http_status": status,
-                    "authenticated": authenticated,
-                })),
+                metadata: Some(metadata),
             };
             // The path and the forwarded address are the client's to size; the
             // row, its dead-letter line and the notification all see them cut
@@ -626,42 +691,27 @@ fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid,
 
     let config = req.app_data::<web::Data<AuthConfig>>()?;
 
-    // Prefer an `Authorization: Bearer <jwt>` (or `DPoP <jwt>`) header
-    // (service-to-service / API clients), but fall back to the `axiam_access` cookie. The admin UI uses
-    // cookie-based auth, so authenticated browser requests carry the access token
-    // as a cookie, not a header — without this fallback every UI action was logged
-    // as `System` with a nil tenant_id and never appeared in the tenant audit log.
-    let credentials: String = match req
+    // One carrier rule shared with the REST extractors (#751): the
+    // `axiam_access` cookie first, then `Authorization: Bearer|DPoP`. A header
+    // that is not a token carrier (`Basic`, a proxy credential) does not shadow
+    // the cookie, so the row names the same user the extractor admitted.
+    //
+    // Caching the identity is safe: the signature and expiry are facts about the
+    // token, and every reader that admits a request from the cache
+    // (`cached_identity` in the REST extractors) enforces the `cnf` sender
+    // constraint against that request's own proof; the rate-limit key reads
+    // `sender_constrained` and keys such a token on `(ip, principal)`. A request
+    // with no proof is still refused there.
+    let cookie = req.cookie(axiam_auth::carrier::ACCESS_COOKIE);
+    let authorization = req
         .headers()
         .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-    {
-        Some(header) => {
-            let header = header.trim();
-            let mut parts = header.splitn(2, char::is_whitespace);
-            let scheme = parts.next().unwrap_or("");
-            let creds = parts.next().unwrap_or("").trim();
-            // `DPoP` joins `Bearer` (RFC 9449 §7.1; #670): a sender-constrained
-            // token arrives under its own scheme, and a request carrying one was
-            // recorded as `System` with a nil tenant. The match is spelled here
-            // rather than called from `axiam_oauth2::dpop::is_dpop_scheme`
-            // because `axiam-oauth2` sits above this crate in the layering.
-            //
-            // Caching the identity is safe: the signature and expiry are facts
-            // about the token, and every reader that admits a request from the
-            // cache (`cached_identity` in the REST extractors) enforces the
-            // `cnf` sender constraint against that request's own proof; the
-            // rate-limit key reads `sender_constrained` and keys such a token on
-            // `(ip, principal)`. A request with no proof is still refused there.
-            let known =
-                scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("dpop");
-            if !known || creds.is_empty() {
-                return None;
-            }
-            creds.to_owned()
-        }
-        None => req.cookie("axiam_access")?.value().to_owned(),
-    };
+        .and_then(|h| h.to_str().ok());
+    let (_, credentials) = axiam_auth::carrier::access_token_carrier(
+        cookie.as_ref().map(|c| c.value()),
+        authorization,
+    )?;
+    let credentials = credentials.to_owned();
 
     let validated = validate_access_token(&credentials, config).ok()?;
     let user_id = Uuid::parse_str(&validated.0.sub).ok()?;

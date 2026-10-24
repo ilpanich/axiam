@@ -2,6 +2,7 @@
 //! and MFA (TOTP).
 
 pub mod attestation;
+pub mod carrier;
 pub mod client_secret;
 pub mod config;
 pub mod crypto;

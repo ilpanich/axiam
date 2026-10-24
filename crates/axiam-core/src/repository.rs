@@ -418,6 +418,39 @@ pub trait UserRepository: Send + Sync {
         pseudonym: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// [`Self::anonymize_user`], with the erasure-record marker it sets in the
+    /// same write (#689) stamped `record_stamp`, a stamp the caller chose
+    /// (#737).
+    ///
+    /// The caller arms its guard on the marker from that stamp **before** the
+    /// write, so the marker is guarded from the instant it exists, rather than
+    /// from a read-back after it: every release and settle is conditional on
+    /// the stamp, so a guard whose write never landed changes nothing.
+    ///
+    /// Unlike [`Self::anonymize_user`], it writes only an account that is
+    /// still deletion-pending, with the condition in the write (#784), and
+    /// answers whether it did: `false` means another unit erased the account
+    /// first — one that took over the claim of a unit stalled past its lease —
+    /// and nothing was written.
+    ///
+    /// The default is [`Self::anonymize_user`], ignores the stamp and answers
+    /// `true`: it is for an implementation that keeps no record marker (every
+    /// test double). One that keeps a marker overrides it — without that, a
+    /// guard armed from the stamp would never match its marker, which would
+    /// then wait out the record lease.
+    fn anonymize_user_marked(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+        record_stamp: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        let _ = record_stamp;
+        let anonymized = self.anonymize_user(tenant_id, user_id, email_hash, pseudonym);
+        async move { anonymized.await.map(|()| true) }
+    }
+
     /// Make `user_id` a directory account (G-3): the **only** writer of
     /// [`User::directory_external_id`].
     ///
@@ -643,14 +676,21 @@ pub trait RoleRepository: Send + Sync {
         scope: AssignmentScope,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Remove a role assignment from a user.
+    /// Remove a role assignment from a user, and answer whether this call
+    /// removed the edge.
+    ///
+    /// `Ok(false)` means no edge matched — it was never there, or a concurrent
+    /// unassignment removed it first. That is not an error: the end state is
+    /// the one the caller asked for. A caller that records the removal (the
+    /// erasure's `network_role.unassigned` row) writes only on `true`, so two
+    /// units racing over one edge record it once.
     fn unassign_from_user(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         role_id: Uuid,
         resource_id: Option<Uuid>,
-    ) -> impl Future<Output = AxiamResult<()>> + Send;
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 
     /// Get all roles assigned to a user (direct + via group membership).
     fn get_user_roles(
@@ -1560,6 +1600,12 @@ pub trait AuditLogRepository: Send + Sync {
     /// - `ip_address` → NULL
     /// - known PII metadata keys (`email`, `username`, `name`, etc.) → `[redacted]`
     /// - `resource_id` → nil UUID where it equals `user_id`
+    ///
+    /// Except the erasure's own record (#784): a `gdpr.user_pseudonymized` row
+    /// whose `metadata.pseudonym` is `pseudonym` names the erased account as
+    /// its actor on purpose, and carries no PII. A unit stalled past its
+    /// claim's lease that scrubs after another erased and recorded the account
+    /// leaves that row as it is.
     ///
     /// Returns the count of updated rows.
     fn pseudonymize_actor(
@@ -2521,8 +2567,38 @@ pub trait RefreshTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
-    /// Delete expired and revoked refresh tokens (garbage collection).
-    fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+    /// Delete every refresh token of a user within a tenant, revoked or not
+    /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a
+    /// re-run of the erasure is safe. The caller revokes first; this removes
+    /// the rows the revocation left.
+    ///
+    /// Returns the number of rows deleted.
+    fn delete_all_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete the refresh tokens whose `expires_at` is before `before`,
+    /// revoked or not (garbage collection).
+    ///
+    /// A **revoked row whose expiry is still ahead is kept**: a rotated token
+    /// is identified as a replay by its row (`find_rotated`, T-254), so the
+    /// row must outlive the token. The caller picks `before` as now minus the
+    /// replay-detection retention.
+    ///
+    /// Deletes **at most `limit` rows**, so a first run over a table that has
+    /// never been swept (or a long outage of the sweep) is bounded; the caller
+    /// repeats while a call returns `limit`.
+    ///
+    /// Returns the number of rows this call deleted, counted from the
+    /// `DELETE` itself: a row another replica's overlapping batch removed
+    /// first is not counted.
+    fn delete_expired(
+        &self,
+        before: DateTime<Utc>,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait FederationConfigRepository: Send + Sync {
@@ -5949,5 +6025,101 @@ mod tests {
                 .expect("the default never fails");
 
         assert_eq!(stranded, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // `anonymize_user_marked` default (#784)
+    //
+    // An implementation that keeps no record marker inherits the default: it
+    // must write through `anonymize_user` with the same identifiers and answer
+    // `true`, and a failure of that write must reach the caller unchanged.
+    // -----------------------------------------------------------------------
+
+    struct RecordingUsers {
+        calls: std::sync::Mutex<Vec<(Uuid, Uuid, String, String)>>,
+        fail: bool,
+    }
+
+    /// The methods the default under test never calls.
+    macro_rules! never_called {
+        ($($name:ident($($arg:ty),*) -> $ret:ty;)*) => {
+            $(async fn $name(&self, $(_: $arg),*) -> $ret { unreachable!() })*
+        };
+    }
+
+    impl UserRepository for RecordingUsers {
+        never_called! {
+            create(CreateUser) -> AxiamResult<User>;
+            get_by_id(Uuid, Uuid) -> AxiamResult<User>;
+            get_by_username(Uuid, &str) -> AxiamResult<User>;
+            get_by_email(Uuid, &str) -> AxiamResult<User>;
+            update(Uuid, Uuid, UpdateUser) -> AxiamResult<User>;
+            delete(Uuid, Uuid) -> AxiamResult<()>;
+            update_totp_step(Uuid, Uuid, u64) -> AxiamResult<bool>;
+            list(Uuid, Pagination) -> AxiamResult<PaginatedResult<User>>;
+            increment_failed_logins(Uuid, Uuid, u32, i64, f64, i64) -> AxiamResult<()>;
+        }
+        async fn anonymize_user(
+            &self,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            email_hash: &str,
+            pseudonym: &str,
+        ) -> AxiamResult<()> {
+            self.calls.lock().unwrap().push((
+                tenant_id,
+                user_id,
+                email_hash.to_owned(),
+                pseudonym.to_owned(),
+            ));
+            if self.fail {
+                Err(AxiamError::Internal("write refused".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    #[test]
+    fn the_default_marked_anonymisation_delegates_and_answers_true() {
+        let repo = RecordingUsers {
+            calls: Default::default(),
+            fail: false,
+        };
+        let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+        let wrote = block_on(repo.anonymize_user_marked(tenant, user, "h", "p", Utc::now()))
+            .expect("the default does not fail");
+        assert!(
+            wrote,
+            "the default has no marker to lose, so it always wrote"
+        );
+        assert_eq!(
+            *repo.calls.lock().unwrap(),
+            vec![(tenant, user, "h".to_owned(), "p".to_owned())]
+        );
+    }
+
+    #[test]
+    fn the_default_marked_anonymisation_surfaces_a_failed_write() {
+        let repo = RecordingUsers {
+            calls: Default::default(),
+            fail: true,
+        };
+        let outcome = block_on(repo.anonymize_user_marked(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "h",
+            "p",
+            Utc::now(),
+        ));
+        assert!(matches!(outcome, Err(AxiamError::Internal(_))));
+        assert_eq!(repo.calls.lock().unwrap().len(), 1);
     }
 }

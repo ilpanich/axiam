@@ -42,6 +42,9 @@ samael = { workspace = true, optional = true }
 flate2 = { workspace = true }
 x509-parser = { workspace = true }
 pem = { workspace = true }
+# ES256 signing of the Apple client secret with a secret key; see the module
+# docs of src/apple.rs for why not jsonwebtoken (RUSTSEC-2026-0387).
+ring = { workspace = true }
 # XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005): raw-XML
 # introspection to bind the verified <ds:Signature> Reference to the
 # consumed Assertion. Already resolved transitively via samael's `xmlsec`

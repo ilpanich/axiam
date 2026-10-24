@@ -351,6 +351,30 @@ record back still saves. A client an administrator created (`managed_by: admin`)
 is not bounded; to give an application such a grant, register it through the
 admin API.
 
+Two more members are bounded by the same rule (#746). An `allowed_resources`
+entry outside the tenant's `external_client_allowed_resources` answers `422
+resource_exceeds_registration_policy`, and a `redirect_uris` entry its
+registration would refuse answers `422 redirect_exceeds_registration_policy`.
+Which rule applies follows the row's `managed_by` (#768):
+
+- a `dcr` row: the host must be in `dcr_allowed_redirect_hosts` (the loopback
+  hosts are always inside);
+- a `cimd` row: the URI must pass the tenant's CIMD policy, the same function
+  that validates a client's metadata document. That is `https`, or `http` on a
+  loopback host; no fragment; a host in `cimd.trusted_redirect_domains`
+  (loopback always allowed); and, while `cimd.restrict_same_domain` is on (the
+  default), the host of the client's own `client_id` URL. `dcr_allowed_redirect_hosts`
+  plays no part for a `cimd` row. See
+  [Client ID Metadata Documents](client-id-metadata-documents.md).
+
+Both name the offending entries in the message and leave the row unchanged.
+As for scopes and grants, a resource or redirect URI the row already holds is
+not counted, so a policy that has narrowed since registration does not strand
+an otherwise editable client; an administrator-managed client is not bounded.
+A `cimd` row's `redirect_uris` are in any case replaced from the document on
+its next fetch, so an edit lasts at most one cache period
+(`cimd.max_cache_secs`).
+
 **Rotation.** A successful `PUT` returns a new token and the old one stops
 working in the same database statement. Of two concurrent updates with one
 token, one succeeds and the other gets `401`. A refused update rotates nothing.

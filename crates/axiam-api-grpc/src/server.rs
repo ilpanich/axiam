@@ -65,7 +65,7 @@ use crate::config::GrpcConfig;
 use crate::middleware::auth::AuthInterceptor;
 use crate::middleware::drain_rejected::DrainRejectedBodyLayer;
 use crate::middleware::rate_limit::{
-    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
+    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer,
 };
 use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
@@ -296,7 +296,7 @@ where
     // extractor (both ultimately key off GrpcTrustedHopsKeyExtractor logic)
     // so a rotating XFF cannot mint a fresh bucket in one layer while being
     // correctly collapsed in the other.
-    let trusted_hops = trusted_hops_from_env();
+    let trusted_hops = axiam_core::forwarded_for::configured_trusted_hops();
     // Built exactly ONCE per process: this constructs the write-behind
     // `SharedRateLimitCounter` (and spawns its single background flusher on
     // this runtime). Cloning the LAYER is fine — the counter inside is an

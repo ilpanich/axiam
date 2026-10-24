@@ -407,7 +407,19 @@ impl Drop for Landing {
 impl CaSlot {
     /// The cached list, if it was signed over exactly `digest` and is not yet
     /// due for its refresh.
-    fn fresh(&self, digest: &[u8; 32], now: DateTime<Utc>) -> Option<PublishedCrl> {
+    ///
+    /// A named instant (`follow_clock` false) is served only a list whose
+    /// `thisUpdate` is not later than it (#666). The wall clock is not held to
+    /// that: `thisUpdate` follows the datastore-clocked revocation date, which
+    /// may lead the replica's clock, and refusing the list it has just cached
+    /// would re-sign (or answer `503`) on every request until the clocks
+    /// agree (#736).
+    fn fresh(
+        &self,
+        digest: &[u8; 32],
+        now: DateTime<Utc>,
+        follow_clock: bool,
+    ) -> Option<PublishedCrl> {
         let published = self
             .published
             .lock()
@@ -416,7 +428,7 @@ impl CaSlot {
             .as_ref()
             .filter(|cached| {
                 cached.entries_digest == *digest
-                    && cached.crl.this_update <= now
+                    && (follow_clock || cached.crl.this_update <= now)
                     && now < cached.refresh_at
             })
             .map(|cached| cached.crl.clone())
@@ -623,7 +635,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
         }));
 
         let slot = self.slot(ca.id);
-        if let Some(crl) = slot.fresh(&digest, now) {
+        if let Some(crl) = slot.fresh(&digest, now, follow_clock) {
             return Ok(crl);
         }
         self.resign(slot, ca, digest, now, follow_clock).await
@@ -676,7 +688,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                 Turn::Lead(landing) => {
                     // A flight that landed between this request's look at the
                     // cache and its claim may have left exactly this list.
-                    if let Some(crl) = slot.fresh(&digest, now) {
+                    if let Some(crl) = slot.fresh(&digest, now, follow_clock) {
                         landing.land(Ok(crl.clone()));
                         return Ok(crl);
                     }
@@ -719,6 +731,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                         } else {
                             now
                         },
+                        follow_clock,
                     ) {
                         return Ok(crl);
                     }

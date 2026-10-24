@@ -9,7 +9,7 @@
 # references are NOT repeated here: each is read from the `${BENCH_*_IMAGE:-default}`
 # line of the compose file that owns it, so a pin bumped in a compose file is
 # the pin this script pulls. Anything already exported (BENCH_KEYCLOAK_IMAGE=
-# keycloak/keycloak:26.8.0 on a host that cannot reach quay.io, say) wins, and is
+# keycloak/keycloak:26.8.1 on a host that cannot reach quay.io, say) wins, and is
 # what gets pulled and recorded.
 #
 # A failed pull is a hard error, on purpose: `bench-up` falls back to a LOCAL SOURCE

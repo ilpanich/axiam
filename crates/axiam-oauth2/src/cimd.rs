@@ -430,48 +430,8 @@ pub fn validate(
     }
     let client_host = client_id.host_str().unwrap_or_default().to_owned();
     for uri in &doc.redirect_uris {
-        let parsed = Url::parse(uri).map_err(|_| {
-            CimdError::Refused(format!("redirect_uri {uri:?} is not a valid absolute URI"))
-        })?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| {
-                CimdError::Refused(format!("redirect_uri {uri:?} has no host component"))
-            })?
-            .to_owned();
-        let loopback = is_loopback_host(&host);
-        match parsed.scheme() {
-            "https" => {}
-            // RFC 8252 §7.3. A loopback callback never leaves the machine the
-            // person is sitting at, which is why every desktop MCP client uses
-            // one and why plaintext on it is not a transport exposure.
-            "http" if loopback => {}
-            other => {
-                return Err(CimdError::Refused(format!(
-                    "redirect_uri {uri:?} uses scheme {other:?}: a CIMD client's callback must \
-                     be https, or http on a loopback host (RFC 8252 section 7.3)"
-                )));
-            }
-        }
-        if parsed.fragment().is_some() {
-            return Err(CimdError::Refused(format!(
-                "redirect_uri {uri:?} carries a fragment, which RFC 6749 section 3.1.2 forbids"
-            )));
-        }
-        if !redirect_host_is_allowed(&cimd.trusted_redirect_domains, &host) {
-            return Err(CimdError::Refused(format!(
-                "the host {host:?} is not one this tenant accepts a CIMD redirect for; an \
-                 administrator sets cimd.trusted_redirect_domains (loopback is always allowed)"
-            )));
-        }
-        // The same-domain rule, which is why the desktop profiles turn it off:
-        // a loopback callback can never share a host with an `https` client_id.
-        if cimd.restrict_same_domain && !host.eq_ignore_ascii_case(&client_host) {
-            return Err(CimdError::Refused(format!(
-                "redirect_uri {uri:?} is on {host:?}, and this tenant requires every redirect \
-                 to be on the client_id's own host ({client_host:?}). A client with a loopback \
-                 callback needs cimd.restrict_same_domain off"
-            )));
+        if let Some(reason) = redirect_uri_refusal(cimd, &client_host, uri) {
+            return Err(CimdError::Refused(reason));
         }
     }
 
@@ -618,6 +578,60 @@ pub fn validate(
             ciba: Default::default(),
         },
     })
+}
+
+/// Why `uri` may not be a redirect URI of a CIMD client whose `client_id` lives
+/// on `client_host`, or `None` when the tenant's CIMD policy admits it.
+///
+/// The one rule for a CIMD client's callbacks: `https`, or `http` on a loopback
+/// host; no fragment; a host in `cimd.trusted_redirect_domains` (loopback always
+/// allowed); and, while `cimd.restrict_same_domain` is on, the `client_id`'s own
+/// host. [`validate`] applies it to a fetched document and the administrator
+/// `PUT` applies it to a `managed_by: cimd` row (#768), so the two cannot
+/// disagree.
+pub fn redirect_uri_refusal(cimd: &CimdPolicy, client_host: &str, uri: &str) -> Option<String> {
+    let parsed = match Url::parse(uri) {
+        Ok(p) => p,
+        Err(_) => return Some(format!("redirect_uri {uri:?} is not a valid absolute URI")),
+    };
+    let Some(host) = parsed.host_str().map(str::to_owned) else {
+        return Some(format!("redirect_uri {uri:?} has no host component"));
+    };
+    let loopback = is_loopback_host(&host);
+    match parsed.scheme() {
+        "https" => {}
+        // RFC 8252 §7.3. A loopback callback never leaves the machine the
+        // person is sitting at, which is why every desktop MCP client uses
+        // one and why plaintext on it is not a transport exposure.
+        "http" if loopback => {}
+        other => {
+            return Some(format!(
+                "redirect_uri {uri:?} uses scheme {other:?}: a CIMD client's callback must \
+                 be https, or http on a loopback host (RFC 8252 section 7.3)"
+            ));
+        }
+    }
+    if parsed.fragment().is_some() {
+        return Some(format!(
+            "redirect_uri {uri:?} carries a fragment, which RFC 6749 section 3.1.2 forbids"
+        ));
+    }
+    if !redirect_host_is_allowed(&cimd.trusted_redirect_domains, &host) {
+        return Some(format!(
+            "the host {host:?} is not one this tenant accepts a CIMD redirect for; an \
+             administrator sets cimd.trusted_redirect_domains (loopback is always allowed)"
+        ));
+    }
+    // The same-domain rule, which is why the desktop profiles turn it off:
+    // a loopback callback can never share a host with an `https` client_id.
+    if cimd.restrict_same_domain && !host.eq_ignore_ascii_case(client_host) {
+        return Some(format!(
+            "redirect_uri {uri:?} is on {host:?}, and this tenant requires every redirect \
+             to be on the client_id's own host ({client_host:?}). A client with a loopback \
+             callback needs cimd.restrict_same_domain off"
+        ));
+    }
+    None
 }
 
 /// The three hosts RFC 8252 §7.3 contemplates for a native application's

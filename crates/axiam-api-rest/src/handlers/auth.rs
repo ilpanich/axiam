@@ -449,6 +449,8 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     tag = "auth",
     request_body = LoginRequest,
     responses(
+        (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
+        (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
         (status = 200, description = "Login successful", body = LoginSuccessResponse),
         (status = 202, description = "MFA challenge required", body = MfaRequiredResponse),
         (status = 403, description = "MFA setup required", body = MfaSetupRequiredResponse),
@@ -1394,7 +1396,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
 /// current session is preserved (D-14, D-15).
 ///
 /// Returns 204 on success, 401 on wrong current password, 422 on policy
-/// violation.
+/// violation, 503 when the password-hash gate is saturated.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/password/change",
@@ -1404,6 +1406,8 @@ pub async fn reset_mfa<C: Connection + Clone>(
         (status = 204, description = "Password changed; other sessions revoked"),
         (status = 401, description = "Wrong current password or unauthenticated"),
         (status = 422, description = "New password violates policy"),
+        (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
+        (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
     ),
     security(("bearer" = []))
 )]

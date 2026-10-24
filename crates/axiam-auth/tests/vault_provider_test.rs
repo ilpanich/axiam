@@ -148,11 +148,11 @@ async fn a_rejected_token_is_an_error_not_an_absence() {
         .to_string();
     assert!(
         err.contains("403"),
-        "the status belongs in the message: {err}"
+        "the status belongs in the message (text withheld)"
     );
     assert!(
         err.contains("policy") || err.contains("mount"),
-        "and a hint at the cause: {err}"
+        "and a hint at the cause (text withheld)"
     );
 }
 
@@ -209,7 +209,10 @@ async fn a_malformed_key_in_vault_is_an_error() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains(OPAQUE_SETUP_KEY), "{err}");
+    assert!(
+        err.contains(OPAQUE_SETUP_KEY),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -226,7 +229,10 @@ async fn the_token_never_appears_in_an_error_message() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(!err.contains("test-token"), "{err}");
+    assert!(
+        !err.contains("test-token"),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -275,9 +281,12 @@ async fn assert_redirect_refused(vault: &MockServer, elsewhere: &MockServer, err
     let host = reqwest::Url::parse(&vault.uri()).unwrap();
     assert!(
         err.contains("redirect") && err.contains(host.host_str().unwrap()),
-        "the refusal names the host that redirected: {err}"
+        "the refusal names the host that redirected (text withheld)"
     );
-    assert!(!err.contains("test-token"), "{err}");
+    assert!(
+        !err.contains("test-token"),
+        "vault refusal text did not match (withheld)"
+    );
     assert_eq!(vault.received_requests().await.unwrap().len(), 1);
     assert!(
         elsewhere.received_requests().await.unwrap().is_empty(),
@@ -375,9 +384,18 @@ async fn a_vault_that_never_answers_fails_within_the_bound_naming_the_host_and_n
         "the bound did not hold: {took:?}"
     );
     let host = reqwest::Url::parse(&server.uri()).unwrap();
-    assert!(err.contains(host.host_str().unwrap()), "{err}");
-    assert!(err.contains("timed out"), "{err}");
-    assert!(!err.contains("test-token"), "{err}");
+    assert!(
+        err.contains(host.host_str().unwrap()),
+        "vault refusal text did not match (withheld)"
+    );
+    assert!(
+        err.contains("timed out"),
+        "vault refusal text did not match (withheld)"
+    );
+    assert!(
+        !err.contains("test-token"),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[test]

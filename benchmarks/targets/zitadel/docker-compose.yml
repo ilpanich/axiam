@@ -5,7 +5,7 @@
 # falls back to client_credentials (handled in scenarios/lib/targets.js). TLS mode
 # is controlled by ZITADEL_TLS_* set by the runner from the security profile.
 #
-# Pinned to Zitadel v4.19.4 (see the image line). The OIDC endpoints the adapter uses
+# Pinned to Zitadel v4.19.5 (see the image line). The OIDC endpoints the adapter uses
 # (/oauth/v2/token, /oauth/v2/introspect, /oauth/v2/keys, /oidc/v1/userinfo) are
 # standard discovery paths unchanged from v2; `start-from-init`, the masterkey
 # flag, and the ZITADEL_DATABASE_*/EXTERNAL* env are all still valid in v4. v4
@@ -15,8 +15,8 @@ name: bench-zitadel
 
 services:
   zitadel:
-    # Pinned to Zitadel v4.19.4 (run 6). Override with BENCH_ZITADEL_IMAGE.
-    image: ${BENCH_ZITADEL_IMAGE:-ghcr.io/zitadel/zitadel:v4.19.4}
+    # Pinned to Zitadel v4.19.5 (run 6; re-pinned 2026-10-22, was v4.19.4). Override with BENCH_ZITADEL_IMAGE.
+    image: ${BENCH_ZITADEL_IMAGE:-ghcr.io/zitadel/zitadel:v4.19.5}
     container_name: bench-zitadel
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}

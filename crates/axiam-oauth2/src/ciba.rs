@@ -830,6 +830,12 @@ pub const DEFAULT_REQUESTS_PER_CLIENT_HINT: u32 = 3;
 /// expiry still cannot hold more open requests for one hint than the allowance.
 pub const HINT_CAP_WINDOW_SECS: u64 = MAX_REQUESTED_EXPIRY_SECS;
 
+/// The endpoint prefix of the hint cap's keys in the shared counter's
+/// `{endpoint}:{key}` space. A `const`, so that
+/// `rate_limit_bucket_names_test` reads it and checks it against every
+/// middleware bucket name (#735).
+const HINT_CAP_BUCKET: &str = "ciba_hint_cap";
+
 /// What a hint names, as the cap counts it and the lookup reads it: a
 /// `login_hint` as sent (already trimmed), or a verified `id_token_hint`'s
 /// subject. Computed without looking anyone up.
@@ -920,7 +926,10 @@ enum HintName {
 /// above still assumes that the replicas serving the cap agree with the
 /// datastore to within the sweep's margin (one minute): a reader whose clock
 /// runs further ahead may find the previous window's row already swept and read
-/// it as zero, and the stretch may then admit up to twice the allowance.
+/// it as zero, and the stretch may then admit up to twice the allowance. The
+/// datastore's clock is one clock for the shipped single-node SurrealDB; a
+/// clustered SurrealDB evaluates `time::now()` on whichever compute node runs
+/// the statement, so the margin must also cover the skew between its nodes.
 #[derive(Clone)]
 pub struct CibaHintCap {
     store: std::sync::Arc<dyn axiam_db::SharedRateLimitStore>,
@@ -1003,7 +1012,7 @@ impl CibaHintCap {
                 value.as_bytes(),
             ],
         );
-        format!("ciba_hint_cap:{tenant_id}:{}", hex::encode(mac))
+        format!("{HINT_CAP_BUCKET}:{tenant_id}:{}", hex::encode(mac))
     }
 
     /// Count this call, decide, and take the count back if it is refused: the

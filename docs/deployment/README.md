@@ -226,6 +226,90 @@ dependency bump that makes the name available.
 |---|---|
 | `AXIAM__DB__ALLOW_MEMORY_ENGINE` | **Development only.** `true` lets the server start against a positively-identified `memory` datastore instead of refusing. Never set it in a deployment; single-use redemption is not guaranteed when it is honoured. Unset (the default) fails closed. |
 
+## Schema migrations at startup
+
+Every replica runs the schema migrations when it starts, before it serves a
+request. Replicas started together do not migrate at the same time: the first
+takes a **lease** on the datastore (the row `_migration_lock:startup`, five
+minutes on the datastore's clock, refreshed every minute while it migrates)
+and the others wait, logging `Another instance holds the migration lease;
+waiting for it`, then find the migrations recorded and start. A rolling update
+or a scale-out from zero needs no special ordering (#755), **provided the
+orchestrator gives a starting replica time to wait**: the HTTP listener, and
+with it `/health`, is bound only after the migrations, so a replica that is
+waiting for the lease, or migrating, answers no probe. In the logs such a
+replica shows the `waiting for it` line above and nothing more, up to five
+minutes behind a dead holder and longer behind a long migration. The shipped
+`k8s/server/deployment.yml` therefore carries a `startupProbe` on `/health`
+(10 s period, 60 failures, ten minutes) that holds the liveness probe back until
+the server is up; without it, the liveness probe (30 s delay, three failures)
+kills the waiting replica after about 90 s and it restarts into
+`CrashLoopBackOff` until the row expires. Another orchestrator needs the same
+allowance, and a datastore whose migrations run longer than ten minutes needs
+the shipped `failureThreshold` raised.
+
+- A replica that dies while migrating leaves its lease behind; the next
+  replica takes it over once it has expired, at most five minutes later. Each
+  migration is one transaction, so nothing is half applied. The same holds for
+  a `SIGTERM` (or a kill) that reaches a replica while it holds the lease: no
+  signal handler runs before the HTTP server exists, so the row is left behind
+  and expires like a dead holder's.
+- "The datastore's clock" is one clock for the shipped single-node SurrealDB.
+  A clustered SurrealDB evaluates `time::now()` on whichever node runs each
+  statement, so the lease excludes only while the skew between nodes stays under
+  about four minutes (its lifetime less one refresh); past that, the tolerance
+  below still keeps the outcome correct.
+- A replica that stalls past the lease's lifetime without dying can overlap
+  with its successor. The runner tolerates that case too: a migration the
+  other replica recorded first is logged as applied by another instance, and
+  the boot continues.
+- The lease row left by a 1.1.1 or older binary (no holder, no expiry) is read
+  as stale and replaced. A 1.1.1
+  replica still running during a rolling update ignores the lease and removes the
+  row when it finishes, even a 1.1.2 holder's. That costs nothing from 1.1.1 to
+  1.1.2, which adds no migration; a 1.1.2 holder whose lease disappears logs it
+  and carries on.
+- A migration missing **below** the newest one recorded — a datastore that
+  ran a branch build — is applied late, with a `WARN`, only if it is
+  additive (every statement a `DEFINE … IF NOT EXISTS`). Otherwise the replica
+  refuses to start with an error naming the version, because a backfill, a
+  `REMOVE` or an older `OVERWRITE` run after its successors would undo them;
+  resolve that gap by hand (#729; the procedure is
+  [below](#recovering-from-a-refused-migration-gap)). A released build never
+  leaves such a gap.
+
+### Recovering from a refused migration gap
+
+The boot error reads `Migration vN 'name' is not recorded but vM is, and vN is
+not additive …`. The replica has changed nothing and released its lease; no
+other migration was applied. Work through these in order:
+
+1. **Inspect.** `SELECT version, name, applied_at FROM _migration ORDER BY
+   version;` shows what the datastore recorded; compare it with the binary's
+   list (the `SCHEMA_V*` constants and `MIGRATIONS` in
+   `crates/axiam-db/src/schema.rs`). vN is the version the error names; the
+   datastore ran a branch build that skipped it. Read vN's statements.
+2. **If vN's effect is already in place** (a later migration redefined or
+   overwrote the same objects, or its backfill's target rows have since been
+   changed by the application or by a later migration), do not run it. Record
+   it, so the runner stops asking, and decide separately whether any data needs
+   repairing:
+   `CREATE _migration SET version = N, name = '<name from the error>';`
+   (`applied_at` defaults to now; the table's only other fields are `version`
+   and `name`, as `MIGRATION_TABLE_DDL` defines them).
+3. **If vN's effect is missing** and its statements are safe to run now (they
+   define an object nothing else defines, or backfill rows nothing has touched
+   since), run vN's statements by hand in one transaction together with the
+   `CREATE _migration` above, so that a failure records nothing.
+4. **Otherwise, restore** the backup taken before the branch build, and start
+   the release binary against it. Never run a backfill or a `REMOVE` over data
+   written after its successors: that is what the refusal protects.
+
+Start the replicas again afterwards; the runner finds every version recorded and
+boots. If you cannot tell which case applies, take step 4 and ask.
+
+**Migration v109 on a development datastore.** A development datastore that applied migration v109 before commit `7a9b002c` has v109 recorded without the `dpop_jkt` field and fails closed on DPoP-bound refresh; re-run the migration by deleting the v109 record (`DELETE _migration WHERE version = 109;`) and restarting the server.
+
 ## Required secrets & environment
 
 All AXIAM configuration keys use a **double underscore** after the `AXIAM`
@@ -886,7 +970,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` | Max `POST …/email-config/test` requests per minute per IP, on each of the organization and tenant routes (default `10`). The delivery self-test connects to the effective email provider and mails the caller; the limit bounds how fast an administrator, or a stolen administrator token, can use it to resolve names and time connections. One bucket per route. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Email providers: where they may connect](#email-providers-where-they-may-connect). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
-| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on logs one `WARN` at boot saying so. An entry that does not parse stops the boot. Both listeners (REST and gRPC) read it. See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
+| `AXIAM__RATE_LIMIT__TRUSTED_PROXIES` | The proxies whose `X-Forwarded-For` is read at all: CIDR blocks or addresses, comma-separated (default empty), e.g. `10.42.0.0/16`. A request whose transport peer is inside the list is keyed under `TRUSTED_HOPS` as above; **every other request is keyed on its peer**, whatever it wrote. **`none`** (case-insensitive, the whole value): no proxy sits in front, so no peer's header is read and every request is keyed on its peer on both listeners, audit rows included; it draws no boot `WARN`, and `none` beside other entries stops the boot. Empty: every peer's header is read, as before 1.1.1, and a server with native TLS on (either listener) logs one `WARN` at boot saying so. An entry that does not parse, or a value that is not valid UTF-8, stops the boot (#732; the bytes are not echoed). Both listeners (REST and gRPC) read it. **Audit rows follow the same rule** (#752): the request row's `ip_address`, the `ip_address` of the handlers' own rows (except the deliberately peer-only rows below) and the `http.client_ip` log field are the address the limiters key on — the peer unless it is listed, then the rightmost untrusted hop — and the request row's `metadata.forwarded_for_claimed` keeps the leftmost `X-Forwarded-For` entry as the caller wrote it when that differs. **Every `X-Forwarded-For` field line is read** (#796): repeated lines are one list, joined in the order received (RFC 9110 §5.3), so a proxy that adds its own line rather than appending to the client's (HAProxy's `option forwardfor`) is read through its line; a header with a line that is not visible ASCII is treated as absent, and the peer is used. **Exception (SEC-087):** the rows written by the OAuth2 token, CIBA, SAML IdP and SAML SLO handlers (`handlers/oauth2.rs`, `handlers/ciba.rs`, `handlers/saml_idp.rs`, `handlers/saml_idp_slo.rs`) record the transport peer in `ip_address` whatever `TRUSTED_PROXIES` says, because a caller cannot forge it (amended 2026-10-23, R112-13). See [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) (#711, T-212). |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
 | `AXIAM__RATE_LIMIT__PROFILE` | Deployment posture preset: `internet` (default — the shipped values above, unchanged) \| `gateway` \| `mesh`. Sets the machine-traffic family (key mode, token/introspect/revoke/authz, device login, and the gRPC authz ceiling) coherently in one variable; never changes the human endpoints. See [Sizing your rate limits](rate-limit-sizing.md). |
 | `AXIAM__RATE_LIMIT__SHARED` | Enables (`on`, default) or disables (`off`) the cross-replica shared counter. `off` is a **single-replica escape hatch**: it skips the shared layer entirely (no state, no store call, no flusher) and leaves the per-replica in-memory `Governor` as the sole limiter. Do not set `off` behind an HPA/multiple replicas — it re-opens the N× effective-limit multiplication the shared counter exists to close. |
@@ -933,7 +1017,7 @@ the socket peer. Therefore:
 
 | Topology | Header the server sees | Value |
 |---|---|---|
-| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; list the proxies in `TRUSTED_PROXIES` — see below |
+| Direct, no proxy (or a layer-4 pass-through) | whatever the caller wrote, if anything — nothing appends to it | any; set `TRUSTED_PROXIES=none` (no proxy is trusted; every request is keyed on its peer) — see below |
 | `k8s/ingress.yml` — ingress-nginx → server | `<client>` | **`0`** |
 | Compose/Pi — Caddy → server | `<client>` | **`0`** |
 | Caddy → frontend nginx → server | `<client>, <caddy>` | **`1`** |
@@ -958,13 +1042,22 @@ controller's pods, Caddy's container network): their requests are keyed under
 `TRUSTED_HOPS` exactly as before, and a request from any other peer is keyed on
 that peer, whatever it wrote — so the direct client chooses nothing.
 
+With **no proxy at all** — a direct connection, or a layer-4 pass-through —
+there is nothing to list: set `AXIAM__RATE_LIMIT__TRUSTED_PROXIES=none`. No
+peer's header is read, every request is keyed on its own address on the REST
+and the gRPC listener, and audit rows record that address (the claimed header
+still lands in `forwarded_for_claimed`). Unlike the empty default it states the
+topology, so the boot `WARN` is not emitted. (Before 1.1.2 the only way to say
+this was a placeholder entry no peer matches.)
+
 Left empty (the default), every peer's header is read, which is what the server
 did before the setting existed. It stays the default because the server cannot
 tell a re-encrypting proxy from a direct client without it: the shipped
 Kubernetes topology runs native TLS behind ingress-nginx, and keying every
 native-TLS peer on itself would collapse its clients into the ingress's bucket.
-A server with native TLS on and the list empty therefore logs one `WARN` at
-boot naming the variable. Even with the list set, do not expose the listener to
+A server with native TLS on — the REST listener, the gRPC listener, or both —
+and the list empty therefore logs one `WARN` at boot naming the variable and
+each listener that terminates TLS. Even with the list set, do not expose the listener to
 the internet without the appending proxy: a client that reaches it directly is
 limited per address, not per proxy-reported client, and every route is served
 there. Where a client must reach it directly — the FreeRADIUS recipe's Live
@@ -1930,9 +2023,9 @@ finished rather than wait for it:
   within the same bound, and cuts it there. Each has a point of no return — the
   erasure's anonymization of the account, the purge's removal of the tenant
   row — after which no later sweep finds the work again. Before it, the work
-  gives itself up as soon as the stop begins: the account stays due, the tenant
-  stays deleted and its purge claim is released, so the next start does the
-  work at once; once the stop has begun it starts no new crossing (a crossing
+  gives itself up as soon as the stop begins: the account stays due and its
+  erasure claim is released, the tenant stays deleted and its purge claim is
+  released, so the next start does the work at once; once the stop has begun it starts no new crossing (a crossing
   already being sent completes). So a stop
   can leave unfinished only:
   - an erasure or a tenant purge that crossed its point of no return **before**
@@ -1943,37 +2036,44 @@ finished rather than wait for it:
     that did not answer the handful of statements left in the whole window after
     the stop began (5 to 18 s for `SIGTERM`, 2 to 13 s after a lost lease). The log
     says `an erasure or tenant purge that had passed its point of no return did
-    not reach its audit row in time`. The erasure, or the purge,
-    stands (an erasure's proof too, unless it was cut before the proof: see
-    the list below), and **the next start writes the row** (#689, schema v108): the point
+    not reach its audit row in time`. The erasure and its proof, or the
+    purge, stand, and **the next start writes what the work still owed** (#689,
+    schema v108; #737, 1.1.2): the point
     of no return leaves a marker in its own transaction —
     `user.erasure_audit_pending` on the erased account, a `tenant_purge_pending`
     row keyed by the tenant id — which the work clears with its row, and the
     first GDPR purge sweep and tenant purge sweep of the next start, on any
     replica, write what a marker still stands for, once. For a tenant purge
     that is the row the cut purge would have written (the marker keeps its
-    export time and counts); for an erasure it carries the pseudonym, `recovered:
+    export time and counts). For an erasure the sweep redoes the erasure's tail
+    in its order: the erasure proof, unless the account has one (a cut before
+    the proof leaves none); the second certificate revocation of #668, which
+    is idempotent; then the row, which carries the pseudonym, `recovered:
     true` and `certificates_revoked: null` (the count was the cut purge's alone),
     and the deletion request is completed in the same transaction as the marker
-    is cleared. A row the cut work had already written is found and not written
-    again. The log says `recorded an erasure whose unit was cut before its
-    record` or `recorded a tenant purge whose unit was cut before its record`.
+    is cleared — never before the proof is written and that revocation has
+    run: a failure of either leaves the marker to the next sweep. An erasure
+    whose proof fails to write fails its tick and releases its marker, so the
+    next sweep finishes it the same way. A row the cut work had already written
+    is found and not written again. The log says `recorded an erasure whose
+    unit was cut before its record` (with `wrote the erasure proof of an
+    erasure cut before it` when the proof was missing) or `recorded a tenant
+    purge whose unit was cut before its record`.
     The marker is the next start's at once when the cut work's drop guard
-    released it; when the release was not written — a `SIGKILL`, or a unit cut
+    released it — an erasure arms that guard from the stamp it writes, before
+    its anonymization, so this holds from the anonymization on; when the
+    release was not written — a `SIGKILL`, or a unit cut
     at the teardown's bound, whose guard releases the marker from a spawned task
     that the process exit may cancel — it is left to the one-hour lease, after
     which any replica's sweep records it. A row dead-lettered by the cut work (the datastore refused it)
     is not in the datastore, so the sweep writes it there too: replay the
     dead-letter file with that in mind;
-  - an erasure cut between its anonymization and its erasure proof: the
-    recovery writes the record and completes the request, but it writes no
-    proof and does not repeat the second certificate revocation of #668, and
-    the unit's marker guard is armed only after the proof, so a cut before it
-    leaves the marker to the one-hour lease and not to the next start. The
-    erasure is complete as far as the account is concerned; what can be
-    missing is the proof and, for a certificate bound to the account in that
-    window, one revocation (an administrator revokes it by id). Open as
-    #737, for 1.1.2;
+    (Amended 2026-10-22, #737: until 1.1.2 this list had one more item — an
+    erasure cut between its anonymization and its erasure proof was recorded
+    and its request completed with no proof, without the second revocation,
+    and only after the one-hour lease, because the marker's guard was armed
+    after the proof. The recovery now writes both, and the guard is armed
+    before the anonymization);
   - a data export cut after it was marked ready and before its mail was queued:
     a download nobody was told about, which expires after 24 h.
 
@@ -1991,6 +2091,32 @@ finished rather than wait for it:
   records it once. (Corrected 2026-10-19, #714: before 1.1.1 a cut while the
   orphan purge read whether rows were left held the id for the lease, and could
   record an id another replica had already purged a second time.)
+  Every replica runs the GDPR purge sweep too, and an erasure is claimed the
+  same way (#738, 1.1.2): before its first destructive step the erasure takes
+  an exclusive claim on the account — on its deletion request
+  (`purge_claimed_at`), or, for an account deletion-pending without one, a
+  stamp on the user row — and another replica's sweep that read the same
+  account skips it without an error, so the account is erased once and its SSF
+  `account_purged` goes out once. The claim is released on every exit before
+  the anonymization (a failure, the stop, a cut or a panic), so the next sweep
+  takes the account at once; only a release that is not written — a
+  `SIGKILL`, or a unit cut at the stop's bound — leaves it to the one-hour
+  lease, after which any replica's sweep takes it over. A released claim still
+  refuses a cancel: the steps before the anonymization revoke what a cancel
+  does not restore. A unit that stalled past the lease and then runs on finds
+  the account no longer deletion-pending and stops before its audit scrub,
+  writing nothing; the log says `another unit erased it`. One that stalls
+  between that read and the scrub runs the scrub — which never touches the
+  erasure's own `gdpr.user_pseudonymized` row — and stops at the
+  anonymization, which writes only a deletion-pending account, before
+  `account_purged`; the log says `erased by another unit`. Either way the
+  account is anonymized once and `account_purged` goes out once. (Corrected
+  2026-10-22, #738: before 1.1.2 two sweeps that read one due account both ran
+  its erasure; the record stayed single, but the SSF notification went out
+  twice and the later unit failed its tick on the proof. Corrected 2026-10-23,
+  #784: until then a unit stalled past the lease re-ran the scrub, which nilled
+  the actor of its successor's record, anonymized the account again and sent
+  `account_purged` a second time.)
   (Corrected 2026-10-15, #655 and #624: before 1.1.0 the cut reached the
   erasure and the purge wherever they were, so an erasure cut between the
   anonymization and its audit row lost the row, a cut purge held its tenant for
@@ -2026,6 +2152,36 @@ broker never carried them. What the profile changes for audit — the terminal
 rows of deliveries lost on restart, external audit ingestion — is reviewed path
 by path in
 [`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
+
+#### The refresh-token sweep (`oauth2_refresh_token`)
+
+The cleanup task's `oauth2_refresh_token` job (on `GET /health/jobs`, run at the
+cleanup interval by every replica) deletes the OAuth2 refresh-token rows whose
+`expires_at` is more than **seven days** in the past, revoked or not
+(`REFRESH_REPLAY_RETENTION`, #753, 1.1.2). The cutoff is the expiry, not the
+revocation: a rotated token is recognised as a replay by its row (T-254), so a
+revoked or rotated row whose expiry is still ahead is kept, and a token that
+lapsed a week ago can no longer be redeemed or tell the session anything it
+does not already carry. The table is therefore bounded by the refresh-token
+lifetime plus a week. A run deletes at most 5 000 rows (10 batches of 500) and
+the next tick continues, so the first run after an upgrade, which finds every row
+expired since the deployment began, takes as many ticks as the backlog needs and
+delays no other job; it runs after `vault_revocation`, `tenant_purge` and
+`certificate_retention` in the tick (R112W1-02, #781). That week is also the bound on what is **recorded**
+(R112W1-04, #783): a replay of a rotated token is audited as
+`oauth2.refresh_token_replayed` only while its row exists, so on a `standard`
+client until the row's expiry (issuance plus the refresh lifetime, 30 days by
+default) plus seven days, and on a `fapi2` client, whose rotated row is
+retired after the 60-second grace, for seven days and sixty seconds after
+rotation. A later replay is refused exactly as before (`invalid_grant`) but
+leaves no session marker and no audit row (T-254). A GDPR erasure deletes the user's rows outright, after
+revoking them, as erasure step (a), before the point of no return, so an erasure
+that was cut after the anonymization has them gone already and its recovery
+(which redoes the proof, the second revocation and the record, not step (a))
+needs no more. The step itself is idempotent. (Corrected 2026-10-22, #753: before 1.1.2
+the erasure revoked a user's rows and nothing deleted any, so they stayed, with
+`user_id`, `client_id`, the scopes and the DPoP key thumbprint, until the tenant
+was purged.)
 
 #### The audit dead-letter file
 

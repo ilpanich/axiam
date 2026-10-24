@@ -2366,3 +2366,171 @@ async fn decide_as(
         .await
         .expect("no infrastructure error")
 }
+
+// ---------------------------------------------------------------------------
+// R111W4-02 (#726): the clearance carries what the decision read
+// ---------------------------------------------------------------------------
+
+/// The names of `role`'s network grants, as `(action, effect)`.
+fn carried(role: &ClearedRole) -> Vec<(String, PermissionEffect)> {
+    role.network_grants
+        .iter()
+        .map(|g| (g.permission.action.clone(), g.effect))
+        .collect()
+}
+
+/// Every network-sensitive clearance of a §5.3 write carries the role it read
+/// (its name and only its `network:` grants), the node an assignment confers
+/// at, the permission a grant or revoke names, and for a binding the account
+/// the certificate is taken from and the nodes checked — the success row is
+/// built from these, not from reads after the write.
+#[tokio::test]
+async fn r111w4_02_a_cleared_write_carries_what_the_gate_read() {
+    let mut w = World::new();
+    let root = w.root();
+    let admin = Oracle::default().allow(w.writer, NETWORK_GRANT, root);
+    let role = w.role(
+        false,
+        &[
+            (NETWORK_JOIN, DENY),
+            ("roles:get", ALLOW),
+            (NETWORK_READ, ALLOW),
+        ],
+    );
+    let name = w.store.roles[&role].name.clone();
+    let device = Uuid::new_v4();
+    let expected = vec![
+        (NETWORK_JOIN.to_owned(), DENY),
+        (NETWORK_READ.to_owned(), ALLOW),
+    ];
+
+    // An assignment at the tenant: the node is `/network`.
+    let c = cleared(
+        w.decide(
+            &admin,
+            NetworkWrite::RoleAssign {
+                role_id: role,
+                grantee: Grantee::ServiceAccount(device),
+                resource_id: None,
+                inherit: true,
+            },
+        )
+        .await,
+    );
+    let read = c.role().expect("the role it read");
+    assert_eq!((read.id, read.name.as_str()), (role, name.as_str()));
+    assert_eq!(carried(read), expected, "only the network: grants");
+    assert_eq!(c.node(), Some(root));
+    assert!(c.permission().is_none() && c.cleared_binding().is_none());
+
+    // An unassignment at a node.
+    let n = Uuid::new_v4();
+    let admin_at_n = Oracle::default().allow(w.writer, NETWORK_GRANT, n);
+    let c = cleared(
+        w.decide(
+            &admin_at_n,
+            NetworkWrite::RoleUnassign {
+                role_id: role,
+                grantee: Grantee::ServiceAccount(device),
+                resource_id: Some(n),
+            },
+        )
+        .await,
+    );
+    assert_eq!(carried(c.role().unwrap()), expected);
+    assert_eq!(c.node(), Some(n));
+
+    // A grant: the role's grants before it, and the permission granted.
+    let grant = w.permission(NETWORK_GRANT);
+    let c = cleared(
+        w.decide(
+            &admin,
+            NetworkWrite::PermissionGrant {
+                role_id: role,
+                permission_id: grant,
+                effect: DENY,
+                scope_ids: &[],
+            },
+        )
+        .await,
+    );
+    assert_eq!(carried(c.role().unwrap()), expected);
+    assert_eq!(c.permission().unwrap().action, NETWORK_GRANT);
+    assert_eq!(c.node(), None);
+
+    // A revoke: the role, the permission, the effect read.
+    let join = w.store.grants[&role][0].permission.id;
+    let c = cleared(
+        w.decide(
+            &admin,
+            NetworkWrite::PermissionRevoke {
+                role_id: role,
+                permission_id: join,
+            },
+        )
+        .await,
+    );
+    assert_eq!(c.role().unwrap().name, name);
+    assert_eq!(c.permission().unwrap().id, join);
+    assert_eq!(c.revoked_effect(), Some(Some(DENY)));
+
+    // A delete and an update carry the role too (R111W4-03 builds on it).
+    let c = cleared(
+        w.decide(&admin, NetworkWrite::RoleDelete { role_id: role })
+            .await,
+    );
+    assert_eq!(carried(c.role().unwrap()), expected);
+    let c = cleared(
+        w.decide(
+            &admin,
+            NetworkWrite::RoleUpdate {
+                role_id: role,
+                is_global: Some(false),
+            },
+        )
+        .await,
+    );
+    assert_eq!(c.role().unwrap().id, role);
+
+    // A binding: the account it is taken from, and the nodes checked.
+    let join_role = w.role(false, &[(NETWORK_JOIN, ALLOW)]);
+    w.assign(device, join_role, Some(n), true);
+    let cert = Uuid::new_v4();
+    let previous = Uuid::new_v4();
+    w.store.bindings.insert(cert, previous);
+    let c = cleared(
+        w.decide(
+            &admin_at_n.allow(device, NETWORK_JOIN, n),
+            NetworkWrite::CertificateBind {
+                certificate_id: cert,
+                service_account_id: device,
+            },
+        )
+        .await,
+    );
+    assert_eq!(
+        c.cleared_binding(),
+        Some(&ClearedBinding {
+            before: Some(previous),
+            nodes: vec![n],
+        })
+    );
+    assert!(c.role().is_none());
+
+    // A write the gate has nothing to add to carries nothing.
+    let plain = w.role(false, &[("roles:get", ALLOW)]);
+    let c = cleared(
+        w.decide(
+            &Oracle::default(),
+            NetworkWrite::RoleAssign {
+                role_id: plain,
+                grantee: Grantee::User(Uuid::new_v4()),
+                resource_id: None,
+                inherit: true,
+            },
+        )
+        .await,
+    );
+    assert!(!c.is_network_sensitive());
+    assert!(c.role().is_none() && c.node().is_none());
+}

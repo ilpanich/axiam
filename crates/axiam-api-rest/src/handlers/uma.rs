@@ -55,7 +55,9 @@ impl actix_web::FromRequest for ProtectionApiToken {
         req: &actix_web::HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
-        std::future::ready(extract_pat(req))
+        std::future::ready(
+            extract_pat(req).map_err(|e| crate::extractors::auth::mark_refused(req, e)),
+        )
     }
 }
 
@@ -169,9 +171,10 @@ pub struct Uma2Configuration {
     request_body = PermissionRequestBody,
     responses(
         (status = 201, description = "Ticket minted", body = PermissionTicketResponse),
-        (status = 400, description = "Malformed request or undeclared scope"),
+        (status = 400, description = "Malformed request, undeclared scope, or a resource set this client did not register (the same answer as an unknown id)"),
         (status = 401, description = "Missing or invalid PAT"),
         (status = 403, description = "Token lacks the uma_protection scope"),
+        (status = 429, description = "`rate_limit_exceeded`: the per-resource-server bucket is spent; honour `Retry-After`"),
     ),
     security(("bearer_auth" = []))
 )]

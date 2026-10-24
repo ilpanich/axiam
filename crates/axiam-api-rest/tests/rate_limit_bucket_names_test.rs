@@ -33,15 +33,25 @@
 //!   prefix is the text before the first `:` of the key's `format!` string
 //!   (directly, through a function of the file, or a local `let`);
 //! * the four gRPC families, the literals of `shared_endpoint` in
-//!   `axiam-api-grpc`.
+//!   `axiam-api-grpc`;
+//! * the store's own writers outside `axiam-db`, `….increment_by(key, …)` and
+//!   `….increment(key, …)` (R111W2-05, #735): today the CIBA hint cap's, whose
+//!   key is built by a chain (`let own = slot(i)`, a closure over `{base}`, a
+//!   method whose `format!` starts with a `const`).
+//!
+//! The prefix of a store key is **read**, not moved into a `const` the scan
+//! looks up by name: a scan that knows one `const` by name would read nothing
+//! of the next writer someone adds, while this one refuses any `increment*`
+//! key it cannot trace to a literal or `const` prefix, so a new writer is
+//! either counted or fails the build.
 //!
 //! All of them enter one uniqueness check. The scan refuses, rather than skips,
 //! a constructor it does not know and a name or prefix it cannot read, and
 //! `the_scan_finds_the_registrations` fails if a reformat ever makes it read
 //! nothing: a scan that silently matches nothing would turn the real assertion
-//! into a vacuous pass. Not read: `increment_by` on the store (the CIBA hint
-//! cap's `ciba_hint_cap:` keys) and `check(` on the counter, which no handler
-//! calls today.
+//! into a vacuous pass. Not read: `check(` on the counter, which no handler
+//! calls today, and the read-only `peek_bucket` and the take-back `decrement`,
+//! which only touch a row an `increment*` already created under the same key.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -95,6 +105,13 @@ const SHARED_ON_PURPOSE: &[(&str, usize, &str)] = &[
 const WRITER_MIDDLEWARE: &str = "RateLimitShared";
 const WRITER_HANDLER: &str = "check_at";
 const WRITER_GRPC: &str = "gRPC family";
+const WRITER_STORE: &str = "increment_by";
+
+/// The store's write primitives outside `axiam-db`, and the crate that defines
+/// them (whose own forwarding, `increment` to `increment_by`, takes no key of
+/// its own).
+const STORE_CALLS: [&str; 2] = ["increment_by", "increment"];
+const STORE_CRATE_DIR: &str = "axiam-db/";
 
 /// The counter methods a handler spends a bucket with. `check_at*` on the
 /// counter is the only way a handler reaches it; any other `check_at…` call is
@@ -444,10 +461,12 @@ fn literal_at(text: &str) -> Option<String> {
 }
 
 /// The format string a bucket-key expression is built from: `format!("…")`
-/// itself, a call to a function of this file whose body formats the key, or a
-/// local `let` bound to `format!("…")`.
+/// itself, a call to a function (or a closure bound by `let`) of this file whose
+/// body formats the key, or a local `let` bound to either; `self.` is looked
+/// through, and a `let` is followed through its right-hand side.
 fn key_format_string(text: &str, at: usize, expr: &str) -> Option<String> {
     let expr = expr.trim_start_matches('&').trim();
+    let expr = expr.strip_prefix("self.").unwrap_or(expr);
     if let Some(rest) = expr.strip_prefix("format!(") {
         return literal_at(rest);
     }
@@ -456,6 +475,18 @@ fn key_format_string(text: &str, at: usize, expr: &str) -> Option<String> {
         return None;
     }
     let after_ident = &expr[ident.len()..];
+    let last_let = |ident: &str| {
+        let needle = format!("let {ident}");
+        let mut found = None;
+        let mut search = 0;
+        while let Some(pos) = text[search..].find(&needle).map(|i| i + search) {
+            search = pos + needle.len();
+            if pos < at && !text[search..].starts_with(is_ident) {
+                found = Some(search);
+            }
+        }
+        found
+    };
     if after_ident.starts_with('(') {
         // `fn ident(` — the first `format!(` of its body.
         let needle = format!("fn {ident}");
@@ -467,25 +498,38 @@ fn key_format_string(text: &str, at: usize, expr: &str) -> Option<String> {
                 return literal_at(&body[body.find("format!(")? + "format!(".len()..]);
             }
         }
-        None
+        // `let ident = |…| format!(…)` — a closure of the caller.
+        let binding = &text[last_let(&ident)?..at];
+        let closure = &binding[binding.find('=')? + 1..];
+        let closure = closure.trim_start().strip_prefix('|')?;
+        let body = &closure[closure.find('|')? + 1..];
+        literal_at(&body[body.find("format!(")? + "format!(".len()..])
     } else if after_ident.is_empty() {
-        // `let ident = format!(…);` — the last binding before the call.
-        let needle = format!("let {ident}");
-        let mut found = None;
-        let mut search = 0;
-        while let Some(pos) = text[search..].find(&needle).map(|i| i + search) {
-            search = pos + needle.len();
-            if pos < at && !text[search..].starts_with(is_ident) {
-                found = Some(search);
-            }
+        // `let ident = …;` — the last binding before the call.
+        let found = last_let(&ident)?;
+        let binding = &text[found..at];
+        let rest = binding[binding.find('=')? + 1..].trim_start();
+        match rest.strip_prefix("format!(") {
+            Some(fmt) => literal_at(fmt),
+            None => key_format_string(text, found, rest[..rest.find(';')?].trim()),
         }
-        let binding = &text[found?..at];
-        let rest = &binding[binding.find('=')? + 1..];
-        let fmt = rest.trim_start().strip_prefix("format!(")?;
-        literal_at(fmt)
     } else {
         None
     }
+}
+
+/// The endpoint prefix of a key format string: the text before its first `:`,
+/// a `{CONST}` of this file resolved, or a `{name}` bound earlier in the
+/// function followed to the format string that binds it.
+fn prefix_of(text: &str, raw: &str, at: usize, format: &str, depth: usize) -> Option<String> {
+    let head = format.split(':').next().unwrap_or_default();
+    let Some(inner) = head.strip_prefix('{').and_then(|h| h.strip_suffix('}')) else {
+        return Some(head.to_string());
+    };
+    resolve_const(raw, inner).or_else(|| {
+        let bound = key_format_string(text, at, inner)?;
+        (depth > 0).then(|| prefix_of(text, raw, at, &bound, depth - 1))?
+    })
 }
 
 /// Every handler-side `….check_at(key, …)` / `….check_at_human(key, …)` in one
@@ -521,11 +565,7 @@ fn check_at_registrations_in(file: &str, raw: &str) -> Vec<Registration> {
             )
         };
         let format = key_format_string(&text, at, expr).unwrap_or_else(|| unreadable());
-        let head = format.split(':').next().unwrap_or_default();
-        let prefix = match head.strip_prefix('{').and_then(|h| h.strip_suffix('}')) {
-            Some(constant) => resolve_const(raw, constant).unwrap_or_else(|| unreadable()),
-            None => head.to_string(),
-        };
+        let prefix = prefix_of(&text, raw, at, &format, 4).unwrap_or_else(|| unreadable());
         if !format.contains(':') || prefix.is_empty() || prefix.contains(['{', '}']) {
             unreadable();
         }
@@ -534,6 +574,48 @@ fn check_at_registrations_in(file: &str, raw: &str) -> Vec<Registration> {
             line,
             name: prefix,
             writer: WRITER_HANDLER,
+        });
+    }
+    out
+}
+
+/// Every store-side `….increment_by(key, …)` / `….increment(key, …)` in one
+/// file, outside `#[cfg(test)]`, with the endpoint prefix of its key. Refuses a
+/// key whose prefix it cannot trace, as `check_at_registrations_in` does.
+fn store_registrations_in(file: &str, raw: &str) -> Vec<Registration> {
+    let text = without_cfg_test_items(&without_comment_lines(raw));
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("increment").map(|i| i + from) {
+        let name: String = text[at..].chars().take_while(|c| is_ident(*c)).collect();
+        from = at + name.len();
+        if text[..at].chars().next_back().is_some_and(is_ident)
+            || !text[..at].trim_end().ends_with('.')
+            || !text[from..].starts_with('(')
+            || !STORE_CALLS.contains(&name.as_str())
+        {
+            continue;
+        }
+        let line = text[..at].matches('\n').count() + 1;
+        let expr = first_argument(&text[from + 1..]);
+        let unreadable = || -> ! {
+            panic!(
+                "{file}:{line}: the key `{expr}` of `.{name}(` does not trace to a \
+                 `format!(\"prefix:…\")` (through `let`s, a closure or a function of this file) \
+                 with a literal or `const` prefix before the first `:`; the duplicate-name scan \
+                 cannot read it"
+            )
+        };
+        let format = key_format_string(&text, at, expr).unwrap_or_else(|| unreadable());
+        let prefix = prefix_of(&text, raw, at, &format, 4).unwrap_or_else(|| unreadable());
+        if !format.contains(':') || prefix.is_empty() || prefix.contains(['{', '}']) {
+            unreadable();
+        }
+        out.push(Registration {
+            file: file.to_string(),
+            line,
+            name: prefix,
+            writer: WRITER_STORE,
         });
     }
     out
@@ -590,6 +672,9 @@ fn all_registrations() -> Vec<Registration> {
             continue;
         }
         out.extend(check_at_registrations_in(&rel, &raw));
+        if !rel.starts_with(STORE_CRATE_DIR) {
+            out.extend(store_registrations_in(&rel, &raw));
+        }
     }
     let raw = std::fs::read_to_string(root.join(GRPC_FILE)).expect("the gRPC rate-limit file");
     out.extend(grpc_families_in(GRPC_FILE, &raw));
@@ -693,8 +778,9 @@ fn the_scan_finds_the_registrations() {
         "ciba_notify",               // a `check_at` key, through a local `let`
         "ciba_approval_list",        // a `check_at_human` key, through a function
         "network_decide",            // a `check_at` key, through a function and a `const`
-        "grpc_authz",                // a gRPC family
-        "grpc_infra",                // the last gRPC family
+        "ciba_hint_cap", // an `increment_by` key, through `let`s, a closure and a `const`
+        "grpc_authz",    // a gRPC family
+        "grpc_infra",    // the last gRPC family
     ] {
         assert!(names.contains_key(known), "`{known}` was not found");
     }
@@ -704,6 +790,10 @@ fn the_scan_finds_the_registrations() {
         "the `check_at` keys were not all found"
     );
     assert_eq!(writers(WRITER_GRPC), 4, "the four gRPC families");
+    assert!(
+        writers(WRITER_STORE) >= 1,
+        "the store's `increment_by` keys were not found"
+    );
 }
 
 /// The detector, on synthetic sources: it flags a repeat, resolves a `const`,
@@ -963,4 +1053,52 @@ fn a_grpc_family_that_is_not_a_literal_is_refused() {
         "grpc.rs",
         "fn shared_endpoint(self) -> &'static str { match self { Self::A => NAME } }",
     );
+}
+
+/// A store-side `increment_by` / `increment` prefix is read through the chain
+/// the CIBA hint cap builds its key with, and collides with a middleware name
+/// (R111W2-05, #735).
+#[test]
+fn an_increment_by_prefix_collides_with_a_middleware_name() {
+    let store = r#"
+        const CAP_BUCKET: &str = "cap";
+        struct Cap;
+        impl Cap {
+            fn bucket(&self, t: Uuid) -> String { format!("{CAP_BUCKET}:{t}:x") }
+            async fn admit(&self, t: Uuid) {
+                let base = self.bucket(t);
+                let slot = |i: i64| format!("{base}:{}", i % 2);
+                let own = slot(1);
+                self.store.increment_by(&own, now, 1).await;
+                self.store.increment(&format!("plain:{t}"), now).await;
+                self.store.peek_bucket(&slot(0)).await;
+            }
+        }
+        #[cfg(test)]
+        mod tests { fn t() { s.increment_by(&k, now, 1); } }
+    "#;
+    let regs = store_registrations_in("s.rs", store);
+    let names: Vec<_> = regs.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["cap", "plain"]);
+    assert!(regs.iter().all(|r| r.writer == WRITER_STORE));
+
+    let mut all = regs;
+    all.extend(registrations_in(
+        "r.rs",
+        "x.wrap(RateLimitShared::<C>::new(\"cap\", 1));",
+    ));
+    let found = violations(&all, &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`cap` is registered 2 times"),
+        "{found:?}"
+    );
+    assert!(found[0].contains("[increment_by]") && found[0].contains("[RateLimitShared]"));
+}
+
+/// A store key the scan cannot trace is refused, never skipped.
+#[test]
+#[should_panic(expected = "the duplicate-name scan cannot read it")]
+fn an_increment_by_key_the_scan_cannot_read_is_refused() {
+    store_registrations_in("s.rs", "self.store.increment_by(&key, now, 1);");
 }

@@ -116,10 +116,23 @@ short-lived security/token material deliberately excluded by design
 `federation_login_state`, `account_deletion`, `export_job`,
 `erasure_proof`) — consistent with the same "no live credential/token
 material in the export" principle already applied to sessions and WebAuthn
-above. `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
-confirms no repository file has been added since Phase 25 other than
-`rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). **No
-user-owned table is missing from the export blob.**
+above. "Short-lived" describes the token, not the row, and the row names the
+user, the client and (since v109) the device key's thumbprint, so it is not kept
+for the life of the tenant: an erasure **deletes** the user's `oauth2_refresh_token`
+rows (revoking them first; Art. 17, #753), and the cleanup task's
+`oauth2_refresh_token` job **sweeps** every other row once its expiry is more
+than seven days past — the window in which a replay of a rotated token is still
+detected (T-254). (Corrected 2026-10-22, #753: before 1.1.2 the erasure revoked
+the rows and nothing deleted them.) `git log --diff-filter=A -- 'crates/axiam-db/src/repository/*.rs'`
+confirmed, **at Phase 25**, that no repository file had been added since other
+than `rate_limit.rs` (Phase 24, infra rate-limiting — not personal data). That
+sentence is dated: repository files have been added since (`network.rs`,
+`ciba_request.rs`, `ssf_*.rs`, `opaque_*.rs`, `directory_*.rs`, `scim_*.rs`,
+`erasure_proof.rs` among them), so the D-04 classification below holds as of
+Phase 25 and is **not re-derived for them here** (amended 2026-10-23, R112-13,
+#806; the erasure and export coverage of the newer tables is described in the
+sections that introduced each). **No user-owned table was missing from the
+export blob at Phase 25.**
 
 ### Encryption at rest and the optional PGP layer
 
@@ -164,7 +177,17 @@ invoked as a deliberate additional step rather than an always-on default.
   deleted user was the actor: `actor_id` becomes the **nil UUID**, an
   `actor_pseudonym` metadata field is set to the pseudonym, the original
   user UUID no longer appears anywhere in the row, and `ip_address` is
-  nulled.
+  nulled, together with the request row's second client address,
+  `metadata.forwarded_for_claimed` (the caller's leftmost `X-Forwarded-For`
+  entry, recorded since 1.1.2 when it differs from `ip_address`; #752, #794).
+  A `network_role.*` row written by someone else that names the erased user
+  as its grantee, a success row (`grantee.id`) or a refused write's
+  (`before.user` / `after.user`), has that id set to the nil UUID too (#758,
+  #802). The one row that names the erased account by id is the erasure's
+  own record, `gdpr.user_pseudonymized`, written after the scrub with the
+  anonymized row's id as its actor and only the pseudonym and a certificate
+  count in its metadata; the scrub never rewrites it, so a unit that runs late
+  cannot strip the record of the account it is about (#784, 1.1.2).
 - An `erasure_proof` row (pseudonym, tenant_id, user_id, erased_at) is
   written durably, backed by a **`UNIQUE` index on `erasure_proof.user_id`**
   for idempotent-retry safety (Phase 25).
@@ -204,7 +227,7 @@ itself. An unbound certificate of the account outside the bounds stays active
 and is an administrator's to revoke by id. It runs first
 because that convention reads the names the anonymization overwrites; it is
 fail-closed, so a failure leaves the account due and the next sweep retries.
-A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure. The recovery of an erasure cut past its point of no return (the next start's sweep) writes `gdpr.user_pseudonymized` and completes the request but writes no erasure proof and does not repeat this pass; that gap is open as #737, for 1.1.2.
+A second revocation, by the `user_id` binding only, runs right after the anonymization (#668, 1.1.1) and catches a certificate issued for the account between (b4) and the anonymization; it is best effort and idempotent, and a failure is logged without undoing the erasure. The recovery of an erasure cut past its point of no return (the next start's sweep, #689) writes the erasure proof unless the account has one, repeats this pass, and only then writes `gdpr.user_pseudonymized` and completes the request; a failure of the proof or of the pass leaves the erasure to the next sweep, so no request is completed without its proof (#737, 1.1.2; until then the recovery wrote neither).
 The rows are **revoked, not deleted** — each carries `revoked_at`, so it is on
 its issuer's revocation list, and a `vault_pki` issuer's list in Vault gets it
 from the `vault_revocation` sweep — under the same security retention the tenant deletion below records
@@ -418,12 +441,13 @@ only deletion path). Collection was not configurable at all, which is the
 remaining half of Art. 5(1)(c): a deployment whose lawful basis does not support
 holding a full client address for two years had nothing to turn off.
 
-With minimisation on, two fields are reduced **before** the append:
+With minimisation on, three fields are reduced **before** the append:
 
 | Field | Minimised to | Why this granularity |
 |---|---|---|
 | `ip_address` | `/24` (IPv4) or `/48` (IPv6) prefix | Keeps the network an action came from and drops the part that identifies a subscriber line or a device |
 | `metadata.user_agent` | a coarse family (`Firefox`, `curl`, `other`) | A full user-agent string is a fingerprint; the family is what an investigation reads |
+| `metadata.forwarded_for_claimed` | the same prefix as `ip_address` | The request row's claimed address (#752) is a client address too (#794) |
 
 An address that does not parse is dropped rather than written through: a value
 that cannot be parsed cannot be shown to have been minimised.
@@ -435,9 +459,12 @@ that cannot be parsed cannot be shown to have been minimised.
    (T-241), the provider and external subject on a JIT provision (T-161) are
    accountability evidence other controls depend on. Dropping them would weaken
    three controls to narrow one, and none of them is request metadata. The
-   request-audit middleware itself collects `http_status` and `authenticated`
-   and nothing else, pinned exactly by
-   `the_request_audit_middleware_collects_only_the_outcome`.
+   request-audit middleware itself collects `http_status` and `authenticated`,
+   plus `forwarded_for_claimed` when the caller's leftmost `X-Forwarded-For`
+   entry differs from the recorded address (#752), and nothing else, pinned
+   exactly, with and without the header, by
+   `the_request_audit_middleware_collects_only_the_outcome`. That one key is an
+   address, so it is minimised and erased like `ip_address` (#794).
 2. **Deployment-wide, not per tenant.** Audit is an accountability control the
    deployment relies on *including against a tenant administrator*. A per-tenant
    switch would let a tenant weaken the evidence used to investigate that
@@ -449,8 +476,9 @@ that cannot be parsed cannot be shown to have been minimised.
    startup, exactly as retention is.
 
 **Erasure and export keep working, and the reason is worth stating.** The Art.
-17 scrub (`pseudonymize_actor`, §2) clears `ip_address` outright, so a truncated
-value is erased by the same statement as a whole one. The Art. 15 export's
+17 scrub (`pseudonymize_actor`, §2) clears `ip_address` and
+`metadata.forwarded_for_claimed` outright, so a truncated value is erased by the
+same statement as a whole one. The Art. 15 export's
 `audit_entries` section (§1) reads `action`, `outcome`, `timestamp` and
 `resource_id` — never the address — so a data subject's inventory is identical
 whether or not the deployment minimises.
@@ -465,6 +493,9 @@ whether or not the deployment minimises.
   differs is the one it never reads.
 - `structured_accountability_metadata_survives_minimisation` and the truncation
   unit tests, including the fail-closed case for an unparseable address.
+- `minimisation_on_truncates_the_claimed_forwarded_address` and
+  `pseudonymize_actor_removes_the_claimed_forwarded_address` (#794) — the
+  request row's claimed address is truncated and erased like `ip_address`.
 
 ---
 
@@ -661,6 +692,12 @@ endpoint.
 - **No production code was modified by this verification pass** — all four
   evidence tests already existed and already passed prior to this plan; this
   document is the net-new artifact.
+- **Amended 2026-10-23 (release 1.1.2, R112-01, #794).** §2 and §2a named
+  `ip_address` as the audit row's only client address and said the request
+  middleware collected `http_status` and `authenticated` "and nothing else".
+  Since #752 (1.1.2, W2.2) the request row also carries
+  `metadata.forwarded_for_claimed`; the erasure scrub now clears it and
+  minimisation truncates it, and both sections say so.
 - **Milestone:** `1.0.0` — this document will be re-verified (re-run
   tests, re-check the repository cross-check) at the next milestone that
   touches GDPR export/erasure/consent behavior.

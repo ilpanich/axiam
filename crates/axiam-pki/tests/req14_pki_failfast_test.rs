@@ -4,6 +4,8 @@
 //! key source is configured, instead of silently encrypting CA private keys
 //! with an all-zero key (the previous insecure fallback).
 
+mod support;
+
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{CreateCaCertificate, KeyAlgorithm};
 use axiam_db::repository::SurrealCaCertificateRepository;
@@ -21,8 +23,7 @@ use surrealdb::engine::local::Mem;
 #[allow(dead_code)]
 fn test_ca_custodians() -> std::sync::Arc<axiam_pki::CaKeyCustodians> {
     std::sync::Arc::new(
-        axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-            .expect("test CA key custodians"),
+        axiam_pki::custodians_from_env(Some(support::test_key())).expect("test CA key custodians"),
     )
 }
 
@@ -85,7 +86,7 @@ async fn ca_custody_without_any_key_source_defers_its_refusal_to_first_use() {
 /// must keep working unchanged.
 #[tokio::test]
 async fn an_encryption_key_alone_yields_database_custody() {
-    let custodians = axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
+    let custodians = axiam_pki::custodians_from_env(Some(support::test_key()))
         .expect("an encryption key is enough on its own");
     assert_eq!(
         custodians.default_custody(),
@@ -99,7 +100,7 @@ async fn ca_generate_with_key_ok() {
     let db = setup_db().await;
     let repo = SurrealCaCertificateRepository::new(db);
     let config = PkiConfig {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(support::test_key()),
         ..Default::default()
     };
     let svc = CaService::new(

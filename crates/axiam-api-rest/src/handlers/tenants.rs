@@ -237,6 +237,7 @@ pub struct TenantPath {
     params(("org_id" = Uuid, Path, description = "Organization ID")),
     request_body = CreateTenantRequest,
     responses(
+        (status = 422, description = "`reserved_metadata_key`: the metadata uses a key the server reserves"),
         (status = 201, description = "Tenant created", body = Tenant),
     ),
     security(("bearer" = []))
@@ -624,6 +625,7 @@ pub async fn get<C: Connection + Clone>(
     ),
     request_body = UpdateTenant,
     responses(
+        (status = 422, description = "`reserved_metadata_key`: the metadata uses a key the server reserves"),
         (status = 200, description = "Tenant updated", body = Tenant),
         (status = 404, description = "Tenant not found"),
     ),

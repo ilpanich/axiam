@@ -114,7 +114,10 @@ async fn a_refused_write_names_the_policy_rather_than_the_status_alone() {
         .await
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("403"), "{msg}");
+    assert!(
+        msg.contains("403"),
+        "vault refusal text did not match (withheld)"
+    );
     // Not just the word "policy": the rule itself, as HCL, addressed to the
     // mount and prefix THIS deployment configured. An operator who has moved
     // either must not be handed the defaults.
@@ -122,9 +125,12 @@ async fn a_refused_write_names_the_policy_rather_than_the_status_alone() {
         msg.contains(&format!(
             r#"path "secret/data/{PREFIX}/*" {{ capabilities = ["create", "read", "update"] }}"#
         )),
-        "{msg}"
+        "vault refusal text did not match (withheld)"
     );
-    assert!(msg.contains("just vault-policy"), "{msg}");
+    assert!(
+        msg.contains("just vault-policy"),
+        "vault refusal text did not match (withheld)"
+    );
     assert!(!msg.contains(TOKEN), "the token must never reach an error");
     assert!(!msg.contains(PEM), "nor the key");
 }
@@ -144,8 +150,14 @@ async fn a_sealed_vault_is_not_reported_as_a_policy_problem() {
         .await
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("503"), "{msg}");
-    assert!(!msg.contains("capabilities"), "{msg}");
+    assert!(
+        msg.contains("503"),
+        "vault refusal text did not match (withheld)"
+    );
+    assert!(
+        !msg.contains("capabilities"),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -214,9 +226,18 @@ async fn a_missing_secret_is_a_custody_problem_not_a_transport_one() {
         .await
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("holds no key"), "{msg}");
-    assert!(msg.contains("deleted") && msg.contains("mount"), "{msg}");
-    assert!(msg.contains(&format!("{PREFIX}/{org}/{ca}")), "{msg}");
+    assert!(
+        msg.contains("holds no key"),
+        "vault refusal text did not match (withheld)"
+    );
+    assert!(
+        msg.contains("deleted") && msg.contains("mount"),
+        "vault refusal text did not match (withheld)"
+    );
+    assert!(
+        msg.contains(&format!("{PREFIX}/{org}/{ca}")),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -236,7 +257,10 @@ async fn a_secret_without_the_expected_field_says_which_field() {
         .load(&key_ref(Uuid::new_v4(), Uuid::new_v4()), None)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("private_key_pem"), "{err}");
+    assert!(
+        err.to_string().contains("private_key_pem"),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -251,7 +275,10 @@ async fn a_non_json_response_is_reported_as_such() {
         .load(&key_ref(Uuid::new_v4(), Uuid::new_v4()), None)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("non-JSON"), "{err}");
+    assert!(
+        err.to_string().contains("non-JSON"),
+        "vault refusal text did not match (withheld)"
+    );
 }
 
 #[tokio::test]
@@ -328,7 +355,10 @@ async fn a_refused_delete_is_reported() {
         .await
         .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("403"), "{msg}");
+    assert!(
+        msg.contains("403"),
+        "vault refusal text did not match (withheld)"
+    );
     // Revocation deletes the *metadata* path, so the rule quoted is the
     // metadata one — a reader handed the data rule here would grant a
     // capability that does not fix anything.
@@ -336,7 +366,7 @@ async fn a_refused_delete_is_reported() {
         msg.contains(&format!(
             r#"path "secret/metadata/{PREFIX}/*" {{ capabilities = ["delete"] }}"#
         )),
-        "{msg}"
+        "vault refusal text did not match (withheld)"
     );
     assert!(!msg.contains(TOKEN), "the 403 error leaked the token");
 }
@@ -382,7 +412,7 @@ async fn an_unreachable_vault_names_the_operation_that_failed() {
             "load" => "reading the CA key",
             _ => "deleting the CA key",
         };
-        assert!(msg.contains(expected), "{label}: {msg}");
+        assert!(msg.contains(expected), "{label} (text withheld)");
         assert!(!msg.contains(TOKEN), "{label} leaked the token");
         assert!(!msg.contains(PEM), "{label} leaked the key");
     }
@@ -430,7 +460,7 @@ async fn a_redirect_from_vault_is_an_error_and_the_other_host_sees_nothing() {
     for err in &errors {
         assert!(
             err.contains("redirect") && err.contains(host),
-            "the refusal names the host that redirected: {err}"
+            "the refusal names the host that redirected (text withheld)"
         );
         assert!(!err.contains(TOKEN), "a redirect refusal leaked the token");
     }

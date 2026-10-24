@@ -1238,3 +1238,141 @@ mod saml_schema_tests {
         assert_eq!(index["maximum"], 65_535, "{index}");
     }
 }
+
+/// R111-06 (#756): four refusals the handlers return must be declared in the
+/// spec. There is no variant checker (D-8); this list is the checker, so a
+/// handler that starts returning one of these must be added here, and one that
+/// is added here without declaring it fails.
+#[cfg(test)]
+mod declared_refusal_tests {
+    use super::api_doc;
+
+    const TENANT_ROUTES: &[(&str, &str)] = &[
+        ("post", "/api/v1/organizations/{org_id}/tenants"),
+        ("put", "/api/v1/organizations/{org_id}/tenants/{tenant_id}"),
+    ];
+
+    /// `409 already_exists`: the unique issuer + serial indexes.
+    const ALREADY_EXISTS: &[(&str, &str)] = &[
+        ("post", "/api/v1/certificates"),
+        ("post", "/api/v1/certificates/sign-csr"),
+        ("post", "/api/v1/organizations/{org_id}/ca-certificates"),
+        (
+            "post",
+            "/api/v1/organizations/{org_id}/ca-certificates/import",
+        ),
+        (
+            "post",
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        ),
+        (
+            "post",
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+        ),
+    ];
+
+    /// `503 service_unavailable`: a crypto permit (`axiam-pki::permit`) or the
+    /// password-hash gate (`axiam_auth::crypto_gate::acquire_hash_permit`:
+    /// login, password change and reset confirmation, #772). CA import takes
+    /// no permit, so it is not here.
+    const UNAVAILABLE: &[(&str, &str)] = &[
+        ("post", "/api/v1/auth/login"),
+        ("post", "/api/v1/auth/password/change"),
+        ("post", "/api/v1/auth/reset/confirm"),
+        ("post", "/api/v1/certificates"),
+        ("post", "/api/v1/certificates/sign-csr"),
+        ("post", "/api/v1/organizations/{org_id}/ca-certificates"),
+        (
+            "post",
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        ),
+        (
+            "post",
+            "/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+        ),
+        ("post", "/api/v1/pgp-keys"),
+        ("post", "/api/v1/pgp-keys/sign-audit-batch"),
+    ];
+
+    /// `409 conflict` / `stale_version`: `NetworkConflict::StaleRole`.
+    const STALE: &[(&str, &str)] = &[
+        ("put", "/api/v1/roles/{role_id}"),
+        ("delete", "/api/v1/roles/{role_id}"),
+        ("post", "/api/v1/roles/{role_id}/users"),
+        ("delete", "/api/v1/roles/{role_id}/users/{user_id}"),
+        ("post", "/api/v1/roles/{role_id}/service-accounts"),
+        (
+            "delete",
+            "/api/v1/roles/{role_id}/service-accounts/{service_account_id}",
+        ),
+        ("post", "/api/v1/roles/{role_id}/groups"),
+        ("delete", "/api/v1/roles/{role_id}/groups/{group_id}"),
+        ("post", "/api/v1/roles/{role_id}/permissions"),
+        (
+            "delete",
+            "/api/v1/roles/{role_id}/permissions/{permission_id}",
+        ),
+    ];
+
+    fn assert_declares(status: &str, routes: &[(&str, &str)]) {
+        let doc = serde_json::to_value(api_doc()).expect("the spec serialises");
+        let missing: Vec<String> = routes
+            .iter()
+            .filter(|(method, path)| {
+                doc.pointer(&format!(
+                    "/paths/{}/{method}/responses/{status}",
+                    path.replace('~', "~0").replace('/', "~1")
+                ))
+                .is_none()
+            })
+            .map(|(method, path)| format!("{} {path}", method.to_uppercase()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these operations return {status} but do not declare it: {missing:#?}"
+        );
+    }
+
+    #[test]
+    fn tenants_declare_422_reserved_metadata_key() {
+        assert_declares("422", TENANT_ROUTES);
+    }
+
+    #[test]
+    fn certificate_and_ca_writes_declare_409_already_exists() {
+        assert_declares("409", ALREADY_EXISTS);
+    }
+
+    #[test]
+    fn crypto_permit_and_login_gate_declare_503() {
+        assert_declares("503", UNAVAILABLE);
+    }
+
+    /// R112-10 (#803): the token operation also answers `401`, `429` and `500`.
+    #[test]
+    fn token_declares_401_429_and_500() {
+        for status in ["401", "429", "500"] {
+            assert_declares(status, &[("post", "/oauth2/token")]);
+        }
+    }
+
+    /// `429`: the per-resource-server bucket of `/uma2/perm` and the governor
+    /// in front of the three hash-gated routes.
+    #[test]
+    fn uma_perm_and_hash_gated_routes_declare_429() {
+        assert_declares(
+            "429",
+            &[
+                ("post", "/uma2/perm"),
+                ("post", "/api/v1/auth/login"),
+                ("post", "/api/v1/auth/password/change"),
+                ("post", "/api/v1/auth/reset/confirm"),
+            ],
+        );
+    }
+
+    #[test]
+    fn role_and_permission_writes_declare_409_stale_version() {
+        assert_declares("409", STALE);
+    }
+}

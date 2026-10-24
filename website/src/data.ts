@@ -491,6 +491,52 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-1-2",
+    date: "2026-10-24",
+    dateShort: "Oct 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.1.2",
+    excerpt:
+      "AXIAM 1.1.2 closes seventy-six Low and Informational findings of the 1.1.1 reviews and of its own waves, takes a real migration lease, adds no route and no migration, and carries SDK contract 1.64 in all eleven SDKs. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "Seventy-six issues closed, the threat model at 2.44.0, contract 1.64 in all eleven SDKs. No route and no migration. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.1.2 is" },
+      {
+        type: "p",
+        text: "1.1.2 is a patch release of the 1.1 line. It closes the findings the 1.1.1 reviews, the maintainer's contract answers, the 1.1.2 wave reviews and the combined review filed ([#720](https://github.com/ilpanich/axiam/issues/720) … [#806](https://github.com/ilpanich/axiam/issues/806)): the erasure path, PKI and Vault, rate limiting, audit attribution and the boot, the schema runner, OAuth2 clients and the spec, network policy, the FreeRADIUS recipe, CI and tooling. Each wave ended in a security review of its own diff, and a combined review and a sweep followed.",
+      },
+      { type: "h", text: "Contract 1.64 and the SDKs" },
+      {
+        type: "p",
+        text: "Contract 1.64 answers the maintainer's three questions: the recovered erasure row may carry `certificates_revoked: null`, a device poll waits out `429 rate_limit_exceeded`, and the wording of C163-10 is relaxed. All eleven SDKs re-sync and port it. Check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "The threat model" },
+      {
+        type: "p",
+        text: "Model 2.44.0 holds **488 threats: 457 mitigated, 21 open, 10 not applicable**. The entries the waves amended are reconciled; no status changed.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.1.2]` section of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. There is no migration; the schema stays at v109. The migration runner takes a real lease, so the 1.1.1 advice to roll replicas one at a time is withdrawn; give a starting replica time to wait for the lease. `AXIAM__RATE_LIMIT__TRUSTED_PROXIES=none` is new, audit rows' `ip_address` follows the limiters' rule, and every `X-Forwarded-For` field line is now read. SCIM refuses a request that carries both the `axiam_access` cookie and a provisioning token. The admin client `PUT` gains two `422` codes and bounds a DCR or CIMD client's logout URIs.",
+      },
+      { type: "h", text: "What is not in 1.1.2" },
+      {
+        type: "p",
+        text: "The OpenID Foundation submissions ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open: AXIAM is not certified, and every conformance figure on this site is a self-run. Benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) is not done.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.1.2 is a patch release of the first stable line. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "axiam-1-1-1",
     date: "2026-10-20",
     dateShort: "Oct 2026",

@@ -212,6 +212,21 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   only. The PKI tests that wrapped CA keys under an all-zero constant now use a
   per-process random key, and the assertion messages the waves added print
   labels, not bodies or errors (see Tests and CI).
+- **The Sign in with Apple client secret is signed by `ring`, and RUSTSEC-2026-0387
+  is ignored on the strength of that change.** The advisory (crypto-bigint <0.7.6,
+  timing variability in subtraction, division, zero counting and Montgomery
+  multiplication) has no fix AXIAM can take: crypto-bigint 0.5.5 is held by
+  `elliptic-curve` 0.13 and `cx448` 0.1.1, under `pgp` 0.21.0 and `jsonwebtoken` 11,
+  both newest. Its one secret-key use in AXIAM was the ES256 client secret minted
+  with the tenant's `.p8` key on every Apple OIDC callback, which an
+  unauthenticated caller can start; `jsonwebtoken`'s `rust_crypto` signer ran that
+  on `p256` 0.13. The JWS is now assembled in `axiam-federation` and signed by
+  `ring`, already the TLS provider, so no crate enters the graph. The `.p8` must be
+  PKCS#8 (`PRIVATE KEY`), which is what Apple issues; a SEC1 `EC PRIVATE KEY` that
+  `jsonwebtoken` also took is now refused with a message saying so. Every other
+  use is public-key only: AXIAM generates no Ed448, X448 or EC OpenPGP key and
+  imports none, verifies ES256/ES384 without signing, and runs OPAQUE on
+  Ristretto255. The reachability note is in `deny.toml`.
 
 ### Changed
 

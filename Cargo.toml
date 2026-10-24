@@ -180,6 +180,11 @@ rcgen = "0.14"
 x509-parser = { version = "0.18", features = ["verify"] }
 pgp = "0.21"
 pem = "4"
+# ES256 for the Sign in with Apple client secret (axiam-federation/src/apple.rs).
+# Already in Cargo.lock as the rustls / tokio-rustls provider, so no crate enters
+# the graph. Used instead of jsonwebtoken's `rust_crypto` signer because that one
+# runs on p256 0.13 -> crypto-bigint 0.5.5 (RUSTSEC-2026-0387).
+ring = "0.17"
 
 # SAML
 samael = { version = "0.0.22", features = ["xmlsec"] }

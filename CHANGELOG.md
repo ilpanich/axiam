@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.2] - Unreleased
 
-1.1.2 follows 1.1.1 and closes the sixty-three issues the 1.1.1 reviews, the
-maintainer's contract answers and the 1.1.2 wave reviews filed (#720 … #741,
-#746, #747, #750 … #758, #760 and #764 … #792) with nine waves: the erasure path,
+1.1.2 follows 1.1.1 and closes the seventy-six issues the 1.1.1 reviews, the
+maintainer's contract answers, the 1.1.2 wave reviews and the combined review
+filed (#720 … #741, #746, #747, #750 … #758, #760, #764 … #792 and #794 … #806)
+with nine waves: the erasure path,
 PKI and Vault (W1); rate limiting, audit attribution and the boot (W2); the
 schema runner, OAuth2 clients and the spec (W3); network policy (W4); the
 FreeRADIUS recipe (W5); CI and tooling (W6); SDK contract 1.64 (W7); release
@@ -85,12 +86,36 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   redirect_exceeds_registration_policy` refuses a redirect host outside the
   registration policy (DCR's `dcr_allowed_redirect_hosts`, CIMD's own policy).
   A value the row already holds still saves. A console or script that widened
-  such a client must narrow its request (#746, #768).
+  such a client must narrow its request. **The same `422
+  redirect_exceeds_registration_policy` now also refuses a new
+  `post_logout_redirect_uris` or `backchannel_logout_uri`** on such a client when
+  its host fails the row's redirect-host predicate; the message names the member,
+  values the row already holds are exempt, `backchannel_logout_uri: ""` (a clear)
+  is accepted, and an administrator-managed client is not bounded (#746, #768,
+  #800).
 - **A role delete that releases a `network:` grant writes one
   `network_role.deleted` audit row,** with the role's id and name and its
   `network:` permissions (action, effect) as the gate read them. Delete a role
   with no `network:` grant and no row is written. An alert on
   `network_role.*` should include it (#727).
+- **Every `X-Forwarded-For` field line is read, joined in the order received.**
+  Before 1.1.2 the rate limiters and the audit rows read the first line only. A
+  request that carries the header twice, as HAProxy's `option forwardfor` makes it
+  when it adds its own line, is now one list (RFC 9110 §5.3), and the rule selects
+  from the proxy's line, not the client's. A request with any line that is not
+  visible ASCII has no header at all and is keyed on its peer. Behind such a
+  proxy, a client's rate-limit bucket and the audit row's `ip_address` now come
+  from the proxy's line, not from a value the client wrote (#796).
+- **SCIM refuses a request that carries both the `axiam_access` cookie and a
+  provisioning token.** It answers `401` as ambiguous, before the token is
+  resolved. An identity provider sends the token alone and is unaffected; a
+  script that kept a console session cookie beside the token must drop the cookie.
+  The `Bearer` scheme is matched in any letter case, and a refused token is
+  recorded `authenticated: false` in the request row (#801).
+- **During a mixed 1.1.1/1.1.2 roll one account erasure can still run twice.** A
+  1.1.1 replica ignores 1.1.2's exclusive claim, so the result is one erasure
+  record and a doubled SSF `account_purged` notification, bounded by the rollout
+  window; once every replica runs 1.1.2 the claim is exclusive (#806).
 - **Upgrading from 1.1.0 directly.** 1.1.1 renamed the FreeRADIUS recipe's
   profiles (D3 is now **Static**, D4 is now **Live**), and the rename moved
   files and variable names. An operator who goes from 1.1.0 straight to 1.1.2
@@ -157,6 +182,36 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   token** (`Cache-Read-Only := yes` beside `Cache-TTL := 0`; the retry stores
   with a negative TTL) (#720), **and its read no longer inserts the `-`
   sentinel** (#764).
+- **The erasure and audit minimisation cover the request row's claimed
+  address.** `metadata.forwarded_for_claimed` is cleared by the Art. 17 scrub and
+  truncated like `ip_address` when minimisation is on (#794).
+- **Every `X-Forwarded-For` field line is read.** Repeated lines are one list
+  (RFC 9110), so a listed proxy that adds its own line rather than appending
+  (HAProxy's `option forwardfor`) no longer lets a client's forged first line
+  choose its rate-limit bucket or the audit row's address, on REST and gRPC
+  (#796).
+- **A decision-cache flush of an organization tenant reaches its
+  organization-level principals' cached decisions in every member tenant,** and
+  refuses an evaluation in flight against any tenant, so a grant revoked from an
+  organization admin is no longer served from the cache until the TTL (#797).
+- **SCIM `/Groups` flushes the decision cache.** A member added or removed by
+  create, `PUT` or `PATCH` has its cached decisions dropped, and a group delete
+  flushes the tenant, as the native group routes do (#798).
+- **SCIM's provisioning token follows the carrier rule.** A request that carries
+  both the `axiam_access` cookie and a provisioning token is refused `401` as
+  ambiguous, a refused token is recorded `authenticated: false` in the request
+  row, and the `Bearer` scheme is matched in any case (#801).
+- **An erasure leaves no grantee id in `network_role.*_refused` rows** (`after.user`
+  of an assignment's, `before.user` of an unassignment's), **and its role pass
+  flushes the erased account's cached decisions,** locally and by broadcast
+  (#802).
+- **Dependency refresh behind the release gate:** tokio 1.54.0 → 1.54.1
+  (RUSTSEC-2026-0384, a race in `tokio::time::Interval`; 1.54.0 is also yanked)
+  and ctutils 0.4.3 → 0.4.4 (RUSTSEC-2026-0385, non-constant-time mask generation
+  and `u128` comparisons, pulled in by `aes-gcm`, `digest` and `phc`). Lockfile
+  only. The PKI tests that wrapped CA keys under an all-zero constant now use a
+  per-process random key, and the assertion messages the waves added print
+  labels, not bodies or errors (see Tests and CI).
 
 ### Changed
 
@@ -190,6 +245,14 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   reset confirm** (#772).
 - **The Live compose override starts FreeRADIUS threaded** (`-f -xx -l stdout`)
   (#765).
+- **The administrator `PUT /oauth2-clients/{id}` bounds a DCR or CIMD client's
+  `post_logout_redirect_uris` and `backchannel_logout_uri`** with the same host
+  predicate as its `redirect_uris` (see the upgrade notes) (#800).
+- **The OpenAPI spec declares `401`, `429` and `500` on `POST /oauth2/token`,
+  `429` on `POST /uma2/perm`, and `429` on login, password change and reset
+  confirmation.** The server already answered them; the spec, its digest and the
+  management registry change, and a client generator's output grows these
+  responses (#803).
 
 ### Fixed
 
@@ -213,6 +276,12 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   corrected (#779).
 - **The k8s liveness probe no longer kills a replica waiting on the migration
   lease** (#770).
+- **The migration runner's additive-change scanner skips trailing `--`, `//`, `#`
+  and `/* */` comments and honours backslash escapes inside string literals,** so
+  a comment containing an apostrophe can no longer hide a non-additive statement
+  from the out-of-order guard (#799).
+- **The migration-lease comment no longer quotes the server's text,** which the
+  conflict-marker check read as a second classifier of unique violations (#795).
 
 ### Documentation
 
@@ -249,6 +318,10 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   the e2e's assertions say what they show (#722).
 - **The deployment guide has a section on schema migrations at startup** and a
   procedure for a refused gap (#771).
+- **Text and hygiene after the 1.1.2 merges:** the peer-only rows of the
+  `TRUSTED_PROXIES` guide, T-484's AMQP sentence, the GDPR D-04 sentence dated,
+  T-444's order, the plan's merge notes, `bench-quick`, the v109 note's place, the
+  `-xx` log note and the mixed-version erasure line (#806).
 
 ### Tests and CI
 
@@ -267,6 +340,12 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
 - **A GDPR recovery concurrency test** (#758).
 - **The gRPC key extractor's address rule and a `TRUSTED_PROXIES=none` test on
   the gRPC listener** (#790).
+- **The RADIUS e2e workflow's path filter includes the access-token carrier rule
+  and the decision's client-address and limiter files** (#804).
+- **The assertion messages the waves added print labels, not bodies, errors or
+  FreeRADIUS logs;** the e2e's log readers redact the token after `Bearer` and
+  `access_token`, its redaction test builds its fake token at run time, and the
+  ten remaining PKI tests use a per-process random CA wrapping key (#805).
 
 ### Still open
 

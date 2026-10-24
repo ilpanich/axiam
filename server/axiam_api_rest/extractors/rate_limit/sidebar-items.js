@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["bucket_key_part","configured_trusted_hops","extract_basic_client_id","extract_client_id","extract_form_client_id","verified_principal"],"struct":["ClientAwareKeyExtractor","RateLimitClientId","RateLimitPrincipal","XForwardedForKeyExtractor"]};
+window.SIDEBAR_ITEMS = {"fn":["bucket_key_part","configured_trusted_hops","confirm_principal_session","extract_basic_client_id","extract_client_id","extract_form_client_id","verified_principal"],"struct":["ClientAwareKeyExtractor","RateLimitClientId","RateLimitPrincipal","XForwardedForKeyExtractor"]};

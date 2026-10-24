@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AuditIngestOutcome"],"fn":["process_audit_event","start_audit_consumer"]};
+window.SIDEBAR_ITEMS = {"constant":["INGESTED_VIA_AMQP","INGESTED_VIA_KEY","PRODUCER_METADATA_KEY"],"enum":["AuditIngestOutcome"],"fn":["process_audit_event","start_audit_consumer"]};

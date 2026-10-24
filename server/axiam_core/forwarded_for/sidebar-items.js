@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["TRUSTED_PROXIES_VAR"],"struct":["TrustedProxies","TrustedProxiesError"]};
+window.SIDEBAR_ITEMS = {"constant":["TRUSTED_PROXIES_NONE","TRUSTED_PROXIES_VAR"],"enum":["TrustedProxiesError"],"fn":["configured_trusted_hops","forwarded_for_claimed","forwarded_for_header","select_client_ip"],"struct":["SelectedClientIp","TrustedProxies"]};

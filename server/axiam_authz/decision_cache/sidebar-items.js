@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["DecisionCache","DecisionCacheConfig","DecisionCacheStats"]};
+window.SIDEBAR_ITEMS = {"struct":["CacheGeneration","DecisionCache","DecisionCacheConfig","DecisionCacheStats"]};

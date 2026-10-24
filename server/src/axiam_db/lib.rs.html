@@ -79,17 +79,20 @@
 <a href=#79 id=79 data-nosnippet>79</a>/// because it replaces the former `axiam_db::hash_client_secret` free
 <a href=#80 id=80 data-nosnippet>80</a>/// function — which could hash without a key and is therefore gone.
 <a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">pub use </span>axiam_auth::client_secret::{<span class="self">self</span>, ClientSecretHasher, ClientSecretVerdict};
-<a href=#82 id=82 data-nosnippet>82</a><span class="kw">pub use </span>schema::{run_migrations, schema_v1};
-<a href=#83 id=83 data-nosnippet>83</a><span class="kw">pub use </span>seeder::{
-<a href=#84 id=84 data-nosnippet>84</a>    ReconcileOutcome, SeedRolesResult, SeederStateRow, SetupTokenRemint,
-<a href=#85 id=85 data-nosnippet>85</a>    mint_bootstrap_setup_token_if_needed, reconcile_default_role_grants,
-<a href=#86 id=86 data-nosnippet>86</a>    remint_bootstrap_setup_token, seed_default_roles, seed_permissions,
-<a href=#87 id=87 data-nosnippet>87</a>};
-<a href=#88 id=88 data-nosnippet>88</a><span class="kw">pub use </span>session_validation_cache::SessionValidationCache;
-<a href=#89 id=89 data-nosnippet>89</a><span class="doccomment">/// Re-export SurrealDB connection types for use in repository type aliases.
-<a href=#90 id=90 data-nosnippet>90</a></span><span class="kw">pub use </span>surrealdb::Connection;
-<a href=#91 id=91 data-nosnippet>91</a><span class="doccomment">/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
-<a href=#92 id=92 data-nosnippet>92</a>/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
-<a href=#93 id=93 data-nosnippet>93</a>/// longer the WebSocket client.
-<a href=#94 id=94 data-nosnippet>94</a></span><span class="kw">pub use </span>surrealdb::engine::remote::http::Client <span class="kw">as </span>DbClient;
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">pub use </span>schema::{
+<a href=#83 id=83 data-nosnippet>83</a>    MigrationLease, PendingMigrations, run_migrations, run_migrations_under_lease,
+<a href=#84 id=84 data-nosnippet>84</a>    run_migrations_with_lease, schema_v1,
+<a href=#85 id=85 data-nosnippet>85</a>};
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">pub use </span>seeder::{
+<a href=#87 id=87 data-nosnippet>87</a>    ReconcileOutcome, SeedRolesResult, SeederStateRow, SetupTokenRemint,
+<a href=#88 id=88 data-nosnippet>88</a>    mint_bootstrap_setup_token_if_needed, reconcile_default_role_grants,
+<a href=#89 id=89 data-nosnippet>89</a>    remint_bootstrap_setup_token, seed_default_roles, seed_permissions,
+<a href=#90 id=90 data-nosnippet>90</a>};
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">pub use </span>session_validation_cache::SessionValidationCache;
+<a href=#92 id=92 data-nosnippet>92</a><span class="doccomment">/// Re-export SurrealDB connection types for use in repository type aliases.
+<a href=#93 id=93 data-nosnippet>93</a></span><span class="kw">pub use </span>surrealdb::Connection;
+<a href=#94 id=94 data-nosnippet>94</a><span class="doccomment">/// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
+<a href=#95 id=95 data-nosnippet>95</a>/// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
+<a href=#96 id=96 data-nosnippet>96</a>/// longer the WebSocket client.
+<a href=#97 id=97 data-nosnippet>97</a></span><span class="kw">pub use </span>surrealdb::engine::remote::http::Client <span class="kw">as </span>DbClient;
 </code></pre></div></section></main></body></html>

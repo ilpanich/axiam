@@ -2,39 +2,40 @@
 <a href=#2 id=2 data-nosnippet>2</a>//! and MFA (TOTP).
 <a href=#3 id=3 data-nosnippet>3</a>
 <a href=#4 id=4 data-nosnippet>4</a></span><span class="kw">pub mod </span>attestation;
-<a href=#5 id=5 data-nosnippet>5</a><span class="kw">pub mod </span>client_secret;
-<a href=#6 id=6 data-nosnippet>6</a><span class="kw">pub mod </span>config;
-<a href=#7 id=7 data-nosnippet>7</a><span class="kw">pub mod </span>crypto;
-<a href=#8 id=8 data-nosnippet>8</a><span class="kw">pub mod </span>crypto_gate;
-<a href=#9 id=9 data-nosnippet>9</a><span class="kw">pub mod </span>error;
-<a href=#10 id=10 data-nosnippet>10</a><span class="kw">pub mod </span>hibp_breaker;
-<a href=#11 id=11 data-nosnippet>11</a><span class="kw">pub mod </span>lockout;
-<a href=#12 id=12 data-nosnippet>12</a><span class="kw">pub mod </span>mfa_methods;
-<a href=#13 id=13 data-nosnippet>13</a><span class="kw">pub mod </span>opaque;
-<a href=#14 id=14 data-nosnippet>14</a><span class="kw">pub mod </span>password;
-<a href=#15 id=15 data-nosnippet>15</a><span class="kw">pub mod </span>password_reset;
-<a href=#16 id=16 data-nosnippet>16</a><span class="kw">pub mod </span>policy;
-<a href=#17 id=17 data-nosnippet>17</a><span class="kw">pub mod </span>secrets;
-<a href=#18 id=18 data-nosnippet>18</a><span class="kw">pub mod </span>service;
-<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>token;
-<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>totp;
-<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>unknown_name_lockout;
-<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>verification;
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>webauthn;
-<a href=#24 id=24 data-nosnippet>24</a>
-<a href=#25 id=25 data-nosnippet>25</a><span class="kw">pub use </span>attestation::{AttestationCaCache, ComplianceStatus, evaluate_credential_compliance};
-<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>client_secret::{ClientSecretHasher, ClientSecretVerdict};
-<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>config::AuthConfig;
-<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>error::AuthError;
-<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>hibp_breaker::HibpBreaker;
-<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>mfa_methods::MfaMethodService;
-<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub use </span>opaque::{OpaqueEnrolled, OpaqueRejection, OpaqueServer, OpaqueServerKeys, OpaqueVerified};
-<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>password_reset::PasswordResetService;
-<a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub use </span>service::{
-<a href=#34 id=34 data-nosnippet>34</a>    AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
-<a href=#35 id=35 data-nosnippet>35</a>    MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
-<a href=#36 id=36 data-nosnippet>36</a>};
-<a href=#37 id=37 data-nosnippet>37</a><span class="kw">pub use </span>token::{AccessTokenClaims, ValidatedClaims};
-<a href=#38 id=38 data-nosnippet>38</a><span class="kw">pub use </span>verification::EmailVerificationService;
-<a href=#39 id=39 data-nosnippet>39</a><span class="kw">pub use </span>webauthn::WebauthnService;
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">pub mod </span>carrier;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">pub mod </span>client_secret;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">pub mod </span>config;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">pub mod </span>crypto;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">pub mod </span>crypto_gate;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">pub mod </span>error;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">pub mod </span>hibp_breaker;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">pub mod </span>lockout;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">pub mod </span>mfa_methods;
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">pub mod </span>opaque;
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">pub mod </span>password;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">pub mod </span>password_reset;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">pub mod </span>policy;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">pub mod </span>secrets;
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">pub mod </span>service;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">pub mod </span>token;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">pub mod </span>totp;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">pub mod </span>unknown_name_lockout;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub mod </span>verification;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">pub mod </span>webauthn;
+<a href=#25 id=25 data-nosnippet>25</a>
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">pub use </span>attestation::{AttestationCaCache, ComplianceStatus, evaluate_credential_compliance};
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">pub use </span>client_secret::{ClientSecretHasher, ClientSecretVerdict};
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub use </span>config::AuthConfig;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub use </span>error::AuthError;
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub use </span>hibp_breaker::HibpBreaker;
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub use </span>mfa_methods::MfaMethodService;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>opaque::{OpaqueEnrolled, OpaqueRejection, OpaqueServer, OpaqueServerKeys, OpaqueVerified};
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub use </span>password_reset::PasswordResetService;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub use </span>service::{
+<a href=#35 id=35 data-nosnippet>35</a>    AuthService, EnrollMfaOutput, LoginInput, LoginOutput, LoginResult, MfaChallengeOutput,
+<a href=#36 id=36 data-nosnippet>36</a>    MfaSetupOutput, RefreshInput, RefreshOutput, VerifyMfaInput,
+<a href=#37 id=37 data-nosnippet>37</a>};
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">pub use </span>token::{AccessTokenClaims, ValidatedClaims};
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">pub use </span>verification::EmailVerificationService;
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">pub use </span>webauthn::WebauthnService;
 </code></pre></div></section></main></body></html>

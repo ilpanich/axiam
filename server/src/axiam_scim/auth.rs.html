@@ -73,7 +73,7 @@
 <a href=#73 id=73 data-nosnippet>73</a><span class="kw">use </span>std::sync::Arc;
 <a href=#74 id=74 data-nosnippet>74</a>
 <a href=#75 id=75 data-nosnippet>75</a><span class="kw">use </span>actix_web::dev::Payload;
-<a href=#76 id=76 data-nosnippet>76</a><span class="kw">use </span>actix_web::{FromRequest, HttpRequest, web};
+<a href=#76 id=76 data-nosnippet>76</a><span class="kw">use </span>actix_web::{FromRequest, HttpMessage, HttpRequest, web};
 <a href=#77 id=77 data-nosnippet>77</a><span class="kw">use </span>axiam_api_rest::authz::{AuthzChecker, RequirePermission};
 <a href=#78 id=78 data-nosnippet>78</a><span class="kw">use </span>axiam_api_rest::extractors::auth::AuthenticatedUser;
 <a href=#79 id=79 data-nosnippet>79</a><span class="kw">use </span>axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
@@ -133,92 +133,127 @@
 <a href=#133 id=133 data-nosnippet>133</a>/// Header only — never the `axiam_access` cookie. A provisioning token is a
 <a href=#134 id=134 data-nosnippet>134</a>/// machine credential presented by an IdP; accepting it from a cookie would
 <a href=#135 id=135 data-nosnippet>135</a>/// make it reachable from a browser, and therefore CSRF-reachable, for no
-<a href=#136 id=136 data-nosnippet>136</a>/// benefit to any real caller.
-<a href=#137 id=137 data-nosnippet>137</a></span><span class="kw">fn </span>bearer_value(req: <span class="kw-2">&amp;</span>HttpRequest) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
-<a href=#138 id=138 data-nosnippet>138</a>    req.headers()
-<a href=#139 id=139 data-nosnippet>139</a>        .get(actix_web::http::header::AUTHORIZATION)<span class="question-mark">?
-<a href=#140 id=140 data-nosnippet>140</a>        </span>.to_str()
-<a href=#141 id=141 data-nosnippet>141</a>        .ok()<span class="question-mark">?
-<a href=#142 id=142 data-nosnippet>142</a>        </span>.strip_prefix(<span class="string">"Bearer "</span>)
-<a href=#143 id=143 data-nosnippet>143</a>        .map(str::to_owned)
-<a href=#144 id=144 data-nosnippet>144</a>}
-<a href=#145 id=145 data-nosnippet>145</a>
-<a href=#146 id=146 data-nosnippet>146</a><span class="kw">impl </span>FromRequest <span class="kw">for </span>ScimPrincipal {
-<a href=#147 id=147 data-nosnippet>147</a>    <span class="kw">type </span>Error = ScimError;
-<a href=#148 id=148 data-nosnippet>148</a>    <span class="kw">type </span>Future = Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, <span class="self">Self</span>::Error&gt;&gt;&gt;&gt;;
-<a href=#149 id=149 data-nosnippet>149</a>
-<a href=#150 id=150 data-nosnippet>150</a>    <span class="kw">fn </span>from_request(req: <span class="kw-2">&amp;</span>HttpRequest, payload: <span class="kw-2">&amp;mut </span>Payload) -&gt; <span class="self">Self</span>::Future {
-<a href=#151 id=151 data-nosnippet>151</a>        <span class="comment">// Dispatch on the handle prefix rather than trying both arms in
-<a href=#152 id=152 data-nosnippet>152</a>        // sequence. Trying JWT-then-token would turn every malformed JWT into
-<a href=#153 id=153 data-nosnippet>153</a>        // a database lookup, and would make "which credential did it think
-<a href=#154 id=154 data-nosnippet>154</a>        // this was?" unanswerable from the response — which is precisely the
-<a href=#155 id=155 data-nosnippet>155</a>        // question an operator asks when provisioning breaks.
-<a href=#156 id=156 data-nosnippet>156</a>        </span><span class="kw">let </span>presented = bearer_value(req);
-<a href=#157 id=157 data-nosnippet>157</a>        <span class="kw">let </span>is_provisioning_token = presented
-<a href=#158 id=158 data-nosnippet>158</a>            .as_deref()
-<a href=#159 id=159 data-nosnippet>159</a>            .is_some_and(|t| t.starts_with(SCIM_TOKEN_PREFIX));
-<a href=#160 id=160 data-nosnippet>160</a>
-<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">if </span>!is_provisioning_token {
-<a href=#162 id=162 data-nosnippet>162</a>            <span class="kw">let </span>fut = AuthenticatedUser::from_request(req, payload);
-<a href=#163 id=163 data-nosnippet>163</a>            <span class="kw">return </span>Box::pin(<span class="kw">async move </span>{
-<a href=#164 id=164 data-nosnippet>164</a>                fut.<span class="kw">await
-<a href=#165 id=165 data-nosnippet>165</a>                    </span>.map(|u| ScimPrincipal::Jwt(Box::new(u)))
-<a href=#166 id=166 data-nosnippet>166</a>                    .map_err(ScimError::from)
-<a href=#167 id=167 data-nosnippet>167</a>            });
-<a href=#168 id=168 data-nosnippet>168</a>        }
-<a href=#169 id=169 data-nosnippet>169</a>
-<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">let </span>resolver = req
-<a href=#171 id=171 data-nosnippet>171</a>            .app_data::&lt;web::Data&lt;Arc&lt;<span class="kw">dyn </span>ScimTokenResolver&gt;&gt;&gt;()
-<a href=#172 id=172 data-nosnippet>172</a>            .map(|d| d.get_ref().clone());
-<a href=#173 id=173 data-nosnippet>173</a>
-<a href=#174 id=174 data-nosnippet>174</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#175 id=175 data-nosnippet>175</a>            <span class="comment">// A deployment that registered no resolver cannot honour
-<a href=#176 id=176 data-nosnippet>176</a>            // provisioning tokens at all. Failing closed here (rather than
-<a href=#177 id=177 data-nosnippet>177</a>            // falling through to the JWT arm, which would then reject the
-<a href=#178 id=178 data-nosnippet>178</a>            // handle as a malformed JWT) keeps the error honest.
-<a href=#179 id=179 data-nosnippet>179</a>            </span><span class="kw">let </span>resolver = resolver.ok_or_else(|| {
-<a href=#180 id=180 data-nosnippet>180</a>                ScimError::new(
-<a href=#181 id=181 data-nosnippet>181</a>                    actix_web::http::StatusCode::UNAUTHORIZED,
-<a href=#182 id=182 data-nosnippet>182</a>                    <span class="string">"SCIM provisioning tokens are not enabled on this deployment"</span>,
-<a href=#183 id=183 data-nosnippet>183</a>                )
-<a href=#184 id=184 data-nosnippet>184</a>            })<span class="question-mark">?</span>;
-<a href=#185 id=185 data-nosnippet>185</a>            <span class="kw">let </span>raw = presented.unwrap_or_default();
-<a href=#186 id=186 data-nosnippet>186</a>
-<a href=#187 id=187 data-nosnippet>187</a>            <span class="kw">let </span>principal = resolver.resolve(<span class="kw-2">&amp;</span>raw).<span class="kw">await</span>.ok_or_else(|| {
-<a href=#188 id=188 data-nosnippet>188</a>                ScimError::new(
-<a href=#189 id=189 data-nosnippet>189</a>                    actix_web::http::StatusCode::UNAUTHORIZED,
-<a href=#190 id=190 data-nosnippet>190</a>                    <span class="string">"invalid or expired provisioning token"</span>,
-<a href=#191 id=191 data-nosnippet>191</a>                )
-<a href=#192 id=192 data-nosnippet>192</a>            })<span class="question-mark">?</span>;
-<a href=#193 id=193 data-nosnippet>193</a>
-<a href=#194 id=194 data-nosnippet>194</a>            resolver
-<a href=#195 id=195 data-nosnippet>195</a>                .touch(principal.tenant_id, principal.token_id)
-<a href=#196 id=196 data-nosnippet>196</a>                .<span class="kw">await</span>;
-<a href=#197 id=197 data-nosnippet>197</a>
-<a href=#198 id=198 data-nosnippet>198</a>            <span class="prelude-val">Ok</span>(ScimPrincipal::Token(principal))
-<a href=#199 id=199 data-nosnippet>199</a>        })
-<a href=#200 id=200 data-nosnippet>200</a>    }
-<a href=#201 id=201 data-nosnippet>201</a>}
-<a href=#202 id=202 data-nosnippet>202</a>
-<a href=#203 id=203 data-nosnippet>203</a><span class="doccomment">/// Enforce `scim:provision` for the calling principal, using the SAME
-<a href=#204 id=204 data-nosnippet>204</a>/// authorization path every native `/api/v1/*` handler uses. Not
-<a href=#205 id=205 data-nosnippet>205</a>/// resource-scoped (SCIM has no notion of an AXIAM `resource` hierarchy), so
-<a href=#206 id=206 data-nosnippet>206</a>/// the check runs against the global sentinel (`Uuid::nil()`), exactly like
-<a href=#207 id=207 data-nosnippet>207</a>/// `users:create`/`groups:create` do today.
-<a href=#208 id=208 data-nosnippet>208</a>///
-<a href=#209 id=209 data-nosnippet>209</a>/// Goes through [`RequirePermission::check_subject`] rather than `check`
-<a href=#210 id=210 data-nosnippet>210</a>/// because the principal may not be an [`AuthenticatedUser`]. That seam
-<a href=#211 id=211 data-nosnippet>211</a>/// already exists for exactly this case ("a caller that may be a machine
-<a href=#212 id=212 data-nosnippet>212</a>/// rather than a user"), so a provisioning token introduces no new
-<a href=#213 id=213 data-nosnippet>213</a>/// authorization code — the same grants, resolved the same way, for the same
-<a href=#214 id=214 data-nosnippet>214</a>/// subject id.
-<a href=#215 id=215 data-nosnippet>215</a></span><span class="kw">pub async fn </span>require_scim_provision(
-<a href=#216 id=216 data-nosnippet>216</a>    principal: <span class="kw-2">&amp;</span>ScimPrincipal,
-<a href=#217 id=217 data-nosnippet>217</a>    authz: <span class="kw-2">&amp;</span><span class="kw">dyn </span>AuthzChecker,
-<a href=#218 id=218 data-nosnippet>218</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ScimError&gt; {
-<a href=#219 id=219 data-nosnippet>219</a>    RequirePermission::new(SCIM_PROVISION_PERMISSION, Uuid::nil())
-<a href=#220 id=220 data-nosnippet>220</a>        .check_subject(principal.tenant_id(), principal.user_id(), authz)
-<a href=#221 id=221 data-nosnippet>221</a>        .<span class="kw">await
-<a href=#222 id=222 data-nosnippet>222</a>        </span>.map_err(ScimError::from)
-<a href=#223 id=223 data-nosnippet>223</a>}
+<a href=#136 id=136 data-nosnippet>136</a>/// benefit to any real caller. The scheme is matched case-insensitively
+<a href=#137 id=137 data-nosnippet>137</a>/// (RFC 9110 §11.1), as the shared carrier rule matches it (#801).
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="kw">fn </span>bearer_value(req: <span class="kw-2">&amp;</span>HttpRequest) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="kw">let </span>header = req
+<a href=#140 id=140 data-nosnippet>140</a>        .headers()
+<a href=#141 id=141 data-nosnippet>141</a>        .get(actix_web::http::header::AUTHORIZATION)<span class="question-mark">?
+<a href=#142 id=142 data-nosnippet>142</a>        </span>.to_str()
+<a href=#143 id=143 data-nosnippet>143</a>        .ok()<span class="question-mark">?
+<a href=#144 id=144 data-nosnippet>144</a>        </span>.trim();
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">let </span>(scheme, credentials) = header.split_once(char::is_whitespace)<span class="question-mark">?</span>;
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="kw">let </span>credentials = credentials.trim();
+<a href=#147 id=147 data-nosnippet>147</a>    (scheme.eq_ignore_ascii_case(<span class="string">"bearer"</span>) &amp;&amp; !credentials.is_empty())
+<a href=#148 id=148 data-nosnippet>148</a>        .then(|| credentials.to_owned())
+<a href=#149 id=149 data-nosnippet>149</a>}
+<a href=#150 id=150 data-nosnippet>150</a>
+<a href=#151 id=151 data-nosnippet>151</a><span class="doccomment">/// Whether the request carries a non-blank `axiam_access` cookie, the
+<a href=#152 id=152 data-nosnippet>152</a>/// carrier the shared rule reads first (`axiam_auth::carrier`).
+<a href=#153 id=153 data-nosnippet>153</a></span><span class="kw">fn </span>has_access_cookie(req: <span class="kw-2">&amp;</span>HttpRequest) -&gt; bool {
+<a href=#154 id=154 data-nosnippet>154</a>    req.cookie(axiam_auth::carrier::ACCESS_COOKIE)
+<a href=#155 id=155 data-nosnippet>155</a>        .is_some_and(|c| !c.value().trim().is_empty())
+<a href=#156 id=156 data-nosnippet>156</a>}
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a><span class="doccomment">/// Refuse the provisioning-token branch, leaving the extractor's verdict for
+<a href=#159 id=159 data-nosnippet>159</a>/// the audit middleware (D-12): the request row's `authenticated` is then
+<a href=#160 id=160 data-nosnippet>160</a>/// `false`, whatever token the middleware itself could verify (#801).
+<a href=#161 id=161 data-nosnippet>161</a></span><span class="kw">fn </span>refused(req: <span class="kw-2">&amp;</span>HttpRequest, detail: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str) -&gt; ScimError {
+<a href=#162 id=162 data-nosnippet>162</a>    req.extensions_mut()
+<a href=#163 id=163 data-nosnippet>163</a>        .insert(axiam_auth::carrier::AuthVerdict::Refused);
+<a href=#164 id=164 data-nosnippet>164</a>    ScimError::new(actix_web::http::StatusCode::UNAUTHORIZED, detail)
+<a href=#165 id=165 data-nosnippet>165</a>}
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a><span class="kw">impl </span>FromRequest <span class="kw">for </span>ScimPrincipal {
+<a href=#168 id=168 data-nosnippet>168</a>    <span class="kw">type </span>Error = ScimError;
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="kw">type </span>Future = Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, <span class="self">Self</span>::Error&gt;&gt;&gt;&gt;;
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="kw">fn </span>from_request(req: <span class="kw-2">&amp;</span>HttpRequest, payload: <span class="kw-2">&amp;mut </span>Payload) -&gt; <span class="self">Self</span>::Future {
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="comment">// Dispatch on the handle prefix rather than trying both arms in
+<a href=#173 id=173 data-nosnippet>173</a>        // sequence. Trying JWT-then-token would turn every malformed JWT into
+<a href=#174 id=174 data-nosnippet>174</a>        // a database lookup, and would make "which credential did it think
+<a href=#175 id=175 data-nosnippet>175</a>        // this was?" unanswerable from the response — which is precisely the
+<a href=#176 id=176 data-nosnippet>176</a>        // question an operator asks when provisioning breaks.
+<a href=#177 id=177 data-nosnippet>177</a>        </span><span class="kw">let </span>presented = bearer_value(req);
+<a href=#178 id=178 data-nosnippet>178</a>        <span class="kw">let </span>is_provisioning_token = presented
+<a href=#179 id=179 data-nosnippet>179</a>            .as_deref()
+<a href=#180 id=180 data-nosnippet>180</a>            .is_some_and(|t| t.starts_with(SCIM_TOKEN_PREFIX));
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">if </span>!is_provisioning_token {
+<a href=#183 id=183 data-nosnippet>183</a>            <span class="kw">let </span>fut = AuthenticatedUser::from_request(req, payload);
+<a href=#184 id=184 data-nosnippet>184</a>            <span class="kw">return </span>Box::pin(<span class="kw">async move </span>{
+<a href=#185 id=185 data-nosnippet>185</a>                fut.<span class="kw">await
+<a href=#186 id=186 data-nosnippet>186</a>                    </span>.map(|u| ScimPrincipal::Jwt(Box::new(u)))
+<a href=#187 id=187 data-nosnippet>187</a>                    .map_err(ScimError::from)
+<a href=#188 id=188 data-nosnippet>188</a>            });
+<a href=#189 id=189 data-nosnippet>189</a>        }
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="comment">// CONTRACT §6.1 rule 11 reads the `axiam_access` cookie first, and the
+<a href=#192 id=192 data-nosnippet>192</a>        // audit middleware names the request row's actor by that rule. A
+<a href=#193 id=193 data-nosnippet>193</a>        // request carrying a session cookie *and* a provisioning token would
+<a href=#194 id=194 data-nosnippet>194</a>        // be served as the token's principal and recorded as the cookie's
+<a href=#195 id=195 data-nosnippet>195</a>        // user. An IdP sends no cookies, so such a request is not a real
+<a href=#196 id=196 data-nosnippet>196</a>        // provisioning call: it is refused as ambiguous rather than resolved
+<a href=#197 id=197 data-nosnippet>197</a>        // either way (#801, R112-08).
+<a href=#198 id=198 data-nosnippet>198</a>        </span><span class="kw">if </span>has_access_cookie(req) {
+<a href=#199 id=199 data-nosnippet>199</a>            <span class="kw">let </span>refusal = refused(
+<a href=#200 id=200 data-nosnippet>200</a>                req,
+<a href=#201 id=201 data-nosnippet>201</a>                <span class="string">"ambiguous credentials: a session cookie and a provisioning token"</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            );
+<a href=#203 id=203 data-nosnippet>203</a>            <span class="kw">return </span>Box::pin(<span class="kw">async move </span>{ <span class="prelude-val">Err</span>(refusal) });
+<a href=#204 id=204 data-nosnippet>204</a>        }
+<a href=#205 id=205 data-nosnippet>205</a>
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">let </span>resolver = req
+<a href=#207 id=207 data-nosnippet>207</a>            .app_data::&lt;web::Data&lt;Arc&lt;<span class="kw">dyn </span>ScimTokenResolver&gt;&gt;&gt;()
+<a href=#208 id=208 data-nosnippet>208</a>            .map(|d| d.get_ref().clone());
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">let </span>req = req.clone();
+<a href=#210 id=210 data-nosnippet>210</a>
+<a href=#211 id=211 data-nosnippet>211</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#212 id=212 data-nosnippet>212</a>            <span class="comment">// A deployment that registered no resolver cannot honour
+<a href=#213 id=213 data-nosnippet>213</a>            // provisioning tokens at all. Failing closed here (rather than
+<a href=#214 id=214 data-nosnippet>214</a>            // falling through to the JWT arm, which would then reject the
+<a href=#215 id=215 data-nosnippet>215</a>            // handle as a malformed JWT) keeps the error honest.
+<a href=#216 id=216 data-nosnippet>216</a>            </span><span class="kw">let </span>resolver = resolver.ok_or_else(|| {
+<a href=#217 id=217 data-nosnippet>217</a>                refused(
+<a href=#218 id=218 data-nosnippet>218</a>                    <span class="kw-2">&amp;</span>req,
+<a href=#219 id=219 data-nosnippet>219</a>                    <span class="string">"SCIM provisioning tokens are not enabled on this deployment"</span>,
+<a href=#220 id=220 data-nosnippet>220</a>                )
+<a href=#221 id=221 data-nosnippet>221</a>            })<span class="question-mark">?</span>;
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="kw">let </span>raw = presented.unwrap_or_default();
+<a href=#223 id=223 data-nosnippet>223</a>
+<a href=#224 id=224 data-nosnippet>224</a>            <span class="kw">let </span>principal = resolver
+<a href=#225 id=225 data-nosnippet>225</a>                .resolve(<span class="kw-2">&amp;</span>raw)
+<a href=#226 id=226 data-nosnippet>226</a>                .<span class="kw">await
+<a href=#227 id=227 data-nosnippet>227</a>                </span>.ok_or_else(|| refused(<span class="kw-2">&amp;</span>req, <span class="string">"invalid or expired provisioning token"</span>))<span class="question-mark">?</span>;
+<a href=#228 id=228 data-nosnippet>228</a>
+<a href=#229 id=229 data-nosnippet>229</a>            resolver
+<a href=#230 id=230 data-nosnippet>230</a>                .touch(principal.tenant_id, principal.token_id)
+<a href=#231 id=231 data-nosnippet>231</a>                .<span class="kw">await</span>;
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="prelude-val">Ok</span>(ScimPrincipal::Token(principal))
+<a href=#234 id=234 data-nosnippet>234</a>        })
+<a href=#235 id=235 data-nosnippet>235</a>    }
+<a href=#236 id=236 data-nosnippet>236</a>}
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a><span class="doccomment">/// Enforce `scim:provision` for the calling principal, using the SAME
+<a href=#239 id=239 data-nosnippet>239</a>/// authorization path every native `/api/v1/*` handler uses. Not
+<a href=#240 id=240 data-nosnippet>240</a>/// resource-scoped (SCIM has no notion of an AXIAM `resource` hierarchy), so
+<a href=#241 id=241 data-nosnippet>241</a>/// the check runs against the global sentinel (`Uuid::nil()`), exactly like
+<a href=#242 id=242 data-nosnippet>242</a>/// `users:create`/`groups:create` do today.
+<a href=#243 id=243 data-nosnippet>243</a>///
+<a href=#244 id=244 data-nosnippet>244</a>/// Goes through [`RequirePermission::check_subject`] rather than `check`
+<a href=#245 id=245 data-nosnippet>245</a>/// because the principal may not be an [`AuthenticatedUser`]. That seam
+<a href=#246 id=246 data-nosnippet>246</a>/// already exists for exactly this case ("a caller that may be a machine
+<a href=#247 id=247 data-nosnippet>247</a>/// rather than a user"), so a provisioning token introduces no new
+<a href=#248 id=248 data-nosnippet>248</a>/// authorization code — the same grants, resolved the same way, for the same
+<a href=#249 id=249 data-nosnippet>249</a>/// subject id.
+<a href=#250 id=250 data-nosnippet>250</a></span><span class="kw">pub async fn </span>require_scim_provision(
+<a href=#251 id=251 data-nosnippet>251</a>    principal: <span class="kw-2">&amp;</span>ScimPrincipal,
+<a href=#252 id=252 data-nosnippet>252</a>    authz: <span class="kw-2">&amp;</span><span class="kw">dyn </span>AuthzChecker,
+<a href=#253 id=253 data-nosnippet>253</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), ScimError&gt; {
+<a href=#254 id=254 data-nosnippet>254</a>    RequirePermission::new(SCIM_PROVISION_PERMISSION, Uuid::nil())
+<a href=#255 id=255 data-nosnippet>255</a>        .check_subject(principal.tenant_id(), principal.user_id(), authz)
+<a href=#256 id=256 data-nosnippet>256</a>        .<span class="kw">await
+<a href=#257 id=257 data-nosnippet>257</a>        </span>.map_err(ScimError::from)
+<a href=#258 id=258 data-nosnippet>258</a>}
 </code></pre></div></section></main></body></html>

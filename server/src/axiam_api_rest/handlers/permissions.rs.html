@@ -274,253 +274,271 @@
 <a href=#274 id=274 data-nosnippet>274</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
 <a href=#275 id=275 data-nosnippet>275</a>    request_body = GrantPermissionRequest,
 <a href=#276 id=276 data-nosnippet>276</a>    responses(
-<a href=#277 id=277 data-nosnippet>277</a>        (status = <span class="number">204</span>, description = <span class="string">"Permission granted to role"</span>),
-<a href=#278 id=278 data-nosnippet>278</a>    ),
-<a href=#279 id=279 data-nosnippet>279</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
-<a href=#280 id=280 data-nosnippet>280</a>)]
-<a href=#281 id=281 data-nosnippet>281</a><span class="kw">pub async fn </span>grant_to_role&lt;C: Connection + Clone&gt;(
-<a href=#282 id=282 data-nosnippet>282</a>    principal: AuthenticatedPrincipal,
-<a href=#283 id=283 data-nosnippet>283</a>    authz: AuthzData,
-<a href=#284 id=284 data-nosnippet>284</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#285 id=285 data-nosnippet>285</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#286 id=286 data-nosnippet>286</a>    body: web::Json&lt;GrantPermissionRequest&gt;,
-<a href=#287 id=287 data-nosnippet>287</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#288 id=288 data-nosnippet>288</a>    RequirePermission::new(<span class="string">"permissions:grant"</span>, Uuid::nil())
-<a href=#289 id=289 data-nosnippet>289</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
-<a href=#290 id=290 data-nosnippet>290</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">let </span>req = body.into_inner();
-<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span>role_id = path.into_inner();
-<a href=#293 id=293 data-nosnippet>293</a>    <span class="comment">// §5.3 / §4.2: a `network:` grant changes every assignment of the role at
-<a href=#294 id=294 data-nosnippet>294</a>    // once, so it takes `network:grant` at /network (and every meta permission
-<a href=#295 id=295 data-nosnippet>295</a>    // it confers), and never lands on a global or group-held role.
-<a href=#296 id=296 data-nosnippet>296</a>    </span><span class="kw">let </span>scope_ids = req.scope_ids.clone();
-<a href=#297 id=297 data-nosnippet>297</a>    <span class="kw">let </span>write = NetworkWrite::PermissionGrant {
-<a href=#298 id=298 data-nosnippet>298</a>        role_id,
-<a href=#299 id=299 data-nosnippet>299</a>        permission_id: req.permission_id,
-<a href=#300 id=300 data-nosnippet>300</a>        effect: req.effect,
-<a href=#301 id=301 data-nosnippet>301</a>        scope_ids: <span class="kw-2">&amp;</span>scope_ids,
-<a href=#302 id=302 data-nosnippet>302</a>    };
-<a href=#303 id=303 data-nosnippet>303</a>    <span class="kw">let </span>cleared =
-<a href=#304 id=304 data-nosnippet>304</a>        network_gate::authorize(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref(), <span class="kw-2">&amp;</span>state, write).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#305 id=305 data-nosnippet>305</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = state
-<a href=#306 id=306 data-nosnippet>306</a>        .permission_repo
-<a href=#307 id=307 data-nosnippet>307</a>        .grant_to_role_claimed(
-<a href=#308 id=308 data-nosnippet>308</a>            principal.tenant_id,
-<a href=#309 id=309 data-nosnippet>309</a>            role_id,
-<a href=#310 id=310 data-nosnippet>310</a>            req.permission_id,
-<a href=#311 id=311 data-nosnippet>311</a>            req.scope_ids,
-<a href=#312 id=312 data-nosnippet>312</a>            req.effect,
-<a href=#313 id=313 data-nosnippet>313</a>            cleared.role_claim(),
-<a href=#314 id=314 data-nosnippet>314</a>        )
-<a href=#315 id=315 data-nosnippet>315</a>        .<span class="kw">await
-<a href=#316 id=316 data-nosnippet>316</a>    </span>{
-<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">return </span>network_gate::refused_after_clearance(<span class="kw-2">&amp;</span>principal, <span class="kw-2">&amp;</span>state, write, error).<span class="kw">await</span>;
-<a href=#318 id=318 data-nosnippet>318</a>    }
-<a href=#319 id=319 data-nosnippet>319</a>    network_gate::record_cleared(<span class="kw-2">&amp;</span>principal, <span class="kw-2">&amp;</span>state, write, <span class="kw-2">&amp;</span>cleared).<span class="kw">await</span>;
-<a href=#320 id=320 data-nosnippet>320</a>    <span class="comment">// D7: an ALLOW grant widens access (safe direction) for every subject
-<a href=#321 id=321 data-nosnippet>321</a>    // holding the role (set unknown here) — flush the tenant so the new grant
-<a href=#322 id=322 data-nosnippet>322</a>    // is visible immediately.
-<a href=#323 id=323 data-nosnippet>323</a>    //
-<a href=#324 id=324 data-nosnippet>324</a>    // B1: a DENY grant *narrows* access, which is the direction where a stale
-<a href=#325 id=325 data-nosnippet>325</a>    // cache is a security problem rather than an inconvenience. The same
-<a href=#326 id=326 data-nosnippet>326</a>    // tenant flush covers it, on the same event path and with the same
-<a href=#327 id=327 data-nosnippet>327</a>    // measured 262 ms contract — a deny rule is a grant, not a special case.
-<a href=#328 id=328 data-nosnippet>328</a>    </span>authz
-<a href=#329 id=329 data-nosnippet>329</a>        .get_ref()
-<a href=#330 id=330 data-nosnippet>330</a>        .as_ref()
-<a href=#331 id=331 data-nosnippet>331</a>        .invalidate_tenant(principal.tenant_id)
-<a href=#332 id=332 data-nosnippet>332</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#333 id=333 data-nosnippet>333</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#334 id=334 data-nosnippet>334</a>}
-<a href=#335 id=335 data-nosnippet>335</a>
-<a href=#336 id=336 data-nosnippet>336</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/permissions`
-<a href=#337 id=337 data-nosnippet>337</a></span><span class="attr">#[utoipa::path(
-<a href=#338 id=338 data-nosnippet>338</a>    get,
-<a href=#339 id=339 data-nosnippet>339</a>    path = <span class="string">"/api/v1/roles/{role_id}/permissions"</span>,
-<a href=#340 id=340 data-nosnippet>340</a>    tag = <span class="string">"permissions"</span>,
-<a href=#341 id=341 data-nosnippet>341</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
-<a href=#342 id=342 data-nosnippet>342</a>    responses(
-<a href=#343 id=343 data-nosnippet>343</a>        (status = <span class="number">200</span>, description = <span class="string">"Permission grants for role, with scopes resolved"</span>,
-<a href=#344 id=344 data-nosnippet>344</a>         body = Vec&lt;ResolvedPermissionGrant&gt;),
-<a href=#345 id=345 data-nosnippet>345</a>    ),
-<a href=#346 id=346 data-nosnippet>346</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
-<a href=#347 id=347 data-nosnippet>347</a>)]
-<a href=#348 id=348 data-nosnippet>348</a><span class="kw">pub async fn </span>list_role_permissions&lt;C: Connection + Clone&gt;(
-<a href=#349 id=349 data-nosnippet>349</a>    principal: AuthenticatedPrincipal,
-<a href=#350 id=350 data-nosnippet>350</a>    authz: AuthzData,
-<a href=#351 id=351 data-nosnippet>351</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#352 id=352 data-nosnippet>352</a>    path: web::Path&lt;Uuid&gt;,
-<a href=#353 id=353 data-nosnippet>353</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#354 id=354 data-nosnippet>354</a>    RequirePermission::new(<span class="string">"permissions:list"</span>, Uuid::nil())
-<a href=#355 id=355 data-nosnippet>355</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
-<a href=#356 id=356 data-nosnippet>356</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#357 id=357 data-nosnippet>357</a>    <span class="kw">let </span>grants = state
-<a href=#358 id=358 data-nosnippet>358</a>        .permission_repo
-<a href=#359 id=359 data-nosnippet>359</a>        .get_role_permission_grants(principal.tenant_id, path.into_inner())
-<a href=#360 id=360 data-nosnippet>360</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#361 id=361 data-nosnippet>361</a>
-<a href=#362 id=362 data-nosnippet>362</a>    <span class="comment">// Resolve each grant's `scope_ids` to the scopes they name.
-<a href=#363 id=363 data-nosnippet>363</a>    //
-<a href=#364 id=364 data-nosnippet>364</a>    // The grant edge stores scope UUIDs and nothing else, so the admin UI could
-<a href=#365 id=365 data-nosnippet>365</a>    // only ever render "3 scopes" — a number with no way to find out which
-<a href=#366 id=366 data-nosnippet>366</a>    // three. Answering "which scopes does this grant cover?" from the client
-<a href=#367 id=367 data-nosnippet>367</a>    // would have meant listing every resource in the tenant and then every
-<a href=#368 id=368 data-nosnippet>368</a>    // resource's scopes, just to turn three UUIDs into three names. The ids are
-<a href=#369 id=369 data-nosnippet>369</a>    // resolved here instead, where one lookup answers it.
-<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">let </span>resolved = resolve_grant_scopes(<span class="kw-2">&amp;</span>state, principal.tenant_id, grants).<span class="kw">await</span>;
-<a href=#371 id=371 data-nosnippet>371</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(resolved))
-<a href=#372 id=372 data-nosnippet>372</a>}
+<a href=#277 id=277 data-nosnippet>277</a>        (status = <span class="number">409</span>, description = <span class="string">"`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale"</span>, body = <span class="kw">crate</span>::handlers::network::NetworkConflictResponse),
+<a href=#278 id=278 data-nosnippet>278</a>        (status = <span class="number">204</span>, description = <span class="string">"Permission granted to role"</span>),
+<a href=#279 id=279 data-nosnippet>279</a>    ),
+<a href=#280 id=280 data-nosnippet>280</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
+<a href=#281 id=281 data-nosnippet>281</a>)]
+<a href=#282 id=282 data-nosnippet>282</a><span class="kw">pub async fn </span>grant_to_role&lt;C: Connection + Clone&gt;(
+<a href=#283 id=283 data-nosnippet>283</a>    principal: AuthenticatedPrincipal,
+<a href=#284 id=284 data-nosnippet>284</a>    authz: AuthzData,
+<a href=#285 id=285 data-nosnippet>285</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#286 id=286 data-nosnippet>286</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#287 id=287 data-nosnippet>287</a>    body: web::Json&lt;GrantPermissionRequest&gt;,
+<a href=#288 id=288 data-nosnippet>288</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#289 id=289 data-nosnippet>289</a>    RequirePermission::new(<span class="string">"permissions:grant"</span>, Uuid::nil())
+<a href=#290 id=290 data-nosnippet>290</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
+<a href=#291 id=291 data-nosnippet>291</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span>req = body.into_inner();
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">let </span>role_id = path.into_inner();
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="comment">// §5.3 / §4.2: a `network:` grant changes every assignment of the role at
+<a href=#295 id=295 data-nosnippet>295</a>    // once, so it takes `network:grant` at /network (and every meta permission
+<a href=#296 id=296 data-nosnippet>296</a>    // it confers), and never lands on a global or group-held role.
+<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="kw">let </span>scope_ids = req.scope_ids.clone();
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">let </span>write = NetworkWrite::PermissionGrant {
+<a href=#299 id=299 data-nosnippet>299</a>        role_id,
+<a href=#300 id=300 data-nosnippet>300</a>        permission_id: req.permission_id,
+<a href=#301 id=301 data-nosnippet>301</a>        effect: req.effect,
+<a href=#302 id=302 data-nosnippet>302</a>        scope_ids: <span class="kw-2">&amp;</span>scope_ids,
+<a href=#303 id=303 data-nosnippet>303</a>    };
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="kw">let </span>cleared =
+<a href=#305 id=305 data-nosnippet>305</a>        network_gate::authorize(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref(), <span class="kw-2">&amp;</span>state, write).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="kw">let </span>repo = state.permission_repo.clone();
+<a href=#307 id=307 data-nosnippet>307</a>    <span class="kw">let </span>tenant_id = principal.tenant_id;
+<a href=#308 id=308 data-nosnippet>308</a>    <span class="kw">let </span>permission_id = req.permission_id;
+<a href=#309 id=309 data-nosnippet>309</a>    <span class="kw">let </span>granted_scopes = req.scope_ids;
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="kw">let </span>effect = req.effect;
+<a href=#311 id=311 data-nosnippet>311</a>    <span class="kw">let </span>claim = cleared.role_claim();
+<a href=#312 id=312 data-nosnippet>312</a>    <span class="comment">// R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+<a href=#313 id=313 data-nosnippet>313</a>    // task, which a client that goes away does not cancel.
+<a href=#314 id=314 data-nosnippet>314</a>    // D7: an ALLOW grant widens access (safe direction) for every subject
+<a href=#315 id=315 data-nosnippet>315</a>    // holding the role (set unknown here) — flush the tenant so the new grant
+<a href=#316 id=316 data-nosnippet>316</a>    // is visible immediately.
+<a href=#317 id=317 data-nosnippet>317</a>    //
+<a href=#318 id=318 data-nosnippet>318</a>    // B1: a DENY grant *narrows* access, which is the direction where a stale
+<a href=#319 id=319 data-nosnippet>319</a>    // cache is a security problem rather than an inconvenience. The same
+<a href=#320 id=320 data-nosnippet>320</a>    // tenant flush covers it, on the same event path and with the same
+<a href=#321 id=321 data-nosnippet>321</a>    // measured 262 ms contract — a deny rule is a grant, not a special case.
+<a href=#322 id=322 data-nosnippet>322</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(error) = network_gate::write_and_record(
+<a href=#323 id=323 data-nosnippet>323</a>        <span class="kw-2">&amp;</span>state,
+<a href=#324 id=324 data-nosnippet>324</a>        authz.get_ref(),
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="kw-2">&amp;</span>network_gate::GateActor::principal(<span class="kw-2">&amp;</span>principal),
+<a href=#326 id=326 data-nosnippet>326</a>        write,
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw-2">&amp;</span>cleared,
+<a href=#328 id=328 data-nosnippet>328</a>        network_gate::CacheFlush::Tenant,
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="kw">async move </span>{
+<a href=#330 id=330 data-nosnippet>330</a>            repo.grant_to_role_claimed(
+<a href=#331 id=331 data-nosnippet>331</a>                tenant_id,
+<a href=#332 id=332 data-nosnippet>332</a>                role_id,
+<a href=#333 id=333 data-nosnippet>333</a>                permission_id,
+<a href=#334 id=334 data-nosnippet>334</a>                granted_scopes,
+<a href=#335 id=335 data-nosnippet>335</a>                effect,
+<a href=#336 id=336 data-nosnippet>336</a>                claim,
+<a href=#337 id=337 data-nosnippet>337</a>            )
+<a href=#338 id=338 data-nosnippet>338</a>            .<span class="kw">await
+<a href=#339 id=339 data-nosnippet>339</a>        </span>},
+<a href=#340 id=340 data-nosnippet>340</a>    )
+<a href=#341 id=341 data-nosnippet>341</a>    .<span class="kw">await
+<a href=#342 id=342 data-nosnippet>342</a>    </span>{
+<a href=#343 id=343 data-nosnippet>343</a>        <span class="kw">return </span>network_gate::refused_in_task(error);
+<a href=#344 id=344 data-nosnippet>344</a>    }
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#346 id=346 data-nosnippet>346</a>}
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a><span class="doccomment">/// `GET /api/v1/roles/{role_id}/permissions`
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="attr">#[utoipa::path(
+<a href=#350 id=350 data-nosnippet>350</a>    get,
+<a href=#351 id=351 data-nosnippet>351</a>    path = <span class="string">"/api/v1/roles/{role_id}/permissions"</span>,
+<a href=#352 id=352 data-nosnippet>352</a>    tag = <span class="string">"permissions"</span>,
+<a href=#353 id=353 data-nosnippet>353</a>    params((<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>)),
+<a href=#354 id=354 data-nosnippet>354</a>    responses(
+<a href=#355 id=355 data-nosnippet>355</a>        (status = <span class="number">200</span>, description = <span class="string">"Permission grants for role, with scopes resolved"</span>,
+<a href=#356 id=356 data-nosnippet>356</a>         body = Vec&lt;ResolvedPermissionGrant&gt;),
+<a href=#357 id=357 data-nosnippet>357</a>    ),
+<a href=#358 id=358 data-nosnippet>358</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
+<a href=#359 id=359 data-nosnippet>359</a>)]
+<a href=#360 id=360 data-nosnippet>360</a><span class="kw">pub async fn </span>list_role_permissions&lt;C: Connection + Clone&gt;(
+<a href=#361 id=361 data-nosnippet>361</a>    principal: AuthenticatedPrincipal,
+<a href=#362 id=362 data-nosnippet>362</a>    authz: AuthzData,
+<a href=#363 id=363 data-nosnippet>363</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#364 id=364 data-nosnippet>364</a>    path: web::Path&lt;Uuid&gt;,
+<a href=#365 id=365 data-nosnippet>365</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#366 id=366 data-nosnippet>366</a>    RequirePermission::new(<span class="string">"permissions:list"</span>, Uuid::nil())
+<a href=#367 id=367 data-nosnippet>367</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
+<a href=#368 id=368 data-nosnippet>368</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="kw">let </span>grants = state
+<a href=#370 id=370 data-nosnippet>370</a>        .permission_repo
+<a href=#371 id=371 data-nosnippet>371</a>        .get_role_permission_grants(principal.tenant_id, path.into_inner())
+<a href=#372 id=372 data-nosnippet>372</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#373 id=373 data-nosnippet>373</a>
-<a href=#374 id=374 data-nosnippet>374</a><span class="doccomment">/// A scope named by a grant, resolved to something a human can read.
-<a href=#375 id=375 data-nosnippet>375</a></span><span class="attr">#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-<a href=#376 id=376 data-nosnippet>376</a></span><span class="kw">pub struct </span>GrantedScope {
-<a href=#377 id=377 data-nosnippet>377</a>    <span class="doccomment">/// The scope's id, as it appears in the grant's `scope_ids`.
-<a href=#378 id=378 data-nosnippet>378</a>    </span><span class="kw">pub </span>id: Uuid,
-<a href=#379 id=379 data-nosnippet>379</a>    <span class="doccomment">/// The scope's name, e.g. `invoices`.
-<a href=#380 id=380 data-nosnippet>380</a>    </span><span class="kw">pub </span>name: String,
-<a href=#381 id=381 data-nosnippet>381</a>    <span class="doccomment">/// The resource the scope belongs to.
-<a href=#382 id=382 data-nosnippet>382</a>    </span><span class="kw">pub </span>resource_id: Uuid,
-<a href=#383 id=383 data-nosnippet>383</a>}
-<a href=#384 id=384 data-nosnippet>384</a>
-<a href=#385 id=385 data-nosnippet>385</a><span class="doccomment">/// A permission grant with its scopes resolved.
-<a href=#386 id=386 data-nosnippet>386</a>///
-<a href=#387 id=387 data-nosnippet>387</a>/// A superset of [`PermissionGrant`]: `scope_ids` is still present and still
-<a href=#388 id=388 data-nosnippet>388</a>/// authoritative, so a client written before `scopes` existed is unaffected.
-<a href=#389 id=389 data-nosnippet>389</a></span><span class="attr">#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-<a href=#390 id=390 data-nosnippet>390</a></span><span class="kw">pub struct </span>ResolvedPermissionGrant {
-<a href=#391 id=391 data-nosnippet>391</a>    <span class="doccomment">/// The permission this grant is about.
-<a href=#392 id=392 data-nosnippet>392</a>    </span><span class="kw">pub </span>permission: Permission,
-<a href=#393 id=393 data-nosnippet>393</a>    <span class="doccomment">/// The scope ids the grant is constrained to. Empty is the wildcard.
-<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">pub </span>scope_ids: Vec&lt;Uuid&gt;,
-<a href=#395 id=395 data-nosnippet>395</a>    <span class="doccomment">/// Whether the grant permits or refuses.
-<a href=#396 id=396 data-nosnippet>396</a>    </span><span class="kw">pub </span>effect: PermissionEffect,
-<a href=#397 id=397 data-nosnippet>397</a>    <span class="doccomment">/// The scopes `scope_ids` names, in the same order where resolvable.
-<a href=#398 id=398 data-nosnippet>398</a>    ///
-<a href=#399 id=399 data-nosnippet>399</a>    /// A scope that cannot be resolved is **omitted** rather than represented
-<a href=#400 id=400 data-nosnippet>400</a>    /// by a placeholder, so this can be shorter than `scope_ids`. That happens
-<a href=#401 id=401 data-nosnippet>401</a>    /// when a scope was deleted while a grant still referenced it, and showing
-<a href=#402 id=402 data-nosnippet>402</a>    /// a name for something that no longer exists would be worse than showing
-<a href=#403 id=403 data-nosnippet>403</a>    /// one fewer chip beside a count that still says how many ids the grant
-<a href=#404 id=404 data-nosnippet>404</a>    /// carries.
-<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="kw">pub </span>scopes: Vec&lt;GrantedScope&gt;,
-<a href=#406 id=406 data-nosnippet>406</a>}
-<a href=#407 id=407 data-nosnippet>407</a>
-<a href=#408 id=408 data-nosnippet>408</a><span class="doccomment">/// Turn each grant's `scope_ids` into [`GrantedScope`]s.
-<a href=#409 id=409 data-nosnippet>409</a>///
-<a href=#410 id=410 data-nosnippet>410</a>/// One lookup per distinct scope across the whole response, not per grant:
-<a href=#411 id=411 data-nosnippet>411</a>/// several grants on the same role commonly name the same scopes, and issuing
-<a href=#412 id=412 data-nosnippet>412</a>/// the same read once per grant would make a role page's cost quadratic in how
-<a href=#413 id=413 data-nosnippet>413</a>/// carefully its grants were narrowed — penalising exactly the operators doing
-<a href=#414 id=414 data-nosnippet>414</a>/// the right thing.
-<a href=#415 id=415 data-nosnippet>415</a>///
-<a href=#416 id=416 data-nosnippet>416</a>/// A failed lookup drops the scope and logs; it never fails the request. The
-<a href=#417 id=417 data-nosnippet>417</a>/// caller asked for the role's grants, and `scope_ids` — the authoritative
-<a href=#418 id=418 data-nosnippet>418</a>/// part — is already in hand.
-<a href=#419 id=419 data-nosnippet>419</a></span><span class="kw">async fn </span>resolve_grant_scopes&lt;C: Connection + Clone&gt;(
-<a href=#420 id=420 data-nosnippet>420</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
-<a href=#421 id=421 data-nosnippet>421</a>    tenant_id: Uuid,
-<a href=#422 id=422 data-nosnippet>422</a>    grants: Vec&lt;PermissionGrant&gt;,
-<a href=#423 id=423 data-nosnippet>423</a>) -&gt; Vec&lt;ResolvedPermissionGrant&gt; {
-<a href=#424 id=424 data-nosnippet>424</a>    <span class="kw">use </span>axiam_core::repository::ScopeRepository <span class="kw">as _</span>;
-<a href=#425 id=425 data-nosnippet>425</a>    <span class="kw">use </span>std::collections::HashMap;
-<a href=#426 id=426 data-nosnippet>426</a>
-<a href=#427 id=427 data-nosnippet>427</a>    <span class="kw">let </span><span class="kw-2">mut </span>cache: HashMap&lt;Uuid, <span class="prelude-ty">Option</span>&lt;GrantedScope&gt;&gt; = HashMap::new();
-<a href=#428 id=428 data-nosnippet>428</a>    <span class="kw">for </span>grant <span class="kw">in </span><span class="kw-2">&amp;</span>grants {
-<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">for </span>scope_id <span class="kw">in </span><span class="kw-2">&amp;</span>grant.scope_ids {
-<a href=#430 id=430 data-nosnippet>430</a>            <span class="kw">if </span>cache.contains_key(scope_id) {
-<a href=#431 id=431 data-nosnippet>431</a>                <span class="kw">continue</span>;
-<a href=#432 id=432 data-nosnippet>432</a>            }
-<a href=#433 id=433 data-nosnippet>433</a>            <span class="kw">let </span>resolved = <span class="kw">match </span>state.scope_repo.get_by_id(tenant_id, <span class="kw-2">*</span>scope_id).<span class="kw">await </span>{
-<a href=#434 id=434 data-nosnippet>434</a>                <span class="prelude-val">Ok</span>(scope) =&gt; <span class="prelude-val">Some</span>(GrantedScope {
-<a href=#435 id=435 data-nosnippet>435</a>                    id: scope.id,
-<a href=#436 id=436 data-nosnippet>436</a>                    name: scope.name,
-<a href=#437 id=437 data-nosnippet>437</a>                    resource_id: scope.resource_id,
-<a href=#438 id=438 data-nosnippet>438</a>                }),
-<a href=#439 id=439 data-nosnippet>439</a>                <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#440 id=440 data-nosnippet>440</a>                    <span class="macro">tracing::debug!</span>(
-<a href=#441 id=441 data-nosnippet>441</a>                        error = %e,
-<a href=#442 id=442 data-nosnippet>442</a>                        %tenant_id,
-<a href=#443 id=443 data-nosnippet>443</a>                        %scope_id,
-<a href=#444 id=444 data-nosnippet>444</a>                        <span class="string">"a grant names a scope that no longer resolves"
-<a href=#445 id=445 data-nosnippet>445</a>                    </span>);
-<a href=#446 id=446 data-nosnippet>446</a>                    <span class="prelude-val">None
-<a href=#447 id=447 data-nosnippet>447</a>                </span>}
-<a href=#448 id=448 data-nosnippet>448</a>            };
-<a href=#449 id=449 data-nosnippet>449</a>            cache.insert(<span class="kw-2">*</span>scope_id, resolved);
-<a href=#450 id=450 data-nosnippet>450</a>        }
-<a href=#451 id=451 data-nosnippet>451</a>    }
-<a href=#452 id=452 data-nosnippet>452</a>
-<a href=#453 id=453 data-nosnippet>453</a>    grants
-<a href=#454 id=454 data-nosnippet>454</a>        .into_iter()
-<a href=#455 id=455 data-nosnippet>455</a>        .map(|grant| {
-<a href=#456 id=456 data-nosnippet>456</a>            <span class="kw">let </span>scopes = grant
-<a href=#457 id=457 data-nosnippet>457</a>                .scope_ids
-<a href=#458 id=458 data-nosnippet>458</a>                .iter()
-<a href=#459 id=459 data-nosnippet>459</a>                .filter_map(|id| cache.get(id).and_then(|s| s.clone()))
-<a href=#460 id=460 data-nosnippet>460</a>                .collect();
-<a href=#461 id=461 data-nosnippet>461</a>            ResolvedPermissionGrant {
-<a href=#462 id=462 data-nosnippet>462</a>                permission: grant.permission,
-<a href=#463 id=463 data-nosnippet>463</a>                scope_ids: grant.scope_ids,
-<a href=#464 id=464 data-nosnippet>464</a>                effect: grant.effect,
-<a href=#465 id=465 data-nosnippet>465</a>                scopes,
-<a href=#466 id=466 data-nosnippet>466</a>            }
-<a href=#467 id=467 data-nosnippet>467</a>        })
-<a href=#468 id=468 data-nosnippet>468</a>        .collect()
-<a href=#469 id=469 data-nosnippet>469</a>}
-<a href=#470 id=470 data-nosnippet>470</a>
-<a href=#471 id=471 data-nosnippet>471</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
-<a href=#472 id=472 data-nosnippet>472</a></span><span class="attr">#[utoipa::path(
-<a href=#473 id=473 data-nosnippet>473</a>    delete,
-<a href=#474 id=474 data-nosnippet>474</a>    path = <span class="string">"/api/v1/roles/{role_id}/permissions/{permission_id}"</span>,
-<a href=#475 id=475 data-nosnippet>475</a>    tag = <span class="string">"permissions"</span>,
-<a href=#476 id=476 data-nosnippet>476</a>    params(
-<a href=#477 id=477 data-nosnippet>477</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
-<a href=#478 id=478 data-nosnippet>478</a>        (<span class="string">"permission_id" </span>= Uuid, Path, description = <span class="string">"Permission ID"</span>),
-<a href=#479 id=479 data-nosnippet>479</a>    ),
-<a href=#480 id=480 data-nosnippet>480</a>    responses(
-<a href=#481 id=481 data-nosnippet>481</a>        (status = <span class="number">204</span>, description = <span class="string">"Permission revoked from role"</span>),
-<a href=#482 id=482 data-nosnippet>482</a>    ),
-<a href=#483 id=483 data-nosnippet>483</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
-<a href=#484 id=484 data-nosnippet>484</a>)]
-<a href=#485 id=485 data-nosnippet>485</a><span class="kw">pub async fn </span>revoke_from_role&lt;C: Connection + Clone&gt;(
-<a href=#486 id=486 data-nosnippet>486</a>    principal: AuthenticatedPrincipal,
-<a href=#487 id=487 data-nosnippet>487</a>    authz: AuthzData,
-<a href=#488 id=488 data-nosnippet>488</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#489 id=489 data-nosnippet>489</a>    path: web::Path&lt;RolePermissionPath&gt;,
-<a href=#490 id=490 data-nosnippet>490</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#491 id=491 data-nosnippet>491</a>    RequirePermission::new(<span class="string">"permissions:revoke"</span>, Uuid::nil())
-<a href=#492 id=492 data-nosnippet>492</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
-<a href=#493 id=493 data-nosnippet>493</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#494 id=494 data-nosnippet>494</a>    <span class="kw">let </span>p = path.into_inner();
-<a href=#495 id=495 data-nosnippet>495</a>    <span class="comment">// §5.3: revoking a `network:` grant of either effect (a deny's revoke
-<a href=#496 id=496 data-nosnippet>496</a>    // releases a quarantine) takes `network:grant` at /network.
-<a href=#497 id=497 data-nosnippet>497</a>    </span><span class="kw">let </span>write = NetworkWrite::PermissionRevoke {
-<a href=#498 id=498 data-nosnippet>498</a>        role_id: p.role_id,
-<a href=#499 id=499 data-nosnippet>499</a>        permission_id: p.permission_id,
-<a href=#500 id=500 data-nosnippet>500</a>    };
-<a href=#501 id=501 data-nosnippet>501</a>    <span class="kw">let </span>cleared =
-<a href=#502 id=502 data-nosnippet>502</a>        network_gate::authorize(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref(), <span class="kw-2">&amp;</span>state, write).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#503 id=503 data-nosnippet>503</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = state
-<a href=#504 id=504 data-nosnippet>504</a>        .permission_repo
-<a href=#505 id=505 data-nosnippet>505</a>        .revoke_from_role_claimed(
-<a href=#506 id=506 data-nosnippet>506</a>            principal.tenant_id,
-<a href=#507 id=507 data-nosnippet>507</a>            p.role_id,
-<a href=#508 id=508 data-nosnippet>508</a>            p.permission_id,
-<a href=#509 id=509 data-nosnippet>509</a>            cleared.role_claim(),
-<a href=#510 id=510 data-nosnippet>510</a>        )
-<a href=#511 id=511 data-nosnippet>511</a>        .<span class="kw">await
-<a href=#512 id=512 data-nosnippet>512</a>    </span>{
-<a href=#513 id=513 data-nosnippet>513</a>        <span class="kw">return </span>network_gate::refused_after_clearance(<span class="kw-2">&amp;</span>principal, <span class="kw-2">&amp;</span>state, write, error).<span class="kw">await</span>;
-<a href=#514 id=514 data-nosnippet>514</a>    }
-<a href=#515 id=515 data-nosnippet>515</a>    network_gate::record_cleared(<span class="kw-2">&amp;</span>principal, <span class="kw-2">&amp;</span>state, write, <span class="kw-2">&amp;</span>cleared).<span class="kw">await</span>;
-<a href=#516 id=516 data-nosnippet>516</a>    <span class="comment">// D7 (REVOCATION — security critical): revoking a grant removes access for
-<a href=#517 id=517 data-nosnippet>517</a>    // every subject holding this role. The subject set isn't known here without
-<a href=#518 id=518 data-nosnippet>518</a>    // a query, so flush the whole tenant — this must never leave a stale allow.
-<a href=#519 id=519 data-nosnippet>519</a>    </span>authz
-<a href=#520 id=520 data-nosnippet>520</a>        .get_ref()
-<a href=#521 id=521 data-nosnippet>521</a>        .as_ref()
-<a href=#522 id=522 data-nosnippet>522</a>        .invalidate_tenant(principal.tenant_id)
-<a href=#523 id=523 data-nosnippet>523</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#524 id=524 data-nosnippet>524</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
-<a href=#525 id=525 data-nosnippet>525</a>}
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="comment">// Resolve each grant's `scope_ids` to the scopes they name.
+<a href=#375 id=375 data-nosnippet>375</a>    //
+<a href=#376 id=376 data-nosnippet>376</a>    // The grant edge stores scope UUIDs and nothing else, so the admin UI could
+<a href=#377 id=377 data-nosnippet>377</a>    // only ever render "3 scopes" — a number with no way to find out which
+<a href=#378 id=378 data-nosnippet>378</a>    // three. Answering "which scopes does this grant cover?" from the client
+<a href=#379 id=379 data-nosnippet>379</a>    // would have meant listing every resource in the tenant and then every
+<a href=#380 id=380 data-nosnippet>380</a>    // resource's scopes, just to turn three UUIDs into three names. The ids are
+<a href=#381 id=381 data-nosnippet>381</a>    // resolved here instead, where one lookup answers it.
+<a href=#382 id=382 data-nosnippet>382</a>    </span><span class="kw">let </span>resolved = resolve_grant_scopes(<span class="kw-2">&amp;</span>state, principal.tenant_id, grants).<span class="kw">await</span>;
+<a href=#383 id=383 data-nosnippet>383</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(resolved))
+<a href=#384 id=384 data-nosnippet>384</a>}
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a><span class="doccomment">/// A scope named by a grant, resolved to something a human can read.
+<a href=#387 id=387 data-nosnippet>387</a></span><span class="attr">#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+<a href=#388 id=388 data-nosnippet>388</a></span><span class="kw">pub struct </span>GrantedScope {
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="doccomment">/// The scope's id, as it appears in the grant's `scope_ids`.
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="kw">pub </span>id: Uuid,
+<a href=#391 id=391 data-nosnippet>391</a>    <span class="doccomment">/// The scope's name, e.g. `invoices`.
+<a href=#392 id=392 data-nosnippet>392</a>    </span><span class="kw">pub </span>name: String,
+<a href=#393 id=393 data-nosnippet>393</a>    <span class="doccomment">/// The resource the scope belongs to.
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">pub </span>resource_id: Uuid,
+<a href=#395 id=395 data-nosnippet>395</a>}
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a><span class="doccomment">/// A permission grant with its scopes resolved.
+<a href=#398 id=398 data-nosnippet>398</a>///
+<a href=#399 id=399 data-nosnippet>399</a>/// A superset of [`PermissionGrant`]: `scope_ids` is still present and still
+<a href=#400 id=400 data-nosnippet>400</a>/// authoritative, so a client written before `scopes` existed is unaffected.
+<a href=#401 id=401 data-nosnippet>401</a></span><span class="attr">#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+<a href=#402 id=402 data-nosnippet>402</a></span><span class="kw">pub struct </span>ResolvedPermissionGrant {
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="doccomment">/// The permission this grant is about.
+<a href=#404 id=404 data-nosnippet>404</a>    </span><span class="kw">pub </span>permission: Permission,
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="doccomment">/// The scope ids the grant is constrained to. Empty is the wildcard.
+<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">pub </span>scope_ids: Vec&lt;Uuid&gt;,
+<a href=#407 id=407 data-nosnippet>407</a>    <span class="doccomment">/// Whether the grant permits or refuses.
+<a href=#408 id=408 data-nosnippet>408</a>    </span><span class="kw">pub </span>effect: PermissionEffect,
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="doccomment">/// The scopes `scope_ids` names, in the same order where resolvable.
+<a href=#410 id=410 data-nosnippet>410</a>    ///
+<a href=#411 id=411 data-nosnippet>411</a>    /// A scope that cannot be resolved is **omitted** rather than represented
+<a href=#412 id=412 data-nosnippet>412</a>    /// by a placeholder, so this can be shorter than `scope_ids`. That happens
+<a href=#413 id=413 data-nosnippet>413</a>    /// when a scope was deleted while a grant still referenced it, and showing
+<a href=#414 id=414 data-nosnippet>414</a>    /// a name for something that no longer exists would be worse than showing
+<a href=#415 id=415 data-nosnippet>415</a>    /// one fewer chip beside a count that still says how many ids the grant
+<a href=#416 id=416 data-nosnippet>416</a>    /// carries.
+<a href=#417 id=417 data-nosnippet>417</a>    </span><span class="kw">pub </span>scopes: Vec&lt;GrantedScope&gt;,
+<a href=#418 id=418 data-nosnippet>418</a>}
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a><span class="doccomment">/// Turn each grant's `scope_ids` into [`GrantedScope`]s.
+<a href=#421 id=421 data-nosnippet>421</a>///
+<a href=#422 id=422 data-nosnippet>422</a>/// One lookup per distinct scope across the whole response, not per grant:
+<a href=#423 id=423 data-nosnippet>423</a>/// several grants on the same role commonly name the same scopes, and issuing
+<a href=#424 id=424 data-nosnippet>424</a>/// the same read once per grant would make a role page's cost quadratic in how
+<a href=#425 id=425 data-nosnippet>425</a>/// carefully its grants were narrowed — penalising exactly the operators doing
+<a href=#426 id=426 data-nosnippet>426</a>/// the right thing.
+<a href=#427 id=427 data-nosnippet>427</a>///
+<a href=#428 id=428 data-nosnippet>428</a>/// A failed lookup drops the scope and logs; it never fails the request. The
+<a href=#429 id=429 data-nosnippet>429</a>/// caller asked for the role's grants, and `scope_ids` — the authoritative
+<a href=#430 id=430 data-nosnippet>430</a>/// part — is already in hand.
+<a href=#431 id=431 data-nosnippet>431</a></span><span class="kw">async fn </span>resolve_grant_scopes&lt;C: Connection + Clone&gt;(
+<a href=#432 id=432 data-nosnippet>432</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#433 id=433 data-nosnippet>433</a>    tenant_id: Uuid,
+<a href=#434 id=434 data-nosnippet>434</a>    grants: Vec&lt;PermissionGrant&gt;,
+<a href=#435 id=435 data-nosnippet>435</a>) -&gt; Vec&lt;ResolvedPermissionGrant&gt; {
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="kw">use </span>axiam_core::repository::ScopeRepository <span class="kw">as _</span>;
+<a href=#437 id=437 data-nosnippet>437</a>    <span class="kw">use </span>std::collections::HashMap;
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="kw">let </span><span class="kw-2">mut </span>cache: HashMap&lt;Uuid, <span class="prelude-ty">Option</span>&lt;GrantedScope&gt;&gt; = HashMap::new();
+<a href=#440 id=440 data-nosnippet>440</a>    <span class="kw">for </span>grant <span class="kw">in </span><span class="kw-2">&amp;</span>grants {
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">for </span>scope_id <span class="kw">in </span><span class="kw-2">&amp;</span>grant.scope_ids {
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="kw">if </span>cache.contains_key(scope_id) {
+<a href=#443 id=443 data-nosnippet>443</a>                <span class="kw">continue</span>;
+<a href=#444 id=444 data-nosnippet>444</a>            }
+<a href=#445 id=445 data-nosnippet>445</a>            <span class="kw">let </span>resolved = <span class="kw">match </span>state.scope_repo.get_by_id(tenant_id, <span class="kw-2">*</span>scope_id).<span class="kw">await </span>{
+<a href=#446 id=446 data-nosnippet>446</a>                <span class="prelude-val">Ok</span>(scope) =&gt; <span class="prelude-val">Some</span>(GrantedScope {
+<a href=#447 id=447 data-nosnippet>447</a>                    id: scope.id,
+<a href=#448 id=448 data-nosnippet>448</a>                    name: scope.name,
+<a href=#449 id=449 data-nosnippet>449</a>                    resource_id: scope.resource_id,
+<a href=#450 id=450 data-nosnippet>450</a>                }),
+<a href=#451 id=451 data-nosnippet>451</a>                <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#452 id=452 data-nosnippet>452</a>                    <span class="macro">tracing::debug!</span>(
+<a href=#453 id=453 data-nosnippet>453</a>                        error = %e,
+<a href=#454 id=454 data-nosnippet>454</a>                        %tenant_id,
+<a href=#455 id=455 data-nosnippet>455</a>                        %scope_id,
+<a href=#456 id=456 data-nosnippet>456</a>                        <span class="string">"a grant names a scope that no longer resolves"
+<a href=#457 id=457 data-nosnippet>457</a>                    </span>);
+<a href=#458 id=458 data-nosnippet>458</a>                    <span class="prelude-val">None
+<a href=#459 id=459 data-nosnippet>459</a>                </span>}
+<a href=#460 id=460 data-nosnippet>460</a>            };
+<a href=#461 id=461 data-nosnippet>461</a>            cache.insert(<span class="kw-2">*</span>scope_id, resolved);
+<a href=#462 id=462 data-nosnippet>462</a>        }
+<a href=#463 id=463 data-nosnippet>463</a>    }
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>    grants
+<a href=#466 id=466 data-nosnippet>466</a>        .into_iter()
+<a href=#467 id=467 data-nosnippet>467</a>        .map(|grant| {
+<a href=#468 id=468 data-nosnippet>468</a>            <span class="kw">let </span>scopes = grant
+<a href=#469 id=469 data-nosnippet>469</a>                .scope_ids
+<a href=#470 id=470 data-nosnippet>470</a>                .iter()
+<a href=#471 id=471 data-nosnippet>471</a>                .filter_map(|id| cache.get(id).and_then(|s| s.clone()))
+<a href=#472 id=472 data-nosnippet>472</a>                .collect();
+<a href=#473 id=473 data-nosnippet>473</a>            ResolvedPermissionGrant {
+<a href=#474 id=474 data-nosnippet>474</a>                permission: grant.permission,
+<a href=#475 id=475 data-nosnippet>475</a>                scope_ids: grant.scope_ids,
+<a href=#476 id=476 data-nosnippet>476</a>                effect: grant.effect,
+<a href=#477 id=477 data-nosnippet>477</a>                scopes,
+<a href=#478 id=478 data-nosnippet>478</a>            }
+<a href=#479 id=479 data-nosnippet>479</a>        })
+<a href=#480 id=480 data-nosnippet>480</a>        .collect()
+<a href=#481 id=481 data-nosnippet>481</a>}
+<a href=#482 id=482 data-nosnippet>482</a>
+<a href=#483 id=483 data-nosnippet>483</a><span class="doccomment">/// `DELETE /api/v1/roles/{role_id}/permissions/{permission_id}`
+<a href=#484 id=484 data-nosnippet>484</a></span><span class="attr">#[utoipa::path(
+<a href=#485 id=485 data-nosnippet>485</a>    delete,
+<a href=#486 id=486 data-nosnippet>486</a>    path = <span class="string">"/api/v1/roles/{role_id}/permissions/{permission_id}"</span>,
+<a href=#487 id=487 data-nosnippet>487</a>    tag = <span class="string">"permissions"</span>,
+<a href=#488 id=488 data-nosnippet>488</a>    params(
+<a href=#489 id=489 data-nosnippet>489</a>        (<span class="string">"role_id" </span>= Uuid, Path, description = <span class="string">"Role ID"</span>),
+<a href=#490 id=490 data-nosnippet>490</a>        (<span class="string">"permission_id" </span>= Uuid, Path, description = <span class="string">"Permission ID"</span>),
+<a href=#491 id=491 data-nosnippet>491</a>    ),
+<a href=#492 id=492 data-nosnippet>492</a>    responses(
+<a href=#493 id=493 data-nosnippet>493</a>        (status = <span class="number">409</span>, description = <span class="string">"`conflict` with `reason_code` `stale_version`: the role or its assignments changed since they were read, or the network gate refused the write as stale"</span>, body = <span class="kw">crate</span>::handlers::network::NetworkConflictResponse),
+<a href=#494 id=494 data-nosnippet>494</a>        (status = <span class="number">204</span>, description = <span class="string">"Permission revoked from role"</span>),
+<a href=#495 id=495 data-nosnippet>495</a>    ),
+<a href=#496 id=496 data-nosnippet>496</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
+<a href=#497 id=497 data-nosnippet>497</a>)]
+<a href=#498 id=498 data-nosnippet>498</a><span class="kw">pub async fn </span>revoke_from_role&lt;C: Connection + Clone&gt;(
+<a href=#499 id=499 data-nosnippet>499</a>    principal: AuthenticatedPrincipal,
+<a href=#500 id=500 data-nosnippet>500</a>    authz: AuthzData,
+<a href=#501 id=501 data-nosnippet>501</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#502 id=502 data-nosnippet>502</a>    path: web::Path&lt;RolePermissionPath&gt;,
+<a href=#503 id=503 data-nosnippet>503</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#504 id=504 data-nosnippet>504</a>    RequirePermission::new(<span class="string">"permissions:revoke"</span>, Uuid::nil())
+<a href=#505 id=505 data-nosnippet>505</a>        .check(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref())
+<a href=#506 id=506 data-nosnippet>506</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#507 id=507 data-nosnippet>507</a>    <span class="kw">let </span>p = path.into_inner();
+<a href=#508 id=508 data-nosnippet>508</a>    <span class="comment">// §5.3: revoking a `network:` grant of either effect (a deny's revoke
+<a href=#509 id=509 data-nosnippet>509</a>    // releases a quarantine) takes `network:grant` at /network.
+<a href=#510 id=510 data-nosnippet>510</a>    </span><span class="kw">let </span>write = NetworkWrite::PermissionRevoke {
+<a href=#511 id=511 data-nosnippet>511</a>        role_id: p.role_id,
+<a href=#512 id=512 data-nosnippet>512</a>        permission_id: p.permission_id,
+<a href=#513 id=513 data-nosnippet>513</a>    };
+<a href=#514 id=514 data-nosnippet>514</a>    <span class="kw">let </span>cleared =
+<a href=#515 id=515 data-nosnippet>515</a>        network_gate::authorize(<span class="kw-2">&amp;</span>principal, authz.get_ref().as_ref(), <span class="kw-2">&amp;</span>state, write).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#516 id=516 data-nosnippet>516</a>    <span class="kw">let </span>repo = state.permission_repo.clone();
+<a href=#517 id=517 data-nosnippet>517</a>    <span class="kw">let </span>tenant_id = principal.tenant_id;
+<a href=#518 id=518 data-nosnippet>518</a>    <span class="kw">let </span>role_id = p.role_id;
+<a href=#519 id=519 data-nosnippet>519</a>    <span class="kw">let </span>permission_id = p.permission_id;
+<a href=#520 id=520 data-nosnippet>520</a>    <span class="kw">let </span>claim = cleared.role_claim();
+<a href=#521 id=521 data-nosnippet>521</a>    <span class="comment">// R111W4-02 / R112W4-01: the write, its row and the D7 flush run as one
+<a href=#522 id=522 data-nosnippet>522</a>    // task, which a client that goes away does not cancel.
+<a href=#523 id=523 data-nosnippet>523</a>    // D7 (REVOCATION — security critical): revoking a grant removes access for
+<a href=#524 id=524 data-nosnippet>524</a>    // every subject holding this role. The subject set isn't known here without
+<a href=#525 id=525 data-nosnippet>525</a>    // a query, so flush the whole tenant — this must never leave a stale allow.
+<a href=#526 id=526 data-nosnippet>526</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(error) = network_gate::write_and_record(
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="kw-2">&amp;</span>state,
+<a href=#528 id=528 data-nosnippet>528</a>        authz.get_ref(),
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="kw-2">&amp;</span>network_gate::GateActor::principal(<span class="kw-2">&amp;</span>principal),
+<a href=#530 id=530 data-nosnippet>530</a>        write,
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw-2">&amp;</span>cleared,
+<a href=#532 id=532 data-nosnippet>532</a>        network_gate::CacheFlush::Tenant,
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="kw">async move </span>{
+<a href=#534 id=534 data-nosnippet>534</a>            repo.revoke_from_role_claimed(tenant_id, role_id, permission_id, claim)
+<a href=#535 id=535 data-nosnippet>535</a>                .<span class="kw">await
+<a href=#536 id=536 data-nosnippet>536</a>        </span>},
+<a href=#537 id=537 data-nosnippet>537</a>    )
+<a href=#538 id=538 data-nosnippet>538</a>    .<span class="kw">await
+<a href=#539 id=539 data-nosnippet>539</a>    </span>{
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="kw">return </span>network_gate::refused_in_task(error);
+<a href=#541 id=541 data-nosnippet>541</a>    }
+<a href=#542 id=542 data-nosnippet>542</a>    <span class="prelude-val">Ok</span>(HttpResponse::NoContent().finish())
+<a href=#543 id=543 data-nosnippet>543</a>}
 </code></pre></div></section></main></body></html>

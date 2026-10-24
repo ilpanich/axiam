@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["authorize","authorize_as","record_cleared","refused_after_clearance"],"struct":["GateActor"]};
+window.SIDEBAR_ITEMS = {"enum":["CacheFlush"],"fn":["authorize","authorize_as","refused_after_clearance","refused_in_task","write_and_record"],"struct":["GateActor","NetworkWriteTasks"]};

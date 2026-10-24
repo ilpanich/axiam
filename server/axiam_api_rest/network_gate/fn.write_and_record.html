@@ -1,0 +1,61 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Run the repository write of a network-sensitive write that the gate cleared, and record it once it landed (R110W6-06, #703, T-484): one `network_role.assigned` / `.unassigned` / `.granted` / `.revoked` / `.deleted` or `certificate_binding.bound` row (one of the six), with the role, the grantee, the node and the `network:` permissions the write conferred (or removed); an assignment’s row also carries `exemption`, the named exemption it cleared under (`organization-bootstrap`) or `null`. Without it a cleared write is visible only in the route’s generic request row, which says neither that it touched the network namespace nor where a join landed."><title>write_and_record in axiam_api_rest::network_gate - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">write_and_record</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.1.2</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">write_<wbr>and_<wbr>record</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>api_<wbr>rest::<wbr>network_<wbr>gate</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_api_rest</a>::<wbr><a href="index.html">network_gate</a></div><h1>Function <span class="fn">write_<wbr>and_<wbr>record</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_api_rest/network_gate.rs.html#373-441">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn write_and_record&lt;C, T, W&gt;(
+    state: &amp;<a class="struct" href="../state/struct.AppState.html" title="struct axiam_api_rest::state::AppState">AppState</a>&lt;C&gt;,
+    authz: &amp;<a class="struct" href="https://doc.rust-lang.org/1.99.1/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;dyn <a class="trait" href="../authz/trait.AuthzChecker.html" title="trait axiam_api_rest::authz::AuthzChecker">AuthzChecker</a>&gt;,
+    actor: &amp;<a class="struct" href="struct.GateActor.html" title="struct axiam_api_rest::network_gate::GateActor">GateActor</a>,
+    write: NetworkWrite&lt;'_&gt;,
+    cleared: &amp;GateClearance,
+    flush: <a class="enum" href="enum.CacheFlush.html" title="enum axiam_api_rest::network_gate::CacheFlush">CacheFlush</a>,
+    repository_write: W,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.99.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;T, AxiamError&gt;<div class="where">where
+    C: Connection + <a class="trait" href="https://doc.rust-lang.org/1.99.1/core/clone/trait.Clone.html" title="trait core::clone::Clone">Clone</a>,
+    T: <a class="trait" href="https://doc.rust-lang.org/1.99.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'static,
+    W: <a class="trait" href="https://doc.rust-lang.org/1.99.1/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/1.99.1/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;T, AxiamError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/1.99.1/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'static,</div></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Run the repository write of a network-sensitive write that the gate
+cleared, and record it once it landed (R110W6-06, #703, T-484): one
+<code>network_role.assigned</code> / <code>.unassigned</code> / <code>.granted</code> / <code>.revoked</code> /
+<code>.deleted</code> or <code>certificate_binding.bound</code> row (one of the six), with the
+role, the grantee, the node and the <code>network:</code> permissions the write
+conferred (or removed); an assignment’s row
+also carries <code>exemption</code>, the named exemption it cleared under
+(<code>organization-bootstrap</code>) or <code>null</code>. Without it a cleared write is visible
+only in the route’s generic request row, which says neither that it touched
+the network namespace nor where a join landed.</p>
+<p><strong>The row cannot be separated from the write (R111W4-02, #726).</strong> It is
+built here, before the write, from what the gate read
+([<code>GateClearance::role</code>], [<code>GateClearance::permission</code>]) — not from reads
+after the write, which a concurrent role delete made fail and a concurrent
+regrant made lie. Then <code>repository_write</code> and the append run as <strong>one
+spawned task</strong>, which this function awaits through its <code>JoinHandle</code>. Actix
+drops a handler’s future when its client goes away; dropping the handle
+does not cancel the task, so a write that commits is appended whether or not
+anyone still waits for the answer. The task is spawned through
+<a href="../state/struct.AppState.html#structfield.network_writes" title="field axiam_api_rest::state::AppState::network_writes"><code>AppState::network_writes</code></a> — on the composition root’s runtime, which an
+orderly stop keeps until the task is done or the stop’s budget is spent
+(<a href="struct.NetworkWriteTasks.html" title="struct axiam_api_rest::network_gate::NetworkWriteTasks"><code>NetworkWriteTasks</code></a>, R112W4-02) — so the write must be <code>Send</code> and own
+what it uses (<code>'static</code>).</p>
+<p><strong>What follows the commit rides the same task (R112W4-01, #775).</strong> The D7
+decision-cache flush the write needs (<code>flush</code>: the grantee for a user or
+service-account assignment, the tenant for a group assignment, a role
+delete, a grant or a revoke; local <strong>and</strong> broadcast, through
+<code>AuthzChecker::invalidate_*</code>) runs after the write and <strong>before</strong> the row,
+so a revocation’s row is never readable while the allow it revokes is
+still served from the cache of the replica that wrote it. A failed flush
+(the broadcast was not confirmed) does not drop the row of a write that
+landed: the row is appended and the flush’s error returned (<code>503</code>, the
+handlers’ convention for an unconfirmed revocation). On a stale claim the
+<code>network_role.*_refused</code> row is appended in the task too (the caller then
+answers with <a href="fn.refused_in_task.html" title="fn axiam_api_rest::network_gate::refused_in_task"><code>refused_in_task</code></a>). Before this, both ran in the handler’s
+future, after the task: a client gone after the spawn left a committed
+revocation whose cached allow outlived it, on every replica, until the TTL.</p>
+<p>No success row is written when the clearance is not network-sensitive,
+when the write fails, or when the write is not one of those named above (a
+role update, a resource write, a segment or profile write — those keep
+their own rows).</p>
+<p>A failure to describe the write or to append the row is logged and does not
+undo or fail the write that already landed — the convention of
+[<code>audit_refusal</code>], and of every other audit append in the handlers. The row
+carries ids, names and actions only; never a certificate, key or token.</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<p>Whatever <code>repository_write</code> returns; the flush’s error once the write
+landed; <code>AxiamError::Internal</code> if the runtime cancels the task (it shuts
+down). A panic in the task is resumed here.</p>
+</div></details></section></div></main></body></html>

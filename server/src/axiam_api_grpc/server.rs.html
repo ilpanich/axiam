@@ -65,7 +65,7 @@
 <a href=#65 id=65 data-nosnippet>65</a><span class="kw">use </span><span class="kw">crate</span>::middleware::auth::AuthInterceptor;
 <a href=#66 id=66 data-nosnippet>66</a><span class="kw">use </span><span class="kw">crate</span>::middleware::drain_rejected::DrainRejectedBodyLayer;
 <a href=#67 id=67 data-nosnippet>67</a><span class="kw">use </span><span class="kw">crate</span>::middleware::rate_limit::{
-<a href=#68 id=68 data-nosnippet>68</a>    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer, trusted_hops_from_env,
+<a href=#68 id=68 data-nosnippet>68</a>    GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer,
 <a href=#69 id=69 data-nosnippet>69</a>};
 <a href=#70 id=70 data-nosnippet>70</a><span class="kw">use </span><span class="kw">crate</span>::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
 <a href=#71 id=71 data-nosnippet>71</a><span class="kw">use </span><span class="kw">crate</span>::proto::authorization_service_server::AuthorizationServiceServer;
@@ -296,7 +296,7 @@
 <a href=#296 id=296 data-nosnippet>296</a>    // extractor (both ultimately key off GrpcTrustedHopsKeyExtractor logic)
 <a href=#297 id=297 data-nosnippet>297</a>    // so a rotating XFF cannot mint a fresh bucket in one layer while being
 <a href=#298 id=298 data-nosnippet>298</a>    // correctly collapsed in the other.
-<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="kw">let </span>trusted_hops = trusted_hops_from_env();
+<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="kw">let </span>trusted_hops = axiam_core::forwarded_for::configured_trusted_hops();
 <a href=#300 id=300 data-nosnippet>300</a>    <span class="comment">// Built exactly ONCE per process: this constructs the write-behind
 <a href=#301 id=301 data-nosnippet>301</a>    // `SharedRateLimitCounter` (and spawns its single background flusher on
 <a href=#302 id=302 data-nosnippet>302</a>    // this runtime). Cloning the LAYER is fine — the counter inside is an

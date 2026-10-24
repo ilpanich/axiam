@@ -176,7 +176,7 @@
 <a href=#176 id=176 data-nosnippet>176</a>            http.flavor = %http_flavor(request.version()),
 <a href=#177 id=177 data-nosnippet>177</a>            http.scheme = %connection_info.scheme(),
 <a href=#178 id=178 data-nosnippet>178</a>            http.host = %connection_info.host(),
-<a href=#179 id=179 data-nosnippet>179</a>            http.client_ip = %connection_info.realip_remote_addr().unwrap_or(<span class="string">""</span>),
+<a href=#179 id=179 data-nosnippet>179</a>            http.client_ip = %<span class="kw">crate</span>::extractors::client_info::client_ip(request.request()).unwrap_or_default(),
 <a href=#180 id=180 data-nosnippet>180</a>            http.user_agent = %user_agent,
 <a href=#181 id=181 data-nosnippet>181</a>            http.target = %target,
 <a href=#182 id=182 data-nosnippet>182</a>            http.status_code = tracing::field::Empty,

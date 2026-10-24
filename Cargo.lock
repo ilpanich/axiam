@@ -1215,6 +1215,7 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "axiam-api-rest",
+ "axiam-audit",
  "axiam-auth",
  "axiam-authz",
  "axiam-core",

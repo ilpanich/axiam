@@ -48,6 +48,10 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }
+# R112-08 (#801): the carrier-rule test reads the request row the audit
+# middleware writes. Inward (layer 2), and already in the graph through
+# axiam-api-rest.
+axiam-audit = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-test-support = { workspace = true }
 actix-rt = { workspace = true }

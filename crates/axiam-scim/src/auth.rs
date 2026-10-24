@@ -73,7 +73,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use actix_web::dev::Payload;
-use actix_web::{FromRequest, HttpRequest, web};
+use actix_web::{FromRequest, HttpMessage, HttpRequest, web};
 use axiam_api_rest::authz::{AuthzChecker, RequirePermission};
 use axiam_api_rest::extractors::auth::AuthenticatedUser;
 use axiam_api_rest::extractors::scim_token::{ScimTokenPrincipal, ScimTokenResolver};
@@ -133,14 +133,35 @@ impl ScimPrincipal {
 /// Header only — never the `axiam_access` cookie. A provisioning token is a
 /// machine credential presented by an IdP; accepting it from a cookie would
 /// make it reachable from a browser, and therefore CSRF-reachable, for no
-/// benefit to any real caller.
+/// benefit to any real caller. The scheme is matched case-insensitively
+/// (RFC 9110 §11.1), as the shared carrier rule matches it (#801).
 fn bearer_value(req: &HttpRequest) -> Option<String> {
-    req.headers()
+    let header = req
+        .headers()
         .get(actix_web::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::to_owned)
+        .trim();
+    let (scheme, credentials) = header.split_once(char::is_whitespace)?;
+    let credentials = credentials.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !credentials.is_empty())
+        .then(|| credentials.to_owned())
+}
+
+/// Whether the request carries a non-blank `axiam_access` cookie, the
+/// carrier the shared rule reads first (`axiam_auth::carrier`).
+fn has_access_cookie(req: &HttpRequest) -> bool {
+    req.cookie(axiam_auth::carrier::ACCESS_COOKIE)
+        .is_some_and(|c| !c.value().trim().is_empty())
+}
+
+/// Refuse the provisioning-token branch, leaving the extractor's verdict for
+/// the audit middleware (D-12): the request row's `authenticated` is then
+/// `false`, whatever token the middleware itself could verify (#801).
+fn refused(req: &HttpRequest, detail: &'static str) -> ScimError {
+    req.extensions_mut()
+        .insert(axiam_auth::carrier::AuthVerdict::Refused);
+    ScimError::new(actix_web::http::StatusCode::UNAUTHORIZED, detail)
 }
 
 impl FromRequest for ScimPrincipal {
@@ -167,9 +188,25 @@ impl FromRequest for ScimPrincipal {
             });
         }
 
+        // CONTRACT §6.1 rule 11 reads the `axiam_access` cookie first, and the
+        // audit middleware names the request row's actor by that rule. A
+        // request carrying a session cookie *and* a provisioning token would
+        // be served as the token's principal and recorded as the cookie's
+        // user. An IdP sends no cookies, so such a request is not a real
+        // provisioning call: it is refused as ambiguous rather than resolved
+        // either way (#801, R112-08).
+        if has_access_cookie(req) {
+            let refusal = refused(
+                req,
+                "ambiguous credentials: a session cookie and a provisioning token",
+            );
+            return Box::pin(async move { Err(refusal) });
+        }
+
         let resolver = req
             .app_data::<web::Data<Arc<dyn ScimTokenResolver>>>()
             .map(|d| d.get_ref().clone());
+        let req = req.clone();
 
         Box::pin(async move {
             // A deployment that registered no resolver cannot honour
@@ -177,19 +214,17 @@ impl FromRequest for ScimPrincipal {
             // falling through to the JWT arm, which would then reject the
             // handle as a malformed JWT) keeps the error honest.
             let resolver = resolver.ok_or_else(|| {
-                ScimError::new(
-                    actix_web::http::StatusCode::UNAUTHORIZED,
+                refused(
+                    &req,
                     "SCIM provisioning tokens are not enabled on this deployment",
                 )
             })?;
             let raw = presented.unwrap_or_default();
 
-            let principal = resolver.resolve(&raw).await.ok_or_else(|| {
-                ScimError::new(
-                    actix_web::http::StatusCode::UNAUTHORIZED,
-                    "invalid or expired provisioning token",
-                )
-            })?;
+            let principal = resolver
+                .resolve(&raw)
+                .await
+                .ok_or_else(|| refused(&req, "invalid or expired provisioning token"))?;
 
             resolver
                 .touch(principal.tenant_id, principal.token_id)

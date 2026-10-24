@@ -323,7 +323,15 @@ One line per closed issue; the `[1.1.2]` section of `CHANGELOG.md` has the entry
 
 ## Open after two sweeps
 
-_None._ (To be filled by the orchestrator only if W9.4's review files anything.)
+W9.4's final addendum (`5bc6109`) filed **no finding**: R112-14 … R112-16 closed against #807 … #809.
+
+What landed after that last sweep and so had no F4 review (§9bis allows no third round):
+
+- **`bff4b22`**: the Sign in with Apple client secret is signed by `ring` instead of `jsonwebtoken`/`p256`, and RUSTSEC-2026-0387 (crypto-bigint 0.5.5, no upgrade path) is ignored on the strength of that change. This is product code, read by the orchestrator only. Behaviour change: the `.p8` must be PKCS#8. The reachability note is in `deny.toml`, with a review date of 2026-12-23.
+- **`faa9e10`**: the `examples/` lockfiles move to body-parser 2.4.0 (CVE-2026-111181) and zod 4.6.7 (CVE-2023-54404), lockfile-only.
+- **`21aae08`** (`uma_test`'s harness turns the shared limiter off) and **`71f91b5`**, **`c4f0ede`** (coverage) are test-only.
+
+Follow-up: Trivy's DB does not yet carry RUSTSEC-2026-0387's GHSA alias. When it does, the Trivy fs step will need a `.trivyignore` entry backed by the same `deny.toml` note.
 
 ## W9 sweep
 

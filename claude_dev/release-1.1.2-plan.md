@@ -772,9 +772,71 @@ wave's next commit, or recorded in §12 as "answered after the fact".
   - the CIBA retry in SDKs not re-probed (Rust, Go, C#);
   - C164-42 and C164-49 for contract 1.65.
 
-### 12.8 W8 … 12.9 W9
+### 12.8 W8 — release readiness (`claude/release-1.1.2-w8-*`)
 
-One subsection per wave as it lands, in the form above.
+- **PR:** #793 (draft, `claude/release-1.1.2` → `main`). The orchestrator opened it at the start of W8 so that the E2E, examples-smoke and Coveralls jobs could run; W8.4 and W8.4b wrote its body. It carries 79 `Closes` lines; #513 and #561 stay open.
+- **Milestone re-read** before W8: nothing after #792. Before W9.1: #794 … #806 (W8.2's). Before W9.3: #807 … #809 (W9.2's).
+- **W8.1 regression gate** (Sonnet, `43cf526`; merged at `b3f56e1`). Everything local is green:
+  - `fmt`; workspace clippy `-D warnings` with SAML on and off.
+  - Every test binary, crate by crate, 0 failed:
+    - core 573, db 1138, auth 465, authz 214, audit 88, pki 380, email 70, oauth2 840, federation 363, directory 290, scim 227;
+    - opaque 8, opaque-ffi 9, amqp 297, test-support 4, api-grpc 116, server 370, api-rest (SAML on) 2087.
+  - The gRPC `client` tests 12/8/5; the conformance suites 14.
+  - Frontend: lint, `tsc`, a11y 8, vitest 2387, build, `npm audit` 0 found. Website: lint, `tsc`, build, `npm audit` 0 found.
+  - `cargo deny` clean.
+  - Commits kept: `4906beb` (the ten PKI test keys made random per process) and `43cf526` (21 assertion messages relabelled). Its `90faacc` and `f7394db` duplicate W8.1b; the plan branch's side was kept at the merge.
+  - Not run here: the RADIUS e2e (no Docker). It is green on the PR, as are E2E Tests and the examples runtime smoke.
+- **W8.1b** (Sonnet, added by the orchestrator when W8.1, inside one long turn, had pushed nothing after three hours; merged at `d14873d`):
+  - `c3f73fd` #795: the lease comment that quoted the server text, which turned Architecture Invariants red.
+  - `6a30ac0` tokio 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, a yanked release).
+  - `e5ec042` ctutils 0.4.3 → 0.4.4 (RUSTSEC-2026-0385).
+  - Both advisories were published 21–23 Oct; both were patch bumps, so nothing went on an ignore list. They are very likely the two moderate Dependabot alerts on `main`.
+- **W8.2 combined F4** (Opus, `301aff5`; merged at `4e2fcc9`):
+  - No Critical, High or Medium. R112-01 … R112-13, filed as #794 … #806: five Low, eight Informational.
+  - Every W1–W7 issue was confirmed closed by the tree.
+  - Its §5 questions were answered with its own defaults: R112-01 stays Low and is fixed; R112-10 is declared now, its contract half goes to 1.65; R112-04 uses the all-shard sweep; R112-08 refuses a cookie plus a token.
+- **W8.3 threat model** (Sonnet, `bf4f79b`, `5de0e10`, `2c80f24`; merged at `8e21301`):
+  - Model 2.44.0; counts unchanged at 488 (457 Mitigated / 21 Open / 10 N/A).
+  - T-289 amended (#746, #768); #758 (b)'s current text fixed.
+  - Open question: 58 entries carry older wording differences between the STRIDE document and `Axiam.json`, which predate this release. They are left as history.
+- **W8.4** (Sonnet, `3f05c8a`, `d5331e9`, `8e4c758`; merged at `aae038d`) and **W8.4b** (`f99b257`, `c562809`, `a0c2696`; merged at `3c19c6e`):
+  - CHANGELOG `[1.1.2] - Unreleased` with the upgrade notes. The 1.1.1 "roll replicas one at a time" advice is withdrawn.
+  - Roadmap row; `SECURITY_VERIFIED_RELEASE` 1.1.2 (2026-10-24); the 1.1.2 news post; the PR body.
+  - Tree over plan:
+    - No v110: the lease's fields live in `MIGRATION_TABLE_DDL`, so the schema stays at v109.
+    - The AMQP mark is `metadata.ingested_via`.
+    - #803's contract-1.65 sentences are recorded, not applied.
+- **W8.1c** (Opus, `21aae08`; merged at `5d59b6f`), the CI-only `uma_test` failure. `the_permission_endpoint_mints_only_for_a_set_the_resource_server_registered` got `429 rate_limit_exceeded` from the shared DB-backed limiter: a key first seen partway through a wall-clock minute is charged `elapsed · limit · 0.9` up front (`COLD_ENTRY_BURST_FRACTION`), so the test's 18 `/uma2/perm` calls against the limit of 120 fail when a run starts in a minute's last ~3 s (3/3 at :57, 3/3 pass at :05). It is time-of-day dependent, not a DB or parallelism effect (`uma_test` runs on the `Mem` engine). It predates this release (#745, `ae8562e`, on `main`); the limiter is behaving as designed. The fix is test-only: `test_app!` builds its state with the shared limiter off, as `m2m_management_test` and `network_routes_test` already do; the per-route governor still applies. Runs: the failing test started at :57/:58.5 5/5, the full binary 12/12 (default threads), 4/4 (`--test-threads=1`), and 3×25/25 with SAML on, all exit 0.
+- **W8.1d** (Opus), RUSTSEC-2026-0387. This advisory, dated 2026-10-23, reports timing variability in `crypto-bigint` <0.7.6. It turned Security Scan red on `e753824`, and on `main` as well. There is no upgrade path: crypto-bigint 0.5.5 is held by `elliptic-curve` 0.13 and `cx448` 0.1.1, under `pgp` 0.21.0 and `jsonwebtoken` 11, and both are already the newest releases. Reachability:
+  - The one secret-key use was the Sign in with Apple ES256 client secret, which `jsonwebtoken`'s `rust_crypto`/`p256` minted on every unauthenticated OIDC callback.
+  - `bff4b22` signs it with `ring` (already the TLS provider), pinned by the test `the_signature_is_rings_not_rust_cryptos`. The `.p8` must now be PKCS#8; a SEC1 key is refused with a message naming PKCS#8.
+  - pgp/cx448 have no secret-key use, because AXIAM only generates Ed25519/RSA-4096 keys and imports none.
+  - The ignore rests on that change and is recorded in `deny.toml`, `ci.yml` and `.cargo/audit.toml`, with review date 2026-12-23. Checks: `cargo audit` exit 0, `cargo deny check advisories` exit 0, federation lib 145 passed.
+  - Merged at `6915c4c`. This code landed **after** the second sweep, so §9bis allows no third review. The orchestrator read the diff (FIXED r‖s signing, unchanged header and claims, no new crate), and the PR body lists it under "Open after two sweeps" as reviewed by the orchestrator only.
+  - W8.1d follow-up `faa9e10` (merged `03adbc5`). The Trivy fs step was red for reasons unrelated to the advisory: three HIGH npm findings in `examples/` lockfiles, CVE-2026-111181 (body-parser 2.3.0→2.4.0, b5 and b7) and CVE-2023-54404 (zod 4.6.5→4.6.7, b7). The bumps are lockfile-only, within the declared ranges. `trivy fs` now exits 0. Trivy's DB does not yet carry the GHSA alias of RUSTSEC-2026-0387; once it does, a `.trivyignore` entry backed by the same `deny.toml` note will be needed (follow-up).
+- **W8.5 coverage:** (Sonnet, `71f91b5`, `c4f0ede`; merged at `88d4404`), tests only. Local `cargo llvm-cov -p <crate>`, same method before and after: `axiam-core` 93.34 % → 93.53 %, `axiam-server` 83.00 % → 85.43 % (+2.43 points against CI's 0.48-point shortfall from 1.1.1). The absolute local figures use smaller denominators than CI's, so the 1.1.1 comparison rests on the deltas; CI's Coveralls figure on the head is authoritative. New tests: the `anonymize_user_marked` default, the hop selector, `forwarded_for_claimed`, `AuditMinimisation::apply` on non-object metadata; `ErasureClaim`, `purge_under_claim`, `erase_and_record`'s already-proved arm, and a real `CleanupTask` tick. Not covered: the `boot.rs` additions, which a unit test cannot reach. Frontend 96.58 % lines (2387 tests), so `thresholds.lines` stays at 96.48.
+- **CI on #793:**
+  - Every job is green but GitGuardian. Incident 38922452 is a test-only fake token in `f99d71e` and `b8c4fb0`, fixed at `7181404`; the maintainer marks it a false positive or decides on history.
+  - `uma_test` failed on `bb05846` and `3c19c6e`, and did not reproduce locally on `1994e07`; W8.1c above has the root cause and the fix.
+  - Security Scan went red on `e753824` twice over: RUSTSEC-2026-0387 (W8.1d) and three HIGH npm CVEs in the `examples/` lockfiles (`faa9e10`). It is green on `03adbc5`.
+  - The examples runtime smoke on `03adbc5` died pulling Keycloak from quay.io (503) before any test ran; it was re-run once.
+- **Follow-ups (not in this release):**
+  - seven `[0u8; 32]` test keys in `axiam-api-rest` tests outside the plan's ten (`ca_certificate_test`, `certificate_test`, `pgp_key_test`, `pgp_key_gaps_test`, `device_auth_test`, `network_decide_test`, `m2m_management_test`);
+  - the five `check-remediation-evidence.py` rows citing `a15b78d` and `04dc674`, which `main` cannot reach;
+  - the MSRV mismatch (`axiam-opaque` 1.88 vs 1.93).
+
+### 12.9 W9 — the sweep (`claude/release-1.1.2-w9-{a,b,c}`)
+
+- **W9.1a** (Opus; merged at `1a875e8`, `bb05846`, `1e00867`, `1994e07`): #794 `5f6e278`, #796 `c7dfcac`, #797 `ee1d98d`, #798 `d154302`, #801 `82fb433`, #802 `9db4eff`.
+- **W9.1b** (Sonnet; merged at `b8c4fb0`, `ca6e754`): #799 `6c8a9d5`, #800 `ed37a82`, #803 `a34b7e0`, #804 `77d602c`, #805 `f99d71e` + `7181404`, #806 `b277f0f`. #758 (b) needed no commit (`4a518e2`).
+- **Orchestrator merge resolutions:**
+  - T-484 in `Axiam.json` (twice), in the STRIDE document's order, so the copies stay byte-identical.
+  - The TRUSTED_PROXIES row in `docs/deployment/README.md`, keeping both sentences.
+  - Label-wording conflicts in three test files: the plan branch's side kept, checked with fmt and `cargo check`.
+  - `threatModel.ts` regenerated each time.
+- **W9.2** (`f4e7e4a`; merged at `d414377`): R112-01 … R112-13 closed, merges sound. New, Informational: R112-14 #807, R112-15 #808, R112-16 #809.
+- **W9.3** (Sonnet): `d983e55` #807 (the additive-migration scanner fails closed on what it cannot read), `9c973bd` #808 (erasure query 2b: one SELECT plus one UPDATE, reading the trail once instead of three times), `fdd41a2` #809 (`radius_e2e` redacts a bare `eyJ…` token), `3e07753` CHANGELOG/PR body. axiam-db: 1141/1143 passed, 0 failed. axiam-server `cleanup_task` 63, `radius_e2e` 4, lib 169. Not run: SurrealDB's own parse of the #807 probe strings, release-build timing for #808. Merged `e753824`.
+- **W9.4:** final addendum `5bc6109` (merged `27a7300`): R112-14/15/16 closed against #807/#808/#809; **no new findings**. Per §9bis there is no third round. "Open after two sweeps" therefore holds only code that landed after W9.4: W8.1d `bff4b22` (product code, read by the orchestrator only). W8.1c and W8.5 are test-only. Not verified by the reviewer: SurrealDB's parse of the probe strings, FreeRADIUS `-xx` output, release-build timings.
 
 ---
 

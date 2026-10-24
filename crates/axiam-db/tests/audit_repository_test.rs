@@ -688,3 +688,51 @@ async fn pseudonymize_actor_leaves_the_erasures_own_record() {
         "another pseudonym's row is not the record"
     );
 }
+
+/// #808 (R112-15): the single `UPDATE` names all three fields for every row it
+/// touches, so it must not invent a key a row never had: a success row keeps
+/// no `after`/`before`, a refusal row only the side it carried.
+#[tokio::test]
+async fn pseudonymize_actor_adds_no_key_to_the_network_role_rows_it_clears() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let (user_id, admin) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut ids = Vec::new();
+    for (action, metadata) in [
+        (
+            "network_role.assigned",
+            serde_json::json!({ "grantee": { "kind": "user", "id": user_id } }),
+        ),
+        (
+            "network_role.assign_refused",
+            serde_json::json!({ "after": { "user": user_id } }),
+        ),
+        (
+            "network_role.unassign_refused",
+            serde_json::json!({ "before": { "user": user_id } }),
+        ),
+    ] {
+        let mut e = entry(tenant_id, admin, action, AuditOutcome::Failure, None);
+        e.metadata = Some(metadata);
+        ids.push(repo.append(e).await.unwrap().id);
+    }
+    repo.pseudonymize_actor(tenant_id, user_id, "DELETED_USER_deadbeef")
+        .await
+        .unwrap();
+    let rows = repo.get_by_ids(tenant_id, &ids).await.unwrap();
+    let meta = |i: usize| {
+        rows.iter()
+            .find(|r| r.id == ids[i])
+            .unwrap()
+            .metadata
+            .clone()
+    };
+    let nil = serde_json::json!(Uuid::nil());
+    let (assigned, assign_refused, unassign_refused) = (meta(0), meta(1), meta(2));
+    assert_eq!(assigned["grantee"]["id"], nil);
+    assert!(assigned.get("after").is_none() && assigned.get("before").is_none());
+    assert_eq!(assign_refused["after"]["user"], nil);
+    assert!(assign_refused.get("before").is_none() && assign_refused.get("grantee").is_none());
+    assert_eq!(unassign_refused["before"]["user"], nil);
+    assert!(unassign_refused.get("after").is_none() && unassign_refused.get("grantee").is_none());
+}

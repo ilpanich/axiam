@@ -2512,7 +2512,14 @@ DEFINE INDEX IF NOT EXISTS idx_scim_token_user ON TABLE scim_token \
 /// a string literal), a backslash inside a string escaping the next character,
 /// split at every `;` that is outside a string literal and outside a
 /// `{ … }`, `( … )` or `[ … ]` group, each trimmed, empty ones dropped.
-fn migration_statements(sql: &str) -> Vec<String> {
+///
+/// `None` when the scan cannot be trusted (R112-14, #807), so the caller
+/// treats the migration as non-additive: a `⟨…⟩` identifier or a `/…/` regex
+/// literal (the scanner reads neither, and a quote or `#` inside them would
+/// desynchronise it), an ASCII `<` that is not a type argument, cast or
+/// comparison, an unterminated comment, a scan that ends inside a quote, or
+/// one that ends with a group still open.
+fn migration_statements(sql: &str) -> Option<Vec<String>> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -2535,14 +2542,27 @@ fn migration_statements(sql: &str) -> Vec<String> {
             '/' if chars.peek() == Some(&'*') => {
                 chars.next();
                 let mut prev = '\0';
+                let mut closed = false;
                 for n in chars.by_ref() {
                     if prev == '*' && n == '/' {
+                        closed = true;
                         break;
                     }
                     prev = n;
                 }
+                if !closed {
+                    return None;
+                }
                 // A comment separates tokens, as whitespace does.
                 current.push(' ');
+            }
+            // A bare `/` is a regex literal (or division): not read, so refused.
+            '/' | '\u{27e8}' | '\u{27e9}' => return None,
+            '<' if !chars
+                .peek()
+                .is_some_and(|n| n.is_alphanumeric() || " =$(_".contains(*n)) =>
+            {
+                return None;
             }
             '\'' | '"' | '`' => {
                 quote = Some(c);
@@ -2552,19 +2572,24 @@ fn migration_statements(sql: &str) -> Vec<String> {
             _ => {
                 match c {
                     '{' | '(' | '[' => depth += 1,
-                    '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                    '}' | ')' | ']' => depth = depth.checked_sub(1)?,
                     _ => {}
                 }
                 current.push(c);
             }
         }
     }
+    if quote.is_some() || depth != 0 {
+        return None;
+    }
     statements.push(current);
-    statements
-        .into_iter()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
+    Some(
+        statements
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
 }
 
 /// Consume up to, not including, the next newline (the comment's end).
@@ -2583,7 +2608,10 @@ fn skip_line(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 /// (`CREATE`, `UPSERT`, `INSERT`, `RELATE`). The rule is a whitelist on
 /// purpose: a statement form it does not recognise is refused, not trusted.
 fn is_additive(sql: &str) -> bool {
-    migration_statements(sql).iter().all(|statement| {
+    let Some(statements) = migration_statements(sql) else {
+        return false;
+    };
+    statements.iter().all(|statement| {
         let words: Vec<String> = statement
             .split_whitespace()
             .take(5)
@@ -7955,9 +7983,31 @@ mod tests {
              DEFINE INDEX IF NOT EXISTS i ON t COLUMNS a; /* it's */ # end"
         ));
         assert_eq!(
-            migration_statements("A 'x\\';y' ; B -- c; d\n; C /* ; */ D"),
-            ["A 'x\\';y'", "B", "C   D"]
+            migration_statements("A 'x\\';y' ; B -- c; d\n; C /* ; */ D").as_deref(),
+            Some(&["A 'x\\';y'".to_owned(), "B".to_owned(), "C   D".to_owned()][..])
         );
+        // R112-14 (#807): what the scanner does not read, it refuses. Each
+        // string hides an UPDATE behind a `⟨…⟩` identifier, a `/…/` regex
+        // literal or an unbalanced group; none may classify additive.
+        for sql in [
+            "DEFINE FIELD IF NOT EXISTS ⟨a'⟩ ON t TYPE string; UPDATE t SET a = 1; -- '",
+            "DEFINE FIELD IF NOT EXISTS ⟨a#⟩ ON t TYPE string; UPDATE t SET a = 1;",
+            "DEFINE FIELD IF NOT EXISTS ⟨a--⟩ ON t TYPE string; UPDATE t SET a = 1;",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string ASSERT $value = /'/; UPDATE t SET a = 1; /'/",
+            "DEFINE FIELD IF NOT EXISTS ⟨a{⟩ ON t TYPE string; UPDATE t SET a = 1;",
+            // An unterminated quote, comment or group.
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string DEFAULT 'x;",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string /* x;",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string ASSERT (1;",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string ASSERT 1);",
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE string ASSERT $value <'x'>;",
+        ] {
+            assert!(!is_additive(sql), "{sql:?} must not read as additive");
+        }
+        // Type arguments and casts are not a regex or an identifier.
+        assert!(is_additive(
+            "DEFINE FIELD IF NOT EXISTS a ON t TYPE option<array<string>> DEFAULT <datetime> '2020-01-01T00:00:00Z';"
+        ));
     }
 
     #[test]
@@ -7982,8 +8032,14 @@ mod tests {
             assert!(!is_additive(sql), "{sql:?} must not read as additive");
         }
         assert_eq!(
-            migration_statements("A 'x;y'; B { c; d }; ; C"),
-            ["A 'x;y'", "B { c; d }", "C"]
+            migration_statements("A 'x;y'; B { c; d }; ; C").as_deref(),
+            Some(
+                &[
+                    "A 'x;y'".to_owned(),
+                    "B { c; d }".to_owned(),
+                    "C".to_owned()
+                ][..]
+            )
         );
     }
 

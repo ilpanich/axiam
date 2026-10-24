@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.2] - Unreleased
 
-1.1.2 follows 1.1.1 and closes the seventy-six issues the 1.1.1 reviews, the
+1.1.2 follows 1.1.1 and closes the seventy-nine issues the 1.1.1 reviews, the
 maintainer's contract answers, the 1.1.2 wave reviews and the combined review
-filed (#720 … #741, #746, #747, #750 … #758, #760, #764 … #792 and #794 … #806)
+filed (#720 … #741, #746, #747, #750 … #758, #760, #764 … #792 and #794 … #809)
 with nine waves: the erasure path,
 PKI and Vault (W1); rate limiting, audit attribution and the boot (W2); the
 schema runner, OAuth2 clients and the spec (W3); network policy (W4); the
@@ -282,6 +282,13 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   from the out-of-order guard (#799).
 - **The migration-lease comment no longer quotes the server's text,** which the
   conflict-marker check read as a second classifier of unique violations (#795).
+- **The additive-migration scanner fails closed on what it cannot read:** a
+  `⟨…⟩` identifier, a bare `/` (a regex literal), an ASCII `<` that is not a type
+  argument or cast, an unterminated comment, a scan that ends inside a quote or
+  at bracket depth other than zero each make the migration non-additive (#807).
+- **An erasure reads the tenant's audit trail once, not three times, to clear the
+  `network_role.*` grantees:** one `SELECT` over the four actions and one
+  `UPDATE` replace three passes, with the same rows cleared (#808).
 
 ### Documentation
 
@@ -348,6 +355,9 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   FreeRADIUS logs;** the e2e's log readers redact the token after `Bearer` and
   `access_token`, its redaction test builds its fake token at run time, and the
   ten remaining PKI tests use a per-process random CA wrapping key (#805).
+- **The RADIUS e2e's log readers also redact a bare token:** every run that starts
+  with `eyJ` goes, which covers the `-->` and `Tmp-String-2 :=` lines FreeRADIUS
+  prints without a `Bearer` or `access_token` marker (#809).
 
 ### Still open
 

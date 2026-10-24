@@ -42,6 +42,7 @@ use axiam_db::repository::{
     SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
     SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -340,15 +341,29 @@ async fn setup() -> Fixture {
     }
 }
 
+/// The UMA routes with the cross-replica rate limiter switched off; each
+/// route's in-memory governor still applies.
+///
+/// The shared counter seeds a key it first sees partway through a wall-clock
+/// minute with up to 90% of the bucket's limit (`COLD_ENTRY_BURST_FRACTION`,
+/// for limits of 20 and above), so at the shipped 120 a test sending eighteen
+/// `/uma2/perm` requests from one peer, first seen in the last three seconds
+/// of a minute, answered `429` where it asserts `201`: a flake by time of day,
+/// in tests of the Protection API's contract, not of the limiter. The bucket
+/// names are pinned by `rate_limit_bucket_names_test`, the seed by
+/// `axiam-db`'s counter tests.
+fn uma_state(f: &Fixture) -> AppState<TestDb> {
+    let mut state = AppState::for_test(f.db.clone(), f.auth.clone());
+    state.shared_rate_limit = SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+    state
+}
+
 macro_rules! test_app {
     ($f:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($f.auth.clone()))
-                .app_data(web::Data::new(AppState::for_test(
-                    $f.db.clone(),
-                    $f.auth.clone(),
-                )))
+                .app_data(web::Data::new(uma_state(&$f)))
                 .app_data(web::Data::new(make_authz(&$f.db)))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())

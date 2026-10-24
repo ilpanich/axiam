@@ -287,7 +287,9 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
 
 - **Threat model:** the entries the waves amended are reconciled by W8.3 (T-102,
   T-118, T-187, T-212, T-233, T-336, T-424, T-428, T-444, T-447, T-457, T-462,
-  T-470, T-472, T-474, T-477, T-483, T-484, T-486 and SEC-087).
+  T-470, T-472, T-474, T-477, T-483, T-484, T-486 and SEC-087). The model is
+  2.44.0: 488 threats, 457 mitigated, 21 open, 10 not applicable; no status
+  changed.
 - **T-212 and T-428 no longer name the removed public-client bucket** (#734).
 - **T-254 states the replay-record bound after #753:** the record stops a week after the row's expiry (#783).
 - **T-462 is amended for exit 3 and `Cache-Control: no-cache`,** and the

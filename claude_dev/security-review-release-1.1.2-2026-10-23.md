@@ -476,3 +476,101 @@ Each probe was deleted; the tree at commit carries only this document.
 - **PR body:** "Security review: no Critical, High or Medium. Low #794 … #798;
   Informational #799 … #806."
 - **W8.5:** none of these findings touches coverage.
+
+---
+
+## Addendum — W9.2, the sweep (2026-10-24)
+
+**Against:** `claude/release-1.1.2` at `1994e07`. The range is W9.1's diff
+`4e2fcc9..1994e07`, where `4e2fcc9` is this review's merge: 36 commits, 63
+files, 3 162 lines added and 297 removed. The range also carries the W8.1, W8.3
+and W8.4 merges. Their code and threat-model changes were read; the CHANGELOG,
+the PR body and the website prose were not (W8.4b edits them in parallel). All
+36 commits carry a `gpgsig` header (presence only, as in §8).
+
+**Method:**
+- Two read-only verifiers, each in its own worktree at `1994e07`. One took
+  #794, #796, #801 and #802; the other #795, #797, #798, #799, #800 and #803.
+- Here: #804, #805, #806, the merges, the two threat-model copies and every
+  `scripts/check-*`.
+- Each fix was checked against its finding and its named test, and
+  adversarially for a bypass or a regression. Throwaway probes were run and
+  deleted.
+- The §5 defaults were applied by the orchestrator: R112-01 Low and fixed;
+  R112-10 declared now, its contract half for 1.65; R112-04 an all-shard sweep;
+  R112-08 refuses a cookie plus a token.
+
+### A.1 Verdict per finding
+
+| ID | Issue | Commit(s) | Verdict | Where, and the test that proves it |
+|---|---|---|---|---|
+| R112-01 | #794 | `5f6e278` | **closed** | Query 1 sets `metadata.forwarded_for_claimed = NONE` (`audit.rs:451-458`). `AuditMinimisation::apply` re-inserts only `truncate_ip(..)` and drops anything else (`audit_minimisation.rs:90-108`). It runs in `append`, so it covers every writer, AMQP included. Probe: v6 → `/48`, mapped v4 and `:port` → `/24`; scoped v6, `unknown`, null, array and object dropped. The Art. 15 export carries no address (`cleanup.rs:4383-4392`). Tests: `pseudonymize_actor_removes_the_claimed_forwarded_address`, `minimisation_on_truncates_the_claimed_forwarded_address`, and the exact-key middleware test with and without `X-Forwarded-For`. |
+| R112-02 | #795 | `c3f73fd` | **closed** | `check-conflict-markers.py` and `--self-test` exit 0. |
+| R112-03 | #796 | `c7dfcac` | **closed** | One helper, `forwarded_for_header` (`forwarded_for.rs:264-287`), joins every line; a byte outside visible ASCII makes the header absent. All four sites use `get_all`. No single-line read is left in `crates/`. REST and gRPC share the helper. Probe: an empty or space-only first line, 10 000 lines, a non-ASCII line (the client lands in the proxy's own bucket, as before). Tests: the two-line cases in `forwarded_for`, `client_info`, `rate_limit_keying_test`, `service_and_middleware` and the gRPC extractor. |
+| R112-04 | #797 | `ee1d98d` | **closed** | `invalidate_tenant` (`decision_cache.rs:785`) also runs `invalidate_organization_scope` (`:535`) over a `by_org` index (`:383`). Each stripe is locked singly, in index order, and its generation is bumped under its lock, so no deadlock and no in-flight insert survives. A received `Tenant` broadcast takes the same path (`invalidation.rs:88`). The original probe now gives `None` and `false`. An 8-thread × 20 000-operation stress probe left every index empty. Tests: `a_flush_of_the_organization_tenant_drops_its_principals_decisions_elsewhere` (+3); `decision_cache_integration_test::r112_04_*` (2). |
+| R112-05 | #798 | `d154302` | **closed** | `flush_member` (`axiam-scim/src/groups.rs:147`) is called after every committed add or remove: POST with members, PUT, PATCH add, remove and `RemoveAll`, and replace (which `patch.rs:403-416` lowers to `RemoveAll` plus add). Delete calls `invalidate_tenant` (`:490`). A broadcast failure is `503`. Test: `scim_groups_cache_flush_test` (4). POST-with-members and `RemoveAll` are covered in code, not by a test of their own. |
+| R112-06 | #799 | `6c8a9d5` | **closed as filed; residual R112-14** | Trailing `--`/`//`/`#`, `/* */`, escapes, CRLF and backtick identifiers are now right, and the reviewed refused set is unchanged. Test: `the_additive_rule_is_comment_and_escape_aware`. SurrealDB `⟨…⟩` identifiers and `/…/` regex literals still desynchronise the scan (A.2). |
+| R112-07 | #800 | `ed37a82` | **closed** | Both logout members go through the row's host predicate (`oauth2_clients.rs:719-820`). Held values are exempt per member; a clear is allowed; admin rows are not bounded. The `422` comes before the update is built. Test: `admin_put_of_a_logout_uri_outside_the_registration_policy_is_422_on_dcr_and_cimd_rows`. |
+| R112-08 | #801 | `82fb433` | **closed** | Cookie plus `scim_` token → `401` before resolution (`axiam-scim/src/auth.rs:198-204`). `refused()` leaves the verdict on every refusal (`:161-165`). `Bearer` is case-insensitive. Probe: cookie plus `Basic`, `Bearer not-a-jwt` or `DPoP` takes the JWT branch, and the cookie's user is both served and recorded. Test: `scim_carrier_rule_test` (4). |
+| R112-09 | #802 | `9db4eff` | **closed; cost residual R112-15** | (a) Refusal rows are cleared on both sides (`metadata.after.user`, `metadata.before.user`), which matches the gate (`axiam-authz/src/network_gate.rs:1823-1829`, `:1912-1918`). (b) `CleanupTask::with_subject_flush` is wired on the only `CleanupTask::new` (`boot.rs:2976-2996`). It calls `invalidate_subject` last, only on success, and broadcasts when configured. Tests: `pseudonymize_actor_clears_the_user_of_network_role_refusal_rows`; `the_erasures_role_pass_flushes_the_accounts_cached_decisions`. |
+| R112-10 | #803 | `a34b7e0` | **closed** | The regenerated spec is byte-identical. `/oauth2/token` declares 200/400/401/429/500; `/uma2/perm` 201/400/401/403/429 with the #745 text; login, change and reset-confirm declare `429` beside `503`, and each route really sits behind a governor. The digest is `f5613aea…`; the registry and `apiIndex.ts` are in sync. Tests: `token_declares_401_429_and_500`, `uma_perm_and_hash_gated_routes_declare_429`. |
+| R112-11 | #804 | `77d602c` | **closed** | `carrier.rs`, `client_info.rs`, `forwarded_for.rs` and `rate_limit_shared.rs` are in the workflow's single `pull_request` filter; every listed path exists. |
+| R112-12 | #805 | `f99d71e`, `7181404`, W8.1 `4906beb`, `43cf526` | **closed as filed; residual R112-16** | Labels replace the `{body}`/`{err:?}` messages, and the PKI tests take a run-time key (`axiam-pki/tests/support/mod.rs`). `redact_secrets` covers `Bearer` and `access_token`, and its fake token is built at run time. The bare token in the `-xx` EXPAND result and `Tmp-String-2` lines is not covered (A.2). |
+| R112-13 | #806 | `b277f0f` | **closed** | (a) the SEC-087 rows named; (b) T-484's AMQP sentence, both copies; (c) the D-04 sentence; (e) the plan notes; (f) the `case` above `mkdir`; (g) the v109 note moved under "Schema migrations at startup" (`docs/deployment/README.md:311`); (h) the log note; (i) the mixed-version line in `release-1.1.2-upgrade-notes.md:58`. (d), the T-444 order, is W8.3's. For W8.4b: (i) is not yet in `CHANGELOG.md`. |
+
+### A.2 New findings (all Informational)
+
+| ID | Severity | Where (`path:line`) | What | Fix | Test | Issue |
+|---|---|---|---|---|---|---|
+| R112-14 | Informational | `axiam-db/src/schema.rs:2515-2568` (quotes at `:2547`) | The #799 scanner knows only `'`, `"` and `` ` `` as quotes. A `#` or `--` inside `⟨…⟩` is read as a comment; a `'` inside `⟨…⟩` or `/…/` opens a phantom string; a `{` inside `⟨…⟩` unbalances the depth. Probe: five strings with a hidden `UPDATE` classify additive. Developer SQL only; no current migration is affected. | Fail closed on `⟨`, on a bare `/`, and on a scan that ends inside a quote or with `depth != 0`; or treat `⟨…⟩` as a quote. | The five strings plus an unterminated quote in `the_additive_rule_is_comment_and_escape_aware`. | #807 |
+| R112-15 | Informational (cost) | `axiam-db/src/repository/audit.rs:508-525` | Query 2b now reads the tenant's trail three times; `EXPLAIN` shows the tenant prefix only. Probe at 50 000 rows (debug): +3 s on 16.7 s. That is roughly +1.9 s per erasure at #782's release figures, much of #782's gain. | One `SELECT` over the four actions, then one `UPDATE` with an `IF … THEN $nil_uuid ELSE … END` per field. | The #802 and grantee tests stay green; one assertion that 2b issues a single `SELECT`. | #808 |
+| R112-16 | Informational | `axiam-server/tests/radius_e2e.rs` (`redact_secrets`); `docker/radius/raddb/live/check-eap-tls:89,171` | The Live policy assigns the bare token to `Tmp-String-2` (`%{1}`). At `-xx` FreeRADIUS prints `--> eyJ…` and `&control:Tmp-String-2 := eyJ…` with no `Bearer`/`access_token` marker, so those lines pass unredacted. This is from FreeRADIUS 3.2's debug format, not run here. | Also redact every `is_token_char` run that starts with `eyJ`. | `-->` and `Tmp-String-2 :=` lines (quoted and bare) in `the_log_redaction_hides_the_token_and_keeps_the_rest`. | #809 |
+
+### A.3 The merges and the threat model
+
+- **Empty `--remerge-diff`:** seven of the ten merges in the range.
+- **The three hand-resolved merges:**
+  - `bb05846` (T-484 in `Axiam.json` and `threatModel.ts`; the `TRUSTED_PROXIES` row) and `1994e07` (T-484 again): each resolution keeps one side's line. That line is the text both sides would need: the T-484 mitigation is byte-identical to the STRIDE entry, as checked below.
+  - `b3f56e1` (`oauth2_client_test.rs`, `network_repository_test.rs`, `schema.rs`): keeps the plan branch's labels. No assertion is lost; only message strings differ.
+  - In the merged `schema.rs` comment, the literal R112-02 is about stays out of the code.
+- **Threat model:**
+  - All ten "Amended 2026-10-23" paragraphs that the range adds to `threat-model-stride.md` appear **byte-identical** in `Axiam.json`, from the opening `**Amended` through the end of each amendment (a script over both files).
+  - `node website/scripts/gen-threat-model.mjs`, run in a scratch worktree, reproduces `threatModel.ts` and `threatModelSummary.ts` with no diff (488 threats: 457 Mitigated, 21 Open, 10 not applicable; model 2.44.0).
+- **Dependencies:** `Cargo.lock` moves tokio 1.54.0 → 1.54.1 (RUSTSEC-2026-0384) and ctutils 0.4.3 → 0.4.4 (RUSTSEC-2026-0385), and nothing else.
+
+### A.4 Checks run at `1994e07` (each tool's own exit code)
+
+| Command | Exit |
+|---|---|
+| every `scripts/check-*.py` (14) | 0, except `check-sdk-amqps.py` and `check-sdk-artifact-drift.py` (2: no SDK siblings) and `check-website-links.py` (1: the proxy's 403), as in §8 |
+| every `--self-test` the scripts have (11) | 0 (`check-remediation-evidence.py` and `check-website-links.py` have none) |
+| `check-doc-links.sh`; `check-probe-pin.sh`; `check-token-cache.py` and `--self-test` | 0 (538 links); 0; 0; 0 |
+| `cargo build -p axiam-server --no-default-features`, then `--dump-openapi \| cmp - sdks/openapi.json` | 0; 0 |
+| `check-spec-digest.py` (`f5613aea…`); `gen-management-registry.py --check`; `gen-api-index.mjs` in a scratch copy, then `diff` | 0; 0; 0 |
+| `cargo test -p axiam-core --lib` | 0 (551) |
+| `cargo test -p axiam-db --test audit_repository_test`; `--lib schema::tests` | 0 (12); 0 (91) |
+| `cargo test -p axiam-authz --lib decision_cache`; `--test decision_cache_integration_test` | 0 (34); 0 (18) |
+| `cargo test -p axiam-api-rest --no-default-features --test rate_limit_keying_test`; `--test oauth2_client_test`; `--lib client_info`; `--lib openapi` | 0 (23); 0 (45); 0 (3); 0 (17) |
+| `cargo test -p axiam-audit --test service_and_middleware` | 0 (40) |
+| `cargo test -p axiam-api-grpc --lib rate_limit` | 0 (25) |
+| `cargo test -p axiam-scim --test scim_carrier_rule_test`; `--test scim_groups_cache_flush_test` | 0 (4); 0 (4) |
+| `cargo test -p axiam-server --no-default-features --test cleanup_task` | 0 (63) |
+| `cargo clippy --lib --tests -- -D warnings` on `axiam-core`, `axiam-scim`, `axiam-authz`, `axiam-db` | 0 each |
+| `git worktree add … 1994e07` and the throwaway probes listed in A.1 and A.2 | run and deleted |
+
+**Not verified:**
+- A live AMQP broadcast for #797, #798 and #802; their tests use an engine
+  without a broadcaster, or a simulated one.
+- A real proxy sending several `X-Forwarded-For` lines.
+- Release-build timings at 100 000 rows for R112-15.
+- SurrealDB's own parse of R112-14's strings.
+- FreeRADIUS `-xx` output for R112-16 (no Docker).
+- The CHANGELOG, the PR body and the website prose (W8.4b's).
+
+### A.5 Is the release ready (§9bis)?
+
+**No, not yet.** W9.2 filed three Informational findings (#807 … #809), each a
+residual of a W9.1 fix. By §9bis they go to **W9.3** (fix; one Sonnet 5.5
+session suffices for all three) and **W9.4** (addendum). Anything a W9.4
+review would file goes to the PR body's "Open after two sweeps". Nothing is
+Medium or higher. Every finding R112-01 … R112-13 is closed by the tree.

@@ -574,3 +574,108 @@ residual of a W9.1 fix. By §9bis they go to **W9.3** (fix; one Sonnet 5.5
 session suffices for all three) and **W9.4** (addendum). Anything a W9.4
 review would file goes to the PR body's "Open after two sweeps". Nothing is
 Medium or higher. Every finding R112-01 … R112-13 is closed by the tree.
+
+---
+
+## Addendum — W9.4, the second sweep (2026-10-24)
+
+**Against:** `claude/release-1.1.2` at `e753824`. The range is W9.3's diff
+`d414377..e753824`: five commits, one of them the merge. It touches six
+files: `schema.rs`, `audit.rs`, `audit_repository_test.rs`,
+`radius_e2e.rs`, `CHANGELOG.md` and the PR body.
+- All five commits carry a `gpgsig` header.
+- The merge's `--remerge-diff` is empty.
+
+This is the last review under §9bis. It files no issue: whatever it finds goes
+to the PR body's "Open after two sweeps".
+
+### B.1 Verdict per finding
+
+| ID | Issue | Commit | Verdict |
+|---|---|---|---|
+| R112-14 | #807 | `d983e55` | **closed** (details below) |
+| R112-15 | #808 | `9c973bd` | **closed** (details below) |
+| R112-16 | #809 | `fdd41a2` | **closed** (details below) |
+
+**R112-14 (#807).** `migration_statements` returns `None`, which
+`is_additive` reads as non-additive, on any of:
+- `⟨` or `⟩`;
+- a bare `/` (`//` and `/*` are matched first);
+- an ASCII `<` not followed by an alphanumeric or one of ` =$(_`;
+- an unterminated `/*`;
+- an unmatched closer (`checked_sub`);
+- a scan that ends inside a quote or with `depth != 0`.
+
+Evidence:
+- The test covers every R112-14 string plus four unterminated forms, and keeps
+  `option<array<string>>` and `<datetime>` additive.
+- The pinned `the_additive_rule_refuses_exactly_the_reviewed_migrations` still
+  passes, so no shipped migration changed class.
+- Adversarial reading: what remains needs SQL that SurrealDB itself would not
+  parse, e.g. a quote right after a `<ident`, which is a parse error. Every new
+  refusal is fail-closed.
+- Its only cost is a false refusal of a future additive migration that uses
+  `<-` graph syntax or a regex, and only when applied out of order. The runner
+  then refuses the boot and names the gap (#771), which is the safe direction.
+
+**R112-15 (#808).**
+- `ERASE_GRANTEE_SQL` is one `SELECT` over the four actions, with the same
+  per-action predicates as the three old reads, and one `UPDATE`.
+- Each field is set through `IF <its own action and predicate> THEN $nil_uuid
+  ELSE <itself> END`, so every row changes exactly as before.
+- The read is still tenant-scoped.
+
+Tests:
+- `pseudonymize_actor_adds_no_key_to_the_network_role_rows_it_clears`: a
+  success row gains no `after`/`before`, and a refusal row gains only its own
+  side.
+- The #802 refusal-row and grantee tests.
+- `erasure_query_2b_issues_one_select_and_one_update`.
+
+**R112-16 (#809).**
+- `redact_jwts` replaces every token-character run that starts with `eyJ`.
+- It runs after the two marker passes and always consumes at least the three
+  marker characters, so the loop terminates.
+- It may over-redact a word containing `eyJ`, which is harmless in a test
+  report.
+
+Test: `the_log_redaction_hides_the_token_and_keeps_the_rest` with the `-->`
+line, the bare and quoted `Tmp-String-2 :=` lines, and two tokens on one
+line. It also asserts the signature part is gone, and that the text after the
+token is kept.
+
+**Text.** `CHANGELOG.md` and the PR body gain one entry each for #807 … #809.
+The issue count is now seventy-nine and the range now ends at #809 (the count
+was not re-derived here). Nothing else changed.
+
+### B.2 New findings
+
+**None.** Nothing is filed and nothing goes to "Open after two sweeps".
+
+### B.3 Checks run at `e753824` (each tool's own exit code; a scratch worktree, removed)
+
+| Command | Exit |
+|---|---|
+| `cargo test -p axiam-db --lib` (the `schema::tests` and the `audit.rs` unit tests among them) | 0 (335 passed) |
+| `cargo test -p axiam-db --test audit_repository_test` | 0 (13 passed) |
+| `cargo test -p axiam-server --no-default-features --test radius_e2e the_log_redaction` | 0 (1 passed) |
+| `cargo clippy -p axiam-db --lib --tests -- -D warnings`; `cargo clippy -p axiam-server --no-default-features --tests -- -D warnings` | 0; 0 |
+| `cargo fmt -p axiam-db -p axiam-server -- --check` | 0 |
+| `python3 scripts/check-conflict-markers.py` | 0 |
+| `git cat-file -p <c> \| grep -q '^gpgsig'` over `d414377..e753824` | 5/5 |
+| `git show --remerge-diff e753824` | empty |
+
+**Not verified:**
+- SurrealDB's own parse of the probe strings.
+- FreeRADIUS `-xx` output (no Docker).
+- Release-build timings of the one-pass query.
+
+### B.4 Is the release ready (§9bis)?
+
+**Yes, as far as this review goes.** Two conditions hold:
+- Every finding R112-01 … R112-16 (#794 … #809) is closed by the tree at
+  `e753824`.
+- The second sweep's review files nothing, so "Open after two sweeps" is empty.
+
+What remains is the maintainer's: the PR's CI (including the RADIUS e2e and
+CodeQL), the merge, and the tag.

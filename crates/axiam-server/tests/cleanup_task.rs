@@ -5339,3 +5339,130 @@ async fn two_recoveries_over_one_store_record_an_owed_erasure_once() {
     assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
     assert!(!erasure_marker_set(&db, user.id).await);
 }
+
+// ---------------------------------------------------------------------------
+// #738 — what `purge_under_claim` does with the claim on each outcome
+// ---------------------------------------------------------------------------
+
+/// The claim is held through an erasure that reports `Ok(true)` (the account
+/// is erased, nothing is left to release) and let go on every other outcome —
+/// an erasure given up (`Ok(false)`) or failed — so the next sweep takes the
+/// account at once instead of waiting out the lease.
+#[tokio::test]
+async fn the_claim_is_released_unless_the_erasure_reports_the_account_erased() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let deletions = SurrealAccountDeletionRepository::new(db.clone());
+    let attempt = |user: Uuid, outcome: Result<bool, AxiamError>| {
+        let deletions = deletions.clone();
+        async move {
+            purge_under_claim(
+                &deletions,
+                tenant_id,
+                user,
+                Utc::now(),
+                erasure_claim_lease(),
+                async move { outcome },
+            )
+            .await
+        }
+    };
+
+    let given_up = user_due_for_erasure(&db, tenant_id, "claim_given_up").await;
+    assert!(!attempt(given_up.id, Ok(false)).await.unwrap());
+    assert!(
+        attempt(given_up.id, Ok(true)).await.unwrap(),
+        "a given-up erasure released the claim, so the next unit runs"
+    );
+
+    let failed = user_due_for_erasure(&db, tenant_id, "claim_failed").await;
+    assert!(
+        attempt(failed.id, Err(AxiamError::Internal("step failed".into())))
+            .await
+            .is_err(),
+        "the erasure's own failure is the outcome"
+    );
+    assert!(
+        attempt(failed.id, Ok(true)).await.unwrap(),
+        "a failed erasure released the claim, so the next unit runs"
+    );
+
+    let erased = user_due_for_erasure(&db, tenant_id, "claim_settled").await;
+    assert!(attempt(erased.id, Ok(true)).await.unwrap());
+    assert!(
+        !attempt(erased.id, Ok(true)).await.unwrap(),
+        "an erased account keeps its claim: a second unit finds it held"
+    );
+}
+
+/// #738: a unit that stalled past the record lease finds, at its proof, the
+/// one a sweep wrote for its erasure. That is not a failure of the tick: the
+/// unit reports it did not record the erasure (the sweep did), the account
+/// stays anonymized, and exactly one proof stands.
+#[tokio::test]
+async fn an_erasure_whose_proof_a_sweep_already_wrote_gives_the_record_up_without_failing() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let user = erasure_due_with_its_request(&db, tenant_id, "proof_exists_738").await;
+    let (entered_tx, mut entered) = watch::channel(false);
+    let go = Arc::new(Notify::new());
+    let work = never_stopping().with_step_for_tests(Some(hold_at(
+        UnitStep::ErasureProofOwed(user.id),
+        entered_tx,
+        Arc::clone(&go),
+    )));
+    let proofs = SurrealErasureProofRepository::new(db.clone());
+    let unit = {
+        let (db, work) = (db.clone(), work.clone());
+        let user_id = user.id;
+        tokio::spawn(async move {
+            let (audit, proofs, users, certs, deletions) = (
+                SurrealAuditLogRepository::new(db.clone()),
+                SurrealErasureProofRepository::new(db.clone()),
+                SurrealUserRepository::new(db.clone()),
+                SurrealCertificateRepository::new(db.clone()),
+                SurrealAccountDeletionRepository::new(db.clone()),
+            );
+            erase_and_record(
+                &audit,
+                &proofs,
+                &users,
+                &certs,
+                &deletions,
+                None,
+                ErasureSubject {
+                    tenant_id,
+                    user_id,
+                    pseudonym: "DELETED_USER_proof738000001",
+                    email_hash: "hashed_proof_exists_738",
+                    certificates_revoked: 0,
+                },
+                &work,
+            )
+            .await
+        })
+    };
+    wait_until_entered(&mut entered).await;
+    proofs
+        .create(CreateErasureProof {
+            pseudonym: "DELETED_USER_proof738000001".into(),
+            tenant_id,
+            user_id: user.id,
+            erased_at: Utc::now(),
+        })
+        .await
+        .expect("the sweep's proof");
+    go.notify_one();
+
+    let recorded = unit
+        .await
+        .unwrap()
+        .expect("an existing proof is not a failure");
+    assert!(!recorded, "the sweep recorded the erasure, not this unit");
+    assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    let after = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user.id)
+        .await
+        .unwrap();
+    assert!(!after.deletion_pending, "the account is anonymized");
+}

@@ -617,4 +617,41 @@ mod tests {
         let short = select_client_ip(Some("9.9.9.9"), inside, 1, &listed);
         assert_eq!((short.ip, short.discarded_hops), (inside, Some(1)));
     }
+
+    #[test]
+    fn the_claim_is_absent_for_an_empty_first_hop_or_no_header() {
+        assert_eq!(forwarded_for_claimed(None, None), None);
+        assert_eq!(forwarded_for_claimed(Some("  , 1.2.3.4"), None), None);
+        assert_eq!(
+            forwarded_for_claimed(Some("9.9.9.9"), Some(ip("1.2.3.4"))).as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn the_configured_hop_count_is_zero_when_the_variable_is_unset() {
+        if std::env::var_os("AXIAM__RATE_LIMIT__TRUSTED_HOPS").is_some() {
+            return; // the environment names a count; parsing is covered by the selector cases
+        }
+        assert_eq!(configured_trusted_hops(), 0);
+    }
+
+    #[test]
+    fn the_hop_count_picks_from_the_right_and_reports_what_it_could_not_use() {
+        let any = TrustedProxies::parse("").unwrap();
+        let peer = Some(ip("192.0.2.1"));
+        let pick = |header, hops| select_client_ip(Some(header), peer, hops, &any);
+
+        assert_eq!(pick("1.2.3.4, 5.6.7.8", 0).ip, Some(ip("5.6.7.8")));
+        assert_eq!(pick("1.2.3.4, 5.6.7.8", 1).ip, Some(ip("1.2.3.4")));
+        assert_eq!(pick("1.2.3.4, 5.6.7.8", 1).discarded_hops, None);
+
+        let short = pick("1.2.3.4", 1);
+        assert_eq!(short.ip, peer, "fewer hops than trusted: the peer stands");
+        assert_eq!(short.discarded_hops, Some(1));
+
+        let junk = pick("1.2.3.4, not-an-address", 0);
+        assert_eq!(junk.ip, peer, "an unparseable hop is never attributed");
+        assert_eq!(junk.discarded_hops, None);
+    }
 }

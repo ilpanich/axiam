@@ -4845,6 +4845,67 @@ mod w1_failure_arm_tests {
         );
     }
 
+    fn erasure_claim(db: &Surreal<Db>, held: bool) -> ErasureClaim<Db> {
+        ErasureClaim {
+            deletions: SurrealAccountDeletionRepository::new(db.clone()),
+            tenant_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            stamp: Utc::now(),
+            held,
+        }
+    }
+
+    /// An erasure's claim that cannot be released says so and does not fail.
+    #[tokio::test]
+    async fn an_erasure_claim_that_cannot_reach_the_datastore_logs_and_lets_go() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        erasure_claim(&db, true).release().await;
+        assert!(
+            log.text()
+                .contains("could not release an erasure's claim; it lapses with its lease"),
+            "the failed release was not logged"
+        );
+    }
+
+    /// Dropped while holding the claim inside a runtime, the guard spawns the
+    /// release; settled first, it releases nothing.
+    #[tokio::test]
+    async fn dropping_an_erasure_claim_spawns_its_release_only_while_held() {
+        let db = unreachable_db().await;
+        let (log, _guard) = capture();
+        erasure_claim(&db, false).settle();
+        drop(erasure_claim(&db, false));
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(log.text(), "", "a settled claim releases nothing");
+
+        drop(erasure_claim(&db, true));
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            log.text()
+                .contains("could not release the claim of an erasure that was cut"),
+            "the held claim's release was not spawned"
+        );
+    }
+
+    /// With no runtime to spawn on, the guard can only say the claim lapses.
+    #[test]
+    fn dropping_a_held_erasure_claim_outside_a_runtime_logs_that_it_lapses() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let db = runtime.block_on(unreachable_db());
+        let (log, _guard) = capture();
+        drop(erasure_claim(&db, true));
+        assert!(
+            log.text()
+                .contains("the claim of an erasure cut outside a runtime lapses with its lease"),
+            "the lapse was not logged"
+        );
+    }
+
     /// Once the process is stopping, no sweep starts recording.
     #[tokio::test]
     async fn the_record_sweeps_start_nothing_once_the_process_is_stopping() {
@@ -4959,5 +5020,225 @@ mod w1_failure_arm_tests {
             matches!(crossed, Ok(None)),
             "an absent row is another purge's"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The GDPR sweep through the task itself: `sweep_pending_purges` →
+    // `purge_single_user` → `ErasureUnit`, over a migrated in-memory store.
+    // -----------------------------------------------------------------------
+
+    use axiam_core::models::gdpr::CreateAccountDeletion;
+    use axiam_core::models::user::CreateUser;
+    use axiam_core::repository::{
+        AccountDeletionRepository, OrganizationRepository, TenantRepository, UserRepository,
+    };
+    use axiam_db::{
+        SurrealAuditLogRepository, SurrealCertificateRepository, SurrealPasswordHistoryRepository,
+        SurrealRefreshTokenRepository, SurrealWebauthnCredentialRepository,
+    };
+
+    const PEPPER: [u8; 32] = [7; 32];
+
+    fn task(db: &Surreal<Db>, pepper: Option<[u8; 32]>) -> CleanupTask<Db> {
+        let (_stop, shutdown) = watch::channel(false);
+        CleanupTask::new(
+            Arc::new(axiam_db::SurrealAssertionReplayRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealFederationLoginStateRepository::new(
+                db.clone(),
+            )),
+            Arc::new(axiam_db::SurrealSsoHandoffCodeRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealPendingSamlRequestRepository::new(
+                db.clone(),
+            )),
+            Arc::new(axiam_db::SurrealSamlSpSessionRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealSamlLogoutRunRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealAmqpNonceRepository::new(db.clone())),
+            Arc::new(SurrealUserRepository::new(db.clone())),
+            Arc::new(AuthSvc::new(
+                SurrealUserRepository::new(db.clone()),
+                SurrealSessionRepository::new(db.clone()),
+                SurrealFederationLinkRepository::new(db.clone()),
+                SurrealRefreshTokenRepository::new(db.clone()),
+                axiam_auth::AuthConfig::default(),
+                Arc::new(tokio::sync::Semaphore::new(2)),
+            )),
+            Arc::new(SurrealAuditLogRepository::new(db.clone())),
+            Arc::new(SurrealAccountDeletionRepository::new(db.clone())),
+            Arc::new(SurrealErasureProofRepository::new(db.clone())),
+            Arc::new(SurrealFederationLinkRepository::new(db.clone())),
+            Arc::new(SurrealRoleRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealPermissionRepository::new(db.clone())),
+            Arc::new(SurrealGroupRepository::new(db.clone())),
+            Arc::new(SurrealWebauthnCredentialRepository::new(db.clone())),
+            Arc::new(SurrealPasswordHistoryRepository::new(db.clone())),
+            Arc::new(SurrealCertificateRepository::new(db.clone())),
+            Arc::new(SurrealExportJobRepository::new(db.clone())),
+            Arc::new(SurrealConsentRepository::new(db.clone())),
+            Arc::new(SurrealTenantRepository::new(db.clone())),
+            Arc::new(SurrealSessionRepository::new(db.clone())),
+            Arc::new(MailTransportPublisher::InProcess(
+                axiam_amqp::InProcessMailPublisher::disabled(),
+            )),
+            pepper,
+            None,
+            Duration::from_secs(3600),
+            None,
+            None,
+            Arc::new(axiam_db::SurrealOAuth2ClientRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealOAuth2RegistrationTokenRepository::new(
+                db.clone(),
+            )),
+            Arc::new(axiam_db::SurrealSettingsRepository::new(db.clone())),
+            Arc::new(SweptClientGrants::new(
+                SurrealRefreshTokenRepository::new(db.clone()),
+                axiam_db::SurrealAuthorizationCodeRepository::new(db.clone()),
+                axiam_db::SurrealPushedAuthRequestRepository::new(db.clone()),
+                axiam_db::SurrealDeviceGrantRepository::new(db.clone()),
+                axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
+            )),
+            Arc::new(SurrealRefreshTokenRepository::new(db.clone())),
+            crate::job_health::JobHealth::new(Duration::from_secs(3600)),
+            shutdown,
+        )
+    }
+
+    /// A user whose deletion is due, with its pending request.
+    async fn due_user(
+        db: &Surreal<Db>,
+        tenant_id: Uuid,
+        name: &str,
+    ) -> axiam_core::models::user::User {
+        let users = SurrealUserRepository::new(db.clone());
+        let user = users
+            .create(CreateUser {
+                tenant_id,
+                username: name.into(),
+                email: format!("{name}@example.com"),
+                password: axiam_test_support::test_password(),
+                metadata: None,
+            })
+            .await
+            .expect("create user");
+        let past = Utc::now() - chrono::TimeDelta::seconds(1);
+        users
+            .mark_deletion_pending(tenant_id, user.id, past)
+            .await
+            .expect("mark deletion pending");
+        SurrealAccountDeletionRepository::new(db.clone())
+            .create(CreateAccountDeletion {
+                tenant_id,
+                user_id: user.id,
+                cancel_token_hash: format!("{:064x}", 9),
+                scheduled_purge_at: past,
+            })
+            .await
+            .expect("the deletion request");
+        users.get_by_id(tenant_id, user.id).await.expect("reload")
+    }
+
+    /// The sweep erases a due account through the task's own unit: the row is
+    /// anonymized in place, one proof stands, and a second sweep finds nothing.
+    #[tokio::test]
+    async fn the_gdpr_sweep_erases_a_due_account_through_the_task() {
+        let db = migrated_db().await;
+        let tenant_id = Uuid::new_v4();
+        let user = due_user(&db, tenant_id, "swept_account").await;
+        let task = task(&db, Some(PEPPER));
+
+        let purged = task.sweep_pending_purges().await.expect("the sweep runs");
+
+        assert_eq!(purged, 1, "the due account was erased");
+        let after = SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .expect("the row stays, anonymized");
+        assert!(!after.deletion_pending);
+        assert_ne!(after.email, user.email, "the address is gone");
+        assert_eq!(
+            after.username,
+            gdpr_pseudonym(&PEPPER, tenant_id, user.id),
+            "the username is the keyed pseudonym"
+        );
+        let proofs = SurrealErasureProofRepository::new(db.clone());
+        let again = write_erasure_proof(&proofs, tenant_id, user.id, "p", Utc::now()).await;
+        assert!(
+            again.is_err_and(|e| is_existing_proof(&e)),
+            "the erasure proof was written, once"
+        );
+        assert_eq!(
+            task.sweep_pending_purges().await.expect("second sweep"),
+            0,
+            "nothing is left due"
+        );
+    }
+
+    /// Without the pepper the sweep skips the erasure: nothing is touched.
+    #[tokio::test]
+    async fn the_gdpr_sweep_without_a_pepper_erases_nothing() {
+        let db = migrated_db().await;
+        let tenant_id = Uuid::new_v4();
+        let user = due_user(&db, tenant_id, "unswept_account").await;
+
+        let purged = task(&db, None)
+            .sweep_pending_purges()
+            .await
+            .expect("skipping is not a failure");
+
+        assert_eq!(purged, 0);
+        let after = SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user.id)
+            .await
+            .unwrap();
+        assert!(after.deletion_pending, "the account is still due");
+        assert_eq!(after.email, user.email);
+    }
+
+    /// A whole tick over a migrated store runs every sweep in order, erases the
+    /// due account, and is a no-op once the process has been asked to stop.
+    #[tokio::test]
+    async fn a_tick_erases_the_due_account_unless_the_process_is_stopping() {
+        let db = migrated_db().await;
+        let org = axiam_db::SurrealOrganizationRepository::new(db.clone())
+            .create(axiam_core::models::organization::CreateOrganization {
+                name: "Org".into(),
+                slug: "tick-org".into(),
+                metadata: None,
+            })
+            .await
+            .expect("org");
+        // A real tenant: the tick's orphan sweep removes data of a missing one.
+        let tenant_id = SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                kind: axiam_core::models::tenant::TenantKind::Standard,
+                name: "tick".into(),
+                slug: "tick".into(),
+                metadata: None,
+            })
+            .await
+            .expect("tenant")
+            .id;
+        let user = due_user(&db, tenant_id, "ticked_account").await;
+        let users = SurrealUserRepository::new(db.clone());
+
+        let (stop, shutdown) = watch::channel(true);
+        let mut stopping = task(&db, Some(PEPPER));
+        stopping.shutdown = shutdown;
+        stopping.audited = AuditedWork::new(stopping.shutdown.clone());
+        stopping.tick().await;
+        assert!(
+            users
+                .get_by_id(tenant_id, user.id)
+                .await
+                .unwrap()
+                .deletion_pending,
+            "a stopping task starts no sweep"
+        );
+        drop(stop);
+
+        task(&db, Some(PEPPER)).tick().await;
+        let after = users.get_by_id(tenant_id, user.id).await.unwrap();
+        assert!(!after.deletion_pending, "the tick erased the account");
+        assert_ne!(after.email, user.email);
     }
 }

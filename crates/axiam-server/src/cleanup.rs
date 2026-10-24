@@ -173,6 +173,10 @@ pub struct CleanupTask<C: Connection> {
     /// G-5 (D-52): tells SSF receivers an account was purged (the account as it
     /// was before the erasure). `None` — the default — tells nobody.
     ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
+    /// D7 (#802): flushes an erased account's cached decisions after the
+    /// erasure's role pass. `None` — the default, and a deployment without a
+    /// decision cache — flushes nothing.
+    subject_flush: Option<SubjectFlush>,
     /// G-6 (T23.6.3, D-58): the outbound SCIM reconciliation, which the
     /// `scim_reconcile` job runs once a day per enabled target (the claim in
     /// the datastore decides, so replicas do not double-run it). `None` — the
@@ -409,6 +413,16 @@ pub async fn erase_oauth2_refresh_tokens<RT: axiam_core::repository::RefreshToke
     repo.delete_all_for_user(tenant_id, user_id).await
 }
 
+/// Flushes one subject's cached authorization decisions, locally and, when the
+/// broadcast is on, on every replica (D7): the composition root's
+/// `AuthzChecker::invalidate_subject`, which logs a broadcast it cannot
+/// confirm. The erasure's role pass calls it (#802).
+pub type SubjectFlush = Arc<
+    dyn Fn(Uuid, Uuid) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Step (b3)'s role pass (#758 (e)): unassign every direct role assignment of
 /// the erased account, and write one `network_role.unassigned` row (the
 /// [`axiam_authz::network_gate::AUDIT_ROLE_UNASSIGNED`] action) for each
@@ -431,6 +445,12 @@ pub async fn erase_oauth2_refresh_tokens<RT: axiam_core::repository::RefreshToke
 /// read one assignment (a stalled unit and its successor) one writes the row. A public free
 /// function, for the reason [`run_erasure_pipeline`] is.
 ///
+/// Last, `flush` (when the deployment caches decisions) drops the account's
+/// cached decisions, so a decision evaluated before the unassignments is not
+/// served, nor inserted behind them, until the TTL (#802, R112-09 (b)). It
+/// runs after the group memberships of step (b3), removed just before this
+/// pass, are gone too, and on a re-entered erasure as well: it is idempotent.
+///
 /// # Errors
 ///
 /// The datastore error of a read or an unassignment (fail-closed: the purge
@@ -439,6 +459,7 @@ pub async fn remove_erased_users_roles<R, P, A>(
     role_repo: &R,
     permission_repo: &P,
     audit_repo: &A,
+    flush: Option<&SubjectFlush>,
     tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<u64, AxiamError>
@@ -497,6 +518,9 @@ where
         )
         .await;
         network_rows += 1;
+    }
+    if let Some(flush) = flush {
+        flush(tenant_id, user_id).await;
     }
     Ok(network_rows)
 }
@@ -2942,6 +2966,7 @@ struct ErasureUnit<C: Connection> {
     account_deletion_repo: Arc<SurrealAccountDeletionRepository<C>>,
     refresh_token_repo: Arc<axiam_db::SurrealRefreshTokenRepository<C>>,
     ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
+    subject_flush: Option<SubjectFlush>,
 }
 
 impl<C: Connection> ErasureUnit<C> {
@@ -3098,6 +3123,7 @@ impl<C: Connection> ErasureUnit<C> {
             self.role_repo.as_ref(),
             self.permission_repo.as_ref(),
             self.audit_repo.as_ref(),
+            self.subject_flush.as_ref(),
             tenant_id,
             user_id,
         )
@@ -3248,6 +3274,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_buffer_repo: None,
             ssf_step_up_repo: None,
             ssf_sink: None,
+            subject_flush: None,
             scim_reconciliation: None,
             ciba_request_repo: None,
             rate_limit_bucket_repo: None,
@@ -3319,6 +3346,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         self.ssf_buffer_repo = Some(buffer_repo);
         self.ssf_step_up_repo = Some(step_up_repo);
         self.ssf_sink = Some(sink);
+        self
+    }
+
+    /// Flush an erased account's cached authorization decisions after the
+    /// erasure's role pass (D7, #802). A builder step for the reason
+    /// [`Self::with_directory_sync`] is one: the absence has a meaning (no
+    /// decision cache, nothing to flush).
+    #[must_use]
+    pub fn with_subject_flush(mut self, flush: SubjectFlush) -> Self {
+        self.subject_flush = Some(flush);
         self
     }
 
@@ -4128,6 +4165,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             account_deletion_repo: Arc::clone(&self.account_deletion_repo),
             refresh_token_repo: Arc::clone(&self.refresh_token_repo),
             ssf_sink: self.ssf_sink.clone(),
+            subject_flush: self.subject_flush.clone(),
         };
         let (user, work) = (user.clone(), self.audited.clone());
         self.audited

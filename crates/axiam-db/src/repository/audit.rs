@@ -487,7 +487,7 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         // Query 2b: the grantee of a `network_role.assigned` / `.unassigned`
-        // row is the subject, whichever actor wrote it (an administrator, or the
+        // row (and of a refused one, below) is the subject, whichever actor wrote it (an administrator, or the
         // erasure itself). Cleared to the nil UUID like the other identifiers;
         // idempotent, since the match is on the user's id, which a cleared row
         // no longer carries.
@@ -497,6 +497,14 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         // before it reaches into `metadata`) and the `UPDATE` then writes only
         // the chosen ids; the same predicates in the `UPDATE`'s own `WHERE`
         // took 4.3 s per erasure at 100 000 rows in the tenant (R112W1-03).
+        //
+        // The gate's refusal rows (`network_role.assign_refused` /
+        // `.unassign_refused`) name a user grantee by the `(kind, id)` pair of
+        // the refused write: `metadata.after.user` for an assignment, and
+        // `metadata.before.user` for an unassignment (the gate's and the
+        // stale-claim refusal alike). That id is cleared the same way (#802,
+        // R112-09 (a)). A service account's or a group's key is not `user`,
+        // so it is not matched.
         let _ = self
             .db
             .current()
@@ -506,7 +514,19 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
                      AND action IN ['network_role.assigned', 'network_role.unassigned'] \
                      AND metadata.grantee.kind = 'user' \
                      AND metadata.grantee.id = $user_id); \
-                 UPDATE $rows SET metadata.grantee.id = $nil_uuid",
+                 UPDATE $rows SET metadata.grantee.id = $nil_uuid; \
+                 LET $refused_after = (SELECT VALUE id FROM audit_log \
+                     WHERE tenant_id = $tenant_id \
+                     AND action IN ['network_role.assign_refused', \
+                                    'network_role.unassign_refused'] \
+                     AND metadata.after.user = $user_id); \
+                 UPDATE $refused_after SET metadata.after.user = $nil_uuid; \
+                 LET $refused_before = (SELECT VALUE id FROM audit_log \
+                     WHERE tenant_id = $tenant_id \
+                     AND action IN ['network_role.assign_refused', \
+                                    'network_role.unassign_refused'] \
+                     AND metadata.before.user = $user_id); \
+                 UPDATE $refused_before SET metadata.before.user = $nil_uuid",
             )
             .bind(("nil_uuid", nil_uuid.clone()))
             .bind(("tenant_id", tenant_id_str.clone()))

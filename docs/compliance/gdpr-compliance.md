@@ -180,7 +180,10 @@ invoked as a deliberate additional step rather than an always-on default.
   nulled, together with the request row's second client address,
   `metadata.forwarded_for_claimed` (the caller's leftmost `X-Forwarded-For`
   entry, recorded since 1.1.2 when it differs from `ip_address`; #752, #794).
-  The one row that names the erased account by id is the erasure's
+  A `network_role.*` row written by someone else that names the erased user
+  as its grantee, a success row (`grantee.id`) or a refused write's
+  (`before.user` / `after.user`), has that id set to the nil UUID too (#758,
+  #802). The one row that names the erased account by id is the erasure's
   own record, `gdpr.user_pseudonymized`, written after the scrub with the
   anonymized row's id as its actor and only the pseudonym and a certificate
   count in its metadata; the scrub never rewrites it, so a unit that runs late

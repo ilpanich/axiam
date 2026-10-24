@@ -5077,6 +5077,7 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
         &roles,
         &SurrealPermissionRepository::new(db.clone()),
         &audit,
+        None,
         tenant_id,
         user.id,
     )
@@ -5115,6 +5116,7 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
         &roles,
         &SurrealPermissionRepository::new(db.clone()),
         &audit,
+        None,
         tenant_id,
         user.id,
     )
@@ -5150,6 +5152,101 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
 }
 
 // ---------------------------------------------------------------------------
+// #802 (R112-09 (b)) — the erasure's role pass flushes the decision cache
+// ---------------------------------------------------------------------------
+
+/// With the decision cache on, an allow cached for the account before the
+/// erasure is not served after the role pass: the pass ends with the subject
+/// flush the composition root hands the cleanup task. Without the flush (the
+/// control) the stale allow is still served, so the flush is the mechanism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_erasures_role_pass_flushes_the_accounts_cached_decisions() {
+    use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
+    use axiam_authz::{AuthorizationEngine, DecisionCache, DecisionCacheConfig};
+    use axiam_server::cleanup::SubjectFlush;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let role = role_granting(&db, tenant_id, "docs", "documents:read").await;
+    let cache = Arc::new(DecisionCache::new(DecisionCacheConfig {
+        ttl: std::time::Duration::from_secs(300),
+        max_entries_per_tenant: 100,
+    }));
+    let engine = Arc::new(
+        AuthorizationEngine::new(
+            SurrealRoleRepository::new(db.clone()),
+            SurrealPermissionRepository::new(db.clone()),
+            axiam_db::SurrealResourceRepository::new(db.clone()),
+            axiam_db::SurrealScopeRepository::new(db.clone()),
+            axiam_db::SurrealGroupRepository::new(db.clone()),
+        )
+        .with_decision_cache(Arc::clone(&cache)),
+    );
+    let flush: SubjectFlush = {
+        let engine = Arc::clone(&engine);
+        Arc::new(move |tenant_id, user_id| {
+            let engine = Arc::clone(&engine);
+            Box::pin(async move {
+                engine
+                    .invalidate_subject(tenant_id, user_id)
+                    .await
+                    .expect("no broadcaster, so the flush is infallible");
+            })
+        })
+    };
+
+    for (name, with_flush) in [("flushed", true), ("control", false)] {
+        let user = user_due_for_erasure(&db, tenant_id, name).await;
+        SurrealRoleRepository::new(db.clone())
+            .assign_to_user(tenant_id, user.id, role, AssignmentScope::global())
+            .await
+            .expect("assign");
+        let request = AccessRequest {
+            tenant_id,
+            subject_scope: SubjectScope::Tenant,
+            subject_id: user.id,
+            action: "documents:read".into(),
+            resource_id: Uuid::nil(),
+            scope: None,
+        };
+        assert_eq!(
+            engine.check_access(&request).await.unwrap(),
+            AccessDecision::Allow
+        );
+        assert_eq!(cache.get(&request), Some(AccessDecision::Allow));
+
+        remove_erased_users_roles(
+            &SurrealRoleRepository::new(db.clone()),
+            &SurrealPermissionRepository::new(db.clone()),
+            &SurrealAuditLogRepository::new(db.clone()),
+            with_flush.then_some(&flush),
+            tenant_id,
+            user.id,
+        )
+        .await
+        .expect("role pass");
+
+        if with_flush {
+            assert_eq!(
+                cache.get(&request),
+                None,
+                "the erased account's cached allow survived the role pass"
+            );
+            assert!(matches!(
+                engine.check_access(&request).await.unwrap(),
+                AccessDecision::Deny(_)
+            ));
+        } else {
+            assert_eq!(
+                cache.get(&request),
+                Some(AccessDecision::Allow),
+                "control: without the flush the stale allow is served"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #792 — two units in the role pass record one unassignment, not two
 // ---------------------------------------------------------------------------
 
@@ -5177,6 +5274,7 @@ async fn two_concurrent_role_passes_over_one_network_role_write_one_row() {
                     &SurrealRoleRepository::new(db.clone()),
                     &SurrealPermissionRepository::new(db.clone()),
                     &SurrealAuditLogRepository::new(db),
+                    None,
                     tenant_id,
                     user.id,
                 )

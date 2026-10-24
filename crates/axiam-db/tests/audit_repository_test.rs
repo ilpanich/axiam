@@ -493,6 +493,74 @@ async fn pseudonymize_actor_clears_the_grantee_id_of_network_role_rows() {
     }
 }
 
+/// #802 (R112-09 (a)): the gate's refusal rows name a user grantee by the
+/// refused write's `(kind, id)` pair, in `metadata.after` for an assignment
+/// and in `metadata.before` for an unassignment; the erasure clears that id as
+/// it clears a success row's `grantee.id`. A stranger's, a service account's
+/// and another action's value are left, and a second run changes nothing.
+#[tokio::test]
+async fn pseudonymize_actor_clears_the_user_of_network_role_refusal_rows() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db);
+    let (user_id, stranger, admin) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    // `side` is where the gate puts the grantee: "after" for an assignment,
+    // "before" for an unassignment.
+    let row = |action: &str, side: &str, kind: &str, who: Uuid| {
+        let mut e = entry(tenant_id, admin, action, AuditOutcome::Denied, None);
+        let mut named = serde_json::Map::new();
+        named.insert("role_id".into(), serde_json::json!(Uuid::new_v4()));
+        named.insert("role".into(), serde_json::json!("net-admin"));
+        named.insert(kind.into(), serde_json::json!(who.to_string()));
+        named.insert("node".into(), serde_json::json!("none"));
+        let other = if side == "after" { "before" } else { "after" };
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("rule".into(), serde_json::json!("H6"));
+        metadata.insert(side.into(), serde_json::Value::Object(named));
+        metadata.insert(other.into(), serde_json::json!({ "assignments": "none" }));
+        e.metadata = Some(serde_json::Value::Object(metadata));
+        e
+    };
+    let rows_written = [
+        ("network_role.assign_refused", "after", "user", user_id),
+        ("network_role.unassign_refused", "before", "user", user_id),
+        ("network_role.assign_refused", "after", "user", stranger),
+        (
+            "network_role.unassign_refused",
+            "before",
+            "service_account",
+            user_id,
+        ),
+        ("network_role.grant_refused", "after", "user", user_id),
+    ];
+    let mut ids = Vec::new();
+    for (action, side, kind, who) in rows_written {
+        ids.push(repo.append(row(action, side, kind, who)).await.unwrap().id);
+    }
+
+    let nil = serde_json::json!(Uuid::nil().to_string());
+    let mine = serde_json::json!(user_id.to_string());
+    for _ in 0..2 {
+        repo.pseudonymize_actor(tenant_id, user_id, "DELETED_USER_deadbeef")
+            .await
+            .unwrap();
+        let rows = repo.get_by_ids(tenant_id, &ids).await.unwrap();
+        let named = |i: usize| {
+            let (_, side, kind, _) = rows_written[i];
+            let r = rows.iter().find(|r| r.id == ids[i]).unwrap();
+            r.metadata[side][kind].clone()
+        };
+        assert_eq!(named(0), nil);
+        assert_eq!(named(1), nil);
+        assert_eq!(named(2), serde_json::json!(stranger.to_string()));
+        assert_eq!(named(3), mine);
+        assert_eq!(named(4), mine);
+        // The rest of the row is left as it was.
+        let kept = rows.iter().find(|r| r.id == ids[1]).unwrap();
+        assert_eq!(kept.metadata["before"]["role"], "net-admin");
+        assert_eq!(kept.metadata["after"]["assignments"], "none");
+    }
+}
+
 /// R112W1-03: `erasure_recorded` reads the record by its actor (the account)
 /// and, failing that, by the nil actor a scrub leaves with the pseudonym
 /// still in the metadata; another account's record, the same account's other

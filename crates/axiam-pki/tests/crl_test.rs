@@ -5,6 +5,8 @@
 //! under the issuing CA's own public key, so these tests check the bytes a
 //! relying party would fetch rather than the service's account of them.
 
+mod support;
+
 use std::sync::Arc;
 
 use axiam_core::error::AxiamError;
@@ -45,11 +47,10 @@ impl Fixture {
         db.use_ns("test").use_db("test").await.unwrap();
         axiam_db::run_migrations(&db).await.unwrap();
         let custodians = Arc::new(
-            axiam_pki::custodians_from_env(Some([0u8; 32])) // gitleaks:allow
-                .expect("custodians"),
+            axiam_pki::custodians_from_env(Some(support::test_key())).expect("custodians"),
         );
         let config = PkiConfig {
-            encryption_key: Some([0u8; 32]), // gitleaks:allow
+            encryption_key: Some(support::test_key()),
             ..Default::default()
         };
         let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
@@ -871,7 +872,7 @@ async fn a_cached_list_answers_while_another_cas_re_sign_is_in_flight() {
     .unwrap();
     let custodians = Arc::new(
         CaKeyCustodians::new(
-            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(DatabaseCaKeyStore::new(support::test_key())),
             Some(
                 VaultCaKeyStore::new(VaultCaKeyConfig {
                     address: vault.address(),
@@ -1437,7 +1438,7 @@ async fn crls_with_a_held_custodian(
     .unwrap();
     let custodians = Arc::new(
         CaKeyCustodians::new(
-            Some(DatabaseCaKeyStore::new([0u8; 32])), // gitleaks:allow
+            Some(DatabaseCaKeyStore::new(support::test_key())),
             Some(
                 VaultCaKeyStore::new(VaultCaKeyConfig {
                     address: vault.address(),

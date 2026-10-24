@@ -4,6 +4,8 @@
 //!   T-07-03: Ed25519 key rejected for encryption (pgp.rs:173)
 //!   T-07-04: PGP sign+verify roundtrip (CA key material recoverable from encrypted store)
 
+mod support;
+
 use axiam_core::models::audit::{ActorType, AuditLogEntry, AuditOutcome};
 use axiam_core::models::pgp_key::{CreatePgpKey, PgpKeyAlgorithm, PgpKeyPurpose};
 use axiam_db::repository::SurrealPgpKeyRepository;
@@ -24,7 +26,7 @@ async fn setup_db() -> Surreal<TestDb> {
 
 fn test_pki_config() -> PkiConfig {
     PkiConfig {
-        encryption_key: Some([0u8; 32]), // gitleaks:allow
+        encryption_key: Some(support::test_key()),
         ..Default::default()
     }
 }

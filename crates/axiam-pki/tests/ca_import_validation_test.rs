@@ -10,6 +10,8 @@
 //! Only the happy path was covered (through `vault_pki_test.rs`, incidentally
 //! rather than deliberately); every rejection arm was not.
 
+mod support;
+
 use std::sync::Arc;
 
 use axiam_core::error::AxiamError;
@@ -24,8 +26,6 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
-const KEY: [u8; 32] = [0u8; 32]; // gitleaks:allow
-
 async fn service() -> CaService<SurrealCaCertificateRepository<TestDb>> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -33,13 +33,13 @@ async fn service() -> CaService<SurrealCaCertificateRepository<TestDb>> {
     CaService::new(
         SurrealCaCertificateRepository::new(db),
         PkiConfig {
-            encryption_key: Some(KEY),
+            encryption_key: Some(support::test_key()),
             ..Default::default()
         },
         Arc::new(tokio::sync::Semaphore::new(4)),
         Arc::new(
             CaKeyCustodians::new(
-                Some(DatabaseCaKeyStore::new(KEY)),
+                Some(DatabaseCaKeyStore::new(support::test_key())),
                 None,
                 None,
                 Some(axiam_core::ca_keys::CaKeyCustody::Database),

@@ -317,6 +317,9 @@ One line per closed issue; the `[1.1.2]` section of `CHANGELOG.md` has the entry
 | #804 | W9 | the RADIUS e2e filter misses the carrier rule |
 | #805 | W9 | assertion messages and the e2e log readers can print secrets |
 | #806 | W9 | text and hygiene after the 1.1.2 merges |
+| #807 | W9 | the additive-migration scanner misreads `⟨…⟩` identifiers and `/…/` regex literals |
+| #808 | W9 | an erasure reads the tenant's audit trail three times for the grantee pass |
+| #809 | W9 | the e2e log redaction misses the bare token in `-->` and `Tmp-String-2` lines |
 
 ## Open after two sweeps
 
@@ -324,7 +327,7 @@ _None._ (To be filled by the orchestrator only if W9.4's review files anything.)
 
 ## W9 sweep
 
-The combined review of the whole diff (W8.2, `claude_dev/security-review-release-1.1.2-2026-10-23.md`) found no Critical, High or Medium finding: Low #794 … #798; Informational #799 … #806. W9.1 fixed each in its own signed commit.
+The combined review of the whole diff (W8.2, `claude_dev/security-review-release-1.1.2-2026-10-23.md`) found no Critical, High or Medium finding: Low #794 … #798; Informational #799 … #806. W9.1 fixed each in its own signed commit. W9.2 re-reviewed that diff and filed three more Informational findings, #807 … #809, which W9.3 fixed the same way.
 
 Closes #794
 Closes #795
@@ -339,6 +342,9 @@ Closes #803
 Closes #804
 Closes #805
 Closes #806
+Closes #807
+Closes #808
+Closes #809
 
 - **#794** (Low): The erasure and audit minimisation leave `metadata.forwarded_for_claimed`. The Art. 17 scrub clears the claimed address and minimisation truncates it like `ip_address`.
 - **#795** (Low): A migration-lease comment trips the conflict-marker gate. The comment no longer quotes the server's text.
@@ -353,6 +359,9 @@ Closes #806
 - **#804** (Informational): The RADIUS e2e filter misses the carrier rule. The carrier, address and limiter files join the path filter.
 - **#805** (Informational): Assertion messages and the e2e log readers can print secrets. Labels in the assertions, redaction in the log readers, a run-time fake token, random PKI test keys.
 - **#806** (Informational): Text and hygiene after the 1.1.2 merges. Nine text edits, among them the mixed-version erasure line.
+- **#807** (Informational): The additive-migration scanner misreads `⟨…⟩` identifiers and `/…/` regex literals. It fails closed on them, on an unterminated comment or quote, and on unbalanced groups.
+- **#808** (Informational): An erasure reads the tenant's audit trail three times for the grantee pass. One `SELECT` over the four actions and one `UPDATE` with an `IF` per field: three reads of the trail become one, six statements become two, with the same rows cleared.
+- **#809** (Informational): The e2e log redaction misses the bare token in `-->` and `Tmp-String-2` lines. Every `eyJ…` run is redacted; the test builds its fake token at run time.
 
 **Release gate (W8.1).** `cargo audit` and `cargo deny` failed on the merged plan branch for two advisories published after the waves were cut: tokio 1.54.0 (RUSTSEC-2026-0384, a race in `tokio::time::Interval`; the release is also yanked) and ctutils 0.4.3 (RUSTSEC-2026-0385, non-constant-time mask generation). Both are bumped in the lockfile (tokio 1.54.1, ctutils 0.4.4).
 

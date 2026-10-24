@@ -227,6 +227,13 @@ run 6) stay open: both wait on the maintainer's runs and submissions.
   use is public-key only: AXIAM generates no Ed448, X448 or EC OpenPGP key and
   imports none, verifies ES256/ES384 without signing, and runs OPAQUE on
   Ristretto255. The reachability note is in `deny.toml`.
+- **The example apps' lockfiles take body-parser 2.4.0 and zod 4.6.7.**
+  The Trivy filesystem gate (HIGH, fixed upstream) flagged body-parser 2.3.0
+  (CVE-2026-111181, denial of service through unhandled decompression) in
+  `examples/b5-rp-logout-app` and `examples/b7-mcp-server`, and zod 4.6.5
+  (CVE-2023-54404, unbounded array validation) in the latter. Both stay inside
+  the ranges `express` and the example declare, so `package.json` is unchanged;
+  qs moves to 6.16.1 with body-parser.
 
 ### Changed
 

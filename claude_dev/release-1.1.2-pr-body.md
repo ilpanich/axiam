@@ -304,6 +304,19 @@ One line per closed issue; the `[1.1.2]` section of `CHANGELOG.md` has the entry
 | #790 | W2 | the gRPC address rule is a hand-copied twin; no gRPC test of none |
 | #791 | W4 | the decision cache can insert a decision computed before a flush |
 | #792 | W1 | a stalled unit's role pass can write a second network_role.unassigned row |
+| #794 | W9 | the erasure and audit minimisation leave `metadata.forwarded_for_claimed` |
+| #795 | W9 | a migration-lease comment trips the conflict-marker gate |
+| #796 | W9 | only the first `X-Forwarded-For` line is read |
+| #797 | W9 | an organization tenant's cache flush misses its principals' decisions in member tenants |
+| #798 | W9 | SCIM `/Groups` writes never flush the decision cache |
+| #799 | W9 | the additive-migration scanner is fooled by trailing comments and escapes |
+| #800 | W9 | the admin PUT leaves a DCR or CIMD client's logout URIs unbounded |
+| #801 | W9 | SCIM's provisioning token ignores the carrier rule and leaves no verdict |
+| #802 | W9 | the erasure keeps the grantee in refusal rows and flushes no cache |
+| #803 | W9 | the spec omits refusals the server returns |
+| #804 | W9 | the RADIUS e2e filter misses the carrier rule |
+| #805 | W9 | assertion messages and the e2e log readers can print secrets |
+| #806 | W9 | text and hygiene after the 1.1.2 merges |
 
 ## Open after two sweeps
 
@@ -311,8 +324,38 @@ _None._ (To be filled by the orchestrator only if W9.4's review files anything.)
 
 ## W9 sweep
 
-_Placeholder._ The issues filed by W8.2's combined review are added here when
-W9 runs, each with its `Closes #N` line, and the CHANGELOG gains an entry for
-each.
+The combined review of the whole diff (W8.2, `claude_dev/security-review-release-1.1.2-2026-10-23.md`) found no Critical, High or Medium finding: Low #794 … #798; Informational #799 … #806. W9.1 fixed each in its own signed commit.
+
+Closes #794
+Closes #795
+Closes #796
+Closes #797
+Closes #798
+Closes #799
+Closes #800
+Closes #801
+Closes #802
+Closes #803
+Closes #804
+Closes #805
+Closes #806
+
+- **#794** (Low): The erasure and audit minimisation leave `metadata.forwarded_for_claimed`. The Art. 17 scrub clears the claimed address and minimisation truncates it like `ip_address`.
+- **#795** (Low): A migration-lease comment trips the conflict-marker gate. The comment no longer quotes the server's text.
+- **#796** (Low): Only the first `X-Forwarded-For` line is read. Every field line is read, joined in order, on REST and gRPC (limiters and audit rows).
+- **#797** (Low): An organization tenant's cache flush misses its principals' decisions in member tenants. The flush sweeps every shard and bumps every stripe's generation.
+- **#798** (Low): SCIM `/Groups` writes never flush the decision cache. Member writes flush the subject, a group delete flushes the tenant.
+- **#799** (Informational): The additive-migration scanner is fooled by trailing comments and escapes. A single comment- and escape-aware pass.
+- **#800** (Informational): The admin PUT leaves a DCR or CIMD client's logout URIs unbounded. `422 redirect_exceeds_registration_policy` for a new value outside the row's host predicate.
+- **#801** (Informational): SCIM's provisioning token ignores the carrier rule and leaves no verdict. A cookie beside a token is refused `401`; refusals are recorded unauthenticated; `Bearer` is case-insensitive.
+- **#802** (Informational): The erasure keeps the grantee in refusal rows and flushes no cache. `network_role.*_refused` grantees are cleared and the role pass flushes the account's cached decisions.
+- **#803** (Informational): The spec omits refusals the server returns. `401`/`429`/`500` on the token endpoint, `429` on `/uma2/perm`, login, password change and reset confirm.
+- **#804** (Informational): The RADIUS e2e filter misses the carrier rule. The carrier, address and limiter files join the path filter.
+- **#805** (Informational): Assertion messages and the e2e log readers can print secrets. Labels in the assertions, redaction in the log readers, a run-time fake token, random PKI test keys.
+- **#806** (Informational): Text and hygiene after the 1.1.2 merges. Nine text edits, among them the mixed-version erasure line.
+
+**Release gate (W8.1).** `cargo audit` and `cargo deny` failed on the merged plan branch for two advisories published after the waves were cut: tokio 1.54.0 (RUSTSEC-2026-0384, a race in `tokio::time::Interval`; the release is also yanked) and ctutils 0.4.3 (RUSTSEC-2026-0385, non-constant-time mask generation). Both are bumped in the lockfile (tokio 1.54.1, ctutils 0.4.4).
+
+**GitGuardian incident 38922452.** A test-only fake token in the RADIUS e2e redaction test (`f99d71e`, an older commit of this branch) matched a credential pattern; it is built at run time since `7181404`, and the incident awaits the maintainer's false-positive mark.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

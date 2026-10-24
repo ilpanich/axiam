@@ -153,8 +153,10 @@ const PINNED: &[(&str, &str, &str)] = &[(
     "crates/axiam-server/src/cleanup.rs",
     "remove_erased_users_roles",
     // Its signature, whitespace removed.
+    // `flush` since #802.
     "pubasyncfnremove_erased_users_roles<R,P,A>(role_repo:&R,permission_repo:&P,\
-     audit_repo:&A,tenant_id:Uuid,user_id:Uuid,)->Result<u64,AxiamError>",
+     audit_repo:&A,flush:Option<&SubjectFlush>,tenant_id:Uuid,user_id:Uuid,)\
+     ->Result<u64,AxiamError>",
 )];
 
 fn workspace_root() -> PathBuf {

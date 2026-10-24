@@ -2973,6 +2973,27 @@ where
         job_health.clone(),
         cleanup_shutdown_rx,
     )
+    // D7 (#802): the erasure's role pass flushes the erased account's cached
+    // decisions, locally and on every replica, as the role routes do. A failed
+    // broadcast is logged: the local cache is already flushed, the account is
+    // inactive and its sessions revoked, and the TTL bounds the other replicas.
+    .with_subject_flush({
+        let authz = Arc::clone(&rest_authz);
+        Arc::new(move |tenant_id, user_id| {
+            let authz = Arc::clone(&authz);
+            Box::pin(async move {
+                if let Err(error) = authz.invalidate_subject(tenant_id, user_id).await {
+                    tracing::error!(
+                        %tenant_id,
+                        %user_id,
+                        %error,
+                        "the decision-cache flush after an erasure's role pass could not be \
+                         broadcast to the other replicas"
+                    );
+                }
+            })
+        })
+    })
     // G-3 (T23.3.5, D-31): the directory sync job runs on this scheduler, last in
     // each tick, one tenant at a time. There is no multi-replica guard (none of
     // the sweeps has one): every replica runs it, and every write is idempotent

@@ -113,6 +113,46 @@ ignore = [
     # quick-xml >=0.41.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). Parser only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39.4 via object_store 0.13.2 <- surrealdb-core 3.3.0 (newest; pins object_store ^0.13). NsReader only reads S3/Azure bucket responses; AXIAM uses SurrealDB over HTTP and defines no buckets. The 0.41 copy (SAML) is patched. Drop when surrealdb moves off quick-xml <0.41. Review: 2026-09-25" },
+    # RUSTSEC-2026-0387: crypto-bigint <0.7.6 — timing variability in operations meant to be
+    # constant time: subtraction (`borrowing_sub`), trailing-zero count, `div_rem`, `nlimbs`,
+    # Montgomery multiplication, `UintRef` equality and `BoxedMontyForm::invert` (the last two
+    # are 0.7-only types). Solution: upgrade to >=0.7.6.
+    #
+    # Nothing to take: crypto-bigint 0.5.5 is held by elliptic-curve 0.13.8 (non-optional) and
+    # by cx448 0.1.1, and through them by pgp 0.21.0 (newest; cx448 ^0.1.1 non-optional, cx448
+    # 0.1.1 newest), p256/p384/p521/k256 0.13, jsonwebtoken 11.1.0 (`rust_crypto`) and
+    # voprf 0.5.0 / opaque-ke 4.0.1. `cargo tree -i crypto-bigint@0.5.5 -e all --target all`.
+    #
+    # THIS ENTRY IS JUSTIFIED BY A CODE CHANGE, NOT BY THE GRAPH ALONE. Before 1.1.2 there was
+    # one reachable secret-key path, and an unauthenticated caller could drive it: the public
+    # OIDC callback (crates/axiam-api-rest/src/handlers/federation_login.rs:922) runs
+    # crates/axiam-federation/src/oidc.rs:502-503, which minted the Sign in with Apple client
+    # secret with `jsonwebtoken::encode` -> p256 0.13 ECDSA -> `Scalar::{add,sub}` on
+    # crypto-bigint 0.5.5 `add_mod`/`sub_mod`/`sbb` over the tenant's `.p8` key. That signature
+    # is now made by ring (crates/axiam-federation/src/apple.rs:141-157,
+    # EcdsaKeyPair::from_pkcs8), pinned by the test `the_signature_is_rings_not_rust_cryptos`.
+    #
+    # What remains, path by path:
+    #   * pgp / cx448 (Ed448, X448) and pgp's k256/p256/p384/p521: no secret-key use. AXIAM
+    #     generates only Ed25519Legacy or RSA-4096 (crates/axiam-pki/src/pgp.rs:256-260 — a
+    #     closed `PgpKeyAlgorithm` enum); the only `StorePgpKey` is built from that keygen
+    #     (pgp.rs:103), so no route imports a key; signing parses only that stored,
+    #     AES-256-GCM-wrapped key (pgp.rs:178); export encryption refuses non-RSA keys
+    #     (pgp.rs:225) and nothing in AXIAM decrypts or verifies OpenPGP.
+    #   * jsonwebtoken ES256/ES384 elsewhere: verification only (federated ID tokens,
+    #     crates/axiam-federation/src/oidc.rs:1035-1036; DPoP and CIBA proofs) — public scalars.
+    #     AXIAM's own tokens are EdDSA.
+    #   * opaque-ke / voprf: the suite is Ristretto255 (crates/axiam-opaque/src/lib.rs:98-99),
+    #     on curve25519-dalek; voprf takes only hash-to-field `ExpandMsgXmd` from
+    #     elliptic-curve, which does no bigint arithmetic.
+    #
+    # Note also that the fixes upstream landed in 0.7 code; 0.5.5's `Limb::sbb` and `sub_mod`
+    # are branch-free in source. The ignore does not rest on that. Keyed by ID: it would also
+    # mask a future secret-key use of any 0.13 RustCrypto curve — check here before adding one.
+    #
+    # Review date: 2026-12-23. DROP when elliptic-curve 0.13 and cx448 leave the graph (pgp and
+    # jsonwebtoken moving to the crypto-bigint 0.7 generation).
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via elliptic-curve 0.13 / cx448 0.1.1 (pgp 0.21.0, jsonwebtoken 11, p256/p384/p521/k256, voprf); no release on >=0.7.6. The one secret-key path (Apple client-secret ES256, reachable from the public OIDC callback, oidc.rs:502) now signs with ring (axiam-federation/src/apple.rs:141-157, pinned by a test). Remaining uses are public-key only: AXIAM generates no Ed448/X448/EC PGP key (axiam-pki/src/pgp.rs:256-260) and imports none, ES256/ES384 is verify-only, OPAQUE is Ristretto255. Review: 2026-12-23" },
 ]
 
 [licenses]

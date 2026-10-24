@@ -422,7 +422,10 @@ impl Stack {
 /// What a FreeRADIUS debug log (`-xx`) may carry that must never reach a test
 /// report: the Live access token, as a `Bearer` credential, as the
 /// `access_token` member of the `/auth/device` response body, or in an EXPAND
-/// line that quotes either. Everything else in the log is kept.
+/// line that quotes either, or bare: FreeRADIUS prints the `Tmp-String-2`
+/// the Live policy assigns it to (`--> eyJ…`, `&control:Tmp-String-2 := eyJ…`)
+/// with no marker at all, so every run that starts like a JWT (`eyJ`) goes too.
+/// Everything else in the log is kept.
 fn redact_secrets(log: &str) -> String {
     fn is_token_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || "-._~+/=".contains(c)
@@ -448,7 +451,25 @@ fn redact_secrets(log: &str) -> String {
         out.push_str(rest);
         out
     }
-    redact_after(&redact_after(log, "Bearer", " "), "access_token", " \\\":=")
+    // Replace every token-character run that starts with `eyJ` (the marker is
+    // part of the token, unlike `redact_after`'s).
+    fn redact_jwts(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find("eyJ") {
+            out.push_str(&rest[..at]);
+            out.push_str("[redacted]");
+            let tail = &rest[at..];
+            rest = &tail[tail.len() - tail.trim_start_matches(is_token_char).len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+    redact_jwts(&redact_after(
+        &redact_after(log, "Bearer", " "),
+        "access_token",
+        " \\\":=",
+    ))
 }
 
 #[::core::prelude::v1::test]
@@ -466,14 +487,24 @@ fn the_log_redaction_hides_the_token_and_keeps_the_rest() {
         format!(r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":900}}"#),
         format!(r#"(0) EXPAND {{\"access_token\":\"{token}\"}}"#),
         format!("access_token = {token}"),
+        // The `-xx` lines that carry the bare token, with no marker (#809).
+        format!("(0)     --> {token}"),
+        format!("(0)   &control:Tmp-String-2 := {token}"),
+        format!(r#"(0)   &control:Tmp-String-2 := "{token}""#),
+        format!("(0) EXPAND %{{1}}\n(0)    --> {token} then {token}"),
     ] {
         let redacted = redact_secrets(&line);
         assert!(
             !redacted.contains(&head) && !redacted.contains(&body),
             "line leaked"
         );
+        assert!(!redacted.contains(&sig), "line leaked the signature");
         assert!(redacted.contains("[redacted]"), "line was not redacted");
     }
+    assert_eq!(
+        redact_secrets(&format!("(0)   &control:Tmp-String-2 := {token} ok")),
+        "(0)   &control:Tmp-String-2 := [redacted] ok"
+    );
     assert_eq!(
         redact_secrets(r#"{"access_token":"abc","token_type":"Bearer","expires_in":900}"#),
         r#"{"access_token":"[redacted]","token_type":"Bearer","expires_in":900}"#

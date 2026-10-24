@@ -385,4 +385,14 @@ mod tests {
             "minimisation must not strip a producer's structured metadata"
         );
     }
+
+    #[test]
+    fn minimisation_truncates_the_address_even_when_there_is_no_metadata_object() {
+        for metadata in [None, Some(serde_json::json!(["not", "an", "object"]))] {
+            let mut e = entry(Some("203.0.113.42"), metadata.clone());
+            AuditMinimisation::new(true).apply(&mut e);
+            assert_eq!(e.ip_address.as_deref(), Some("203.0.113.0/24"));
+            assert_eq!(e.metadata, metadata, "a non-object is left as it was");
+        }
+    }
 }

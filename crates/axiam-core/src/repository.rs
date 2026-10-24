@@ -6026,4 +6026,100 @@ mod tests {
 
         assert_eq!(stranded, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // `anonymize_user_marked` default (#784)
+    //
+    // An implementation that keeps no record marker inherits the default: it
+    // must write through `anonymize_user` with the same identifiers and answer
+    // `true`, and a failure of that write must reach the caller unchanged.
+    // -----------------------------------------------------------------------
+
+    struct RecordingUsers {
+        calls: std::sync::Mutex<Vec<(Uuid, Uuid, String, String)>>,
+        fail: bool,
+    }
+
+    /// The methods the default under test never calls.
+    macro_rules! never_called {
+        ($($name:ident($($arg:ty),*) -> $ret:ty;)*) => {
+            $(async fn $name(&self, $(_: $arg),*) -> $ret { unreachable!() })*
+        };
+    }
+
+    impl UserRepository for RecordingUsers {
+        never_called! {
+            create(CreateUser) -> AxiamResult<User>;
+            get_by_id(Uuid, Uuid) -> AxiamResult<User>;
+            get_by_username(Uuid, &str) -> AxiamResult<User>;
+            get_by_email(Uuid, &str) -> AxiamResult<User>;
+            update(Uuid, Uuid, UpdateUser) -> AxiamResult<User>;
+            delete(Uuid, Uuid) -> AxiamResult<()>;
+            update_totp_step(Uuid, Uuid, u64) -> AxiamResult<bool>;
+            list(Uuid, Pagination) -> AxiamResult<PaginatedResult<User>>;
+            increment_failed_logins(Uuid, Uuid, u32, i64, f64, i64) -> AxiamResult<()>;
+        }
+        async fn anonymize_user(
+            &self,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            email_hash: &str,
+            pseudonym: &str,
+        ) -> AxiamResult<()> {
+            self.calls.lock().unwrap().push((
+                tenant_id,
+                user_id,
+                email_hash.to_owned(),
+                pseudonym.to_owned(),
+            ));
+            if self.fail {
+                Err(AxiamError::Internal("write refused".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    #[test]
+    fn the_default_marked_anonymisation_delegates_and_answers_true() {
+        let repo = RecordingUsers {
+            calls: Default::default(),
+            fail: false,
+        };
+        let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+        let wrote = block_on(repo.anonymize_user_marked(tenant, user, "h", "p", Utc::now()))
+            .expect("the default does not fail");
+        assert!(
+            wrote,
+            "the default has no marker to lose, so it always wrote"
+        );
+        assert_eq!(
+            *repo.calls.lock().unwrap(),
+            vec![(tenant, user, "h".to_owned(), "p".to_owned())]
+        );
+    }
+
+    #[test]
+    fn the_default_marked_anonymisation_surfaces_a_failed_write() {
+        let repo = RecordingUsers {
+            calls: Default::default(),
+            fail: true,
+        };
+        let outcome = block_on(repo.anonymize_user_marked(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "h",
+            "p",
+            Utc::now(),
+        ));
+        assert!(matches!(outcome, Err(AxiamError::Internal(_))));
+        assert_eq!(repo.calls.lock().unwrap().len(), 1);
+    }
 }

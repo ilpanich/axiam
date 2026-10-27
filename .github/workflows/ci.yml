@@ -750,6 +750,39 @@ jobs:
             exit 1
           }
 
+  node-newest:
+    name: Frontend + Website (newest Node)
+    runs-on: ubuntu-latest
+    # frontend-quality and website-quality run on Node 22, the engines floor
+    # (`>=22.22.2`), so they prove the oldest supported runtime. This job runs
+    # the same lint / type-check / unit-test / build commands on the newest
+    # release line (26, LTS from 2026-10-28) so a break on the runtime people
+    # actually upgrade to is found here, not by a user. It is a separate job
+    # rather than a matrix on the two above so their check names -- which
+    # branch protection may require -- do not change.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "26"
+          cache: "npm"
+          cache-dependency-path: |
+            frontend/package-lock.json
+            website/package-lock.json
+      - name: Frontend install, lint, type-check, unit tests, build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint && npx tsc -b && npm run typecheck:e2e
+          npm test
+          npm run build
+      - name: Website install, lint, type-check, build
+        working-directory: website
+        run: |
+          npm ci
+          npm run lint && npx tsc -b
+          npm run build
+
   bench-harness:
     name: Bench Harness Self-Tests
     runs-on: ubuntu-latest

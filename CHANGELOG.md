@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-29
+
+### Changed
+
+- Cargo update b3-mesh-delegation-grpc example lockfile
+
+- Run frontend and website checks on the newest Node line (26)
+
+- Update b5/b7 example deps, TypeScript 6 -> 7
+
+- Npm update website lockfile
+
+- Npm update frontend lockfile
+
+- Cargo update backend lockfile
+
+- Bump the minor-patch group with 2 updates
+
+- Bump docker/login-action from 4.6.0 to 4.7.0
+
+- Bump the minor-patch group in /frontend with 7 updates
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump the npm_and_yarn group across 2 directories with 2 updates
+
 ## [1.1.2] - Unreleased
 
 1.1.2 follows 1.1.1 and closes the seventy-nine issues the 1.1.1 reviews, the

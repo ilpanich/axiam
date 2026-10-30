@@ -335,6 +335,20 @@ issued to" — and therefore allowed where it was previously refused for want of
 evidence. Introspection shows the claim. `docs/api/token-exchange.md:110-116`
 updated. Small, but it touches an authorization rule, hence Opus.
 
+> **Correction, 2026-10-30 (W1.2).** The consequence stated above is wrong,
+> and the executor showed it by test before committing. With the claim,
+> client A holding user U's token issued to client B can exchange it as a
+> `subject_token` (result: `sub = U`, `client_id = A`) and then present the
+> result as its own `actor_token`, obtaining `act.sub = U` — "U acts for A",
+> the false attribution #518 / D-5 exists to refuse. Holding a token the
+> client itself exchanged is not evidence that U consented to the client.
+> **Maintainer decision D-N9 (option A):** exchanged tokens carry
+> `client_id` *and* an exchange marker (`axiam_exchanged`), and
+> `actor_token_client` refuses any token carrying the marker, `act` or
+> `ext_exchange` — actor behaviour is exactly as before. Pinned by
+> `an_exchanged_token_is_refused_as_an_actor_even_by_its_own_client` and
+> `an_x4_token_names_its_client_and_is_never_that_clients_actor`.
+
 ---
 
 ## 4. Waves
@@ -449,6 +463,8 @@ recommendation.
 | D-N5 | Accept a provider **access token** (plus a userinfo call) for OAuth2-protocol providers — GitHub, classic Facebook — as Auth0 does? | **No.** An access token's audience cannot be verified generically (Google's `tokeninfo` is provider-specific), which is the one check §3.1 rests on. Facebook has Limited Login (OIDC) for apps; GitHub has no native SDK sign-in to begin with. | **Answered by the maintainer 2026-10-30: as recommended.** |
 | D-N6 | Consent for the native grant | **Refuse with `consent_required`** any scope that would need a ceremony; the client's registration decides what needs none, as it does today. An "implicit consent for first-party clients" switch is a separate decision with its own threat entry. | **Answered by the maintainer 2026-10-30: as recommended.** |
 | D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N8 | *(arose in W1.1)* Is `oauth2.refresh_reuse_response` tighten-only like the other security settings (a tenant may choose `refuse` only when its organization is on `refuse`), or may a tenant relax it alone? | **Tighten-only**, as every other hierarchical security setting; "available per tenant" in D-N2 is met through the organization. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N9 | *(arose in W1.2)* The `client_id` claim on exchanged tokens re-opens #518 (an exchanged token becomes an acceptable `actor_token` for its exchanging client — laundering). A: claim + exchange marker, exchanged tokens never actors; B: accept; C: defer G-D | **A** | **Answered by the maintainer 2026-10-30: A.** See the §3.4 correction. |
 
 ---
 

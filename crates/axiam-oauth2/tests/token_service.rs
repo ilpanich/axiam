@@ -5102,6 +5102,177 @@ async fn g_c_the_audit_row_carries_the_response_and_never_the_token() {
 }
 
 // ---------------------------------------------------------------------------
+// F4-W1-01 (#821) — only the token's own, proven client revokes by replay
+// ---------------------------------------------------------------------------
+//
+// The authorization-code precedent: a code replay revokes only when the
+// presenting client is the one the code was issued to. A refresh-token replay
+// now does the same, and on a sender-constrained token also requires the
+// proof the successful refresh would demand. Anything else is still the same
+// `invalid_grant`, still marked and audited, and revokes nothing.
+
+/// Asserts a refused replay that revoked nothing and was audited
+/// `refused_unverified_presenter`, naming both clients.
+fn assert_unverified_presenter(logs: &GcLogs, session_id: Uuid, token_client: &str, label: &str) {
+    assert!(
+        logs.invalidated.lock().unwrap().is_empty(),
+        "{label}: an unproven presenter must not sign the user out"
+    );
+    assert!(
+        logs.revoked_sessions.lock().unwrap().is_empty(),
+        "{label}: an unproven presenter must not revoke the session's refresh tokens"
+    );
+    assert_eq!(
+        logs.replays.lock().unwrap().clone(),
+        vec![(session_id, false)],
+        "{label}: the replay is still marked"
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "refused", "{label}");
+    assert_eq!(
+        metadata["response"], "refused_unverified_presenter",
+        "{label}"
+    );
+    assert_eq!(metadata["token_client_id"], token_client, "{label}");
+}
+
+/// A rotated token issued to another client, presented by `client-1`: the
+/// same refusal, the replay marked and audited, nothing revoked.
+#[tokio::test]
+async fn f4w101_a_replay_through_another_client_revokes_nothing() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, true);
+    stored.client_id = "victim-client".into();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a rotated token is refused through any client");
+    assert_refused_as_consumed(&err);
+    assert_unverified_presenter(&logs, session_id, "victim-client", "another client");
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(
+        metadata["client_id"], "client-1",
+        "the presenting client is recorded beside the token's"
+    );
+}
+
+/// A public DPoP-bound client's rotated token, bound to `KEY_A`, presented by
+/// its own client with no proof or with another key's proof: refused, audited,
+/// nothing revoked.
+#[tokio::test]
+async fn f4w101_a_bound_replay_without_its_proof_revokes_nothing() {
+    for (label, ctx) in [
+        ("no proof", no_cert()),
+        ("another key's proof", proof_for(KEY_B)),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut stored = t254_stored(&raw, session_id, true);
+        stored.dpop_jkt = Some(KEY_A.into());
+        let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+        let (svc, logs) = build_g_c(
+            ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+            refresh_repo,
+            None,
+        );
+        let mut req = refresh_req(&raw);
+        req.client_secret = None;
+        let err = svc
+            .exchange(Uuid::new_v4(), req, &ctx)
+            .await
+            .expect_err("a rotated token is refused");
+        assert_refused_as_consumed(&err);
+        assert_unverified_presenter(&logs, session_id, "client-1", label);
+    }
+}
+
+/// The same bound token presented by its own client with a proof by the key
+/// it is bound to: the presenter is proven, and the session is revoked.
+#[tokio::test]
+async fn f4w101_a_bound_replay_with_its_proof_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, true);
+    stored.dpop_jkt = Some(KEY_A.into());
+    let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+        refresh_repo,
+        None,
+    );
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    let err = svc
+        .exchange(tenant_id, req, &proof_for(KEY_A))
+        .await
+        .expect_err("a rotated token is refused");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)]
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+}
+
+/// A public client identified by its `client_id` alone, presenting its own
+/// bearer refresh token: the standard lane, and it revokes.
+#[tokio::test]
+async fn f4w101_a_public_clients_own_bearer_replay_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(public_registered(&["refresh_token"])),
+        refresh_repo,
+        None,
+    );
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    let err = svc
+        .exchange(tenant_id, req, &no_cert())
+        .await
+        .expect_err("a rotated token is refused");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)]
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+    assert_eq!(metadata["token_client_id"], "client-1");
+}
+
+// ---------------------------------------------------------------------------
 // T-241 — the OIDC Core §5.5 claims request survives a refresh
 // ---------------------------------------------------------------------------
 //

@@ -2765,6 +2765,18 @@ authorization code (RFC 6749 §10.5; OAuth 2.0 Security BCP §4.14.2):
   successor the first rotation returned, which is what an attacker who replayed
   first would be holding.
 
+**Only the token's own client can trigger it.** The revocation runs when the
+client presenting the replayed token is the client it was issued to and, for a
+sender-constrained token (a public DPoP-bound client's), the request carries a
+DPoP proof by the key the token is bound to — the same checks a successful
+refresh of that token would pass. A rotated token presented through another
+client, or without its key's proof, is refused and audited exactly the same
+way but revokes nothing; its audit row says
+`response: "refused_unverified_presenter"` and names the token's client in
+`token_client_id` beside the presenting `client_id`. A leaked old token is
+therefore evidence of the leak, not a way for whoever found it to sign the user
+out.
+
 The client still receives `400 invalid_grant`, whether or not the revocation
 succeeded (a failure is logged at `error` and the audit row then says
 `refused`). Nothing outside the session is touched: another device of the same
@@ -2786,7 +2798,9 @@ The behaviour is the security setting `oauth2.refresh_reuse_response`
 
 It is ordered like every other security setting: an organization baseline
 that tenants inherit and may only **tighten** (`revoke_session` > `refuse`).
-The audit row's `response` key records which response was applied.
+The audit row's `response` key records which response was applied:
+`revoked_session`, `refused` (the policy is `refuse`, or the token named no
+session), or `refused_unverified_presenter` (see above).
 
 **Upgrade note.** The new default changes behaviour for every client on the
 `standard` profile. A client that loses a rotation response and retries with

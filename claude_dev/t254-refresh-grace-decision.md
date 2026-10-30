@@ -230,11 +230,13 @@ publishes to the revocation feed, so every access token carrying that `sid`
 stops at its next request). It also revokes every refresh token issued under
 that session, the successor included, through the new
 `RefreshTokenRepository::revoke_all_for_session`. Only that session is
-touched; the user's other sessions, on the same client or another, are not. This
-is what the authorization-code replay path already does (RFC 6749 §10.5). The
-`oauth2.refresh_token_replayed` row gains `response`: `revoked_session` or
-`refused`, and `null` on an accepted `fapi2` retry. It still carries neither the
-token nor its digest. Schema v110 adds the setting's column and an index on
+touched; the user's other sessions, on the same client or another, are not. The
+authorization-code replay path does the same for a replayed code (RFC 6749
+§10.5), and, as there, only the token's own client may trigger it (below). The
+`oauth2.refresh_token_replayed` row gains `response`: `revoked_session`,
+`refused` or `refused_unverified_presenter`, and `null` on an accepted `fapi2`
+retry; and `token_client_id`, the client the rotated token was issued to, beside
+the presenting `client_id`. It still carries neither the token nor its digest. Schema v110 adds the setting's column and an index on
 `oauth2_refresh_token(tenant_id, session_id)`. It is additive and backfills
 nothing.
 
@@ -273,6 +275,35 @@ met through the organization. A failed read of the setting falls back to
 `revoke_session`, the stricter. This is a policy knob over the *response*. It is
 not the knob §6 declines: the sixty seconds remain a constant.
 
+**Who may trigger it (F4-W1-01, #821).** The wave's F4 review found the first
+cut revoking before, and without, any check of who presented the token: the
+bytes of a rotated token, presented through *any* client of the tenant, signed
+the user out. The code-replay path does not behave that way —
+`replayed_session` matches only a code issued to the presenting client, at its
+redirect URI — and the revocation now follows it. It runs only when the
+presenter is the token's own, proven client:
+
+- the authenticated client (for a public client, the one its `client_id`
+  names) is the client the rotated row was issued to — the live path's
+  ownership check; and
+- the request passes the sender-constraint check the successful refresh runs on
+  that token: the registration's certificate and DPoP requirements
+  (`certificate_binding_for`) and, for a public DPoP-bound client, a proof by
+  the key in the row's `dpop_jkt` (`dpop::enforce_refresh_token_binding`). A
+  refresh-token row carries no certificate thumbprint; a certificate-bound
+  client proves itself by its client authentication, which has already run.
+
+Otherwise the answer is the same `invalid_grant` with the same description, so
+nothing distinguishes "another client's token" from "consumed"; the replay is
+still marked and audited; nothing is revoked; and the row's `response` is
+`refused_unverified_presenter`. The checks run after the policy and the session
+(policy `refuse` or no session → `refused`), so the value always means a
+revocation that would otherwise have run was withheld. A rotated token leaked
+through a log, a dump or a proxy is evidence, not a way to sign the user out;
+a sender-constrained token stays worthless without its key. A public client
+identified by its `client_id` alone, presenting its own bearer token, is the
+`standard` lane and still revokes.
+
 **Failure.** As on the code-replay path, a failed invalidate or revoke is logged
 at `error` and the answer stays `invalid_grant`. It is never a `500`, which
 would tell the presenter that its replay reached a revocation. The two writes
@@ -290,6 +321,7 @@ claim a revocation that did not complete.
 | A logout-revoked token, or a replay naming no session, revokes nothing | `token_service.rs::g_c_a_logout_revoked_token_presented_again_revokes_nothing`, `::g_c_a_replay_naming_no_session_revokes_nothing` |
 | A failed revocation still answers `invalid_grant`, and the row says `refused` | `token_service.rs::g_c_a_failed_revocation_still_answers_invalid_grant` |
 | The row carries `response` and never the token | `token_service.rs::g_c_the_audit_row_carries_the_response_and_never_the_token` |
+| Only the token's own, proven client revokes (#821): another client, or a bound token without its key's proof, revokes nothing and is audited `refused_unverified_presenter`; the proven own client, and a public client's own bearer token, revoke | `token_service.rs::f4w101_a_replay_through_another_client_revokes_nothing`, `::f4w101_a_bound_replay_without_its_proof_revokes_nothing`, `::f4w101_a_bound_replay_with_its_proof_revokes_the_session`, `::f4w101_a_public_clients_own_bearer_replay_revokes_the_session` |
 | The policy port defaults to, and fails to, `revoke_session` | `refresh_reuse.rs::an_unwired_service_revokes_by_default`, `::a_fixed_policy_answers_what_it_was_given`, `::a_failed_read_falls_back_to_the_stricter_default` |
 | The setting's default, its spellings, and tighten-only (D-N8) | `axiam-core` `settings.rs::g_c_the_refresh_reuse_response_defaults_to_revoke_session`, `::g_c_the_wire_spelling_round_trips_and_nothing_else_parses`, `::g_c_a_tenant_may_tighten_the_refresh_reuse_response_and_never_relax_it`, `::g_c_a_baseline_that_tightens_clears_a_weaker_tenant_override`; `settings_repository_gaps_test.rs::refresh_reuse_response_defaults_round_trips_and_tightens` |
 | The revocation reaches that session and no other; v110 is what it says | `oauth2_refresh_token.rs::revoke_all_for_session_revokes_that_session_and_nothing_else`, `schema.rs::v110_adds_only_the_refresh_reuse_setting_and_the_session_index` |

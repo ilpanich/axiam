@@ -106,6 +106,14 @@ enum RefusedReplayResponse {
     /// Refused only: the tenant's policy is `refuse`, the token named no
     /// session, or the revocation could not be completed (logged).
     Refused,
+    /// Refused, and nothing revoked, because the presenter was not proven to
+    /// be the token's holder of record (F4-W1-01, #821): the authenticated
+    /// client is not the client the rotated token was issued to, or the
+    /// request failed the sender-constraint check the successful refresh
+    /// path runs on that token. The leak signal is kept — the row is written
+    /// and the session marked — but a stray copy of a rotated token's bytes is
+    /// not a session kill switch.
+    RefusedUnverifiedPresenter,
 }
 
 impl RefusedReplayResponse {
@@ -113,6 +121,7 @@ impl RefusedReplayResponse {
         match self {
             Self::RevokedSession => "revoked_session",
             Self::Refused => "refused",
+            Self::RefusedUnverifiedPresenter => "refused_unverified_presenter",
         }
     }
 }
@@ -1020,8 +1029,12 @@ where
     /// A **refused** replay also gets the tenant's response to it (G-C, #818),
     /// applied between the two records by [`Self::respond_to_refused_replay`]
     /// so the audit row can say what was done: `response` is
-    /// `revoked_session` or `refused`, and absent (`null`) on a presentation
-    /// the `fapi2` grace accepted, where there is nothing to respond to.
+    /// `revoked_session`, `refused` or `refused_unverified_presenter` (#821),
+    /// and absent (`null`) on a presentation the `fapi2` grace accepted, where
+    /// there is nothing to respond to. `token_client_id` names the client the
+    /// rotated token was issued to, beside `client_id`, the client that
+    /// presented it — they differ exactly when a token turned up in the wrong
+    /// client's hands.
     ///
     /// **The token value is never recorded, in any form** — not the raw token,
     /// not its hash. The row names the client, the session and the outcome,
@@ -1033,6 +1046,7 @@ where
         client: &OAuth2Client,
         replayed: &axiam_core::models::oauth2_client::RefreshToken,
         accepted_under_grace: bool,
+        ctx: &TokenRequestContext,
     ) {
         // The `warn` rather than `info`: on `standard` nothing legitimate
         // produces one, and on `fapi2` it is at least worth knowing how often
@@ -1065,7 +1079,10 @@ where
         let response = if accepted_under_grace {
             None
         } else {
-            Some(self.respond_to_refused_replay(tenant_id, replayed).await)
+            Some(
+                self.respond_to_refused_replay(tenant_id, client, replayed, ctx)
+                    .await,
+            )
         };
 
         let outcome = if accepted_under_grace {
@@ -1094,6 +1111,11 @@ where
                 ip_address: None,
                 metadata: Some(serde_json::json!({
                     "client_id": client.client_id,
+                    // #821 — the client the rotated token was issued to. Equal
+                    // to `client_id` on an ordinary replay; different when the
+                    // token's bytes surfaced through another client, which is
+                    // the leak an investigation wants to see.
+                    "token_client_id": replayed.client_id,
                     "client_profile": client.profile.as_str(),
                     "session_id": replayed.session_id.map(|id| id.to_string()),
                     // The discriminator, spelled out rather than left to be
@@ -1106,9 +1128,10 @@ where
                         "refused"
                     },
                     "rotated_at": replayed.rotated_at.map(|t| t.to_rfc3339()),
-                    // G-C (#818) — what the refusal did: `revoked_session` or
-                    // `refused`; `null` on an accepted presentation. Names an
-                    // outcome, never the token or its digest.
+                    // G-C (#818) — what the refusal did: `revoked_session`,
+                    // `refused` or `refused_unverified_presenter` (#821);
+                    // `null` on an accepted presentation. Names an outcome,
+                    // never the token or its digest.
                     "response": response.map(RefusedReplayResponse::as_str),
                 })),
             })
@@ -1134,10 +1157,21 @@ where
     /// included. Only that session: another session of the same user, on the
     /// same client or another, is untouched.
     ///
-    /// The presenting client is deliberately not compared with the token's.
-    /// The row was found by the token's own hash within the tenant, so whoever
-    /// presented it holds the credential, and a rotated credential in a second
-    /// client's hands is more evidence of a leak, not less.
+    /// # Only the token's own, proven client revokes (#821)
+    ///
+    /// The revocation runs only when the presenter is the token's holder of
+    /// record, as the authorization-code replay path's does
+    /// ([`Self::revoke_after_code_replay`] asks only for a code issued to the
+    /// presenting client): see [`Self::presenter_may_revoke`]. Otherwise the
+    /// answer is the same `invalid_grant`, the marker and the audit row are
+    /// written as for any refused replay, nothing is revoked, and the row's
+    /// `response` is `refused_unverified_presenter`. A copy of a rotated
+    /// token's bytes — out of a log, a crash dump, a proxy — is therefore
+    /// evidence, not a way to sign the user out through some other client of
+    /// the tenant, and a sender-constrained token stays worthless without its
+    /// key. The order is policy, then session, then presenter, so the value
+    /// says the presenter was what stopped a revocation that would otherwise
+    /// have run.
     ///
     /// # A failed revocation does not fail the request
     ///
@@ -1152,7 +1186,9 @@ where
     async fn respond_to_refused_replay(
         &self,
         tenant_id: Uuid,
+        client: &OAuth2Client,
         replayed: &axiam_core::models::oauth2_client::RefreshToken,
+        ctx: &TokenRequestContext,
     ) -> RefusedReplayResponse {
         let policy =
             crate::refresh_reuse::resolve(self.refresh_reuse_policy.as_ref(), tenant_id).await;
@@ -1165,6 +1201,15 @@ where
         let Some(session_id) = replayed.session_id else {
             return RefusedReplayResponse::Refused;
         };
+        if !self.presenter_may_revoke(client, replayed, ctx) {
+            tracing::warn!(
+                %session_id,
+                client_id = %client.client_id,
+                "oauth2: refresh-token replay refused; the presenter is not the token's own, \
+                 proven client, so the session is left alone (#821)"
+            );
+            return RefusedReplayResponse::RefusedUnverifiedPresenter;
+        }
 
         let invalidated = match self.session_repo.invalidate(tenant_id, session_id).await {
             Ok(()) => true,
@@ -1207,6 +1252,48 @@ where
         } else {
             RefusedReplayResponse::Refused
         }
+    }
+
+    /// Whether the presenter of a refused replay is the rotated token's holder
+    /// of record, and so may trigger the G-C revocation (F4-W1-01, #821).
+    ///
+    /// Two conditions, both the ones the successful refresh path applies to a
+    /// live token, and no new one:
+    ///
+    /// 1. **The token's own client.** The authenticated (or, for a public
+    ///    client, `client_id`-identified) client is the client the row was
+    ///    issued to — the live path's `stored.client_id != client_id` check.
+    /// 2. **The token's sender constraint.** The request satisfies the binding
+    ///    the live path would demand before redeeming it: the certificate- and
+    ///    DPoP-binding requirements of the registration
+    ///    ([`Self::certificate_binding_for`]) and, for a public DPoP-bound
+    ///    client, a proof by the key the row is bound to
+    ///    ([`crate::dpop::enforce_refresh_token_binding`] against `dpop_jkt`).
+    ///    A refresh-token row carries no certificate thumbprint — a
+    ///    certificate-bound client proves itself by its client authentication,
+    ///    which has already run — so for mTLS the check is the registration's.
+    ///
+    /// A bearer refresh token of a public client identified by its
+    /// `client_id` alone therefore still revokes when that is the token's own
+    /// client: the standard lane, where the BCP reasoning holds.
+    fn presenter_may_revoke(
+        &self,
+        client: &OAuth2Client,
+        replayed: &axiam_core::models::oauth2_client::RefreshToken,
+        ctx: &TokenRequestContext,
+    ) -> bool {
+        if replayed.client_id != client.client_id {
+            return false;
+        }
+        let Ok(cnf) = self.certificate_binding_for(client, ctx) else {
+            return false;
+        };
+        crate::dpop::enforce_refresh_token_binding(
+            client,
+            replayed.dpop_jkt.as_deref(),
+            cnf.as_ref(),
+        )
+        .is_ok()
     }
 
     /// Attach the reactor gate (X1).
@@ -2914,11 +3001,12 @@ where
                 //
                 // G-C (#818): on this branch — every `standard` replay, and a
                 // `fapi2` replay after its grace ran out — the refusal also
-                // revokes the session under the tenant's default policy (see
-                // `respond_to_refused_replay`). The answer is the same
-                // `invalid_grant` either way.
+                // revokes the session under the tenant's default policy, when
+                // the presenter is the token's own client and passes its
+                // sender constraint (#821; see `respond_to_refused_replay`).
+                // The answer is the same `invalid_grant` either way.
                 if let Some(rotated) = self.rotated_predecessor(tenant_id, &token_hash).await {
-                    self.record_refresh_replay(tenant_id, &client, &rotated, false)
+                    self.record_refresh_replay(tenant_id, &client, &rotated, false, ctx)
                         .await;
                     return Err(OAuth2Error::InvalidGrant(
                         "refresh token already consumed".into(),
@@ -2951,7 +3039,7 @@ where
         // have.
         if stored.rotated_at.is_some() {
             let accepted = crate::fapi::refresh_rotation_grace_secs(&client).is_some();
-            self.record_refresh_replay(tenant_id, &client, &stored, accepted)
+            self.record_refresh_replay(tenant_id, &client, &stored, accepted, ctx)
                 .await;
             if !accepted {
                 return Err(OAuth2Error::InvalidGrant(

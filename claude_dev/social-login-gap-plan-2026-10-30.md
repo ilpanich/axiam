@@ -121,12 +121,24 @@ token from X4 (correctly refused); accepting ID tokens at the RFC 8693 endpoint
 
 ## 2. Scope — four items
 
-| Item | What | Kind | Size | Core model |
-|---|---|---|---|---|
-| **G-A** | Native sign-in with a provider ID token — a new grant at `/oauth2/token`, per-provider trust block, replay guard, admin UI, docs, contract, SDK helper | feature | L | Opus 5.5 |
-| **G-B** | `axiam_idp_hint` on the authorization endpoint + per-client `default_idp`; SPA auto-redirect; SDK authorize-URL builders learn the hint | feature | M | Opus 5.5 (server) / Sonnet 5.5 (SPA, SDKs) |
-| **G-C** | Refresh-token replay revokes the session (T-254 amendment), per-tenant policy, default `revoke_session` | security hardening, **behaviour change** | M | Opus 5.5 |
-| **G-D** | `client_id` claim on exchanged tokens (RFC 9068 §2.2) | conformance | S | Opus 5.5 |
+| Item | Issue | What | Kind | Size | Core model |
+|---|---|---|---|---|---|
+| **G-A** | [#816](https://github.com/ilpanich/axiam/issues/816) | Native sign-in with a provider ID token — a new grant at `/oauth2/token`, per-provider trust block, replay guard, admin UI, docs, contract, SDK helper | feature | L | Opus 5.5 |
+| **G-B** | [#817](https://github.com/ilpanich/axiam/issues/817) | `axiam_idp_hint` on the authorization endpoint + per-client `default_idp`; SPA auto-redirect; SDK authorize-URL builders learn the hint | feature | M | Opus 5.5 (server) / Sonnet 5.5 (SPA, SDKs) |
+| **G-C** | [#818](https://github.com/ilpanich/axiam/issues/818) | Refresh-token replay revokes the session (T-254 amendment), per-tenant policy, default `revoke_session` | security hardening, **behaviour change** | M | Opus 5.5 |
+| **G-D** | [#819](https://github.com/ilpanich/axiam/issues/819) | `client_id` claim on exchanged tokens (RFC 9068 §2.2) | conformance | S | Opus 5.5 |
+
+Per `CLAUDE.md`'s PR rules the issues close only when the release PR merges:
+each wave PR references the issues it advances, and the 1.2.0 PR body lists
+all four as *Closes*.
+
+**Repositories the plan touches.** W1 … W3 and W5 live in `ilpanich/axiam`
+alone. **W4 needs the eleven SDK repositories** (`ilpanich/axiam-<lang>-sdk`:
+rust, typescript, python, java, kotlin, csharp, php, go, swift, c,
+cplusplus) — each re-vendors `sdks/CONTRACT.md` 1.65, `sdks/openapi.json`
+and gains the native sign-in helper and the `idp_hint` option on its
+authorize-URL builder. An orchestrating session that does not have them
+attached stops at the end of W3 and hands W4 to one that does.
 
 Semantic versioning: G-A and G-B add surface, G-C changes default behaviour
 (with a setting that restores today's) — a **minor**, 1.2.0 (D-N7).

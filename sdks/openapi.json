@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.3",
-    "x-axiam-spec-digest": "sha256:cae2fb00bcb7070a5fc1ee6e4de9c70aa1477be2109b09ea5e186f883592b3d3"
+    "x-axiam-spec-digest": "sha256:428db019bba0ac5dc5b85045f51d19de917560008dbdfc7f0ef1330e0e15248e"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -22327,11 +22327,11 @@
       },
       "OAuth2Policy": {
         "type": "object",
-        "description": "OAuth 2.0 authorization-server behaviour that is a tenant's to decide\n(G-C, #818).\n\nA struct of its own rather than a field on [`TokenPolicy`] because it is\nnot a lifetime, and so the resolved setting reads by its documented name,\n`oauth2.refresh_reuse_response`.",
+        "description": "OAuth 2.0 authorization-server behaviour that is a tenant's to decide\n(G-C, #818).\n\nA struct of its own rather than a field on `TokenPolicy` because it is\nnot a lifetime, and so the resolved setting reads by its documented name,\n`oauth2.refresh_reuse_response`.",
         "properties": {
           "refresh_reuse_response": {
             "$ref": "#/components/schemas/RefreshReuseResponse",
-            "description": "What a refused refresh-token replay does besides refusing. Ordered: a\ntenant may move from `refuse` to `revoke_session` and never back while\nits organization's baseline is `revoke_session`.\n\nPublished as a reference to the [`RefreshReuseResponse`] schema, so the\ntwo legal values reach the SDK generators as an `enum` (F4-W1-06, #823)."
+            "description": "What a refused refresh-token replay does besides refusing. Ordered: a\ntenant may move from `refuse` to `revoke_session` and never back while\nits organization's baseline is `revoke_session`.\n\nPublished as a reference to the `RefreshReuseResponse` schema, so the\ntwo legal values reach the SDK generators as an `enum` (F4-W1-06, #823)."
           }
         }
       },
@@ -24264,7 +24264,7 @@
       },
       "RefreshReuseResponse": {
         "type": "string",
-        "description": "What the token endpoint does when a refresh token that has already been\nrotated is presented again and **refused** (G-C, #818 — the T-254\namendment).\n\nTwo values, ordered by strictness:\n\n* [`Self::RevokeSession`] — the default (D-N2). The refusal also\n  invalidates the session the replayed token names (which publishes to the\n  revocation feed) and revokes every refresh token issued under that\n  session — whichever client it was issued to, the console sign-in\n  included, with no back-channel logout sent — as the authorization-code\n  replay path does for a code (RFC 6749 §10.5; OAuth 2.0 Security BCP\n  §4.14.2). Only a presentation by the token's own client, passing the\n  token's sender constraint, triggers it (#821). On a client with no\n  grace window the honest holder of a replayed token has nothing left to\n  lose — its token is already dead and it never received the successor —\n  so the revocation costs it nothing and costs whoever holds the successor\n  everything.\n* [`Self::Refuse`] — the 1.1.x behaviour: the presentation is refused,\n  marked on the session and audited, and nothing else is revoked.\n\nNeither value changes what is *accepted*. A `fapi2` client's presentation\ninside the grace window is accepted and marked whatever this says (D-N4);\na token revoked at logout is not a replay and revokes nothing.",
+        "description": "What the token endpoint does when a refresh token that has already been\nrotated is presented again and **refused** (G-C, #818 — the T-254\namendment).\n\nTwo values, ordered by strictness:\n\n* `revoke_session` — the default (D-N2). The refusal also\n  invalidates the session the replayed token names (which publishes to the\n  revocation feed) and revokes every refresh token issued under that\n  session — whichever client it was issued to, the console sign-in\n  included, with no back-channel logout sent — as the authorization-code\n  replay path does for a code (RFC 6749 §10.5; OAuth 2.0 Security BCP\n  §4.14.2). Only a presentation by the token's own client, passing the\n  token's sender constraint, triggers it (#821). On a client with no\n  grace window the honest holder of a replayed token has nothing left to\n  lose — its token is already dead and it never received the successor —\n  so the revocation costs it nothing and costs whoever holds the successor\n  everything.\n* `refuse` — the 1.1.x behaviour: the presentation is refused,\n  marked on the session and audited, and nothing else is revoked.\n\nNeither value changes what is *accepted*. A `fapi2` client's presentation\ninside the grace window is accepted and marked whatever this says (D-N4);\na token revoked at logout is not a replay and revokes nothing.\n\nThis text is published as the schema's description in `sdks/openapi.json`,\nso it carries no rustdoc intra-doc links (F4-W1-08, #824).",
         "enum": [
           "revoke_session",
           "refuse"
@@ -28085,7 +28085,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/RefreshReuseResponse",
-                "description": "G-C (#818) — tighten-only on `refuse` → `revoke_session`; see\n[`OAuth2Policy::refresh_reuse_response`]."
+                "description": "G-C (#818) — tighten-only on `refuse` → `revoke_session`; see\n`OAuth2Policy.refresh_reuse_response`."
               },
               {
                 "type": "null"

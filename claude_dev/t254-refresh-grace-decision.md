@@ -310,6 +310,15 @@ a sender-constrained token stays worthless without its key. A public client
 identified by its `client_id` alone, presenting its own bearer token, is the
 `standard` lane and still revokes.
 
+The live-row branch records the same leak (F4-W1-07, #824). A row that still
+exists and carries `rotated_at` — a `fapi2` row inside its grace, or a
+superseded row whose client has since left `fapi2` — presented through another
+client used to hit the ownership refusal before anything was recorded. It is
+now marked and audited `refused_unverified_presenter`, with `token_client_id`,
+first; it revokes nothing, is not accepted, and keeps that branch's answer,
+`invalid_grant` "refresh token was not issued to this client". A live row that
+was never rotated is not a replay and is still refused with no record.
+
 **Failure.** As on the code-replay path, a failed invalidate or revoke is logged
 at `error` and the answer stays `invalid_grant`. It is never a `500`, which
 would tell the presenter that its replay reached a revocation. The two writes
@@ -332,6 +341,7 @@ client's answer is unchanged.
 | A failed revocation still answers `invalid_grant`, and the row says `revocation_failed` with the failed write(s) (#822) — the token write, the session write, or both | `token_service.rs::g_c_a_failed_revocation_still_answers_invalid_grant`, `::f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed`, `::f4w102_failed_writes_is_null_unless_the_revocation_failed` |
 | The row carries `response` and never the token | `token_service.rs::g_c_the_audit_row_carries_the_response_and_never_the_token` |
 | Only the token's own, proven client revokes (#821): another client, or a bound token without its key's proof, revokes nothing and is audited `refused_unverified_presenter`; the proven own client, and a public client's own bearer token, revoke | `token_service.rs::f4w101_a_replay_through_another_client_revokes_nothing`, `::f4w101_a_bound_replay_without_its_proof_revokes_nothing`, `::f4w101_a_bound_replay_with_its_proof_revokes_the_session`, `::f4w101_a_public_clients_own_bearer_replay_revokes_the_session` |
+| A live superseded row (in-window `fapi2`, or off `fapi2`) through another client is recorded and revokes nothing, with the unchanged answer; a never-rotated row is not recorded (#824) | `token_service.rs::f4w107_a_live_superseded_row_through_another_client_is_recorded_and_revokes_nothing`, `::f4w107_a_never_rotated_row_through_another_client_is_not_recorded` |
 | The policy port defaults to, and fails to, `revoke_session` | `refresh_reuse.rs::an_unwired_service_revokes_by_default`, `::a_fixed_policy_answers_what_it_was_given`, `::a_failed_read_falls_back_to_the_stricter_default` |
 | The setting's default, its spellings, and tighten-only (D-N8) | `axiam-core` `settings.rs::g_c_the_refresh_reuse_response_defaults_to_revoke_session`, `::g_c_the_wire_spelling_round_trips_and_nothing_else_parses`, `::g_c_a_tenant_may_tighten_the_refresh_reuse_response_and_never_relax_it`, `::g_c_a_baseline_that_tightens_clears_a_weaker_tenant_override`; `settings_repository_gaps_test.rs::refresh_reuse_response_defaults_round_trips_and_tightens` |
 | The revocation reaches that session and no other; v110 is what it says | `oauth2_refresh_token.rs::revoke_all_for_session_revokes_that_session_and_nothing_else`, `schema.rs::v110_adds_only_the_refresh_reuse_setting_and_the_session_index` |

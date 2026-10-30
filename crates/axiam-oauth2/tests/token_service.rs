@@ -5378,6 +5378,97 @@ async fn f4w101_a_public_clients_own_bearer_replay_revokes_the_session() {
 }
 
 // ---------------------------------------------------------------------------
+// F4-W1-07 (#824) — a live superseded row presented through another client
+// ---------------------------------------------------------------------------
+//
+// The live-row branch refuses another client's presentation before it reaches
+// the replay record. A row that carries `rotated_at` is a rotated token, so
+// that presentation is now recorded like a not-found replay — marked, audited
+// `refused_unverified_presenter` with `token_client_id` — and still revokes
+// nothing. The answer is the one this branch has always given. A row never
+// rotated is not a replay and is not recorded.
+
+/// The ownership refusal this branch has always answered, unchanged.
+fn assert_refused_as_not_this_clients(err: &axiam_oauth2::error::OAuth2Error, label: &str) {
+    assert_eq!(err.error_code(), "invalid_grant", "{label}");
+    assert_eq!(
+        err.error_description(),
+        "refresh token was not issued to this client",
+        "{label}: the live-row ownership refusal keeps its description"
+    );
+}
+
+/// A `fapi2` row superseded inside its grace, and a superseded row whose
+/// client has left `fapi2`, each presented by another client: recorded,
+/// nothing revoked, nothing accepted, the same answer as before.
+#[tokio::test]
+async fn f4w107_a_live_superseded_row_through_another_client_is_recorded_and_revokes_nothing() {
+    for (label, client, ctx, secret) in [
+        (
+            "fapi2 in-window row",
+            fapi2_refresh_client().0,
+            fapi2_refresh_client().1,
+            false,
+        ),
+        (
+            "superseded row off fapi2",
+            make_client(&["refresh_token"], &["api"]),
+            no_cert(),
+            true,
+        ),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut stored = t254_stored(&raw, session_id, true);
+        stored.client_id = "victim-client".into();
+        let refresh_repo = MockRefreshRepo::new().with_get(stored);
+        let created = refresh_repo.created.clone();
+
+        let (svc, logs) = build_g_c(ClientOutcome::Found(client), refresh_repo, None);
+        let mut req = refresh_req(&raw);
+        if !secret {
+            req.client_secret = None;
+        }
+        let err = svc
+            .exchange(Uuid::new_v4(), req, &ctx)
+            .await
+            .expect_err("another client's token is never redeemed");
+        assert_refused_as_not_this_clients(&err, label);
+        assert!(
+            created.lock().unwrap().is_empty(),
+            "{label}: nothing is rotated"
+        );
+        assert_unverified_presenter(&logs, session_id, "victim-client", label);
+    }
+}
+
+/// A live row that was never rotated, presented by another client, is not a
+/// replay: the same refusal, and no marker and no audit row.
+#[tokio::test]
+async fn f4w107_a_never_rotated_row_through_another_client_is_not_recorded() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, false);
+    stored.client_id = "victim-client".into();
+    let refresh_repo = MockRefreshRepo::new().with_get(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("another client's token is never redeemed");
+    assert_refused_as_not_this_clients(&err, "never rotated");
+    assert!(logs.replays.lock().unwrap().is_empty());
+    assert!(logs.audit.lock().unwrap().is_empty());
+    assert!(logs.invalidated.lock().unwrap().is_empty());
+    assert!(logs.revoked_sessions.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // T-241 — the OIDC Core §5.5 claims request survives a refresh
 // ---------------------------------------------------------------------------
 //

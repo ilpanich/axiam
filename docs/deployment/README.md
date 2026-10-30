@@ -2773,9 +2773,12 @@ refresh of that token would pass. A rotated token presented through another
 client, or without its key's proof, is refused and audited exactly the same
 way but revokes nothing; its audit row says
 `response: "refused_unverified_presenter"` and names the token's client in
-`token_client_id` beside the presenting `client_id`. A leaked old token is
-therefore evidence of the leak, not a way for whoever found it to sign the user
-out.
+`token_client_id` beside the presenting `client_id`. The same record is made
+when a `fapi2` client's just-rotated token (still inside its 60-second grace)
+is presented through another client; that presentation keeps its existing
+answer, `invalid_grant` "refresh token was not issued to this client". A
+leaked old token is therefore evidence of the leak, not a way for whoever found
+it to sign the user out.
 
 The client still receives `400 invalid_grant`, whether or not the revocation
 succeeded. A failure is logged at `error`, and the audit row then says

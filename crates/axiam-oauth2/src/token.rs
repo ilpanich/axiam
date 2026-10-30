@@ -3064,6 +3064,21 @@ where
 
         // Verify client ownership
         if stored.client_id != client_id {
+            // F4-W1-07 (#824) — a live row that already carries `rotated_at`
+            // (a `fapi2` row inside its grace, or a superseded row whose
+            // client has since left `fapi2`) is a rotated token, so its
+            // presentation through another client is a replay and the leak
+            // is recorded exactly as on the not-found branch: the session
+            // marked and the row audited with `token_client_id`. The
+            // presenter is not the token's client, so `presenter_may_revoke`
+            // fails and nothing is revoked (`refused_unverified_presenter`,
+            // or `refused` under a `refuse` policy or a session-less row).
+            // The answer is unchanged. A live row never rotated is not a
+            // replay and stays the plain refusal it has always been.
+            if stored.rotated_at.is_some() {
+                self.record_refresh_replay(tenant_id, &client, &stored, false, ctx)
+                    .await;
+            }
             return Err(OAuth2Error::InvalidGrant(
                 "refresh token was not issued to this client".into(),
             ));

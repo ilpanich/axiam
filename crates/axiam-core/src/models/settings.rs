@@ -161,7 +161,7 @@ pub struct WebauthnPolicy {
 ///
 /// Two values, ordered by strictness:
 ///
-/// * [`Self::RevokeSession`] — the default (D-N2). The refusal also
+/// * `revoke_session` — the default (D-N2). The refusal also
 ///   invalidates the session the replayed token names (which publishes to the
 ///   revocation feed) and revokes every refresh token issued under that
 ///   session — whichever client it was issued to, the console sign-in
@@ -173,12 +173,15 @@ pub struct WebauthnPolicy {
 ///   lose — its token is already dead and it never received the successor —
 ///   so the revocation costs it nothing and costs whoever holds the successor
 ///   everything.
-/// * [`Self::Refuse`] — the 1.1.x behaviour: the presentation is refused,
+/// * `refuse` — the 1.1.x behaviour: the presentation is refused,
 ///   marked on the session and audited, and nothing else is revoked.
 ///
 /// Neither value changes what is *accepted*. A `fapi2` client's presentation
 /// inside the grace window is accepted and marked whatever this says (D-N4);
 /// a token revoked at logout is not a replay and revokes nothing.
+///
+/// This text is published as the schema's description in `sdks/openapi.json`,
+/// so it carries no rustdoc intra-doc links (F4-W1-08, #824).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefreshReuseResponse {
@@ -241,7 +244,7 @@ pub const fn refresh_reuse_response_is_at_least(
 /// OAuth 2.0 authorization-server behaviour that is a tenant's to decide
 /// (G-C, #818).
 ///
-/// A struct of its own rather than a field on [`TokenPolicy`] because it is
+/// A struct of its own rather than a field on `TokenPolicy` because it is
 /// not a lifetime, and so the resolved setting reads by its documented name,
 /// `oauth2.refresh_reuse_response`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
@@ -250,7 +253,7 @@ pub struct OAuth2Policy {
     /// tenant may move from `refuse` to `revoke_session` and never back while
     /// its organization's baseline is `revoke_session`.
     ///
-    /// Published as a reference to the [`RefreshReuseResponse`] schema, so the
+    /// Published as a reference to the `RefreshReuseResponse` schema, so the
     /// two legal values reach the SDK generators as an `enum` (F4-W1-06, #823).
     #[serde(default)]
     pub refresh_reuse_response: RefreshReuseResponse,
@@ -1278,7 +1281,7 @@ pub struct TenantSettingsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssf_enabled: Option<bool>,
     /// G-C (#818) — tighten-only on `refuse` → `revoke_session`; see
-    /// [`OAuth2Policy::refresh_reuse_response`].
+    /// `OAuth2Policy.refresh_reuse_response`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_reuse_response: Option<RefreshReuseResponse>,
 }

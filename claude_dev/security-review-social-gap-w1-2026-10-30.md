@@ -361,3 +361,137 @@ Not run: the full workspace suite, the `axiam-federation` and `axiam-db` test
 targets (both read; federation is untouched), clippy (`missing_docs` crates are
 untouched), and `check-spec-digest.py` (the spec diff was read; regenerating it
 needs the server build).
+
+---
+
+## Addendum — sweep (2026-10-30)
+
+**Against:** `dc5e4f5..09242b6` on `claude/social-gap-w1` — `4241409` (#821,
+F4-W1-01), `e398312` (#822, F4-W1-02), `09242b6` (#823, F4-W1-03 … 06). 14
+files, about 635 lines added. Each finding was re-checked against the code
+rather than the commit messages. Two throw-away probe tests ran and were kept
+out of the tree (§A.2).
+
+### A.1 Per-finding verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W1-01** | **Closed** | `respond_to_refused_replay` now returns `RefusedUnverifiedPresenter` before either write unless `presenter_may_revoke` holds (`crates/axiam-oauth2/src/token.rs:1245`). `presenter_may_revoke` (`:1323`) is the live refresh path's own checks and nothing new: `replayed.client_id != client.client_id` (the live path's ownership check, `:3066`), then `certificate_binding_for` and `dpop::enforce_refresh_token_binding` against the row's `dpop_jkt` — the same two calls, in the same order, that the live path makes before it redeems. Client authentication and `fapi::enforce_token_request` have already run on both branches before the row is looked up. Pinned by `f4w101_a_replay_through_another_client_revokes_nothing` (the case my first-pass probe built), `f4w101_a_bound_replay_without_its_proof_revokes_nothing` (no proof, and another key's proof), `f4w101_a_bound_replay_with_its_proof_revokes_the_session`, and `f4w101_a_public_clients_own_bearer_replay_revokes_the_session`. |
+| **F4-W1-02** | **Closed** | `RevocationFailed { session, refresh_tokens }` (`token.rs:114`, built at `:1294`) maps to `response: "revocation_failed"`. `failed_writes` (`:1174`) is a list of the static strings `session_invalidate` / `refresh_tokens_revoke`, and `null` otherwise. The two writes are still attempted independently. Pinned in both directions: the existing test now expects `["refresh_tokens_revoke"]`, and `f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed` drives the new failing `MockSessionRepo::invalidate` alone and with both writes failing. `f4w102_failed_writes_is_null_unless_the_revocation_failed` covers the success case. |
+| **F4-W1-03** | **Closed** | `RefreshReuseResponse`'s rustdoc (and therefore the published schema), `t254-refresh-grace-decision.md` §7, the CHANGELOG and `docs/deployment/README.md` ("What 'the session' covers") now say that every client's refresh tokens under the sign-in and the console session are revoked, and that no back-channel logout is sent. That matches `revoke_all_for_session` and `invalidate`; the dispatch of back-channel logout is still only in `handlers/oauth2.rs`. |
+| **F4-W1-04** | **Closed** | (a) cross-client: `f4w101_a_replay_through_another_client_revokes_nothing`. (b) failing `invalidate`: `f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed`. (c) the fail-closed arms: `token_exchange.rs` gains `f4w104_an_unmarked_token_with_act_is_never_an_actor`, `f4w104_an_unmarked_token_with_ext_exchange_is_never_an_actor`, `f4w104_the_marker_alone_refuses_the_actor`, plus a control (`f4w104_a_plain_client_bound_token_names_its_client`) that proves the fixture would otherwise be accepted. Each assertion tests what its name says. |
+| **F4-W1-05** | **Closed** | `crates/axiam-auth/src/token.rs:1094` is `///`. |
+| **F4-W1-06** | **Closed** | The three `#[schema(value_type = …)]` overrides were removed. `sdks/openapi.json` now has `components.schemas.RefreshReuseResponse` = `{type: string, enum: [revoke_session, refuse]}`, referenced by `$ref` from `OAuth2Policy` and `SetOrgSettings`, and by `oneOf [$ref, null]` from the tenant override. **Spec checked by regeneration, not just by digest:** `cargo build -p axiam-server --no-default-features` and `--dump-openapi` produce a file byte-identical to the committed `sdks/openapi.json` (`cmp` silent); `check-spec-digest.py` passes; `management-registry.json`'s digest follows. The `PUT`-resets-`refuse` behaviour is documented on the field, in the CHANGELOG and in the deployment guide, with the workaround. |
+
+### A.2 The coordinator's specific questions
+
+**Does `presenter_may_revoke` reuse the live path's checks?** Yes — it calls the
+same functions, not a reimplementation (A.1, F4-W1-01). It has no side effects.
+`certificate_binding_for` only reads `ctx`, and `enforce_refresh_token_binding`
+is pure. No DPoP `jti` is consumed and nothing is written, so a refused presenter
+leaves no state behind that the live path would later trip over.
+
+**Is there a gap now that the row stores no mTLS thumbprint?** No exploitable
+one, and the reasoning differs by client type:
+
+- *Confidential clients.* For these, RFC 8705 §4 binds a refresh token to the
+  client's authentication, not to a certificate. Both the live path and the
+  presenter check require that authentication (secret, `private_key_jwt`, or
+  `tls_client_auth` / `self_signed_tls_client_auth`, whose certificate is
+  checked against the registration). `certificate_binding_for` then only
+  requires that *a* certificate be present. So a presenter needs the client's
+  credential, which is the same bar as redeeming.
+- *Public clients.* This is the case where an unbound refresh token would
+  matter. I probed it: a public client (`none`) registered with
+  `tls_client_certificate_bound_access_tokens: true`, presenting an unrelated
+  self-asserted certificate. The probe answered `invalid_client` both for a live
+  token and for a replay, and nothing was revoked. The reason is that
+  `carries_no_client_credential` counts a presented certificate as a
+  credential, and a public client must present none. Without a certificate,
+  `certificate_binding_for` refuses. Such a registration can therefore never
+  redeem or revoke: it is an unusable configuration, not a gap.
+- *Public DPoP-bound clients.* These are the public sender-constrained shape
+  that works, and the row's `dpop_jkt` covers them.
+
+The CHANGELOG's phrase "DPoP/mTLS sender constraint" is accurate in that sense.
+For mTLS the constraint is enforced through client authentication.
+
+**Does the check order (policy → session → presenter) open an oracle or bypass?**
+No.
+
+- *No response oracle.* All four outcomes return from one site,
+  `Err(InvalidGrant("refresh token already consumed"))` (`token.rs:3056`, and
+  `:3090` on the live-row branch), after `record_refresh_replay` has returned
+  `()`. Nothing the response carries depends on the `response` value.
+- *No timing oracle for an unverified presenter.* Every path short of a
+  verified presenter does exactly one settings read and no writes: policy
+  `refuse`, no session, and wrong client or missing proof all do the same work.
+  Only a verified presenter, which is the token's own client, pays for the two
+  writes. So a third party cannot learn the tenant's policy, or whether the row
+  names a session.
+- *No bypass.* The presenter check is the last gate before the writes, and no
+  path reaches `invalidate` or `revoke_all_for_session` without passing it.
+- *The ordering is not a security property.* It only makes
+  `refused_unverified_presenter` mean "a revocation that would otherwise have
+  run was withheld", as documented.
+
+**Is the client response byte-identical across `refused`,
+`refused_unverified_presenter` and `revocation_failed`?** Yes, by construction
+(see above). The tests assert it: every `f4w101_*` case and
+`f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed` goes
+through `assert_refused_as_consumed` (the same code and description);
+`f4w102_failed_writes_is_null_unless_the_revocation_failed` discards the
+response and asserts only the audit row.
+
+**Do the new audit keys ever carry a token?** No.
+
+- `token_client_id` is `replayed.client_id`, a client identifier read from the
+  row (`token.rs:1152`).
+- `failed_writes` is a list of two static strings.
+- The new `warn!` at the presenter refusal logs `session_id` and the presenting
+  `client_id` only.
+- `g_c_the_audit_row_carries_the_response_and_never_the_token` still runs over
+  the whole metadata object, which now includes both keys.
+- `audit_minimisation.rs`'s module text was updated to list them.
+
+**Do the threat model and docs match the code?** Yes, on all four points:
+
+- T-254 in both copies (`threat-model-stride.md`, `Axiam.json` and the
+  regenerated `website/src/threatModel.ts`) is tightened in place at 2.45.0,
+  with no status change.
+- `t254-refresh-grace-decision.md` §7 adds "Who may trigger it", whose two
+  bullets are exactly `presenter_may_revoke`, and replaces the sentence my
+  review flagged ("That is what the authorization-code replay path already
+  does") with the qualified version.
+- Its pinning table names tests that exist and pass.
+- The deployment guide's three new paragraphs match the code.
+
+### A.3 New findings
+
+| ID | Severity | Where | Finding |
+|---|---|---|---|
+| **F4-W1-07** | Informational | `crates/axiam-oauth2/src/token.rs:3066` | The new leak signal (`token_client_id` ≠ `client_id`) exists only on the not-found branch. On the live-row branch — a `fapi2` row superseded less than 60 s ago, or a superseded row whose client has since left `fapi2` and that has not yet expired — the ownership check runs *before* `record_refresh_replay`. A presentation through another client is therefore refused `"refresh token was not issued to this client"` with no session marker and no audit row. This is pre-existing and narrow (a ≤ 60 s window, or a registration change), and the response differs from the not-found branch's, as it always has. Recommended: record a replay before the ownership refusal when `stored.rotated_at.is_some()`, with `response: "refused_unverified_presenter"`, so the leak is audited on both branches. |
+| **F4-W1-08** | Informational | `sdks/openapi.json`, `components.schemas.RefreshReuseResponse.description` | Removing the `value_type` override publishes the enum's rustdoc verbatim, including intra-doc links (`` [`Self::RevokeSession`] ``, `` [`Self::Refuse`] ``) that mean nothing to an SDK reader. This is cosmetic: a `#[schema(description = …)]` or a plainer first paragraph would fix it, and the contract (the `enum`) is correct. |
+
+The sweep introduced nothing at Low or above. The unused-configuration
+question (a public, certificate-bound registration is accepted by
+`validate_registration` but can never redeem) is a usability point for a later
+cleanup, not a security finding.
+
+### A.4 Checks run (sweep)
+
+```text
+cargo test -p axiam-oauth2 --test token_service -- g_c_ f4w10 t254_    # exit 0, 24 passed
+cargo test -p axiam-oauth2 --lib -- token_exchange refresh_reuse      # exit 0, 39 passed
+cargo test -p axiam-core --lib -- g_c_                                # exit 0, 4 passed
+cargo build -p axiam-server --no-default-features                     # exit 0
+./target/debug/axiam-server --dump-openapi | cmp - sdks/openapi.json  # identical
+python3 scripts/check-spec-digest.py                                  # exit 0
+# probes (appended to token_service.rs, then the file restored; tree clean):
+#   public + tls_client_certificate_bound_access_tokens, any certificate:
+#   live redemption -> invalid_client; replay -> nothing revoked.
+```
+
+Not re-run for the sweep: the REST integration targets (the sweep changes no
+REST handler or extractor; the first pass ran `token_exchange_test` and
+`oauth2_flow_test` green) and the full workspace suite.

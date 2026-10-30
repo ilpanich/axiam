@@ -32,3 +32,18 @@ updates:
     schedule:
       interval: weekly
       day: monday
+
+  # Base images in docker/Dockerfile.* are pinned by digest. Without this
+  # entry nothing moves them, and the release workflow's Trivy image scan
+  # (HIGH,CRITICAL, fixable only) fails the first time Debian ships a fix the
+  # pinned distroless/cc-debian12 build predates — v1.1.3 failed that way with
+  # the same digest v1.1.2 had passed with five days earlier.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      base-images:
+        patterns:
+          - "*"

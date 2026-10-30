@@ -360,6 +360,12 @@ updated. Small, but it touches an authorization rule, hence Opus.
 > the task *defines* behaviour under adversarial input, **Sonnet 5.5** where
 > the design above already states the fix and names the precedent at a
 > `file:line`.
+>
+> **Amended 2026-10-30 by the maintainer:** no PR per wave. When a wave's
+> F4 and sweeps are clean, the orchestrator fast-forwards the plan branch
+> `claude/social-gap-1.2.0` to the wave branch (linear history, no merge
+> commit) and cuts the next wave from it. A **single PR**, plan branch →
+> `main`, is opened after W5; the maintainer merges it and tags.
 
 ### 4.0 Model per activity — the suggestion, in one table
 
@@ -438,9 +444,69 @@ The maintainer merges and tags `v1.2.0`.
 
 ### 4.1 Wave results (written by the orchestrator as each wave lands)
 
-*Empty until W1 lands. One subsection per wave: base commit, PR, what
-changed against §4, test counts before/after, issues filed under §1.4-style
-"arises while the plan runs".*
+*One subsection per wave: base commit, PR, what changed against §4, test
+counts before/after, issues filed under §1.4-style "arises while the plan
+runs".*
+
+#### W1 — the security core (`claude/social-gap-w1`, closed 2026-10-30)
+
+**Base** `85721de` (the plan branch after the D-N1…D-N7 record). **PR:** none
+per the 2026-10-30 amendment above; the plan branch was fast-forwarded to the
+wave head. **Commits**, each signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `f978dff` | W1.1 G-C (#818) | `revoke_all_for_session`; refused replay on `standard`, post-window `fapi2` and superseded-off-`fapi2` invalidates the session and revokes its refresh tokens; setting `oauth2.refresh_reuse_response` (`revoke_session` default \| `refuse`), tighten-only; audit `response`; schema **v110** (column + `idx_refresh_token_session`); CHANGELOG *Changed* + deployment upgrade note; OpenAPI regenerated |
+| `9f1c855` | W1.2 G-D (#819) | `client_id` on B3 and X4 tokens **plus** the `axiam_exchanged` marker; `actor_token_client` refuses marked / `act` / `ext_exchange` tokens (D-N9); introspection (REST and gRPC) echoes the `client_id` claim |
+| `9e761ad` | orchestrator | D-N8, D-N9, §3.4 correction |
+| `3c7d031` | W1.3 | T-37, T-254, T-471 amended; model **2.45.0**; T-254 decision §7 |
+| `dc5e4f5` | F4 | `security-review-social-gap-w1-2026-10-30.md`: 0 C/H/M, 2 Low, 4 Info |
+| `4241409` `e398312` `09242b6` | sweep 1 | #821, #822, #823 |
+| `fe5de4e` | F4 addendum 1 | all six closed; 2 Info → #824 |
+| `4119629` | sweep 2 | #824 |
+| `ed33742` | F4 addendum 2 | both closed; F4-W1-09 (Info, docs wording) left open by the two-sweep rule |
+
+**Deltas against §4.**
+- **W1.2 stopped before committing.** The consequence §3.4 predicted was a
+  #518 regression (actor-token laundering), shown by a probe test; the
+  maintainer chose option A (D-N9). The probe is now the regression test
+  `an_exchanged_token_is_refused_as_an_actor_even_by_its_own_client`.
+- **G-D needed no new threat id**: T-471 (#518 / D-5) already covered it and
+  was amended; T-489…T-494 stay reserved for W2/W3.
+- **G-C is narrower than §3.3 stated** after #821: only the token's own client,
+  passing the same binding checks a live refresh runs, triggers revocation;
+  any other presentation is refused, marked and audited
+  (`refused_unverified_presenter`) — the authorization-code replay precedent.
+  Audit `response` values: `revoked_session` \| `refused` \|
+  `refused_unverified_presenter` \| `revocation_failed` (with `failed_writes`);
+  `token_client_id` recorded beside the presenting client.
+- **Beyond scope, accepted:** introspection now returns `client_id` for every
+  JWT access token (code, refresh, CIBA, device too — RFC 7662 conformant,
+  F4-checked); `website/src/docs/oauth2.ts` and the agents guide corrected.
+- **OpenAPI** regenerated three times in-wave (`RefreshReuseResponse`
+  component); `sdks/openapi.json` and `management-registry.json` must be
+  re-vendored by W4.
+
+**Tests**, before → after on the binaries the wave touched: `axiam-oauth2`
+`token_service` 149 → 166, lib 630 → 636; `axiam-api-rest`
+`oauth2_flow_test` 44 → 46, `token_exchange_test` 29 → 31,
+`external_token_exchange_test` 27 → 28; `axiam-auth` lib 278 → 280;
+`grpc_units` 47 → 48; plus new `axiam-db` (3) and `axiam-core` (4) tests. Full
+binaries of every touched crate green at each commit; none skipped or
+ignored beyond the pre-existing live-service ignores.
+
+**Issues filed:** [#821](https://github.com/ilpanich/axiam/issues/821),
+[#822](https://github.com/ilpanich/axiam/issues/822),
+[#823](https://github.com/ilpanich/axiam/issues/823),
+[#824](https://github.com/ilpanich/axiam/issues/824) — all fixed in-wave,
+close with the 1.2.0 PR. **Open after two sweeps:** F4-W1-09 (Info) — the docs
+say a cross-client presentation is always audited
+`refused_unverified_presenter`; under `refuse` or a session-less row it is
+`refused`. Text only; proposed for W5.1.
+
+**Not run:** OIDF conformance suite (no Docker); the full workspace suite in
+one invocation (per-crate binaries instead); the frontend suite (no console
+change in W1).
 
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,

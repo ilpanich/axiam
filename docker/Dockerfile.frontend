@@ -29,7 +29,7 @@
 # `--platform=$BUILDPLATFORM` pins this stage to the build host: wasm32 output
 # is byte-identical regardless of which machine emits it, so compiling it once
 # natively is both faster than and equivalent to compiling it per target arch.
-FROM --platform=$BUILDPLATFORM rust:1.97-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a AS wasm
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS wasm
 
 # Same version release-opaque.yml installs, so the artifact this image ships and
 # the one published to npm come out of the same tool. Fetched as a release
@@ -74,7 +74,7 @@ RUN wasm-pack build crates/axiam-opaque-wasm \
 # ---------------------------------------------------------------------------
 # Stage 2: Build the React frontend
 # ---------------------------------------------------------------------------
-FROM node:24-alpine@sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14 AS builder
+FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS builder
 
 WORKDIR /app
 
@@ -105,7 +105,7 @@ RUN test -n "$(find dist/assets -name 'axiam_opaque_bg-*.wasm' -print -quit)" \
 # ---------------------------------------------------------------------------
 # Stage 2: Serve with unprivileged nginx (listens on 8080, runs as uid 101)
 # ---------------------------------------------------------------------------
-FROM nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e
 
 # ---------------------------------------------------------------------------
 # Patch OS packages before finalizing (D-06 Trivy HIGH/CRITICAL gate).

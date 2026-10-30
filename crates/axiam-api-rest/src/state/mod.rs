@@ -750,12 +750,16 @@ impl<C: Connection + Clone> AppState<C> {
         // state below holds.
         let tenant_org_cache: Arc<crate::tenant_org_cache::TenantOrgCache> =
             Arc::new(Default::default());
-        let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
-            Arc::new(crate::scope_policy::SettingsScopePolicy::new(
-                tenant_repo.clone(),
-                SurrealSettingsRepository::new(db.clone()),
-                Arc::clone(&tenant_org_cache),
-            ));
+        let settings_policy = Arc::new(crate::scope_policy::SettingsScopePolicy::new(
+            tenant_repo.clone(),
+            SurrealSettingsRepository::new(db.clone()),
+            Arc::clone(&tenant_org_cache),
+        ));
+        let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy = settings_policy.clone();
+        // G-C (#818): the tenant's refresh-reuse response, from the same
+        // settings-backed value.
+        let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
+            settings_policy;
         let authorize_service =
             AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600)
                 .with_scope_policy(Arc::clone(&scope_policy));
@@ -783,7 +787,8 @@ impl<C: Connection + Clone> AppState<C> {
                 ca_cert_repo.clone(),
             )),
         )
-        .with_scope_policy(Arc::clone(&scope_policy));
+        .with_scope_policy(Arc::clone(&scope_policy))
+        .with_refresh_reuse_policy(refresh_reuse_policy);
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
         // different origin from the issuer is a phishing shape, and deriving

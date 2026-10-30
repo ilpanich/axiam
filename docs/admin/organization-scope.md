@@ -383,6 +383,26 @@ The overtaken field is **cleared**, not rewritten to the new value. An absent
 override keeps tracking; a value written in would freeze at today's level and
 need the same repair after the next change.
 
+`refresh_reuse_response` (resolved as `oauth2.refresh_reuse_response`) follows
+the same rule. It decides what a **refused** refresh-token replay does besides
+refusing: `revoke_session` (the default) also invalidates the session the
+replayed token belongs to and revokes that session's refresh tokens;
+`refuse` only refuses, marks and audits, as 1.1.x did. `revoke_session` is the
+stricter value, so a tenant may choose it under an organization on `refuse`
+and not the reverse:
+
+```
+PUT /api/v1/organizations/{org_id}/settings
+{ ..., "refresh_reuse_response": "refuse" }
+
+PUT /api/v1/tenants/{tenant_id}/settings
+{ "refresh_reuse_response": "revoke_session" }   # tightening: accepted
+{ "refresh_reuse_response": "refuse" }           # under revoke_session: 400
+```
+
+What counts as a replay, and the upgrade note, are in the deployment guide's
+[Refresh-token replay revokes the session](../deployment/README.md#refresh-token-replay-revokes-the-session-g-c-818).
+
 ### The OPAQUE `required` gate
 
 `required` refuses password login for a whole tenant before any credential is

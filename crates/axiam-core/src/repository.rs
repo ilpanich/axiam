@@ -2567,6 +2567,26 @@ pub trait RefreshTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// Revoke every refresh token issued under one session within a tenant
+    /// (G-C, #818). Idempotent — already-revoked tokens are skipped and do not
+    /// count toward the returned total.
+    ///
+    /// The scope a refused refresh-token replay revokes: the session the
+    /// replayed token names, and nothing wider. [`Self::revoke_all_for_user`]
+    /// would sign the user out of every client on every device; a token of
+    /// *another* session of the same user and client is left alone.
+    ///
+    /// `rotated_at` is deliberately not stamped: these tokens were not
+    /// succeeded, their grant was ended, and a later presentation of one is an
+    /// ordinary stale credential rather than a second replay.
+    ///
+    /// Returns the number of tokens newly revoked.
+    fn revoke_all_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
     /// Delete every refresh token of a user within a tenant, revoked or not
     /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a
     /// re-run of the erasure is safe. The caller revokes first; this removes

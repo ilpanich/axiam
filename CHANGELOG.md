@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A refused refresh-token replay now revokes the session the replayed token
+  belongs to: on a `standard` client, and on a `fapi2` client once its 60-second
+  grace window has passed, presenting an already-rotated refresh token is still
+  answered `400 invalid_grant`, and now also invalidates that session (published
+  to the revocation feed when it is enabled) and revokes every refresh token
+  issued under it, the successor included. Other sessions of the same user are
+  untouched, a `fapi2` retry inside the grace window is still accepted, and a
+  token revoked at logout is not a replay. The new organization/tenant setting
+  `oauth2.refresh_reuse_response` defaults to `revoke_session`; setting it to
+  `refuse` restores the 1.1.x behaviour (refuse, mark and audit only). The
+  `oauth2.refresh_token_replayed` audit row gains a `response` key
+  (`revoked_session` | `refused`). Schema v110, additive. (#818)
+
 ## [1.1.3] - 2026-10-29
 
 ### Changed

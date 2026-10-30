@@ -1313,12 +1313,16 @@ where
     // service that decides what an externally registered client's token may
     // carry. Left unwired, those services refuse such clients with
     // `server_error` rather than trust the client row.
-    let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
-        Arc::new(axiam_api_rest::scope_policy::SettingsScopePolicy::new(
-            tenant_repo.clone(),
-            settings_repo.clone(),
-            Arc::clone(&tenant_org_cache),
-        ));
+    let settings_policy = Arc::new(axiam_api_rest::scope_policy::SettingsScopePolicy::new(
+        tenant_repo.clone(),
+        settings_repo.clone(),
+        Arc::clone(&tenant_org_cache),
+    ));
+    let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy = settings_policy.clone();
+    // G-C (#818) — the tenant's effective `oauth2.refresh_reuse_response`, read
+    // by the token endpoint only after a refresh-token replay was refused.
+    let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
+        settings_policy;
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -1359,6 +1363,8 @@ where
     .with_reactor_gate(Arc::clone(&reactor_gate))
     // #613 (T-289) — see `scope_policy` above.
     .with_scope_policy(Arc::clone(&scope_policy))
+    // G-C (#818) — see `refresh_reuse_policy` above.
+    .with_refresh_reuse_policy(refresh_reuse_policy)
     // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
     // client-authentication families.
     //

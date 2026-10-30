@@ -578,6 +578,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "rate_limit_bucket_updated_at_index",
         sql: SCHEMA_V109,
     },
+    Migration {
+        version: 110,
+        name: "refresh_reuse_response",
+        sql: SCHEMA_V110,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5643,6 +5648,29 @@ DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at ON TABLE rate_limit_buck
 DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v110 — a refused refresh-token replay revokes its session (G-C, #818)
+// -----------------------------------------------------------------------
+//
+// **`security_settings.oauth2_refresh_reuse_response`** is the layered
+// `oauth2.refresh_reuse_response` setting: `revoke_session` (the default,
+// D-N2) or `refuse` (the 1.1.x behaviour). `option<string>` with no `DEFAULT`
+// and **no backfill**: a row written before this migration reads `NONE`, which
+// the repository resolves to the default, so an upgraded deployment takes the
+// new behaviour without a write — and an operator who wants the old one sets
+// `refuse` explicitly. The `ASSERT` lists the two spellings the model writes.
+//
+// **`idx_refresh_token_session`** serves `revoke_all_for_session`, the
+// statement a refused replay runs. Without it each replay would scan every
+// refresh token of every tenant, at a rate chosen by whoever holds a rotated
+// token. The engine builds it from the rows present.
+const SCHEMA_V110: &str = "\
+DEFINE FIELD IF NOT EXISTS oauth2_refresh_reuse_response ON TABLE security_settings
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['revoke_session', 'refuse'];
+DEFINE INDEX IF NOT EXISTS idx_refresh_token_session ON TABLE oauth2_refresh_token
+    COLUMNS tenant_id, session_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6006,6 +6034,37 @@ mod tests {
             ],
             "v109 defines the index and the field and nothing else"
         );
+    }
+
+    /// G-C (#818) — v110 is the refresh-reuse setting's column, optional and
+    /// asserted to the model's two spellings, and the per-session index the
+    /// revocation selects on; nothing else, and nothing backfilled (an absent
+    /// value reads as the default, `revoke_session`).
+    #[test]
+    fn v110_adds_only_the_refresh_reuse_setting_and_the_session_index() {
+        let statements: Vec<&str> = SCHEMA_V110
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS oauth2_refresh_reuse_response ON TABLE \
+                 security_settings\n    TYPE option<string> ASSERT $value = NONE OR $value IN \
+                 ['revoke_session', 'refuse']",
+                "DEFINE INDEX IF NOT EXISTS idx_refresh_token_session ON TABLE \
+                 oauth2_refresh_token\n    COLUMNS tenant_id, session_id",
+            ],
+            "v110 defines the setting's column and the index and nothing else"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V110.contains(forbidden),
+                "v110 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V110));
     }
 
     /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
@@ -7593,9 +7652,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&109),
-            "v109 is the newest migration (#676 — the `rate_limit_bucket.updated_at` index the \
-             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`); v108 was \
+            Some(&110),
+            "v110 is the newest migration (G-C, #818 — \
+             `security_settings.oauth2_refresh_reuse_response` and the \
+             `idx_refresh_token_session` index a refused replay's revocation selects on); v109 \
+             was #676 — the `rate_limit_bucket.updated_at` index the \
+             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`; v108 was \
              #689 — `user.erasure_audit_pending` and `tenant_purge_pending`, the markers an \
              erasure and a tenant purge leave at their point of no return and clear with their \
              record, so that a unit cut there is recorded by the next start; \

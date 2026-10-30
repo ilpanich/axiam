@@ -15,13 +15,20 @@
 //! `scope_ceiling::applies_to` is answered from the client row before this is
 //! reached — and it is the read `crate::cimd::materialise_if_cimd` already
 //! makes for every URL-shaped `client_id`.
+//!
+//! G-C (#818) — the same value also answers
+//! [`axiam_oauth2::refresh_reuse::RefreshReusePolicy`], the tenant's effective
+//! `oauth2.refresh_reuse_response`, read fresh for the same reason and only
+//! after a refresh-token replay has been refused.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use axiam_core::error::AxiamResult;
+use axiam_core::models::settings::RefreshReuseResponse;
 use axiam_core::repository::{SettingsRepository, TenantRepository};
+use axiam_oauth2::refresh_reuse::RefreshReusePolicy;
 use axiam_oauth2::scope_ceiling::ExternalClientScopePolicy;
 use uuid::Uuid;
 
@@ -47,6 +54,31 @@ impl<TR, ST> SettingsScopePolicy<TR, ST> {
     }
 }
 
+impl<TR, ST> SettingsScopePolicy<TR, ST>
+where
+    TR: TenantRepository + Send + Sync,
+    ST: SettingsRepository + Send + Sync,
+{
+    /// The tenant's effective settings, through the shared
+    /// `tenant_id → organization_id` cache.
+    async fn effective(
+        &self,
+        tenant_id: Uuid,
+    ) -> AxiamResult<axiam_core::models::settings::SecuritySettings> {
+        let org_id = match self.tenant_org.get(tenant_id) {
+            Some(org_id) => org_id,
+            None => {
+                let tenant = self.tenants.get_by_id(tenant_id).await?;
+                self.tenant_org.insert(tenant_id, tenant.organization_id);
+                tenant.organization_id
+            }
+        };
+        self.settings
+            .get_effective_settings(org_id, tenant_id)
+            .await
+    }
+}
+
 impl<TR, ST> ExternalClientScopePolicy for SettingsScopePolicy<TR, ST>
 where
     TR: TenantRepository + Send + Sync,
@@ -56,20 +88,25 @@ where
         &'a self,
         tenant_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<String>>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.effective(tenant_id).await?.oidc.dcr_allowed_scopes) })
+    }
+}
+
+impl<TR, ST> RefreshReusePolicy for SettingsScopePolicy<TR, ST>
+where
+    TR: TenantRepository + Send + Sync,
+    ST: SettingsRepository + Send + Sync,
+{
+    fn refresh_reuse_response<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<RefreshReuseResponse>> + Send + 'a>> {
         Box::pin(async move {
-            let org_id = match self.tenant_org.get(tenant_id) {
-                Some(org_id) => org_id,
-                None => {
-                    let tenant = self.tenants.get_by_id(tenant_id).await?;
-                    self.tenant_org.insert(tenant_id, tenant.organization_id);
-                    tenant.organization_id
-                }
-            };
-            let settings = self
-                .settings
-                .get_effective_settings(org_id, tenant_id)
-                .await?;
-            Ok(settings.oidc.dcr_allowed_scopes)
+            Ok(self
+                .effective(tenant_id)
+                .await?
+                .oauth2
+                .refresh_reuse_response)
         })
     }
 }

@@ -532,6 +532,30 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
+    async fn revoke_all_for_session(&self, tenant_id: Uuid, session_id: Uuid) -> AxiamResult<u64> {
+        // G-C (#818): the family a refused replay revokes is the session's,
+        // not the user's. One statement, so the count is what this call
+        // revoked and a second call (a second replay) revokes none.
+        // `rotated_at` is left as it is — see the trait.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_refresh_token SET revoked = true \
+                 WHERE tenant_id = $tenant_id \
+                   AND session_id = $session_id \
+                   AND revoked = false \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("session_id", session_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
+    }
+
     async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
         let mut result = self
             .db
@@ -1111,6 +1135,143 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "absent must not be read as 'rotated'; nothing recorded that it was"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // G-C (#818) — a refused replay revokes its session's refresh tokens
+    // -----------------------------------------------------------------
+
+    /// One token of `session_id`, issued to `client_id` for `user_id`.
+    async fn issue_in_session(
+        repo: &SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+        tenant_id: Uuid,
+        token_hash: &str,
+        user_id: Uuid,
+        client_id: &str,
+        session_id: Uuid,
+    ) {
+        repo.create(CreateRefreshToken {
+            tenant_id,
+            token_hash: token_hash.to_owned(),
+            client_id: client_id.into(),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            session_id: Some(session_id),
+            requested_userinfo_claims: Vec::new(),
+            dpop_jkt: None,
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The session's family is revoked — the rotated predecessor's live
+    /// successor and a sibling grant of the same session alike — and nothing
+    /// else: not another session of the same user and client, not the same
+    /// session id in another tenant. Idempotent: a second replay revokes none.
+    #[tokio::test]
+    async fn revoke_all_for_session_revokes_that_session_and_nothing_else() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let replayed_session = Uuid::new_v4();
+        let other_session = Uuid::new_v4();
+
+        // The replayed token, already rotated, and its live successor.
+        issue_in_session(
+            &repo,
+            tenant_id,
+            "gc-pred",
+            user_id,
+            "oa_a",
+            replayed_session,
+        )
+        .await;
+        repo.revoke_rotated(tenant_id, "gc-pred").await.unwrap();
+        issue_in_session(
+            &repo,
+            tenant_id,
+            "gc-succ",
+            user_id,
+            "oa_a",
+            replayed_session,
+        )
+        .await;
+        // A second client's grant under the same browser session.
+        issue_in_session(
+            &repo,
+            tenant_id,
+            "gc-sibling",
+            user_id,
+            "oa_b",
+            replayed_session,
+        )
+        .await;
+        // The same user and client, signed in on another device.
+        issue_in_session(&repo, tenant_id, "gc-other", user_id, "oa_a", other_session).await;
+        // The same session id in another tenant.
+        issue_in_session(
+            &repo,
+            other_tenant,
+            "gc-foreign",
+            user_id,
+            "oa_a",
+            replayed_session,
+        )
+        .await;
+
+        let revoked = repo
+            .revoke_all_for_session(tenant_id, replayed_session)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked, 2,
+            "the successor and the sibling; the already-revoked predecessor is not counted"
+        );
+
+        for hash in ["gc-succ", "gc-sibling"] {
+            assert!(
+                repo.get_by_token_hash(tenant_id, hash).await.is_err(),
+                "a refresh token of the replayed session must now be refused ({hash})"
+            );
+        }
+        repo.get_by_token_hash(tenant_id, "gc-other")
+            .await
+            .expect("another session of the same user and client is untouched");
+        repo.get_by_token_hash(other_tenant, "gc-foreign")
+            .await
+            .expect("the same session id in another tenant is untouched");
+
+        // The family was ended, not rotated: a later presentation of the
+        // successor is a stale credential, not a second replay.
+        assert!(
+            repo.find_rotated(tenant_id, "gc-succ")
+                .await
+                .unwrap()
+                .is_none(),
+            "revoke_all_for_session must not stamp rotated_at"
+        );
+        // The replayed predecessor is still recognisable as a replay.
+        assert!(
+            repo.find_rotated(tenant_id, "gc-pred")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        assert_eq!(
+            repo.revoke_all_for_session(tenant_id, replayed_session)
+                .await
+                .unwrap(),
+            0,
+            "idempotent: nothing left to revoke"
         );
     }
 }

@@ -155,6 +155,102 @@ pub struct WebauthnPolicy {
     pub webauthn_user_verification: WebauthnUserVerification,
 }
 
+/// What the token endpoint does when a refresh token that has already been
+/// rotated is presented again and **refused** (G-C, #818 — the T-254
+/// amendment).
+///
+/// Two values, ordered by strictness:
+///
+/// * [`Self::RevokeSession`] — the default (D-N2). The refusal also
+///   invalidates the session the replayed token names (which publishes to the
+///   revocation feed) and revokes every refresh token issued under that
+///   session, as the authorization-code replay path already does
+///   (RFC 6749 §10.5; OAuth 2.0 Security BCP §4.14.2). On a client with no
+///   grace window the honest holder of a replayed token has nothing left to
+///   lose — its token is already dead and it never received the successor —
+///   so the revocation costs it nothing and costs whoever holds the successor
+///   everything.
+/// * [`Self::Refuse`] — the 1.1.x behaviour: the presentation is refused,
+///   marked on the session and audited, and nothing else is revoked.
+///
+/// Neither value changes what is *accepted*. A `fapi2` client's presentation
+/// inside the grace window is accepted and marked whatever this says (D-N4);
+/// a token revoked at logout is not a replay and revokes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshReuseResponse {
+    /// Refuse, and revoke the session the replayed token belongs to.
+    #[default]
+    RevokeSession,
+    /// Refuse only (the pre-G-C behaviour).
+    Refuse,
+}
+
+impl RefreshReuseResponse {
+    /// The stored/wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RevokeSession => "revoke_session",
+            Self::Refuse => "refuse",
+        }
+    }
+
+    /// Parse a stored/wire value; `None` for anything unrecognised.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "revoke_session" => Some(Self::RevokeSession),
+            "refuse" => Some(Self::Refuse),
+            _ => None,
+        }
+    }
+
+    /// Rank by strictness. Explicit rather than derived from declaration
+    /// order, for the reason [`WebauthnUserVerification`]'s ranking gives: a
+    /// new variant must decide where it sits.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Refuse => 0,
+            Self::RevokeSession => 1,
+        }
+    }
+
+    /// Whether this response revokes the replayed token's session.
+    pub const fn revokes_session(self) -> bool {
+        matches!(self, Self::RevokeSession)
+    }
+}
+
+impl std::fmt::Display for RefreshReuseResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether `candidate` is at least as strict as `baseline` — the tenant
+/// override ordering for [`OAuth2Policy::refresh_reuse_response`].
+pub const fn refresh_reuse_response_is_at_least(
+    candidate: RefreshReuseResponse,
+    baseline: RefreshReuseResponse,
+) -> bool {
+    candidate.rank() >= baseline.rank()
+}
+
+/// OAuth 2.0 authorization-server behaviour that is a tenant's to decide
+/// (G-C, #818).
+///
+/// A struct of its own rather than a field on [`TokenPolicy`] because it is
+/// not a lifetime, and so the resolved setting reads by its documented name,
+/// `oauth2.refresh_reuse_response`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OAuth2Policy {
+    /// What a refused refresh-token replay does besides refusing. Ordered: a
+    /// tenant may move from `refuse` to `revoke_session` and never back while
+    /// its organization's baseline is `revoke_session`.
+    #[serde(default)]
+    #[schema(value_type = String, example = "revoke_session")]
+    pub refresh_reuse_response: RefreshReuseResponse,
+}
+
 /// Whether, and on what terms, a client may register itself through
 /// RFC 7591 dynamic client registration (T21.4).
 ///
@@ -1090,6 +1186,10 @@ pub struct SecuritySettings {
     pub privacy: PrivacyPolicy,
     pub webauthn: WebauthnPolicy,
     pub oidc: OidcPolicy,
+    /// G-C (#818) — `oauth2.refresh_reuse_response`. Defaulted so a document
+    /// written before the field reads as the default.
+    #[serde(default)]
+    pub oauth2: OAuth2Policy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1172,6 +1272,11 @@ pub struct TenantSettingsOverride {
     /// [`OidcPolicy::ssf_enabled`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssf_enabled: Option<bool>,
+    /// G-C (#818) — tighten-only on `refuse` → `revoke_session`; see
+    /// [`OAuth2Policy::refresh_reuse_response`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub refresh_reuse_response: Option<RefreshReuseResponse>,
 }
 
 impl TenantSettingsOverride {
@@ -1284,6 +1389,12 @@ pub struct SetOrgSettings {
     #[serde(default)]
     #[schema(example = false)]
     pub ssf_enabled: bool,
+    /// G-C (#818) — defaulted to `revoke_session` (D-N2): an API client
+    /// written before the field lands on the new default. `refuse` restores
+    /// the 1.1.x behaviour.
+    #[serde(default)]
+    #[schema(value_type = String, example = "revoke_session")]
+    pub refresh_reuse_response: RefreshReuseResponse,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -1386,6 +1497,9 @@ pub fn system_defaults() -> SetOrgSettings {
         // G-5 / D-45 — no tenant transmits security events until an
         // organization says so (I1).
         ssf_enabled: false,
+        // G-C / D-N2 — a refused refresh-token replay revokes its session,
+        // as an authorization-code replay already does.
+        refresh_reuse_response: RefreshReuseResponse::RevokeSession,
     }
 }
 
@@ -1654,6 +1768,11 @@ pub fn effective_settings(
                 .clone()
                 .unwrap_or_else(|| org.oidc.cimd.clone()),
         },
+        oauth2: OAuth2Policy {
+            refresh_reuse_response: tenant_override
+                .refresh_reuse_response
+                .unwrap_or(org.oauth2.refresh_reuse_response),
+        },
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -1876,6 +1995,17 @@ pub fn clamp_overrides_to_org(
     if !org.oidc.ssf_enabled && overrides.ssf_enabled == Some(true) {
         overrides.ssf_enabled = None;
         cleared.push("ssf_enabled");
+    }
+
+    // G-C (#818) — on the ordering `validate_tenant_override` uses: a tenant
+    // `refuse` under an organization that has since chosen `revoke_session`
+    // is dropped and the tenant tracks the baseline again.
+    if overrides
+        .refresh_reuse_response
+        .is_some_and(|r| !refresh_reuse_response_is_at_least(r, org.oauth2.refresh_reuse_response))
+    {
+        overrides.refresh_reuse_response = None;
+        cleared.push("refresh_reuse_response");
     }
 
     // T21.4 — the three ordered dynamic-registration controls, on the same
@@ -2188,6 +2318,20 @@ pub fn validate_tenant_override(
              (transmitting security events is the organization's decision, not the tenant's)"
                 .into(),
         );
+    }
+
+    // --- G-C (#818) refresh-token reuse response: tighten-only ---
+    //
+    // `revoke_session` > `refuse`. A tenant may revoke where its organization
+    // only refuses; it may not stop revoking where its organization revokes.
+    if let Some(response) = overrides.refresh_reuse_response
+        && !refresh_reuse_response_is_at_least(response, org.oauth2.refresh_reuse_response)
+    {
+        violations.push(format!(
+            "refresh_reuse_response: tenant value {} is less restrictive than \
+             org baseline {}",
+            response, org.oauth2.refresh_reuse_response,
+        ));
     }
 
     // --- T21.4 dynamic client registration: three ordered controls ---
@@ -2550,6 +2694,11 @@ pub fn diff_against_org(
             tenant.oidc.saml_idp_enabled
         ),
         ssf_enabled: diff!(ssf_enabled, org.oidc.ssf_enabled, tenant.oidc.ssf_enabled),
+        refresh_reuse_response: diff!(
+            refresh_reuse_response,
+            org.oauth2.refresh_reuse_response,
+            tenant.oauth2.refresh_reuse_response
+        ),
         default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
             tenant.oidc.default_locale.clone()
         } else {
@@ -2624,6 +2773,9 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             saml_idp_enabled: input.saml_idp_enabled,
             ssf_enabled: input.ssf_enabled,
             ssf_inactive_reason: None,
+        },
+        oauth2: OAuth2Policy {
+            refresh_reuse_response: input.refresh_reuse_response,
         },
         created_at: now,
         updated_at: now,
@@ -4852,6 +5004,149 @@ mod tests {
             diff_against_org(&org, &org).server_cert_allowed_names,
             None,
             "an unchanged list is no override"
+        );
+    }
+
+    // --- G-C (#818): oauth2.refresh_reuse_response ---
+
+    fn org_with_reuse(response: RefreshReuseResponse) -> SecuritySettings {
+        let mut input = system_defaults();
+        input.refresh_reuse_response = response;
+        settings_from_org_input(Uuid::new_v4(), Uuid::new_v4(), &input)
+    }
+
+    /// D-N2: the default is `revoke_session`, wherever a default is taken —
+    /// the system defaults, an API body written before the field existed, and
+    /// a resolved document written before it.
+    #[test]
+    fn g_c_the_refresh_reuse_response_defaults_to_revoke_session() {
+        assert_eq!(
+            system_defaults().refresh_reuse_response,
+            RefreshReuseResponse::RevokeSession
+        );
+        assert_eq!(
+            RefreshReuseResponse::default(),
+            RefreshReuseResponse::RevokeSession
+        );
+
+        let mut body = serde_json::to_value(system_defaults()).unwrap();
+        body.as_object_mut()
+            .unwrap()
+            .remove("refresh_reuse_response");
+        let parsed: SetOrgSettings = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            parsed.refresh_reuse_response,
+            RefreshReuseResponse::RevokeSession
+        );
+
+        let mut doc = serde_json::to_value(org_settings()).unwrap();
+        doc.as_object_mut().unwrap().remove("oauth2");
+        let parsed: SecuritySettings = serde_json::from_value(doc).unwrap();
+        assert_eq!(
+            parsed.oauth2.refresh_reuse_response,
+            RefreshReuseResponse::RevokeSession
+        );
+    }
+
+    #[test]
+    fn g_c_the_wire_spelling_round_trips_and_nothing_else_parses() {
+        for response in [
+            RefreshReuseResponse::RevokeSession,
+            RefreshReuseResponse::Refuse,
+        ] {
+            assert_eq!(
+                RefreshReuseResponse::from_wire(response.as_str()),
+                Some(response)
+            );
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                serde_json::Value::String(response.as_str().into())
+            );
+        }
+        assert_eq!(RefreshReuseResponse::from_wire("revoke"), None);
+        assert_eq!(RefreshReuseResponse::from_wire(""), None);
+        assert!(serde_json::from_str::<RefreshReuseResponse>("\"revoke_family\"").is_err());
+    }
+
+    /// Tighten-only: `refuse` < `revoke_session`.
+    #[test]
+    fn g_c_a_tenant_may_tighten_the_refresh_reuse_response_and_never_relax_it() {
+        let revoke = org_with_reuse(RefreshReuseResponse::RevokeSession);
+        let refuse = org_with_reuse(RefreshReuseResponse::Refuse);
+        let to = |r| TenantSettingsOverride {
+            refresh_reuse_response: Some(r),
+            ..Default::default()
+        };
+
+        let err = validate_tenant_override(&revoke, &to(RefreshReuseResponse::Refuse))
+            .expect_err("a tenant may not stop revoking where its organization revokes");
+        assert!(err.to_string().contains("refresh_reuse_response"));
+        assert!(
+            validate_tenant_override(&revoke, &to(RefreshReuseResponse::RevokeSession)).is_ok()
+        );
+        assert!(
+            validate_tenant_override(&refuse, &to(RefreshReuseResponse::RevokeSession)).is_ok()
+        );
+        assert!(validate_tenant_override(&refuse, &to(RefreshReuseResponse::Refuse)).is_ok());
+
+        // Resolution: an override wins, an absent one inherits.
+        let merged = effective_settings(
+            &refuse,
+            &to(RefreshReuseResponse::RevokeSession),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            merged.oauth2.refresh_reuse_response,
+            RefreshReuseResponse::RevokeSession
+        );
+        let inherited = effective_settings(
+            &refuse,
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert_eq!(
+            inherited.oauth2.refresh_reuse_response,
+            RefreshReuseResponse::Refuse
+        );
+
+        // Diff round-trip, and an unchanged value is no override.
+        assert_eq!(
+            diff_against_org(&refuse, &merged).refresh_reuse_response,
+            Some(RefreshReuseResponse::RevokeSession)
+        );
+        assert_eq!(
+            diff_against_org(&refuse, &inherited).refresh_reuse_response,
+            None
+        );
+    }
+
+    /// An organization that moves to `revoke_session` overtakes a tenant that
+    /// had chosen `refuse` under the old baseline; a tenant's stricter choice
+    /// survives the baseline moving the other way.
+    #[test]
+    fn g_c_a_baseline_that_tightens_clears_a_weaker_tenant_override() {
+        let revoke = org_with_reuse(RefreshReuseResponse::RevokeSession);
+        let mut weaker = TenantSettingsOverride {
+            refresh_reuse_response: Some(RefreshReuseResponse::Refuse),
+            ..Default::default()
+        };
+        assert_eq!(
+            clamp_overrides_to_org(&revoke, &mut weaker),
+            vec!["refresh_reuse_response"]
+        );
+        assert_eq!(weaker.refresh_reuse_response, None);
+
+        let refuse = org_with_reuse(RefreshReuseResponse::Refuse);
+        let mut stricter = TenantSettingsOverride {
+            refresh_reuse_response: Some(RefreshReuseResponse::RevokeSession),
+            ..Default::default()
+        };
+        assert!(clamp_overrides_to_org(&refuse, &mut stricter).is_empty());
+        assert_eq!(
+            stricter.refresh_reuse_response,
+            Some(RefreshReuseResponse::RevokeSession)
         );
     }
 }

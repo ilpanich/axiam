@@ -96,6 +96,27 @@ pub use crate::fapi::FAPI2_REFRESH_ROTATION_GRACE_SECS as REFRESH_ROTATION_GRACE
 /// and `outcome` follows the request.
 pub const REFRESH_REPLAY_AUDIT_ACTION: &str = "oauth2.refresh_token_replayed";
 
+/// What a refused refresh-token replay did, as the `response` key of its
+/// [`REFRESH_REPLAY_AUDIT_ACTION`] row records it (G-C, #818).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusedReplayResponse {
+    /// The session the token named was invalidated and its refresh tokens
+    /// revoked.
+    RevokedSession,
+    /// Refused only: the tenant's policy is `refuse`, the token named no
+    /// session, or the revocation could not be completed (logged).
+    Refused,
+}
+
+impl RefusedReplayResponse {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::RevokedSession => "revoked_session",
+            Self::Refused => "refused",
+        }
+    }
+}
+
 /// How long a refresh-token row outlives its own `expires_at` (T-254, #753).
 ///
 /// A replay is recognised by the row, not by a clock: `find_rotated` reads a
@@ -681,6 +702,10 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// answers every external client's grant with `server_error` rather than
     /// quietly trusting the client row.
     scope_policy: crate::scope_ceiling::SharedScopePolicy,
+    /// G-C (#818) — the tenant's effective `oauth2.refresh_reuse_response`,
+    /// read only after a refresh-token replay has been refused. Defaults to
+    /// the system default, `revoke_session`; see [`crate::refresh_reuse`].
+    refresh_reuse_policy: crate::refresh_reuse::SharedRefreshReusePolicy,
 }
 
 /// A well-formed current-scheme client-secret hash that no secret produces
@@ -795,6 +820,7 @@ where
             refresh_token_lifetime_secs,
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
             scope_policy: crate::scope_ceiling::unwired(),
+            refresh_reuse_policy: crate::refresh_reuse::default_policy(),
         }
     }
 
@@ -991,6 +1017,12 @@ where
     /// become a `500` for the same reason (T-15-04) — so every error here is
     /// logged and swallowed.
     ///
+    /// A **refused** replay also gets the tenant's response to it (G-C, #818),
+    /// applied between the two records by [`Self::respond_to_refused_replay`]
+    /// so the audit row can say what was done: `response` is
+    /// `revoked_session` or `refused`, and absent (`null`) on a presentation
+    /// the `fapi2` grace accepted, where there is nothing to respond to.
+    ///
     /// **The token value is never recorded, in any form** — not the raw token,
     /// not its hash. The row names the client, the session and the outcome,
     /// which is everything an investigation needs and nothing that would make
@@ -1025,6 +1057,16 @@ where
                 "oauth2: failed to mark a refresh-token replay on its session"
             );
         }
+
+        // G-C — after the marker, so a `refuse` tenant's session carries it
+        // exactly as before; under `revoke_session` the marker goes with the
+        // session row and the audit row below is what survives, which is the
+        // record T-254 already named as the one that outlives the session.
+        let response = if accepted_under_grace {
+            None
+        } else {
+            Some(self.respond_to_refused_replay(tenant_id, replayed).await)
+        };
 
         let outcome = if accepted_under_grace {
             // The request succeeded, and saying otherwise would make every
@@ -1064,6 +1106,10 @@ where
                         "refused"
                     },
                     "rotated_at": replayed.rotated_at.map(|t| t.to_rfc3339()),
+                    // G-C (#818) — what the refusal did: `revoked_session` or
+                    // `refused`; `null` on an accepted presentation. Names an
+                    // outcome, never the token or its digest.
+                    "response": response.map(RefusedReplayResponse::as_str),
                 })),
             })
             .await
@@ -1073,6 +1119,93 @@ where
                 %tenant_id,
                 "oauth2: failed to write the {REFRESH_REPLAY_AUDIT_ACTION} audit log"
             );
+        }
+    }
+
+    /// Apply the tenant's response to a **refused** refresh-token replay
+    /// (G-C, #818), and say which response was applied.
+    ///
+    /// Under `revoke_session` — the default — this does what
+    /// [`Self::revoke_after_code_replay`] does for an authorization code:
+    /// invalidate the session the replayed token names (which drops the
+    /// validity cache and publishes to the revocation feed, so every access
+    /// token carrying that `sid` stops at its next request) and revoke every
+    /// refresh token issued under it, the successor an attacker may hold
+    /// included. Only that session: another session of the same user, on the
+    /// same client or another, is untouched.
+    ///
+    /// The presenting client is deliberately not compared with the token's.
+    /// The row was found by the token's own hash within the tenant, so whoever
+    /// presented it holds the credential, and a rotated credential in a second
+    /// client's hands is more evidence of a leak, not less.
+    ///
+    /// # A failed revocation does not fail the request
+    ///
+    /// The code-replay path answers the same `invalid_grant` whether or not
+    /// `invalidate` succeeded, logging the failure; this matches it. The
+    /// refusal is already decided and is what protects this request; turning
+    /// it into a `500` would tell the presenter that its replay reached a
+    /// revocation (an oracle the code path also declines to offer) and would
+    /// protect nothing more. The two writes are attempted independently, each
+    /// failure is logged at `error`, and the audit row then says `refused`
+    /// rather than claim a revocation that did not complete.
+    async fn respond_to_refused_replay(
+        &self,
+        tenant_id: Uuid,
+        replayed: &axiam_core::models::oauth2_client::RefreshToken,
+    ) -> RefusedReplayResponse {
+        let policy =
+            crate::refresh_reuse::resolve(self.refresh_reuse_policy.as_ref(), tenant_id).await;
+        if !policy.revokes_session() {
+            return RefusedReplayResponse::Refused;
+        }
+        // A grant with no session behind it (a device-grant or machine token)
+        // has no family to revoke beyond the token itself, which is already
+        // dead.
+        let Some(session_id) = replayed.session_id else {
+            return RefusedReplayResponse::Refused;
+        };
+
+        let invalidated = match self.session_repo.invalidate(tenant_id, session_id).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %session_id,
+                    "oauth2: refresh-token replay refused but its session could not be revoked; \
+                     the request is still denied"
+                );
+                false
+            }
+        };
+        let revoked = match self
+            .refresh_token_repo
+            .revoke_all_for_session(tenant_id, session_id)
+            .await
+        {
+            Ok(count) => {
+                tracing::warn!(
+                    %session_id,
+                    refresh_tokens_revoked = count,
+                    "oauth2: refresh-token replay refused; revoked the session it was issued \
+                     under (G-C)"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %session_id,
+                    "oauth2: refresh-token replay refused but the session's refresh tokens \
+                     could not be revoked; the request is still denied"
+                );
+                false
+            }
+        };
+        if invalidated && revoked {
+            RefusedReplayResponse::RevokedSession
+        } else {
+            RefusedReplayResponse::Refused
         }
     }
 
@@ -1092,6 +1225,17 @@ where
     #[must_use]
     pub fn with_scope_policy(mut self, policy: crate::scope_ceiling::SharedScopePolicy) -> Self {
         self.scope_policy = policy;
+        self
+    }
+
+    /// Install the tenant refresh-reuse policy (G-C, #818). Left out, every
+    /// tenant gets the system default, `revoke_session`.
+    #[must_use]
+    pub fn with_refresh_reuse_policy(
+        mut self,
+        policy: crate::refresh_reuse::SharedRefreshReusePolicy,
+    ) -> Self {
+        self.refresh_reuse_policy = policy;
         self
     }
 
@@ -2767,6 +2911,12 @@ where
                 //
                 // The second read runs only on this branch, so the grant that
                 // succeeds pays nothing for it.
+                //
+                // G-C (#818): on this branch — every `standard` replay, and a
+                // `fapi2` replay after its grace ran out — the refusal also
+                // revokes the session under the tenant's default policy (see
+                // `respond_to_refused_replay`). The answer is the same
+                // `invalid_grant` either way.
                 if let Some(rotated) = self.rotated_predecessor(tenant_id, &token_hash).await {
                     self.record_refresh_replay(tenant_id, &client, &rotated, false)
                         .await;

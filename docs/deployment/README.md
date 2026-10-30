@@ -2749,6 +2749,63 @@ issuer, and the only issuer AXIAM accepts on an inbound token is the root one �
 which is what it accepted before this setting existed. The `?tenant_id=`
 documents are byte-identical either way.
 
+## Refresh-token replay revokes the session (G-C, #818)
+
+A refresh token is single-use: every refresh rotates it, and presenting the
+old one again is a **replay** (T-254). AXIAM has always refused that
+presentation on a `standard` client and recorded it — a marker on the session
+and an `oauth2.refresh_token_replayed` audit row. It now also **revokes the
+session** the replayed token belongs to, as it already did for a replayed
+authorization code (RFC 6749 §10.5; OAuth 2.0 Security BCP §4.14.2):
+
+- the session is invalidated, so every access token carrying its `sid` stops at
+  the next request, and — with the [revocation feed](#session-revocation-feed-optional-t-39--t-143)
+  on — the session is published to `GET /oauth2/revocations`;
+- every refresh token issued under that session is revoked, including the
+  successor the first rotation returned, which is what an attacker who replayed
+  first would be holding.
+
+The client still receives `400 invalid_grant`, whether or not the revocation
+succeeded (a failure is logged at `error` and the audit row then says
+`refused`). Nothing outside the session is touched: another device of the same
+user, on the same client or another, keeps working.
+
+What is **not** a replay, and revokes nothing: a `fapi2` client's retry inside
+its 60-second grace window (accepted, as FAPI 2.0 requires); a token revoked at
+logout, by a password reset or by RFC 7009 and presented again (an ordinary
+stale credential). A `fapi2` replay *after* the window is refused and revokes,
+like a `standard` one.
+
+The behaviour is the security setting `oauth2.refresh_reuse_response`
+(`refresh_reuse_response` in the organization and tenant settings bodies):
+
+| Value | On a refused replay |
+|---|---|
+| `revoke_session` **(default)** | Refuse, mark, audit, and revoke the session and its refresh tokens |
+| `refuse` | Refuse, mark and audit only — the 1.1.x behaviour |
+
+It is ordered like every other security setting: an organization baseline
+that tenants inherit and may only **tighten** (`revoke_session` > `refuse`).
+The audit row's `response` key records which response was applied.
+
+**Upgrade note.** The new default changes behaviour for every client on the
+`standard` profile. A client that loses a rotation response and retries with
+the old token was already refused and had to re-authorize; it now also signs
+its user out of that session, which is the point. A client that sends two
+refreshes with the same token concurrently — a client defect the BCP declines
+to accommodate — will now see its session revoked rather than one request
+refused. To keep the 1.1.x behaviour, set the organization baseline before
+upgrading or right after:
+
+```
+PUT /api/v1/organizations/{org_id}/settings
+{ ..., "refresh_reuse_response": "refuse" }
+```
+
+Schema migration v110 is additive (one optional column and one index on
+`oauth2_refresh_token(tenant_id, session_id)`) and backfills nothing: a
+settings row written before it reads as `revoke_session`.
+
 ## Session revocation feed (optional, T-39 / T-143)
 
 `AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.

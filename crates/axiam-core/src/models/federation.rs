@@ -692,6 +692,210 @@ impl TokenExchangeTrust {
     }
 }
 
+// ---------------------------------------------------------------------------
+// G-A — native sign-in with a provider ID token
+// ---------------------------------------------------------------------------
+
+/// Bound on how many native client IDs a provider's `native_login` block may
+/// list. Same bound, and the same reason, as the X4 audiences: the list is
+/// read on every native sign-in, so an unbounded one is a per-request cost an
+/// admin can set.
+pub const MAX_NATIVE_LOGIN_CLIENT_IDS: usize = MAX_ACCEPTED_AUDIENCES;
+
+/// Bound on the length, in bytes, of one native client ID.
+///
+/// An iOS bundle ID, an Android OAuth client ID (`<n>-<hash>.apps.googleusercontent.com`)
+/// and an Apple Services ID are all well under a hundred characters; 512
+/// leaves room for an operator's own scheme without admitting a pasted
+/// document as an audience.
+pub const MAX_NATIVE_LOGIN_CLIENT_ID_LEN: usize = 512;
+
+/// Per-provider trust for **native sign-in**: an app that obtained an ID token
+/// from this provider through the provider's own SDK presents it, and gets an
+/// ordinary AXIAM sign-in back (G-A, `claude_dev/social-login-gap-plan-2026-10-30.md` §3.1).
+///
+/// The rule every field serves: *an ID token is accepted as a sign-in only
+/// when it was issued to us*. "Us" is a client ID the operator listed here for
+/// exactly this purpose — not the provider's web `client_id` unless listed,
+/// and never "any audience".
+///
+/// Deliberately a separate block from `token_exchange` (X4) rather than a mode
+/// of it: X4 turns a partner token into an API credential and refuses an
+/// ID-token-shaped subject token; this accepts *only* an ID token and turns it
+/// into a sign-in. Different trust statements, different switches.
+///
+/// Subject resolution (`linked_only` / `jit_provision`) is not repeated here:
+/// a native sign-in resolves its user exactly as the provider's browser login
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct NativeLoginTrust {
+    /// Off unless an operator says otherwise, per provider.
+    ///
+    /// Configuring a provider for *browser* login is not agreement to accept
+    /// its ID tokens *from apps*.
+    pub enabled: bool,
+    /// The audiences a presented ID token may carry: the iOS bundle ID,
+    /// Android client ID or Apple app ID the native SDK was configured with.
+    /// **Non-empty when `enabled`** — there is no accept-all value, and the web
+    /// `client_id` is accepted only when it is listed.
+    pub client_ids: Vec<String>,
+    /// Bound on `now - iat` for a presented ID token, independent of its `exp`.
+    pub max_token_age_secs: i64,
+}
+
+impl Default for NativeLoginTrust {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_ids: Vec::new(),
+            max_token_age_secs: DEFAULT_MAX_TOKEN_AGE_SECS,
+        }
+    }
+}
+
+/// Why a submitted `native_login` block was refused.
+///
+/// Every `Display` arm starts with the config path of the field the operator
+/// has to change, as `TrustConfigError`'s do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeLoginConfigError {
+    /// `enabled` with no `client_ids`.
+    NoClientIds,
+    /// A blank (empty or whitespace-only) entry in `client_ids`.
+    BlankClientId,
+    /// More than [`MAX_NATIVE_LOGIN_CLIENT_IDS`] entries; carries the count.
+    TooManyClientIds(usize),
+    /// An entry longer than [`MAX_NATIVE_LOGIN_CLIENT_ID_LEN`]; carries its length.
+    ClientIdTooLong(usize),
+    /// The same client ID listed twice; carries the entry.
+    DuplicateClientId(String),
+    /// `max_token_age_secs` outside `1..=MAX_TOKEN_AGE_CEILING_SECS`.
+    TokenAgeOutOfRange(i64),
+    /// `enabled` on a provider whose protocol issues no ID token.
+    UnsupportedProtocol(FederationProtocol),
+}
+
+impl std::fmt::Display for NativeLoginConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoClientIds => write!(
+                f,
+                "native_login.client_ids must name at least one client ID when native \
+                 sign-in is enabled; there is no accept-all value, and the web client_id \
+                 is accepted only when it is listed"
+            ),
+            Self::BlankClientId => write!(f, "native_login.client_ids contains a blank entry"),
+            Self::TooManyClientIds(n) => write!(
+                f,
+                "native_login.client_ids has {n} entries; \
+                 the maximum is {MAX_NATIVE_LOGIN_CLIENT_IDS}"
+            ),
+            Self::ClientIdTooLong(n) => write!(
+                f,
+                "native_login.client_ids has an entry of {n} characters; \
+                 the maximum is {MAX_NATIVE_LOGIN_CLIENT_ID_LEN}"
+            ),
+            Self::DuplicateClientId(id) => {
+                write!(f, "native_login.client_ids lists '{id}' more than once")
+            }
+            Self::TokenAgeOutOfRange(v) => write!(
+                f,
+                "native_login.max_token_age_secs is {v}; \
+                 it must be between 1 and {MAX_TOKEN_AGE_CEILING_SECS}"
+            ),
+            Self::UnsupportedProtocol(p) => match p {
+                FederationProtocol::Saml => write!(
+                    f,
+                    "native_login.enabled is refused on a Saml provider: native sign-in \
+                     verifies an OpenID Connect ID token, and a SAML provider issues none \
+                     (no issuer to match, no JWKS to verify against)"
+                ),
+                other => write!(
+                    f,
+                    "native_login.enabled is refused on an {} provider: native sign-in \
+                     verifies an OpenID Connect ID token, and the OAuth2 variant issues \
+                     none. Use protocol 'OidcConnect' where the provider supports it \
+                     (Facebook: Limited Login)",
+                    other.as_str()
+                ),
+            },
+        }
+    }
+}
+
+impl NativeLoginTrust {
+    /// Reject a block that cannot be enforced safely, whatever the provider.
+    ///
+    /// As with `TokenExchangeTrust::validate`, every rule applies **whether or
+    /// not `enabled` is set** except the non-empty one: a disabled block with
+    /// nonsense in it becomes an enabled block with nonsense in it the moment
+    /// someone flips the switch, and the flip is not where an operator expects
+    /// to learn a client ID was blank.
+    pub fn validate(&self) -> Result<(), NativeLoginConfigError> {
+        if self.enabled && self.client_ids.is_empty() {
+            return Err(NativeLoginConfigError::NoClientIds);
+        }
+        if self.client_ids.len() > MAX_NATIVE_LOGIN_CLIENT_IDS {
+            return Err(NativeLoginConfigError::TooManyClientIds(
+                self.client_ids.len(),
+            ));
+        }
+        if self.client_ids.iter().any(|c| c.trim().is_empty()) {
+            return Err(NativeLoginConfigError::BlankClientId);
+        }
+        if let Some(long) = self
+            .client_ids
+            .iter()
+            .find(|c| c.len() > MAX_NATIVE_LOGIN_CLIENT_ID_LEN)
+        {
+            return Err(NativeLoginConfigError::ClientIdTooLong(long.len()));
+        }
+        // Refused rather than silently collapsed: a duplicate is usually a
+        // paste of the wrong value over the one that was meant, and dropping
+        // it would hide that the intended ID is missing.
+        for (i, id) in self.client_ids.iter().enumerate() {
+            if self.client_ids[..i].contains(id) {
+                return Err(NativeLoginConfigError::DuplicateClientId(id.clone()));
+            }
+        }
+        if self.max_token_age_secs < 1 || self.max_token_age_secs > MAX_TOKEN_AGE_CEILING_SECS {
+            return Err(NativeLoginConfigError::TokenAgeOutOfRange(
+                self.max_token_age_secs,
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`Self::validate`], plus the protocol rule: only an
+    /// `OidcConnect` provider may **enable** native sign-in.
+    ///
+    /// A SAML provider has no ID token, issuer or JWKS; the OAuth2 variant
+    /// (GitHub, Facebook's default) has no ID token either. An enabled block
+    /// on one of them would be a claim in the admin UI that app sign-ins are
+    /// accepted when nothing could verify them. A *disabled* block is allowed
+    /// on any protocol, as X4's is.
+    pub fn validate_for_protocol(
+        &self,
+        protocol: FederationProtocol,
+    ) -> Result<(), NativeLoginConfigError> {
+        self.validate()?;
+        if self.enabled && protocol != FederationProtocol::OidcConnect {
+            return Err(NativeLoginConfigError::UnsupportedProtocol(protocol));
+        }
+        Ok(())
+    }
+
+    /// Whether `aud` (already flattened to a list) names a listed client ID.
+    ///
+    /// Exact string equality, as `TokenExchangeTrust::audience_accepted`: no
+    /// case folding, no trimming, no prefix match.
+    pub fn audience_accepted(&self, token_audiences: &[String]) -> bool {
+        token_audiences
+            .iter()
+            .any(|a| self.client_ids.iter().any(|c| c == a))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FederationConfig {
     pub id: Uuid,
@@ -740,6 +944,15 @@ pub struct FederationConfig {
     /// today's behaviour.
     #[serde(default)]
     pub token_exchange: TokenExchangeTrust,
+    /// Native sign-in trust (G-A): which app-issued ID tokens of this
+    /// provider are accepted as a sign-in.
+    ///
+    /// Meaningful only for `OidcConnect` rows; enabling it on any other
+    /// protocol is refused at write. Absent in the datastore for every row
+    /// written before schema v111, which reads back as
+    /// `NativeLoginTrust::default()` — `enabled: false`.
+    #[serde(default)]
+    pub native_login: NativeLoginTrust,
     // ------------------------------------------------------------------
     // Login-provider additions (schema v52) — see
     // `claude_dev/federation-sso-login-design.md`.
@@ -940,6 +1153,7 @@ impl std::fmt::Debug for FederationConfig {
             .field("client_secret_nonce", &"[REDACTED]")
             .field("client_secret_key_version", &"[REDACTED]")
             .field("token_exchange", &self.token_exchange)
+            .field("native_login", &self.native_login)
             .field("provider_kind", &self.provider_kind)
             .field("provider_slug", &self.provider_slug)
             .field("allow_tenant_inheritance", &self.allow_tenant_inheritance)
@@ -983,6 +1197,8 @@ pub struct CreateFederationConfig {
     pub allowed_algorithms: Option<Vec<String>>,
     /// X4 trust for exchanging this provider's tokens. Omitted ⇒ disabled.
     pub token_exchange: Option<TokenExchangeTrust>,
+    /// G-A native sign-in trust. Omitted ⇒ disabled.
+    pub native_login: Option<NativeLoginTrust>,
     // --- schema v52 login-provider fields ---
     /// Which provider this is. Omitted ⇒ derived from `protocol`.
     pub provider_kind: Option<ProviderKind>,
@@ -1031,6 +1247,10 @@ pub struct UpdateFederationConfig {
     /// trust configuration is how an operator ends up with an
     /// `accepted_audiences` they did not intend to keep.
     pub token_exchange: Option<TokenExchangeTrust>,
+    /// G-A native sign-in trust. Replaced wholesale when present, for the
+    /// same reason as `token_exchange`: a partial merge is how an operator
+    /// keeps a client ID they believed they had removed.
+    pub native_login: Option<NativeLoginTrust>,
     // --- schema v52 login-provider fields ---
     /// Operator-chosen identifier. `Some(None)` clears it.
     ///
@@ -1125,6 +1345,7 @@ mod tests {
             client_secret_nonce: Some(NONCE.to_string()),
             client_secret_key_version: Some(1),
             token_exchange: TokenExchangeTrust::default(),
+            native_login: NativeLoginTrust::default(),
             provider_kind: ProviderKind::GenericOidc,
             provider_slug: None,
             allow_tenant_inheritance: false,
@@ -1376,6 +1597,7 @@ mod tests {
             client_secret_nonce: None,
             client_secret_key_version: None,
             token_exchange: TokenExchangeTrust::default(),
+            native_login: NativeLoginTrust::default(),
             provider_kind: kind,
             provider_slug: slug.map(str::to_string),
             allow_tenant_inheritance: false,
@@ -1880,5 +2102,346 @@ mod tests {
     fn subject_mapping_wire_names_are_stable() {
         assert_eq!(SubjectMapping::LinkedOnly.as_str(), "linked_only");
         assert_eq!(SubjectMapping::JitProvision.as_str(), "jit_provision");
+    }
+
+    // -----------------------------------------------------------------------
+    // G-A — NativeLoginTrust
+    //
+    // Mirrors the TokenExchangeTrust tests above: the default is off and
+    // valid, every refusal is asserted by variant AND by the field its message
+    // names, and the protocol rule is pinned for every kind/protocol pairing
+    // the provider model admits.
+    // -----------------------------------------------------------------------
+
+    fn a_valid_native_login() -> NativeLoginTrust {
+        NativeLoginTrust {
+            enabled: true,
+            client_ids: vec!["com.example.app".to_string()],
+            max_token_age_secs: DEFAULT_MAX_TOKEN_AGE_SECS,
+        }
+    }
+
+    /// The headline default: native sign-in is off, and a provider nobody
+    /// touched accepts no app-issued ID token.
+    #[test]
+    fn the_default_native_login_block_is_disabled_and_trusts_nothing() {
+        let d = NativeLoginTrust::default();
+        assert!(!d.enabled);
+        assert!(d.client_ids.is_empty());
+        assert_eq!(d.max_token_age_secs, 300);
+        assert_eq!(d.max_token_age_secs, DEFAULT_MAX_TOKEN_AGE_SECS);
+        assert!(d.validate().is_ok(), "the default must be a valid config");
+        assert!(!d.audience_accepted(&["com.example.app".to_string()]));
+    }
+
+    #[test]
+    fn a_well_formed_native_login_block_validates() {
+        a_valid_native_login()
+            .validate()
+            .expect("the baseline the other cases mutate must itself be valid");
+    }
+
+    /// There is no accept-all client ID, so enabling without one is refused.
+    #[test]
+    fn enabling_native_login_without_a_client_id_is_refused() {
+        let t = NativeLoginTrust {
+            enabled: true,
+            ..NativeLoginTrust::default()
+        };
+        assert_eq!(t.validate(), Err(NativeLoginConfigError::NoClientIds));
+    }
+
+    #[test]
+    fn every_native_login_rejection_names_the_field_the_operator_has_to_fix() {
+        let too_many = (0..=MAX_NATIVE_LOGIN_CLIENT_IDS)
+            .map(|i| format!("com.example.app{i}"))
+            .collect::<Vec<_>>();
+        let too_long = "a".repeat(MAX_NATIVE_LOGIN_CLIENT_ID_LEN + 1);
+
+        let cases: Vec<(NativeLoginConfigError, NativeLoginTrust)> = vec![
+            (
+                NativeLoginConfigError::NoClientIds,
+                NativeLoginTrust {
+                    client_ids: Vec::new(),
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::TooManyClientIds(too_many.len()),
+                NativeLoginTrust {
+                    client_ids: too_many,
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::BlankClientId,
+                NativeLoginTrust {
+                    client_ids: vec!["com.example.app".to_string(), "  ".to_string()],
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::BlankClientId,
+                NativeLoginTrust {
+                    client_ids: vec![String::new()],
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::ClientIdTooLong(too_long.len()),
+                NativeLoginTrust {
+                    client_ids: vec![too_long],
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::DuplicateClientId("com.example.app".to_string()),
+                NativeLoginTrust {
+                    client_ids: vec![
+                        "com.example.app".to_string(),
+                        "web-client".to_string(),
+                        "com.example.app".to_string(),
+                    ],
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::TokenAgeOutOfRange(0),
+                NativeLoginTrust {
+                    max_token_age_secs: 0,
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::TokenAgeOutOfRange(-1),
+                NativeLoginTrust {
+                    max_token_age_secs: -1,
+                    ..a_valid_native_login()
+                },
+            ),
+            (
+                NativeLoginConfigError::TokenAgeOutOfRange(MAX_TOKEN_AGE_CEILING_SECS + 1),
+                NativeLoginTrust {
+                    max_token_age_secs: MAX_TOKEN_AGE_CEILING_SECS + 1,
+                    ..a_valid_native_login()
+                },
+            ),
+        ];
+
+        for (expected, trust) in cases {
+            let got = trust
+                .validate()
+                .expect_err("this configuration cannot be enforced safely");
+            assert_eq!(got, expected);
+            let message = got.to_string();
+            assert!(
+                message.starts_with("native_login."),
+                "a rejection must name its config path; got: {message}"
+            );
+        }
+
+        // The protocol refusals name their field too.
+        for protocol in [FederationProtocol::Saml, FederationProtocol::OAuth2] {
+            let message = NativeLoginConfigError::UnsupportedProtocol(protocol).to_string();
+            assert!(
+                message.starts_with("native_login.enabled"),
+                "got: {message}"
+            );
+            assert!(message.contains(protocol.as_str()), "got: {message}");
+        }
+    }
+
+    #[test]
+    fn native_login_token_age_is_bounded_at_both_ends() {
+        for good in [1, DEFAULT_MAX_TOKEN_AGE_SECS, MAX_TOKEN_AGE_CEILING_SECS] {
+            let t = NativeLoginTrust {
+                max_token_age_secs: good,
+                ..a_valid_native_login()
+            };
+            assert!(t.validate().is_ok(), "{good} should be accepted");
+        }
+    }
+
+    #[test]
+    fn native_login_client_id_bounds_are_inclusive() {
+        let at_count = (0..MAX_NATIVE_LOGIN_CLIENT_IDS)
+            .map(|i| format!("com.example.app{i}"))
+            .collect::<Vec<_>>();
+        assert!(
+            NativeLoginTrust {
+                client_ids: at_count,
+                ..a_valid_native_login()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            NativeLoginTrust {
+                client_ids: vec!["a".repeat(MAX_NATIVE_LOGIN_CLIENT_ID_LEN)],
+                ..a_valid_native_login()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_bound_a_native_login_rejection_quotes_is_the_bound_that_was_applied() {
+        let over = MAX_NATIVE_LOGIN_CLIENT_IDS + 1;
+        let message = NativeLoginConfigError::TooManyClientIds(over).to_string();
+        assert!(message.contains(&over.to_string()));
+        assert!(message.contains(&MAX_NATIVE_LOGIN_CLIENT_IDS.to_string()));
+
+        let message = NativeLoginConfigError::ClientIdTooLong(9_999).to_string();
+        assert!(message.contains("9999"));
+        assert!(message.contains(&MAX_NATIVE_LOGIN_CLIENT_ID_LEN.to_string()));
+
+        let message = NativeLoginConfigError::TokenAgeOutOfRange(99_999).to_string();
+        assert!(message.contains("99999"));
+        assert!(message.contains(&MAX_TOKEN_AGE_CEILING_SECS.to_string()));
+    }
+
+    /// The precedent's asymmetry: a disabled block needs no client IDs (that
+    /// is the default), but whatever it does carry is still validated.
+    #[test]
+    fn a_disabled_native_login_block_is_still_validated_except_for_the_non_empty_rule() {
+        NativeLoginTrust {
+            enabled: false,
+            client_ids: Vec::new(),
+            ..a_valid_native_login()
+        }
+        .validate()
+        .expect("an unused block need not name a client ID");
+
+        assert_eq!(
+            NativeLoginTrust {
+                enabled: false,
+                client_ids: vec![" ".to_string()],
+                ..a_valid_native_login()
+            }
+            .validate(),
+            Err(NativeLoginConfigError::BlankClientId)
+        );
+        assert_eq!(
+            NativeLoginTrust {
+                enabled: false,
+                max_token_age_secs: 0,
+                ..a_valid_native_login()
+            }
+            .validate(),
+            Err(NativeLoginConfigError::TokenAgeOutOfRange(0))
+        );
+    }
+
+    /// Only an OIDC-protocol provider may enable native sign-in — checked for
+    /// every kind against every protocol the kind admits, so Facebook's two
+    /// variants are both pinned: Limited Login (OIDC) may, the default OAuth2
+    /// variant may not.
+    #[test]
+    fn native_login_may_be_enabled_only_on_an_oidc_protocol_provider() {
+        for kind in ProviderKind::ALL {
+            for protocol in [
+                FederationProtocol::OidcConnect,
+                FederationProtocol::Saml,
+                FederationProtocol::OAuth2,
+            ] {
+                if validate_protocol_for_kind(*kind, protocol).is_err() {
+                    continue;
+                }
+                let got = a_valid_native_login().validate_for_protocol(protocol);
+                if protocol == FederationProtocol::OidcConnect {
+                    assert_eq!(got, Ok(()), "{kind:?}/{protocol:?} must admit it");
+                } else {
+                    assert_eq!(
+                        got,
+                        Err(NativeLoginConfigError::UnsupportedProtocol(protocol)),
+                        "{kind:?}/{protocol:?} must refuse it"
+                    );
+                }
+            }
+        }
+        // Named explicitly, because these are the cases the rule exists for.
+        assert!(
+            a_valid_native_login()
+                .validate_for_protocol(ProviderKind::Github.protocol())
+                .is_err()
+        );
+        assert!(
+            a_valid_native_login()
+                .validate_for_protocol(ProviderKind::Facebook.protocol())
+                .is_err(),
+            "Facebook's default is the OAuth2 variant"
+        );
+        for kind in [
+            ProviderKind::Google,
+            ProviderKind::Apple,
+            ProviderKind::Microsoft,
+        ] {
+            assert!(
+                a_valid_native_login()
+                    .validate_for_protocol(kind.protocol())
+                    .is_ok()
+            );
+        }
+    }
+
+    /// A disabled block is allowed on any protocol, as X4's is — refusing it
+    /// would make the default invalid on every SAML and OAuth2 row.
+    #[test]
+    fn a_disabled_native_login_block_is_allowed_on_any_protocol() {
+        for protocol in [
+            FederationProtocol::OidcConnect,
+            FederationProtocol::Saml,
+            FederationProtocol::OAuth2,
+        ] {
+            assert!(
+                NativeLoginTrust::default()
+                    .validate_for_protocol(protocol)
+                    .is_ok()
+            );
+        }
+        // …but the protocol rule does not short-circuit the block's own rules.
+        assert_eq!(
+            NativeLoginTrust {
+                enabled: true,
+                client_ids: Vec::new(),
+                ..NativeLoginTrust::default()
+            }
+            .validate_for_protocol(FederationProtocol::OidcConnect),
+            Err(NativeLoginConfigError::NoClientIds)
+        );
+    }
+
+    #[test]
+    fn native_login_audience_matching_is_exact() {
+        let t = NativeLoginTrust {
+            client_ids: vec![
+                "com.example.app".to_string(),
+                "123-abc.apps.googleusercontent.com".to_string(),
+            ],
+            ..a_valid_native_login()
+        };
+        assert!(t.audience_accepted(&["com.example.app".to_string()]));
+        assert!(t.audience_accepted(&[
+            "someone-else".to_string(),
+            "123-abc.apps.googleusercontent.com".to_string(),
+        ]));
+        assert!(!t.audience_accepted(&["com.example.App".to_string()]));
+        assert!(!t.audience_accepted(&["com.example.app ".to_string()]));
+        assert!(!t.audience_accepted(&["com.example".to_string()]));
+        assert!(!t.audience_accepted(&[]));
+    }
+
+    /// A config deserialized from a payload that predates the field reads as
+    /// disabled — the serde-level counterpart of the absent-column rule.
+    #[test]
+    fn a_config_payload_without_native_login_reads_as_disabled() {
+        let mut v = serde_json::to_value(config(ProviderKind::Google, None)).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("native_login");
+        // Never serialized, always required on the way in.
+        obj.insert("client_secret".into(), serde_json::json!(""));
+        let c: FederationConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(c.native_login, NativeLoginTrust::default());
     }
 }

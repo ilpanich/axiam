@@ -1578,6 +1578,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,

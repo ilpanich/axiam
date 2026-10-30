@@ -620,6 +620,7 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            native_login: None,
             token_exchange: Some(TokenExchangeTrust {
                 enabled: true,
                 accepted_audiences: vec![AXIAM_AUDIENCE.to_string()],

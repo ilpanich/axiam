@@ -583,6 +583,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "refresh_reuse_response",
         sql: SCHEMA_V110,
     },
+    Migration {
+        version: 111,
+        name: "federation_native_login_trust",
+        sql: SCHEMA_V111,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5671,6 +5676,29 @@ DEFINE INDEX IF NOT EXISTS idx_refresh_token_session ON TABLE oauth2_refresh_tok
     COLUMNS tenant_id, session_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v111 — native sign-in trust on federation providers (G-A, #816)
+// -----------------------------------------------------------------------
+//
+// The `native_login` block (`NativeLoginTrust`): which app-issued ID tokens of
+// an OIDC provider are accepted as a sign-in. Three columns on the existing
+// `federation_config` table, every one `option<…>` with **no `DEFAULT` and no
+// backfill**: a row written before this migration reads `NONE` in each, which
+// the repository resolves to `NativeLoginTrust::default()` — `enabled: false`,
+// no client IDs, a 300 s age bound. Turning native sign-in on is therefore an
+// explicit act on each provider, never a consequence of upgrading.
+//
+// No index: the grant resolves its provider by id or slug within the tenant,
+// both already indexed, and reads the block from that one row.
+const SCHEMA_V111: &str = "\
+DEFINE FIELD IF NOT EXISTS native_login_enabled ON TABLE federation_config
+    TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS native_login_client_ids ON TABLE federation_config
+    TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE federation_config
+    TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6040,6 +6068,45 @@ mod tests {
     /// asserted to the model's two spellings, and the per-session index the
     /// revocation selects on; nothing else, and nothing backfilled (an absent
     /// value reads as the default, `revoke_session`).
+    /// G-A (#816) — v111 is the `native_login` block's three optional
+    /// columns on `federation_config`, and nothing else: no index, no
+    /// `DEFAULT`, nothing backfilled (an absent value reads as the disabled
+    /// default).
+    #[test]
+    fn v111_adds_only_the_native_login_columns() {
+        let statements: Vec<&str> = SCHEMA_V111
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS native_login_enabled ON TABLE federation_config\n    \
+                 TYPE option<bool>",
+                "DEFINE FIELD IF NOT EXISTS native_login_client_ids ON TABLE \
+                 federation_config\n    TYPE option<array<string>>",
+                "DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE \
+                 federation_config\n    TYPE option<int>",
+            ],
+            "v111 defines the three native_login columns and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V111.contains(forbidden),
+                "v111 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V111));
+    }
+
     #[test]
     fn v110_adds_only_the_refresh_reuse_setting_and_the_session_index() {
         let statements: Vec<&str> = SCHEMA_V110
@@ -7652,10 +7719,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&110),
-            "v110 is the newest migration (G-C, #818 — \
+            Some(&111),
+            "v111 is the newest migration (G-A, #816 — `federation_config.native_login_enabled`, \
+             `native_login_client_ids` and `native_login_max_token_age_secs`, the native \
+             sign-in trust block, absent reading as disabled); v110 was G-C, #818 — \
              `security_settings.oauth2_refresh_reuse_response` and the \
-             `idx_refresh_token_session` index a refused replay's revocation selects on); v109 \
+             `idx_refresh_token_session` index a refused replay's revocation selects on; v109 \
              was #676 — the `rate_limit_bucket.updated_at` index the \
              cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`; v108 was \
              #689 — `user.erasure_audit_pending` and `tenant_purge_pending`, the markers an \

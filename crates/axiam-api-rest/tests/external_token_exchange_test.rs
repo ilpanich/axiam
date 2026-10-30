@@ -346,6 +346,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            native_login: None,
             token_exchange: Some(TokenExchangeTrust {
                 enabled: spec.enabled,
                 accepted_audiences: spec.accepted_audiences,

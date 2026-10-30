@@ -2376,6 +2376,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             client_secret_ciphertext: None,
             client_secret_nonce: None,
             client_secret_key_version: None,
+            native_login: Default::default(),
             token_exchange: Default::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

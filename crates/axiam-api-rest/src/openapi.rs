@@ -602,6 +602,9 @@ use crate::handlers;
         // X4 — external-IdP token-exchange trust.
         handlers::federation::TokenExchangeTrustRequest,
         handlers::federation::TokenExchangeTrustResponse,
+        // G-A — native sign-in trust.
+        handlers::federation::NativeLoginTrustRequest,
+        handlers::federation::NativeLoginTrustResponse,
         handlers::federation::OidcAuthorizeRequest,
         handlers::federation::OidcCallbackRequest,
         handlers::federation::OidcCallbackResponse,

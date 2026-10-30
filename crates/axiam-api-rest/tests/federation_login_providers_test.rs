@@ -2408,3 +2408,576 @@ async fn an_explicit_null_oauth2_endpoint_is_read_and_refused() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// G-A (#816) — the `native_login` trust block on the admin API
+//
+// Assertion messages here are fixed strings: none interpolates a response
+// body, which carries client identifiers.
+// ---------------------------------------------------------------------------
+
+/// A Google provider body, with an optional `native_login` block.
+fn google_body(native_login: Option<Value>) -> Value {
+    let mut body = json!({
+        "provider": "Google",
+        "provider_kind": "google",
+        "protocol": "OidcConnect",
+        "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+        "client_id": "web-client-id",
+        "client_secret": "secret",
+    });
+    if let Some(block) = native_login {
+        body["native_login"] = block;
+    }
+    body
+}
+
+/// The `message` of an error body, for a containment check.
+fn error_message(body: &Value) -> String {
+    body["message"].as_str().unwrap_or_default().to_string()
+}
+
+#[actix_rt::test]
+async fn g_a_native_login_is_disabled_unless_configured() {
+    let f = setup("nl-default").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        google_body(None)
+    );
+    assert_eq!(status, 201, "create without the block must succeed");
+    assert_eq!(created["native_login"]["enabled"], false);
+    assert_eq!(created["native_login"]["client_ids"], json!([]));
+    assert_eq!(created["native_login"]["max_token_age_secs"], 300);
+}
+
+#[actix_rt::test]
+async fn g_a_a_valid_native_login_block_is_accepted_on_create_and_on_update() {
+    let f = setup("nl-valid").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        google_body(Some(json!({
+            "enabled": true,
+            "client_ids": ["com.example.ios", "123-abc.apps.googleusercontent.com"],
+            "max_token_age_secs": 120,
+        })))
+    );
+    assert_eq!(status, 201, "a valid block on an OIDC provider is accepted");
+    assert_eq!(created["native_login"]["enabled"], true);
+    assert_eq!(
+        created["native_login"]["client_ids"],
+        json!(["com.example.ios", "123-abc.apps.googleusercontent.com"])
+    );
+    assert_eq!(created["native_login"]["max_token_age_secs"], 120);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // A block on an update, starting from a provider without one.
+    let (status, plain) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-2",
+        json!({
+            "provider": "Apple",
+            "provider_kind": "apple",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://appleid.apple.com/.well-known/openid-configuration",
+            "client_id": "com.example.web",
+            "client_secret": "secret",
+        })
+    );
+    assert_eq!(status, 201, "create of the Apple provider must succeed");
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-1",
+        plain["id"].as_str().unwrap(),
+        json!({ "native_login": { "enabled": true, "client_ids": ["com.example.ios"] } })
+    );
+    assert_eq!(status, 200, "a valid block on an update is accepted");
+    assert_eq!(body["native_login"]["enabled"], true);
+    assert_eq!(
+        body["native_login"]["client_ids"],
+        json!(["com.example.ios"])
+    );
+    assert_eq!(
+        body["native_login"]["max_token_age_secs"], 300,
+        "an omitted age takes the default"
+    );
+
+    // An update that does not name the block leaves it as it was.
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-2",
+        &id,
+        json!({ "provider": "Google (renamed)" })
+    );
+    assert_eq!(status, 200, "an unrelated update succeeds");
+    assert_eq!(body["native_login"]["enabled"], true);
+    assert_eq!(body["native_login"]["max_token_age_secs"], 120);
+}
+
+/// The block is replaced wholesale: what the update names is the whole block,
+/// and a client ID it leaves out is gone.
+#[actix_rt::test]
+async fn g_a_an_update_replaces_the_native_login_block_wholesale() {
+    let f = setup("nl-wholesale").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        google_body(Some(json!({
+            "enabled": true,
+            "client_ids": ["com.example.old", "com.example.keep"],
+            "max_token_age_secs": 900,
+        })))
+    );
+    assert_eq!(status, 201, "create must succeed");
+    let id = created["id"].as_str().unwrap();
+
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-1",
+        id,
+        json!({ "native_login": { "enabled": true, "client_ids": ["com.example.keep"] } })
+    );
+    assert_eq!(status, 200, "the replacement is accepted");
+    assert_eq!(
+        body["native_login"]["client_ids"],
+        json!(["com.example.keep"]),
+        "a client ID left out of the replacement is removed, not merged back"
+    );
+    assert_eq!(
+        body["native_login"]["max_token_age_secs"], 300,
+        "an omitted member of the replacement takes its default, not the old value"
+    );
+
+    // Turning it off with an empty list is a valid replacement too.
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-2",
+        id,
+        json!({ "native_login": { "enabled": false } })
+    );
+    assert_eq!(status, 200, "a disabled empty block is valid");
+    assert_eq!(body["native_login"]["enabled"], false);
+    assert_eq!(body["native_login"]["client_ids"], json!([]));
+}
+
+#[actix_rt::test]
+async fn g_a_native_login_refusals_on_create_name_the_field() {
+    let f = setup("nl-refusals").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let too_many: Vec<String> = (0..=64).map(|i| format!("com.example.app{i}")).collect();
+    let cases: Vec<(&str, Value, &str)> = vec![
+        (
+            "enabled with no client ids",
+            json!({ "enabled": true, "client_ids": [] }),
+            "native_login.client_ids",
+        ),
+        (
+            "a blank client id",
+            json!({ "enabled": true, "client_ids": ["com.example.app", "  "] }),
+            "native_login.client_ids",
+        ),
+        (
+            "too many client ids",
+            json!({ "enabled": true, "client_ids": too_many }),
+            "native_login.client_ids",
+        ),
+        (
+            "a client id that is too long",
+            json!({ "enabled": true, "client_ids": ["a".repeat(513)] }),
+            "native_login.client_ids",
+        ),
+        (
+            "a repeated client id",
+            json!({ "enabled": true, "client_ids": ["com.example.app", "com.example.app"] }),
+            "native_login.client_ids",
+        ),
+        (
+            "a zero token age",
+            json!({ "enabled": true, "client_ids": ["com.example.app"], "max_token_age_secs": 0 }),
+            "native_login.max_token_age_secs",
+        ),
+        (
+            "a token age above the ceiling",
+            json!({ "enabled": true, "client_ids": ["com.example.app"], "max_token_age_secs": 3601 }),
+            "native_login.max_token_age_secs",
+        ),
+    ];
+    for (i, (case, block, field)) in cases.into_iter().enumerate() {
+        let (status, body) = create_config!(
+            app,
+            auth,
+            f.db,
+            f.org_id,
+            f.tenant_id,
+            &format!("t-admin-{i}"),
+            google_body(Some(block))
+        );
+        assert_eq!(status, 400, "{case} must be refused");
+        assert!(
+            error_message(&body).contains(field),
+            "the refusal of {case} must name {field}"
+        );
+    }
+}
+
+/// Only an OIDC-protocol provider may enable the block: a SAML provider and
+/// the OAuth2 variant (GitHub, and Facebook's default) issue no ID token.
+/// Facebook's OIDC variant (Limited Login) may.
+#[actix_rt::test]
+async fn g_a_native_login_is_refused_on_saml_and_oauth2_providers_at_create() {
+    let f = setup("nl-protocol-create").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let block = json!({ "enabled": true, "client_ids": ["com.example.app"] });
+
+    let saml = json!({
+        "provider": "Test SAML IdP",
+        "protocol": "Saml",
+        "metadata_url": "https://idp.example.com/metadata",
+        "client_id": "https://axiam.example.com/saml/sp",
+        "client_secret": "saml-dummy-secret",
+        "native_login": block,
+    });
+    let github = json!({
+        "provider": "GitHub",
+        "provider_kind": "github",
+        "protocol": "OAuth2",
+        "client_id": "cid",
+        "client_secret": "secret",
+        "authorization_endpoint": "https://github.com/login/oauth/authorize",
+        "token_endpoint": "https://github.com/login/oauth/access_token",
+        "userinfo_endpoint": "https://api.github.com/user",
+        "native_login": block,
+    });
+    let facebook_oauth2 = json!({
+        "provider": "Facebook",
+        "provider_kind": "facebook",
+        "protocol": "OAuth2",
+        "client_id": "cid",
+        "client_secret": "secret",
+        "authorization_endpoint": "https://www.facebook.com/v19.0/dialog/oauth",
+        "token_endpoint": "https://graph.facebook.com/v19.0/oauth/access_token",
+        "userinfo_endpoint": "https://graph.facebook.com/me",
+        "native_login": block,
+    });
+    for (i, (case, body)) in [
+        ("SAML", saml),
+        ("GitHub (OAuth2)", github),
+        ("Facebook (OAuth2)", facebook_oauth2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, resp) = create_config!(
+            app,
+            auth,
+            f.db,
+            f.org_id,
+            f.tenant_id,
+            &format!("t-admin-{i}"),
+            body
+        );
+        assert_eq!(status, 400, "native_login on {case} must be refused");
+        assert!(
+            error_message(&resp).contains("native_login.enabled"),
+            "the refusal on {case} must name native_login.enabled"
+        );
+    }
+
+    // A *disabled* block is allowed on any protocol, as X4's is.
+    let (status, _) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-disabled",
+        json!({
+            "provider": "Test SAML IdP 2",
+            "protocol": "Saml",
+            "metadata_url": "https://idp2.example.com/metadata",
+            "client_id": "https://axiam.example.com/saml/sp2",
+            "client_secret": "saml-dummy-secret",
+            "native_login": { "enabled": false },
+        })
+    );
+    assert_eq!(
+        status, 201,
+        "a disabled block is allowed on a SAML provider"
+    );
+
+    // Facebook's OIDC variant is an OIDC provider and may enable it.
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-fb-oidc",
+        json!({
+            "provider": "Facebook",
+            "provider_kind": "facebook",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://www.facebook.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "native_login": block,
+        })
+    );
+    assert_eq!(status, 201, "Facebook Limited Login (OIDC) may enable it");
+    assert_eq!(created["native_login"]["enabled"], true);
+}
+
+/// The same gate on the update path — the T-241 lesson: a rule that runs only
+/// on create is a rule with an update around it.
+#[actix_rt::test]
+async fn g_a_native_login_refusals_on_update() {
+    let f = setup("nl-protocol-update").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let block = json!({ "enabled": true, "client_ids": ["com.example.app"] });
+
+    let (status, saml) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-saml",
+        json!({
+            "provider": "Test SAML IdP",
+            "protocol": "Saml",
+            "metadata_url": "https://idp.example.com/metadata",
+            "client_id": "https://axiam.example.com/saml/sp",
+            "client_secret": "saml-dummy-secret",
+        })
+    );
+    assert_eq!(status, 201, "SAML create must succeed");
+    let (status, github) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-github",
+        json!({
+            "provider": "GitHub",
+            "provider_kind": "github",
+            "protocol": "OAuth2",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "authorization_endpoint": "https://github.com/login/oauth/authorize",
+            "token_endpoint": "https://github.com/login/oauth/access_token",
+            "userinfo_endpoint": "https://api.github.com/user",
+        })
+    );
+    assert_eq!(status, 201, "GitHub create must succeed");
+    let (status, google) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin-google",
+        google_body(None)
+    );
+    assert_eq!(status, 201, "Google create must succeed");
+
+    for (i, (case, id, patch, field)) in [
+        ("SAML", &saml, block.clone(), "native_login.enabled"),
+        (
+            "GitHub (OAuth2)",
+            &github,
+            block.clone(),
+            "native_login.enabled",
+        ),
+        (
+            "empty client_ids while enabled",
+            &google,
+            json!({ "enabled": true, "client_ids": [] }),
+            "native_login.client_ids",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = update_config!(
+            app,
+            auth,
+            f.db,
+            f.org_id,
+            f.tenant_id,
+            &format!("t-editor-{i}"),
+            id["id"].as_str().unwrap(),
+            json!({ "native_login": patch })
+        );
+        assert_eq!(status, 400, "the update with {case} must be refused");
+        assert!(
+            error_message(&body).contains(field),
+            "the refusal of {case} must name {field}"
+        );
+    }
+
+    // Nothing was written by a refused update.
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-check",
+        google["id"].as_str().unwrap(),
+        json!({ "enabled": true })
+    );
+    assert_eq!(status, 200, "a follow-up update succeeds");
+    assert_eq!(body["native_login"]["enabled"], false);
+}
+
+/// The unauthenticated providers listing never carries the block or anything
+/// in it.
+#[actix_rt::test]
+async fn g_a_the_public_providers_listing_never_exposes_native_login() {
+    let f = setup("nl-public").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let (status, _) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        google_body(Some(json!({
+            "enabled": true,
+            "client_ids": ["com.example.native-app-id-that-must-not-leak"],
+            "max_token_age_secs": 1234,
+        })))
+    );
+    assert_eq!(status, 201, "create must succeed");
+
+    let body = providers_for(&app, &f.org_slug, Some(&f.tenant_slug)).await;
+    assert_eq!(body["providers"].as_array().unwrap().len(), 1);
+    let raw = serde_json::to_string(&body).unwrap();
+    for forbidden in [
+        "native_login",
+        "client_ids",
+        "native-app-id-that-must-not-leak",
+        "max_token_age_secs",
+        "1234",
+    ] {
+        assert!(
+            !raw.contains(forbidden),
+            "the unauthenticated providers response must not carry a native_login member"
+        );
+    }
+}
+
+/// Tenant isolation, as the precedent tests it: another tenant's
+/// administrator can neither read the block nor replace it.
+#[actix_rt::test]
+async fn g_a_another_tenant_cannot_read_or_replace_the_native_login_block() {
+    let f = setup("nl-isolation").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        google_body(Some(json!({
+            "enabled": true,
+            "client_ids": ["com.example.app"],
+        })))
+    );
+    assert_eq!(status, 201, "create must succeed");
+    let id = created["id"].as_str().unwrap();
+
+    // An administrator of the organization-scope tenant — a different tenant
+    // of the same organization.
+    let (status, _) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.org_tenant_id,
+        "o-admin",
+        id,
+        json!({ "native_login": { "enabled": true, "client_ids": ["com.attacker.app"] } })
+    );
+    assert_eq!(status, 404, "another tenant's config is not found");
+
+    let admin = admin_in(&f.db, f.org_tenant_id, "o-reader").await;
+    let token = mint_token(&auth, admin, f.org_tenant_id, f.org_id);
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 404, "another tenant cannot read it");
+
+    // The owner still sees exactly what it wrote.
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor",
+        id,
+        json!({ "enabled": true })
+    );
+    assert_eq!(status, 200, "the owner can still update it");
+    assert_eq!(
+        body["native_login"]["client_ids"],
+        json!(["com.example.app"])
+    );
+}

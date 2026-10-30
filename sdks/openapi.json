@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.3",
-    "x-axiam-spec-digest": "sha256:428db019bba0ac5dc5b85045f51d19de917560008dbdfc7f0ef1330e0e15248e"
+    "x-axiam-spec-digest": "sha256:e273628747c66ea102db7d5b3186419d39024cf07481c3fdc90568fa99e52ef0"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2989,6 +2989,7 @@
                           "attribute_map",
                           "enabled",
                           "token_exchange",
+                          "native_login",
                           "provider_kind",
                           "allow_tenant_inheritance",
                           "scopes",
@@ -3095,6 +3096,10 @@
                           "mints_client_secret": {
                             "type": "boolean",
                             "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+                          },
+                          "native_login": {
+                            "$ref": "#/components/schemas/NativeLoginTrustResponse",
+                            "description": "Native sign-in trust (G-A)."
                           },
                           "pkce_required": {
                             "type": "boolean",
@@ -18394,6 +18399,17 @@
             ],
             "description": "OIDC discovery URL or SAML metadata URL."
           },
+          "native_login": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NativeLoginTrustRequest",
+                "description": "Native sign-in trust (G-A). Omitted means disabled. Refused when\nenabled on a `Saml` or `OAuth2` provider."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "protocol": {
             "type": "string",
             "description": "Federation protocol: \"OidcConnect\" or \"Saml\"."
@@ -20045,6 +20061,7 @@
           "attribute_map",
           "enabled",
           "token_exchange",
+          "native_login",
           "provider_kind",
           "allow_tenant_inheritance",
           "scopes",
@@ -20151,6 +20168,10 @@
           "mints_client_secret": {
             "type": "boolean",
             "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+          },
+          "native_login": {
+            "$ref": "#/components/schemas/NativeLoginTrustResponse",
+            "description": "Native sign-in trust (G-A)."
           },
           "pkce_required": {
             "type": "boolean",
@@ -21493,6 +21514,58 @@
           "persistent",
           "email_address"
         ]
+      },
+      "NativeLoginTrustRequest": {
+        "type": "object",
+        "description": "Native sign-in trust (G-A): which ID tokens this provider issued to an\napp are accepted as a sign-in at the token endpoint.\n\nMirrors the domain block on the wire, as `TokenExchangeTrustRequest` does,\nso an omitted member takes its documented default rather than failing\ndeserialization. Only an `OidcConnect` provider may enable it.",
+        "properties": {
+          "client_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audiences a presented ID token may carry: the iOS bundle ID,\nAndroid client ID or Apple app ID the native SDK was configured with.\nRequired (non-empty) when `enabled`; at most 64 entries of at most 512\ncharacters, none blank, none repeated. The web `client_id` is accepted\nonly when it is listed here."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Off unless explicitly enabled. Configuring a provider for browser\nlogin is not agreement to accept its ID tokens from apps."
+          },
+          "max_token_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bound on `now - iat` for a presented ID token, 1 to 3600 seconds.\nOmitted: 300."
+          }
+        }
+      },
+      "NativeLoginTrustResponse": {
+        "type": "object",
+        "description": "Native sign-in trust as returned to an administrator. Nothing here is\nsecret; it is never part of the unauthenticated providers listing.",
+        "required": [
+          "enabled",
+          "client_ids",
+          "max_token_age_secs"
+        ],
+        "properties": {
+          "client_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The accepted ID-token audiences."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether ID tokens from apps are accepted as a sign-in."
+          },
+          "max_token_age_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bound on `now - iat`, in seconds."
+          }
+        }
       },
       "NetworkConflictReason": {
         "type": "string",
@@ -28880,6 +28953,17 @@
               "null"
             ],
             "description": "OIDC discovery or SAML metadata URL. Explicit `null` clears it;\nomitted leaves it."
+          },
+          "native_login": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NativeLoginTrustRequest",
+                "description": "Native sign-in trust (G-A). Replaced **wholesale** when present, as\n`token_exchange` is; omitted leaves it. Refused when enabled on a\n`Saml` or `OAuth2` provider."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "provider": {
             "type": [

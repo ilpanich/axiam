@@ -5,8 +5,8 @@
 
 use axiam_core::models::email_verification::CreateEmailVerificationToken;
 use axiam_core::models::federation::{
-    CreateFederationConfig, CreateFederationLink, FederationProtocol, SubjectMapping,
-    TokenExchangeTrust, UpdateFederationConfig,
+    CreateFederationConfig, CreateFederationLink, FederationProtocol, NativeLoginTrust,
+    SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::{CreateOAuth2Client, UpdateOAuth2Client};
@@ -251,6 +251,7 @@ async fn federation_config_crud_and_backfill() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,
@@ -331,6 +332,7 @@ async fn a_provider_without_a_trust_block_reads_back_disabled() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,
@@ -396,6 +398,7 @@ async fn a_trust_block_round_trips_through_the_datastore() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            native_login: None,
             token_exchange: Some(trust.clone()),
             provider_kind: None,
             provider_slug: None,
@@ -477,6 +480,7 @@ async fn a_saml_provider_is_never_a_token_exchange_candidate() {
         attribute_map: None,
         idp_signing_cert_pem: None,
         allowed_algorithms: None,
+        native_login: None,
         token_exchange: Some(TokenExchangeTrust {
             enabled: true,
             accepted_audiences: vec!["https://api.example.com".into()],
@@ -527,6 +531,7 @@ async fn a_globally_disabled_provider_is_not_a_candidate() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: Some(TokenExchangeTrust {
                 enabled: true,
                 accepted_audiences: vec!["https://api.example.com".into()],
@@ -576,6 +581,268 @@ async fn a_globally_disabled_provider_is_not_a_candidate() {
     );
 }
 
+/// An OIDC provider config with an optional native sign-in block; every other
+/// field at its omitted value.
+fn oidc_config_with_native_login(
+    tenant_id: Uuid,
+    provider: &str,
+    native_login: Option<NativeLoginTrust>,
+) -> CreateFederationConfig {
+    CreateFederationConfig {
+        tenant_id,
+        provider: provider.into(),
+        protocol: FederationProtocol::OidcConnect,
+        metadata_url: Some("https://idp.example/.well-known/openid-configuration".into()),
+        client_id: "web-client".into(),
+        client_secret: String::new(),
+        attribute_map: None,
+        idp_signing_cert_pem: None,
+        allowed_algorithms: None,
+        native_login,
+        token_exchange: None,
+        provider_kind: None,
+        provider_slug: None,
+        allow_tenant_inheritance: None,
+        scopes: None,
+        authorization_endpoint: None,
+        token_endpoint: None,
+        userinfo_endpoint: None,
+        allowed_issuer_tenants: None,
+        apple_team_id: None,
+        apple_key_id: None,
+        require_pkce: None,
+        button_icon: None,
+        allow_sha1_signatures: None,
+        idp_metadata_signing_cert_pem: None,
+    }
+}
+
+/// G-A (#816): every field of the native sign-in block survives a write and
+/// a read, through the full projection (`get_by_id`) and both narrowed ones
+/// (`list`, `list_all`) — each names the columns separately, so each is a
+/// place one could be forgotten.
+#[tokio::test]
+async fn a_native_login_block_round_trips_through_the_datastore() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let block = NativeLoginTrust {
+        enabled: true,
+        client_ids: vec![
+            "com.example.app".to_string(),
+            "123-abc.apps.googleusercontent.com".to_string(),
+        ],
+        max_token_age_secs: 120,
+    };
+    let cfg = repo
+        .create(oidc_config_with_native_login(
+            tenant_id,
+            "google",
+            Some(block.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cfg.native_login, block, "create returns what it stored");
+    assert_eq!(
+        repo.get_by_id(tenant_id, cfg.id)
+            .await
+            .unwrap()
+            .native_login,
+        block
+    );
+    let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    assert_eq!(page.items[0].native_login, block);
+    let all = repo.list_all(tenant_id).await.unwrap();
+    assert_eq!(all[0].native_login, block);
+    // Independent of the X4 block: setting one leaves the other at its default.
+    assert_eq!(all[0].token_exchange, TokenExchangeTrust::default());
+}
+
+/// An omitted block is stored as the disabled default, and an update that
+/// does not name the block leaves it as it was.
+#[tokio::test]
+async fn an_omitted_native_login_block_is_disabled_and_an_unrelated_update_keeps_it() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let plain = repo
+        .create(oidc_config_with_native_login(tenant_id, "plain", None))
+        .await
+        .unwrap();
+    assert_eq!(plain.native_login, NativeLoginTrust::default());
+
+    let block = NativeLoginTrust {
+        enabled: true,
+        client_ids: vec!["com.example.app".to_string()],
+        max_token_age_secs: 300,
+    };
+    let cfg = repo
+        .create(oidc_config_with_native_login(
+            tenant_id,
+            "with-block",
+            Some(block.clone()),
+        ))
+        .await
+        .unwrap();
+    let after = repo
+        .update(
+            tenant_id,
+            cfg.id,
+            UpdateFederationConfig {
+                provider: Some("renamed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.provider, "renamed");
+    assert_eq!(after.native_login, block);
+}
+
+/// The update replaces the block wholesale: a client ID absent from the new
+/// block is gone, not merged back in.
+#[tokio::test]
+async fn a_native_login_update_replaces_the_block_wholesale() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db);
+
+    let cfg = repo
+        .create(oidc_config_with_native_login(
+            tenant_id,
+            "google",
+            Some(NativeLoginTrust {
+                enabled: true,
+                client_ids: vec![
+                    "com.example.old".to_string(),
+                    "com.example.keep".to_string(),
+                ],
+                max_token_age_secs: 600,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let replacement = NativeLoginTrust {
+        enabled: false,
+        client_ids: vec!["com.example.keep".to_string()],
+        max_token_age_secs: 300,
+    };
+    let after = repo
+        .update(
+            tenant_id,
+            cfg.id,
+            UpdateFederationConfig {
+                native_login: Some(replacement.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.native_login, replacement);
+    assert_eq!(
+        repo.get_by_id(tenant_id, cfg.id)
+            .await
+            .unwrap()
+            .native_login,
+        replacement
+    );
+}
+
+/// A row written before schema v111 carries none of the three columns. It
+/// must read back as the disabled default — through every projection — and
+/// never as a block that accepts anything.
+#[tokio::test]
+async fn a_pre_v111_row_reads_native_login_as_disabled() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealFederationConfigRepository::new(db.clone());
+
+    let cfg = repo
+        .create(oidc_config_with_native_login(
+            tenant_id,
+            "legacy",
+            Some(NativeLoginTrust {
+                enabled: true,
+                client_ids: vec!["com.example.app".to_string()],
+                max_token_age_secs: 60,
+            }),
+        ))
+        .await
+        .unwrap();
+    // Strip the columns back to the state a pre-v111 writer left them in.
+    db.query(
+        "UPDATE type::record('federation_config', $id) SET \
+         native_login_enabled = NONE, \
+         native_login_client_ids = NONE, \
+         native_login_max_token_age_secs = NONE",
+    )
+    .bind(("id", cfg.id.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let read = repo.get_by_id(tenant_id, cfg.id).await.unwrap();
+    assert_eq!(read.native_login, NativeLoginTrust::default());
+    assert!(!read.native_login.enabled);
+    let page = repo.list(tenant_id, Pagination::default()).await.unwrap();
+    assert_eq!(page.items[0].native_login, NativeLoginTrust::default());
+    let all = repo.list_all(tenant_id).await.unwrap();
+    assert_eq!(all[0].native_login, NativeLoginTrust::default());
+}
+
+/// Tenant isolation: another tenant can neither read nor overwrite the block.
+#[tokio::test]
+async fn a_native_login_block_is_invisible_and_immutable_from_another_tenant() {
+    let (db, org_id, tenant_id) = setup().await;
+    let other = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Other".into(),
+            slug: "other".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let repo = SurrealFederationConfigRepository::new(db);
+    let block = NativeLoginTrust {
+        enabled: true,
+        client_ids: vec!["com.example.app".to_string()],
+        max_token_age_secs: 300,
+    };
+    let cfg = repo
+        .create(oidc_config_with_native_login(
+            tenant_id,
+            "google",
+            Some(block.clone()),
+        ))
+        .await
+        .unwrap();
+
+    assert!(repo.get_by_id(other.id, cfg.id).await.is_err());
+    assert!(
+        repo.update(
+            other.id,
+            cfg.id,
+            UpdateFederationConfig {
+                native_login: Some(NativeLoginTrust::default()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(repo.list_all(other.id).await.unwrap().is_empty());
+    assert_eq!(
+        repo.get_by_id(tenant_id, cfg.id)
+            .await
+            .unwrap()
+            .native_login,
+        block,
+        "the owning tenant's block is untouched"
+    );
+}
+
 #[tokio::test]
 async fn federation_config_not_found_branches() {
     let (db, _org, tenant_id) = setup().await;
@@ -613,6 +880,7 @@ async fn federation_config_list_excludes_secret_columns() {
         attribute_map: None,
         idp_signing_cert_pem: None,
         allowed_algorithms: None,
+        native_login: None,
         token_exchange: None,
         provider_kind: None,
         provider_slug: None,
@@ -657,6 +925,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,
@@ -687,6 +956,7 @@ async fn federation_config_legacy_plaintext_excludes_encrypted_rows() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,

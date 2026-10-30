@@ -20,7 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oauth2.refresh_reuse_response` defaults to `revoke_session`; setting it to
   `refuse` restores the 1.1.x behaviour (refuse, mark and audit only). The
   `oauth2.refresh_token_replayed` audit row gains a `response` key
-  (`revoked_session` | `refused`). Schema v110, additive. (#818)
+  (`revoked_session` | `refused` | `refused_unverified_presenter` |
+  `revocation_failed`), a `failed_writes` key on a failed revocation, and
+  `token_client_id`. Only the replayed token's own client, passing the token's
+  DPoP/mTLS sender constraint, triggers the revocation; any other presenter is
+  refused the same way and revokes nothing (#821). "The session" is the browser
+  sign-in, so the revocation reaches every client's refresh tokens under it and
+  the console session, with no back-channel logout sent. An organization
+  settings `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
+  Schema v110, additive. (#818, #821, #822, #823)
 
 ### Fixed
 

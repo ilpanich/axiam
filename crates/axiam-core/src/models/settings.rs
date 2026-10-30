@@ -164,8 +164,11 @@ pub struct WebauthnPolicy {
 /// * [`Self::RevokeSession`] — the default (D-N2). The refusal also
 ///   invalidates the session the replayed token names (which publishes to the
 ///   revocation feed) and revokes every refresh token issued under that
-///   session, as the authorization-code replay path already does
-///   (RFC 6749 §10.5; OAuth 2.0 Security BCP §4.14.2). On a client with no
+///   session — whichever client it was issued to, the console sign-in
+///   included, with no back-channel logout sent — as the authorization-code
+///   replay path does for a code (RFC 6749 §10.5; OAuth 2.0 Security BCP
+///   §4.14.2). Only a presentation by the token's own client, passing the
+///   token's sender constraint, triggers it (#821). On a client with no
 ///   grace window the honest holder of a replayed token has nothing left to
 ///   lose — its token is already dead and it never received the successor —
 ///   so the revocation costs it nothing and costs whoever holds the successor
@@ -246,8 +249,10 @@ pub struct OAuth2Policy {
     /// What a refused refresh-token replay does besides refusing. Ordered: a
     /// tenant may move from `refuse` to `revoke_session` and never back while
     /// its organization's baseline is `revoke_session`.
+    ///
+    /// Published as a reference to the [`RefreshReuseResponse`] schema, so the
+    /// two legal values reach the SDK generators as an `enum` (F4-W1-06, #823).
     #[serde(default)]
-    #[schema(value_type = String, example = "revoke_session")]
     pub refresh_reuse_response: RefreshReuseResponse,
 }
 
@@ -1275,7 +1280,6 @@ pub struct TenantSettingsOverride {
     /// G-C (#818) — tighten-only on `refuse` → `revoke_session`; see
     /// [`OAuth2Policy::refresh_reuse_response`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<String>)]
     pub refresh_reuse_response: Option<RefreshReuseResponse>,
 }
 
@@ -1391,9 +1395,10 @@ pub struct SetOrgSettings {
     pub ssf_enabled: bool,
     /// G-C (#818) — defaulted to `revoke_session` (D-N2): an API client
     /// written before the field lands on the new default. `refuse` restores
-    /// the 1.1.x behaviour.
+    /// the 1.1.x behaviour. Because it is defaulted, a `PUT` from a client
+    /// written before 1.2.0 (which omits it) sets an organization on `refuse`
+    /// back to `revoke_session` — the stricter direction (F4-W1-06).
     #[serde(default)]
-    #[schema(value_type = String, example = "revoke_session")]
     pub refresh_reuse_response: RefreshReuseResponse,
 }
 

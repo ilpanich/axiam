@@ -2781,7 +2781,17 @@ The client still receives `400 invalid_grant`, whether or not the revocation
 succeeded. A failure is logged at `error`, and the audit row then says
 `response: "revocation_failed"` with `failed_writes` naming the write that
 failed (`session_invalidate`, `refresh_tokens_revoke`, or both) — query for it:
-it is a replay whose successor may still be live. Nothing outside the session is touched: another device of the same
+it is a replay whose successor may still be live.
+
+**What "the session" covers.** It is the browser sign-in the replayed token
+descends from, so the revocation reaches every client's refresh tokens issued
+under that sign-in — not only those of the client that presented the token —
+and ends the console (SSO) session: the user is signed out of every relying
+party sharing it. **No back-channel logout is sent** to those relying parties;
+their access tokens stop at the session check and, where it is on, through the
+revocation feed. That is the power RP-initiated logout already gives a client,
+exercised silently, and only the token's own client can exercise it (above).
+Nothing outside that sign-in is touched: another device or browser of the same
 user, on the same client or another, keeps working.
 
 What is **not** a replay, and revokes nothing: a `fapi2` client's retry inside
@@ -2817,6 +2827,13 @@ upgrading or right after:
 PUT /api/v1/organizations/{org_id}/settings
 { ..., "refresh_reuse_response": "refuse" }
 ```
+
+An organization settings `PUT` from a client written before 1.2.0 omits
+`refresh_reuse_response`, and the field defaults, so such a `PUT` moves an
+organization you set to `refuse` back to `revoke_session` — the stricter
+direction, never a weakening. Re-send `"refresh_reuse_response": "refuse"`
+from an updated client, or keep the older client away from organization
+settings.
 
 Schema migration v110 is additive (one optional column and one index on
 `oauth2_refresh_token(tenant_id, session_id)`) and backfills nothing: a

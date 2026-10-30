@@ -1109,6 +1109,65 @@ mod tests {
     use super::*;
     use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 
+    /// F4-W1-04 (#823) — hand-built actor claims for the fail-closed arms of
+    /// [`actor_token_client`]: a token naming `oa_exchanger` as its client,
+    /// with no `axiam_exchanged` marker, plus whatever `extra` adds.
+    fn actor_claims(extra: serde_json::Value) -> AccessTokenClaims {
+        let mut claims = serde_json::json!({
+            "sub": "00000000-0000-4000-8000-000000000001",
+            "tenant_id": "00000000-0000-4000-8000-000000000002",
+            "org_id": "00000000-0000-4000-8000-000000000003",
+            "iss": "https://axiam.test",
+            "iat": 1_700_000_000,
+            "exp": 1_700_000_900,
+            "jti": "f4w104",
+            "aud": AUD_USER,
+            "client_id": "oa_exchanger",
+        });
+        let (Some(base), Some(extra)) = (claims.as_object_mut(), extra.as_object()) else {
+            panic!("both are JSON objects");
+        };
+        base.extend(extra.clone());
+        serde_json::from_value(claims).expect("the hand-built claims deserialize")
+    }
+
+    /// The control: with no marker, `act` or `ext_exchange`, the `client_id`
+    /// claim is the answer.
+    #[test]
+    fn f4w104_a_plain_client_bound_token_names_its_client() {
+        let claims = actor_claims(serde_json::json!({}));
+        assert!(claims.axiam_exchanged.is_none());
+        assert_eq!(actor_token_client(&claims), Some("oa_exchanger"));
+    }
+
+    /// An exchanged token that lost its marker but carries `act` (a B3
+    /// delegation shape) is still never an actor, even for the client it
+    /// names.
+    #[test]
+    fn f4w104_an_unmarked_token_with_act_is_never_an_actor() {
+        let claims = actor_claims(serde_json::json!({ "act": { "sub": "oa_exchanger" } }));
+        assert!(claims.axiam_exchanged.is_none() && claims.act.is_some());
+        assert_eq!(actor_token_client(&claims), None);
+    }
+
+    /// Likewise an unmarked token carrying `ext_exchange` (the X4 shape).
+    #[test]
+    fn f4w104_an_unmarked_token_with_ext_exchange_is_never_an_actor() {
+        let claims = actor_claims(serde_json::json!({
+            "ext_exchange": { "iss": "https://partner.example" }
+        }));
+        assert!(claims.axiam_exchanged.is_none() && claims.ext_exchange.is_some());
+        assert_eq!(actor_token_client(&claims), None);
+    }
+
+    /// And the marker alone is enough, with neither of the other two.
+    #[test]
+    fn f4w104_the_marker_alone_refuses_the_actor() {
+        let claims = actor_claims(serde_json::json!({ "axiam_exchanged": true }));
+        assert!(claims.act.is_none() && claims.ext_exchange.is_none());
+        assert_eq!(actor_token_client(&claims), None);
+    }
+
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
     }

@@ -1091,7 +1091,7 @@ pub fn unverified_issuer_of(token: &str) -> Option<String> {
 /// * **`cnf` may be set** (SEC-096), binding the *result* to the credential the
 ///   exchanging client proved at the token endpoint. See the note on the
 ///   parameter below for why this is not the subject token's `cnf`.
-////// * **`client_id` is the exchanging client** (RFC 9068 §2.2, #819), and the
+/// * **`client_id` is the exchanging client** (RFC 9068 §2.2, #819), and the
 ///   token carries the `axiam_exchanged` marker
 ///   ([`AccessTokenClaims::axiam_exchanged`]), which keeps it from ever
 ///   counting as a token issued to that client when presented as an

@@ -230,7 +230,13 @@ publishes to the revocation feed, so every access token carrying that `sid`
 stops at its next request). It also revokes every refresh token issued under
 that session, the successor included, through the new
 `RefreshTokenRepository::revoke_all_for_session`. Only that session is
-touched; the user's other sessions, on the same client or another, are not. The
+touched; the user's other sessions, on the same client or another, are not.
+"That session" is the browser sign-in the token descends from (F4-W1-03,
+#823): the refresh tokens revoked are every client's issued under it, not only
+the replayed token's client's, and the console (SSO) session ends too, so the
+user is signed out of every relying party sharing that sign-in. No back-channel
+logout token is sent to those relying parties; their access tokens stop through
+the session check and the revocation feed. The
 authorization-code replay path does the same for a replayed code (RFC 6749
 §10.5), and, as there, only the token's own client may trigger it (below). The
 `oauth2.refresh_token_replayed` row gains `response`: `revoked_session`,

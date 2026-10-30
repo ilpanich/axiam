@@ -390,6 +390,39 @@ async fn an_unbound_token_reports_no_confirmation() {
     assert!(resp.ext_exchange_iss.is_empty());
 }
 
+/// G-D (#819): an exchanged token names the exchanging client in RFC 9068's
+/// `client_id`, and gRPC introspection reports it, as REST does. Before #819
+/// a user-subject token reported an empty `client_id` here whatever it carried.
+#[tokio::test]
+async fn introspection_reports_an_exchanged_tokens_client_id() {
+    let tenant = Uuid::new_v4();
+    let svc = token_service();
+    let token = axiam_auth::token::issue_exchanged_token(
+        &Uuid::new_v4().to_string(),
+        axiam_auth::token::SubjectKind::User,
+        tenant,
+        Uuid::new_v4(),
+        &["profile".to_string()],
+        &auth_config(),
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        Utc::now().timestamp() + 60,
+        None,
+        None,
+        None,
+        "oa_exchanger",
+    )
+    .unwrap();
+    let mut req = Request::new(IntrospectTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+
+    let resp = svc.introspect_token(req).await.unwrap().into_inner();
+    assert!(resp.active);
+    assert_eq!(resp.client_id, "oa_exchanger");
+}
+
 /// An inactive response discloses nothing — including whether the token that
 /// failed was bound. Otherwise the SEC-068 cross-tenant guard would leak
 /// through the new fields it does not know about.

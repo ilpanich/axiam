@@ -138,10 +138,12 @@ pub struct AccessTokenClaims {
     /// `actor_token`: `sub` remains the user, and this names the party acting
     /// for them. Absent on every ordinary token, and — deliberately — absent
     /// on an *impersonation* exchange too, because impersonation's whole
-    /// definition is that the resulting token is indistinguishable from one
-    /// the subject obtained directly. That is exactly why impersonation is
-    /// off by default, gated behind a per-client grant, and audited: the
-    /// audit record is the only place it is visible.
+    /// definition is that the resulting token records no actor. (Since #819
+    /// it does carry the exchanging client's `client_id` and the
+    /// [`Self::axiam_exchanged`] marker, which say that an exchange produced
+    /// it, not who acted.) That is exactly why impersonation is off by
+    /// default, gated behind a per-client grant, and audited: the audit
+    /// record is the only place the acting is visible.
     ///
     /// Nested for chained delegation (`act.act`), capped at
     /// [`MAX_ACT_CHAIN_DEPTH`] — an uncapped chain is an unbounded field
@@ -177,6 +179,38 @@ pub struct AccessTokenClaims {
     ///    therefore A trusts C, which nobody configured and nobody can see.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_exchange: Option<ExtExchangeClaim>,
+    /// AXIAM private claim: this token was minted by an RFC 8693 token
+    /// exchange (G-D, #819). Always `true` when present; absent on every other
+    /// token, so a token from any other grant is byte-identical to one issued
+    /// before this claim existed.
+    ///
+    /// # Why a new claim, and why every exchange shape carries it
+    ///
+    /// Since #819 an exchanged token carries RFC 9068's `client_id`, naming
+    /// the client that ran the exchange. That alone would make it look, to
+    /// the #518 actor-token rule, like a token *issued to* that client — and
+    /// it is not: the client only had to *hold* the subject token, which may
+    /// have been issued to anybody (an MCP server holds its callers' tokens by
+    /// design). Exchanging a foreign token and then presenting the result as
+    /// an `actor_token` would write the foreign token's `sub` into `act`,
+    /// which is exactly what #518 (D-5) refuses. This claim is what lets
+    /// `axiam_oauth2::token_exchange` refuse an exchanged token as an actor.
+    ///
+    /// No existing claim covers all three exchange shapes: `act` is absent on
+    /// an impersonation, `ext_exchange` is present only on X4, and a missing
+    /// `sid` is shared with client-credentials tokens and RPTs. Hence a
+    /// separate, `axiam_`-prefixed claim (RFC 9068 §2.2 asks private claims
+    /// not to collide with the registered space, as
+    /// [`Self::axiam_requested_claims`] does).
+    ///
+    /// It is inside the signed token and only [`issue_exchanged_token`] sets
+    /// it; a `token.pre_issue` reactor cannot, because reactor claims render
+    /// under `ext`. It weakens the "indistinguishable" property of an
+    /// impersonation exchange only to the extent that `client_id` already
+    /// does: a resource server can see that the token came from an exchange,
+    /// not whether it was a delegation or an impersonation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axiam_exchanged: Option<bool>,
     /// RFC 7800 / RFC 8705 §3.1 confirmation claim (X5.1) — present **only**
     /// on a sender-constrained token.
     ///
@@ -194,8 +228,9 @@ pub struct AccessTokenClaims {
     /// RFC 9068 §2.2 — the `client_id` this token was issued to (W7, X7 G8).
     ///
     /// Present on a token minted by the OAuth2 authorization-code grant and by
-    /// a refresh of one; absent everywhere else, including on every token
-    /// issued before this wave. Absent is not "unknown to be safe": a resource
+    /// a refresh of one, by the CIBA and device grants, and (since #819) by a
+    /// token exchange, where it names the *exchanging* client; absent
+    /// everywhere else, including on every token issued before this wave. Absent is not "unknown to be safe": a resource
     /// server that needs to know which relying party is holding a token, and
     /// finds no answer, must treat the answer as *no relying party it can
     /// name*.
@@ -572,6 +607,7 @@ pub struct AccessTokenSpec {
     act: Option<ActClaim>,
     permissions: Option<Vec<RptPermission>>,
     ext_exchange: Option<ExtExchangeClaim>,
+    exchanged: bool,
     client_id: Option<String>,
     requested_userinfo_claims: Option<Vec<String>>,
 }
@@ -600,6 +636,7 @@ impl AccessTokenSpec {
             act: None,
             permissions: None,
             ext_exchange: None,
+            exchanged: false,
             client_id: None,
             requested_userinfo_claims: None,
         }
@@ -659,6 +696,10 @@ impl AccessTokenSpec {
 
     /// A token minted by an RFC 8693 exchange, where the caller decides the
     /// subject, its kind and the audience.
+    ///
+    /// Always stamps the `axiam_exchanged` marker
+    /// ([`AccessTokenClaims::axiam_exchanged`]), so no exchange path can forget
+    /// it: the #518 actor-token rule depends on it.
     pub fn exchanged(
         subject: &str,
         sub_kind: SubjectKind,
@@ -667,14 +708,16 @@ impl AccessTokenSpec {
         jti: impl Into<String>,
         aud: &str,
     ) -> Self {
-        Self::new(
+        let mut spec = Self::new(
             subject.to_owned(),
             sub_kind,
             tenant_id,
             org_id,
             jti.into(),
             aud,
-        )
+        );
+        spec.exchanged = true;
+        spec
     }
 
     /// Stamp a space-separated `scope` claim. An empty slice omits the claim.
@@ -692,9 +735,18 @@ impl AccessTokenSpec {
     ///
     /// `None` reproduces the token every caller received before this method
     /// existed, byte for byte, which is why only the OAuth2 grants call it
-    /// with `Some` — the code, refresh, CIBA and device grants (#681): the
-    /// claim is a fact about a grant, and a token minted by a login, an mTLS
-    /// device sign-in or an exchange has no relying party to name.
+    /// with `Some` — the code, refresh, CIBA and device grants (#681), and
+    /// since #819 the token exchange. The claim is a fact about a grant; a
+    /// token minted by a login or an mTLS device sign-in has no relying party
+    /// to name.
+    ///
+    /// #681 put an exchange in the second group too. That was wrong: an
+    /// exchange is a grant at the token endpoint by an authenticated client,
+    /// and RFC 9068 §2.2 makes `client_id` REQUIRED on a JWT access token, so
+    /// [`issue_exchanged_token`] names the *exchanging* client. Naming it does
+    /// not make the token "issued to" that client in the #518 sense — see
+    /// [`AccessTokenClaims::axiam_exchanged`] for why an exchanged token is
+    /// still never accepted as an `actor_token`.
     #[must_use]
     pub fn client_id(mut self, client_id: Option<&str>) -> Self {
         self.client_id = client_id.map(str::to_owned);
@@ -830,6 +882,7 @@ impl AccessTokenSpec {
             act: self.act.clone(),
             permissions: self.permissions.clone(),
             ext_exchange: self.ext_exchange.clone(),
+            axiam_exchanged: self.exchanged.then_some(true),
             cnf: self.cnf.clone(),
             ext: self.ext.clone(),
             client_id: self.client_id.clone(),
@@ -1038,6 +1091,11 @@ pub fn unverified_issuer_of(token: &str) -> Option<String> {
 /// * **`cnf` may be set** (SEC-096), binding the *result* to the credential the
 ///   exchanging client proved at the token endpoint. See the note on the
 ///   parameter below for why this is not the subject token's `cnf`.
+////// * **`client_id` is the exchanging client** (RFC 9068 §2.2, #819), and the
+///   token carries the `axiam_exchanged` marker
+///   ([`AccessTokenClaims::axiam_exchanged`]), which keeps it from ever
+///   counting as a token issued to that client when presented as an
+///   `actor_token` (#518).
 ///
 /// Everything else — issuer, algorithm, key handling — is identical, so an
 /// exchanged token validates through exactly the same path as any other.
@@ -1069,8 +1127,11 @@ pub fn issue_exchanged_token(
     act: Option<ActClaim>,
     ext_exchange: Option<ExtExchangeClaim>,
     cnf: Option<CnfClaim>,
+    client_id: &str,
 ) -> Result<String, AuthError> {
     AccessTokenSpec::exchanged(subject, sub_kind, tenant_id, org_id, jti, aud)
+        // RFC 9068 §2.2 (#819): the client that ran the exchange.
+        .client_id(Some(client_id))
         .scopes(scopes)
         .expires_at(expires_at)
         .act(act)
@@ -2830,6 +2891,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             None,
             Some(CnfClaim::from_dpop_thumbprint(JKT)),
+            "oa_exchanger",
         )
         .unwrap();
 
@@ -2859,6 +2921,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             None,
             None,
+            "oa_exchanger",
         )
         .unwrap();
 
@@ -2927,6 +2990,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             None,
             None,
             None,
+            "oa_exchanger",
         )
         .unwrap();
 
@@ -2948,6 +3012,76 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert!(!json.contains("ext_exchange"), "wire payload: {json}");
     }
 
+    // -----------------------------------------------------------------
+    // G-D (#819) — client_id and the exchange marker
+    // -----------------------------------------------------------------
+
+    /// RFC 9068 §2.2: an exchanged token names the client that ran the
+    /// exchange, and carries the `axiam_exchanged` marker the #518 actor rule
+    /// reads.
+    #[test]
+    fn an_exchanged_token_names_the_exchanging_client_and_is_marked() {
+        let config = test_config();
+        let token = issue_exchanged_token(
+            &Uuid::new_v4().to_string(),
+            SubjectKind::User,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &["read".to_string()],
+            &config,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+            Utc::now().timestamp() + 60,
+            None,
+            None,
+            None,
+            "oa_exchanger",
+        )
+        .unwrap();
+
+        let claims = decode_access_token(&token, &config).unwrap();
+        assert_eq!(claims.client_id.as_deref(), Some("oa_exchanger"));
+        assert_eq!(claims.axiam_exchanged, Some(true));
+    }
+
+    /// The marker is additive: every token that is not from an exchange is
+    /// byte-identical to one issued before it existed — no key on the wire.
+    #[test]
+    fn a_token_from_any_other_grant_carries_no_exchange_marker() {
+        let config = test_config();
+        let user = AccessTokenSpec::user(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "j")
+            .client_id(Some("oa_rp"))
+            .issue(&config)
+            .unwrap();
+        let machine = issue_client_credentials_token(
+            "oa_machine",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+        )
+        .unwrap();
+        for token in [user, machine] {
+            let payload = token.split('.').nth(1).unwrap();
+            let json = String::from_utf8(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !json.contains("axiam_exchanged"),
+                "a non-exchange token must not carry the marker key"
+            );
+            assert!(
+                decode_access_token_any_audience(&token, &config)
+                    .unwrap()
+                    .axiam_exchanged
+                    .is_none()
+            );
+        }
+    }
+
     #[test]
     fn a_cross_domain_exchange_stamps_the_foreign_issuer_and_it_survives_a_round_trip() {
         let config = test_config();
@@ -2966,6 +3100,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
                 iss: "https://partner.example/".into(),
             }),
             None,
+            "oa_exchanger",
         )
         .unwrap();
 
@@ -3006,6 +3141,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             act: None,
             permissions: None,
             ext_exchange: None,
+            axiam_exchanged: None,
             cnf,
             ext: None,
             client_id: None,

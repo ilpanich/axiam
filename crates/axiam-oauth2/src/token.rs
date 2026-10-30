@@ -3451,10 +3451,13 @@ where
             return Ok(IntrospectionResponse {
                 active: true,
                 scope: claims.scope.clone(),
-                // Access tokens don't carry an explicit client_id
-                // claim; omit it to avoid confusing sub (user ID)
-                // with client_id.
-                client_id: None,
+                // RFC 7662 §2.2 — echoed from RFC 9068's `client_id` claim,
+                // which the code, refresh, CIBA and device grants stamp and,
+                // since #819, the token exchange (naming the exchanging
+                // client). Never derived from `sub`: a token without the claim
+                // (a console sign-in, a client-credentials token) reports
+                // none rather than a user id that could pass for a client.
+                client_id: claims.client_id.clone(),
                 sub: Some(claims.sub.clone()),
                 exp: Some(claims.exp),
                 iat: Some(claims.iat),

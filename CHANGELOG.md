@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oauth2.refresh_token_replayed` audit row gains a `response` key
   (`revoked_session` | `refused`). Schema v110, additive. (#818)
 
+### Fixed
+
+- Tokens issued by token exchange (RFC 8693 same-domain delegation and
+  impersonation, and X4 cross-domain exchange) now carry the RFC 9068 §2.2
+  `client_id` claim, naming the client that ran the exchange. Introspection
+  reports it: `POST /oauth2/introspect` now echoes `client_id` from any access
+  token that carries the claim, so code, refresh, CIBA and device tokens report
+  it too. gRPC `IntrospectToken` also prefers the claim. Every exchanged token
+  also carries a new marker claim, `axiam_exchanged: true`, which no other
+  token carries. An exchanged token is never accepted as an `actor_token`,
+  including by the client it names, so the #518 rule cannot be bypassed by
+  exchanging a foreign token first and then presenting the result as the
+  actor. Tokens from every other grant are unchanged byte for byte. (#819)
+
 ## [1.1.3] - 2026-10-29
 
 ### Changed

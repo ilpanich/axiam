@@ -265,7 +265,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that the result is indistinguishable from a token the subject obtained directly, which is why it is off by default, gated per client, and visible only in the audit record. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
+        text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that nothing in the result records who acted, which is why it is off by default, gated per client, and visible only in the audit record. Since #819 every exchanged token does name the exchanging client in `client_id` and carries `axiam_exchanged: true`, so a resource server can tell it came from an exchange, but not whether that exchange was a delegation or an impersonation. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
       },
       { type: "h", id: "claims-request", text: "The `claims` request, and what survives a refresh" },
       {
@@ -696,7 +696,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Since 1.0.0 the actor token must have been **issued to the exchanging client** (#518): a client's own `client_credentials` token, whose `sub` is its `client_id`, or a user token from its own code, refresh, CIBA or device grant. A valid token issued to another client, a console sign-in or a service account's token is refused with `invalid_request`, so a client cannot write somebody else into `act`.",
+        text: "Since 1.0.0 the actor token must have been **issued to the exchanging client** (#518): a client's own `client_credentials` token, whose `sub` is its `client_id`, or a user token from its own code, refresh, CIBA or device grant. A valid token issued to another client, a console sign-in, a service account's token or any token minted by an exchange (even one whose `client_id` is the exchanging client, #819) is refused with `invalid_request`, so a client cannot write somebody else into `act`.",
       },
       {
         type: "p",

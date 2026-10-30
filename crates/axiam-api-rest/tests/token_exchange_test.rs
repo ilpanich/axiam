@@ -560,6 +560,178 @@ async fn an_actor_token_naming_no_client_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// G-D (#819): `client_id` on exchanged tokens, and never as an actor
+// ---------------------------------------------------------------------------
+
+/// RFC 7662 introspection of `token`, authenticated as `client_id`.
+macro_rules! introspect {
+    ($app:expr, $f:expr, $client_id:expr, $secret:expr, $token:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/introspect?tenant_id={}", $f.tenant_id))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "token={}&client_id={}&client_secret={}",
+                $token, $client_id, $secret
+            ))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        assert_eq!(resp.status().as_u16(), 200, "introspection status");
+        let json: Value = test::read_body_json(resp).await;
+        json
+    }};
+}
+
+/// RFC 9068 §2.2 makes `client_id` REQUIRED on a JWT access token; before
+/// #819 an exchanged token had none. Both B3 shapes — delegation and
+/// impersonation — now name the client that ran the exchange, carry the
+/// `axiam_exchanged` marker, still come with no refresh token, and
+/// introspection reports the `client_id`.
+#[actix_web::test]
+async fn an_exchanged_token_names_the_exchanging_client() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let cases = [
+        (
+            f.client_id.as_str(),
+            f.client_secret.as_str(),
+            subject_params(&f, &["read"]),
+        ),
+        (
+            f.imp_client_id.as_str(),
+            f.imp_client_secret.as_str(),
+            subject_only_params(&f, &["read"]),
+        ),
+    ];
+    for (client_id, secret, params) in cases {
+        let (status, body) = exchange!(app, f, client_id, secret, params);
+        assert_eq!(status, 200, "exchange status for {client_id}");
+        assert!(
+            body.get("refresh_token").is_none(),
+            "an exchange never issues a refresh token"
+        );
+        let token = body["access_token"].as_str().unwrap();
+        let claims = decode_claims(token);
+        assert_eq!(claims["client_id"], client_id, "client_id claim");
+        assert_eq!(claims["axiam_exchanged"], true, "exchange marker");
+        assert_eq!(
+            claims["sub"],
+            f.user_id.to_string(),
+            "sub is still the user"
+        );
+
+        let introspected = introspect!(app, f, client_id, secret, token);
+        assert_eq!(introspected["active"], true);
+        assert_eq!(
+            introspected["client_id"], client_id,
+            "introspected client_id"
+        );
+        assert!(
+            introspected.get("axiam_exchanged").is_none(),
+            "the marker is a token claim, not an introspection member"
+        );
+    }
+}
+
+/// G-D regression for #518 (D-5). The rule (`actor_token_client`): an
+/// `actor_token` is accepted only if the token itself shows it was issued to
+/// the exchanging client — its RFC 9068 `client_id` is that client, or it is
+/// that client's own client-credentials token (`axiam:m2m`, `sub` = the
+/// client) — and **a token minted by a token exchange never is**, even though
+/// since #819 it carries the exchanging client's `client_id`.
+///
+/// Without that last clause the client reopens #518 in two requests: a token
+/// issued to ANOTHER client (refused as an actor directly) is exchanged as the
+/// SUBJECT — a delegation with the client's own client-credentials actor —
+/// and the result, which names this client, is then presented as the
+/// `actor_token`, writing the foreign token's `sub` into `act`. The probe that
+/// found this answered 200 with `act.sub` = that user. Refused here for both
+/// B3 shapes, each presented by the very client it was issued to.
+#[actix_web::test]
+async fn an_exchanged_token_is_refused_as_an_actor_even_by_its_own_client() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // Step 0: the foreign token is refused as an actor directly (#518).
+    let foreign_code = code_grant_token(&f, &f.imp_client_id);
+    let (status, _) = exchange!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        actor_params(&f, &["read"], &foreign_code)
+    );
+    assert_eq!(status, 400, "direct use of a foreign actor token");
+
+    // Step 1a: launder it through a delegation exchange as the SUBJECT.
+    let laundering = format!(
+        "&subject_token={}&subject_token_type={}&actor_token={}&actor_token_type={}&scope=read",
+        foreign_code,
+        enc(TOKEN_TYPE_ACCESS_TOKEN),
+        own_actor_token(&f),
+        enc(TOKEN_TYPE_ACCESS_TOKEN)
+    );
+    let (status, body) = exchange!(app, f, f.client_id, f.client_secret, laundering);
+    assert_eq!(status, 200, "delegation exchange status");
+    let delegated = body["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(decode_claims(&delegated)["client_id"], f.client_id.as_str());
+
+    // Step 1b: an impersonation exchange, by the client holding that grant.
+    let (status, body) = exchange!(
+        app,
+        f,
+        f.imp_client_id,
+        f.imp_client_secret,
+        subject_only_params(&f, &["read"])
+    );
+    assert_eq!(status, 200, "impersonation exchange status");
+    let impersonated = body["access_token"].as_str().unwrap().to_owned();
+    let claims = decode_claims(&impersonated);
+    assert_eq!(claims["client_id"], f.imp_client_id.as_str());
+    assert!(claims.get("act").is_none(), "impersonation carries no act");
+
+    // Step 2: each presented as the actor by its OWN exchanging client, and
+    // by the other client, is refused with #518's description.
+    let attempts = [
+        (&delegated, f.client_id.as_str(), f.client_secret.as_str()),
+        (
+            &delegated,
+            f.imp_client_id.as_str(),
+            f.imp_client_secret.as_str(),
+        ),
+        (
+            &impersonated,
+            f.imp_client_id.as_str(),
+            f.imp_client_secret.as_str(),
+        ),
+        (
+            &impersonated,
+            f.client_id.as_str(),
+            f.client_secret.as_str(),
+        ),
+    ];
+    for (actor, client_id, secret) in attempts {
+        let (status, body) = exchange!(
+            app,
+            f,
+            client_id,
+            secret,
+            actor_params(&f, &["read"], actor)
+        );
+        assert_eq!(
+            status, 400,
+            "exchanged actor token presented by {client_id}"
+        );
+        assert_eq!(body["error"], "invalid_request");
+        assert_eq!(
+            body["error_description"], "actor_token was not issued to the exchanging client",
+            "error description for {client_id}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Impersonation
 // ---------------------------------------------------------------------------
 

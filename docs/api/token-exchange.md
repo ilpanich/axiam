@@ -19,6 +19,11 @@ The design rationale — including the alternatives rejected and the threat each
 check answers — is in
 [`claude_dev/token-exchange-design.md`](../../claude_dev/token-exchange-design.md).
 
+Token exchange is not how a user signs in to an app. It narrows a token a
+service already holds; it does not establish a session. A native app that
+wants to sign a user in with a provider's ID token waits for the native
+sign-in endpoint planned under issue #816.
+
 ## Request
 
 ```http
@@ -77,8 +82,11 @@ reads it, and an uncapped chain is an unbounded field inside a signed token.
 Exceeding the cap is `invalid_request`.
 
 **Impersonation** — *"service S is now U, and nothing in the token records
-that."* The issued token is indistinguishable from one the user obtained
-directly. Useful for support tooling and admin "view as", and the single most
+which service acted."* The issued token carries no `act`. Since #819 it does
+name the client that ran the exchange in `client_id` and carries
+`axiam_exchanged: true` (see [Issued token](#issued-token)), so a resource
+server can tell that it came from an exchange, but not whether that exchange
+was a delegation or an impersonation. Useful for support tooling and admin "view as", and the single most
 dangerous operation in this document, because the audit record is the only
 remaining evidence it happened.
 
@@ -114,8 +122,19 @@ from:
 |---|---|---|
 | The exchanging client's own `client_credentials` token (the usual choice) | its `sub`, which is the `client_id` (audience `axiam:m2m`) | the `client_id` |
 | A user token from the exchanging client's own code, refresh, CIBA or device grant | its `client_id` claim (RFC 9068 §2.2) | the user's id |
-| A console sign-in, a service account's token, a token minted by an exchange | no client — refused | — |
+| A console sign-in, a service account's token | no client — refused | — |
+| A token minted by an exchange (B3 delegation, B3 impersonation or X4), even one whose `client_id` is the exchanging client | never counted as issued to anyone — refused | — |
 | Any of the above for another client | that client — refused | — |
+
+**An exchanged token is never accepted as an `actor_token`.** Since #819 it
+carries the exchanging client's `client_id`, but that client only had to
+*hold* the subject token, which may have been issued to anybody. If exchanged
+tokens were accepted, the #518 rule could be bypassed in two requests. First,
+exchange a foreign token as the subject. Then present the result, which now
+names your client, as the actor, and the foreign token's `sub` would land in
+`act`. The `axiam_exchanged` marker that every exchanged token carries is
+what the check reads. Exchanged tokens issued before #819 carry no
+`client_id` and were refused already.
 
 RFC 8693 §4.4's `may_act` claim, which would let a subject token name other
 parties that may act for it, is not read; it is planned for `1.0.x`.
@@ -249,6 +268,21 @@ that requested one type and received another must be able to tell.
 **No refresh token is issued.** A refresh token would let the holder outlive
 the subject token indefinitely — the lifetime cap above, defeated. Re-run the
 exchange instead.
+
+### Issued token
+
+The issued access token is an ordinary AXIAM JWT access token and validates
+through the same path as any other. These claims are specific to an exchange:
+
+| Claim | Value |
+|---|---|
+| `sub`, `sub_kind` | The subject token's subject, unchanged. For X4, the linked AXIAM user. |
+| `client_id` | The **exchanging** client (RFC 9068 §2.2, since #819), never the subject token's client. Introspection (`POST /oauth2/introspect` and gRPC `IntrospectToken`) reports it as `client_id`. |
+| `axiam_exchanged` | `true` on every token minted by an exchange (B3 delegation, B3 impersonation, X4) and absent on every other token (#819). It is what stops an exchanged token from being used as an [actor](#the-actor). It is not echoed by introspection. |
+| `act` | Delegation only: the actor, nested for a re-exchange. |
+| `ext_exchange` | X4 only: `{ "iss": "<partner issuer>" }`. |
+| `cnf` | The exchanging client's own binding, when it registered one (SEC-096). |
+| `aud`, `scope`, `exp` | As described under [Audience](#audience), [Scope narrowing](#scope-narrowing) and [Lifetime](#lifetime). |
 
 ## Errors
 

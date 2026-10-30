@@ -495,3 +495,106 @@ python3 scripts/check-spec-digest.py                                  # exit 0
 Not re-run for the sweep: the REST integration targets (the sweep changes no
 REST handler or extractor; the first pass ran `token_exchange_test` and
 `oauth2_flow_test` green) and the full workspace suite.
+
+---
+
+## Addendum 2 — second sweep (2026-10-30)
+
+**Against:** `fe5de4e..4119629` — `4119629` (#824: F4-W1-07, F4-W1-08). It
+touches 10 files and adds about 140 lines. The only production change is one
+guarded call in the refresh grant's live-row ownership branch
+(`crates/axiam-oauth2/src/token.rs:3066`); the rest is rustdoc, the regenerated
+spec, two tests and documentation. This is the final F4 pass on W1. Under the
+1.1.2 plan's §1.4 rule there is no third sweep round, so anything new below is
+for the final PR's "Open after two sweeps" list.
+
+### B.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W1-07** | **Closed** | Before the ownership refusal, `if stored.rotated_at.is_some() { self.record_refresh_replay(tenant_id, &client, &stored, false, ctx).await; }`. The cross-client presentation of a live superseded row (in-window `fapi2`, or a row whose client has left `fapi2`) is now marked and audited with `token_client_id`. `presenter_may_revoke` fails on the client comparison, so nothing is revoked. Pinned by `f4w107_a_live_superseded_row_through_another_client_is_recorded_and_revokes_nothing` (both shapes; it also asserts that nothing was rotated) and `f4w107_a_never_rotated_row_through_another_client_is_not_recorded`. |
+| **F4-W1-08** | **Closed** | Every intra-doc link in the text that reaches the spec for this setting is now a code span: `RefreshReuseResponse` (both bullets), `OAuth2Policy` and the override field. A scan of the regenerated `components.schemas` found no `` [`…`] `` in any `refresh_reuse` description. The links that remain in `TenantSettingsOverride` (`CimdPolicy`, `OidcPolicy::…`) were there before W1 and belong to other fields. **The spec was regenerated again:** `cargo build -p axiam-server --no-default-features`, then `--dump-openapi`, is byte-identical to the committed `sdks/openapi.json`, `check-spec-digest.py` passes, and `management-registry.json` follows the new digest. |
+
+### B.2 The coordinator's questions
+
+**Is the client response byte-identical?** Yes. `record_refresh_replay` returns
+`()`, and the branch still returns the same literal
+`InvalidGrant("refresh token was not issued to this client")`.
+`assert_refused_as_not_this_clients` asserts the code and the exact description
+for both shapes and for the never-rotated row.
+
+**Oracle, write amplification, DoS — what must the presenter hold?** Two
+things:
+
+1. They must pass client authentication as *some* client of the tenant whose
+   registration holds `refresh_token`, and pass that client's
+   `fapi::enforce_token_request`. All of that runs before the row lookup
+   (`token.rs:3018`). For a public client this is only its `client_id`.
+2. They must hold the **raw bytes** of a refresh token whose row is still live
+   and carries `rotated_at`, because the lookup is by that token's hash within
+   the tenant.
+
+Without the bytes, this branch is unreachable.
+
+- **Writes per request.** One settings read, one session-marker update and one
+  audit insert, with no revocation. That is exactly what the not-found branch
+  has cost a holder of rotated-token bytes since #821, which deliberately left
+  recording open to any client. The new branch adds a route to the same writes,
+  not a new class of write, and it is bounded by the token endpoint's rate
+  limiter.
+- **Repeated presentation.** Spamming the same bytes inflates the victim
+  session's "Replay refused" counter and the audit log. That is noise in the
+  places an operator should be looking anyway, and it is attributable: each row
+  names the presenting client and the token's client.
+- **Oracles.**
+  - The response text on this branch ("not issued to this client") already
+    told a holder of the bytes that the token is live and someone else's.
+    That predates W1 and is unchanged.
+  - The only new signal is timing: a rotated foreign row now costs three
+    datastore round trips where a never-rotated one costs none. It tells a
+    party who already holds the token whether that token has been rotated.
+    This is negligible and recorded here rather than raised.
+- **No bypass.** The branch still returns before any rotation or issuance, and
+  the recording path cannot revoke, because the presenter check fails on the
+  client comparison whatever the policy is.
+
+**Is the never-rotated row still unrecorded?** Yes. The guard is
+`stored.rotated_at.is_some()`, and the `f4w107_a_never_rotated_row…` test
+asserts no marker, no audit row, no invalidation and no revocation.
+
+**Policy → session → presenter: `refused` under a `refuse` policy or a
+session-less row — is that acceptable?** Yes. `response` describes what the
+endpoint *did*, and under `refuse` or with no session there was no revocation
+to withhold. The leak evidence does not depend on `response`, because
+`token_client_id` and `client_id` are written on every row. An operator
+looking for tokens that surfaced in the wrong client's hands should query
+`token_client_id != client_id`, not `response = "refused_unverified_presenter"`.
+Some documentation states the latter unconditionally, which is F4-W1-09.
+
+**Do the T-254 texts match the code?** In substance, yes:
+
+- `t254-refresh-grace-decision.md` §7 (the new paragraph and its table row),
+  T-254 in `threat-model-stride.md`, `Axiam.json` and the regenerated
+  `website/src/threatModel.ts`, and the deployment guide all describe the
+  `rotated_at` guard, the unchanged answer, no revocation, and no record for a
+  never-rotated row.
+- Every test named there exists and passes.
+- The imprecisions are in F4-W1-09.
+
+### B.3 New finding — for the final PR's "Open after two sweeps" list
+
+| ID | Severity | Where | Finding |
+|---|---|---|---|
+| **F4-W1-09** | Informational | `docs/deployment/README.md:2773-2776`; `claude_dev/t254-refresh-grace-decision.md:302-305`, `:317`; T-254 (#824 sentence) | The documentation says, unconditionally, that a cross-client presentation is audited `response: "refused_unverified_presenter"`. The code (`token.rs:3066` comment, `respond_to_refused_replay`) gives `refused` when the tenant's policy is `refuse` or the row names no session. Separately, the decision record's sentence "nothing distinguishes 'another client's token' from 'consumed'" holds only on the not-found branch: the live-row branch answers "not issued to this client", as §7's own later paragraph says. Neither affects behaviour. Recommended: qualify the `response` value by policy and session, and tell operators to find leaks with `token_client_id != client_id`. |
+
+Nothing at Low or above. No defect from the first pass or either sweep remains
+open in code.
+
+### B.4 Checks run (second sweep)
+
+```text
+cargo build -p axiam-server --no-default-features                       # exit 0
+./target/debug/axiam-server --dump-openapi | cmp - sdks/openapi.json    # identical (cmp exit 0)
+python3 scripts/check-spec-digest.py                                    # exit 0
+cargo test -p axiam-oauth2 --test token_service -- g_c_ f4w10 t254_     # exit 0, 26 passed (both f4w107_* ok)
+```

@@ -29,9 +29,11 @@
 //!
 //! **It does not strip the structured metadata domain producers write**, and
 //! that limit is the design rather than an omission.
-//! `oauth2.refresh_token_replayed` names the client, its profile, the
-//! disposition (T-254) and the response (G-C) — never the token or its
-//! digest; a sensitive-scope release names the claim by name
+//! `oauth2.refresh_token_replayed` names the presenting client and the
+//! token's own client, the profile, the disposition (T-254), the response
+//! (G-C: `revoked_session`, `refused`, `refused_unverified_presenter`,
+//! `revocation_failed`) and any revocation write that failed — never the token
+//! or its digest; a sensitive-scope release names the claim by name
 //! (T-241); a JIT provision names the provider and the external subject
 //! (T-161). Those are accountability evidence that other threats' mitigations
 //! depend on. Dropping them would weaken three controls to narrow one, and

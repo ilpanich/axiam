@@ -2778,8 +2778,10 @@ therefore evidence of the leak, not a way for whoever found it to sign the user
 out.
 
 The client still receives `400 invalid_grant`, whether or not the revocation
-succeeded (a failure is logged at `error` and the audit row then says
-`refused`). Nothing outside the session is touched: another device of the same
+succeeded. A failure is logged at `error`, and the audit row then says
+`response: "revocation_failed"` with `failed_writes` naming the write that
+failed (`session_invalidate`, `refresh_tokens_revoke`, or both) — query for it:
+it is a replay whose successor may still be live. Nothing outside the session is touched: another device of the same
 user, on the same client or another, keeps working.
 
 What is **not** a replay, and revokes nothing: a `fapi2` client's retry inside
@@ -2800,7 +2802,7 @@ It is ordered like every other security setting: an organization baseline
 that tenants inherit and may only **tighten** (`revoke_session` > `refuse`).
 The audit row's `response` key records which response was applied:
 `revoked_session`, `refused` (the policy is `refuse`, or the token named no
-session), or `refused_unverified_presenter` (see above).
+session), `refused_unverified_presenter` or `revocation_failed` (see above).
 
 **Upgrade note.** The new default changes behaviour for every client on the
 `standard` profile. A client that loses a rotation response and retries with

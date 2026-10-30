@@ -103,9 +103,20 @@ enum RefusedReplayResponse {
     /// The session the token named was invalidated and its refresh tokens
     /// revoked.
     RevokedSession,
-    /// Refused only: the tenant's policy is `refuse`, the token named no
-    /// session, or the revocation could not be completed (logged).
+    /// Refused only: the tenant's policy is `refuse`, or the token named no
+    /// session.
     Refused,
+    /// The revocation was due and at least one of its two writes failed
+    /// (F4-W1-02, #822): the session may still be live, or its refresh tokens
+    /// — the successor an attacker may hold among them — may be. Logged at
+    /// `error`, kept distinct from [`Self::Refused`] so an operator can find
+    /// the replays that were *not* contained, and never sent to the client.
+    RevocationFailed {
+        /// `SessionRepository::invalidate` failed.
+        session: bool,
+        /// `RefreshTokenRepository::revoke_all_for_session` failed.
+        refresh_tokens: bool,
+    },
     /// Refused, and nothing revoked, because the presenter was not proven to
     /// be the token's holder of record (F4-W1-01, #821): the authenticated
     /// client is not the client the rotated token was issued to, or the
@@ -122,6 +133,27 @@ impl RefusedReplayResponse {
             Self::RevokedSession => "revoked_session",
             Self::Refused => "refused",
             Self::RefusedUnverifiedPresenter => "refused_unverified_presenter",
+            Self::RevocationFailed { .. } => "revocation_failed",
+        }
+    }
+
+    /// The writes that failed, for the audit row's `failed_writes`; `None`
+    /// unless the response is [`Self::RevocationFailed`].
+    fn failed_writes(self) -> Option<Vec<&'static str>> {
+        match self {
+            Self::RevocationFailed {
+                session,
+                refresh_tokens,
+            } => Some(
+                [
+                    session.then_some("session_invalidate"),
+                    refresh_tokens.then_some("refresh_tokens_revoke"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            ),
+            _ => None,
         }
     }
 }
@@ -1029,9 +1061,11 @@ where
     /// A **refused** replay also gets the tenant's response to it (G-C, #818),
     /// applied between the two records by [`Self::respond_to_refused_replay`]
     /// so the audit row can say what was done: `response` is
-    /// `revoked_session`, `refused` or `refused_unverified_presenter` (#821),
-    /// and absent (`null`) on a presentation the `fapi2` grace accepted, where
-    /// there is nothing to respond to. `token_client_id` names the client the
+    /// `revoked_session`, `refused`, `refused_unverified_presenter` (#821) or
+    /// `revocation_failed` (#822, with `failed_writes` naming which of
+    /// `session_invalidate` and `refresh_tokens_revoke` failed), and absent
+    /// (`null`) on a presentation the `fapi2` grace accepted, where there is
+    /// nothing to respond to. `token_client_id` names the client the
     /// rotated token was issued to, beside `client_id`, the client that
     /// presented it — they differ exactly when a token turned up in the wrong
     /// client's hands.
@@ -1129,10 +1163,15 @@ where
                     },
                     "rotated_at": replayed.rotated_at.map(|t| t.to_rfc3339()),
                     // G-C (#818) — what the refusal did: `revoked_session`,
-                    // `refused` or `refused_unverified_presenter` (#821);
-                    // `null` on an accepted presentation. Names an outcome,
-                    // never the token or its digest.
+                    // `refused`, `refused_unverified_presenter` (#821) or
+                    // `revocation_failed` (#822); `null` on an accepted
+                    // presentation. Names an outcome, never the token or its
+                    // digest.
                     "response": response.map(RefusedReplayResponse::as_str),
+                    // #822 — on `revocation_failed`, which writes failed
+                    // (`session_invalidate`, `refresh_tokens_revoke`);
+                    // `null` otherwise.
+                    "failed_writes": response.and_then(RefusedReplayResponse::failed_writes),
                 })),
             })
             .await
@@ -1181,8 +1220,10 @@ where
     /// it into a `500` would tell the presenter that its replay reached a
     /// revocation (an oracle the code path also declines to offer) and would
     /// protect nothing more. The two writes are attempted independently, each
-    /// failure is logged at `error`, and the audit row then says `refused`
-    /// rather than claim a revocation that did not complete.
+    /// failure is logged at `error`, and the audit row then says
+    /// `revocation_failed`, with `failed_writes` naming the write(s) that
+    /// failed (F4-W1-02, #822) — distinct from `refused`, which is policy, so
+    /// a replay that was *not* contained can be found in the audit log.
     async fn respond_to_refused_replay(
         &self,
         tenant_id: Uuid,
@@ -1250,7 +1291,10 @@ where
         if invalidated && revoked {
             RefusedReplayResponse::RevokedSession
         } else {
-            RefusedReplayResponse::Refused
+            RefusedReplayResponse::RevocationFailed {
+                session: !invalidated,
+                refresh_tokens: !revoked,
+            }
         }
     }
 

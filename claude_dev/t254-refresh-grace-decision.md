@@ -234,8 +234,8 @@ touched; the user's other sessions, on the same client or another, are not. The
 authorization-code replay path does the same for a replayed code (RFC 6749
 §10.5), and, as there, only the token's own client may trigger it (below). The
 `oauth2.refresh_token_replayed` row gains `response`: `revoked_session`,
-`refused` or `refused_unverified_presenter`, and `null` on an accepted `fapi2`
-retry; and `token_client_id`, the client the rotated token was issued to, beside
+`refused`, `refused_unverified_presenter` or `revocation_failed`, and `null` on
+an accepted `fapi2` retry; and `token_client_id`, the client the rotated token was issued to, beside
 the presenting `client_id`. It still carries neither the token nor its digest. Schema v110 adds the setting's column and an index on
 `oauth2_refresh_token(tenant_id, session_id)`. It is additive and backfills
 nothing.
@@ -307,8 +307,12 @@ identified by its `client_id` alone, presenting its own bearer token, is the
 **Failure.** As on the code-replay path, a failed invalidate or revoke is logged
 at `error` and the answer stays `invalid_grant`. It is never a `500`, which
 would tell the presenter that its replay reached a revocation. The two writes
-are attempted independently, and the audit row then says `refused` rather than
-claim a revocation that did not complete.
+are attempted independently. The first cut then audited `refused`, the value a
+`refuse` tenant also produces, so the one case an operator must be told about —
+a successor left live — read as policy (F4-W1-02, #822). The row now says
+`revocation_failed`, and `failed_writes` names which of `session_invalidate`
+and `refresh_tokens_revoke` failed (`null` on every other response); the
+client's answer is unchanged.
 
 **Where it is pinned.**
 
@@ -319,7 +323,7 @@ claim a revocation that did not complete.
 | A superseded row refused off `fapi2` revokes | `token_service.rs::g_c_a_superseded_row_refused_off_fapi_revokes_the_session` |
 | `refuse` keeps §3's behaviour | `token_service.rs::g_c_the_refuse_setting_restores_the_previous_behaviour` |
 | A logout-revoked token, or a replay naming no session, revokes nothing | `token_service.rs::g_c_a_logout_revoked_token_presented_again_revokes_nothing`, `::g_c_a_replay_naming_no_session_revokes_nothing` |
-| A failed revocation still answers `invalid_grant`, and the row says `refused` | `token_service.rs::g_c_a_failed_revocation_still_answers_invalid_grant` |
+| A failed revocation still answers `invalid_grant`, and the row says `revocation_failed` with the failed write(s) (#822) — the token write, the session write, or both | `token_service.rs::g_c_a_failed_revocation_still_answers_invalid_grant`, `::f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed`, `::f4w102_failed_writes_is_null_unless_the_revocation_failed` |
 | The row carries `response` and never the token | `token_service.rs::g_c_the_audit_row_carries_the_response_and_never_the_token` |
 | Only the token's own, proven client revokes (#821): another client, or a bound token without its key's proof, revokes nothing and is audited `refused_unverified_presenter`; the proven own client, and a public client's own bearer token, revoke | `token_service.rs::f4w101_a_replay_through_another_client_revokes_nothing`, `::f4w101_a_bound_replay_without_its_proof_revokes_nothing`, `::f4w101_a_bound_replay_with_its_proof_revokes_the_session`, `::f4w101_a_public_clients_own_bearer_replay_revokes_the_session` |
 | The policy port defaults to, and fails to, `revoke_session` | `refresh_reuse.rs::an_unwired_service_revokes_by_default`, `::a_fixed_policy_answers_what_it_was_given`, `::a_failed_read_falls_back_to_the_stricter_default` |

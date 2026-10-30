@@ -898,6 +898,9 @@ struct MockSessionRepo(
     /// to mark. A replay marker is a side effect with no visible response
     /// either, so the same trick: record the call and assert on the log.
     ReplayLog,
+    /// F4-W1-02 (#822) — when set, `invalidate` records the call and then
+    /// fails, so the G-C failure path can be driven from the session side.
+    bool,
 );
 
 impl axiam_core::repository::SessionRepository for MockSessionRepo {
@@ -936,6 +939,9 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     }
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.1.lock().unwrap().push((tenant_id, id));
+        if self.3 {
+            return Err(AxiamError::Database("invalidate failed".into()));
+        }
         Ok(())
     }
     async fn consume(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<bool> {
@@ -1162,7 +1168,12 @@ fn build_with_session_log(
         MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, sessions.clone(), Arc::new(Mutex::new(Vec::new()))),
+        MockSessionRepo(
+            None,
+            sessions.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+        ),
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
@@ -3330,7 +3341,12 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         MockTenantRepo::new(TenantOutcome::Found),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, Arc::new(Mutex::new(Vec::new())), replays.clone()),
+        MockSessionRepo(
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+            replays.clone(),
+            false,
+        ),
         audit,
         test_config(),
         2_592_000,
@@ -4735,6 +4751,17 @@ fn build_g_c(
     refresh: MockRefreshRepo,
     policy: Option<axiam_core::models::settings::RefreshReuseResponse>,
 ) -> (Svc, GcLogs) {
+    build_g_c_with(client, refresh, policy, false)
+}
+
+/// [`build_g_c`], with the session repository's `invalidate` failing when
+/// `invalidate_fails` is set (F4-W1-02, #822).
+fn build_g_c_with(
+    client: ClientOutcome,
+    refresh: MockRefreshRepo,
+    policy: Option<axiam_core::models::settings::RefreshReuseResponse>,
+    invalidate_fails: bool,
+) -> (Svc, GcLogs) {
     let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
     let invalidated: InvalidateLog = Arc::new(Mutex::new(Vec::new()));
     let replays: ReplayLog = Arc::new(Mutex::new(Vec::new()));
@@ -4748,7 +4775,7 @@ fn build_g_c(
         MockTenantRepo::new(TenantOutcome::Found),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, invalidated.clone(), replays.clone()),
+        MockSessionRepo(None, invalidated.clone(), replays.clone(), invalidate_fails),
         audit,
         test_config(),
         2_592_000,
@@ -5012,7 +5039,7 @@ async fn g_c_a_logout_revoked_token_presented_again_revokes_nothing() {
 
 /// A revocation that fails does not change the answer: still `invalid_grant`,
 /// never a `500`, and the audit row does not claim a revocation that did not
-/// complete.
+/// complete — it says `revocation_failed` and names the failed write (#822).
 #[tokio::test]
 async fn g_c_a_failed_revocation_still_answers_invalid_grant() {
     let raw = generate_refresh_token();
@@ -5038,7 +5065,85 @@ async fn g_c_a_failed_revocation_still_answers_invalid_grant() {
     let metadata = only_replay_audit(&logs.audit)
         .metadata
         .expect("the audit row carries metadata");
-    assert_eq!(metadata["response"], "refused");
+    assert_eq!(metadata["response"], "revocation_failed");
+    assert_eq!(
+        metadata["failed_writes"],
+        serde_json::json!(["refresh_tokens_revoke"])
+    );
+}
+
+/// F4-W1-02 (#822) — `invalidate` fails: the refresh tokens are still revoked
+/// (the writes are independent), the answer is unchanged, and the audit row
+/// says `revocation_failed` naming the session write. With both writes
+/// failing it names both.
+#[tokio::test]
+async fn f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed() {
+    for (label, tokens_fail, expected) in [
+        (
+            "invalidate only",
+            false,
+            serde_json::json!(["session_invalidate"]),
+        ),
+        (
+            "both writes",
+            true,
+            serde_json::json!(["session_invalidate", "refresh_tokens_revoke"]),
+        ),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut refresh_repo =
+            MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+        refresh_repo.session_revocation_fails = tokens_fail;
+
+        let (svc, logs) = build_g_c_with(
+            ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+            refresh_repo,
+            None,
+            true,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+            .await
+            .expect_err("still refused");
+        assert_refused_as_consumed(&err);
+        assert_eq!(
+            logs.invalidated.lock().unwrap().len(),
+            1,
+            "{label}: the invalidation was attempted"
+        );
+        assert_eq!(
+            logs.revoked_sessions.lock().unwrap().clone(),
+            vec![session_id],
+            "{label}: the token revocation is attempted whatever the session write did"
+        );
+        let metadata = only_replay_audit(&logs.audit)
+            .metadata
+            .expect("the audit row carries metadata");
+        assert_eq!(metadata["response"], "revocation_failed", "{label}");
+        assert_eq!(metadata["failed_writes"], expected, "{label}");
+    }
+}
+
+/// `failed_writes` is `null` on every response that is not a failure.
+#[tokio::test]
+async fn f4w102_failed_writes_is_null_unless_the_revocation_failed() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let _ = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await;
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+    assert!(metadata["failed_writes"].is_null());
 }
 
 /// A replayed token that names no session has no family beyond itself; the
@@ -5720,6 +5825,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
                 session,
                 Arc::new(Mutex::new(Vec::new())),
                 Arc::new(Mutex::new(Vec::new())),
+                false,
             ),
             MockAuditRepo::default(),
             test_config(),

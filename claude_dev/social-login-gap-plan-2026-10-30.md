@@ -335,6 +335,37 @@ updated. Small, but it touches an authorization rule, hence Opus.
 > the design above already states the fix and names the precedent at a
 > `file:line`.
 
+### 4.0 Model per activity — the suggestion, in one table
+
+The rule (release-1.1.2 plan §1.1) is "the cheapest model that can be
+trusted with the row's *definition*, not with its typing". Applied here:
+
+| Activity | Model | Why this one |
+|---|---|---|
+| **Orchestrator** — runs the plan, cuts branches, writes §4.1 wave results, takes the D-N decisions back to the maintainer | **Opus 5.5** | Holds the whole plan and every cross-wave invariant (X4 untouched, T-254 lanes, layering) |
+| W1.1 refresh-reuse response (G-C) | **Opus 5.5** | Defines behaviour under adversarial input and concurrency (two rotations racing, replay vs. lost response); changes a default |
+| W1.2 `client_id` on exchanged tokens (G-D) | **Opus 5.5** | Small, but it changes an authorization rule (`actor_token_client`) and the executor must judge the consequence on the evidence |
+| W1.3 threat model + F4 review of W1 | **Opus 5.5** | Every F4 review is Opus |
+| W2.1 `NativeLoginTrust` model, validation, admin API | **Opus 5.5** | Validation rules are the security boundary (non-empty `client_ids`, refusals on SAML/OAuth2 kinds, replace-wholesale) |
+| W2.2 `native_login.rs` verification + replay guard | **Opus 5.5** | The long pole and the one place an ordering mistake is an account takeover |
+| W2.3 the grant at the token endpoint | **Opus 5.5** | Issues a sign-in token set from a non-browser input; consent, rotation, DPoP and the `grant_types` gate must compose correctly |
+| W2.4 admin UI trust card | Sonnet 5.5 | Precedent exists: the X4 `token_exchange` card on the same page |
+| W2.5 OpenAPI regen, `docs/api/native-sign-in.md`, website block | Sonnet 5.5 | Text and a scripted regen; the design in §3.1 is the source |
+| W2.5 F4 review of W2 | **Opus 5.5** | Review |
+| W3.1 `axiam_idp_hint` parsing, server-side resolution, `Cosmetic.idp`, `default_idp` validation | **Opus 5.5** | Tenant isolation of the resolver and the byte-identical no-hint property are defined here |
+| W3.2 SPA auto-redirect/cancel/no-loop; `default_idp` field in the console | Sonnet 5.5 | Precedent: `handleSsoSelect` and the `login_hint` handling in `LoginPage.tsx` |
+| W3.3 docs (authorize parameters, website) | Sonnet 5.5 | Text |
+| W3.3 F4 review of W3 | **Opus 5.5** | Review |
+| W4.1 contract 1.65 text, `sdks/openapi.json` re-vendor | Sonnet 5.5 | The contract's shape is fixed by §3; the task is stating it in the contract's register |
+| W4.2 … W4.12 the eleven SDK ports | Sonnet 5.5 ×11, in parallel | Each follows the Rust reference and the contract; the W7 pattern of the 1.1.2 plan |
+| W4.13 cross-SDK conformance review | **Opus 5.5** | Review across eleven codebases against one contract |
+| W5 CHANGELOG, upgrade notes, competitor rows, roadmap row | Sonnet 5.5 | Text, with the wave results as source |
+| W5 combined F4 security review before the tag | **Opus 5.5** | Review |
+
+Haiku 5.5 is not suggested for any row: every task here either touches a
+security boundary or must read a long design faithfully, and the SDK ports
+need language-specific judgement the contract does not spell out.
+
 ### W1 — the security core (branch `claude/social-gap-w1`)
 
 | Task | Item | Model | Size | Acceptance |
@@ -371,10 +402,19 @@ updated. Small, but it touches an authorization rule, hence Opus.
 
 ### W5 — release readiness 1.2.0 (on the plan branch)
 
-CHANGELOG (`Added` G-A, G-B, G-D; `Changed` G-C with the setting that restores
-1.1.x behaviour); upgrade notes; `competitor-comparison-keycloak.md` rows
-(native social, IdP hint, reuse detection) flipped with the date; roadmap table
-row; the combined F4 review (Opus 5.5); tag after the maintainer merges.
+| Task | Model | Size |
+|---|---|---|
+| W5.1 CHANGELOG (`Added` G-A, G-B, G-D; `Changed` G-C with the setting that restores 1.1.x behaviour); upgrade notes | Sonnet 5.5 | S |
+| W5.2 `competitor-comparison-keycloak.md` rows (native social, IdP hint, reuse detection) flipped with the date; roadmap table row; `CLAUDE.md` protocol line | Sonnet 5.5 | S |
+| W5.3 combined F4 security review of the plan branch before the tag | **Opus 5.5** | M |
+
+The maintainer merges and tags `v1.2.0`.
+
+### 4.1 Wave results (written by the orchestrator as each wave lands)
+
+*Empty until W1 lands. One subsection per wave: base commit, PR, what
+changed against §4, test counts before/after, issues filed under §1.4-style
+"arises while the plan runs".*
 
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,

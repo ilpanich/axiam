@@ -210,3 +210,93 @@ carries its twin, as the W-waves did.
   that lengthened it would widen the window for every tenant at once. If a
   deployment ever needs to differ, it belongs on the client's registration,
   where the profile switch already lives.
+
+## 7. Amendment 2026-10-30 — G-C
+
+Recorded in [`social-login-gap-plan-2026-10-30.md`](social-login-gap-plan-2026-10-30.md)
+§3.3 (#818) and landed in f978dff. §1–§6 above are the 2026-09-12 record and are
+left as written; where this section changes what they describe, it says so.
+
+**What changed.** A presentation of an already-rotated refresh token that is
+*refused* no longer stops at the refusal and the marker. That covers every
+replay on a `standard` client, a replay on a `fapi2` client after its 60-second
+grace (the row `supersede` expired, which `find_rotated` still finds), and a
+superseded row whose client has since left `fapi2` (§5's
+`t254_the_registration_decides_…` case). Each is still answered `400
+invalid_grant` ("refresh token already consumed") and still marked and audited
+as §3.2 describes. Under the default it now also invalidates the session the
+token names (`SessionRepository::invalidate`, which drops the validity cache and
+publishes to the revocation feed, so every access token carrying that `sid`
+stops at its next request). It also revokes every refresh token issued under
+that session, the successor included, through the new
+`RefreshTokenRepository::revoke_all_for_session`. Only that session is
+touched; the user's other sessions, on the same client or another, are not. This
+is what the authorization-code replay path already does (RFC 6749 §10.5). The
+`oauth2.refresh_token_replayed` row gains `response`: `revoked_session` or
+`refused`, and `null` on an accepted `fapi2` retry. It still carries neither the
+token nor its digest. Schema v110 adds the setting's column and an index on
+`oauth2_refresh_token(tenant_id, session_id)`. It is additive and backfills
+nothing.
+
+**Why §2's false-positive argument does not reach these lanes.** §2 rejected
+family revocation because a client whose rotation response was lost retries with
+the old token, having never received the successor, and revoking would log out
+a conformant client. That argument is about a token that can still be redeemed,
+and so about the `fapi2` window. On a lane with no window open, that client
+already holds a dead token and no successor: it cannot continue either way (§4's
+"cost"), so revoking the session takes nothing from it that it still had. It
+takes everything from whoever holds the successor, who may be the thief who won
+the race. The one false positive left is a client that sends two refreshes with
+the same token concurrently. That is a client defect, and the OAuth 2.0 Security
+BCP declines to accommodate it. This is not §2's option (a): (a) acts *inside*
+the window, on a presentation that is accepted, and it stays not done.
+
+**What stayed.** The `fapi2` window is exactly as §3.1 built it (decision D-N4
+of the plan): inside it a presentation is accepted, rotated again and marked
+`accepted_under_fapi_grace`, and it revokes nothing, even when the successor has
+already been used. The window is sender-constrained, the conformance runs were
+made with it, and in-window reuse detection remains §6's improvement rather than
+a fix. A token revoked at logout is not a replay (`find_rotated` requires
+`rotated_at`) and revokes nothing. So is a replayed token that names no session
+(a grant with no session behind it). The two rotation lanes, the `NotFound` to
+the loser of a race, and the seven-day retention bound of 2026-10-22 (T-254) are
+unchanged. A replay later than that bound is neither recorded nor revoking.
+
+**The setting.** `oauth2.refresh_reuse_response`, set as `refresh_reuse_response`
+in the organization and tenant settings bodies: `revoke_session` (the default,
+D-N2) or `refuse`. `refuse` keeps the behaviour §3 built: refuse, mark, audit.
+It is tighten-only like every ordered security setting (D-N8), ordered
+`revoke_session` > `refuse`. A tenant may choose `refuse` only under an
+organization on `refuse`. That is validated on write, and a tenant override
+weaker than a baseline that tightens is cleared. "Available per tenant" in D-N2 is
+met through the organization. A failed read of the setting falls back to
+`revoke_session`, the stricter. This is a policy knob over the *response*. It is
+not the knob §6 declines: the sixty seconds remain a constant.
+
+**Failure.** As on the code-replay path, a failed invalidate or revoke is logged
+at `error` and the answer stays `invalid_grant`. It is never a `500`, which
+would tell the presenter that its replay reached a revocation. The two writes
+are attempted independently, and the audit row then says `refused` rather than
+claim a revocation that did not complete.
+
+**Where it is pinned.**
+
+| Property | Test |
+|---|---|
+| A `standard` replay invalidates its session and revokes that session's refresh tokens | `token_service.rs::g_c_a_standard_replay_revokes_the_session_it_names` |
+| A `fapi2` replay after the grace revokes; inside it, nothing is revoked | `token_service.rs::g_c_a_fapi2_replay_after_the_grace_revokes_the_session`, `::g_c_a_fapi2_replay_inside_the_grace_is_accepted_and_revokes_nothing` |
+| A superseded row refused off `fapi2` revokes | `token_service.rs::g_c_a_superseded_row_refused_off_fapi_revokes_the_session` |
+| `refuse` keeps §3's behaviour | `token_service.rs::g_c_the_refuse_setting_restores_the_previous_behaviour` |
+| A logout-revoked token, or a replay naming no session, revokes nothing | `token_service.rs::g_c_a_logout_revoked_token_presented_again_revokes_nothing`, `::g_c_a_replay_naming_no_session_revokes_nothing` |
+| A failed revocation still answers `invalid_grant`, and the row says `refused` | `token_service.rs::g_c_a_failed_revocation_still_answers_invalid_grant` |
+| The row carries `response` and never the token | `token_service.rs::g_c_the_audit_row_carries_the_response_and_never_the_token` |
+| The policy port defaults to, and fails to, `revoke_session` | `refresh_reuse.rs::an_unwired_service_revokes_by_default`, `::a_fixed_policy_answers_what_it_was_given`, `::a_failed_read_falls_back_to_the_stricter_default` |
+| The setting's default, its spellings, and tighten-only (D-N8) | `axiam-core` `settings.rs::g_c_the_refresh_reuse_response_defaults_to_revoke_session`, `::g_c_the_wire_spelling_round_trips_and_nothing_else_parses`, `::g_c_a_tenant_may_tighten_the_refresh_reuse_response_and_never_relax_it`, `::g_c_a_baseline_that_tightens_clears_a_weaker_tenant_override`; `settings_repository_gaps_test.rs::refresh_reuse_response_defaults_round_trips_and_tightens` |
+| The revocation reaches that session and no other; v110 is what it says | `oauth2_refresh_token.rs::revoke_all_for_session_revokes_that_session_and_nothing_else`, `schema.rs::v110_adds_only_the_refresh_reuse_setting_and_the_session_index` |
+| End to end: session gone and on the revocation feed, successor refused, another session still refreshing, one audit row | `oauth2_flow_test.rs::g_c_a_refused_refresh_replay_revokes_its_session_end_to_end` |
+| End to end: an organization on `refuse` keeps the successor working | `oauth2_flow_test.rs::g_c_an_organization_on_refuse_keeps_the_previous_behaviour_end_to_end` |
+
+The §5 tests are unchanged. The threat model records this as a dated amendment
+to T-37 and T-254 at model 2.45.0. The operator's account is
+`docs/deployment/README.md`, "Refresh-token replay revokes the session (G-C,
+#818)", with the upgrade note, and `docs/admin/organization-scope.md`.

@@ -436,15 +436,19 @@ plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.
 
 ## 5. Decisions requested from the maintainer
 
-| # | Question | Recommendation |
-|---|---|---|
-| D-N1 | Where does native sign-in live: a grant at `/oauth2/token` (OAuth2 token set, client-bound, consent-ruled); a session-world `POST /api/v1/auth/federation/native` (the SDK login shape, cookies/handoff); or both? | **The grant.** It answers the analysis' two complaints (client binding, refresh) in the OAuth2 world where mobile apps live, and reuses rotation, DPoP and consent as they stand. The SDK helper wraps it. A session-world variant can follow if the console or an SDK needs it. |
-| D-N2 | Default for `oauth2.refresh_reuse_response` | **`revoke_session`.** The BCP's behaviour, what the compared products do, and what AXIAM already does for an authorization-code replay. `refuse` stays available per tenant. |
-| D-N3 | Hint parameter name | **`axiam_idp_hint`** alone, by the vendor-namespace rule already written at `login_hop.rs`. A `kc_idp_hint` alias would make a Keycloak client "just work" but puts a competitor's prefix in AXIAM's API; decline unless a migration asks for it. |
-| D-N4 | On `fapi2`, revoke inside the grace window when the *successor* has already been rotated (the BCP's definitive breach signal)? | **Not in this plan.** T-254's reasoning stands for that lane; the window is sender-constrained; certification was obtained with it. Record as the residual it already is. |
-| D-N5 | Accept a provider **access token** (plus a userinfo call) for OAuth2-protocol providers — GitHub, classic Facebook — as Auth0 does? | **No.** An access token's audience cannot be verified generically (Google's `tokeninfo` is provider-specific), which is the one check §3.1 rests on. Facebook has Limited Login (OIDC) for apps; GitHub has no native SDK sign-in to begin with. |
-| D-N6 | Consent for the native grant | **Refuse with `consent_required`** any scope that would need a ceremony; the client's registration decides what needs none, as it does today. An "implicit consent for first-party clients" switch is a separate decision with its own threat entry. |
-| D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. |
+All seven were put to the maintainer on 2026-10-30, before W1 was cut, and
+each was answered explicitly (none applied by default). Every answer is the
+recommendation.
+
+| # | Question | Recommendation | Answer |
+|---|---|---|---|
+| D-N1 | Where does native sign-in live: a grant at `/oauth2/token` (OAuth2 token set, client-bound, consent-ruled); a session-world `POST /api/v1/auth/federation/native` (the SDK login shape, cookies/handoff); or both? | **The grant.** It answers the analysis' two complaints (client binding, refresh) in the OAuth2 world where mobile apps live, and reuses rotation, DPoP and consent as they stand. The SDK helper wraps it. A session-world variant can follow if the console or an SDK needs it. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N2 | Default for `oauth2.refresh_reuse_response` | **`revoke_session`.** The BCP's behaviour, what the compared products do, and what AXIAM already does for an authorization-code replay. `refuse` stays available per tenant. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N3 | Hint parameter name | **`axiam_idp_hint`** alone, by the vendor-namespace rule already written at `login_hop.rs`. A `kc_idp_hint` alias would make a Keycloak client "just work" but puts a competitor's prefix in AXIAM's API; decline unless a migration asks for it. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N4 | On `fapi2`, revoke inside the grace window when the *successor* has already been rotated (the BCP's definitive breach signal)? | **Not in this plan.** T-254's reasoning stands for that lane; the window is sender-constrained; certification was obtained with it. Record as the residual it already is. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N5 | Accept a provider **access token** (plus a userinfo call) for OAuth2-protocol providers — GitHub, classic Facebook — as Auth0 does? | **No.** An access token's audience cannot be verified generically (Google's `tokeninfo` is provider-specific), which is the one check §3.1 rests on. Facebook has Limited Login (OIDC) for apps; GitHub has no native SDK sign-in to begin with. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N6 | Consent for the native grant | **Refuse with `consent_required`** any scope that would need a ceremony; the client's registration decides what needs none, as it does today. An "implicit consent for first-party clients" switch is a separate decision with its own threat entry. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. | **Answered by the maintainer 2026-10-30: as recommended.** |
 
 ---
 

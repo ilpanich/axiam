@@ -33,6 +33,7 @@ import {
   layoutClassFor,
   resolveLocale,
   sanitizeDisplay,
+  sanitizeLocale,
   sanitizeLoginHint,
   useMessages,
 } from "@/i18n";
@@ -142,6 +143,12 @@ export function LoginPage() {
   // own, so these checks are the ones that have to hold on their own — the
   // same argument `sanitizeReturnTo` and `sanitizeRequiredAcr` make.
   const [locale] = useState(() => resolveLocale(searchParams.get("ui_locale")));
+  // The locale the hop *asked for*, as opposed to the one rendered (which falls
+  // back to the default): only the former is handed on with a federated
+  // sign-in's hop (#832), so a retry renders exactly as this page did.
+  const [requestedLocale] = useState(() =>
+    sanitizeLocale(searchParams.get("ui_locale")),
+  );
   const [displayMode] = useState(() =>
     sanitizeDisplay(searchParams.get("display")),
   );
@@ -478,8 +485,12 @@ export function LoginPage() {
    * because that is what the binding is.
    *
    * Nothing is stored client-side beyond which completion endpoint to use when
-   * the browser comes back: the `state` round-trips through the provider, and
-   * the nonce and PKCE verifier never leave the server.
+   * the browser comes back and, on a login hop, the hop itself (#832): the
+   * `state` round-trips through the provider, and the nonce and PKCE verifier
+   * never leave the server. The hop is what lets `SsoCallbackPage` resume the
+   * relying party's authorization request instead of ending on the dashboard;
+   * `return_to` is the value `sanitizeReturnTo` already accepted, re-validated
+   * once more here and again when it is read back.
    */
   const handleSsoSelect = async (
     provider: PublicFederationProvider,
@@ -494,9 +505,21 @@ export function LoginPage() {
       federation_config_id: provider.id,
       redirect_uri: ssoCallbackUrl(),
     };
+    const hopReturnTo = sanitizeReturnTo(returnTo);
     rememberPendingSso({
       protocol: provider.protocol,
       displayName: provider.display_name,
+      ...(hopReturnTo
+        ? {
+            hop: {
+              returnTo: hopReturnTo,
+              ...(requiredAcr ? { acr: requiredAcr } : {}),
+              ...(requestedLocale ? { uiLocale: requestedLocale } : {}),
+              ...(displayMode ? { display: displayMode } : {}),
+              ...(loginHint ? { loginHint } : {}),
+            },
+          }
+        : {}),
     });
     try {
       if (provider.protocol === "Saml") {

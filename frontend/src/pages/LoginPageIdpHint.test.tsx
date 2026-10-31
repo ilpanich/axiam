@@ -122,6 +122,35 @@ describe("LoginPage — idp auto-redirect", () => {
     expect(assign).toHaveBeenCalledWith("https://idp.example/auth");
     // return_to is untouched (the page never rewrites it for SSO).
     expect(navigate).not.toHaveBeenCalled();
+    // #832: the hop travels with the sign-in, so the callback can resume it.
+    expect(JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}").hop).toEqual({
+      returnTo: "/oauth2/authorize?x=1",
+    });
+  });
+
+  it("records the hop's presentation with the pending sign-in, and never idp (#832)", async () => {
+    await setup(
+      `?return_to=${encodeURIComponent("/oauth2/authorize?x=1")}&ui_locale=en&display=popup&login_hint=ada&idp=${IDP}`,
+    );
+    await screen.findByRole("status");
+    await advance(3200);
+    expect(startCalls()).toHaveLength(1);
+    const pending = JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}");
+    expect(pending.hop).toEqual({
+      returnTo: "/oauth2/authorize?x=1",
+      uiLocale: "en",
+      display: "popup",
+      loginHint: "ada",
+    });
+    expect(JSON.stringify(pending)).not.toContain(IDP);
+  });
+
+  it("records no hop when the page was not reached through one", async () => {
+    await setup(`?idp=${IDP}`);
+    await screen.findByRole("status");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+    expect(JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}")).not.toHaveProperty("hop");
   });
 
   it("starts a SAML provider through the SAML endpoint too", async () => {

@@ -6,6 +6,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 import {
   HANDOFF_QUERY_PARAM,
   SSO_CALLBACK_PATH,
+  loginHopRetryPath,
   rememberPendingSso,
   ssoCallbackUrl,
   ssoLoginService,
@@ -65,6 +66,90 @@ describe("the pending record", () => {
       throw new Error("denied");
     });
     expect(takePendingSso()).toBeNull();
+  });
+});
+
+/** #832 (F4-W3-01) — the login hop a federated sign-in was started from. */
+describe("the pending record's login hop", () => {
+  const RETURN_TO = "/oauth2/authorize?client_id=rp&response_type=code";
+
+  it("round-trips a hop that passes every sanitiser", () => {
+    rememberPendingSso({
+      protocol: "OidcConnect",
+      displayName: "Okta",
+      hop: {
+        returnTo: RETURN_TO,
+        acr: "urn:axiam:acr:mfa",
+        uiLocale: "de",
+        display: "popup",
+        loginHint: "ada@example.com",
+      },
+    });
+    expect(takePendingSso()?.hop).toEqual({
+      returnTo: RETURN_TO,
+      acr: "urn:axiam:acr:mfa",
+      uiLocale: "de",
+      display: "popup",
+      loginHint: "ada@example.com",
+    });
+  });
+
+  it.each([
+    ["an absolute URL", "https://evil.example/oauth2/authorize?x=1"],
+    ["a protocol-relative URL", "//evil.example/oauth2/authorize?x=1"],
+    ["a path that is not the authorization endpoint", "/admin?x=1"],
+    ["a value with a fragment", "/oauth2/authorize?x=1#frag"],
+    ["a non-string", 42],
+  ])("drops the whole hop when the stored return_to is %s", (_label, value) => {
+    sessionStorage.setItem(
+      "axiam.sso.pending",
+      JSON.stringify({ protocol: "OidcConnect", displayName: "Okta", hop: { returnTo: value, acr: "urn:axiam:acr:mfa" } }),
+    );
+    const pending = takePendingSso();
+    expect(pending).toEqual({ protocol: "OidcConnect", displayName: "Okta" });
+  });
+
+  it("drops a tampered presentation field and keeps the rest", () => {
+    sessionStorage.setItem(
+      "axiam.sso.pending",
+      JSON.stringify({
+        protocol: "OidcConnect",
+        displayName: "Okta",
+        hop: { returnTo: RETURN_TO, acr: "urn:evil", display: "<script>", uiLocale: "xx" },
+      }),
+    );
+    expect(takePendingSso()?.hop).toEqual({ returnTo: RETURN_TO });
+  });
+});
+
+describe("loginHopRetryPath", () => {
+  const RETURN_TO = "/oauth2/authorize?client_id=rp&response_type=code";
+
+  it("is a bare /login without a hop", () => {
+    expect(loginHopRetryPath(undefined)).toBe("/login");
+  });
+
+  it("carries return_to and the presentation, never idp or reauth", () => {
+    const path = loginHopRetryPath({
+      returnTo: RETURN_TO,
+      acr: "urn:axiam:acr:mfa",
+      loginHint: "ada@example.com",
+      // A field the type does not have, smuggled in: it must not appear.
+      ...({ idp: "11111111-1111-4111-8111-111111111111", reauth: "1" } as object),
+    } as never);
+    const url = new URL(path, "https://spa.example");
+    expect(url.pathname).toBe("/login");
+    expect(url.searchParams.get("return_to")).toBe(RETURN_TO);
+    expect(url.searchParams.get("acr")).toBe("urn:axiam:acr:mfa");
+    expect(url.searchParams.get("login_hint")).toBe("ada@example.com");
+    expect(url.searchParams.has("idp")).toBe(false);
+    expect(url.searchParams.has("reauth")).toBe(false);
+  });
+
+  it("re-validates return_to at the moment it builds the link", () => {
+    expect(loginHopRetryPath({ returnTo: "https://evil.example/oauth2/authorize?x=1" })).toBe(
+      "/login",
+    );
   });
 });
 

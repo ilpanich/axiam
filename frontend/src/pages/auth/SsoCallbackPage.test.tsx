@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { screen } from "@testing-library/react";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -192,5 +192,123 @@ describe("SsoCallbackPage", () => {
     // Give a second effect run a chance to fire before asserting it did not.
     await new Promise((r) => setTimeout(r, 20));
     expect(apiMock.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * #832 (F4-W3-01) — a federated sign-in started from a login hop returns to
+ * the relying party, and a failed one leads back to that hop without `idp`.
+ */
+describe("SsoCallbackPage — the login hop", () => {
+  const RETURN_TO = "/oauth2/authorize?client_id=rp&response_type=code&state=xyz";
+  const IDP = "11111111-1111-4111-8111-111111111111";
+  let assign: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    assign = vi.fn();
+    vi.spyOn(window, "location", "get").mockReturnValue({
+      ...window.location,
+      pathname: "/auth/sso/callback",
+      origin: "https://spa.example",
+      assign,
+    } as unknown as Location);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const rememberHop = (protocol: "OidcConnect" | "OAuth2" | "Saml" = "OidcConnect") =>
+    rememberPendingSso({
+      protocol,
+      displayName: "Okta",
+      hop: { returnTo: RETURN_TO, acr: "urn:axiam:acr:mfa", loginHint: "ada" },
+    });
+
+  it.each([
+    ["an OIDC redirect", "OidcConnect", "?code=c&state=s", "/api/v1/auth/federation/oidc/callback"],
+    ["an OAuth2 redirect", "OAuth2", "?code=c&state=s", "/api/v1/auth/federation/oauth2/callback"],
+    ["a SAML/Apple handoff code", "Saml", "?axiam_handoff=one-time", "/api/v1/auth/federation/handoff"],
+  ] as const)("resumes the hop after %s", async (_label, protocol, query, endpoint) => {
+    rememberHop(protocol);
+    renderWithProviders(<SsoCallbackPage />, { route: `/auth/sso/callback${query}` });
+
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledWith(RETURN_TO));
+    expect(apiMock.post).toHaveBeenCalledWith(endpoint, expect.anything());
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("goes to the dashboard when the sign-in was not started from a hop", async () => {
+    rememberPendingSso({ protocol: "OidcConnect", displayName: "Okta" });
+    renderWithProviders(<SsoCallbackPage />, { route: "/auth/sso/callback?code=c&state=s" });
+    await vi.waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
+    );
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("rejects a tampered stored return_to and goes to the dashboard", async () => {
+    sessionStorage.setItem(
+      "axiam.sso.pending",
+      JSON.stringify({
+        protocol: "OidcConnect",
+        displayName: "Okta",
+        hop: { returnTo: "https://evil.example/oauth2/authorize?x=1" },
+      }),
+    );
+    renderWithProviders(<SsoCallbackPage />, { route: "/auth/sso/callback?code=c&state=s" });
+    await vi.waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
+    );
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("goes to the dashboard when storage refuses to read", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    renderWithProviders(<SsoCallbackPage />, { route: "/auth/sso/callback?code=c&state=s" });
+    await vi.waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
+    );
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * F4-W3-04: this link is the real path back from a failed leg, and the
+   * reason there is no loop — it never carries `idp`, so the page it opens has
+   * nothing to start.
+   */
+  it.each([
+    ["a provider error", "?error=access_denied", false],
+    ["a failed completion", "?code=c&state=s", true],
+  ])("after %s, Back to sign in keeps return_to and drops idp", async (_label, query, rejects) => {
+    if (rejects) {
+      apiMock.post.mockRejectedValue({ isAxiosError: true, response: { status: 401, data: {} } });
+    }
+    rememberHop();
+    renderWithProviders(<SsoCallbackPage />, { route: `/auth/sso/callback${query}` });
+
+    await screen.findByRole("alert");
+    const link = screen.getByRole("link", { name: "Back to sign in" });
+    const url = new URL(link.getAttribute("href") ?? "", "https://spa.example");
+    expect(url.pathname).toBe("/login");
+    expect(url.searchParams.get("return_to")).toBe(RETURN_TO);
+    expect(url.searchParams.get("acr")).toBe("urn:axiam:acr:mfa");
+    expect(url.searchParams.get("login_hint")).toBe("ada");
+    expect(url.searchParams.has("idp")).toBe(false);
+    expect(url.searchParams.has("reauth")).toBe(false);
+    expect(link.getAttribute("href")).not.toContain(IDP);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("links to a bare /login after a failure with no hop", async () => {
+    rememberPendingSso({ protocol: "OidcConnect", displayName: "Okta" });
+    renderWithProviders(<SsoCallbackPage />, { route: "/auth/sso/callback?error=access_denied" });
+    await screen.findByRole("alert");
+    expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute(
+      "href",
+      "/login",
+    );
   });
 });

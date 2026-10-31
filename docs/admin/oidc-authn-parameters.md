@@ -366,6 +366,18 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
   within the last 10 minutes (a `sessionStorage` guard, recorded *before*
   navigating away so Back from the provider is quiet, and cleared on a
   successful sign-in). A start that fails shows the ordinary page and its error.
+- **Back to the relying party** (#832). A provider sign-in started from the
+  login hop — by this redirect or by a provider button on the hop page —
+  carries the hop's `return_to` with it (in the tab's `sessionStorage`, as the
+  value the page's own `return_to` check accepted). When the provider returns
+  and AXIAM completes the sign-in (OIDC and OAuth2 redirects, and the SAML and
+  Apple handoff code alike), the page resumes the authorization request, which
+  then issues the code to the relying party; `return_to` is checked again
+  before the browser is sent there, and a value that fails the check sends the
+  user to the console instead. If the provider leg fails, **Back to sign in**
+  returns to the hop's sign-in page with `return_to` (and `acr`, `login_hint`,
+  `display`, `ui_locale`) but **never** `idp` and never `reauth`, so it starts
+  nothing by itself and the person can choose another way.
 - A hand-written `/login?idp=…` can at worst start a provider the tenant already
   shows as a button.
 

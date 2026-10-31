@@ -354,6 +354,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**Precedence:** a hint that resolves beats the client's `default_idp`, which beats the chooser. `default_idp` must name a provider the tenant can sign in with (`400 validation_error` otherwise, on create and on update); a default whose provider was later disabled is ignored, not an error. Dynamic registration and client ID metadata documents cannot set it.",
           "**Every lane, and PAR.** The hint is read whatever `authn_request_params` says. Under PAR the pushed hint is authoritative and a query copy beside the `request_uri` is ignored. A browser that already holds a session is not sent to sign in, so the hint is moot; a re-authentication hop carries it.",
           "**The sign-in page redirects after a short pause** (1.5 s, 3 s with reduced motion) behind a visible \"Choose another way to sign in\" button, and never loops: no redirect after an error return, for a provider already started in the last ten minutes, or for an unmatched value.",
+          "**Back to the relying party.** Once the provider signs the user in, the sign-in page resumes the original authorization request, so the relying party gets its code; a failed provider leg leads back to the sign-in page for that request without restarting the provider.",
           "**Coming from Keycloak?** There is deliberately no `kc_idp_hint` alias. Rename the parameter and give the equivalent provider the same `provider_slug`.",
         ],
       },

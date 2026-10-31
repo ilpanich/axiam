@@ -71,7 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   motion), behind a "Choose another way to sign in" control, and never loops
   (no redirect after a failed provider leg, for an unlisted id, or for a
   provider already started in the last ten minutes); the console client form
-  gains a "Default identity provider" select. There is deliberately no
+  gains a "Default identity provider" select. A provider sign-in started from
+  the login hop — automatically or with a provider button — now returns to the
+  relying party's authorization request when it completes (OIDC, OAuth2, SAML
+  and Apple alike) instead of ending on the console dashboard, and a failed
+  provider leg's "Back to sign in" keeps the request's `return_to` but not the
+  provider id (#832). There is deliberately no
   `kc_idp_hint` alias. Documented in `docs/admin/oidc-authn-parameters.md`
   (with a Keycloak migration note) and `docs/admin/browser-login-hop.md`;
   threat-model entries T-493 and T-494; OpenAPI regenerated. Schema

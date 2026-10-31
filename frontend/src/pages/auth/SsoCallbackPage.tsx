@@ -9,11 +9,14 @@ import {
   withReachableTenantSelected,
 } from "@/lib/fetchCurrentUser";
 import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
+import { resumeLoginHop } from "@/lib/returnTo";
 import {
   HANDOFF_QUERY_PARAM,
   clearAutoRedirect,
+  loginHopRetryPath,
   ssoLoginService,
   takePendingSso,
+  type SsoLoginHop,
 } from "@/services/ssoLogin";
 import { useAuthStore } from "@/stores/auth";
 
@@ -37,12 +40,23 @@ import { useAuthStore } from "@/stores/auth";
  * the outcome this route exists to avoid: a person who cancelled at Google, one
  * whose ten-minute state row expired, and one whose GitHub email is unverified
  * need three different next actions.
+ *
+ * **Back to the relying party** (#832, F4-W3-01). A sign-in started from a
+ * login hop — by the `idp` auto-redirect or by a button on a hop page — carries
+ * the hop in the pending record. On success the page resumes it through
+ * `resumeLoginHop`, the same tail the password path uses, which re-validates
+ * `return_to` at the moment it navigates; without a hop it goes to the
+ * dashboard as before. On failure "Back to sign in" returns to the hop's
+ * `/login` with `return_to` and its presentation, and never with `idp`.
  */
 export function SsoCallbackPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { setUser } = useAuthStore();
   const [error, setError] = useState<string | null>(null);
+  // The hop this sign-in was started from, for the failure link. State rather
+  // than a ref so the link renders with it; set once, from the pending record.
+  const [hop, setHop] = useState<SsoLoginHop | undefined>(undefined);
   // React 18 StrictMode mounts effects twice in development, and every
   // credential this route consumes is single-use — a second attempt would
   // always fail and would report *that* failure to the user.
@@ -56,6 +70,7 @@ export function SsoCallbackPage() {
     const providerName = pending?.displayName ?? "your identity provider";
 
     const finish = async () => {
+      setHop(pending?.hop);
       // Strip the credential from the address bar before anything else. It is
       // spent either way, but a code sitting in browser history and in the
       // `Referer` of every subsequent request is worth one line to avoid.
@@ -106,7 +121,11 @@ export function SsoCallbackPage() {
       }
       clearAutoRedirect();
       setUser(await withReachableTenantSelected(hydrated));
-      navigate("/dashboard", { replace: true });
+      // Resume the authorization request this sign-in was for, if there was
+      // one; the dashboard otherwise. `resumeLoginHop` re-validates the value.
+      resumeLoginHop(pending?.hop?.returnTo, (path) =>
+        navigate(path, { replace: true }),
+      );
     };
 
     void finish();
@@ -141,7 +160,7 @@ export function SsoCallbackPage() {
         <span>{error}</span>
       </div>
       <Button asChild className="w-full">
-        <Link to="/login">Back to sign in</Link>
+        <Link to={loginHopRetryPath(hop)}>Back to sign in</Link>
       </Button>
     </PublicLayout>
   );

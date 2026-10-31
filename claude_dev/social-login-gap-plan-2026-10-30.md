@@ -548,6 +548,8 @@ recommendation.
 | D-N17 | *(F4-W2-03, #829)* Google Android tokens: `aud` = web client ID, `azp` = Android client ID. Change the audience rule or only the docs? | **azp-first**: the issued-to party is `azp` when present, else the single `aud`, and must be listed; with a listed `azp`, `aud` may be listed or the provider's web `client_id`; browser-flow tokens stay refused | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N18 | *(F4-W2-04, #830)* Bind provider app IDs to specific AXIAM clients? | **Residual for 1.2.0**, recorded under T-489 and documented | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N19 | *(F4-W2-06, #830)* Single use per provider config or deployment-wide? | **Deployment-wide**: the replay row is keyed on (issuer, SHA-256(token)); v112 is unreleased, so its definition changes in-wave | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N20 | *(F4-W2-12, #831)* First-sign-in provisioning still tells a caller whether an email/username is taken, as browser login does. Record a residual or change provisioning now? | **Residual** shared with browser login; correct the text that claims otherwise; a provisioning change can be planned later | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N21 | *(F4-W2-14, #831)* Upper-case hex nonce hashes are refused. Accept either case or document lower-case only? | **Accept either case**: normalise before the constant-time compare | **Answered by the maintainer 2026-10-31: as recommended.** |
 
 ---
 

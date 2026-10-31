@@ -282,7 +282,8 @@ impl Fx {
     }
 
     /// A well-formed native ID token's claims: issued to the iOS app, now,
-    /// bound to the fixture's nonce.
+    /// bound to the fixture's nonce the way D-N16 requires — the claim is the
+    /// SHA-256 hex of the raw nonce the request carries.
     fn claims(&self) -> Value {
         json!({
             "iss": self.idp.issuer(),
@@ -290,7 +291,7 @@ impl Fx {
             "sub": "user-1",
             "iat": now(),
             "exp": now() + 600,
-            "nonce": self.nonce,
+            "nonce": sha256_hex(&self.nonce),
             "email": "ada@example.com",
             "email_verified": true,
             "name": "Ada",
@@ -408,20 +409,119 @@ async fn the_provider_may_be_named_by_its_slug() {
     assert_eq!(subject.provider_id, fx.provider_id);
 }
 
-#[tokio::test]
-async fn nonce_matching_the_raw_request_nonce_is_accepted() {
-    let fx = Fx::new().await;
-    let token = fx.token(json!({ "nonce": fx.nonce }));
-    fx.sign_in(&token).await.expect("raw nonce");
-}
-
-/// Apple's documented pattern: the app hands the SDK the SHA-256 hex of its
-/// nonce, and the ID token carries that.
+/// D-N16: the app hands the SDK the SHA-256 hex of its nonce, the ID token
+/// carries that, and the request carries the raw value.
 #[tokio::test]
 async fn nonce_matching_the_sha256_hex_of_the_request_nonce_is_accepted() {
     let fx = Fx::new().await;
     let token = fx.token(json!({ "nonce": sha256_hex(&fx.nonce) }));
     fx.sign_in(&token).await.expect("hashed nonce");
+}
+
+/// F4-W2-02 — the raw form is refused: a claim equal to the request's nonce
+/// is what a token's holder could always send, by reading the claim. The
+/// refusal spends nothing.
+#[tokio::test]
+async fn a_raw_nonce_equal_to_the_claim_is_refused() {
+    let fx = Fx::new().await;
+    let token = fx.token(json!({ "nonce": fx.nonce }));
+    refused(fx.sign_in(&token).await, NativeLoginError::NonceMismatch);
+}
+
+/// F4-W2-02, the review's probe kept as a test: a presenter who holds only a
+/// leaked token reads its `nonce` claim from the payload and sends it as the
+/// nonce. Refused, and the genuine app's presentation still signs in — the
+/// token was not spent by the attempt.
+#[tokio::test]
+async fn a_presenter_who_copies_the_nonce_claim_is_refused() {
+    let fx = Fx::new().await;
+    let token = fx.token(json!({}));
+    let payload = token.split('.').nth(1).expect("a JWS");
+    let claims: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url"),
+    )
+    .expect("json");
+    let copied = claims["nonce"].as_str().expect("a nonce claim").to_owned();
+    assert_ne!(
+        copied, fx.nonce,
+        "the token carries the hash, not the raw nonce"
+    );
+
+    refused(
+        fx.sign_in_as(fx.tenant_id, &fx.provider_id.to_string(), &token, &copied)
+            .await,
+        NativeLoginError::NonceMismatch,
+    );
+    fx.sign_in(&token)
+        .await
+        .expect("the genuine presentation still signs in");
+}
+
+/// D-N17 — Google's Android shape: `aud` is the provider's web (server)
+/// client, `azp` the listed Android client. Issued to the `azp`.
+#[tokio::test]
+async fn the_android_shape_signs_in_as_its_azp() {
+    let fx = Fx::new().await;
+    let token = fx.token(json!({ "aud": WEB, "azp": ANDROID }));
+    let subject = fx.sign_in(&token).await.expect("android shape");
+    assert_eq!(subject.audience, ANDROID);
+}
+
+/// D-N17 — the iOS shape without a server client: one listed `aud`, no `azp`
+/// (and the same with an `azp` naming the same client).
+#[tokio::test]
+async fn the_ios_shape_signs_in_as_its_aud() {
+    let fx = Fx::new().await;
+    let subject = fx
+        .sign_in(&fx.token(json!({ "aud": IOS })))
+        .await
+        .expect("ios shape");
+    assert_eq!(subject.audience, IOS);
+    let subject = fx
+        .sign_in(&fx.token(
+            json!({ "aud": IOS, "azp": IOS, "sub": "user-2", "email": "user-2@example.com" }),
+        ))
+        .await
+        .expect("ios shape with azp");
+    assert_eq!(subject.audience, IOS);
+}
+
+/// D-N17 — a token from the provider's browser flow is issued to the web
+/// client (`azp` the web client, or absent), which is not listed: refused,
+/// although the web client is the provider's own.
+#[tokio::test]
+async fn a_browser_flow_token_is_refused() {
+    let fx = Fx::new().await;
+    refused(
+        fx.sign_in(&fx.token(json!({ "aud": WEB, "azp": WEB })))
+            .await,
+        NativeLoginError::AuthorizedPartyRefused,
+    );
+    refused(
+        fx.sign_in(&fx.token(json!({ "aud": WEB }))).await,
+        NativeLoginError::WrongAudience,
+    );
+}
+
+/// D-N17 — a listed `azp` does not carry a token addressed elsewhere: `aud`
+/// must name a listed ID or the provider's web client.
+#[tokio::test]
+async fn a_listed_azp_with_a_foreign_aud_is_refused() {
+    let fx = Fx::new().await;
+    refused(
+        fx.sign_in(&fx.token(json!({ "aud": "another-web-client", "azp": ANDROID })))
+            .await,
+        NativeLoginError::WrongAudience,
+    );
+    // A listed `azp` with a third party's `azp`-less shape is not rescued
+    // either: a foreign `azp` beside a listed `aud` is refused.
+    refused(
+        fx.sign_in(&fx.token(json!({ "aud": IOS, "azp": "third-party" })))
+            .await,
+        NativeLoginError::AuthorizedPartyRefused,
+    );
 }
 
 #[tokio::test]
@@ -697,14 +797,22 @@ async fn a_wrong_aud_is_refused() {
     );
 }
 
-/// Deny by default: the provider's web `client_id` is not a native audience
-/// unless it is listed.
+/// Deny by default: the provider's web `client_id` is never the party a token
+/// was issued to unless it is listed. Listing it — which the docs advise
+/// against — admits the browser flow's tokens (`aud` the web client, `azp`
+/// the web client or absent), exactly as configured; this pins that
+/// behaviour so a change to it is a decision, not an accident.
 #[tokio::test]
 async fn the_web_client_id_is_refused_unless_listed() {
     let fx = Fx::new().await;
     refused(
         fx.sign_in(&fx.token(json!({ "aud": WEB }))).await,
         NativeLoginError::WrongAudience,
+    );
+    refused(
+        fx.sign_in(&fx.token(json!({ "aud": WEB, "azp": WEB })))
+            .await,
+        NativeLoginError::AuthorizedPartyRefused,
     );
 
     fx.update_provider(
@@ -719,6 +827,13 @@ async fn the_web_client_id_is_refused_unless_listed() {
     fx.sign_in(&fx.token(json!({ "aud": WEB })))
         .await
         .expect("listed web client id");
+    fx.sign_in(
+        &fx.token(
+            json!({ "aud": WEB, "azp": WEB, "sub": "user-2", "email": "user-2@example.com" }),
+        ),
+    )
+    .await
+    .expect("listed web client id, browser-flow shape");
 }
 
 #[tokio::test]
@@ -1066,7 +1181,7 @@ fn native_requires_a_marker_x4_refuses() {
             base.clone(),
             Some(typ)
         ));
-        let with_nonce = json!({ "nonce": "n" });
+        let with_nonce = json!({ "nonce": sha256_hex("n") });
         assert!(
             check_shape(Some(typ), &with_nonce, "n").is_ok(),
             "native accepts the ID-token type {typ}"
@@ -1111,30 +1226,59 @@ fn the_iat_bounds_are_inclusive_and_the_future_has_the_leeway() {
     ));
 }
 
+/// D-N17, the pure rule: the issued-to party is the `azp` when present,
+/// otherwise the single `aud`, and it must be listed.
 #[test]
-fn the_audience_rule_reads_azp_only_for_several_audiences() {
+fn the_audience_rule_is_azp_first() {
     let ids = vec![IOS.to_owned(), ANDROID.to_owned()];
-    // One audience: the azp, whatever it says, is not consulted (Google's
-    // Android tokens carry aud = the server client and azp = the app).
+    let rule = |aud: Value, azp: Option<Value>| issued_to(&ids, WEB, Some(&aud), azp.as_ref());
+    // No azp: one listed audience.
+    assert_eq!(rule(json!(IOS), None), Ok(IOS.to_owned()));
+    assert_eq!(rule(json!([IOS]), None), Ok(IOS.to_owned()));
+    assert_eq!(rule(json!(WEB), None), Err(NativeLoginError::WrongAudience));
     assert_eq!(
-        issued_to(&ids, Some(&json!(IOS)), Some(&json!("anything"))),
-        Ok(IOS.to_owned())
+        rule(json!([IOS, ANDROID]), None),
+        Err(NativeLoginError::AuthorizedPartyRefused),
+        "several audiences need an azp, even when all are listed"
+    );
+    // An azp: it must be listed, and is the answer.
+    assert_eq!(
+        rule(json!(WEB), Some(json!(ANDROID))),
+        Ok(ANDROID.to_owned())
+    );
+    assert_eq!(rule(json!(IOS), Some(json!(IOS))), Ok(IOS.to_owned()));
+    assert_eq!(
+        rule(json!([WEB, "x"]), Some(json!(ANDROID))),
+        Ok(ANDROID.to_owned())
     );
     assert_eq!(
-        issued_to(&ids, Some(&json!([IOS])), None),
-        Ok(IOS.to_owned())
+        rule(json!(IOS), Some(json!("anything"))),
+        Err(NativeLoginError::AuthorizedPartyRefused),
+        "an unlisted azp is refused even beside a listed aud"
     );
     assert_eq!(
-        issued_to(&ids, Some(&json!(["x", "y"])), Some(&json!(IOS))),
+        rule(json!(WEB), Some(json!(WEB))),
+        Err(NativeLoginError::AuthorizedPartyRefused),
+        "a browser-flow token"
+    );
+    assert_eq!(
+        rule(json!([IOS, "x"]), Some(json!(42))),
+        Err(NativeLoginError::AuthorizedPartyRefused)
+    );
+    // A listed azp does not carry an audience that is neither listed nor the
+    // provider's web client.
+    assert_eq!(
+        rule(json!(["x", "y"]), Some(json!(IOS))),
         Err(NativeLoginError::WrongAudience),
         "azp cannot stand in for an audience"
     );
+    // No configured web client: nothing matches it.
     assert_eq!(
-        issued_to(&ids, Some(&json!([IOS, "x"])), Some(&json!(42))),
-        Err(NativeLoginError::AuthorizedPartyRefused)
+        issued_to(&ids, "", Some(&json!("")), Some(&json!(ANDROID))),
+        Err(NativeLoginError::WrongAudience)
     );
     assert_eq!(
-        issued_to(&ids, None, None),
+        issued_to(&ids, WEB, None, None),
         Err(NativeLoginError::WrongAudience)
     );
 }

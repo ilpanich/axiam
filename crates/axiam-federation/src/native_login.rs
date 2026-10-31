@@ -8,7 +8,9 @@
 //!
 //! "Us" is one of the client IDs an operator listed in the provider's
 //! `native_login.client_ids` for exactly this purpose — not the provider's web
-//! `client_id` unless it is listed, and never "any audience".
+//! `client_id` unless it is listed, and never "any audience". The party a
+//! token was issued to is its `azp` when it carries one, otherwise its single
+//! `aud` (D-N17, see [`issued_to`]).
 //!
 //! This module answers one question: *which AXIAM user does this ID token
 //! prove signed in, through which provider?* The grant that turns the answer
@@ -30,15 +32,18 @@
 //!    provider's `allowed_algorithms`, `kid` resolved through the JWKS cache
 //!    with its rate-limited rollover refetch — no new fetch surface.
 //! 4. **Signature and claims**, through the browser login's own verification
-//!    core: `iss` exactly the discovered issuer; `aud` (string or array) naming
-//!    a listed client ID; `azp` present and listed when `aud` has several
-//!    members (OIDC Core §3.1.3.7); `exp` in the future within the 60 s leeway
-//!    (D-05); `iat` neither older than `max_token_age_secs` nor in the future
-//!    beyond the leeway.
+//!    core: `iss` exactly the discovered issuer; the token issued to a listed
+//!    client ID, **azp-first** (D-N17): a listed `azp`, with `aud` (string or
+//!    array) containing a listed ID or the provider's web `client_id` — the
+//!    shape of Google's Android tokens — or, with no `azp`, a single listed
+//!    `aud` (several audiences need an `azp`, OIDC Core §3.1.3.7); `exp` in
+//!    the future within the 60 s leeway (D-05); `iat` neither older than
+//!    `max_token_age_secs` nor in the future beyond the leeway.
 //! 5. **Shape**: an ID token and nothing else — `nonce` present and equal, in
-//!    constant time, to the request's nonce or to its SHA-256 hex (Apple's
-//!    documented pattern); an access-token `typ` (`at+jwt`) refused. The
-//!    marker list is [`crate::token_shape`]'s, the same one X4 refuses by.
+//!    constant time, to the lower-case SHA-256 hex of the request's nonce
+//!    (D-N16; the app gives the provider SDK the hash and AXIAM the raw
+//!    value); an access-token `typ` (`at+jwt`) refused. The marker list is
+//!    [`crate::token_shape`]'s, the same one X4 refuses by.
 //! 6. **Replay**: the token's SHA-256 recorded in the replay store, until `exp`
 //!    plus the leeway; a second presentation is refused, and a store that
 //!    cannot record refuses too.
@@ -61,8 +66,11 @@
 //!   genuine token without the nonce it is bound to (from a log, a proxy, a
 //!   crash report) could present it, fail the nonce check *after* burning its
 //!   hash, and turn the victim's own sign-in into a "replay". Recorded after
-//!   step 5, only a presenter holding both the token and its nonce — the app
-//!   that started the sign-in — can spend it.
+//!   step 5, only a presenter holding both the token and its raw nonce — the
+//!   app that started the sign-in — can spend it. That holds because the
+//!   token carries only the nonce's SHA-256 (D-N16): the claim a token holder
+//!   can read from the payload is not the value the request must carry. When
+//!   the claim itself was accepted too, copying it passed (F4-W2-02).
 //! * **Not after subject resolution (step 7).** Then two concurrent
 //!   presentations would both resolve, and both sign in, before either
 //!   recorded. The insert is the one atomic decision (a UNIQUE index), placed
@@ -114,7 +122,8 @@ pub struct NativeIdTokenRequest<'a> {
     pub provider: &'a str,
     /// The ID token the provider issued to the app.
     pub id_token: &'a str,
-    /// The raw nonce the app generated and handed to the provider's SDK.
+    /// The raw nonce the app generated. The provider's SDK was given its
+    /// lower-case SHA-256 hex, which is what the token's `nonce` claim holds.
     pub nonce: &'a str,
 }
 
@@ -151,8 +160,8 @@ pub struct NativeSubject {
     /// The provider-local subject the user was resolved from (after the
     /// provider's `attribute_map`). Audit only.
     pub external_subject: String,
-    /// The listed client ID the token was issued to: the `azp` when `aud` had
-    /// several members, otherwise the one `aud` that matched.
+    /// The listed client ID the token was issued to: its `azp` when it carries
+    /// one, otherwise its single `aud`.
     pub audience: String,
     /// True when this sign-in created the AXIAM user.
     pub newly_provisioned: bool,
@@ -197,9 +206,12 @@ pub enum NativeLoginError {
     BadSignature,
     /// Step 4: `iss` is not the provider's discovered issuer.
     WrongIssuer,
-    /// Step 4: `aud` names no listed client ID.
+    /// Step 4: with no `azp`, the single `aud` is not listed; with a listed
+    /// `azp`, `aud` names neither a listed ID nor the provider's web
+    /// `client_id`.
     WrongAudience,
-    /// Step 4: `aud` has several members and `azp` is absent or not listed.
+    /// Step 4: the `azp` is present and not listed (or not a string), or `aud`
+    /// has several members and there is no `azp`.
     AuthorizedPartyRefused,
     /// Step 4: `exp` has passed, beyond the leeway.
     Expired,
@@ -214,8 +226,9 @@ pub enum NativeLoginError {
     /// Step 5: the token has no `nonce` — it is not an ID token from a flow
     /// the app bound to a nonce.
     NonceMissing,
-    /// Step 5: the `nonce` is neither the request's nonce nor its SHA-256
-    /// hex, or the request carried none.
+    /// Step 5: the `nonce` is not the SHA-256 hex of the request's nonce
+    /// (a claim equal to the request's value unhashed included), or the
+    /// request carried none.
     NonceMismatch,
     /// Step 6: this token was presented before.
     Replayed,
@@ -246,12 +259,12 @@ impl std::fmt::Display for NativeLoginError {
             Self::WrongAudience => {
                 write!(
                     f,
-                    "the token's audience names no native client ID of the provider"
+                    "the token was not issued to a native client ID of the provider"
                 )
             }
             Self::AuthorizedPartyRefused => write!(
                 f,
-                "the token has several audiences and its azp is absent or not a native client ID"
+                "the token's azp is not a native client ID, or it has several audiences and no azp"
             ),
             Self::Expired => write!(f, "the token has expired"),
             Self::TooOld => write!(
@@ -342,7 +355,8 @@ impl NativeLoginError {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-/// Lowercase hex SHA-256 — the replay key of a token, and Apple's nonce form.
+/// Lowercase hex SHA-256 — the replay key of a token, and the nonce form the
+/// token must carry (D-N16).
 fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
 }
@@ -368,33 +382,54 @@ fn names(config: &FederationConfig, provider: &str) -> bool {
 }
 
 /// Step 4's audience rule beyond the decoder's: which listed client ID the
-/// token was issued to.
+/// token was issued to — **azp-first** (D-N17, F4-W2-03).
 ///
-/// The decoder has already checked that some `aud` member is listed. With one
-/// member that member is the answer. With several, OIDC Core §3.1.3.7 says the
-/// `azp` names the party the token was issued to, so it must be present and
-/// listed itself — otherwise a token minted for a third party that merely
-/// added one of our IDs to its audience would sign in here.
+/// * With an `azp`, the `azp` is the party the token was issued to (OIDC Core
+///   §2), so it must be listed. `aud` must then contain a listed ID or the
+///   provider's own web `client_id`: Google issues an Android app's token
+///   for the *server* client it asks for, so `aud` is the web client and
+///   `azp` the Android client. A token for some third party that merely
+///   carries one of our IDs in `aud` has a foreign `azp`, and is refused.
+/// * Without an `azp`, `aud` must be one listed value (an iOS token without a
+///   server client). Several audiences need an `azp` (OIDC Core §3.1.3.7).
+///
+/// So a browser-flow token — `aud` the web client, `azp` the web client or
+/// absent — is refused unless the operator lists the web client, which
+/// admits exactly those tokens and which the docs advise against.
+///
+/// `web_client_id` is the provider's configured `client_id`; empty means
+/// none, and matches nothing.
 fn issued_to(
     client_ids: &[String],
+    web_client_id: &str,
     aud: Option<&serde_json::Value>,
     azp: Option<&serde_json::Value>,
 ) -> Result<String, NativeLoginError> {
     let audiences = flatten_audience(aud);
     let listed = |v: &str| client_ids.iter().any(|c| c == v);
-    match audiences.as_slice() {
-        [] => Err(NativeLoginError::WrongAudience),
-        [one] if listed(one) => Ok(one.clone()),
-        [_] => Err(NativeLoginError::WrongAudience),
-        many => {
-            if !many.iter().any(|a| listed(a)) {
-                return Err(NativeLoginError::WrongAudience);
-            }
-            match azp.and_then(serde_json::Value::as_str) {
-                Some(azp) if listed(azp) => Ok(azp.to_owned()),
-                _ => Err(NativeLoginError::AuthorizedPartyRefused),
+    if audiences.is_empty() {
+        return Err(NativeLoginError::WrongAudience);
+    }
+    match azp {
+        Some(azp) => {
+            let azp = azp
+                .as_str()
+                .filter(|azp| listed(azp))
+                .ok_or(NativeLoginError::AuthorizedPartyRefused)?;
+            let addressed = audiences
+                .iter()
+                .any(|a| listed(a) || (!web_client_id.is_empty() && a == web_client_id));
+            if addressed {
+                Ok(azp.to_owned())
+            } else {
+                Err(NativeLoginError::WrongAudience)
             }
         }
+        None => match audiences.as_slice() {
+            [one] if listed(one) => Ok(one.clone()),
+            [_] => Err(NativeLoginError::WrongAudience),
+            _ => Err(NativeLoginError::AuthorizedPartyRefused),
+        },
     }
 }
 
@@ -416,9 +451,12 @@ fn check_iat(iat: Option<u64>, now: i64, max_age_secs: i64) -> Result<(), Native
 /// Step 5: the token is an ID token bound to this request's nonce.
 ///
 /// `typ` (header or claim) must not name an access, refresh or logout token;
-/// `nonce` must be present and equal, in constant time, to the request nonce
-/// or to its SHA-256 hex. Both comparisons always run, so the time taken does
-/// not say which form matched.
+/// `nonce` must be present and equal, in constant time, to the lower-case
+/// SHA-256 hex of the request nonce (D-N16, F4-W2-02). The raw form — a claim
+/// equal to the request's value — is **not** accepted: a JWT payload is
+/// readable by whoever holds the token, so accepting the claim itself would
+/// let a token's holder copy it into the request. With the hashed form the
+/// value to present is a SHA-256 preimage of what the token carries.
 fn check_shape(
     header_typ: Option<&str>,
     raw: &serde_json::Value,
@@ -439,9 +477,7 @@ fn check_shape(
         return Err(NativeLoginError::NonceMismatch);
     }
     let hashed = sha256_hex(request_nonce);
-    let raw_match = token_nonce.as_bytes().ct_eq(request_nonce.as_bytes());
-    let hashed_match = token_nonce.as_bytes().ct_eq(hashed.as_bytes());
-    if bool::from(raw_match | hashed_match) {
+    if bool::from(token_nonce.as_bytes().ct_eq(hashed.as_bytes())) {
         Ok(())
     } else {
         Err(NativeLoginError::NonceMismatch)
@@ -541,9 +577,15 @@ where
 
         // --- 3 and 4. Header, key, signature, iss, aud, exp ------------------
         // The browser login's verification core, with the native client IDs
-        // as the accepted audiences and the same JWKS cache key, so the two
-        // share one rollover state for this provider.
-        let audiences: Vec<&str> = trust.client_ids.iter().map(String::as_str).collect();
+        // and the provider's web `client_id` as the audiences the decoder
+        // admits, and the same JWKS cache key, so the two share one rollover
+        // state for this provider. The web client is admitted here only so a
+        // token addressed to it can reach `issued_to`, which accepts it solely
+        // as the `aud` of a token whose `azp` is listed (D-N17).
+        let mut audiences: Vec<&str> = trust.client_ids.iter().map(String::as_str).collect();
+        if !config.client_id.is_empty() && !audiences.contains(&config.client_id.as_str()) {
+            audiences.push(config.client_id.as_str());
+        }
         let checked = self
             .verify_id_token_core(
                 request.id_token,
@@ -558,7 +600,12 @@ where
         let claims = &checked.verified.claims;
         let raw = &checked.verified.raw;
 
-        let audience = issued_to(&trust.client_ids, claims.aud.as_ref(), raw.get("azp"))?;
+        let audience = issued_to(
+            &trust.client_ids,
+            &config.client_id,
+            claims.aud.as_ref(),
+            raw.get("azp"),
+        )?;
         check_iat(claims.iat, now, trust.max_token_age_secs)?;
         let id_token_exp = claims
             .exp

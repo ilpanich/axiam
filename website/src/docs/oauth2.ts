@@ -760,7 +760,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         items: [
           "**It is off by default, per provider**, and a separate switch from `token_exchange`: configuring a provider for browser login is not agreement to accept its ID tokens from apps.",
           "**Only OIDC providers** can enable it — Google, Apple, Microsoft, generic OIDC and Facebook's OIDC variant (Limited Login). SAML and OAuth2-protocol providers are refused.",
-          "**List the app's client IDs** in the provider's `native_login.client_ids` (Google's iOS and Android client IDs, Apple's bundle ID, the Facebook app ID). The list must not be empty, and matching is exact.",
+          "**List the app's client IDs** in the provider's `native_login.client_ids` (Google's iOS and Android client IDs, Apple's bundle ID, the Facebook app ID). The token is issued to its `azp` when it has one, otherwise to its single `aud`, and that party must be listed; with a listed `azp`, `aud` may also be the provider's web client ID, which is how Google's Android tokens arrive. Do not list the web client ID itself: that would admit the browser flow's tokens. The list must not be empty, and matching is exact.",
           "**Register the grant on the client** (`grant_types`). A client without it gets `unauthorized_client`. Add `refresh_token` for a refresh token; a refresh token is issued only to a client that holds it.",
         ],
       },
@@ -769,8 +769,8 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**One answer for every refusal.** A wrong audience, a bad signature, an expired or replayed token and a provider that is switched off are all the same `invalid_grant`. The reason is in the audit record (`federation.native_login`), which never carries the token or the nonce.",
-          "**Single use.** Each ID token is accepted once. The record is written only after the signature and the nonce check out, so only the app that holds both can spend it, and a record that cannot be written refuses the sign-in.",
-          "**The nonce** is the raw value the app generated, or its SHA-256 hex (Apple's pattern); a token with no `nonce` is refused.",
+          "**Single use.** Each ID token is accepted once. The record is written only after the signature and the nonce check out, and a record that cannot be written refuses the sign-in.",
+          "**The nonce is hashed.** The app generates a random raw nonce, gives the provider's SDK its lower-case SHA-256 hex, and sends AXIAM the raw value; AXIAM accepts the token only when the SHA-256 of the request's `nonce` equals the token's `nonce` claim. Someone who reads a leaked token sees only the hash and cannot present the raw value, so cannot spend it. A token with no `nonce`, or whose claim equals the request's value unhashed, is refused.",
           "**The same user as the browser.** A native and a browser sign-in through the same provider resolve to the same AXIAM user, and an unverified email is never marked verified.",
           "**A session, not a bare token.** The access token carries `sid`, so logout, a password reset or an administrator's revocation ends it. The grant has its own rate-limit bucket on the login preset.",
           "**Consent.** A scope that needs a consent ceremony is `consent_required`; the provider token is already spent, so the app completes consent and obtains a fresh one.",

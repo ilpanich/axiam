@@ -394,8 +394,15 @@ fn enc(s: &str) -> String {
         .replace('&', "%26")
 }
 
-/// A provider ID token for the native app, bound to `nonce`; `patch` overrides
-/// claims (`null` removes one).
+/// The lower-case SHA-256 hex the app hands the provider's SDK (D-N16).
+fn sha256_hex(raw: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(raw.as_bytes()))
+}
+
+/// A provider ID token for the native app, bound to the raw `nonce` the way
+/// D-N16 requires — its `nonce` claim is the SHA-256 hex of it; `patch`
+/// overrides claims (`null` removes one).
 fn id_token(f: &Fixture, nonce: &str, sub: &str, patch: Value) -> String {
     let mut claims = json!({
         "iss": f.issuer,
@@ -403,7 +410,7 @@ fn id_token(f: &Fixture, nonce: &str, sub: &str, patch: Value) -> String {
         "sub": sub,
         "iat": now(),
         "exp": now() + 600,
-        "nonce": nonce,
+        "nonce": sha256_hex(nonce),
         "email": format!("{sub}@example.com"),
         "email_verified": true,
         "name": "Ada Lovelace",
@@ -632,22 +639,60 @@ async fn the_token_set_follows_the_registration_and_the_request() {
     assert_eq!(status, 200, "{body}");
 }
 
-/// Apple's documented pattern: the provider signs the SHA-256 hex of the raw
-/// nonce, and the app presents the raw one — which is what comes back.
+/// D-N16 (Apple's documented pattern, and the only one accepted): the
+/// provider signs the SHA-256 hex of the raw nonce, and the app presents the
+/// raw one — which is what comes back.
 #[actix_web::test]
 async fn the_hashed_nonce_pattern_signs_in_and_returns_the_raw_nonce() {
-    use sha2::Digest;
     let f = setup().await;
     let app = test_app!(f);
     let app_client = native_client(&f, "apple-style").await;
 
     let raw = "raw-nonce-from-the-app";
-    let hashed = hex::encode(sha2::Sha256::digest(raw.as_bytes()));
-    let token = id_token(&f, &hashed, "tim", json!({}));
+    let token = id_token(&f, raw, "tim", json!({}));
+    assert_eq!(claims_of(&token)["nonce"], sha256_hex(raw));
     let (status, body) =
         token_endpoint!(app, f, grant_body(&app_client, SLUG, &token, raw, "openid"));
     assert_eq!(status, 200, "{body}");
     assert_eq!(claims_of(body["id_token"].as_str().unwrap())["nonce"], raw);
+}
+
+/// F4-W2-02: the nonce a token carries is never the value to present. A
+/// token whose claim equals the request's nonce (the old raw form) is
+/// refused; a leaked token presented with its own claim copied into `nonce`
+/// is refused — and neither attempt spends the token, so the app holding the
+/// raw nonce still signs in with it.
+#[actix_web::test]
+async fn a_raw_or_copied_nonce_is_refused_and_does_not_spend_the_token() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+
+    // The raw form.
+    let raw = "raw-form-nonce";
+    let token = id_token(&f, raw, "ada", json!({ "nonce": raw }));
+    let (status, body) =
+        token_endpoint!(app, f, grant_body(&app_client, SLUG, &token, raw, "openid"));
+    assert_generic_invalid_grant(status, &body, "raw form");
+
+    // The copied claim.
+    let raw = "the-apps-own-nonce";
+    let token = id_token(&f, raw, "ada", json!({}));
+    let copied = claims_of(&token)["nonce"].as_str().unwrap().to_owned();
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, &copied, "openid")
+    );
+    assert_generic_invalid_grant(status, &body, "copied claim");
+
+    let (status, body) =
+        token_endpoint!(app, f, grant_body(&app_client, SLUG, &token, raw, "openid"));
+    assert_eq!(status, 200, "the token was not spent: {body}");
+    assert_eq!(
+        reason_codes(&native_login_rows(&f).await),
+        ["nonce_mismatch", "nonce_mismatch", "accepted"]
+    );
 }
 
 /// The first sign-in provisions the user; the next one, with another token

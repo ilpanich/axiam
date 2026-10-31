@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.1.3",
-    "x-axiam-spec-digest": "sha256:2afd82170e93f0f1943434d9c4618f2857659acd05f9f2012e6579ea755e1933"
+    "x-axiam-spec-digest": "sha256:d4b1b8dc4d1b31cda6d591631abbe8266c9da67d963b0f7af0aa3df857c5a2a4"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -15740,7 +15740,7 @@
           "oauth2"
         ],
         "summary": "`POST /oauth2/token` -- OAuth2 token endpoint.",
-        "description": "Accepts form-encoded body per RFC 6749. Supports authorization_code,\nclient_credentials, and refresh_token grant types. The `tenant_id` is\npassed as a query parameter since the token endpoint is unauthenticated\n(the client is authenticating itself here).\n\nAlso serves the native sign-in grant\n`urn:axiam:params:oauth:grant-type:provider-id-token`, which signs a user\nin with an ID token a mobile or desktop app obtained from a federated OIDC\nprovider's native SDK. Parameters: `provider` (federation config UUID or\nprovider slug), `id_token`, `nonce` (the raw nonce or its SHA-256 hex), and\noptional `scope` and `resource`. Every refusal of the provider token is\n`invalid_grant` (\"the provider ID token is not acceptable\"); the grant is\nrate limited per client address (`rate_limit_exceeded`). This is not token\nexchange (RFC 8693).",
+        "description": "Accepts form-encoded body per RFC 6749. Supports authorization_code,\nclient_credentials, and refresh_token grant types. The `tenant_id` is\npassed as a query parameter since the token endpoint is unauthenticated\n(the client is authenticating itself here).\n\nAlso serves the native sign-in grant\n`urn:axiam:params:oauth:grant-type:provider-id-token`, which signs a user\nin with an ID token a mobile or desktop app obtained from a federated OIDC\nprovider's native SDK. Parameters: `provider` (federation config UUID or\nprovider slug), `id_token`, `nonce` (the raw nonce; the provider's SDK was\ngiven its lower-case SHA-256 hex, which the ID token's `nonce` claim must\nequal), and optional `scope` and `resource`. Every refusal of the provider token is\n`invalid_grant` (\"the provider ID token is not acceptable\"); the grant is\nrate limited per client address (`rate_limit_exceeded`). This is not token\nexchange (RFC 8693).",
         "operationId": "token",
         "parameters": [
           {
@@ -28560,7 +28560,7 @@
               "string",
               "null"
             ],
-            "description": "The raw nonce the app generated and handed to the provider's SDK; the\nID token's `nonce` is this value or its SHA-256 hex."
+            "description": "The raw nonce the app generated. The app gave the provider's SDK its\nlower-case SHA-256 hex, and the ID token's `nonce` claim must equal\nthat hash; a claim equal to this value unhashed is refused."
           },
           "provider": {
             "type": [

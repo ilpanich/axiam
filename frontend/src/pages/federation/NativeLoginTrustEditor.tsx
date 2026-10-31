@@ -173,11 +173,16 @@ export function NativeLoginTrustEditor({
           </ul>
         )}
         <p className="text-xs text-muted-foreground">
-          The audience an app&apos;s ID token must carry: the iOS bundle ID,
-          Android client ID or Apple app ID the native SDK was configured with.
-          Required when enabled, matched exactly, and there is no accept-all
-          value. The provider&apos;s web client ID is <strong>not</strong>{" "}
-          accepted unless you list it here.
+          The client IDs your native apps sign in as: the iOS client ID,
+          Android client ID, Apple bundle ID or Facebook app ID the native SDK
+          was configured with. A token is issued to its <code>azp</code> when
+          it has one, otherwise to its single <code>aud</code>, and that party
+          must be listed — so an Android token whose audience is the web client
+          ID is accepted when its <code>azp</code>, the Android client ID, is
+          listed. Required when enabled, matched exactly, and there is no
+          accept-all value. The provider&apos;s web client ID is{" "}
+          <strong>not</strong> accepted unless you list it here, and listing it
+          also admits the browser flow&apos;s tokens.
         </p>
       </div>
 

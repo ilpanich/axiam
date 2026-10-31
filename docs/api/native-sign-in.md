@@ -16,11 +16,13 @@ grant_type=urn:axiam:params:oauth:grant-type:provider-id-token
 **The one rule everything below serves: an ID token is accepted as a sign-in
 only when it was issued to us.** "Us" is a client ID the operator listed on the
 provider for exactly this purpose. Not the provider's web client ID unless it
-is listed, and never "any audience".
+is listed, and never "any audience". The party a token was issued to is its
+`azp` when it carries one, otherwise its single `aud` (see
+[Which client IDs to list](#which-client-ids-to-list)).
 
 Design rationale and the decisions behind it:
 [`claude_dev/social-login-gap-plan-2026-10-30.md`](../../claude_dev/social-login-gap-plan-2026-10-30.md)
-(section 3.1, D-N1 and D-N10 to D-N15).
+(section 3.1, D-N1, D-N10 to D-N15 and D-N16 to D-N19).
 
 ---
 
@@ -77,8 +79,8 @@ that omits it leaves the stored block as it was.
   "native_login": {
     "enabled": true,
     "client_ids": [
-      "1234567890-abcdefg.apps.googleusercontent.com",
-      "1234567890-hijklmn.apps.googleusercontent.com",
+      "1234567890-android.apps.googleusercontent.com",
+      "1234567890-ios.apps.googleusercontent.com",
       "com.example.myapp"
     ],
     "max_token_age_secs": 300
@@ -89,17 +91,38 @@ that omits it leaves the stored block as it was.
 | Field | Meaning |
 |---|---|
 | `enabled` | Off unless you say otherwise. |
-| `client_ids` | The audiences a presented ID token may carry. Non-empty when `enabled`; at most 64 entries, each at most 512 bytes, no blanks, no duplicates. Matching is exact. |
+| `client_ids` | The client IDs your native apps sign in as: the party a presented ID token must have been issued to. Non-empty when `enabled`; at most 64 entries, each at most 512 bytes, no blanks, no duplicates. Matching is exact. |
 | `max_token_age_secs` | How old `iat` may be, independent of `exp`. Default 300, range 1 to 3600. |
+
+### Which client IDs to list
+
+AXIAM decides who a token was **issued to** *azp-first*:
+
+1. If the token has an `azp` claim, the `azp` is the issued-to party. It must be
+   in `client_ids`. The token's `aud` (a string or an array) must then contain
+   a listed ID **or the provider's own web `client_id`** (the `client_id` of
+   the provider configuration).
+2. If it has no `azp`, `aud` must be a single value, and that value must be in
+   `client_ids`. A token with several audiences and no `azp` is refused (OIDC
+   Core 3.1.3.7).
+
+The sign-in is attributed to the issued-to party (`azp`, or the single `aud`).
 
 What to list, by provider:
 
 | Provider | What goes in `client_ids` |
 |---|---|
-| Google | The **iOS client ID** and the **Android client ID** the app's Google Sign-In SDK is configured with. These differ from the web client ID, and Google mints the ID token with *that* client as `aud`. |
+| Google | The **Android client ID** and the **iOS client ID** the app's Google SDK is configured with. Do **not** list the web client ID. On Android, Google issues the ID token for the *server (web)* client ID the app requests it for (`setServerClientId` / `requestIdToken`): `aud` is the web client ID and `azp` is the Android client ID, which is accepted because the `azp` is listed and the `aud` is the provider's own web client. On iOS without a server client ID, `aud` is the iOS client ID (and `azp`, when present, is the same); with one, the shape is Android's. |
 | Apple | The app's **bundle ID** (the "App ID"). For the web flow `aud` is the Services ID instead; list it only if you want that token accepted here. |
 | Facebook | Limited Login only, on a provider configured as the **OIDC variant**: the Facebook app ID. Classic Facebook Login produces an access token, not an ID token, and cannot use this grant. |
 | Microsoft / generic OIDC | The application (client) IDs your native app registered. |
+
+**Do not list the provider's web client ID.** Nothing native needs it, and it
+is what the browser login's tokens are issued to: a token with `aud` = the web
+client and `azp` = the web client (or no `azp`) is refused only while the web
+client is not listed. If you list it, those browser-flow tokens become
+acceptable here as well. That is the configuration the audience rule exists to
+keep out, so the admin console says the same.
 
 The provider's own `allowed_algorithms`, issuer and JWKS are the ones its
 browser login uses; nothing new is fetched.
@@ -163,7 +186,7 @@ shares the same rate-limit bucket.
 | `grant_type` | yes | The URN above. |
 | `provider` | yes | The federation provider's UUID, or its `provider_slug`. It must be a provider of this tenant, or one inherited from its organization. |
 | `id_token` | yes | The compact JWT the provider's SDK returned. |
-| `nonce` | yes | See [Nonce rules](#nonce-rules). |
+| `nonce` | yes | The **raw** nonce; the provider's SDK was given its SHA-256. See [Nonce rules](#nonce-rules). |
 | `scope` | no | Within the client's registered scopes. Omitted: the client's registered set. |
 | `resource` | no | An RFC 8707 resource the client may address. |
 | client authentication | per client | Public client: `client_id`. Confidential: its registered method. A client registered for DPoP or mTLS sender binding must present the proof, and gets a bound token. |
@@ -212,18 +235,34 @@ configuration. The reason is in the server log and the audit record
 
 ## Nonce rules
 
-The app generates a random nonce, hands the provider the nonce (or a hash of
-it) when it starts the sign-in, and sends **the same raw nonce** to AXIAM. The
-ID token must carry a `nonce` claim that equals either:
+The nonce is **hashed for the provider and raw for AXIAM.** For each sign-in
+attempt the app:
 
-- the request's `nonce`, **or**
-- the **lower-case SHA-256 hex** of the request's `nonce`.
+1. generates a random **raw** nonce: unguessable (at least 128 bits from a
+   cryptographic random source) and new for each attempt;
+2. computes its SHA-256 and encodes it as **lower-case hex** (64 characters);
+3. gives the provider's SDK that **hex string** as the nonce;
+4. sends AXIAM the **raw** value in the `nonce` parameter, with the ID token
+   the SDK returned.
 
-The second form is Apple's documented pattern: the app passes `sha256(raw)` to
-Apple and keeps `raw`. Both comparisons are constant time. A token with no
-`nonce` claim, or with one that matches neither, is refused. AXIAM generates no
-nonce for you; the app must, and must make it unguessable and new for each
-attempt.
+AXIAM accepts the token only when the lower-case SHA-256 hex of the request's
+`nonce` equals the token's `nonce` claim, compared in constant time. A token
+with no `nonce` claim is refused, and so is one whose claim equals the
+request's `nonce` *unhashed*.
+
+Why hashed only: a JWT payload is readable by whoever holds the token. If the
+claim itself were accepted as the nonce, anyone who obtained a leaked token
+(from a log, a crash report or a debugging proxy) could copy the claim into the
+request, spend the token first and turn the app's own sign-in into a "replay".
+With the hashed form the token carries only `sha256(raw)`, and presenting it
+needs `raw`, which never left the app.
+
+This is Apple's documented pattern. Google's SDKs (Credential Manager's
+`setNonce`, Google Sign-In for iOS) take any string as the nonce, so the app
+passes the hex there in the same way.
+
+AXIAM generates no nonce for you, and the AXIAM ID token it returns carries
+the raw `nonce` the app sent.
 
 ---
 
@@ -246,12 +285,14 @@ The order is the design. Each step runs before the next.
    JWKS cache (including its rate-limited refetch after a key rollover). No new
    outbound fetch surface.
 5. **Signature and claims.** `iss` is exactly the provider's discovered issuer.
-   `aud` names a listed client ID; if `aud` has several members `azp` must be
-   present and listed (OIDC Core 3.1.3.7), and the sign-in is attributed to the
-   `azp`. `exp` is in the future (60 seconds of clock leeway). `iat` is no older
-   than `max_token_age_secs` and not in the future beyond the leeway.
+   The token was issued to a listed client ID, azp-first (see
+   [Which client IDs to list](#which-client-ids-to-list)): a listed `azp`, with
+   `aud` containing a listed ID or the provider's web client ID; or, with no
+   `azp`, a single listed `aud`. `exp` is in the future (60 seconds of clock
+   leeway). `iat` is no older than `max_token_age_secs` and not in the future
+   beyond the leeway.
 6. **Shape and nonce.** The token has ID-token shape: `nonce` present and
-   matching, and not an access token (`typ: at+jwt`, or the claims only access
+   equal to the SHA-256 hex of the request's `nonce`, and not an access token (`typ: at+jwt`, or the claims only access
    tokens carry). This is X4's test run in reverse, from the same marker list.
 7. **Replay.** The token's SHA-256 is recorded; a second presentation is refused
    (see [Single use](#single-use-and-replay)).
@@ -275,9 +316,10 @@ hash, and kept until the token's `exp` plus 60 seconds. Google tokens carry no
 `jti`, so the hash of the exact bytes is the identity.
 
 - The record is written only after the signature, the claims and the nonce have
-  been checked, so only a presenter who holds the token **and** its nonce can
-  spend it. Someone who obtained a victim's token from a log or a proxy cannot
-  burn it by presenting it without the nonce.
+  been checked, so only a presenter who holds the token **and** its raw nonce
+  can spend it. The token carries only the nonce's SHA-256, so someone who
+  obtained a victim's token from a log or a proxy cannot read the raw value out
+  of it, and cannot spend or burn the token.
 - It is written before anything acts on the presentation, and the insert is one
   atomic decision, so two concurrent presentations produce exactly one winner.
 - A write conflict is retried; a record that cannot be written **refuses** the
@@ -400,14 +442,23 @@ curl -sS -X PUT "$AXIAM/api/v1/federation-configs/$PROVIDER_ID" \
   -d '{
         "native_login": {
           "enabled": true,
-          "client_ids": ["1234567890-abcdefg.apps.googleusercontent.com"],
+          "client_ids": [
+            "1234567890-android.apps.googleusercontent.com",
+            "1234567890-ios.apps.googleusercontent.com"
+          ],
           "max_token_age_secs": 300
         }
       }'
 ```
 
-App side, after the Google SDK returned `$GOOGLE_ID_TOKEN` for the nonce
-`$NONCE`:
+App side: generate a raw nonce, give the Google SDK its SHA-256 hex, and send
+AXIAM the raw value with the ID token the SDK returned:
+
+```bash
+NONCE=$(openssl rand -hex 32)                              # raw, kept by the app
+NONCE_FOR_SDK=$(printf '%s' "$NONCE" | sha256sum | cut -d' ' -f1)  # given to the SDK
+# … the Google SDK, given $NONCE_FOR_SDK, returns $GOOGLE_ID_TOKEN …
+```
 
 ```bash
 curl -sS -X POST "$AXIAM/oauth2/token?tenant_id=$TENANT_ID" \

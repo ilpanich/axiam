@@ -16,8 +16,10 @@
 //! `POST /oauth2/token` with
 //! `grant_type=`[`PROVIDER_ID_TOKEN_GRANT_TYPE`], `provider` (the federation
 //! provider's UUID or `provider_slug`), `id_token`, `nonce` (the raw nonce the
-//! app generated), optional `scope` and RFC 8707 `resource`, and the client's
-//! usual authentication — a public (mobile) client sends `client_id` only.
+//! app generated; the provider's SDK was given its SHA-256 hex, which is what
+//! the token carries — D-N16), optional `scope` and RFC 8707 `resource`, and
+//! the client's usual authentication — a public (mobile) client sends
+//! `client_id` only.
 //!
 //! # Why a vendor URN, and this one
 //!

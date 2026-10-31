@@ -269,7 +269,7 @@ export function validateTokenExchangeTrust(
  */
 export interface NativeLoginTrust {
   enabled: boolean;
-  /** iOS bundle ID / Android client ID / Apple app ID the native SDK uses. */
+  /** The parties native apps sign in as (`azp`, else the single `aud`): iOS / Android client ID, Apple bundle ID. */
   client_ids: string[];
   max_token_age_secs: number;
 }

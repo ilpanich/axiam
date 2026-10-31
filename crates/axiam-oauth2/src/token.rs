@@ -255,8 +255,9 @@ pub struct TokenRequest {
     pub provider: Option<String>,
     /// The ID token the provider issued to the native app.
     pub id_token: Option<String>,
-    /// The raw nonce the app generated and handed to the provider's SDK; the
-    /// ID token's `nonce` is this value or its SHA-256 hex.
+    /// The raw nonce the app generated. The app gave the provider's SDK its
+    /// lower-case SHA-256 hex, and the ID token's `nonce` claim must equal
+    /// that hash; a claim equal to this value unhashed is refused.
     pub nonce: Option<String>,
 }
 

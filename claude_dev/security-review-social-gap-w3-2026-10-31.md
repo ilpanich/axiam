@@ -418,3 +418,245 @@ said "choose another way" once is unlikely to mean it less on reload.
    (b) as a follow-up that also benefits the manual button.
 3. **F4-W3-05** — audit client create/update (with `default_idp`) in this
    plan, or record the gap as a T-494 residual and open an issue.
+
+---
+
+## Addendum 1 — sweep 1 re-check (2026-10-31)
+
+**Against:** `a151491..d1c6f40` on `claude/social-gap-w3`. The commits are
+`b42318c` (#832, F4-W3-01; D-N25), `30f5b84` (#833, F4-W3-02 … 04 and 06 … 11;
+D-N26) and `d1c6f40` (#834, F4-W3-05; D-N27). The range touches 21 files and
+adds about 1 240 lines. I re-checked each finding against the code, not
+against the commit messages, and read the new code for what it adds. Two
+throw-away probes ran and were kept out of the tree (below). The following
+were run and were green (exit 0):
+
+- `cargo test -p axiam-oauth2 --lib -- authn_params par:: login_hop`: 70 passed,
+  including `the_shared_idp_hint_bound_trims_unicode_whitespace_and_matches_the_parse`.
+- `cargo test -p axiam-api-rest --no-default-features --test oauth2_idp_hint_test`:
+  19 passed (20 with the probe), including
+  `t494_client_writes_are_audited_by_field_name_and_never_carry_a_secret` and
+  `a_repeated_hint_is_refused_like_a_repeated_login_hint`.
+- `cargo test -p axiam-api-rest --no-default-features --test par_test`: 31 passed,
+  including `a_pushed_idp_hint_is_bounded_at_push_time_and_never_refused`.
+- `npx vitest run LoginPageIdpHint.test.tsx SsoCallbackPage.test.tsx ssoLogin.test.ts OAuth2ClientsPage.test.tsx`:
+  4 files, 121 passed.
+- `scripts/check-crate-layering.py`: OK, 19 crates, 62 edges.
+- `scripts/check-spec-digest.py`: OK. The range changes no OpenAPI-visible
+  shape (the handlers gained an `HttpRequest` extractor only).
+- `cargo fmt -p axiam-oauth2 -p axiam-api-rest -- --check`: clean.
+
+**Probes.** (1) REST, appended to `oauth2_idp_hint_test.rs` and then removed:
+a `PUT` of `grant_types` alone is audited as `["grant_types"]`; one of
+`redirect_uris` alone as `["redirect_uris"]`; re-sending the same redirect
+URIs in another order also lists `redirect_uris` (a false *positive*, harmless);
+re-setting `default_idp` to its current value lists nothing and does not
+restate the value. (2) SPA, a temporary `F4Probe.test.tsx`, then deleted: with
+`return_to` carrying `max_age=00`, `max_age=%2B0`, `max_age=%200`,
+`prompt=consent%09login` or `prompt=consent%0Alogin`, the page **auto-starts**
+the provider; with `prompt=login` it does not (F4-W3-14).
+
+### A.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W3-01** | **Closed** | `handleSsoSelect` (`LoginPage.tsx:552`) stores the hop only when `sanitizeReturnTo(returnTo)` accepts it, together with the sanitised `acr`, requested locale, `display` and `login_hint`, and never `idp` or `reauth`. `takePendingSso` (`ssoLogin.ts:180`) removes the record before parsing and runs every field back through its own sanitiser (`revalidateHop`, `:161`); a `returnTo` that fails discards the whole hop. On success `SsoCallbackPage` calls `resumeLoginHop(pending?.hop?.returnTo, …)` (`:126`), which sanitises a third time immediately before `window.location.assign`, and falls back to `/dashboard`. On failure the link is `loginHopRetryPath(hop)` (`:163`), which sanitises a fourth time and builds `/login?return_to=…` without `idp`/`reauth`; `LoginPage` sanitises again on load. So `return_to` passes the same sanitiser at every read and right before every navigation. All four completions (OIDC and OAuth2 redirects, SAML and Apple handoff) share the one success tail. Tests: `resumes the hop after %s`, `goes to the dashboard when the sign-in was not started from a hop`, `rejects a tampered stored return_to and goes to the dashboard`, `after %s, Back to sign in keeps return_to and drops idp`, `drops the whole hop when the stored return_to is %s`. **Planting** — see A.3 below. |
+| **F4-W3-02** | **Closed** | `loads no providers and starts nothing from ?%s=` pins `?org=`, `?org=&tenant=` and `?tenant=` (no providers request, no start, no `assign`). The `LoginPage` comment, `docs/admin/oidc-authn-parameters.md` ("The person names the workspace first") and T-493 state the rule and why it is load-bearing, and say any future binding must be server-side. |
+| **F4-W3-03** | **Closed as decided (D-N26 (a))**, with a gap on PAR (F4-W3-12) | `freshAuthRequired` (`LoginPage.tsx:251`) is `reauth=1`, a sanitised `acr`, or `demandsFreshLogin(returnTo)`. When true, `autoProvider` is `null` and the hinted provider is only `suggested` (a ring on the button); the start needs a click. Forwarding upstream stays a later item, as decided and as the docs say. The SPA-side detection of `prompt`/`max_age` is the executor's extension (verdict in A.2). It cannot see a pushed request (F4-W3-12), and it reads spellings differently from the server (F4-W3-14). |
+| **F4-W3-04** | **Closed** | `sso_error` is gone (no occurrence in code); `error`/`error_description` remain, labelled defence in depth, and the test is renamed to say so. `follows SsoCallbackPage's own failure link and does not start again` exercises the real path. T-493, the docs' "No loop" bullet and the `ssoLogin.ts` guard comment name the operative guards. One stale copy remains in `claude_dev/frontend-coverage-matrix.md` (F4-W3-15). |
+| **F4-W3-05** | **Closed (D-N27: audit in this wave)** | `oauth2.client_created` / `_updated` / `_deleted` (`oauth2_clients.rs:1071`, `:1569`, `:1843`) through `audit_client_write` (`:1685`), after the write and only on success. Every early return in `update` (`?` and the `422` paths) is before `update_if_unchanged`, and nothing between the write and the audit can return, so no successful write escapes the row. `changed_client_fields` (`:1719`) compares the stored row (the one the conditional write was keyed on) with the row the repository returned; I checked it against every field of `OAuth2Client` (`axiam-core/src/models/oauth2_client.rs`): all 23 mutable registration members are compared, and only the immutable ones, the bookkeeping timestamps and `client_secret_hash` are not. No false negative: `default_idp` set→other, set→`null` (recorded as `null`), grant types and redirect URIs are all listed (test plus probe). **Metadata**: create records `client_id`, `name`, `grant_types`, auth method, profile and `default_idp`; update records names only plus `default_idp`'s new value when it moved; delete records `client_id`, `name`, `managed_by`. No secret, no hash, no redirect URI, key set or DN. The test asserts that neither the one-time secret nor the stored hash appears in any row. Only DCR, RFC 7592 and CIMD stay on their own rows, as stated. |
+| **F4-W3-06** | **Closed** | "apart from the hint's own echo inside `return_to`" is in T-493, the docs, the website and the CHANGELOG; the 4096-byte case is stated. |
+| **F4-W3-07** | **Closed** | `bound_idp_hint` (`authn_params.rs:530`) documents `str::trim` and is pinned by `the_shared_idp_hint_bound_trims_unicode_whitespace_and_matches_the_parse`, which also proves that the query parse and the push-time bound agree on every case. |
+| **F4-W3-08** | **Closed** | `a_repeated_hint_is_refused_like_a_repeated_login_hint` compares full snapshots, including a repeat of two listed providers. Documented. |
+| **F4-W3-09** | **Closed** | The push bound is applied before storage (`par.rs:293`), and the use-time bound is unchanged (the authorize handler still parses the peeked value through `authn_params`), so the bound is applied twice and agrees. `peek` still consumes nothing. Its rustdoc now says what reaches the front channel, and the claim is right: a PAR `return_to` carries only `client_id`, `request_uri` and the marker, so the pushed string is never echoed. |
+| **F4-W3-10** | **Closed** | The admin help text says the list is a convenience and the server decides; T-494 says the same. |
+| **F4-W3-11** | **Closed** | The cancel calls `markAutoRedirect` (`LoginPage.tsx:919`) before hiding the countdown; `records the cancel, so a reload does not restart the countdown`. The ten-minute TTL keeps it a convenience, never a lockout. |
+
+### A.2 The executor's choices beyond the brief
+
+1. **Re-authentication detection also covers a step-up `acr` and a `return_to`
+   with `prompt=login` or `max_age=0`; an ordinary `max_age` still
+   auto-starts.** **Accepted.** Reading the server's own request to suppress an
+   automatic action can only make the page *more* conservative: a wrong reading
+   costs a click and never a token, and the server stays the judge of
+   freshness. Excluding an ordinary `max_age=N` is right: with no AXIAM
+   session, any sign-in is "fresh" by AXIAM's clock. The residual (upstream
+   `auth_time` is not propagated, so `auth_time` is AXIAM's) is the same
+   later forwarding item, and every auto-start already needs the workspace
+   step, which shows someone is present. Two limits. On PAR the page cannot see
+   the request (F4-W3-12). The page's parse differs from the server's
+   (F4-W3-14). A third side effect: a **stale-cookie** first leg also carries
+   `reauth=1`, so it no longer auto-starts either (F4-W3-13).
+2. **The failure link drops `reauth`.** **Accepted.** The `reauth` effect ends
+   the AXIAM session and counts an attempt against the `@/lib/reauth` loop
+   guard. The first visit already ended the session, and no session was made
+   by the failed leg. Re-sending `reauth` would only make a person's retries
+   trip the three-in-a-minute guard. The server's freshness check does not
+   depend on the SPA's flag: the resumed `return_to` keeps its hop marker, so
+   the return leg is answered rather than redirected again, and it is judged
+   on the new session. The retry page still carries `acr` (so a step-up still
+   demands its factor) and carries no `idp` (so nothing auto-starts whatever
+   `freshAuthRequired` reads).
+3. **`sso_error` removed from the error-parameter check.** **Accepted.** Nothing
+   set it. Keeping a dead name in a guard list suggests a code path that does
+   not exist, which is how F4-W3-04 arose. `error`/`error_description` stay as
+   defence in depth for a hand-made link.
+4. **An over-long pushed hint is stored as no hint.** **Accepted, with one
+   wording nit.** The outcome is identical to the query carrier and to an
+   over-long pushed `login_hint` (dropped, never refused). The *storage* is
+   not identical: `login_hint` is still stored as pushed and dropped at use
+   (`par.rs:283`), while the hint is now dropped before storage. That is
+   stricter, and harmless. The phrases "as for an over-long pushed
+   `login_hint`" (T-493) and "just as the push never refuses an over-long
+   `login_hint`" (the docs) are true of the refusal. T-493's sentence order
+   reads as if `login_hint` were also stored as none; that is optional to fix.
+5. **Audit: only successful writes, and an audit-append failure is logged
+   while the request still succeeds.** **Accepted, and consistent.** Every
+   administrator audit row in `crates/axiam-api-rest/src/handlers` is written
+   the same way: `if let Err(e) = audit_repo.append(..) { tracing::error!(..) }`
+   after the durable write. That covers `saml_admin.rs`, `scim_targets.rs`,
+   `ssf_admin.rs`, `directory.rs`, `federation.rs` (the SHA-1 opt-in, itself a
+   security downgrade), `users.rs` (certificate revocation on delete),
+   `ca_certificates.rs` and the #675 conversion in this same module. No REST
+   admin write fails closed on audit. Failing *this* one closed would be
+   worse than the precedent: the write is already committed, so a `5xx` would
+   be retried as a no-op, misreport the state, and still leave no row. Real
+   fail-closed auditing needs the row in the same transaction as the write.
+   That is a deployment-wide design decision (ASVS V7 and ISO 27001 A.8.15 lean
+   that way), not a W3 item. The `tracing::error!` carries `client_id` and the
+   action only. Not auditing refused writes also matches the other
+   registries. A refused write changed nothing, and the authorization layer,
+   not the registry, is where denied attempts belong.
+
+### A.3 Can the pending-SSO record be planted or steered?
+
+The question was whether an attacker can land a victim's fresh session on an
+attacker-chosen `/oauth2/authorize` request. **No new capability.** Path by
+path:
+
+- **Another tab or another origin.** The record is in `sessionStorage`, so it
+  is per origin *and* per tab. Another origin cannot read or write it. Another
+  AXIAM tab has its own copy. A tab opened from this one gets a snapshot at
+  open time and never writes back.
+- **A crafted `/login?return_to=<attacker request>&idp=…`.** The record is
+  written only by `handleSsoSelect`, that is, by a click or by the auto-start
+  after the person submits the workspace step. The victim then signs in, and
+  the request resumed is the attacker's. That is *exactly* what the same URL
+  does on the password path, where `resumeLoginHop` has resumed `return_to`
+  since T23.1.3. `sanitizeReturnTo` confines the value to the four
+  authorization-continuation shapes on this origin. The resumed request still
+  needs a registered `redirect_uri`, a session in that client's tenant, and
+  consent where the client requires it. This is the standard OAuth
+  consent-phishing residual of every login hop, not something #832 adds.
+- **A login CSRF into `/auth/sso/callback`.** The federated state is not bound
+  to the browser: the handoff code, or `code`+`state`, of the attacker's own
+  sign-in completes in any browser. So an attacker who drives the victim's tab
+  there logs it in as the attacker. That is pre-existing and outside this
+  range. If the tab still holds a stale hop (a provider leg the victim
+  abandoned earlier in that tab), that hop is resumed under the attacker's
+  session. But an attacker who already holds a session in the victim's
+  browser can navigate it to *any* `/oauth2/authorize` request directly, so
+  the stale hop adds nothing. Binding the hop to its start would also catch
+  this case cheaply (F4-W3-16, optional).
+- **One-time semantics.** `takePendingSso` removes the record before it parses
+  it, so a hop is consumed by the first callback. The resume navigates to
+  the server-built `return_to`, hop marker included, so the return leg is
+  answered and not re-hopped, exactly as on the password path. Under PAR,
+  `peek` on the anonymous leg consumes nothing, and the `request_uri` is
+  consumed once, by the return leg. A retry after a failed leg resumes the same
+  unconsumed `request_uri` if it has not expired, and otherwise gets the
+  ordinary `invalid_request_uri`. Back-navigation to a spent request is
+  refused as before. `resumeLoginHop` clears the `@/lib/reauth` counter for
+  the destination exactly as the password path does, and the counter still
+  counts every `reauth=1` load.
+
+### A.4 Invariants
+
+| # | Invariant | Verdict | Evidence |
+|---|---|---|---|
+| 1 | X4 refuses ID tokens by name and by shape; its tests unchanged | **Holds** | Neither `token_exchange.rs` (`axiam-oauth2`, `axiam-federation`) nor any of their tests is in the range. |
+| 2 | No refresh token from token exchange | **Holds** | No exchange code in the range. |
+| 3 | `fapi2` grace unchanged | **Holds** | `fapi.rs` is not in the range. The push-time bound is silent on every lane, so it cannot make a `fapi2` push refusable. |
+| 4 | Crate layering | **Holds** | "19 crates, 62 internal production edge(s), all pointing inward; 4 declared test-only inversion(s)". |
+| 5 | `missing_docs` on `axiam-authz` / `axiam-directory` | **Holds (untouched)** | Neither crate is in the range. The new public items (`bound_idp_hint`, the three action constants) are documented anyway. |
+| 6 | Spec current | **Holds** | Digest matches; no schema-visible change. |
+| 7 | Threat model and docs cite real tests | **Holds** | Every name in the T-493 and T-494 amendments was looked up in the tree (`grep`) and its assertions read: the four Rust tests, the six `LoginPageIdpHint` cases, the four `SsoCallbackPage` cases and the two `ssoLogin` cases. |
+
+### A.5 New findings
+
+| ID | Severity | Where | Finding | Fix |
+|---|---|---|---|---|
+| **F4-W3-12** | Low | `LoginPage.tsx:122`, `:251`; `oauth2.rs:1127` (the anonymous leg passes `acr = None`); `ParService::peek` | Under PAR, the anonymous first leg carries no sign that the pushed request asks for `prompt=login`/`max_age=0`, so the page auto-starts and an upstream session answers silently. That is the F4-W3-03 shape on exactly the clients most likely to ask for it (`fapi2` is PAR-only). | S |
+| F4-W3-13 | Info | `oauth2.rs:1127` (`stale` → `reauth=1`); `docs/admin/oidc-authn-parameters.md` ("Not on a re-authentication") | `reauth=1` also means "a stale session cookie was presented" on the first leg. The page now treats that as a re-authentication and does not auto-start, so a returning user whose cookie outlived the server session loses the headline redirect. The docs list only `prompt=login`/`max_age`/`acr_values` as sources. Fails safe. | XS–S |
+| F4-W3-14 | Info | `LoginPage.tsx:122` | The page's `prompt`/`max_age` reading is not the server's. The server splits `prompt` on ASCII whitespace and parses `max_age` as a trimmed `u64` (`00`, `+0`, ` 0` are all `0`); the page splits on a space and compares with `"0"`. Probe: `max_age=00`, `%2B0`, `%200`, `prompt=consent%09login`, `consent%0Alogin` all auto-start. Only the relying party chooses the spelling, so nobody gains from it. | XS |
+| F4-W3-15 | Info | `claude_dev/frontend-coverage-matrix.md:38` | Still describes the guard as `error`, `error_description`, `sso_error` "on a failed SSO leg" — the description F4-W3-04 corrected everywhere else. | XS |
+| F4-W3-16 | Info | `ssoLogin.ts` (`PendingSso`); `SsoCallbackPage.tsx` | The stored hop is not bound to the start it belongs to, so any callback in the tab consumes it, including a login-CSRF one (A.3). Optional hardening. | XS |
+
+**F4-W3-12 (Low) — PAR hides the fresh-login demand from the page.**
+*Scenario.* A `fapi2` (PAR-only) relying party pushes `prompt=login` (or
+`max_age=0`) with `axiam_idp_hint`, or it has a `default_idp`. The browser has
+no AXIAM session. `resolve_authorize_principal` builds the first-leg hop with
+`reauth` false (no stale cookie) and `acr = None`. The `return_to` is
+`/oauth2/authorize?client_id=…&request_uri=…` plus the marker, so
+`demandsFreshLogin` has nothing to read. The page auto-starts the provider
+1.5 s after the workspace step. The provider still holds a session, so it
+answers at once. AXIAM mints a session with `authenticated_at = now`, and
+the return leg satisfies `prompt=login`/`max_age=0`: the relying party gets
+an `auth_time` for a sign-in at which nobody presented a credential. The docs
+state the PAR limitation ("only `reauth` and `acr` mark the hop"). T-493's
+"No unattended re-authentication" sentence does not.
+
+*Recommendation.* Fix size **S**: have the **server** mark the hop. The
+server is the only party that can see both carriers. Add a typed flag to
+`Cosmetic` (or a third value of `reauth`), set on the anonymous leg when the
+effective request asks for `prompt=login` or `max_age=0`. For PAR, widen
+`PeekedRequest` by one `bool`, which keeps `peek`'s "nothing that
+authorizes" property. Drop `demandsFreshLogin`'s parsing of `return_to`, and
+F4-W3-14 goes with it. If deferred, add the PAR caveat to T-493 as a
+residual.
+
+**F4-W3-13 (Info) — a stale cookie now suppresses the auto-redirect.** The
+first leg sets `reauth=1` when a presented `axiam_op_session` resolves to no
+session (`oauth2.rs:1127`). Since #833, `reauth=1` means "never auto-start".
+That is safe, but it drops G-B's flow for every user whose cookie outlived
+the server session: idle expiry, revocation, a server-side logout that did
+not reach this browser. The relying party asked for nothing here, so nothing
+in D-N26 calls for the suppression. *Recommendation.* XS if the page keys
+suppression on the server's own fresh-authentication marker from F4-W3-12 and
+not on `reauth`. Otherwise, accept it and add "or a stale session cookie" to
+the docs' list of what `reauth=1` means.
+
+**F4-W3-14 (Info) — two parsers of one value.** See the table. The divergence
+only ever makes the page *start* where the server would demand fresh
+authentication, never the reverse. *Recommendation.* XS: mirror the server
+(split on `/[\t\n\f\r ]+/`; trim, then `/^\+?0+$/`), or remove the parse
+through F4-W3-12.
+
+**F4-W3-15 (Info) — stale coverage matrix.** Reword the `auth` row to match
+T-493: the failure link carries no `idp`; the `sessionStorage` guard, now
+also written on cancel; one start per load; the workspace step; `error` and
+`error_description` as defence in depth.
+
+**F4-W3-16 (Info, optional) — bind the stored hop to its start.**
+`oidc/start` and `oauth2/start` return the `state`, so the record could keep
+it, and `SsoCallbackPage` could resume the hop only when the callback's
+`state` equals it. For a handoff, it could resume only when the record's
+`federation_config_id` matches the provider the completion reports, or it
+could accept the handoff case as is. When they differ, complete the sign-in
+but land on the dashboard. This stops a foreign or stale callback from
+consuming a hop. It costs nothing on the normal path, and it leaves a browser
+whose storage is disabled exactly where it is today. It does not fix the
+underlying unbound-state login CSRF, which is a pre-existing, separate matter.
+
+### A.6 Needs a maintainer decision
+
+- **F4-W3-12:** fix it in W3 by having the server mark the anonymous hop when
+  the inline *or pushed* request demands fresh authentication (recommended;
+  it also settles F4-W3-13 and F4-W3-14), or record the PAR gap as a T-493
+  residual next to the upstream-forwarding item.
+- **Audit failure policy (A.2 item 5):** no change recommended for W3. Whether
+  any administrator write should fail closed on audit (which needs the row
+  written in the write's transaction) is a deployment-wide question. If it is
+  wanted, it belongs on the roadmap, not in this wave.
+
+F4-W3-01 … 11 are closed. Nothing here is High or Medium.

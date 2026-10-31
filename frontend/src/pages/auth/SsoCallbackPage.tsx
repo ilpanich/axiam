@@ -11,6 +11,7 @@ import {
 import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 import {
   HANDOFF_QUERY_PARAM,
+  clearAutoRedirect,
   ssoLoginService,
   takePendingSso,
 } from "@/services/ssoLogin";
@@ -103,6 +104,7 @@ export function SsoCallbackPage() {
         setError("Signed in, but your account could not be loaded.");
         return;
       }
+      clearAutoRedirect();
       setUser(await withReachableTenantSelected(hydrated));
       navigate("/dashboard", { replace: true });
     };

@@ -28,6 +28,10 @@ import {
   type CreateRegistrationTokenPayload,
 } from "@/services/registrationTokens";
 import { settingsService } from "@/services/settings";
+import { ssoLoginService } from "@/services/ssoLogin";
+import { federationService } from "@/services/federation";
+import { useAuthStore } from "@/stores/auth";
+import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type Column } from "@/components/DataTable";
 import { PaginationControls, SearchBox } from "@/components/ListToolbar";
@@ -575,6 +579,33 @@ function PostureFields({
 
 // ─── Shared form fields ───────────────────────────────────────────────────────
 
+/** One entry of the "Default identity provider" select. */
+interface IdpOption {
+  id: string;
+  label: string;
+}
+
+/**
+ * The options, plus the stored value if the listing no longer offers it.
+ *
+ * A default naming a provider that has since been disabled must stay visible:
+ * a select that silently showed "None" would let the next save look like a
+ * clear. The server is the judge of whether it is still valid.
+ */
+function withCurrentIdp(
+  options: readonly IdpOption[],
+  current: string,
+): readonly IdpOption[] {
+  if (!current || options.some((o) => o.id === current)) return options;
+  return [...options, { id: current, label: `Unavailable provider (${current})` }];
+}
+
+/** `default_idp` rejections are the server's sentence, shown as written. */
+function clientSaveError(err: unknown, fallback: string): string {
+  if (getApiErrorStatus(err) === 400) return getApiErrorMessage(err, fallback);
+  return err instanceof Error ? err.message : fallback;
+}
+
 interface ClientFormFieldsProps {
   name: string;
   grantTypes: string[];
@@ -584,6 +615,10 @@ interface ClientFormFieldsProps {
   backchannelLogoutUri: string;
   posture: ClientPosturePayload;
   thumbprintsRaw: string;
+  /** G-B — "" is "None". */
+  defaultIdp: string;
+  idpOptions: readonly IdpOption[];
+  onDefaultIdpChange: (v: string) => void;
   onNameChange: (v: string) => void;
   onGrantTypesChange: (v: string[]) => void;
   onRedirectUrisChange: (v: string) => void;
@@ -604,6 +639,9 @@ function ClientFormFields({
   backchannelLogoutUri,
   posture,
   thumbprintsRaw,
+  defaultIdp,
+  idpOptions,
+  onDefaultIdpChange,
   onNameChange,
   onGrantTypesChange,
   onRedirectUrisChange,
@@ -663,6 +701,36 @@ function ClientFormFields({
         onChange={onScopesChange}
         hintMap={OAUTH2_SCOPE_HINTS}
       />
+
+      {/* G-B — only admin-managed clients reach these forms; a dcr/cimd client
+          opens the read-only detail instead and cannot set a default. */}
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-default-idp`}>
+          Default identity provider
+        </Label>
+        <select
+          id={`${idPrefix}-default-idp`}
+          value={defaultIdp}
+          onChange={(e) => onDefaultIdpChange(e.target.value)}
+          aria-describedby={`${idPrefix}-default-idp-help`}
+          className="h-9 w-full rounded-md border border-input bg-background/50 px-3 text-sm"
+        >
+          <option value="">None</option>
+          {withCurrentIdp(idpOptions, defaultIdp).map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <p
+          id={`${idPrefix}-default-idp-help`}
+          className="text-xs text-muted-foreground"
+        >
+          When a sign-in starts with no <code>axiam_idp_hint</code>, the login
+          page goes straight to this provider. Users can still choose another
+          way to sign in.
+        </p>
+      </div>
 
       {/* B5 — session/logout settings */}
       <div className="space-y-2">
@@ -1048,6 +1116,8 @@ function useClientFormState() {
     ...DEFAULT_POSTURE,
   });
   const [thumbprintsRaw, setThumbprintsRaw] = useState("");
+  // G-B — "" is "None".
+  const [defaultIdp, setDefaultIdp] = useState("");
   const [error, setError] = useState("");
 
   function patchPosture(patch: Partial<ClientPosturePayload>) {
@@ -1063,6 +1133,7 @@ function useClientFormState() {
     setBackchannelLogoutUri("");
     setPosture({ ...DEFAULT_POSTURE });
     setThumbprintsRaw("");
+    setDefaultIdp("");
     setError("");
   }
 
@@ -1099,6 +1170,7 @@ function useClientFormState() {
     setThumbprintsRaw(
       (client.self_signed_tls_client_auth_thumbprints ?? []).join("\n")
     );
+    setDefaultIdp(client.default_idp ?? "");
     setError("");
   }
 
@@ -1119,6 +1191,8 @@ function useClientFormState() {
     patchPosture,
     thumbprintsRaw,
     setThumbprintsRaw,
+    defaultIdp,
+    setDefaultIdp,
     error,
     setError,
     reset,
@@ -1197,6 +1271,35 @@ export function OAuth2ClientsPage() {
     "/api/v1/oauth2-clients",
   );
 
+  // G-B — the providers a default can name. The public listing is the same
+  // resolver the server validates `default_idp` against (inherited
+  // organization providers included), so it is the right source whenever the
+  // console knows its workspace; otherwise fall back to the tenant's own
+  // enabled configs. A failure leaves the select at "None" rather than
+  // blocking the form.
+  const orgSlug = useAuthStore((s) => s.orgSlug);
+  const tenantSlug = useAuthStore((s) => s.tenantSlug);
+  const { data: idpOptions = [] } = useQuery<IdpOption[]>({
+    queryKey: ["oauth2-client-idp-options", orgSlug, tenantSlug],
+    queryFn: async () => {
+      if (orgSlug) {
+        const list = await ssoLoginService.listProviders(
+          orgSlug,
+          tenantSlug ?? undefined,
+        );
+        return list.map((p) => ({
+          id: p.id,
+          label: p.inherited ? `${p.display_name} (organization)` : p.display_name,
+        }));
+      }
+      const configs = await federationService.getAll();
+      return configs
+        .filter((c) => c.enabled)
+        .map((c) => ({ id: c.id, label: c.provider }));
+    },
+    staleTime: 60_000,
+  });
+
   // ─── Create state ──────────────────────────────────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
   const createForm = useClientFormState();
@@ -1230,7 +1333,7 @@ export function OAuth2ClientsPage() {
       // message it always had.
       createForm.setError(
         scopeCeilingMessage(err) ??
-          (err instanceof Error ? err.message : "Failed to create OAuth2 client.")
+          clientSaveError(err, "Failed to create OAuth2 client.")
       );
     },
   });
@@ -1268,6 +1371,7 @@ export function OAuth2ClientsPage() {
       scopes: createForm.scopes.length > 0 ? createForm.scopes : undefined,
       post_logout_redirect_uris: parseUris(createForm.postLogoutRedirectUris),
       backchannel_logout_uri: createForm.backchannelLogoutUri.trim() || undefined,
+      ...(createForm.defaultIdp ? { default_idp: createForm.defaultIdp } : {}),
       ...posture,
     };
     createMutation.mutate(payload);
@@ -1294,7 +1398,7 @@ export function OAuth2ClientsPage() {
       // outside the tenant's `dcr_allowed_scopes`.
       editForm.setError(
         scopeCeilingMessage(err) ??
-          (err instanceof Error ? err.message : "Failed to update OAuth2 client.")
+          clientSaveError(err, "Failed to update OAuth2 client.")
       );
     },
   });
@@ -1346,6 +1450,12 @@ export function OAuth2ClientsPage() {
         // "" clears a previously registered URI, matching the backend's
         // Some("") semantics — trimming to empty is deliberate, not a bug.
         backchannel_logout_uri: editForm.backchannelLogoutUri.trim(),
+        // G-B — only a *change* is sent (omitted leaves the stored value, so an
+        // unrelated edit is never blocked by a default that went stale); `null`
+        // is the backend's spelling of "clear".
+        ...(editForm.defaultIdp !== (editClient.default_idp ?? "")
+          ? { default_idp: editForm.defaultIdp || null }
+          : {}),
         // The same Some("") semantics apply to every optional posture string,
         // so sending "" for an emptied field clears it rather than leaving the
         // stored value behind.
@@ -1558,6 +1668,9 @@ export function OAuth2ClientsPage() {
           backchannelLogoutUri={createForm.backchannelLogoutUri}
           posture={createForm.posture}
           thumbprintsRaw={createForm.thumbprintsRaw}
+          defaultIdp={createForm.defaultIdp}
+          idpOptions={idpOptions}
+          onDefaultIdpChange={createForm.setDefaultIdp}
           onNameChange={createForm.setName}
           onGrantTypesChange={createForm.setGrantTypes}
           onRedirectUrisChange={createForm.setRedirectUris}
@@ -1590,6 +1703,9 @@ export function OAuth2ClientsPage() {
           backchannelLogoutUri={editForm.backchannelLogoutUri}
           posture={editForm.posture}
           thumbprintsRaw={editForm.thumbprintsRaw}
+          defaultIdp={editForm.defaultIdp}
+          idpOptions={idpOptions}
+          onDefaultIdpChange={editForm.setDefaultIdp}
           onNameChange={editForm.setName}
           onGrantTypesChange={editForm.setGrantTypes}
           onRedirectUrisChange={editForm.setRedirectUris}

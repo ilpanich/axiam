@@ -117,6 +117,8 @@ const en = {
   cancelAuthorizationAction: "Cancel",
   signingIn: "Signing in...",
   orSeparator: "or",
+  ssoRedirecting: "Redirecting to {provider}…",
+  ssoChooseAnother: "Choose another way to sign in",
   passkeySignIn: "Sign in with a passkey",
   waitingForDevice: "Waiting for your device…",
 
@@ -209,6 +211,8 @@ const it: Bundle = {
   cancelAuthorizationAction: "Annulla",
   signingIn: "Accesso in corso...",
   orSeparator: "oppure",
+  ssoRedirecting: "Reindirizzamento a {provider}…",
+  ssoChooseAnother: "Scegli un altro modo per accedere",
   passkeySignIn: "Accedi con una passkey",
   waitingForDevice: "In attesa del tuo dispositivo…",
 
@@ -296,6 +300,8 @@ const fr: Bundle = {
   cancelAuthorizationAction: "Annuler",
   signingIn: "Connexion en cours...",
   orSeparator: "ou",
+  ssoRedirecting: "Redirection vers {provider}…",
+  ssoChooseAnother: "Choisir une autre méthode de connexion",
   passkeySignIn: "Se connecter avec une clé d'accès",
   waitingForDevice: "En attente de votre appareil…",
 
@@ -386,6 +392,8 @@ const de: Bundle = {
   cancelAuthorizationAction: "Abbrechen",
   signingIn: "Anmeldung läuft...",
   orSeparator: "oder",
+  ssoRedirecting: "Weiterleitung zu {provider} …",
+  ssoChooseAnother: "Anders anmelden",
   passkeySignIn: "Mit einem Passkey anmelden",
   waitingForDevice: "Warten auf Ihr Gerät…",
 
@@ -475,6 +483,8 @@ const es: Bundle = {
   cancelAuthorizationAction: "Cancelar",
   signingIn: "Iniciando sesión...",
   orSeparator: "o",
+  ssoRedirecting: "Redirigiendo a {provider}…",
+  ssoChooseAnother: "Elegir otra forma de iniciar sesión",
   passkeySignIn: "Iniciar sesión con una clave de acceso",
   waitingForDevice: "Esperando a tu dispositivo…",
 

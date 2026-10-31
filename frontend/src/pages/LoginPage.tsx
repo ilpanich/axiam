@@ -42,6 +42,9 @@ import {
   loginOpaque,
 } from "@/services/opaque";
 import {
+  autoRedirectAttempted,
+  clearAutoRedirect,
+  markAutoRedirect,
   rememberPendingSso,
   ssoCallbackUrl,
   ssoLoginService,
@@ -92,6 +95,33 @@ interface LoginResponse {
   available_methods?: string[];
   mfa_setup_required?: boolean;
   setup_token?: string;
+}
+
+/** Query parameters a failed SSO leg may leave on `/login`; any one vetoes the auto-redirect. */
+const SSO_ERROR_PARAMS = ["error", "error_description", "sso_error"] as const;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `idp` as a lowercase UUID, or `null` for anything else. */
+function parseIdpHint(raw: string | null): string | null {
+  return raw !== null && UUID_RE.test(raw) ? raw.toLowerCase() : null;
+}
+
+/**
+ * How long the "Redirecting to …" screen waits before navigating.
+ *
+ * 1.5 s: long enough to read the provider's name and reach the cancel button,
+ * short enough that the common case (a single-IdP tenant) does not feel
+ * stalled. Doubled for people who asked their system to reduce motion, who
+ * skew toward assistive technology and need longer to react (WCAG 2.2.1 spirit).
+ */
+const AUTO_REDIRECT_DELAY_MS = 1500;
+function autoRedirectDelayMs(): number {
+  const reduced =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return reduced ? AUTO_REDIRECT_DELAY_MS * 2 : AUTO_REDIRECT_DELAY_MS;
 }
 
 export function LoginPage() {
@@ -165,6 +195,27 @@ export function LoginPage() {
   const [requiredAcr] = useState(() =>
     sanitizeRequiredAcr(searchParams.get("acr"))
   );
+  // G-B (W3.2) — `idp=<uuid>`, the provider `/oauth2/authorize` resolved from
+  // `axiam_idp_hint` or the client's `default_idp`. Read once, like `return_to`,
+  // and only ever *compared* with the ids of the providers the public listing
+  // returned: it is never used to build a URL, so a hand-written
+  // `/login?idp=…` can at worst start a provider this tenant already shows as a
+  // button. Anything that is not a UUID is dropped here.
+  const [idpHint] = useState(() => parseIdpHint(searchParams.get("idp")));
+  // Whether this page load is the *return* from a failed SSO leg, or a second
+  // visit for the same provider (Back button, a relying party restarting the
+  // request). Either way the person already saw that provider; sending them
+  // there again is the loop. Evaluated once, before this page records its own
+  // attempt, so it cannot see itself.
+  const [autoSuppressed] = useState(
+    () =>
+      SSO_ERROR_PARAMS.some((k) => searchParams.has(k)) ||
+      (idpHint !== null && autoRedirectAttempted(idpHint)),
+  );
+  const [autoCancelled, setAutoCancelled] = useState(false);
+  // Set when the timer fires. A ref, not state: StrictMode's second effect run
+  // must see it, and nothing renders from it.
+  const autoStarted = useRef(false);
   // W4 (T1.6) — the loop guard. `null` until the check below runs; a string is
   // the message shown *instead* of the form.
   const [loopBlocked, setLoopBlocked] = useState<string | null>(null);
@@ -288,6 +339,7 @@ export function LoginPage() {
    * permissions array.
    */
   const completeSignIn = async () => {
+    clearAutoRedirect();
     const hydrated = await fetchCurrentUser();
     if (!hydrated) {
       setError(m.authenticationError);
@@ -429,7 +481,9 @@ export function LoginPage() {
    * the browser comes back: the `state` round-trips through the provider, and
    * the nonce and PKCE verifier never leave the server.
    */
-  const handleSsoSelect = async (provider: PublicFederationProvider) => {
+  const handleSsoSelect = async (
+    provider: PublicFederationProvider,
+  ): Promise<boolean> => {
     setError(null);
     setSsoBusyId(provider.id);
     const body = {
@@ -447,13 +501,14 @@ export function LoginPage() {
     try {
       if (provider.protocol === "Saml") {
         submitSamlAuthnRequest(await ssoLoginService.startSaml(body));
-        return;
+        return true;
       }
       const start =
         provider.protocol === "OAuth2"
           ? await ssoLoginService.startOauth2(body)
           : await ssoLoginService.startOidc(body);
       window.location.assign(start.authorize_url);
+      return true;
     } catch (err) {
       setSsoBusyId(null);
       setError(
@@ -462,8 +517,39 @@ export function LoginPage() {
           format(m.ssoStartFailed, { provider: provider.display_name }),
         ),
       );
+      return false;
     }
   };
+
+  // G-B (W3.2) — the provider to start by itself, if any: the hint names a
+  // loaded provider, the person has not declined, and nothing says we have been
+  // here before. No match (unknown, disabled, other tenant, garbled) is simply
+  // "no auto-redirect": the page is the ordinary one.
+  const autoProvider =
+    !autoSuppressed && !autoCancelled && idpHint !== null && providers
+      ? (providers.find((p) => p.id.toLowerCase() === idpHint) ?? null)
+      : null;
+  const autoPending = autoProvider !== null && !loopBlocked;
+  const autoProviderId = autoPending ? autoProvider.id : null;
+
+  useEffect(() => {
+    if (!autoProvider || autoStarted.current) return;
+    const timer = window.setTimeout(() => {
+      if (autoStarted.current) return;
+      autoStarted.current = true;
+      // Recorded before navigating away so Back from the provider lands on a
+      // page that does not repeat it.
+      markAutoRedirect(autoProvider.id.toLowerCase());
+      void handleSsoSelect(autoProvider).then((started) => {
+        // A start that failed shows the ordinary page with its error banner.
+        if (!started) setAutoCancelled(true);
+      });
+    }, autoRedirectDelayMs());
+    return () => window.clearTimeout(timer);
+    // Keyed on the provider's id: `autoProvider` is a new object per
+    // `providers` array, and re-arming on identity would restart the delay.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoProviderId]);
 
   const handleOrgTenantSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -729,8 +815,42 @@ export function LoginPage() {
           </div>
         )}
 
+        {/* G-B: the relying party (or the client's default) chose a provider.
+            A live region, so the announcement is not left to the focus move;
+            the cancel control is a real button and takes focus, so a keyboard
+            or screen-reader user can decline before the delay elapses. */}
+        {autoPending && (
+          <div className="py-6 text-center" data-testid="idp-auto-redirect">
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-col items-center gap-3"
+            >
+              <Loader2
+                size={28}
+                className="animate-spin motion-reduce:animate-none text-primary"
+                aria-hidden="true"
+              />
+              <p className="text-sm text-muted-foreground">
+                {format(m.ssoRedirecting, {
+                  provider: autoProvider.display_name,
+                })}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              className="mt-4"
+              autoFocus
+              onClick={() => setAutoCancelled(true)}
+            >
+              {m.ssoChooseAnother}
+            </Button>
+          </div>
+        )}
+
         {/* Step 1: Org + Tenant */}
-        {!loopBlocked && step === "org-tenant" && (
+        {!loopBlocked && !autoPending && step === "org-tenant" && (
           <form onSubmit={handleOrgTenantSubmit}>
             <fieldset>
               <legend className="text-lg font-semibold text-foreground mb-1">
@@ -798,7 +918,7 @@ export function LoginPage() {
         )}
 
         {/* Step 2: Credentials */}
-        {!loopBlocked && step === "credentials" && (
+        {!loopBlocked && !autoPending && step === "credentials" && (
           <form onSubmit={handleCredentialsSubmit}>
             <div className="mb-6">
               <h2 className="text-lg font-semibold text-foreground mb-1">
@@ -1008,7 +1128,7 @@ export function LoginPage() {
         )}
 
         {/* Step 3: MFA */}
-        {!loopBlocked && step === "mfa" && (
+        {!loopBlocked && !autoPending && step === "mfa" && (
           <form onSubmit={handleMfaSubmit}>
             <div className="flex flex-col items-center mb-6">
               <div className="h-12 w-12 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center mb-3 shadow-glow-cyan">

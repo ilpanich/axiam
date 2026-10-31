@@ -1045,3 +1045,139 @@ describe("OAuth2ClientsPage — provider ID token grant (G-A)", () => {
     expect(await screen.findByText("Provider ID Token")).toBeInTheDocument();
   });
 });
+
+// ─── G-B (W3.2) — Default identity provider ───────────────────────────────────
+
+const IDP_A = "11111111-1111-4111-8111-111111111111";
+const IDP_B = "22222222-2222-4222-8222-222222222222";
+
+const idpProviders = [
+  { id: IDP_A, provider_kind: "google", display_name: "Google", protocol: "OidcConnect", has_bundled_mark: true, inherited: false },
+  { id: IDP_B, provider_kind: "generic_oidc", display_name: "Acme SSO", protocol: "OidcConnect", has_bundled_mark: false, inherited: true },
+];
+
+/** Routes the providers listing beside the client list. */
+function mockWithProviders(clientList: unknown = clients) {
+  apiMock.get.mockImplementation((url: string) =>
+    url === "/api/v1/auth/federation/providers"
+      ? Promise.resolve(res({ providers: idpProviders }))
+      : Promise.resolve(res(clientList)),
+  );
+}
+
+describe("OAuth2ClientsPage — default identity provider (G-B)", () => {
+  beforeEach(async () => {
+    const { useAuthStore } = await import("@/stores/auth");
+    useAuthStore.setState({ orgSlug: "acme", tenantSlug: "default" });
+  });
+
+  async function openEdit(name = "Web App") {
+    await userEvent.click(
+      await screen.findByRole("button", { name: `Edit OAuth2 client ${name}` }),
+    );
+    return screen.getByRole("dialog");
+  }
+
+  it("lists the tenant's providers (inherited ones marked) beside None, with the help text", async () => {
+    mockWithProviders();
+    renderWithProviders(<OAuth2ClientsPage />);
+    const dialog = await openEdit();
+    const select = within(dialog).getByLabelText("Default identity provider");
+    await waitFor(() =>
+      expect(within(select).getByRole("option", { name: "Google" })).toBeInTheDocument(),
+    );
+    expect(within(select).getByRole("option", { name: "None" })).toBeInTheDocument();
+    expect(
+      within(select).getByRole("option", { name: "Acme SSO (organization)" }),
+    ).toBeInTheDocument();
+    expect(select).toHaveValue("");
+    expect(
+      within(dialog).getByText(/the login page goes straight to this provider/),
+    ).toHaveTextContent("Users can still choose another way to sign in.");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/auth/federation/providers", {
+      params: { org_slug: "acme", tenant_slug: "default" },
+    });
+  });
+
+  it("sends the chosen provider on update", async () => {
+    mockWithProviders();
+    apiMock.put.mockResolvedValue(res(clients[0]));
+    renderWithProviders(<OAuth2ClientsPage />);
+    const dialog = await openEdit();
+    const select = within(dialog).getByLabelText("Default identity provider");
+    await within(select).findByRole("option", { name: "Google" });
+    await userEvent.selectOptions(select, IDP_A);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalled());
+    expect(apiMock.put.mock.calls[0][1].default_idp).toBe(IDP_A);
+  });
+
+  it("sends null to clear a stored default, and omits the field when untouched", async () => {
+    mockWithProviders([{ ...clients[0], default_idp: IDP_A }]);
+    apiMock.put.mockResolvedValue(res(clients[0]));
+    renderWithProviders(<OAuth2ClientsPage />);
+    let dialog = await openEdit();
+    const select = within(dialog).getByLabelText("Default identity provider");
+    await within(select).findByRole("option", { name: "Google" });
+    expect(select).toHaveValue(IDP_A);
+
+    // Untouched: not in the payload, so a stale default never blocks an edit.
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1]).not.toHaveProperty("default_idp");
+
+    // Cleared: explicit null.
+    dialog = await openEdit();
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Default identity provider"),
+      "",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(2));
+    expect(apiMock.put.mock.calls[1][1].default_idp).toBeNull();
+  });
+
+  it("sends default_idp on create only when one is chosen", async () => {
+    mockWithProviders();
+    apiMock.post.mockResolvedValue(res({ ...clients[0], client_secret: "s" }));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "App");
+    const select = within(dialog).getByLabelText("Default identity provider");
+    await within(select).findByRole("option", { name: "Acme SSO (organization)" });
+    await userEvent.selectOptions(select, IDP_B);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalled());
+    expect(apiMock.post.mock.calls[0][1].default_idp).toBe(IDP_B);
+  });
+
+  it("shows the server's 400 message", async () => {
+    mockWithProviders();
+    apiMock.put.mockRejectedValue(
+      httpFailure(400, {
+        error: "validation_error",
+        message: "default_idp: no such identity provider for this tenant",
+      }),
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    const dialog = await openEdit();
+    const select = within(dialog).getByLabelText("Default identity provider");
+    await within(select).findByRole("option", { name: "Google" });
+    await userEvent.selectOptions(select, IDP_A);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("default_idp: no such identity provider for this tenant");
+    expect(alert).not.toHaveTextContent("Request failed with status code");
+  });
+
+  it("offers no control for a dcr-managed client", async () => {
+    mockWithProviders(dcrClients);
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "View OAuth2 client Self-Registered App" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByLabelText("Default identity provider")).not.toBeInTheDocument();
+  });
+});

@@ -240,3 +240,54 @@ export function submitSamlAuthnRequest(payload: {
   form.submit();
   form.remove();
 }
+
+/**
+ * **The auto-redirect loop guard** (G-B, W3.2).
+ *
+ * `/login?idp=<uuid>` starts that provider by itself. Without a memory of having
+ * done so, a failed leg followed by the relying party restarting the
+ * authorization request, or simply the browser's Back button from the provider,
+ * would bounce the person to the provider forever. So the page records the
+ * attempt in `sessionStorage` *before* it navigates away and refuses to repeat
+ * it for the same provider within {@link AUTO_REDIRECT_TTL_MS}.
+ *
+ * Cleared on a completed sign-in (see `SsoCallbackPage`, `LoginPage`), so a
+ * later, unrelated sign-in is not penalised. The TTL bounds the cost of a
+ * sign-in that was abandoned at the provider: it is a convenience that expires,
+ * never a lockout. Storage that refuses writes degrades to "no guard", which the
+ * other two defences (an error parameter on `/login`, one start per page load)
+ * still cover for the in-page cases.
+ */
+const AUTO_KEY = "axiam.sso.auto";
+export const AUTO_REDIRECT_TTL_MS = 10 * 60 * 1000;
+
+export function markAutoRedirect(idp: string): void {
+  try {
+    sessionStorage.setItem(AUTO_KEY, JSON.stringify({ idp, at: Date.now() }));
+  } catch {
+    // See above: degrade to no guard.
+  }
+}
+
+export function autoRedirectAttempted(idp: string): boolean {
+  try {
+    const raw = sessionStorage.getItem(AUTO_KEY);
+    if (!raw) return false;
+    const seen = JSON.parse(raw) as { idp?: unknown; at?: unknown };
+    return (
+      seen.idp === idp &&
+      typeof seen.at === "number" &&
+      Date.now() - seen.at < AUTO_REDIRECT_TTL_MS
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function clearAutoRedirect(): void {
+  try {
+    sessionStorage.removeItem(AUTO_KEY);
+  } catch {
+    // Nothing to clear.
+  }
+}

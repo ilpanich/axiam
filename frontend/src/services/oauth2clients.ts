@@ -134,6 +134,15 @@ export interface OAuth2Client {
    * that has never been authorized.
    */
   last_authorized_at?: string;
+  /**
+   * G-B (W3.1) — the federation provider the login page goes straight to when
+   * the sign-in carried no `axiam_idp_hint`. Omitted by the server when unset.
+   * Admin-managed clients only: a dcr/cimd registration cannot set it.
+   *
+   * Hand-written until W3.3 regenerates `sdks/openapi.json` and this file is
+   * reconciled with `OAuth2ClientResponse.default_idp`.
+   */
+  default_idp?: string;
 }
 
 /**
@@ -173,6 +182,8 @@ export interface CreateOAuth2ClientPayload extends ClientPosturePayload {
   scopes?: string[];
   post_logout_redirect_uris?: string[];
   backchannel_logout_uri?: string;
+  /** G-B — a provider id the tenant can see; omit for none. */
+  default_idp?: string;
 }
 
 export interface UpdateOAuth2ClientPayload extends ClientPosturePayload {
@@ -183,6 +194,12 @@ export interface UpdateOAuth2ClientPayload extends ClientPosturePayload {
   post_logout_redirect_uris?: string[];
   /** Pass "" to clear a previously registered URI (mirrors the backend). */
   backchannel_logout_uri?: string;
+  /**
+   * G-B — three states, like the backend: omitted leaves the stored value,
+   * `null` clears it, an id sets it. An invalid or invisible provider is a 400
+   * `validation_error` naming `default_idp`.
+   */
+  default_idp?: string | null;
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────

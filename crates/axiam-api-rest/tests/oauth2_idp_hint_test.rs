@@ -3,8 +3,9 @@
 //! T-494).
 //!
 //! An authorization request may name the federation provider the sign-in page
-//! should start with, by its `provider_slug` or its UUID, and a client may
-//! register a default. Both are resolved on the server against the request
+//! should start with, by its UUID, its `provider_slug` or — for a branded
+//! provider, when exactly one of that kind is offered — its kind name
+//! (`google`, `apple`, …; D-N24), and a client may register a default. Both are resolved on the server against the request
 //! tenant's **effective, enabled** provider list — the list
 //! `GET /api/v1/auth/federation/providers` already shows that page — and the
 //! page receives the matched provider's id (`idp=<uuid>`) or nothing.
@@ -94,6 +95,7 @@ fn test_auth_config() -> AuthConfig {
 struct Fixture {
     db: Surreal<TestDb>,
     org_id: Uuid,
+    org_tenant_id: Uuid,
     tenant_id: Uuid,
     user_id: Uuid,
     /// Tenant's own, enabled, `generic_oidc` slug `corp-okta`.
@@ -266,6 +268,7 @@ async fn setup() -> Fixture {
     Fixture {
         db,
         org_id: org.id,
+        org_tenant_id: org_tenant.id,
         tenant_id: tenant.id,
         user_id: user.id,
         own,
@@ -499,6 +502,66 @@ async fn public_listing(app: &impl TestApp, f: &Fixture) -> Vec<Uuid> {
         .iter()
         .map(|p| Uuid::parse_str(p["id"].as_str().unwrap()).unwrap())
         .collect()
+}
+
+/// `(id, provider_kind)` for every button the public listing offers the
+/// tenant's sign-in page — the kind is part of that unauthenticated response.
+async fn public_listing_kinds(app: &impl TestApp, f: &Fixture) -> Vec<(Uuid, String)> {
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/api/v1/auth/federation/providers?org_id={}&tenant_id={}",
+            f.org_id, f.tenant_id
+        ))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = test::read_body_json(resp).await;
+    body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                Uuid::parse_str(p["id"].as_str().unwrap()).unwrap(),
+                p["provider_kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Asserts that `raw` is ignored: the hinted response equals the unhinted one
+/// byte for byte, apart from the hint's own echo in `return_to`.
+async fn assert_ignored(app: &impl TestApp, f: &Fixture, client_id: &str, raw: &str) {
+    let baseline = snapshot(hop(app, f.tenant_id, client_id, "").await).await;
+    let hinted = snapshot(
+        hop(
+            app,
+            f.tenant_id,
+            client_id,
+            &format!("&axiam_idp_hint={raw}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        without_echo(hinted, raw),
+        baseline,
+        "an ignored hint ({raw}) must leave no trace but its own echo"
+    );
+}
+
+/// The `idp` an anonymous request hinted with `raw` reaches the login page with.
+async fn hinted_idp(app: &impl TestApp, f: &Fixture, client_id: &str, raw: &str) -> Option<Uuid> {
+    let resp = hop(
+        app,
+        f.tenant_id,
+        client_id,
+        &format!("&axiam_idp_hint={raw}"),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    idp_of(&location(&resp))
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +803,192 @@ async fn a_reauthentication_hop_carries_the_resolved_provider() {
 }
 
 // ---------------------------------------------------------------------------
+// Kind names (D-N24)
+// ---------------------------------------------------------------------------
+
+/// **D-N24.** A branded kind name names the one offered provider of that kind
+/// — here the organization's inherited Google — in any ASCII case, because the
+/// listing's kind names are lower-case canonical (surrounding whitespace is
+/// trimmed by the parameter parse, as for every form). Nothing else is folded, a
+/// branded kind nobody offers is no hint, and the generic kinds are not hint
+/// names at all: the tenant offers exactly one `generic_oidc` provider, and
+/// `generic_oidc` still does not reach it.
+#[actix_rt::test]
+async fn d_n24_a_kind_name_resolves_to_the_only_provider_of_that_kind() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({})).await;
+
+    for hint in ["google", "Google", "GOOGLE", "%20google"] {
+        let resp = hop(
+            &app,
+            f.tenant_id,
+            &client_id,
+            &format!("&axiam_idp_hint={hint}"),
+        )
+        .await;
+        let loc = location(&resp);
+        assert_eq!(idp_of(&loc), Some(f.org_inherited), "{hint}: {loc}");
+        assert!(
+            loc.ends_with(&format!("&idp={}", f.org_inherited)),
+            "the typed id, never the name, reaches the page: {loc}"
+        );
+    }
+
+    for raw in [
+        "github",
+        "apple",
+        "microsoft",
+        "facebook",
+        "generic_oidc",
+        "GENERIC_OIDC",
+        "generic-oidc",
+        "generic_saml",
+        "goo%20gle",
+        "googl",
+    ] {
+        assert_ignored(&app, &f, &client_id, raw).await;
+    }
+}
+
+/// **D-N24, the enumeration property.** The kind is already public: the
+/// providers listing carries `provider_kind` for every button. A kind-name
+/// hint resolves **if and only if** the listing shows exactly one provider of
+/// that kind and the kind is branded, and it resolves to that listed id — so
+/// the endpoint answers nothing the listing does not.
+#[actix_rt::test]
+async fn d_n24_a_kind_name_resolves_exactly_when_the_listing_shows_one_of_that_kind() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({})).await;
+
+    // A second offered Apple makes one branded kind ambiguous on the listing.
+    provider(&f.db, f.tenant_id, ProviderKind::Apple, None, false).await;
+    provider(&f.db, f.tenant_id, ProviderKind::Apple, None, false).await;
+
+    let listed = public_listing_kinds(&app, &f).await;
+    assert!(
+        listed
+            .iter()
+            .any(|(id, kind)| *id == f.org_inherited && kind == "google"),
+        "the listing already shows the inherited provider's kind: {listed:?}"
+    );
+
+    for kind in ProviderKind::ALL {
+        let of_kind: Vec<Uuid> = listed
+            .iter()
+            .filter(|(_, k)| k == kind.as_str())
+            .map(|(id, _)| *id)
+            .collect();
+        let resolved = hinted_idp(&app, &f, &client_id, kind.as_str()).await;
+        let expected = (!kind.uses_slug() && of_kind.len() == 1).then(|| of_kind[0]);
+        assert_eq!(resolved, expected, "{kind:?}: listed {of_kind:?}");
+    }
+}
+
+/// **D-N24, ambiguity.** An organization's Google and the tenant's own Google
+/// never both count — the tenant's shadows the organization's, so `google`
+/// names the tenant's. Two Google configs of the tenant's own are two offered
+/// providers of one kind: `google` is ambiguous and ignored, byte-identically,
+/// exactly like a slug two providers share. The UUID still names either.
+#[actix_rt::test]
+async fn d_n24_a_kind_two_offered_providers_share_is_ignored() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({})).await;
+
+    let own_google = provider(&f.db, f.tenant_id, ProviderKind::Google, None, false).await;
+    assert_eq!(
+        hinted_idp(&app, &f, &client_id, "google").await,
+        Some(own_google),
+        "the tenant's Google shadows the organization's: one Google is offered"
+    );
+
+    let second_google = provider(&f.db, f.tenant_id, ProviderKind::Google, None, false).await;
+    for raw in ["google", "Google"] {
+        assert_ignored(&app, &f, &client_id, raw).await;
+    }
+    assert_eq!(
+        hinted_idp(&app, &f, &client_id, &second_google.to_string()).await,
+        Some(second_google)
+    );
+}
+
+/// **D-N24, precedence.** A slug is the operator's explicit word for one
+/// provider; a kind name is a category. With a generic provider slugged
+/// `google` beside the inherited Google, `google` names the slugged provider,
+/// and `Google` — the same word in another case — is ignored rather than
+/// silently reaching the other provider. Only offered providers' slugs count:
+/// once the slugged provider is disabled, `google` is the kind name again, as
+/// the listing (which no longer shows it) would lead anyone to expect.
+#[actix_rt::test]
+async fn d_n24_a_slug_wins_over_a_kind_name() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({})).await;
+
+    let slugged = provider(
+        &f.db,
+        f.tenant_id,
+        ProviderKind::GenericOidc,
+        Some("google"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        hinted_idp(&app, &f, &client_id, "google").await,
+        Some(slugged),
+        "the slug, not the kind"
+    );
+    for raw in ["Google", "GOOGLE"] {
+        assert_ignored(&app, &f, &client_id, raw).await;
+    }
+    assert_eq!(
+        hinted_idp(&app, &f, &client_id, &f.org_inherited.to_string()).await,
+        Some(f.org_inherited),
+        "the branded Google is still reachable by its id"
+    );
+
+    disable(&f.db, f.tenant_id, slugged).await;
+    assert_eq!(
+        hinted_idp(&app, &f, &client_id, "google").await,
+        Some(f.org_inherited)
+    );
+}
+
+/// **D-N24, disabled.** A kind name whose only provider is disabled names
+/// nothing the tenant is offered, and is ignored byte-identically — with the
+/// client default then applying exactly as it would without the hint.
+#[actix_rt::test]
+async fn d_n24_a_kind_name_of_a_disabled_provider_is_ignored() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, plain) = client(&app, &jwt, json!({})).await;
+    let (_, defaulted) = client(&app, &jwt, json!({"default_idp": f.own})).await;
+
+    disable(&f.db, f.org_tenant_id, f.org_inherited).await;
+    for raw in ["google", "Google"] {
+        assert_ignored(&app, &f, &plain, raw).await;
+        assert_ignored(&app, &f, &defaulted, raw).await;
+    }
+    assert_eq!(
+        hinted_idp(&app, &f, &defaulted, "google").await,
+        Some(f.own),
+        "the default applies, as without a hint"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // PAR
 // ---------------------------------------------------------------------------
 
@@ -805,6 +1054,46 @@ async fn a_pushed_hint_is_honoured_and_a_query_copy_beside_it_is_not() {
         idp_of(&location(&resp)),
         Some(f.org_inherited),
         "the query copy is not the request; the default applies"
+    );
+}
+
+/// **D-N24 under PAR.** A pushed kind name resolves like a query one: it
+/// reaches the first leg's sign-in page as the provider's id and overrides
+/// the default; a pushed kind name nobody offers is no hint.
+#[actix_rt::test]
+async fn a_pushed_kind_name_is_resolved_like_a_query_one() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({"default_idp": f.own})).await;
+
+    let par_hop = |request_uri: String| {
+        let query = format!(
+            "client_id={client_id}&request_uri={}&tenant_id={}",
+            url::form_urlencoded::byte_serialize(request_uri.as_bytes()).collect::<String>(),
+            f.tenant_id
+        );
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/authorize?{query}"))
+            .to_request()
+    };
+
+    let pushed = push_handle(&f, &client_id, Some("Google")).await;
+    let resp = test::call_service(&app, par_hop(pushed)).await;
+    assert_eq!(
+        idp_of(&location(&resp)),
+        Some(f.org_inherited),
+        "the pushed kind name, over the default"
+    );
+
+    let pushed = push_handle(&f, &client_id, Some("apple")).await;
+    let resp = test::call_service(&app, par_hop(pushed)).await;
+    assert_eq!(
+        idp_of(&location(&resp)),
+        Some(f.own),
+        "no Apple is offered: no hint, so the default"
     );
 }
 

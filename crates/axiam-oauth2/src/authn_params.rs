@@ -276,8 +276,8 @@ pub struct AuthnRequestParams {
     pub ui_locales: Option<String>,
     /// A space-separated BCP 47 list.
     pub claims_locales: Option<String>,
-    /// G-B (#817) — `axiam_idp_hint`: a provider's `provider_slug` or UUID, as
-    /// the relying party sent it.
+    /// G-B (#817) — `axiam_idp_hint`: a provider's UUID, `provider_slug` or
+    /// branded kind name (D-N24), as the relying party sent it.
     ///
     /// Bounded to [`MAX_HINT_LEN`] bytes and dropped — never truncated — when
     /// longer, or when it is not the UTF-8 the relying party meant (a value

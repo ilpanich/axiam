@@ -173,7 +173,9 @@ pub struct AuthorizeQuery {
     #[serde(rename = "axiam_user_declined")]
     pub user_declined: Option<String>,
     /// G-B (#817) — which federation provider the sign-in page should start
-    /// with: a provider's `provider_slug` or its UUID.
+    /// with: a provider's UUID, its `provider_slug`, or a branded provider
+    /// kind name (`google`, `github`, `facebook`, `apple`, `microsoft`; ASCII
+    /// case-insensitive) when exactly one provider of that kind is offered.
     ///
     /// `axiam_`-prefixed by the vendor-namespace rule `axiam_login_hop` states
     /// (`axiam_oauth2::login_hop::LOGIN_HOP_MARKER`); there is no
@@ -1179,18 +1181,18 @@ fn bounded_idp_hint(raw: Option<&str>) -> Option<String> {
 /// * a hint that matches nothing (unknown, disabled, not inheritable,
 ///   shadowed, another tenant's, or a URL) is treated as **no hint**, so the
 ///   client default then applies exactly as it would have without the hint;
-/// * a hint that matches more than one provider (a slug shared by two kinds)
-///   is ambiguous and treated the same way;
+/// * a hint that matches more than one provider (a slug shared by two kinds,
+///   or a kind name two providers share) is ambiguous and treated the same
+///   way;
 /// * a default that no longer matches (its provider was disabled or deleted
 ///   after registration) is ignored, never an error — the registration was
 ///   valid when written, and the user still gets a sign-in page;
 /// * a datastore failure is ignored too: a sign-in page without a preselected
 ///   provider is always a correct answer.
 ///
-/// A slug is compared exactly (slugs are lower-case by validation); a UUID is
-/// compared as a UUID, so any spelling `Uuid::parse_str` accepts names the same
-/// provider. Only the matched config's own `id` is returned — a type, never
-/// the hint.
+/// What a hint may be — a UUID, a slug or a branded kind name, in that order —
+/// is [`match_idp_hint`]'s rule. Only the matched config's own `id` is
+/// returned — a type, never the hint.
 ///
 /// No hint and no default: no read at all, so a request that uses neither
 /// costs what it cost before G-B.
@@ -1226,15 +1228,104 @@ async fn resolve_login_idp<C: Connection + Clone>(
         }
     };
     if let Some(hint) = hint.as_deref() {
-        let as_id = Uuid::parse_str(hint).ok();
-        let mut matched = effective.iter().filter(|p| {
-            Some(p.config.id) == as_id || p.config.provider_slug.as_deref() == Some(hint)
-        });
-        if let (Some(only), None) = (matched.next(), matched.next()) {
-            return Some(only.config.id);
+        let candidates: Vec<IdpHintCandidate<'_>> = effective
+            .iter()
+            .map(|p| IdpHintCandidate {
+                id: p.config.id,
+                slug: p.config.provider_slug.as_deref(),
+                kind: p.config.provider_kind,
+            })
+            .collect();
+        if let Some(id) = match_idp_hint(&candidates, hint) {
+            return Some(id);
         }
     }
     default_idp.filter(|id| effective.iter().any(|p| p.config.id == *id))
+}
+
+/// G-B (#817) — what [`match_idp_hint`] needs of one effective provider: the
+/// three things a hint may name it by, all of which the public providers
+/// listing already shows (`id`, `provider_kind`) or the operator chose to make
+/// addressable (`provider_slug`).
+#[derive(Debug, Clone, Copy)]
+struct IdpHintCandidate<'a> {
+    id: Uuid,
+    slug: Option<&'a str>,
+    kind: axiam_core::models::federation::ProviderKind,
+}
+
+/// G-B (#817, D-N24) — the one provider `hint` names among `candidates` (the
+/// request tenant's effective, enabled providers), or `None`.
+///
+/// Three forms, tried in order, and the first form that matches **anything**
+/// decides — a later form is never consulted to break an earlier form's tie:
+///
+/// 1. **An explicit identifier: the UUID, or the `provider_slug`.** A UUID is
+///    compared as a UUID, so any spelling `Uuid::parse_str` accepts names the
+///    same provider; a slug is compared exactly (slugs are lower-case
+///    `[a-z0-9-]` by validation). The two are one tier, unchanged from W3.1:
+///    a lower-case hyphenated UUID is also a well-formed slug, so a hint that
+///    is one provider's id *and* another's slug is ambiguous and ignored
+///    rather than settled by a precedence nobody chose on purpose.
+/// 2. **A branded kind name** — `google`, `github`, `facebook`, `apple`,
+///    `microsoft`: the `provider_kind` value the public listing carries for
+///    each button, compared ASCII case-insensitively. Those names are
+///    lower-case canonical on the wire (`ProviderKind::as_str`), so `Google`
+///    has exactly one meaning and refusing it would only punish a
+///    capitalisation; nothing else is folded (no `-`/`_` swap, no inner
+///    whitespace — surrounding whitespace was already trimmed, for every
+///    form, by the parameter parse).
+///
+/// **The slug wins over the kind, including case-folded.** A slug is the
+/// operator's explicit choice of a word for one provider; a kind name is a
+/// category. If an operator slugged a generic provider `google`, the hint
+/// `google` names that provider (tier 1), and so must every spelling of it:
+/// a hint that equals any candidate's slug ignoring ASCII case is never read
+/// as a kind name. Otherwise `Google` would silently reach the branded Google
+/// while `google` reaches the operator's provider — two providers for one
+/// word. Such a hint (`Google` beside a slug `google`) matches nothing and is
+/// ignored. Only effective providers' slugs count: consulting a disabled
+/// provider's slug would let the hint's outcome reveal a provider the public
+/// listing does not show (T-493).
+///
+/// **Ambiguity is no answer**, in either tier: a kind two effective providers
+/// share (two tenant Google configs — nothing stops a tenant holding two) is
+/// ignored, exactly as a shared slug is. An organization's Google and the
+/// tenant's own Google never both count: the tenant's shadows the
+/// organization's in `effective_providers`, so the list holds one of them.
+///
+/// **The generic kinds are not accepted** (`generic_oidc`, `generic_oauth2`,
+/// `generic_saml`). They name a protocol family, not a provider: a client's
+/// `generic_oidc` would mean whichever OIDC provider a tenant happens to hold
+/// alone today, and the day the tenant swaps Okta for Auth0 the same hint
+/// would start a sign-in at a provider the client never named. A branded name
+/// means the same provider in every tenant. A generic provider is named by
+/// its slug or its id.
+fn match_idp_hint(candidates: &[IdpHintCandidate<'_>], hint: &str) -> Option<Uuid> {
+    fn only(mut ids: impl Iterator<Item = Uuid>) -> Option<Uuid> {
+        match (ids.next(), ids.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
+    }
+
+    let as_id = Uuid::parse_str(hint).ok();
+    let explicit = |c: &&IdpHintCandidate<'_>| Some(c.id) == as_id || c.slug == Some(hint);
+    if candidates.iter().any(|c| explicit(&c)) {
+        return only(candidates.iter().filter(explicit).map(|c| c.id));
+    }
+
+    if candidates
+        .iter()
+        .any(|c| c.slug.is_some_and(|slug| slug.eq_ignore_ascii_case(hint)))
+    {
+        return None;
+    }
+    let kind = axiam_core::models::federation::ProviderKind::ALL
+        .iter()
+        .copied()
+        .find(|k| !k.uses_slug() && k.as_str().eq_ignore_ascii_case(hint))?;
+    only(candidates.iter().filter(|c| c.kind == kind).map(|c| c.id))
 }
 
 /// W7 — the tenant's fallback UI language, for the last step of W5's
@@ -6973,5 +7064,148 @@ mod request_object_tests {
         for e in [by_value, by_reference] {
             assert_ne!(e.error_code(), "invalid_request");
         }
+    }
+}
+
+// G-B (#817, D-N24) — `match_idp_hint`, the pure part of the provider-hint
+// resolver: which of the three forms a hint takes, in which order, and what
+// counts as ambiguous. The authorization endpoint's use of it (the effective
+// list, the byte-identical fallback, PAR) is pinned by
+// `tests/oauth2_idp_hint_test.rs`.
+#[cfg(test)]
+mod idp_hint_tests {
+    use axiam_core::models::federation::ProviderKind;
+
+    use super::*;
+
+    fn cand(slug: Option<&'static str>, kind: ProviderKind) -> IdpHintCandidate<'static> {
+        IdpHintCandidate {
+            id: Uuid::new_v4(),
+            slug,
+            kind,
+        }
+    }
+
+    #[test]
+    fn uuid_and_slug_resolve_as_before() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let list = [okta, google];
+        assert_eq!(match_idp_hint(&list, "corp-okta"), Some(okta.id));
+        assert_eq!(
+            match_idp_hint(&list, &google.id.to_string()),
+            Some(google.id)
+        );
+        assert_eq!(
+            match_idp_hint(&list, &google.id.simple().to_string().to_uppercase()),
+            Some(google.id)
+        );
+        assert_eq!(match_idp_hint(&list, "CORP-OKTA"), None, "slugs are exact");
+        assert_eq!(match_idp_hint(&list, "no-such"), None);
+    }
+
+    #[test]
+    fn a_branded_kind_name_resolves_to_the_only_provider_of_that_kind() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let apple = cand(None, ProviderKind::Apple);
+        let list = [okta, google, apple];
+        assert_eq!(match_idp_hint(&list, "google"), Some(google.id));
+        assert_eq!(match_idp_hint(&list, "apple"), Some(apple.id));
+        assert_eq!(match_idp_hint(&list, "github"), None, "none offered");
+        assert_eq!(match_idp_hint(&list, "facebook"), None);
+    }
+
+    #[test]
+    fn kind_names_are_ascii_case_insensitive_and_nothing_else_is_folded() {
+        let google = cand(None, ProviderKind::Google);
+        let list = [google];
+        for hint in ["Google", "GOOGLE", "gOoGlE"] {
+            assert_eq!(match_idp_hint(&list, hint), Some(google.id), "{hint}");
+        }
+        for hint in [
+            " google",
+            "google ",
+            "goo gle",
+            "google-",
+            "googl",
+            "\u{ff47}oogle",
+        ] {
+            assert_eq!(match_idp_hint(&list, hint), None, "{hint:?}");
+        }
+    }
+
+    #[test]
+    fn a_kind_two_providers_share_is_ambiguous_and_ignored() {
+        let a = cand(None, ProviderKind::Google);
+        let b = cand(None, ProviderKind::Google);
+        let apple = cand(None, ProviderKind::Apple);
+        let list = [a, b, apple];
+        assert_eq!(match_idp_hint(&list, "google"), None);
+        assert_eq!(match_idp_hint(&list, "Google"), None);
+        assert_eq!(match_idp_hint(&list, "apple"), Some(apple.id));
+        assert_eq!(
+            match_idp_hint(&list, &a.id.to_string()),
+            Some(a.id),
+            "the id still works"
+        );
+    }
+
+    #[test]
+    fn a_slug_wins_over_a_kind_name_in_every_spelling() {
+        let slugged = cand(Some("google"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let list = [slugged, google];
+        assert_eq!(
+            match_idp_hint(&list, "google"),
+            Some(slugged.id),
+            "the operator's word for a provider is that provider"
+        );
+        for hint in ["Google", "GOOGLE"] {
+            assert_eq!(
+                match_idp_hint(&list, hint),
+                None,
+                "{hint}: never the other provider the same word names"
+            );
+        }
+        assert_eq!(
+            match_idp_hint(&list, &google.id.to_string()),
+            Some(google.id)
+        );
+    }
+
+    #[test]
+    fn the_generic_kinds_are_not_hint_names() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let slugless = cand(None, ProviderKind::GenericOauth2);
+        let saml = cand(Some("adfs"), ProviderKind::GenericSaml);
+        let list = [okta, slugless, saml];
+        for kind in ProviderKind::ALL.iter().filter(|k| k.uses_slug()) {
+            assert_eq!(match_idp_hint(&list, kind.as_str()), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_branded_kind_is_accepted_by_its_wire_name() {
+        for kind in ProviderKind::ALL.iter().filter(|k| !k.uses_slug()) {
+            let only = cand(None, *kind);
+            assert_eq!(
+                match_idp_hint(&[only], kind.as_str()),
+                Some(only.id),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_id_that_is_also_another_providers_slug_is_ambiguous() {
+        let a = cand(None, ProviderKind::Google);
+        let a_id = a.id.to_string();
+        let b = IdpHintCandidate {
+            id: Uuid::new_v4(),
+            slug: Some(&a_id),
+            kind: ProviderKind::GenericOidc,
+        };
+        assert_eq!(match_idp_hint(&[a, b], &a_id), None);
     }
 }

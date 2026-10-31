@@ -51,7 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Provider hint and per-client default provider for browser sign-in (#817):
   `/oauth2/authorize` (and `/oauth2/par`) accept `axiam_idp_hint`, a
-  federation provider's `provider_slug` or UUID, and an OAuth2 client may
+  federation provider's UUID, `provider_slug`, or branded kind name (`google`,
+  `github`, `facebook`, `apple`, `microsoft`, case-insensitive; a slug wins
+  over a kind name, and a kind two offered providers share is ignored as
+  ambiguous; the generic kinds are not accepted), and an OAuth2 client may
   register `default_idp` (a provider id) on the administrator API
   (`POST`/`PUT /api/v1/oauth2-clients`, `null` clears). Both are resolved on
   the server against the tenant's effective, enabled providers — the list

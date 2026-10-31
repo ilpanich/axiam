@@ -129,6 +129,19 @@ browser login uses; nothing new is fetched.
 
 The block is never returned on the public provider listing the login page reads.
 
+**The trust is per tenant, not per AXIAM client (D-N18).** A listed client ID
+says "tokens issued to this app sign in to this tenant"; it does not say
+*through which* AXIAM client. Any client of the tenant that holds the grant can
+redeem a token issued to any listed app, and is given its own scopes and
+`allowed_resources`. With two public clients in one tenant, say a consumer app
+and a staff app with wider scopes, a token issued to the consumer app redeems
+through the staff app's `client_id` too, and the audit record names the staff
+client. The user gains nothing they could not get by signing in to that client
+in a browser, but a holder of a leaked token does. Until a per-client binding
+exists (planned for 1.2.0), register the grant only on the clients that are the
+native apps you listed, and keep apps with different privilege in different
+tenants or on different providers.
+
 ### Register the grant on the client
 
 The client's `grant_types` must include the URN. A client that does not hold it
@@ -187,7 +200,7 @@ shares the same rate-limit bucket.
 | `provider` | yes | The federation provider's UUID, or its `provider_slug`. It must be a provider of this tenant, or one inherited from its organization. |
 | `id_token` | yes | The compact JWT the provider's SDK returned. |
 | `nonce` | yes | The **raw** nonce; the provider's SDK was given its SHA-256. See [Nonce rules](#nonce-rules). |
-| `scope` | no | Within the client's registered scopes. Omitted: the client's registered set. |
+| `scope` | no | Within the client's registered scopes; a scope outside them is `invalid_scope`, not dropped. **Omitted or empty means no scopes**: no `openid`, so no ID token. Ask for what you need. |
 | `resource` | no | An RFC 8707 resource the client may address. |
 | client authentication | per client | Public client: `client_id`. Confidential: its registered method. A client registered for DPoP or mTLS sender binding must present the proof, and gets a bound token. |
 
@@ -214,10 +227,10 @@ access token carries `client_id` and `sid` (see [Session](#the-session-it-create
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `invalid_request` | `provider`, `id_token` or `nonce` is missing or empty. |
+| 400 | `invalid_request` | `provider`, `id_token` or `nonce` is missing or empty, or `nonce` is longer than 512 bytes. |
 | 400 | `unauthorized_client` | The client is not registered for this grant. |
 | 401 | `invalid_client` | Client authentication failed, or a required DPoP or mTLS proof is missing. Carries a `WWW-Authenticate` challenge. |
-| 400 | `invalid_scope` | A scope outside the client's registration. |
+| 400 | `invalid_scope` | A scope outside the client's registration, or `address`/`phone` while the tenant has the sensitive scopes switched off. |
 | 400 | `invalid_target` | A `resource` the client may not address. |
 | 400 | `invalid_grant` | **Every refusal of the provider token**, with the single description `the provider ID token is not acceptable`. |
 | 400 | `consent_required` | A requested scope needs a consent ceremony, and nobody can be asked on this request. See [Consent](#consent). |
@@ -226,8 +239,9 @@ access token carries `client_id` and `sid` (see [Session](#the-session-it-create
 
 **One answer for every refusal.** A wrong audience, a bad signature, an expired
 or replayed token, a provider that is switched off, a provider that does not
-exist, an account that may not sign in and a `login.post_auth` veto are all the
-same `invalid_grant` with the same description. A caller cannot tell a wrong token from a wrong
+exist, an account that may not sign in, a first sign-in whose mapped username
+or email is already taken by another account, and a `login.post_auth` veto are
+all the same `invalid_grant` with the same description. A caller cannot tell a wrong token from a wrong
 configuration. The reason is in the server log and the audit record
 (`reason_code`), where an operator can read it.
 
@@ -259,7 +273,9 @@ needs `raw`, which never left the app.
 
 This is Apple's documented pattern. Google's SDKs (Credential Manager's
 `setNonce`, Google Sign-In for iOS) take any string as the nonce, so the app
-passes the hex there in the same way.
+passes the hex there in the same way. The raw `nonce` may be at most 512 bytes;
+a longer one is `invalid_request`, answered before the token is looked at, so
+it spends nothing.
 
 AXIAM generates no nonce for you, and the AXIAM ID token it returns carries
 the raw `nonce` the app sent.
@@ -274,8 +290,9 @@ The order is the design. Each step runs before the next.
    rules run (`fapi2` clients included, see [FAPI 2.0](#fapi-20)), the
    registration must list the grant, and the sender binding it asks for is
    decided. The rate-limit bucket is charged. Nothing has been written.
-2. **Request.** The three parameters are present, `scope` is within the
-   registration and `resource` is addressable. Still nothing written, so a
+2. **Request.** The three parameters are present (`nonce` at most 512 bytes),
+   `scope` is within the registration, `address`/`phone` are not switched off
+   for the tenant, and `resource` is addressable. Still nothing written, so a
    malformed request does not spend the token.
 3. **Provider.** `provider` names an effective provider of this tenant that is
    enabled, speaks OIDC and has `native_login.enabled`. A provider of another
@@ -292,8 +309,12 @@ The order is the design. Each step runs before the next.
    leeway). `iat` is no older than `max_token_age_secs` and not in the future
    beyond the leeway.
 6. **Shape and nonce.** The token has ID-token shape: `nonce` present and
-   equal to the SHA-256 hex of the request's `nonce`, and not an access token (`typ: at+jwt`, or the claims only access
-   tokens carry). This is X4's test run in reverse, from the same marker list.
+   equal to the SHA-256 hex of the request's `nonce`, and no access-token,
+   refresh-token or logout-token `typ` (`at+jwt` and the like) in the header or
+   the claims. This is X4's test run in reverse, from the same marker list.
+   Only `typ` is read for the access-token side; an access token without one is
+   refused by the nonce requirement and, in practice, by the audience rule
+   (access tokens are issued to APIs, not to app client IDs).
 7. **Replay.** The token's SHA-256 is recorded; a second presentation is refused
    (see [Single use](#single-use-and-replay)).
 8. **User.** The subject is resolved (see [Who the user is](#who-the-user-is))
@@ -310,10 +331,13 @@ The order is the design. Each step runs before the next.
 
 ## Single use and replay
 
-An ID token is accepted **once**. Its SHA-256 is written to a dedicated table
-(`federation_id_token_replay`) under a unique key of tenant, provider and token
-hash, and kept until the token's `exp` plus 60 seconds. Google tokens carry no
-`jti`, so the hash of the exact bytes is the identity.
+An ID token is accepted **once in the whole deployment**. Its SHA-256 is
+written to a dedicated table (`federation_id_token_replay`) under a unique key
+of the token's issuer and the token hash (D-N19), and kept until the token's
+`exp` plus 120 seconds (twice the clock leeway, so a database clock up to a
+minute ahead of a node's does not sweep a row the node would still accept a
+token for). Google tokens carry no `jti`, so the hash of the exact bytes is the
+identity.
 
 - The record is written only after the signature, the claims and the nonce have
   been checked, so only a presenter who holds the token **and** its raw nonce
@@ -326,8 +350,14 @@ hash, and kept until the token's `exp` plus 60 seconds. Google tokens carry no
   sign-in. Failing open would make replay protection optional.
 - Expired rows are removed by the replay-record cleanup sweep.
 
-For an inherited provider, the record is keyed on the tenant that owns the
-provider, so a token cannot be replayed once per inheriting tenant.
+The key names neither a tenant nor a provider configuration, so a token is
+spent once across every tenant and every configuration that would accept it:
+an organization provider inherited by several tenants, two tenants (of one
+organization or of two) whose providers list the same app's client ID, or two
+providers in one tenant. Deleting a tenant does not delete these rows. They
+carry no tenant, and removing one early could let the same token sign in
+through another configuration before it expires. They leave with the expiry
+sweep, at most a couple of minutes after the token itself expires.
 
 ---
 
@@ -379,7 +409,8 @@ provisioned (D-N14). The app does not retry with the same token: it completes
 consent (for example by an authorization-code sign-in for that scope), then
 obtains a **fresh** ID token from the provider SDK and calls the grant again.
 Everything that does not depend on the user (parameters, scope registration,
-`resource`, the grant, the sender binding) is checked first and spends nothing.
+the tenant's sensitive-scope switch, `resource`, the grant, the sender binding)
+is checked first and spends nothing.
 
 ---
 
@@ -394,13 +425,24 @@ registration requires. The profile's refresh-token grace window is unchanged.
 
 ## Rate limit
 
-The grant has its own bucket, `oauth2_provider_id_token:{client_ip}`, using the
-**login** preset (`AXIAM__RATE_LIMIT__LOGIN_PER_MIN`, default 10 per minute; see
-[`docs/deployment/rate-limit-sizing.md`](../deployment/rate-limit-sizing.md)). Both
-the `/oauth2/token` and the `/t/{tenant_id}/oauth2/token` mounts charge the same
-bucket. It is charged after the client is authenticated and before the token is
-looked at, and an exceeded bucket answers `429 rate_limit_exceeded` with
-`Retry-After`.
+The grant has its own bucket, `oauth2_provider_id_token:{tenant_id}:{client_ip}`,
+using the **login** preset (`AXIAM__RATE_LIMIT__LOGIN_PER_MIN`, default 10 per
+minute; see
+[`docs/deployment/rate-limit-sizing.md`](../deployment/rate-limit-sizing.md)).
+It is per tenant and per address: one tenant's sign-ins do not spend another's
+allowance from the same address. Both the `/oauth2/token` and the
+`/t/{tenant_id}/oauth2/token` mounts charge the same bucket for a tenant. It is
+charged after the client is authenticated and before the token is looked at,
+and an exceeded bucket answers `429 rate_limit_exceeded` with `Retry-After`.
+A request whose address cannot be determined at all (no forwarded address and
+no transport peer) is refused rather than pooled with every other such request
+into one shared bucket.
+
+Mobile traffic often arrives through carrier-grade NAT, which puts many
+unrelated users behind one address. If a tenant's native sign-ins are refused
+with `429` at busy times, raise `AXIAM__RATE_LIMIT__LOGIN_PER_MIN`. That is the
+deployment's login preset, so the raise applies to password login as well
+(see the sizing guide).
 
 A guessing attacker holds nothing worth guessing here (a forged token fails the
 signature), but verification costs a JWKS lookup and a database write, so the
@@ -422,8 +464,10 @@ The `reason_code` is where a refusal is told apart: `provider_not_found`,
 `bad_signature`, `wrong_issuer`, `wrong_audience`, `azp_refused`, `expired`,
 `too_old`, `issued_in_future`, `claim_rejected`, `wrong_token_shape`,
 `nonce_missing`, `nonce_mismatch`, `replayed`, `replay_guard_unavailable`,
-`subject_unmapped`, `account_refused`, `reactor_denied` (the `login.post_auth`
-gate refused), `server_error`, and `accepted`.
+`subject_unmapped`, `provisioning_conflict` (a first sign-in whose mapped
+username or email another account already holds), `account_refused`,
+`reactor_denied` (the `login.post_auth` gate refused), `server_error`, and
+`accepted`.
 
 **The record never carries the ID token or the nonce.** Until a provider
 resolves, `provider` is what the request named (bounded in length).

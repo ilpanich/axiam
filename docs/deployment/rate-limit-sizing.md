@@ -321,6 +321,17 @@ whereas raising `login_per_min` widens both.
 reported a 4.4 % error rate that was login throttling, not refresh failures.
 See `benchmarks/docs/methodology.md`.)
 
+**Native sign-in uses the same preset.** The provider-ID-token grant
+([`docs/api/native-sign-in.md`](../api/native-sign-in.md#rate-limit)) has its
+own bucket, keyed per tenant *and* address
+(`oauth2_provider_id_token:{tenant_id}:{client_ip}`), at `login_per_min`. Mobile
+apps are the traffic most often behind carrier-grade NAT, so a tenant with many
+users of one carrier can meet `429` on that grant before any password-login
+caller notices. Keying on the tenant stops one tenant's mobile users spending
+another's allowance; within a tenant, the remedy is a higher `login_per_min`
+(which also widens password guessing per address) or, where sessions are short,
+longer sessions as above.
+
 ### 3.2 The two layers, and which one decides
 
 Every rate-limited surface runs **two** cooperating limiters. Knowing which

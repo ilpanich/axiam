@@ -115,6 +115,15 @@ pub const NATIVE_LOGIN_AUDIT_ACTION: &str = "federation.native_login";
 /// fault. As generic as [`PUBLIC_REFUSAL_DESCRIPTION`], for the same reason.
 pub const SERVER_REFUSAL_DESCRIPTION: &str = "the sign-in could not be completed; retry shortly";
 
+/// The longest `nonce` the grant accepts, in bytes (F4-W2-09).
+///
+/// The nonce is hashed and echoed into the signed AXIAM ID token, so it is
+/// bounded like every other caller-supplied value that reaches a token. A
+/// nonce is a random value: 512 bytes is sixteen times the 32 random bytes a
+/// careful app generates, hex- or base64-encoded with room to spare, and the
+/// same bound `native_login` puts on a listed client ID.
+pub const MAX_NONCE_BYTES: usize = 512;
+
 /// Whether a client's registration lists this grant.
 pub fn holds_provider_id_token_grant(grant_types: &[String]) -> bool {
     grant_types
@@ -123,12 +132,13 @@ pub fn holds_provider_id_token_grant(grant_types: &[String]) -> bool {
 }
 
 /// The three grant parameters, borrowed from the request, or
-/// `invalid_request` naming the first one that is missing or empty.
+/// `invalid_request` naming the first one that is missing or empty, or a
+/// `nonce` longer than [`MAX_NONCE_BYTES`].
 ///
 /// # Errors
 ///
 /// `invalid_request` when `provider`, `id_token` or `nonce` is absent or
-/// empty.
+/// empty, or `nonce` is too long.
 pub fn native_request(req: &TokenRequest) -> Result<NativeIdTokenRequest<'_>, OAuth2Error> {
     fn required<'a>(value: Option<&'a String>, name: &str) -> Result<&'a str, OAuth2Error> {
         value
@@ -140,11 +150,17 @@ pub fn native_request(req: &TokenRequest) -> Result<NativeIdTokenRequest<'_>, OA
                 ))
             })
     }
-    Ok(NativeIdTokenRequest {
+    let request = NativeIdTokenRequest {
         provider: required(req.provider.as_ref(), "provider")?,
         id_token: required(req.id_token.as_ref(), "id_token")?,
         nonce: required(req.nonce.as_ref(), "nonce")?,
-    })
+    };
+    if request.nonce.len() > MAX_NONCE_BYTES {
+        return Err(OAuth2Error::InvalidRequest(format!(
+            "nonce must be at most {MAX_NONCE_BYTES} bytes"
+        )));
+    }
+    Ok(request)
 }
 
 /// The scopes this grant issues: the requested ones, each of which must be
@@ -204,6 +220,27 @@ pub struct ConsentState {
     pub external: crate::external_consent::Requested,
 }
 
+/// What [`decide_consent`] and [`refuse_switched_off_sensitive_scopes`] answer
+/// for the GDPR-sensitive scopes the tenant has switched off.
+const SENSITIVE_SWITCHED_OFF: &str = "the address and phone scopes are not enabled for this tenant";
+
+/// F4-W2-05 (D-N14): the tenant's sensitive-scope switch does not depend on
+/// the user, so it is decided with the other request checks, before the
+/// provider token is verified and spent. `switched_off` is true when the
+/// request asks for `address` or `phone` and the tenant's effective settings
+/// have them off.
+///
+/// # Errors
+///
+/// `invalid_scope`, worded as [`decide_consent`] words it.
+pub fn refuse_switched_off_sensitive_scopes(switched_off: bool) -> Result<(), OAuth2Error> {
+    if switched_off {
+        Err(OAuth2Error::InvalidScope(SENSITIVE_SWITCHED_OFF.into()))
+    } else {
+        Ok(())
+    }
+}
+
 /// D-N6: refuse any scope that would need a consent ceremony.
 ///
 /// This grant has no interaction to offer — no browser, no consent screen —
@@ -223,10 +260,10 @@ pub fn decide_consent(state: ConsentState) -> Result<(), OAuth2Error> {
 
     match sensitive::decide(state.sensitive, state.sensitive_switch_off, false, true) {
         sensitive::Decision::Proceed => {}
+        // Reached only if the switch changed between the early check and
+        // here; the early check is what normally answers it.
         sensitive::Decision::Refuse(sensitive::Refusal::Disabled) => {
-            return Err(OAuth2Error::InvalidScope(
-                "the address and phone scopes are not enabled for this tenant".into(),
-            ));
+            return Err(OAuth2Error::InvalidScope(SENSITIVE_SWITCHED_OFF.into()));
         }
         // `AskForConsent` cannot come back with `prompt_none`, and `Declined`
         // cannot without a consent leg; both are answered as what they would
@@ -695,6 +732,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// F4-W2-09: the nonce is bounded, inclusively, at [`MAX_NONCE_BYTES`]
+    /// bytes, counted in bytes rather than characters.
+    #[test]
+    fn the_nonce_is_bounded() {
+        let mut r = request(PROVIDER_ID_TOKEN_GRANT_TYPE);
+        r.provider = Some("google".into());
+        r.id_token = Some("a.b.c".into());
+        r.nonce = Some("n".repeat(MAX_NONCE_BYTES));
+        assert!(native_request(&r).is_ok(), "the bound itself is accepted");
+        for long in [
+            "n".repeat(MAX_NONCE_BYTES + 1),
+            // 171 three-byte characters: 513 bytes, 171 characters.
+            "\u{20ac}".repeat(171),
+        ] {
+            r.nonce = Some(long);
+            match native_request(&r) {
+                Err(OAuth2Error::InvalidRequest(m)) => assert!(m.starts_with("nonce"), "{m}"),
+                other => panic!("an over-long nonce: {other:?}"),
+            }
+        }
+    }
+
+    /// The tenant's sensitive-scope switch is answered as `invalid_scope`, in
+    /// the words `decide_consent` uses.
+    #[test]
+    fn a_switched_off_sensitive_scope_is_invalid_scope_up_front() {
+        assert!(refuse_switched_off_sensitive_scopes(false).is_ok());
+        let early = refuse_switched_off_sensitive_scopes(true).unwrap_err();
+        let late = decide_consent(ConsentState {
+            sensitive: Sensitive::Disabled,
+            sensitive_switch_off: true,
+            external: External::NotApplicable,
+        })
+        .unwrap_err();
+        assert_eq!(early.to_string(), late.to_string());
+        assert_eq!(early.error_code(), "invalid_scope");
     }
 
     /// The issued scopes are the request within the registration; a scope

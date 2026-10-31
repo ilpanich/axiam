@@ -1344,3 +1344,196 @@ async fn the_grant_has_its_own_login_bucket_shared_by_both_mounts() {
         (400, Some("invalid_grant"))
     );
 }
+
+/// F4-W2-07: the bucket is per tenant as well as per address, so one tenant's
+/// mobile traffic behind a carrier NAT does not spend another tenant's
+/// allowance from the same address.
+#[actix_web::test]
+async fn the_grant_bucket_is_per_tenant() {
+    let f = setup().await;
+    let app = test_app!(f, 1, false);
+    let app_client = native_client(&f, "ios-app").await;
+
+    let token = id_token(&f, "b1", "ada", json!({ "aud": WEB }));
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "b1", "openid")
+    );
+    assert_generic_invalid_grant(status, &body, "the one allowed attempt");
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "b1", "openid")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (429, Some("rate_limit_exceeded")),
+        "{body}"
+    );
+
+    // Another tenant, the same address: its own bucket.
+    let other = SurrealTenantRepository::new(f.db.clone())
+        .create(CreateTenant {
+            organization_id: SurrealTenantRepository::new(f.db.clone())
+                .get_by_id(f.tenant_id)
+                .await
+                .unwrap()
+                .organization_id,
+            kind: TenantKind::Standard,
+            name: "Other".into(),
+            slug: "tenant-other".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let (other_client, _) = client(
+        &f,
+        "other-app",
+        ClientAuthMethod::None,
+        &[PROVIDER_ID_TOKEN_GRANT_TYPE],
+        |c| c.tenant_id = other.id,
+    )
+    .await;
+    let (status, body) = post!(
+        app,
+        format!("/oauth2/token?tenant_id={}", other.id),
+        grant_body(&other_client, SLUG, &token, "b1", "openid"),
+        []
+    );
+    assert_generic_invalid_grant(status, &body, "the other tenant is not limited");
+}
+
+/// F4-W2-07: a request whose address cannot be determined is refused, not
+/// pooled with every other such request into one shared bucket. The route's
+/// own limiter already refuses a request with no peer before any handler
+/// runs; the grant's refusal (`invalid_request`) is the backstop should that
+/// ever change. Either way nothing is spent.
+#[actix_web::test]
+async fn a_request_without_an_address_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+    let token = id_token(&f, "na", "ada", json!({}));
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/oauth2/token?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(grant_body(&app_client, SLUG, &token, "na", "openid"))
+        .to_request();
+    match actix_web::dev::Service::call(&app, req).await {
+        Err(_) => {}
+        Ok(resp) => {
+            assert_eq!(resp.status().as_u16(), 400);
+            let body: Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"], "invalid_request", "{body}");
+        }
+    }
+    assert!(native_login_rows(&f).await.is_empty());
+
+    // Nothing was spent: with an address, the same token signs in.
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "na", "openid")
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// F4-W2-09: an over-long nonce is `invalid_request`, answered before the
+/// token is looked at, so the token is not spent.
+#[actix_web::test]
+async fn an_over_long_nonce_is_invalid_request_and_spends_nothing() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+    let token = id_token(&f, "short", "ada", json!({}));
+
+    let long = "n".repeat(513);
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, &long, "openid")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_request")),
+        "{body}"
+    );
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "short", "openid")
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// F4-W2-05 (D-N14): the tenant's sensitive-scope switch is decided before
+/// the token is verified, so a request for `phone` while it is off spends
+/// nothing: the same token then signs in without it.
+#[actix_web::test]
+async fn a_switched_off_sensitive_scope_does_not_spend_the_token() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let (sensitive, _) = client(
+        &f,
+        "wants-a-phone-number",
+        ClientAuthMethod::None,
+        &[PROVIDER_ID_TOKEN_GRANT_TYPE],
+        |c| c.scopes.push("phone".into()),
+    )
+    .await;
+    let token = id_token(&f, "sw", "ada", json!({}));
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&sensitive, SLUG, &token, "sw", "openid phone")
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_scope")),
+        "{body}"
+    );
+    let (status, body) =
+        token_endpoint!(app, f, grant_body(&sensitive, SLUG, &token, "sw", "openid"));
+    assert_eq!(status, 200, "the token was not spent: {body}");
+    assert_eq!(
+        reason_codes(&native_login_rows(&f).await),
+        ["invalid_scope", "accepted"]
+    );
+}
+
+/// F4-W2-10: a first sign-in whose mapped email another account already
+/// holds is the one generic `invalid_grant`, not a `server_error` that would
+/// say the address has an account. The audit record says why.
+#[actix_web::test]
+async fn a_provisioning_collision_is_one_generic_invalid_grant() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+
+    let token = id_token(&f, "c1", "ada", json!({ "email": "taken@example.com" }));
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "c1", "openid")
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let token = id_token(
+        &f,
+        "c2",
+        "someone-else",
+        json!({ "email": "taken@example.com" }),
+    );
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "c2", "openid")
+    );
+    assert_generic_invalid_grant(status, &body, "provisioning collision");
+    assert_eq!(
+        reason_codes(&native_login_rows(&f).await),
+        ["accepted", "provisioning_conflict"]
+    );
+}

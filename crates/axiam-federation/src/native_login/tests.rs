@@ -964,14 +964,73 @@ async fn a_refused_presentation_does_not_spend_the_token() {
         .expect("the genuine presentation still signs in");
 }
 
+/// D-N19 (F4-W2-06) — single use is deployment-wide: the same app's client
+/// ID listed on an organization provider and on a provider of its own in
+/// another tenant (two configurations of one issuer) does not make a token
+/// usable twice. The first redemption spends it for both.
+#[tokio::test]
+async fn a_token_is_single_use_across_two_configurations_of_its_issuer() {
+    let fx = Fx::new().await;
+    // A sibling tenant with its own provider for the same IdP and app.
+    let sibling = fx
+        .tenants
+        .create(CreateTenant {
+            organization_id: fx.org_id,
+            kind: TenantKind::Standard,
+            name: "Sibling".into(),
+            slug: "tenant-d".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let siblings_own = fx.provider(sibling.id, |_| {}).await;
+    // And an organization provider the first tenant inherits.
+    let org_provider = fx
+        .provider(fx.org_tenant_id, |c| {
+            c.allow_tenant_inheritance = Some(true);
+            c.provider_slug = Some("org-idp".into());
+        })
+        .await;
+
+    let token = fx.token(json!({}));
+    fx.sign_in_as(fx.tenant_id, &org_provider.to_string(), &token, &fx.nonce)
+        .await
+        .expect("the first redemption, through the organization provider");
+    refused(
+        fx.sign_in_as(sibling.id, &siblings_own.to_string(), &token, &fx.nonce)
+            .await,
+        NativeLoginError::Replayed,
+    );
+    // And a second provider of the first tenant itself.
+    refused(fx.sign_in(&token).await, NativeLoginError::Replayed);
+}
+
+/// The row outlives the token by twice the leeway, so a database clock up to
+/// a leeway ahead of this node does not sweep a row the node would still
+/// accept the token for (F4-W2-06).
+#[tokio::test]
+async fn the_replay_row_is_kept_to_exp_plus_twice_the_leeway() {
+    let fx = Fx::new().await;
+    let exp = now() + 600;
+    fx.sign_in(&fx.token(json!({ "exp": exp })))
+        .await
+        .expect("sign-in");
+    let mut r = fx
+        .db
+        .query("SELECT VALUE time::unix(expires_at) FROM federation_id_token_replay")
+        .await
+        .unwrap();
+    let kept: Vec<i64> = r.take(0).unwrap();
+    assert_eq!(kept, [exp + 2 * CLOCK_SKEW_LEEWAY_SECS as i64]);
+}
+
 /// A replay store that cannot record refuses — and refuses before any user is
 /// resolved.
 struct BrokenReplayStore;
 impl ProviderIdTokenReplayRepository for BrokenReplayStore {
     async fn insert_id_token(
         &self,
-        _: Uuid,
-        _: Uuid,
+        _: &str,
         _: &str,
         _: chrono::DateTime<chrono::Utc>,
     ) -> axiam_core::error::AxiamResult<()> {
@@ -1065,6 +1124,23 @@ async fn a_token_the_attribute_map_finds_no_subject_in_is_refused() {
         fx.sign_in(&fx.token(json!({}))).await,
         NativeLoginError::SubjectUnmapped,
     );
+}
+
+/// F4-W2-10 — a first sign-in whose mapped email is another account's is the
+/// generic refusal (`provisioning_conflict`), not a server error: the
+/// endpoint does not say whether an address has an account.
+#[tokio::test]
+async fn a_provisioning_collision_is_a_refusal_not_a_server_error() {
+    let fx = Fx::new().await;
+    fx.sign_in(&fx.token(json!({})))
+        .await
+        .expect("the first identity provisions ada@example.com");
+    let err = fx
+        .sign_in(&fx.token(json!({ "sub": "someone-else" })))
+        .await
+        .expect_err("the same email for another provider subject");
+    assert_eq!(err, NativeLoginError::ProvisioningConflict);
+    assert_eq!(err.refusal(), NativeLoginRefusal::InvalidGrant);
 }
 
 #[tokio::test]
@@ -1307,6 +1383,7 @@ fn every_refusal_is_generic_on_the_wire_and_distinct_in_the_log() {
         NativeLoginError::Replayed,
         NativeLoginError::ReplayGuardUnavailable("datastore down".into()),
         NativeLoginError::SubjectUnmapped,
+        NativeLoginError::ProvisioningConflict,
         NativeLoginError::AccountRefused("datastore down".into()),
         NativeLoginError::Server("datastore down".into()),
     ];

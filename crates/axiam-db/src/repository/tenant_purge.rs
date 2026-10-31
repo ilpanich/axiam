@@ -397,7 +397,9 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("oauth2_proof_replay", Grants),
     PurgeStep::by_tenant("saml_assertion_replay", Grants),
     PurgeStep::by_tenant("amqp_nonce_replay", Grants),
-    PurgeStep::by_tenant("federation_id_token_replay", Grants),
+    // Not `federation_id_token_replay`: its key is deployment-wide (D-N19),
+    // it has no tenant, and its rows leave with the expiry sweep — removing a
+    // purged tenant's early could re-enable a token elsewhere before `exp`.
     // (b) Identity links.
     PurgeStep::by_tenant("federation_link", IdentityLinks),
     // (b2) Stored credential material.

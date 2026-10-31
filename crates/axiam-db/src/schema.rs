@@ -5711,26 +5711,36 @@ DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE federation_c
 // `federation_id_token_replay`: every provider-issued ID token a native
 // sign-in consumed, by the hex SHA-256 of the token as presented (Google's ID
 // tokens carry no `jti`). First sighting by `CREATE`, replay by violation of
-// the UNIQUE `(tenant_id, provider_id, token_hash)` index, no read in the
-// path; a row lives until the token's `exp` plus the 60 s skew allowance and
-// is then swept by the cleanup loop.
+// the UNIQUE `(issuer, token_hash)` index, no read in the path; a row lives
+// until the token's `exp` plus twice the 60 s skew allowance and is then
+// swept by the cleanup loop.
+//
+// **Deployment-wide** (D-N19, F4-W2-06): the key names no tenant and no
+// provider configuration, so a token is spent once whichever tenant or
+// configuration it is presented through. The table therefore has no
+// `tenant_id`, is not tenant-scoped and is not in `TENANT_PURGE_ORDER`: a
+// purged tenant's rows leave with the expiry sweep, because deleting one early
+// could let the same token sign in through another configuration before it
+// expires. A row holds the issuer and a hash, nothing about a user.
+//
+// v112 is unreleased (introduced and changed in the same wave), so its
+// definition changed in place from the W2 key `(tenant_id, provider_id,
+// token_hash)`; it is still additive.
 //
 // A table of its own rather than a fifth `oauth2_proof_replay.kind`: widening
 // that field's ASSERT takes a `DEFINE FIELD OVERWRITE`, which is not additive
 // (#729) — and a third overwrite of one field is the re-narrowing hazard the
 // boot-time gap refusal exists for. Every statement here is
-// `DEFINE … IF NOT EXISTS`. `tenant_id` is the tenant that owns the provider,
-// so the tenant purge removes the rows with it.
+// `DEFINE … IF NOT EXISTS`.
 const SCHEMA_V112: &str = "\
 DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_id_token_replay TYPE string;
-DEFINE FIELD IF NOT EXISTS provider_id ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS issuer ON TABLE federation_id_token_replay TYPE string;
 DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay TYPE string;
 DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_id_token_replay TYPE datetime;
 DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay TYPE datetime
     DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE federation_id_token_replay
-    COLUMNS tenant_id, provider_id, token_hash UNIQUE;
+    COLUMNS issuer, token_hash UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at
     ON TABLE federation_id_token_replay COLUMNS expires_at;
 ";
@@ -6143,10 +6153,11 @@ mod tests {
         assert!(is_additive(SCHEMA_V111));
     }
 
-    /// G-A (#816, D-N10) — v112 is the native sign-in replay table, its
-    /// fields and its two indexes, and nothing else: every statement
+    /// G-A (#816, D-N10, D-N19) — v112 is the native sign-in replay table,
+    /// its fields and its two indexes, and nothing else: every statement
     /// `DEFINE … IF NOT EXISTS` (#729), the uniqueness on exactly
-    /// `(tenant_id, provider_id, token_hash)`, no existing table touched.
+    /// `(issuer, token_hash)` — deployment-wide, so no `tenant_id` field —
+    /// no existing table touched.
     #[test]
     fn v112_adds_only_the_native_sign_in_replay_table() {
         let statements: Vec<String> = SCHEMA_V112
@@ -6158,9 +6169,7 @@ mod tests {
             statements,
             [
                 "DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL",
-                "DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_id_token_replay \
-                 TYPE string",
-                "DEFINE FIELD IF NOT EXISTS provider_id ON TABLE federation_id_token_replay \
+                "DEFINE FIELD IF NOT EXISTS issuer ON TABLE federation_id_token_replay \
                  TYPE string",
                 "DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay \
                  TYPE string",
@@ -6169,7 +6178,7 @@ mod tests {
                 "DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay \
                  TYPE datetime DEFAULT time::now()",
                 "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE \
-                 federation_id_token_replay COLUMNS tenant_id, provider_id, token_hash UNIQUE",
+                 federation_id_token_replay COLUMNS issuer, token_hash UNIQUE",
                 "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at ON TABLE \
                  federation_id_token_replay COLUMNS expires_at",
             ],

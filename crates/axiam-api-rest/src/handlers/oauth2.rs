@@ -1150,6 +1150,48 @@ async fn tenant_default_locale<C: Connection + Clone>(
     locale
 }
 
+/// Whether the tenant's effective settings have the GDPR-sensitive scopes
+/// (`address`, `phone`) on. A settings read that fails is "off", logged.
+async fn sensitive_scopes_enabled<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+) -> bool {
+    // The organization the settings baseline belongs to. Resolved from the
+    // tenant rather than taken from the caller's principal, the same way
+    // `axiam_auth::lockout` resolves it: the authorization endpoint's
+    // principal type carries no `org_id`, and adding one to it would put a
+    // field on the hot path for a branch almost no request takes.
+    match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => match axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            tenant_id,
+        )
+        .await
+        {
+            Ok(settings) => settings.oidc.sensitive_scopes_enabled,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %tenant_id,
+                    "could not read the tenant's effective settings while deciding whether the \
+                     address/phone scopes are enabled; treating them as disabled"
+                );
+                false
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not resolve the organization behind this tenant; treating the \
+                 address/phone scopes as disabled"
+            );
+            false
+        }
+    }
+}
+
 /// W7 / X7 G8 — resolve what this authorization request's GDPR-sensitive
 /// scopes have earned, so `AuthorizeService` can decide without a repository.
 ///
@@ -1190,40 +1232,7 @@ async fn resolve_sensitive_scopes<C: Connection + Clone>(
         return (axiam_oauth2::sensitive::Requested::None, false);
     }
 
-    // The organization the settings baseline belongs to. Resolved from the
-    // tenant rather than taken from the caller's principal, the same way
-    // `axiam_auth::lockout` resolves it: the authorization endpoint's
-    // principal type carries no `org_id`, and adding one to it would put a
-    // field on the hot path for a branch almost no request takes.
-    let enabled = match state.tenant_repo.get_by_id(tenant_id).await {
-        Ok(tenant) => match axiam_core::repository::SettingsRepository::get_effective_settings(
-            &state.settings_repo,
-            tenant.organization_id,
-            tenant_id,
-        )
-        .await
-        {
-            Ok(settings) => settings.oidc.sensitive_scopes_enabled,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    %tenant_id,
-                    "could not read the tenant's effective settings while deciding whether the \
-                     address/phone scopes are enabled; treating them as disabled"
-                );
-                false
-            }
-        },
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                %tenant_id,
-                "could not resolve the organization behind this tenant; treating the \
-                 address/phone scopes as disabled"
-            );
-            false
-        }
-    };
+    let enabled = sensitive_scopes_enabled(state, tenant_id).await;
     if !enabled {
         return (axiam_oauth2::sensitive::Requested::Disabled, true);
     }
@@ -2103,8 +2112,8 @@ pub async fn authorize<C: Connection + Clone>(
 /// given its lower-case SHA-256 hex, which the ID token's `nonce` claim must
 /// equal), and optional `scope` and `resource`. Every refusal of the provider token is
 /// `invalid_grant` ("the provider ID token is not acceptable"); the grant is
-/// rate limited per client address (`rate_limit_exceeded`). This is not token
-/// exchange (RFC 8693).
+/// rate limited per tenant and client address (`rate_limit_exceeded`). This
+/// is not token exchange (RFC 8693).
 #[utoipa::path(
     post,
     path = "/oauth2/token",
@@ -4914,17 +4923,29 @@ async fn handle_provider_id_token<C: Connection + Clone>(
         }
     };
 
-    // The grant's own bucket, `login_per_min` per address — the preset of the
-    // password login it stands in for. Applied here rather than as route
-    // middleware because `/oauth2/token` serves every grant and the grant is
-    // known only once the body is read. Keyed on the caller's address, not on
-    // the client: a mobile app's one public `client_id` is shared by every
-    // person signing in with it, and a per-client bucket would let one caller
-    // lock all of them out. Charged after step 1, so an unauthenticated
-    // caller cannot spend it for a confidential client.
-    let address = client_ip(req).unwrap_or_else(|| "unknown".to_owned());
+    // The grant's own bucket, `login_per_min` per tenant and address — the
+    // preset of the password login it stands in for. Applied here rather than
+    // as route middleware because `/oauth2/token` serves every grant and the
+    // grant is known only once the body is read. Keyed on the caller's
+    // address, not on the client: a mobile app's one public `client_id` is
+    // shared by every person signing in with it, and a per-client bucket
+    // would let one caller lock all of them out. And on the tenant (F4-W2-07):
+    // carrier-grade NAT puts many users of many tenants behind one address,
+    // and one tenant's traffic must not spend another's allowance. Charged
+    // after step 1, so an unauthenticated caller cannot spend it for a
+    // confidential client.
+    //
+    // `client_ip` already falls back to the transport peer; a request with
+    // neither (no forwarded address the rule trusts and no peer) is refused
+    // rather than pooled into one shared `unknown` bucket, where every such
+    // caller would spend everyone else's allowance.
+    let Some(address) = client_ip(req) else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "the caller's network address could not be determined".into(),
+        ));
+    };
     if !state.shared_rate_limit.check_at(
-        &format!("oauth2_provider_id_token:{address}"),
+        &format!("oauth2_provider_id_token:{tenant_id}:{address}"),
         chrono::Utc::now(),
         state.rate_limit_cfg.login_per_min,
     ) {
@@ -4963,6 +4984,17 @@ async fn handle_provider_id_token<C: Connection + Clone>(
         Ok(native) => native,
         Err(e) => return build_oauth2_error_response(&e),
     };
+    // F4-W2-05 (D-N14): the tenant's sensitive-scope switch does not depend on
+    // the user, so it is decided here with the other request checks, before
+    // the provider token is verified and spent.
+    let switched_off = !axiam_oauth2::sensitive::requested(grant.scopes()).is_empty()
+        && !sensitive_scopes_enabled(state, tenant_id).await;
+    if let Err(e) =
+        axiam_oauth2::provider_id_token::refuse_switched_off_sensitive_scopes(switched_off)
+    {
+        audit.refused(state, None, e.error_code()).await;
+        return build_oauth2_error_response(&e);
+    }
 
     // --- 3. §3.1 steps 2–7 -----------------------------------------------
     // No federation service means no encryption key, so no provider's

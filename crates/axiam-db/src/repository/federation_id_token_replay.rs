@@ -7,13 +7,17 @@
 //! table with a `UNIQUE` index, and the index violation **is** the "already
 //! seen" answer. No `SELECT` in the path, so two concurrent presentations of
 //! one token cannot both see "not seen".
+//!
+//! The key is `(issuer, token_hash)`, deployment-wide (D-N19, F4-W2-06): a
+//! token is spent once whichever tenant or provider configuration it is
+//! presented through. The rows carry no tenant, are not in the tenant purge,
+//! and leave with the expiry sweep.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::repository::ProviderIdTokenReplayRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
-use uuid::Uuid;
 
 use crate::handle::DbHandle;
 use crate::helpers::{classify_replay_write_error, cleanup_expired_rows, is_transaction_conflict};
@@ -41,8 +45,7 @@ impl<C: Connection> SurrealProviderIdTokenReplayRepository<C> {
     /// One `CREATE`; the error is the engine's, unclassified.
     async fn try_insert(
         &self,
-        tenant_id: Uuid,
-        provider_id: Uuid,
+        issuer: &str,
         token_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), surrealdb::Error> {
@@ -50,14 +53,12 @@ impl<C: Connection> SurrealProviderIdTokenReplayRepository<C> {
             .current()
             .query(
                 "CREATE type::record('federation_id_token_replay', $row_id) SET \
-                 tenant_id = $tenant_id, \
-                 provider_id = $provider_id, \
+                 issuer = $issuer, \
                  token_hash = $token_hash, \
                  expires_at = $expires_at",
             )
             .bind(("row_id", new_id().to_string()))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("provider_id", provider_id.to_string()))
+            .bind(("issuer", issuer.to_owned()))
             .bind(("token_hash", token_hash.to_owned()))
             .bind(("expires_at", expires_at))
             .await?
@@ -69,8 +70,7 @@ impl<C: Connection> SurrealProviderIdTokenReplayRepository<C> {
 impl<C: Connection> ProviderIdTokenReplayRepository for SurrealProviderIdTokenReplayRepository<C> {
     async fn insert_id_token(
         &self,
-        tenant_id: Uuid,
-        provider_id: Uuid,
+        issuer: &str,
         token_hash: &str,
         expires_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
@@ -84,10 +84,7 @@ impl<C: Connection> ProviderIdTokenReplayRepository for SurrealProviderIdTokenRe
         const ATTEMPTS: usize = 4;
         let mut attempt = 1;
         loop {
-            match self
-                .try_insert(tenant_id, provider_id, token_hash, expires_at)
-                .await
-            {
+            match self.try_insert(issuer, token_hash, expires_at).await {
                 Err(e) if attempt < ATTEMPTS && is_transaction_conflict(&e) => attempt += 1,
                 // The UNIQUE violation is the answer, classified by the one
                 // shared definition every replay guard uses (D-09).

@@ -775,7 +775,7 @@ fn the_scan_finds_the_registrations() {
         "scim",                      // a `const` in another crate (`axiam-scim`)
         "saml_idp_sso",              // behind `#[cfg(feature = "saml")]`
         "oauth2_par",                // a `check_at` key, built inline
-        "oauth2_provider_id_token",  // G-A — a `check_at` key, built inline
+        "oauth2_provider_id_token",  // G-A — a `check_at` key, built inline (tenant, address)
         "ciba_notify",               // a `check_at` key, through a local `let`
         "ciba_approval_list",        // a `check_at_human` key, through a function
         "network_decide",            // a `check_at` key, through a function and a `const`

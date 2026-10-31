@@ -44,13 +44,16 @@
 //!    (D-N16; the app gives the provider SDK the hash and AXIAM the raw
 //!    value); an access-token `typ` (`at+jwt`) refused. The marker list is
 //!    [`crate::token_shape`]'s, the same one X4 refuses by.
-//! 6. **Replay**: the token's SHA-256 recorded in the replay store, until `exp`
-//!    plus the leeway; a second presentation is refused, and a store that
-//!    cannot record refuses too.
+//! 6. **Replay**: the token's SHA-256 recorded in the replay store under its
+//!    issuer, deployment-wide (D-N19), until `exp` plus twice the leeway; a
+//!    second presentation through any tenant or configuration is refused, and
+//!    a store that cannot record refuses too.
 //! 7. **Subject**: the browser login's resolution, unchanged —
 //!    `map_identity(provider_kind, attribute_map, claims)` and then
 //!    `provision_or_link_identity`, provisioning on first sign-in, adopting no
-//!    email as verified; then `account_may_act`.
+//!    email as verified; then `account_may_act`. A first sign-in whose mapped
+//!    username or email another account holds is the generic refusal
+//!    (`provisioning_conflict`), not a server error (F4-W2-10).
 //!
 //! # Why the replay guard sits where it does
 //!
@@ -236,6 +239,10 @@ pub enum NativeLoginError {
     ReplayGuardUnavailable(String),
     /// Step 7: the provider's attribute map yields no external subject.
     SubjectUnmapped,
+    /// Step 7: provisioning a first-time user collided with an existing
+    /// account's username or email. Refused like every other token problem,
+    /// so the endpoint is not an account-existence oracle (F4-W2-10).
+    ProvisioningConflict,
     /// Step 7: the account may not act (locked, inactive, anonymized,
     /// deleted); the text is `account_may_act`'s.
     AccountRefused(String),
@@ -285,6 +292,10 @@ impl std::fmt::Display for NativeLoginError {
             Self::SubjectUnmapped => {
                 write!(f, "no external subject could be mapped from the token")
             }
+            Self::ProvisioningConflict => write!(
+                f,
+                "a first sign-in collided with an existing account's username or email"
+            ),
             Self::AccountRefused(m) => write!(f, "the account may not sign in: {m}"),
             Self::Server(m) => write!(f, "{m}"),
         }
@@ -325,6 +336,7 @@ impl NativeLoginError {
             Self::Replayed => "replayed",
             Self::ReplayGuardUnavailable(_) => "replay_guard_unavailable",
             Self::SubjectUnmapped => "subject_unmapped",
+            Self::ProvisioningConflict => "provisioning_conflict",
             Self::AccountRefused(_) => "account_refused",
             Self::Server(_) => "server_error",
         }
@@ -625,20 +637,21 @@ where
         // --- 6. Replay: spend the token, once --------------------------------
         // After the signature (a forged token records nothing) and before the
         // subject (two concurrent presentations cannot both resolve). Keyed on
-        // the provider's own tenant, so an inherited provider's token is spent
-        // once across the organization rather than once per tenant.
+        // the issuer and the hash only (D-N19): a token is spent once across
+        // the deployment, whichever tenant or provider configuration lists the
+        // app it was issued to.
+        //
+        // The row is kept to `exp` plus *twice* the leeway. `exp` is checked
+        // here against this node's clock with one leeway; the sweep deletes by
+        // the database's clock. The second leeway keeps a row alive while any
+        // node within 60 s of the database would still accept the token.
         let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
-            id_token_exp.saturating_add(CLOCK_SKEW_LEEWAY_SECS as i64),
+            id_token_exp.saturating_add(2 * CLOCK_SKEW_LEEWAY_SECS as i64),
             0,
         )
         .ok_or_else(|| NativeLoginError::ClaimRejected("'exp' is not a date".into()))?;
         match replay
-            .insert_id_token(
-                config.tenant_id,
-                config.id,
-                &sha256_hex(request.id_token),
-                expires_at,
-            )
+            .insert_id_token(&issuer, &sha256_hex(request.id_token), expires_at)
             .await
         {
             Ok(()) => {}
@@ -658,7 +671,10 @@ where
         let resolved = self
             .provision_or_link_identity(tenant_id, config.id, &identity)
             .await
-            .map_err(|e| NativeLoginError::Server(e.to_string()))?;
+            .map_err(|e| match e {
+                FederationError::ProvisioningConflict(_) => NativeLoginError::ProvisioningConflict,
+                other => NativeLoginError::Server(other.to_string()),
+            })?;
         axiam_auth::service::account_may_act(&resolved.user)
             .map_err(|e| NativeLoginError::AccountRefused(e.to_string()))?;
 

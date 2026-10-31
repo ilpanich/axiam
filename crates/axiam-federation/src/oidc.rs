@@ -1050,9 +1050,19 @@ where
             metadata: Some(metadata),
         };
 
-        let user = self.user_repo.create(create_user).await.map_err(|e| {
-            FederationError::ProvisioningFailed(format!("Failed to create user: {e}"))
-        })?;
+        let user = self
+            .user_repo
+            .create(create_user)
+            .await
+            .map_err(|e| match e {
+                // The mapped username or email is another account's. Its own
+                // variant so native sign-in can answer it as a refusal (F4-W2-10);
+                // the browser callback maps both variants the same.
+                AxiamError::AlreadyExists { .. } => {
+                    FederationError::ProvisioningConflict(format!("Failed to create user: {e}"))
+                }
+                e => FederationError::ProvisioningFailed(format!("Failed to create user: {e}")),
+            })?;
 
         let create_link = CreateFederationLink {
             tenant_id,

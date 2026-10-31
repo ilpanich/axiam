@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `provider` (a federation provider's UUID or `provider_slug`), `id_token` and
   `nonce` (the app's raw nonce; the app gives the provider's SDK its
   lower-case SHA-256 hex, and the token's `nonce` claim must equal that hash —
-  a claim equal to the raw value is refused), optional `scope` and `resource`. A mobile app that signed the user in
-  with the provider's own SDK (Sign in with Google, Sign in with Apple, an OIDC
+  a claim equal to the raw value is refused), optional `scope` and
+  `resource`. A mobile app that signed the user in with the provider's own SDK
+  (Sign in with Google, Sign in with Apple, an OIDC
   provider's native SDK) exchanges the ID token for the client's ordinary
   sign-in token set: an access token naming the client and a new session, a
   refresh token under the usual rotation and client binding, and an AXIAM ID
@@ -27,12 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a client whose `grant_types` lists the grant (public clients included).
   Every refusal of the token or the configuration is one `invalid_grant`
   ("the provider ID token is not acceptable"); a scope that would need the
-  user's consent is `consent_required`. Rate limited per address at
+  user's consent is `consent_required`; a `nonce` over 512 bytes is
+  `invalid_request`; every interactive-sign-in reactor gate applies
+  (`login.post_auth`). Rate limited per tenant and address at
   `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` (bucket `oauth2_provider_id_token`), and
   audited as `federation.native_login` (never the token or the nonce). Each
-  provider ID token is accepted once: a dedicated `federation_id_token_replay`
-  record (schema v112, additive) is kept until the token's `exp` plus 60
-  seconds and swept by a new cleanup job of the same name, which appears in
+  provider ID token is accepted once in the whole deployment: a dedicated
+  `federation_id_token_replay` record keyed on the issuer and the token's hash
+  (schema v112, additive; not tenant data, so left to the sweep by the tenant
+  purge) is kept until the token's `exp` plus 120 seconds and swept by a new
+  cleanup job of the same name, which appears in
   `GET /health/jobs`. The per-provider `native_login` trust block
   (`enabled`, `client_ids`, `max_token_age_secs`) is set on
   `PUT /api/v1/federation-configs/{id}` and in the admin console, which also

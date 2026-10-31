@@ -630,6 +630,8 @@ recommendation.
 | D-N25 | *(F4-W3-01, #832)* An SSO sign-in started from a login hop never returns to the relying party (pre-existing; G-B makes it the main path). Fix in W3 or document and defer? | **Fix in W3**: `return_to` carried in the pending-SSO record, the hop resumed on success, kept on the failure link | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N26 | *(F4-W3-03, #833)* The re-authentication hop auto-starts the provider while `prompt=login`/`max_age`/`ForceAuthn` are not forwarded upstream. No auto-start on re-auth, or forward upstream now? | **No auto-start on a re-authentication hop**; forwarding upstream is a later issue | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N27 | *(F4-W3-05, #834)* Admin OAuth2 client create/update/delete are not audited (pre-existing), so `default_idp` changes leave no record. Residual with its own issue, or audit in this wave? | **Recommended: residual + own issue.** | **Answered by the maintainer 2026-10-31: audit in this wave.** |
+| D-N28 | *(F4-W3-12, #835)* Under PAR the sign-in page cannot see `prompt=login`/`max_age=0` and auto-starts the provider. Server marks the hop, or residual? | **The server marks the hop** as a re-authentication (query and PAR alike); the SPA stops parsing `return_to` (also settles F4-W3-13/-14) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N29 | *(F4-W3-16, #835)* Bind the remembered login hop to the SSO start that created it? | **Yes**: resume only on a callback whose `state` matches the one recorded at start | **Answered by the maintainer 2026-10-31: as recommended.** |
 
 ---
 

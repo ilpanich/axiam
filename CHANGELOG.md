@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`, with
   `provider` (a federation provider's UUID or `provider_slug`), `id_token` and
   `nonce` (the app's raw nonce; the app gives the provider's SDK its
-  lower-case SHA-256 hex, and the token's `nonce` claim must equal that hash —
-  a claim equal to the raw value is refused), optional `scope` and
+  SHA-256 hex, and the token's `nonce` claim must equal that hash, the case of
+  its hex letters ignored — a claim equal to the raw value is refused), optional `scope` and
   `resource`. A mobile app that signed the user in with the provider's own SDK
   (Sign in with Google, Sign in with Apple, an OIDC
   provider's native SDK) exchanges the ID token for the client's ordinary
@@ -34,7 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` (bucket `oauth2_provider_id_token`), and
   audited as `federation.native_login` (never the token or the nonce). Each
   provider ID token is accepted once in the whole deployment: a dedicated
-  `federation_id_token_replay` record keyed on the issuer and the token's hash
+  `federation_id_token_replay` record keyed on the issuer and the hash of the
+  token's signing input (the bytes its signature covers, so an ECDSA
+  signature's second encoding is the same token)
   (schema v112, additive; not tenant data, so left to the sweep by the tenant
   purge) is kept until the token's `exp` plus 120 seconds and swept by a new
   cleanup job of the same name, which appears in

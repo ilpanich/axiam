@@ -91,6 +91,87 @@ impl TestKey {
     }
 }
 
+/// A P-256 signing key generated for this run, and its JWK — for the
+/// providers that sign ES256 (F4-W2-11). Signed with `ring`, as
+/// `crate::apple` does, not through `jsonwebtoken::encode`.
+struct EcTestKey {
+    kid: String,
+    pair: ring::signature::EcdsaKeyPair,
+    x: String,
+    y: String,
+}
+
+impl EcTestKey {
+    fn generate(kid: &str) -> Self {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).expect("keygen");
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .expect("parse");
+        // Uncompressed SEC1 point: 0x04 || x || y.
+        let point = pair.public_key().as_ref().to_vec();
+        assert_eq!(point.len(), 65);
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        Self {
+            kid: kid.to_owned(),
+            x: b64(&point[1..33]),
+            y: b64(&point[33..]),
+            pair,
+        }
+    }
+
+    fn jwk(&self) -> Value {
+        json!({
+            "kty": "EC", "crv": "P-256", "kid": self.kid, "use": "sig", "alg": "ES256",
+            "x": self.x, "y": self.y,
+        })
+    }
+
+    fn sign(&self, claims: &Value) -> String {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let header = json!({ "alg": "ES256", "typ": "JWT", "kid": self.kid });
+        let input = format!(
+            "{}.{}",
+            b64(header.to_string().as_bytes()),
+            b64(claims.to_string().as_bytes())
+        );
+        let sig = self
+            .pair
+            .sign(&ring::rand::SystemRandom::new(), input.as_bytes())
+            .expect("sign");
+        format!("{input}.{}", b64(sig.as_ref()))
+    }
+}
+
+/// The order of the P-256 group, big-endian.
+const P256_N: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+];
+
+/// The other valid encoding of an ES256 token's signature: `(r, s)` becomes
+/// `(r, n − s)`, which verifies against the same key and signing input. The
+/// header and payload are untouched; only the third segment changes.
+fn ecdsa_twin(token: &str) -> String {
+    let (input, sig) = token.rsplit_once('.').expect("a JWS");
+    let mut sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(sig)
+        .expect("base64url");
+    assert_eq!(sig.len(), 64, "ES256 is r || s, 32 bytes each");
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let d = i16::from(P256_N[i]) - i16::from(sig[32 + i]) - borrow;
+        borrow = i16::from(d < 0);
+        sig[32 + i] = (d + (borrow << 8)) as u8;
+    }
+    assert_eq!(borrow, 0, "s < n");
+    format!(
+        "{input}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&sig)
+    )
+}
+
 /// A loopback stub IdP: discovery and a JWKS, from a mock server.
 struct Idp {
     server: MockServer,
@@ -123,7 +204,13 @@ impl Idp {
 
     /// Serve this JWKS from now on.
     async fn serve_jwks(&self, keys: &[&TestKey]) {
-        let body = json!({ "keys": keys.iter().map(|k| k.jwk()).collect::<Vec<_>>() });
+        self.serve_jwk_set(keys.iter().map(|k| k.jwk()).collect())
+            .await;
+    }
+
+    /// Serve these JWKs, of any key type, from now on.
+    async fn serve_jwk_set(&self, keys: Vec<Value>) {
+        let body = json!({ "keys": keys });
         Mock::given(method("GET"))
             .and(path("/jwks"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
@@ -457,6 +544,73 @@ async fn a_presenter_who_copies_the_nonce_claim_is_refused() {
     fx.sign_in(&token)
         .await
         .expect("the genuine presentation still signs in");
+}
+
+/// D-N21 (F4-W2-14) — an app whose hex helper emits upper case (.NET
+/// `Convert.ToHexString`, Java `HexFormat.of().withUpperCase()`) gives the
+/// provider the hash in upper case. The claim's hex letters are folded before
+/// the compare, so it signs in, as does mixed case.
+#[tokio::test]
+async fn an_upper_or_mixed_case_hex_nonce_claim_is_accepted() {
+    let fx = Fx::new().await;
+    let upper = sha256_hex(&fx.nonce).to_ascii_uppercase();
+    assert_ne!(upper, sha256_hex(&fx.nonce), "the hash has hex letters");
+    fx.sign_in(&fx.token(json!({ "nonce": upper })))
+        .await
+        .expect("upper-case hex");
+
+    let mixed: String = sha256_hex(&fx.nonce)
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    fx.sign_in(&fx.token(json!({ "nonce": mixed, "sub": "user-2", "email": "bea@example.com" })))
+        .await
+        .expect("mixed-case hex");
+}
+
+/// D-N21 — only ASCII hex case is forgiven. A claim that differs from the
+/// hash in anything else (whitespace, a look-alike letter, a non-hex letter)
+/// is refused, and the request's raw nonce is hashed as sent, never folded.
+#[test]
+fn only_the_hex_case_of_the_nonce_claim_is_folded() {
+    let nonce = "raw-Nonce-1";
+    let lower = sha256_hex(nonce);
+    let upper = lower.to_ascii_uppercase();
+    let claims = |claim: &str| json!({ "nonce": claim });
+    let check = |claim: &str, request: &str| check_shape(None, &claims(claim), request);
+
+    assert_eq!(check(&lower, nonce), Ok(()));
+    assert_eq!(check(&upper, nonce), Ok(()));
+
+    // Anything but hex case is still a mismatch.
+    for bad in [
+        format!("{lower} "),
+        format!(" {upper}"),
+        lower.replacen(|c: char| c.is_ascii_alphabetic(), "\u{FF21}", 1),
+        upper.replacen(|c: char| c.is_ascii_alphabetic(), "G", 1),
+        upper.replacen(|c: char| c.is_ascii_alphabetic(), "g", 1),
+        format!("{lower}00"),
+        lower[..62].to_owned(),
+    ] {
+        assert_eq!(check(&bad, nonce), Err(NativeLoginError::NonceMismatch));
+    }
+    // The request's nonce is the preimage: its case matters.
+    assert_eq!(
+        check(&lower, &nonce.to_ascii_uppercase()),
+        Err(NativeLoginError::NonceMismatch)
+    );
+
+    assert_eq!(
+        fold_hex_case("ABCDEFGXYZ0abc-\u{e9}\u{FF21}"),
+        "abcdefGXYZ0abc-\u{e9}\u{FF21}".as_bytes()
+    );
 }
 
 /// D-N17 — Google's Android shape: `aud` is the provider's web (server)
@@ -1005,6 +1159,63 @@ async fn a_token_is_single_use_across_two_configurations_of_its_issuer() {
     refused(fx.sign_in(&token).await, NativeLoginError::Replayed);
 }
 
+/// F4-W2-11 — the replay key is the token's signing input, not its compact
+/// string. An ES256 signature has a second valid encoding (`s` → `n − s`), so
+/// a spent token's twin is a different string that verifies; it is the same
+/// token and is refused as a replay. The first half shows the twin really
+/// verifies — redeemed first, it signs in, and the original is then the
+/// replay — so the refusal below is the replay guard, not the signature.
+#[tokio::test]
+async fn a_malleated_ecdsa_twin_of_a_spent_token_is_a_replay() {
+    let fx = Fx::new().await;
+    let ec = EcTestKey::generate("ec1");
+    fx.idp.server.reset().await;
+    fx.idp.mount_discovery().await;
+    fx.idp.serve_jwk_set(vec![fx.idp.key.jwk(), ec.jwk()]).await;
+    let es256 = fx
+        .provider(fx.tenant_id, |c| {
+            c.allowed_algorithms = Some(vec!["ES256".into()]);
+            c.provider_slug = Some("es-idp".into());
+        })
+        .await
+        .to_string();
+    let sign_in = |token: String| {
+        let es256 = es256.clone();
+        let fx = &fx;
+        async move { fx.sign_in_as(fx.tenant_id, &es256, &token, &fx.nonce).await }
+    };
+
+    // The twin verifies: presented first, it signs in on its own.
+    let probe = ec.sign(&fx.claims_with(json!({ "sub": "probe", "email": "probe@example.com" })));
+    let probe_twin = ecdsa_twin(&probe);
+    assert_ne!(probe_twin, probe, "the twin is another string");
+    assert_eq!(ecdsa_twin(&probe_twin), probe, "the swap is an involution");
+    sign_in(probe_twin)
+        .await
+        .expect("the twin is a valid signature of the same signing input");
+    refused(sign_in(probe).await, NativeLoginError::Replayed);
+
+    // The attack: a spent token's twin is the same token.
+    let token = ec.sign(&fx.claims());
+    sign_in(token.clone()).await.expect("the first redemption");
+    refused(
+        sign_in(ecdsa_twin(&token)).await,
+        NativeLoginError::Replayed,
+    );
+    refused(sign_in(token).await, NativeLoginError::Replayed);
+}
+
+/// The replay key is the SHA-256 hex of the bytes before the second `.`.
+#[test]
+fn the_replay_key_is_the_hash_of_the_signing_input() {
+    assert_eq!(replay_key("h.p.sig"), Some(sha256_hex("h.p")));
+    assert_eq!(replay_key("h.p.other-sig"), replay_key("h.p.sig"));
+    assert_ne!(replay_key("h.p.sig"), Some(sha256_hex("h.p.sig")));
+    assert_eq!(replay_key("h.p."), Some(sha256_hex("h.p")));
+    assert_eq!(replay_key("h.p"), None);
+    assert_eq!(replay_key(""), None);
+}
+
 /// The row outlives the token by twice the leeway, so a database clock up to
 /// a leeway ahead of this node does not sweep a row the node would still
 /// accept the token for (F4-W2-06).
@@ -1127,8 +1338,10 @@ async fn a_token_the_attribute_map_finds_no_subject_in_is_refused() {
 }
 
 /// F4-W2-10 — a first sign-in whose mapped email is another account's is the
-/// generic refusal (`provisioning_conflict`), not a server error: the
-/// endpoint does not say whether an address has an account.
+/// generic refusal (`provisioning_conflict`), not a server error, so it is
+/// not told apart from other refusals. It is told apart from success: refusal
+/// versus sign-in still says whether the address is taken, as in the browser
+/// login (F4-W2-12, D-N20, a recorded residual).
 #[tokio::test]
 async fn a_provisioning_collision_is_a_refusal_not_a_server_error() {
     let fx = Fx::new().await;

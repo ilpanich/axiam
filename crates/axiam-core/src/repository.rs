@@ -2989,8 +2989,10 @@ pub trait ProviderIdTokenReplayRepository: Send + Sync {
     /// Record a consumed ID token by its hash.
     ///
     /// `issuer` is the token's verified `iss`, exactly as the token spelled
-    /// it. `token_hash` is the lowercase hex SHA-256 of the token as
-    /// presented — never the token. `expires_at` is when the row may go: the
+    /// it. `token_hash` is the lowercase hex SHA-256 of the token's JWS
+    /// signing input — the bytes before its second `.`, which the signature
+    /// covers, so an ECDSA signature's second encoding is the same token
+    /// (F4-W2-11) — never the token. `expires_at` is when the row may go: the
     /// caller passes the token's `exp` plus a margin covering the clock
     /// leeway.
     ///

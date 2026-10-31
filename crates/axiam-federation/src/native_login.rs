@@ -40,14 +40,16 @@
 //!    the future within the 60 s leeway (D-05); `iat` neither older than
 //!    `max_token_age_secs` nor in the future beyond the leeway.
 //! 5. **Shape**: an ID token and nothing else — `nonce` present and equal, in
-//!    constant time, to the lower-case SHA-256 hex of the request's nonce
-//!    (D-N16; the app gives the provider SDK the hash and AXIAM the raw
-//!    value); an access-token `typ` (`at+jwt`) refused. The marker list is
-//!    [`crate::token_shape`]'s, the same one X4 refuses by.
-//! 6. **Replay**: the token's SHA-256 recorded in the replay store under its
-//!    issuer, deployment-wide (D-N19), until `exp` plus twice the leeway; a
-//!    second presentation through any tenant or configuration is refused, and
-//!    a store that cannot record refuses too.
+//!    constant time, to the SHA-256 hex of the request's nonce, the claim's
+//!    hex letters compared without regard to case (D-N16, D-N21; the app gives
+//!    the provider SDK the hash and AXIAM the raw value); an access-token
+//!    `typ` (`at+jwt`) refused. The marker list is [`crate::token_shape`]'s,
+//!    the same one X4 refuses by.
+//! 6. **Replay**: the SHA-256 of the token's JWS signing input (the bytes
+//!    before its second `.`) recorded in the replay store under its issuer,
+//!    deployment-wide (D-N19), until `exp` plus twice the leeway; a second
+//!    presentation through any tenant or configuration is refused, and a store
+//!    that cannot record refuses too.
 //! 7. **Subject**: the browser login's resolution, unchanged —
 //!    `map_identity(provider_kind, attribute_map, claims)` and then
 //!    `provision_or_link_identity`, provisioning on first sign-in, adopting no
@@ -57,13 +59,22 @@
 //!
 //! # Why the replay guard sits where it does
 //!
-//! The store is keyed on the SHA-256 of the token's exact bytes, and a row is
-//! written only once steps 2–5 have all passed:
+//! The store is keyed on the SHA-256 of the token's **signing input** —
+//! `base64url(header) "." base64url(payload)`, the exact bytes before the
+//! second `.`, which the signature covers — and a row is written only once
+//! steps 2–5 have all passed.
+//!
+//! The signature part is left out of the key on purpose (F4-W2-11). An
+//! ECDSA signature has a second valid encoding (`s` → `n − s`), so an
+//! ES256/ES384 token has two compact strings that both verify; hashing the
+//! whole string recorded them as two tokens and let one be spent twice. The
+//! signing input has one spelling per token: changing a byte of it breaks the
+//! signature. That covers any malleable algorithm, not only ECDSA.
 //!
 //! * **Not before the signature (step 4).** Then anyone could write rows: a
 //!   stream of garbage tokens would fill the table. A forged token can never
-//!   take a genuine token's slot either way — its bytes, and so its hash,
-//!   differ — but only a verified token, one the provider really issued to a
+//!   take a genuine token's slot either way — its signed bytes, and so its
+//!   hash, differ — but only a verified token, one the provider really issued to a
 //!   listed client ID, is ever recorded.
 //! * **Not before the nonce (step 5).** Then someone who obtained a victim's
 //!   genuine token without the nonce it is bound to (from a log, a proxy, a
@@ -126,7 +137,8 @@ pub struct NativeIdTokenRequest<'a> {
     /// The ID token the provider issued to the app.
     pub id_token: &'a str,
     /// The raw nonce the app generated. The provider's SDK was given its
-    /// lower-case SHA-256 hex, which is what the token's `nonce` claim holds.
+    /// SHA-256 hex (lower case by convention, upper case accepted — D-N21),
+    /// which is what the token's `nonce` claim holds.
     pub nonce: &'a str,
 }
 
@@ -229,9 +241,9 @@ pub enum NativeLoginError {
     /// Step 5: the token has no `nonce` — it is not an ID token from a flow
     /// the app bound to a nonce.
     NonceMissing,
-    /// Step 5: the `nonce` is not the SHA-256 hex of the request's nonce
-    /// (a claim equal to the request's value unhashed included), or the
-    /// request carried none.
+    /// Step 5: the `nonce` is not the SHA-256 hex (in either case) of the
+    /// request's nonce (a claim equal to the request's value unhashed
+    /// included), or the request carried none.
     NonceMismatch,
     /// Step 6: this token was presented before.
     Replayed,
@@ -240,8 +252,16 @@ pub enum NativeLoginError {
     /// Step 7: the provider's attribute map yields no external subject.
     SubjectUnmapped,
     /// Step 7: provisioning a first-time user collided with an existing
-    /// account's username or email. Refused like every other token problem,
-    /// so the endpoint is not an account-existence oracle (F4-W2-10).
+    /// account's username or email. Refused with the same generic answer as
+    /// every other token problem, not as a server error (F4-W2-10), so it
+    /// cannot be told apart from those refusals.
+    ///
+    /// It *can* be told apart from success: a caller who controls a provider
+    /// identity whose email it chooses learns from refusal versus sign-in
+    /// whether the mapped email or username is taken. That oracle is intrinsic
+    /// to first-sign-in provisioning and is shared with the browser login; it
+    /// is a recorded residual (F4-W2-12, D-N20, T-491), which a later release
+    /// may remove by changing provisioning.
     ProvisioningConflict,
     /// Step 7: the account may not act (locked, inactive, anonymized,
     /// deleted); the text is `account_may_act`'s.
@@ -367,10 +387,39 @@ impl NativeLoginError {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-/// Lowercase hex SHA-256 — the replay key of a token, and the nonce form the
-/// token must carry (D-N16).
+/// Lowercase hex SHA-256 — the nonce form the token carries (D-N16), and
+/// the replay key over a token's signing input ([`replay_key`]).
 fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+/// Step 6's replay key: the lowercase hex SHA-256 of the token's JWS signing
+/// input, `base64url(header) "." base64url(payload)` — the exact bytes before
+/// the second `.` — never of the whole compact token (F4-W2-11).
+///
+/// The signature is outside what it signs, and for ECDSA it has a second
+/// valid encoding (`s` → `n − s`): hashing it too would key one token under
+/// two strings. `None` for a string with fewer than two dots, which cannot
+/// have passed verification.
+fn replay_key(token: &str) -> Option<String> {
+    let mut dots = token.match_indices('.').map(|(i, _)| i);
+    dots.next()?;
+    let second = dots.next()?;
+    Some(sha256_hex(&token[..second]))
+}
+
+/// The token's `nonce` claim with its ASCII hex letters `A`–`F` folded to
+/// lower case and every other byte left as it is (D-N21, F4-W2-14). Only hex
+/// case is forgiven: a claim with any non-hex character still differs from
+/// every SHA-256 hex and is refused.
+fn fold_hex_case(claim: &str) -> Vec<u8> {
+    claim
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'F' => b.to_ascii_lowercase(),
+            other => other,
+        })
+        .collect()
 }
 
 /// Step 2's provider filter: what a provider must be to accept native sign-in
@@ -464,7 +513,9 @@ fn check_iat(iat: Option<u64>, now: i64, max_age_secs: i64) -> Result<(), Native
 ///
 /// `typ` (header or claim) must not name an access, refresh or logout token;
 /// `nonce` must be present and equal, in constant time, to the lower-case
-/// SHA-256 hex of the request nonce (D-N16, F4-W2-02). The raw form — a claim
+/// SHA-256 hex of the request nonce (D-N16, F4-W2-02), after the claim's hex
+/// letters are folded to lower case, so an app whose hex helper emits upper
+/// case is not refused (D-N21, F4-W2-14). The raw form — a claim
 /// equal to the request's value — is **not** accepted: a JWT payload is
 /// readable by whoever holds the token, so accepting the claim itself would
 /// let a token's holder copy it into the request. With the hashed form the
@@ -489,7 +540,11 @@ fn check_shape(
         return Err(NativeLoginError::NonceMismatch);
     }
     let hashed = sha256_hex(request_nonce);
-    if bool::from(token_nonce.as_bytes().ct_eq(hashed.as_bytes())) {
+    if bool::from(
+        fold_hex_case(token_nonce)
+            .as_slice()
+            .ct_eq(hashed.as_bytes()),
+    ) {
         Ok(())
     } else {
         Err(NativeLoginError::NonceMismatch)
@@ -639,7 +694,9 @@ where
         // subject (two concurrent presentations cannot both resolve). Keyed on
         // the issuer and the hash only (D-N19): a token is spent once across
         // the deployment, whichever tenant or provider configuration lists the
-        // app it was issued to.
+        // app it was issued to. The hash is over the signing input, not the
+        // whole token, so an ECDSA signature's second encoding is the same
+        // token (F4-W2-11).
         //
         // The row is kept to `exp` plus *twice* the leeway. `exp` is checked
         // here against this node's clock with one leeway; the sweep deletes by
@@ -650,8 +707,10 @@ where
             0,
         )
         .ok_or_else(|| NativeLoginError::ClaimRejected("'exp' is not a date".into()))?;
+        let token_hash = replay_key(request.id_token)
+            .ok_or_else(|| NativeLoginError::ClaimRejected("not a compact JWS".into()))?;
         match replay
-            .insert_id_token(&issuer, &sha256_hex(request.id_token), expires_at)
+            .insert_id_token(&issuer, &token_hash, expires_at)
             .await
         {
             Ok(()) => {}

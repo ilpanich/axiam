@@ -5709,8 +5709,10 @@ DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE federation_c
 // -----------------------------------------------------------------------
 //
 // `federation_id_token_replay`: every provider-issued ID token a native
-// sign-in consumed, by the hex SHA-256 of the token as presented (Google's ID
-// tokens carry no `jti`). First sighting by `CREATE`, replay by violation of
+// sign-in consumed, by the hex SHA-256 of the token's JWS signing input, the
+// bytes before its second `.` (Google's ID tokens carry no `jti`; the
+// signature is left out because an ECDSA one has two valid encodings,
+// F4-W2-11). First sighting by `CREATE`, replay by violation of
 // the UNIQUE `(issuer, token_hash)` index, no read in the path; a row lives
 // until the token's `exp` plus twice the 60 s skew allowance and is then
 // swept by the cleanup loop.

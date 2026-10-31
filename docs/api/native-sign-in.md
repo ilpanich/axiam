@@ -245,6 +245,18 @@ all the same `invalid_grant` with the same description. A caller cannot tell a w
 configuration. The reason is in the server log and the audit record
 (`reason_code`), where an operator can read it.
 
+**What a refusal still tells.** The taken-username-or-email refusal cannot be
+told apart from the other refusals, but it can be told apart from success.
+Someone who controls a provider identity whose email they choose (an
+unverified email at a generic OIDC provider, say) learns from refusal versus
+sign-in whether that email or username already has an account here. This is
+intrinsic to provisioning on first sign-in, and browser login through the same
+provider answers the same question. It is a recorded residual (D-N20, T-491):
+each probe costs a fresh provider identity and a rate-limit slot, and every
+"free" answer leaves a newly provisioned account behind. A later release may
+close it by changing provisioning (not adopting a colliding email, or not
+provisioning on an unverified one).
+
 ---
 
 ## Nonce rules
@@ -254,15 +266,26 @@ attempt the app:
 
 1. generates a random **raw** nonce: unguessable (at least 128 bits from a
    cryptographic random source) and new for each attempt;
-2. computes its SHA-256 and encodes it as **lower-case hex** (64 characters);
+2. computes its SHA-256 and encodes it as **hex** (64 characters; lower case
+   is the convention, and upper case is accepted too);
 3. gives the provider's SDK that **hex string** as the nonce;
 4. sends AXIAM the **raw** value in the `nonce` parameter, with the ID token
    the SDK returned.
 
 AXIAM accepts the token only when the lower-case SHA-256 hex of the request's
-`nonce` equals the token's `nonce` claim, compared in constant time. A token
+`nonce` equals the token's `nonce` claim, compared in constant time after the
+claim's hex letters `A`–`F` are folded to lower case. Hex case is the only
+difference forgiven: a claim with any other difference — whitespace, a
+character that is not a hex digit, a different length — is refused. A token
 with no `nonce` claim is refused, and so is one whose claim equals the
-request's `nonce` *unhashed*.
+request's `nonce` *unhashed*. The raw `nonce` is hashed exactly as sent; its
+own case is never folded.
+
+Upper case is accepted because some platform helpers emit it (.NET
+`Convert.ToHexString`, Java `HexFormat.of().withUpperCase()`,
+`DatatypeConverter.printHexBinary`); an app built on one of them used to be
+refused with nothing but the generic `invalid_grant`. Accepting it costs no
+security: the value to present is still a SHA-256 preimage of the claim.
 
 Why hashed only: a JWT payload is readable by whoever holds the token. If the
 claim itself were accepted as the nonce, anyone who obtained a leaked token
@@ -309,7 +332,7 @@ The order is the design. Each step runs before the next.
    leeway). `iat` is no older than `max_token_age_secs` and not in the future
    beyond the leeway.
 6. **Shape and nonce.** The token has ID-token shape: `nonce` present and
-   equal to the SHA-256 hex of the request's `nonce`, and no access-token,
+   equal to the SHA-256 hex of the request's `nonce` (hex case ignored), and no access-token,
    refresh-token or logout-token `typ` (`at+jwt` and the like) in the header or
    the claims. This is X4's test run in reverse, from the same marker list.
    Only `typ` is read for the access-token side; an access token without one is
@@ -331,13 +354,21 @@ The order is the design. Each step runs before the next.
 
 ## Single use and replay
 
-An ID token is accepted **once in the whole deployment**. Its SHA-256 is
-written to a dedicated table (`federation_id_token_replay`) under a unique key
-of the token's issuer and the token hash (D-N19), and kept until the token's
-`exp` plus 120 seconds (twice the clock leeway, so a database clock up to a
-minute ahead of a node's does not sweep a row the node would still accept a
-token for). Google tokens carry no `jti`, so the hash of the exact bytes is the
-identity.
+An ID token is accepted **once in the whole deployment**. The SHA-256 of its
+**signing input** — `base64url(header) "." base64url(payload)`, the exact
+bytes before the second `.`, which the signature covers — is written to a
+dedicated table (`federation_id_token_replay`) under a unique key of the
+token's issuer and that hash (D-N19), and kept until the token's `exp` plus
+120 seconds (twice the clock leeway, so a database clock up to a minute ahead
+of a node's does not sweep a row the node would still accept a token for).
+Google tokens carry no `jti`, so the hash of the signed bytes is the identity.
+
+The signature is left out of the hash on purpose. An ECDSA signature (ES256,
+ES384) has a second valid encoding — `s` replaced by `n − s` — so one token
+has two compact strings that both verify. Hashing the whole string made them
+two tokens, and someone holding a spent token and its raw nonce could sign in
+once more with the twin. The signing input has one spelling: change a byte of
+the header or payload and the signature no longer verifies.
 
 - The record is written only after the signature, the claims and the nonce have
   been checked, so only a presenter who holds the token **and** its raw nonce

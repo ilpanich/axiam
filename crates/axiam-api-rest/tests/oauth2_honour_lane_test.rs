@@ -2335,3 +2335,200 @@ async fn m1_to_m4_registration_refuses_the_honour_lane_on_a_fapi2_client() {
         "…nor editable onto it afterwards"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #835 (D-N28) — the first leg marks a fresh-authentication demand
+// ---------------------------------------------------------------------------
+
+/// Push `extra` for `client_id` and return the `request_uri`, form-encoded.
+async fn push_request(
+    app: &impl TestApp,
+    tenant_id: Uuid,
+    client_id: &str,
+    secret: &str,
+    extra: &str,
+) -> String {
+    let form = format!(
+        "response_type=code&client_id={client_id}&client_secret={secret}\
+         &redirect_uri={REDIRECT_URI}&scope=openid&state=w4-state{extra}"
+    );
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/par?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "PAR must accept the push");
+    let pushed: serde_json::Value = test::read_body_json(resp).await;
+    url::form_urlencoded::byte_serialize(pushed["request_uri"].as_str().unwrap().as_bytes())
+        .collect()
+}
+
+/// The `/login` hop's `fresh` parameter, after asserting the answer is a hop.
+fn fresh_marker_of(resp: &actix_web::dev::ServiceResponse, case: &str) -> Option<String> {
+    assert_eq!(resp.status().as_u16(), 302, "{case}");
+    let loc = location(resp);
+    assert!(loc.starts_with("/login?return_to="), "{case}: {loc}");
+    query_param(&format!("https://spa.example.test{loc}"), "fresh")
+}
+
+/// Spellings the honour lane's parse reads as `prompt` naming `login` or
+/// `max_age=0` — F4-W3-14's probe values among them — and ones it does not.
+const FRESH_DEMANDS: [&str; 9] = [
+    "&prompt=login",
+    "&prompt=consent%20login",
+    "&prompt=consent%09login",
+    "&prompt=consent%0Alogin",
+    "&max_age=0",
+    "&max_age=00",
+    "&max_age=%2B0",
+    "&max_age=%200",
+    "&prompt=consent&max_age=0",
+];
+const NOT_FRESH: [&str; 6] = [
+    "",
+    "&prompt=consent",
+    "&prompt=select_account",
+    "&max_age=1",
+    "&max_age=3600",
+    "&login_hint=ada",
+];
+
+/// **#835 (D-N28, F4-W3-12/-14), the query string.** An anonymous first leg
+/// whose request demands a fresh authentication carries `fresh=1`, read by the
+/// honour lane's own parse; anything else carries no marker.
+#[actix_rt::test]
+async fn d_n28_an_inline_fresh_authentication_demand_marks_the_first_leg() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+
+    for extra in FRESH_DEMANDS {
+        let resp = anonymous_authorize(
+            &app,
+            &format!("{}&tenant_id={tenant_id}{extra}", base_query(&client_id)),
+            None,
+        )
+        .await;
+        assert_eq!(
+            fresh_marker_of(&resp, extra).as_deref(),
+            Some("1"),
+            "{extra} demands a fresh authentication"
+        );
+        assert!(
+            !location(&resp).contains("reauth="),
+            "{extra}: a first leg has no session to end, so it is not reauth"
+        );
+    }
+    for extra in NOT_FRESH {
+        let resp = anonymous_authorize(
+            &app,
+            &format!("{}&tenant_id={tenant_id}{extra}", base_query(&client_id)),
+            None,
+        )
+        .await;
+        assert_eq!(fresh_marker_of(&resp, extra), None, "{extra}");
+    }
+}
+
+/// **#835 (D-N28, F4-W3-12), PAR.** The pushed copy is the request in force:
+/// a pushed `prompt=login`/`max_age=0` marks the first leg, a pushed request
+/// without one does not, and a query-string copy beside a `request_uri` is
+/// not read (RFC 9126 §4).
+#[actix_rt::test]
+async fn d_n28_a_pushed_fresh_authentication_demand_marks_the_first_leg() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+
+    let first_leg = |request_uri: String, query_extra: &'static str| {
+        format!(
+            "client_id={client_id}&request_uri={request_uri}&tenant_id={tenant_id}{query_extra}"
+        )
+    };
+    for extra in FRESH_DEMANDS {
+        let request_uri = push_request(&app, tenant_id, &client_id, &secret, extra).await;
+        let resp = anonymous_authorize(&app, &first_leg(request_uri, ""), None).await;
+        assert_eq!(
+            fresh_marker_of(&resp, extra).as_deref(),
+            Some("1"),
+            "pushed {extra} demands a fresh authentication"
+        );
+    }
+    for extra in NOT_FRESH {
+        let request_uri = push_request(&app, tenant_id, &client_id, &secret, extra).await;
+        let resp = anonymous_authorize(&app, &first_leg(request_uri, ""), None).await;
+        assert_eq!(fresh_marker_of(&resp, extra), None, "pushed {extra}");
+    }
+    let request_uri = push_request(&app, tenant_id, &client_id, &secret, "").await;
+    let resp = anonymous_authorize(&app, &first_leg(request_uri, "&prompt=login"), None).await;
+    assert_eq!(
+        fresh_marker_of(&resp, "query prompt=login beside a request_uri"),
+        None,
+        "the query's copy beside a request_uri is not the request"
+    );
+}
+
+/// **#835 (D-N28), the lanes.** Off the honour lane `prompt=login` and
+/// `max_age` are dropped, nothing is asserted about freshness, and the hop
+/// stays W3's: no marker, inline or pushed. With a session the interaction hop
+/// says `reauth=1` and carries no marker either — it is a first-leg flag.
+#[actix_rt::test]
+async fn d_n28_the_marker_is_first_leg_and_honour_lane_only() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (ignore_id, ignore_secret) = create_client(&app, &jwt, ignore_client()).await;
+    for extra in FRESH_DEMANDS {
+        let resp = anonymous_authorize(
+            &app,
+            &format!("{}&tenant_id={tenant_id}{extra}", base_query(&ignore_id)),
+            None,
+        )
+        .await;
+        assert_eq!(fresh_marker_of(&resp, extra), None, "ignore lane, {extra}");
+        let request_uri = push_request(&app, tenant_id, &ignore_id, &ignore_secret, extra).await;
+        let resp = anonymous_authorize(
+            &app,
+            &format!("client_id={ignore_id}&request_uri={request_uri}&tenant_id={tenant_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            fresh_marker_of(&resp, extra),
+            None,
+            "ignore lane, pushed {extra}"
+        );
+    }
+
+    let (honour_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+    let resp = authorize(
+        &app,
+        &token,
+        &format!("{}&prompt=login", base_query(&honour_id)),
+    )
+    .await;
+    let loc = location(&resp);
+    assert!(loc.contains("&reauth=1"), "{loc}");
+    assert_eq!(
+        fresh_marker_of(&resp, "interaction hop"),
+        None,
+        "the interaction hop already says reauth=1"
+    );
+}

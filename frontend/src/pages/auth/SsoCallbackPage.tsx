@@ -13,6 +13,7 @@ import { resumeLoginHop } from "@/lib/returnTo";
 import {
   HANDOFF_QUERY_PARAM,
   clearAutoRedirect,
+  hopForCallback,
   loginHopRetryPath,
   ssoLoginService,
   takePendingSso,
@@ -48,6 +49,12 @@ import { useAuthStore } from "@/stores/auth";
  * `return_to` at the moment it navigates; without a hop it goes to the
  * dashboard as before. On failure "Back to sign in" returns to the hop's
  * `/login` with `return_to` and its presentation, and never with `idp`.
+ *
+ * **Only for its own callback** (#835, D-N29). The record keeps the start's
+ * `state`, and the hop is used only when this arrival carries the same value —
+ * the provider's redirect does, and the server echoes it beside a handoff code
+ * or a form-post error. A mismatched or missing `state` ends on the dashboard
+ * (or a bare `/login` on failure).
  */
 export function SsoCallbackPage() {
   const navigate = useNavigate();
@@ -68,9 +75,14 @@ export function SsoCallbackPage() {
 
     const pending = takePendingSso();
     const providerName = pending?.displayName ?? "your identity provider";
+    // #835 (D-N29) — the hop belongs to the sign-in that stored it, and only
+    // that sign-in's callback (same `state`) may resume it or offer it again.
+    // Any other arrival — a foreign callback driven into this tab, or a stale
+    // one — completes as an ordinary sign-in. The record is gone either way.
+    const hop = hopForCallback(pending, searchParams.get("state"));
 
     const finish = async () => {
-      setHop(pending?.hop);
+      setHop(hop);
       // Strip the credential from the address bar before anything else. It is
       // spent either way, but a code sitting in browser history and in the
       // `Referer` of every subsequent request is worth one line to avoid.
@@ -123,7 +135,7 @@ export function SsoCallbackPage() {
       setUser(await withReachableTenantSelected(hydrated));
       // Resume the authorization request this sign-in was for, if there was
       // one; the dashboard otherwise. `resumeLoginHop` re-validates the value.
-      resumeLoginHop(pending?.hop?.returnTo, (path) =>
+      resumeLoginHop(hop?.returnTo, (path) =>
         navigate(path, { replace: true }),
       );
     };

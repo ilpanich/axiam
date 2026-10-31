@@ -109,23 +109,6 @@ interface LoginResponse {
  */
 const SSO_ERROR_PARAMS = ["error", "error_description"] as const;
 
-/**
- * Whether the authorization request in `return_to` asks for a fresh
- * authentication (`prompt=login`, or `max_age=0`).
- *
- * The re-authentication hop says so with `reauth=1`; a first hop does not,
- * because there was no session to distrust — but the relying party's request
- * may still demand fresh credentials, and the page can read that from the
- * request it is about to resume. Under PAR those parameters are in the pushed
- * request, not in `return_to`, and only `reauth`/`acr` can say so.
- */
-function demandsFreshLogin(returnTo: string | null): boolean {
-  if (!returnTo) return false;
-  const q = new URLSearchParams(returnTo.slice(returnTo.indexOf("?") + 1));
-  const prompt = q.get("prompt") ?? "";
-  return prompt.split(" ").includes("login") || q.get("max_age") === "0";
-}
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -210,11 +193,14 @@ export function LoginPage() {
   const [returnTo] = useState<string | null>(() =>
     sanitizeReturnTo(searchParams.get("return_to"))
   );
-  // `reauth=1` says this browser arrived believing it was signed in and was
-  // not — it presented an `axiam_op_session` cookie that resolved to no live
-  // session. Trusting whatever is left in the store would be how a hop becomes
-  // a loop, so the leftovers are cleared and the user is told why they are
-  // being asked again.
+  // `reauth=1` says not to trust what this browser holds: either it arrived
+  // believing it was signed in and was not — it presented an
+  // `axiam_op_session` cookie that resolved to no live session — or the
+  // authorization endpoint's honour lane needs a fresh sign-in from a live
+  // session (`prompt=login`, an unmet `max_age` or `acr`, a hint naming
+  // somebody else); the CIBA step-up link sets it too. Trusting whatever is
+  // left in the store would be how a hop becomes a loop, so the leftovers are
+  // cleared and the user is told why they are being asked again.
   const [reauthRequested] = useState<boolean>(
     () => searchParams.get("reauth") === "1"
   );
@@ -248,8 +234,21 @@ export function LoginPage() {
   // answer at once and AXIAM would record a fresh authentication nobody
   // performed. On such a hop the matching provider is only *suggested* —
   // highlighted among the buttons — and the person has to click it.
+  //
+  // #835 (D-N28) — which hops those are is the **server's** call, never this
+  // page's reading of `return_to`: `reauth=1` (the browser's session is not to
+  // be trusted — see the effect below for when that is), a step-up `acr`, or
+  // `fresh=1`, which `/oauth2/authorize` adds to a first leg whose request in
+  // force — inline or pushed through PAR — says `prompt=login` or `max_age=0`.
+  // Under PAR this page could not see those values at all, and reading them
+  // out of `return_to` was a second parser of one value (F4-W3-12, -14).
+  // `fresh` is not stripped from the URL: unlike `reauth` it has no effect to
+  // repeat, and a reload must stay quiet.
   const [freshAuthRequired] = useState(
-    () => reauthRequested || requiredAcr !== null || demandsFreshLogin(returnTo),
+    () =>
+      reauthRequested ||
+      requiredAcr !== null ||
+      searchParams.get("fresh") === "1",
   );
   // Whether this page load is a second visit for the same provider (Back
   // button, a relying party restarting the request, a reload after "choose
@@ -529,9 +528,11 @@ export function LoginPage() {
    * because that is what the binding is.
    *
    * Nothing is stored client-side beyond which completion endpoint to use when
-   * the browser comes back and, on a login hop, the hop itself (#832): the
-   * `state` round-trips through the provider, and the nonce and PKCE verifier
-   * never leave the server. The hop is what lets `SsoCallbackPage` resume the
+   * the browser comes back, the start's `state` and, on a login hop, the hop
+   * itself (#832): the `state` round-trips through the provider (and is echoed
+   * on a SAML or Apple handoff), and the nonce and PKCE verifier never leave
+   * the server. The stored `state` is only *compared* — it binds the hop to
+   * this start (#835, D-N29). The hop is what lets `SsoCallbackPage` resume the
    * relying party's authorization request instead of ending on the dashboard;
    * `return_to` is the value `sanitizeReturnTo` already accepted, re-validated
    * once more here and again when it is read back.
@@ -550,30 +551,39 @@ export function LoginPage() {
       redirect_uri: ssoCallbackUrl(),
     };
     const hopReturnTo = sanitizeReturnTo(returnTo);
-    rememberPendingSso({
-      protocol: provider.protocol,
-      displayName: provider.display_name,
-      ...(hopReturnTo
-        ? {
-            hop: {
-              returnTo: hopReturnTo,
-              ...(requiredAcr ? { acr: requiredAcr } : {}),
-              ...(requestedLocale ? { uiLocale: requestedLocale } : {}),
-              ...(displayMode ? { display: displayMode } : {}),
-              ...(loginHint ? { loginHint } : {}),
-            },
-          }
-        : {}),
-    });
+    // Written once the start has answered and before the browser leaves, so
+    // the record carries the start's own `state` (SAML: its `relay_state`):
+    // the callback resumes the hop only when it comes back with that value
+    // (#835, D-N29), and a start that failed leaves no record behind.
+    const remember = (state: string | undefined) =>
+      rememberPendingSso({
+        protocol: provider.protocol,
+        displayName: provider.display_name,
+        ...(state ? { state } : {}),
+        ...(hopReturnTo
+          ? {
+              hop: {
+                returnTo: hopReturnTo,
+                ...(requiredAcr ? { acr: requiredAcr } : {}),
+                ...(requestedLocale ? { uiLocale: requestedLocale } : {}),
+                ...(displayMode ? { display: displayMode } : {}),
+                ...(loginHint ? { loginHint } : {}),
+              },
+            }
+          : {}),
+      });
     try {
       if (provider.protocol === "Saml") {
-        submitSamlAuthnRequest(await ssoLoginService.startSaml(body));
+        const saml = await ssoLoginService.startSaml(body);
+        remember(saml.relay_state);
+        submitSamlAuthnRequest(saml);
         return true;
       }
       const start =
         provider.protocol === "OAuth2"
           ? await ssoLoginService.startOauth2(body)
           : await ssoLoginService.startOidc(body);
+      remember(start.state);
       window.location.assign(start.authorize_url);
       return true;
     } catch (err) {

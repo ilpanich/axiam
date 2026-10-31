@@ -6,6 +6,7 @@ vi.mock("@/lib/api", () => ({ default: apiMock }));
 import {
   HANDOFF_QUERY_PARAM,
   SSO_CALLBACK_PATH,
+  hopForCallback,
   loginHopRetryPath,
   rememberPendingSso,
   ssoCallbackUrl,
@@ -119,6 +120,37 @@ describe("the pending record's login hop", () => {
       }),
     );
     expect(takePendingSso()?.hop).toEqual({ returnTo: RETURN_TO });
+  });
+});
+
+/** #835 (D-N29, F4-W3-16) — the stored hop is bound to its own start. */
+describe("hopForCallback", () => {
+  const hop = { returnTo: "/oauth2/authorize?client_id=rp&response_type=code" };
+
+  it("round-trips the start's state with the record, bounded", () => {
+    rememberPendingSso({ protocol: "OidcConnect", displayName: "Okta", state: "s1", hop });
+    expect(takePendingSso()).toEqual({ protocol: "OidcConnect", displayName: "Okta", state: "s1", hop });
+    for (const state of ["", 42, "x".repeat(513)]) {
+      sessionStorage.setItem(
+        "axiam.sso.pending",
+        JSON.stringify({ protocol: "OidcConnect", displayName: "Okta", state, hop }),
+      );
+      expect(takePendingSso()).toEqual({ protocol: "OidcConnect", displayName: "Okta", hop });
+    }
+  });
+
+  it("returns the hop only for the callback that carries the start's state", () => {
+    const pending = { protocol: "OidcConnect" as const, displayName: "Okta", state: "s1", hop };
+    expect(hopForCallback(pending, "s1")).toEqual(hop);
+    expect(hopForCallback(pending, "s2")).toBeUndefined();
+    expect(hopForCallback(pending, null)).toBeUndefined();
+    expect(hopForCallback(pending, "")).toBeUndefined();
+  });
+
+  it("returns no hop for a record that recorded no state, or has no hop", () => {
+    expect(hopForCallback({ protocol: "OidcConnect", displayName: "Okta", hop }, "s1")).toBeUndefined();
+    expect(hopForCallback({ protocol: "OidcConnect", displayName: "Okta", state: "s1" }, "s1")).toBeUndefined();
+    expect(hopForCallback(null, "s1")).toBeUndefined();
   });
 });
 

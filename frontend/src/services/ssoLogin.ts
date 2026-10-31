@@ -132,13 +132,25 @@ export interface SsoLoginHop {
   loginHint?: string;
 }
 
-interface PendingSso {
+export interface PendingSso {
   protocol: FederationProtocol;
   /** For the error UI: "Sign in with Okta failed", not "Sign in failed". */
   displayName: string;
+  /**
+   * The `state` the start endpoint returned (SAML: its `relay_state`) — the
+   * one value the callback of *this* sign-in brings back, on every arrival
+   * (#835, D-N29). See {@link hopForCallback}.
+   */
+  state?: string;
   /** The login hop this sign-in belongs to, if it was started from one. */
   hop?: SsoLoginHop;
 }
+
+/**
+ * The longest stored `state` the callback will compare. The server's are
+ * 43-character base64url strings; anything far longer is not one of them.
+ */
+const MAX_STATE_LEN = 512;
 
 export function rememberPendingSso(pending: PendingSso): void {
   try {
@@ -184,14 +196,42 @@ export function takePendingSso(): PendingSso | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PendingSso;
     const hop = revalidateHop(parsed.hop);
+    const state =
+      typeof parsed.state === "string" &&
+      parsed.state.length > 0 &&
+      parsed.state.length <= MAX_STATE_LEN
+        ? parsed.state
+        : undefined;
     return {
       protocol: parsed.protocol,
       displayName: parsed.displayName,
+      ...(state ? { state } : {}),
       ...(hop ? { hop } : {}),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * The stored hop, **only** when this callback belongs to the sign-in that
+ * stored it (#835, D-N29, F4-W3-16).
+ *
+ * Every arrival on the callback route carries the start's `state`: an OIDC or
+ * OAuth2 provider redirects with it, and the server echoes it (already spent)
+ * beside a SAML or Apple handoff code and beside a form-post error. A callback
+ * whose `state` is absent or differs is somebody else's sign-in — a login CSRF
+ * landing in this tab — or a stale one, and must not resume a hop the person
+ * left behind: the sign-in it completes then ends on the dashboard, and its
+ * failure link is a bare `/login`. The record itself has already been removed
+ * by {@link takePendingSso}, so it is cleared either way.
+ */
+export function hopForCallback(
+  pending: PendingSso | null,
+  callbackState: string | null,
+): SsoLoginHop | undefined {
+  if (!pending?.hop || !pending.state || !callbackState) return undefined;
+  return pending.state === callbackState ? pending.hop : undefined;
 }
 
 /**

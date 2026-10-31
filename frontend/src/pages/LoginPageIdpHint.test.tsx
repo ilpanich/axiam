@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { apiMock, res } from "@/test/apiMock";
 
 vi.mock("@/lib/api", () => ({ default: apiMock }));
@@ -123,10 +123,11 @@ describe("LoginPage — idp auto-redirect", () => {
     expect(assign).toHaveBeenCalledWith("https://idp.example/auth");
     // return_to is untouched (the page never rewrites it for SSO).
     expect(navigate).not.toHaveBeenCalled();
-    // #832: the hop travels with the sign-in, so the callback can resume it.
-    expect(JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}").hop).toEqual({
-      returnTo: "/oauth2/authorize?x=1",
-    });
+    // #832: the hop travels with the sign-in, so the callback can resume it —
+    // bound to the start's own `state` (#835, D-N29).
+    const pending = JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}");
+    expect(pending.hop).toEqual({ returnTo: "/oauth2/authorize?x=1" });
+    expect(pending.state).toBe("s");
   });
 
   it("records the hop's presentation with the pending sign-in, and never idp (#832)", async () => {
@@ -158,15 +159,22 @@ describe("LoginPage — idp auto-redirect", () => {
     apiMock.get.mockImplementation(() =>
       Promise.resolve(res({ providers: [provider(IDP, "Acme SAML", "Saml")] })),
     );
-    apiMock.post.mockResolvedValue(res({}));
+    apiMock.post.mockResolvedValue(
+      res({ binding: "post", sso_url: "https://idp.example/sso", saml_request_b64: "x", relay_state: "rs" }),
+    );
     vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
-    await setup(`?idp=${IDP}`);
+    await setup(`?return_to=${encodeURIComponent("/oauth2/authorize?x=1")}&idp=${IDP}`);
     await screen.findByRole("status");
     await advance(1600);
     expect(apiMock.post).toHaveBeenCalledWith(
       "/api/v1/auth/federation/saml/login",
       expect.objectContaining({ federation_config_id: IDP }),
     );
+    // #835 (D-N29): SAML's correlator is its relay_state, which the server
+    // echoes beside the handoff code.
+    const pending = JSON.parse(sessionStorage.getItem("axiam.sso.pending") ?? "{}");
+    expect(pending.state).toBe("rs");
+    expect(pending.hop).toEqual({ returnTo: "/oauth2/authorize?x=1" });
   });
 
   it("cancel stops the redirect and shows the ordinary page", async () => {
@@ -247,6 +255,8 @@ describe("LoginPage — idp auto-redirect", () => {
       "Could not start sign-in with Acme SSO",
     );
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // #835: a start that failed leaves no pending record behind.
+    expect(sessionStorage.getItem("axiam.sso.pending")).toBeNull();
     await advance(5000);
     expect(startCalls()).toHaveLength(1);
   });
@@ -276,9 +286,10 @@ describe("LoginPage — idp on a re-authentication hop", () => {
   it.each([
     ["reauth=1", `?return_to=${authorize("x=1")}&reauth=1&idp=${IDP}`],
     ["a step-up acr", `?return_to=${authorize("x=1")}&acr=urn:axiam:acr:mfa&idp=${IDP}`],
-    ["prompt=login in return_to", `?return_to=${authorize("prompt=login")}&idp=${IDP}`],
-    ["prompt=consent login in return_to", `?return_to=${authorize("prompt=consent%20login")}&idp=${IDP}`],
-    ["max_age=0 in return_to", `?return_to=${authorize("max_age=0")}&idp=${IDP}`],
+    // #835 (D-N28): the server's own marker, for a request that says
+    // prompt=login or max_age=0 — inline or pushed, which this page cannot see.
+    ["the server's fresh=1", `?return_to=${authorize("x=1")}&fresh=1&idp=${IDP}`],
+    ["fresh=1 on a PAR hop", `?return_to=${authorize("request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Aabc")}&fresh=1&idp=${IDP}`],
   ])("does not auto-start on %s, and highlights the provider", async (_label, query) => {
     const user = await setup(query);
     const suggested = await screen.findByRole("button", { name: "Sign in with Acme SSO" });
@@ -296,11 +307,69 @@ describe("LoginPage — idp on a re-authentication hop", () => {
     expect(startCalls()[0][1]).toEqual(expect.objectContaining({ federation_config_id: IDP }));
   });
 
+  /**
+   * #835 (F4-W3-14) — the page no longer reads `prompt`/`max_age` out of
+   * `return_to`: whether a hop is a re-authentication is the server's call,
+   * made with its own parser and carried as `fresh=1`. Whatever `return_to`
+   * holds, without a marker the page auto-starts.
+   */
+  it.each([
+    ["prompt=login", "prompt=login"],
+    ["prompt=consent login", "prompt=consent%20login"],
+    ["max_age=0", "max_age=0"],
+    ["max_age=00", "max_age=00"],
+  ])("auto-starts when only return_to says %s", async (_label, q) => {
+    await setup(`?return_to=${authorize(q)}&idp=${IDP}`);
+    await screen.findByTestId("idp-auto-redirect");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+  });
+
   it("still auto-starts for an ordinary max_age", async () => {
     await setup(`?return_to=${authorize("max_age=3600")}&idp=${IDP}`);
     await screen.findByTestId("idp-auto-redirect");
     await advance(1600);
     expect(startCalls()).toHaveLength(1);
+  });
+
+  it.each([
+    ["fresh=0", "&fresh=0"],
+    ["fresh=true", "&fresh=true"],
+    ["no marker", ""],
+  ])("auto-starts on %s: only the server's fresh=1 marks the hop", async (_label, extra) => {
+    await setup(`?return_to=${authorize("x=1")}${extra}&idp=${IDP}`);
+    await screen.findByTestId("idp-auto-redirect");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+  });
+
+  it("stays quiet on reload: the page strips reauth but keeps fresh=1", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    function LocationProbe() {
+      return <output data-testid="search">{useLocation().search}</output>;
+    }
+    renderWithProviders(
+      <>
+        <LoginPage />
+        <LocationProbe />
+      </>,
+      { route: `/login?return_to=${authorize("x=1")}&reauth=1&fresh=1&idp=${IDP}` },
+    );
+    await submitWorkspace(user);
+    await screen.findByRole("button", { name: "Sign in with Acme SSO" });
+    const search = screen.getByTestId("search").textContent ?? "";
+    expect(new URLSearchParams(search).has("reauth")).toBe(false);
+    expect(new URLSearchParams(search).get("fresh")).toBe("1");
+    cleanup();
+
+    // The reload: the URL as the page left it.
+    vi.useRealTimers();
+    await setup(search);
+    await screen.findByRole("button", { name: "Sign in with Acme SSO" });
+    await advance(5000);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
+    expect(startCalls()).toHaveLength(0);
   });
 });
 
@@ -362,8 +431,10 @@ describe("LoginPage — the return from a failed provider leg", () => {
     expect(startCalls()).toHaveLength(1);
     cleanup();
 
+    // The provider's error redirect carries the start's `state` ("s" in the
+    // mocked start): this is that sign-in's callback, so its hop is offered.
     renderWithProviders(<SsoCallbackPage />, {
-      route: "/auth/sso/callback?error=access_denied",
+      route: "/auth/sso/callback?error=access_denied&state=s",
     });
     await screen.findByRole("alert");
     const href = screen.getByRole("link", { name: "Back to sign in" }).getAttribute("href") ?? "";

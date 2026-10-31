@@ -356,9 +356,9 @@ What the sign-in page *acts on* is a type, never the string: the redirect gains
 - **A live session means no hop and no hint.** When the browser already holds an
   OP session the authorization endpoint answers with a code and never builds a
   sign-in URL; the hint selects nothing (the same as Keycloak).
-- **Re-authentication.** The `reauth=1` hop (`prompt=login`, `max_age`, `acr_values`)
-  carries the resolved `idp` like the first hop does, but the sign-in page
-  **does not start it by itself** (D-N26): see below.
+- **Re-authentication.** A hop marked as a re-authentication (`reauth=1`, a
+  step-up `acr`, or `fresh=1` — see below) carries the resolved `idp` like any
+  other hop, but the sign-in page **does not start it by itself** (D-N26).
 
 ### `default_idp` — a per-client default
 
@@ -399,19 +399,29 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
   person's system asks for reduced motion). Cancelling shows the ordinary
   chooser and the redirect never fires; the cancel is remembered in the tab
   like a start (below), so reloading the page does not restart the countdown.
-- **Not on a re-authentication** (D-N26). When the hop asks for a fresh
-  authentication — `reauth=1` (from `prompt=login`, `max_age` or
-  `acr_values`), a step-up `acr`, or a `return_to` whose request carries
-  `prompt=login` or `max_age=0` — the page does not start the provider: it
-  highlights that provider's button and the person has to click it. AXIAM does
-  not yet forward `prompt=login`/`max_age` to an OIDC provider or `ForceAuthn`
-  to a SAML identity provider, so a provider that still holds a session would
-  answer at once, and an unattended start would record a fresh authentication
-  nobody performed. Forwarding them upstream is a later item; a provider that
-  ignores them (several social providers do) cannot give a real
-  re-authentication even then. Under PAR the request's `prompt`/`max_age` are
-  in the pushed request rather than in `return_to`, so there only `reauth` and
-  `acr` mark the hop.
+- **Not on a re-authentication** (D-N26, D-N28). The page does not start the
+  provider when the **server** marked the hop as one; it highlights that
+  provider's button and the person has to click it. AXIAM does not yet forward
+  `prompt=login`/`max_age` to an OIDC provider or `ForceAuthn` to a SAML
+  identity provider, so a provider that still holds a session would answer at
+  once, and an unattended start would record a fresh authentication nobody
+  performed. Forwarding them upstream is a later item; a provider that ignores
+  them (several social providers do) cannot give a real re-authentication even
+  then. The marks, all set by the authorization endpoint (or, for CIBA, by the
+  approval page) and never read by the page out of `return_to`:
+
+  | Mark | Set when |
+  |---|---|
+  | `fresh=1` (#835) | The **first** hop, with no OP session, of an `honour`-lane request whose request in force says `prompt` containing `login`, or `max_age=0`. For a pushed request that is the pushed copy (PAR), otherwise the query string. AXIAM reads both with its own parser, the one the `honour` lane decides with, so `max_age=00`, `+0` and ` 0`, and a `prompt` separated by a tab or newline, count exactly as they do there. A positive `max_age` does not: with no session, any sign-in meets it. Not set on the `ignore` lane or for `fapi2` clients, where those parameters are dropped or refused and nothing about freshness is asserted. |
+  | `reauth=1` | (a) The **first** hop, when the browser presented an `axiam_op_session` cookie that resolves to no live session (idle expiry, revocation, a server-side logout this browser missed): the page ends whatever the browser still holds. (b) Every **interaction** hop on the `honour` lane from an existing session: `prompt=login` (and `prompt=consent`/`select_account` where no consent question is due), `max_age=0`, a `max_age` the session is too old for, an unmet `acr_values`/`claims` class, or an `id_token_hint`/`claims.id_token.sub` naming somebody else. (c) The CIBA approval page's step-up link. |
+  | `acr=…` | An interaction hop (or the CIBA step-up) that needs a particular factor. |
+
+  The resulting behaviour, including case (a): a returning user whose cookie
+  outlived the server session also gets the click-to-start page rather than the
+  automatic redirect. That fails safe (one click, never a token), and the page
+  cannot tell (a) from (b) without the server saying more than it should about
+  a dead session. `fresh` is not removed from the address bar, so a reload stays
+  quiet too.
 - **No loop.** What stops a loop on a real failure: the failed leg ends on the
   SSO callback page, whose **Back to sign in** link carries no `idp`, so the
   page it opens has nothing to start; a relying party that restarts the request
@@ -428,7 +438,15 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
 - **Back to the relying party** (#832). A provider sign-in started from the
   login hop — by this redirect or by a provider button on the hop page —
   carries the hop's `return_to` with it (in the tab's `sessionStorage`, as the
-  value the page's own `return_to` check accepted). When the provider returns
+  value the page's own `return_to` check accepted), **bound to that start**
+  (#835, D-N29): the record keeps the `state` the start endpoint returned
+  (SAML: its `relay_state`), and the hop is used only by a callback carrying
+  the same value. OIDC and OAuth2 providers redirect back with it; for the SAML
+  and Apple returns, which end on AXIAM, the server adds the (already spent)
+  value as `state` beside the handoff code or the error. A callback without it
+  or with another value — somebody else's sign-in driven into this tab, or a
+  stale one — completes as an ordinary sign-in on the console (failure: a bare
+  **Back to sign in**), and the record is discarded either way. When the provider returns
   and AXIAM completes the sign-in (OIDC and OAuth2 redirects, and the SAML and
   Apple handoff code alike), the page resumes the authorization request, which
   then issues the code to the relying party; `return_to` is checked again

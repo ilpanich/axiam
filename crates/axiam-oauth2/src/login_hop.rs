@@ -521,6 +521,31 @@ pub struct Cosmetic<'a> {
     /// built at all, so the hint selects nothing and the authorization
     /// proceeds on the session it has (as in Keycloak).
     pub idp: Option<uuid::Uuid>,
+    /// #835 (D-N28) — the request this hop is for demands a fresh
+    /// authentication whatever the browser holds
+    /// ([`crate::authn_params::AuthnRequestParams::demands_fresh_authentication`]:
+    /// `prompt` names `login`, or `max_age=0`). Carried as `fresh=1`.
+    ///
+    /// Set by the REST layer on the **first leg only**, on the honour lane,
+    /// from whichever carrier is in force — the pushed copy beside a
+    /// `request_uri`, the query string otherwise — because the sign-in page
+    /// can see neither: under PAR the parameters are in the pushed request,
+    /// and reading them out of `return_to` would be a second parser of one
+    /// value (F4-W3-12, F4-W3-14). The page reads it as "never start a
+    /// provider for the person": `prompt=login` and `max_age` are not
+    /// forwarded upstream, so an upstream session would answer at once.
+    ///
+    /// Not `reauth=1`: that flag ends the browser's session and counts against
+    /// the page's re-authentication loop guard, and a first leg has no
+    /// session to end. The interaction hop needs neither: it already carries
+    /// `reauth=1` for every reason it sends a browser to sign in.
+    ///
+    /// Presentation only. It selects no principal, changes nothing that is
+    /// issued (the return leg is judged by `crate::honour` on the session the
+    /// sign-in created, exactly as without it), and never reaches `/consent`.
+    /// [`Cosmetic::from_params`] never sets it: which carrier is in force and
+    /// which lane applies are the caller's to know.
+    pub fresh_authentication: bool,
 }
 
 impl Cosmetic<'_> {
@@ -531,6 +556,7 @@ impl Cosmetic<'_> {
         display: None,
         ui_locale: None,
         idp: None,
+        fresh_authentication: false,
     };
 
     /// Whether anything at all was asked for.
@@ -539,6 +565,7 @@ impl Cosmetic<'_> {
             && self.display.is_none()
             && self.ui_locale.is_none()
             && self.idp.is_none()
+            && !self.fresh_authentication
     }
 }
 
@@ -587,6 +614,8 @@ impl<'a> Cosmetic<'a> {
             // Resolved by the caller, against the tenant's provider list; see
             // [`Cosmetic::idp`]. `params.idp_hint` is deliberately not read.
             idp: None,
+            // The caller's, for the reason given at [`Cosmetic::fresh_authentication`].
+            fresh_authentication: false,
         }
     }
 }
@@ -654,8 +683,20 @@ pub fn build_login_redirect_for(
         location.push_str("&idp=");
         location.push_str(&encode(&idp.to_string()));
     }
+    // #835 (D-N28). Last, so a hop that does not carry it is the URL G-B built
+    // byte for byte.
+    if cosmetic.fresh_authentication {
+        location.push('&');
+        location.push_str(FRESH_LOGIN_PARAM);
+        location.push_str("=1");
+    }
     location
 }
+
+/// The `/login` query parameter that marks a first-leg hop whose request
+/// demands a fresh authentication (#835, D-N28; see
+/// [`Cosmetic::fresh_authentication`]).
+pub const FRESH_LOGIN_PARAM: &str = "fresh";
 
 /// The SPA route that asks the end user to consent to a scope release (W7).
 ///
@@ -696,7 +737,8 @@ pub const CONSENT_PATH: &str = "/consent";
 /// `crate::locale::Locale`) rather than relying-party strings.
 ///
 /// Nor `idp` (G-B): the consent page starts no sign-in, so a provider to
-/// start with means nothing there.
+/// start with means nothing there. Nor `fresh` (#835), for the same reason:
+/// it tells a sign-in page not to start a provider by itself.
 pub fn build_interaction_redirect(
     return_to: &str,
     reason: crate::honour::Reason,
@@ -1206,6 +1248,7 @@ mod tests {
                 display: Some(Display::Popup),
                 ui_locale: Some(Locale::Italian),
                 idp: None,
+                fresh_authentication: false,
             },
         );
         assert!(location.contains("&display=popup"), "{location}");
@@ -1347,6 +1390,7 @@ mod tests {
                 display: Some(Display::Touch),
                 ui_locale: Some(Locale::German),
                 idp: None,
+                fresh_authentication: false,
             },
         );
         let order: Vec<usize> = [
@@ -1535,5 +1579,63 @@ mod tests {
         );
         assert!(location.starts_with(CONSENT_PATH), "{location}");
         assert!(!location.contains("idp="), "{location}");
+    }
+
+    /// #835 (D-N28) — the re-authentication marker is `&fresh=1`, last, and
+    /// only when asked for: without it the URL is the G-B URL byte for byte.
+    #[test]
+    fn the_fresh_authentication_marker_is_appended_last_and_only_when_set() {
+        let id = uuid::Uuid::parse_str("5f0c2f4e-3b1a-4c8e-9a7d-0e2b6c1d9f10").unwrap();
+        for reauth in [false, true] {
+            for idp in [None, Some(id)] {
+                let base = Cosmetic {
+                    login_hint: Some("ada"),
+                    idp,
+                    ..Cosmetic::NONE
+                };
+                let without = build_login_redirect_for(GOOD, reauth, None, &base);
+                let with = build_login_redirect_for(
+                    GOOD,
+                    reauth,
+                    None,
+                    &Cosmetic {
+                        fresh_authentication: true,
+                        ..base
+                    },
+                );
+                assert_eq!(with, format!("{without}&fresh=1"));
+                assert!(!without.contains("fresh="), "{without}");
+            }
+        }
+        assert_eq!(
+            build_login_redirect_for(GOOD, false, None, &Cosmetic::NONE),
+            build_login_redirect(GOOD, false),
+            "Cosmetic::NONE carries no marker"
+        );
+        assert!(
+            !Cosmetic {
+                fresh_authentication: true,
+                ..Cosmetic::NONE
+            }
+            .is_empty()
+        );
+    }
+
+    /// #835 (D-N28) — the consent page starts no sign-in, so the marker never
+    /// reaches it; a re-authentication interaction keeps it when set.
+    #[test]
+    fn the_fresh_authentication_marker_never_reaches_the_consent_page() {
+        let fresh = Cosmetic {
+            fresh_authentication: true,
+            ..Cosmetic::NONE
+        };
+        let consent =
+            build_interaction_redirect(GOOD, crate::honour::Reason::ConsentRequired, None, &fresh);
+        assert!(consent.starts_with(CONSENT_PATH), "{consent}");
+        assert!(!consent.contains("fresh="), "{consent}");
+        let login =
+            build_interaction_redirect(GOOD, crate::honour::Reason::PromptAsked, None, &fresh);
+        assert!(login.starts_with(LOGIN_PATH), "{login}");
+        assert!(login.ends_with("&fresh=1"), "{login}");
     }
 }

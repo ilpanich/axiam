@@ -486,6 +486,25 @@ impl AuthnRequestParams {
         self.present.is_empty()
     }
 
+    /// Whether this request demands a fresh authentication **whatever the
+    /// browser already holds**: `prompt` names `login`, or `max_age` is `0`
+    /// (D-14: `max_age=0` *is* `prompt=login`).
+    ///
+    /// The one predicate the honour lane's decision and the login hop's
+    /// re-authentication marker (#835, D-N28) share, so that the server and
+    /// the sign-in page cannot read a spelling differently: both go through
+    /// this parse, which splits `prompt` on ASCII whitespace and reads
+    /// `max_age` as a trimmed `u64` — `00`, `+0` and ` 0` are all `0`, and
+    /// `consent\tlogin` names `login` (F4-W3-14).
+    ///
+    /// A positive `max_age` is deliberately not on it. It is a test of a
+    /// session's age, and a browser with no session passes it with any sign-in
+    /// at all; `prompt=consent` and `prompt=select_account` ask a question,
+    /// not for a credential.
+    pub fn demands_fresh_authentication(&self) -> bool {
+        self.max_age == Some(0) || self.prompt.contains(&Prompt::Login)
+    }
+
     /// The security-bearing parameters that arrived — the ones that change
     /// what a token means. See the module docs for why the four cosmetic ones
     /// are not on this list.
@@ -1255,5 +1274,59 @@ mod tests {
         assert!(p.is_empty(), "{:?}", p.present());
         assert!(p.security_bearing_present().is_empty());
         assert!(p.parse_error().is_none());
+    }
+
+    /// #835 (D-N28, F4-W3-14) — the fresh-authentication predicate reads every
+    /// spelling the way the honour lane does, because it *is* the honour
+    /// lane's parse: `prompt` split on ASCII whitespace, `max_age` a trimmed
+    /// `u64`.
+    #[test]
+    fn fresh_authentication_is_prompt_login_or_max_age_zero_in_any_spelling() {
+        for (prompt, max_age) in [
+            (Some("login"), None),
+            (Some("consent login"), None),
+            (Some("consent\tlogin"), None),
+            (Some("consent\nlogin"), None),
+            (Some("login\r\nconsent"), None),
+            (None, Some("0")),
+            (None, Some("00")),
+            (None, Some("+0")),
+            (None, Some(" 0")),
+            (None, Some("0\t")),
+            (Some("consent"), Some("0")),
+        ] {
+            let p = parse(RawAuthnParams {
+                prompt,
+                max_age,
+                ..Default::default()
+            });
+            assert!(
+                p.demands_fresh_authentication(),
+                "prompt={prompt:?} max_age={max_age:?} demands a fresh authentication"
+            );
+        }
+        for (prompt, max_age) in [
+            (None, None),
+            (Some("consent"), None),
+            (Some("select_account"), None),
+            (Some("none"), None),
+            (Some("Login"), None),
+            (Some("logins"), None),
+            (None, Some("1")),
+            (None, Some("3600")),
+            (None, Some("-0")),
+            (None, Some("0.0")),
+            (None, Some("")),
+        ] {
+            let p = parse(RawAuthnParams {
+                prompt,
+                max_age,
+                ..Default::default()
+            });
+            assert!(
+                !p.demands_fresh_authentication(),
+                "prompt={prompt:?} max_age={max_age:?} does not"
+            );
+        }
     }
 }

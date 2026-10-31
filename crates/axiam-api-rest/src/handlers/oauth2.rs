@@ -876,6 +876,10 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     let authn_params = honour.then(|| {
         AuthnRequestParams::parse(&RawAuthnParams {
             prompt: q.prompt.as_deref(),
+            // #835 (D-N28) — read for the hop's re-authentication marker only
+            // (`demands_fresh_authentication`); nothing on this arm decides on
+            // it, and a malformed one is the return leg's to refuse.
+            max_age: q.max_age.as_deref(),
             login_hint: q.login_hint.as_deref(),
             display: q.display.as_deref(),
             ui_locales: q.ui_locales.as_deref(),
@@ -1028,6 +1032,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // handler; turning either into `invalid_request` here would lose the code a
     // conformance suite matches on.
     let mut pushed_idp_hint = None;
+    let mut pushed_fresh_authentication = false;
     if classify_request_object(q.request.as_deref(), q.request_uri.as_deref()).is_none()
         && let Some(request_uri) = q.request_uri.as_deref()
         && let Err(refusal) = state
@@ -1035,9 +1040,14 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             .par_service
             .peek(tenant_id, &q.client_id, request_uri)
             .await
-            // G-B — the one value `peek` hands back: the pushed provider hint,
-            // for the sign-in page this browser is about to be sent to.
-            .map(|peeked| pushed_idp_hint = peeked.axiam_idp_hint)
+            // G-B — what `peek` hands back: the pushed provider hint, and
+            // (#835) whether the pushed request demands a fresh
+            // authentication, for the sign-in page this browser is about to
+            // be sent to.
+            .map(|peeked| {
+                pushed_idp_hint = peeked.axiam_idp_hint;
+                pushed_fresh_authentication = peeked.fresh_authentication;
+            })
     {
         // RFC 6749 §4.1.2.1, answered exactly as the `prompt=none` arm above
         // does: redirected only to a `redirect_uri` this client registered,
@@ -1123,6 +1133,27 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         client.default_idp,
     )
     .await;
+    // #835 (D-N28, F4-W3-12) — the hop says when the request in force demands
+    // a fresh authentication (`prompt` naming `login`, or `max_age=0`), so the
+    // sign-in page never starts a provider by itself for it: neither value is
+    // forwarded upstream, and a provider that still holds a session would
+    // answer with nobody present. The page cannot read this itself — under
+    // PAR the values are in the pushed request — so the server, which sees
+    // both carriers, marks it. The pushed copy beside a `request_uri`, the
+    // query otherwise (RFC 9126 §4), each through the honour lane's parse.
+    //
+    // Honour lane only, mirroring the server's own decision: off it,
+    // `prompt=login` and `max_age` are dropped (`ignore`) or refused on the
+    // return leg (`fapi2`), nothing is asserted about the authentication's
+    // freshness, and the `/login` URL stays the one W3 built (invariant 4).
+    cosmetic.fresh_authentication = honour
+        && if q.request_uri.is_some() {
+            pushed_fresh_authentication
+        } else {
+            authn_params
+                .as_ref()
+                .is_some_and(AuthnRequestParams::demands_fresh_authentication)
+        };
     let location =
         axiam_oauth2::login_hop::build_login_redirect_for(&return_to, stale, None, &cosmetic);
 
@@ -2239,6 +2270,9 @@ pub async fn authorize<C: Connection + Clone>(
                 display: *display,
                 ui_locale: *ui_locale,
                 idp,
+                // #835 — first leg only: this hop already says `reauth=1` for
+                // every reason it sends a browser to sign in.
+                fresh_authentication: false,
             };
             let location = axiam_oauth2::login_hop::build_interaction_redirect(
                 &return_to,

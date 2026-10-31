@@ -73,15 +73,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way to sign in" control, and never loops (a failed provider leg links back
   without the provider id; nothing starts for an unlisted id or a provider
   already started or declined in the last ten minutes); on a re-authentication
-  hop (`prompt=login`, `max_age`, a step-up) it only highlights the provider
-  and waits for a click (#833). A pushed hint is bounded at push time like
+  hop it only highlights the provider and waits for a click (#833). Which hops
+  those are is decided by the server (#835): `reauth=1` (a stale session cookie,
+  or an `honour`-lane interaction such as `prompt=login`, an unmet `max_age` or
+  a step-up), a step-up `acr`, or the new `/login?…&fresh=1`, set on the first
+  hop of an `honour`-lane request whose request in force — the pushed copy
+  under PAR, the query string otherwise — says `prompt=login` or `max_age=0`,
+  read with the server's own parser; the page no longer reads `prompt` or
+  `max_age` out of `return_to`. A pushed hint is bounded at push time like
   the query one; the console client form
   gains a "Default identity provider" select. A provider sign-in started from
   the login hop — automatically or with a provider button — now returns to the
   relying party's authorization request when it completes (OIDC, OAuth2, SAML
   and Apple alike) instead of ending on the console dashboard, and a failed
   provider leg's "Back to sign in" keeps the request's `return_to` but not the
-  provider id (#832). There is deliberately no
+  provider id (#832). That hop is resumed only by the callback of the sign-in
+  that stored it: the tab keeps the start's `state` (SAML: `relay_state`), the
+  SAML and Apple handoff redirects (and Apple's form-post error redirect) now
+  also carry the spent value as `state`, and a callback without it or with
+  another value lands on the dashboard (#835). There is deliberately no
   `kc_idp_hint` alias. Documented in `docs/admin/oidc-authn-parameters.md`
   (with a Keycloak migration note) and `docs/admin/browser-login-hop.md`;
   threat-model entries T-493 and T-494; OpenAPI regenerated. Schema

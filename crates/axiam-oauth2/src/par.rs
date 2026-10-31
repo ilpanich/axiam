@@ -378,7 +378,8 @@ where
     ///
     /// # The one value it does hand back (G-B, #817)
     ///
-    /// [`PeekedRequest`] carries the pushed `axiam_idp_hint` and nothing else.
+    /// [`PeekedRequest`] carries the pushed `axiam_idp_hint`, one bool (below)
+    /// and nothing else.
     /// The anonymous browser this runs for is about to be sent to the sign-in
     /// page, and that page is the only place the hint means anything; without
     /// it, a `require_par` client's hint could never reach the page, and the
@@ -392,6 +393,14 @@ where
     /// tenant-public id the browser would show anyway (F4-W3-09). The pushed
     /// string itself is never echoed: a PAR authorization request's
     /// `return_to` carries `client_id` and `request_uri`, not the hint.
+    ///
+    /// # And whether the pushed request demands a fresh authentication (#835)
+    ///
+    /// [`PeekedRequest::fresh_authentication`] — a bool, not the pushed
+    /// `prompt` or `max_age`. The sign-in page must not start a provider by
+    /// itself for a request that says `prompt=login` or `max_age=0`, and under
+    /// PAR only this server can see that it does. A bool authorizes nothing
+    /// and selects nothing, so the property above holds.
     pub async fn peek(
         &self,
         tenant_id: Uuid,
@@ -421,8 +430,20 @@ where
             ));
         }
 
+        // #835 (D-N28) — one bool, through the honour lane's own parse, so
+        // the marker reads `prompt`/`max_age` exactly as `crate::honour` will
+        // when the request is consumed. The values themselves stay here.
+        let fresh_authentication =
+            crate::authn_params::AuthnRequestParams::parse(&crate::authn_params::RawAuthnParams {
+                prompt: stored.params.prompt.as_deref(),
+                max_age: stored.params.max_age.as_deref(),
+                ..Default::default()
+            })
+            .demands_fresh_authentication();
+
         Ok(PeekedRequest {
             axiam_idp_hint: stored.params.axiam_idp_hint,
+            fresh_authentication,
         })
     }
 }
@@ -439,6 +460,13 @@ pub struct PeekedRequest {
     /// the provider it resolved to (`/login?…&idp=<uuid>`), a provider the
     /// tenant's public listing already shows, or nothing.
     pub axiam_idp_hint: Option<String>,
+    /// #835 (D-N28) — whether the pushed request demands a fresh
+    /// authentication (`prompt` naming `login`, or `max_age=0`), decided by
+    /// [`crate::authn_params::AuthnRequestParams::demands_fresh_authentication`]
+    /// on the pushed values. The caller applies it on the honour lane only and
+    /// turns it into the hop's `fresh=1`; the pushed values themselves are not
+    /// handed out.
+    pub fresh_authentication: bool,
 }
 
 /// The single answer given for a `request_uri` that is unknown, expired or
@@ -751,6 +779,7 @@ mod tests {
             peeked,
             PeekedRequest {
                 axiam_idp_hint: Some("corp-okta".into()),
+                fresh_authentication: false,
             }
         );
         assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
@@ -760,6 +789,46 @@ mod tests {
             .await
             .expect("a live handle");
         assert_eq!(plain, PeekedRequest::default());
+    }
+
+    /// #835 (D-N28) — `peek` reports whether the pushed request demands a
+    /// fresh authentication, read through the honour lane's parse (so `00`,
+    /// `+0` and a tab-separated `prompt` count), as a bool and nothing more;
+    /// and the handle is still not spent.
+    #[tokio::test]
+    async fn peek_reports_a_pushed_fresh_authentication_demand_as_a_bool() {
+        let tenant = Uuid::now_v7();
+        for (prompt, max_age, fresh) in [
+            (Some("login"), None, true),
+            (Some("consent\tlogin"), None, true),
+            (None, Some("0"), true),
+            (None, Some("00"), true),
+            (None, Some("+0"), true),
+            (None, Some(" 0"), true),
+            (Some("consent"), None, false),
+            (None, Some("3600"), false),
+            (None, None, false),
+        ] {
+            let mut repo = OneRow::live(tenant, "client-a");
+            if let Some(row) = repo.row.as_mut() {
+                row.params.prompt = prompt.map(str::to_owned);
+                row.params.max_age = max_age.map(str::to_owned);
+            }
+            let svc = service(repo);
+            let peeked = svc
+                .peek(tenant, "client-a", &generate_request_uri())
+                .await
+                .expect("a live handle");
+            assert_eq!(
+                peeked,
+                PeekedRequest {
+                    axiam_idp_hint: None,
+                    fresh_authentication: fresh,
+                },
+                "prompt={prompt:?} max_age={max_age:?}"
+            );
+            assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// Unknown, expired and already-used are one answer, and it is the same

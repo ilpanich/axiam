@@ -222,13 +222,14 @@ describe("SsoCallbackPage — the login hop", () => {
     rememberPendingSso({
       protocol,
       displayName: "Okta",
+      state: "s",
       hop: { returnTo: RETURN_TO, acr: "urn:axiam:acr:mfa", loginHint: "ada" },
     });
 
   it.each([
     ["an OIDC redirect", "OidcConnect", "?code=c&state=s", "/api/v1/auth/federation/oidc/callback"],
     ["an OAuth2 redirect", "OAuth2", "?code=c&state=s", "/api/v1/auth/federation/oauth2/callback"],
-    ["a SAML/Apple handoff code", "Saml", "?axiam_handoff=one-time", "/api/v1/auth/federation/handoff"],
+    ["a SAML/Apple handoff code", "Saml", "?axiam_handoff=one-time&state=s", "/api/v1/auth/federation/handoff"],
   ] as const)("resumes the hop after %s", async (_label, protocol, query, endpoint) => {
     rememberHop(protocol);
     renderWithProviders(<SsoCallbackPage />, { route: `/auth/sso/callback${query}` });
@@ -280,7 +281,7 @@ describe("SsoCallbackPage — the login hop", () => {
    * nothing to start.
    */
   it.each([
-    ["a provider error", "?error=access_denied", false],
+    ["a provider error", "?error=access_denied&state=s", false],
     ["a failed completion", "?code=c&state=s", true],
   ])("after %s, Back to sign in keeps return_to and drops idp", async (_label, query, rejects) => {
     if (rejects) {
@@ -300,6 +301,58 @@ describe("SsoCallbackPage — the login hop", () => {
     expect(url.searchParams.has("reauth")).toBe(false);
     expect(link.getAttribute("href")).not.toContain(IDP);
     expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #835 (D-N29, F4-W3-16) — the hop is bound to the start that stored it. A
+   * callback that is not that sign-in's — a login CSRF driven into this tab,
+   * or a stale callback — completes as an ordinary sign-in and never resumes
+   * (or re-offers) a hop the person left behind. The record is cleared either
+   * way.
+   */
+  it.each([
+    ["an OIDC redirect with another state", "OidcConnect", "?code=c&state=other"],
+    ["an OIDC redirect with no state", "OidcConnect", "?code=c"],
+    ["an OAuth2 redirect with another state", "OAuth2", "?code=c&state=other"],
+    ["a handoff code with another state", "Saml", "?axiam_handoff=one-time&state=other"],
+    ["a handoff code with no state", "Saml", "?axiam_handoff=one-time"],
+  ] as const)("does not resume the hop after %s, and clears the record", async (_label, protocol, query) => {
+    rememberHop(protocol);
+    renderWithProviders(<SsoCallbackPage />, { route: `/auth/sso/callback${query}` });
+    if (query === "?code=c") {
+      // `?code=` with no `state` is an incomplete link, refused before any
+      // completion is attempted — and its link offers no hop either.
+      await screen.findByRole("alert");
+      expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/login");
+    } else {
+      // The sign-in itself completes; only the hop is withheld.
+      await vi.waitFor(() =>
+        expect(navigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
+      );
+    }
+    expect(assign).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("axiam.sso.pending")).toBeNull();
+  });
+
+  it("clears the record when the callback matches, too", async () => {
+    rememberHop();
+    renderWithProviders(<SsoCallbackPage />, { route: "/auth/sso/callback?code=c&state=s" });
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledWith(RETURN_TO));
+    expect(sessionStorage.getItem("axiam.sso.pending")).toBeNull();
+  });
+
+  it.each([
+    ["another state", "?error=access_denied&state=other"],
+    ["no state", "?error=access_denied"],
+  ])("links to a bare /login after a failure carrying %s", async (_label, query) => {
+    rememberHop();
+    renderWithProviders(<SsoCallbackPage />, { route: `/auth/sso/callback${query}` });
+    await screen.findByRole("alert");
+    expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute(
+      "href",
+      "/login",
+    );
+    expect(sessionStorage.getItem("axiam.sso.pending")).toBeNull();
   });
 
   it("links to a bare /login after a failure with no hop", async () => {

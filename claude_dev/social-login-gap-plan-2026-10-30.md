@@ -249,6 +249,13 @@ existing `apple.rs` rules apply unchanged); `nonce_supported` is true. Facebook
 *Limited Login* mints an OIDC ID token (`iss https://www.facebook.com`) and
 works through this grant when the provider is configured as the OIDC variant.
 
+> **Correction 2026-10-31 (W2.2, D-N10/D-N11):** step 6 does not use
+> `ProofReplayRepository`; the replay record lives in the additive table
+> `federation_id_token_replay` (v112) behind its own
+> `ProviderIdTokenReplayRepository`, keyed on the provider's owning tenant.
+> Step 7 has no `subject_mapping`: resolution is the browser path
+> (`map_identity` → `provision_or_link_identity`), then `account_may_act`.
+
 ### 3.2 G-B — IdP hint and per-client default provider
 
 **Parameter.** `axiam_idp_hint`, following the vendor-namespace rule stated at
@@ -531,6 +538,8 @@ recommendation.
 | D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. | **Answered by the maintainer 2026-10-30: as recommended.** |
 | D-N8 | *(arose in W1.1)* Is `oauth2.refresh_reuse_response` tighten-only like the other security settings (a tenant may choose `refuse` only when its organization is on `refuse`), or may a tenant relax it alone? | **Tighten-only**, as every other hierarchical security setting; "available per tenant" in D-N2 is met through the organization. | **Answered by the maintainer 2026-10-30: as recommended.** |
 | D-N9 | *(arose in W1.2)* The `client_id` claim on exchanged tokens re-opens #518 (an exchanged token becomes an acceptable `actor_token` for its exchanging client — laundering). A: claim + exchange marker, exchanged tokens never actors; B: accept; C: defer G-D | **A** | **Answered by the maintainer 2026-10-30: A.** See the §3.4 correction. |
+| D-N10 | *(arose in W2.2)* Where is the provider-ID-token replay record kept? `oauth2_proof_replay.kind` is an ASSERT allow-list; widening it is a non-additive redefinition (#729). (a) widen the ASSERT; (b) a new additive table | **(b)** — `federation_id_token_replay`, schema v112, UNIQUE (tenant_id, provider_id, token_hash), written after signature and nonce checks, kept until `exp` + 60 s, a failed write refuses | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N11 | *(arose in W2.2)* §3.1 step 7 names a provider `subject_mapping` (linked_only / jit_provision) that does not exist. (a) resolve exactly as browser OIDC login (`map_identity` → `provision_or_link_identity`); (b) add a new per-provider mapping setting | **(a)** — native and browser sign-in land on the same user; no `email_verified` refusal; an unverified email is never marked verified | **Answered by the maintainer 2026-10-31: as recommended.** |
 
 ---
 

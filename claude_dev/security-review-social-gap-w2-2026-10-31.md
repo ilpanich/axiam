@@ -595,3 +595,84 @@ pre-sweep branch.
   land in this wave's second sweep.
 - Nothing else is open. F4-W2-01 (the High) is closed, and with it the
   SEC-095 regression.
+
+## Addendum 2 — sweep 2 re-check (2026-10-31)
+
+**Against:** `ace76a9..24f6929` on `claude/social-gap-w2`, the single commit
+`24f6929` (#831; D-N20, D-N21). It touches 11 files: one code file
+(`crates/axiam-federation/src/native_login.rs`), its tests, rustdoc and a
+schema comment in `axiam-core`/`axiam-db`, and text (docs page, CHANGELOG,
+website, T-490/T-491 in all three threat-model copies). I re-checked the code
+and `jsonwebtoken` 11.1.0's own parser, not the commit message. One throw-away
+probe ran and was kept out of the tree (below). The following were run and
+were green:
+
+- `cargo test -p axiam-federation --lib -- native_login token_shape token_exchange`: 76 passed.
+- `cargo test -p axiam-oauth2 --lib -- provider_id_token token_exchange fapi`: 123 passed.
+- `cargo test -p axiam-api-rest --no-default-features --test provider_id_token_test`: 21 passed.
+- `cargo fmt -p axiam-federation -- --check` and
+  `cargo clippy -p axiam-federation --lib --tests -- -D warnings`: clean.
+- `scripts/check-crate-layering.py`: OK, with 19 crates and 62 edges.
+- `scripts/check-spec-digest.py`: OK. The spec is not in the range.
+
+**The probe.** It took a fresh, unspent ES256 token for each variant and
+presented the variant *first*, so that any variant that verified on its own
+would show up as a sign-in, and then presented the original. The variants were:
+`=` and `==` padding on the signature, padding on the header, a fourth
+segment, a trailing `.`, leading and trailing whitespace, a trailing newline,
+the standard base64 alphabet, a DER-encoded signature, and the JWS JSON
+serialization. Every one was refused before step 6 and none was recorded.
+The probe is not in the tree, and the test file is byte-identical to `24f6929`.
+
+### D.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W2-11** | **Closed** | `replay_key` (`native_login.rs:404`) hashes `token[..second_dot]`, called at `:710` on the same `request.id_token` that `verify_id_token_core` verified (`:657`). **Is that exactly what `jsonwebtoken` verifies?** Yes. `decode`, `decode_header` and `verify_signature` (11.1.0, `decoding.rs:270–378`) split with `rsplitn(2, '.')` twice, and each `expect_two!` refuses a third part. The verified message is everything before the *last* dot, and the header is everything before the dot before it. With three or more dots the header part contains a `.`, which `URL_SAFE_NO_PAD` cannot decode, so the token is refused (probe: `bad_signature`). A verified token therefore has exactly two dots, and "before the second dot" equals the bytes the signature covers. **Other encoding variance.** Header and payload are signed bytes, so any re-encoding of them, padded, re-ordered or semantically the same, breaks the signature. Only the provider could produce another one. The signature segment no longer counts at all, so the remaining sources of a second string drop out of the key: ECDSA `s → n − s`, a DER versus fixed-width signature, and padding or non-canonical trailing bits (which `URL_SAFE_NO_PAD`'s `RequireNone`/no-trailing-bits configuration refuses anyway). The same holds for any future malleable algorithm. The JWS JSON serialization is not parsed by `jsonwebtoken` (probe: refused). **Wrong refusal by collision?** Two different tokens share a key only if they share issuer, header and payload byte for byte, that is, the provider signed the same `iat`/`exp`/`nonce`/`sub`/`aud` twice, with only an ECDSA signature differing. That is the same token by D-N16's own terms, because one nonce is one sign-in, so refusing the second is the intended single use and not a false refusal. SHA-256 collisions are out of scope. **"Fewer than two dots" (`:711`, `ClaimRejected("not a compact JWS")`)** is unreachable after step 4, as the rustdoc says. It is a harmless fail-closed guard, and `the_replay_key_is_the_hash_of_the_signing_input` pins it. **Test.** `a_malleated_ecdsa_twin_of_a_spent_token_is_a_replay` goes through the real decoder with a real P-256 key. It shows the twin verifies on its own (so the test is not vacuous), and then that the twin of a spent token, and the original after the twin, are both `Replayed`. |
+| **F4-W2-12** | **Closed as decided (residual, D-N20)** | The `ProvisioningConflict` rustdoc (`native_login.rs:255–265`) now says the refusal cannot be told apart from other refusals but *can* be told apart from success, and calls it a recorded residual shared with browser login. T-491's amendment (d) is corrected by an explicit "Amended 2026-10-31 (F4-W2-12)" paragraph in all three copies (stride, `website/src/threatModel.ts`, Threat Dragon JSON, which still parses). `docs/api/native-sign-in.md:248` "What a refusal still tells" states the residual, its cost per probe and the possible later change. No code change, as decided. |
+| **F4-W2-13** | **Closed** | `website/src/docs/operate.ts:1641` reads "removed once past their `exp` plus two minutes, twice the clock leeway". This matches `:649`'s `exp + 2 × 60 s` and the docs page. |
+| **F4-W2-14** | **Closed as decided (D-N21)** | `fold_hex_case` (`:415`) maps exactly the bytes `b'A'..=b'F'` to lower case and passes every other byte through unchanged. Bytes of a multi-byte UTF-8 character are ≥ 0x80 and never match, and `G`–`Z` are untouched. Only the *claim* is folded. The request nonce is hashed exactly as sent, and `sha256_hex` is already lower case. **Constant time.** The fold branches only on the claim's bytes and allocates only the claim's length. The claim is in the token, which the presenter holds, so it is not secret. The comparison with the value derived from the request nonce is still the single `ct_eq` (`:544`). Its early exit on unequal lengths reveals only the claim's length, which is public. **No regression of F4-W2-02.** Copying an upper-case claim into the request gives `sha256(H) ≠ fold(H)`, so a presenter still needs a SHA-256 preimage. Pinned by `an_upper_or_mixed_case_hex_nonce_claim_is_accepted` and `only_the_hex_case_of_the_nonce_claim_is_folded`. The latter covers whitespace, full-width `Ａ`, `G`/`g`, wrong length, and an upper-cased request nonce refused. |
+| **F4-W2-15** | **Open: PR note pending (no code, as recommended)** | Not in the range, as expected. The note belongs in the final W2 PR description. Add one sentence to it: on such a database, rows written before `24f6929` were keyed on the full token's hash, which no new key matches. The re-key matters only for tokens still inside their lifetime at upgrade, minutes at most, and the table is dropped anyway under the same note. |
+
+### D.2 Invariants
+
+| # | Invariant | Verdict | Evidence |
+|---|---|---|---|
+| 1 | X4 refuses ID tokens by name and by shape; its tests unchanged | **Holds** | Neither `token_exchange.rs` (`axiam-oauth2`, `axiam-federation`) nor `token_shape.rs` is in the range, and their tests pass. `check_shape` still refuses by the shared `token_shape` marker list. |
+| 2 | No refresh token from token exchange | **Holds** | No exchange code in the range. |
+| 3 | fapi2 grace unchanged | **Holds** | `crates/axiam-oauth2/src/fapi.rs` is not in the range, and the `fapi` tests pass. |
+| 4 | Crate layering | **Holds** | "19 crates, 62 internal production edge(s), all pointing inward; 4 declared test-only inversion(s)". The test's P-256 key uses `ring`, already a direct dependency, and no manifest changed. |
+| 5 | `missing_docs` on axiam-authz / axiam-directory | **Holds (untouched)** | Neither crate is in the range. |
+| 6 | Spec current | **Holds** | `sdks/openapi.json` is not in the range, and its digest matches. **On the OpenAPI text:** the grant description and the `nonce` field still say the SDK "was given its lower-case SHA-256 hex". That is accurate *as guidance*: lower case is what AXIAM recomputes and what the docs call the convention. It does not say upper case is refused, so no client is misled into failing. Leaving it avoids a spec regeneration and an eleven-SDK re-sync for no behavioural gain. Should the spec be regenerated for another reason, "SHA-256 hex (either case)" would match the docs exactly. The same applies to the `TokenRequest` rustdoc (`axiam-oauth2/src/token.rs:259`) and the handler doc (`oauth2.rs:2112`), which feed the spec. |
+
+**Docs, threat model and rustdoc against the code.** The module doc (steps 5
+and 6 and "Why the replay guard sits where it does"), `check_shape`'s and
+`replay_key`'s rustdoc, the `ProviderIdTokenReplayRepository::insert_id_token`
+rustdoc, the v112 schema comment, the CHANGELOG, `docs/api/native-sign-in.md`
+(Nonce rules, Single use), `website/src/docs/oauth2.ts`/`operate.ts` and T-490/T-491
+in all three copies all describe the signing-input key and the A–F fold as
+the code implements them. I found no remaining "exact bytes of the token" or
+"lower-case only" claim outside the OpenAPI guidance noted above.
+
+### D.3 New findings
+
+None. One observation that is not a finding, because it predates the sweep and
+nothing external depends on it: a signature segment that fails base64 decoding
+(padding, the standard alphabet, trailing whitespace) or has the wrong length
+(DER) is audited as `claim_rejected` rather than `bad_signature`.
+`verify_id_token_core` passes every `jsonwebtoken` error except
+`InvalidSignature` through as `Claims`, and `from_check` turns the rest into
+`ClaimRejected`. The client sees the same `invalid_grant` either way. If an
+operator ever needs the audit reason to be exact, mapping `ErrorKind::Base64`
+and the crypto-error kinds to `BadSignature` is an XS change.
+
+### D.4 Summary
+
+All fifteen W2 findings, final status after sweep 2:
+
+F4-W2-01 Closed · 02 Closed · 03 Closed · 04 Closed as decided (residual,
+D-N18) · 05 Closed · 06 Closed · 07 Closed · 08 Closed · 09 Closed · 10 Closed
+(the 500 is gone; the oracle is tracked as 12) · 11 Closed · 12 Closed as decided
+(residual, D-N20) · 13 Closed · 14 Closed as decided (D-N21) · 15 Open, PR-note
+only (no code; state it in the W2 PR description). No new findings. Nothing
+blocks W2 on security grounds once the F4-W2-15 note is in the PR.

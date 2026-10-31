@@ -138,7 +138,7 @@ and a staff app with wider scopes, a token issued to the consumer app redeems
 through the staff app's `client_id` too, and the audit record names the staff
 client. The user gains nothing they could not get by signing in to that client
 in a browser, but a holder of a leaked token does. Until a per-client binding
-exists (planned for 1.2.0), register the grant only on the clients that are the
+exists (not in 1.2.0; a later release may add it if asked for), register the grant only on the clients that are the
 native apps you listed, and keep apps with different privilege in different
 tenants or on different providers.
 

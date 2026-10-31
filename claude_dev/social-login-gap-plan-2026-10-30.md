@@ -706,6 +706,8 @@ recommendation.
 | D-N33 | *(arose in W4)* `native_login` is required in federation-config responses, so 1.2-line SDKs cannot decode them from servers older than 1.2.0. Document or make it optional? | **Document the floor**: the spec stays truthful; the SDK CHANGELOGs and the 1.2.0 upgrade notes state that federation-config admin calls of 1.2-line SDKs need a server of 1.2.0 or later | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N34 | *(arose in W4.10)* The Swift `oidcRefresh` lacked the single-flight guard §12.1 requires; the session added it. Keep it in the contract 1.65 PR? | **Keep it** (with D-N2, an unguarded concurrent refresh would end the session); W4.13 reviews it | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N35 | *(arose in W4.11)* The C SDK's CI was red on `main` because the 1.1.3 release left `AXIAM_VERSION_PATCH` at 2 and the version test at "1.1.2". Carry the fix in the contract 1.65 PR? | **Carry it** (ilpanich/axiam-c-sdk `c29f78e`) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N36 | *(W4.13 Q1, C165-11)* Under PAR, should `oidc_par` carry over a hint `oidc_begin` put on the authorization URL (9 SDKs drop it silently)? | **Yes, normative**: the URL's hint is pushed; an explicit `oidc_par` argument wins when both are set (the PHP pattern) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N37 | *(W4.13, C165-03)* The C++ model structs change layout while SOVERSION stays 4. Bump? | **Yes: SOVERSION 5**, `abi_soname` and the CHANGELOG corrected; the release stays minor (D-N32). C goes to SOVERSION 3 under D-N32 (C165-02) | **Answered by the maintainer 2026-10-31: as recommended.** |
 
 ---
 

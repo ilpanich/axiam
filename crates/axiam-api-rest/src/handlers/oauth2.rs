@@ -2359,8 +2359,8 @@ pub async fn authorize<C: Connection + Clone>(
 /// in with an ID token a mobile or desktop app obtained from a federated OIDC
 /// provider's native SDK. Parameters: `provider` (federation config UUID or
 /// provider slug), `id_token`, `nonce` (the raw nonce; the provider's SDK was
-/// given its lower-case SHA-256 hex, which the ID token's `nonce` claim must
-/// equal), and optional `scope` and `resource`. Every refusal of the provider token is
+/// given its SHA-256 hex, in either case, which the ID token's `nonce` claim
+/// must equal), and optional `scope` and `resource`. Every refusal of the provider token is
 /// `invalid_grant` ("the provider ID token is not acceptable"); the grant is
 /// rate limited per tenant and client address (`rate_limit_exceeded`). This
 /// is not token exchange (RFC 8693).

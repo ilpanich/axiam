@@ -333,6 +333,34 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "note",
         text: "`prompt=none` is inherently a login-status oracle for a registered relying party. It is bounded to clients registered in the tenant with exact `redirect_uri` matching, and every outcome is audited as `oauth2.prompt_none.code` or `oauth2.prompt_none.login_required` with the `client_id`, so a relying party polling it is visible. Full detail: [`docs/admin/oidc-authn-parameters.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md).",
       },
+      { type: "h", id: "idp-hint", text: "Sending the user straight to one identity provider" },
+      {
+        type: "p",
+        text: "A relying party that already knows which provider its user wants adds `axiam_idp_hint` to the authorization request (or to the `POST /oauth2/par` body), and AXIAM's sign-in page starts that provider instead of showing the chooser. A client can also carry a `default_idp` for the same purpose when a request names nothing. Neither is behind `authn_request_params`: the hint is AXIAM's own parameter and changes nothing that is issued.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The hint may be", "Notes"],
+        rows: [
+          ["A provider's UUID or its `provider_slug`", "Tried first. A slug is compared exactly; a UUID in any spelling the parser accepts."],
+          ["A branded kind name: `google`, `github`, `facebook`, `apple`, `microsoft`", "ASCII case-insensitive; matches when exactly one offered provider is of that kind. A slug always beats a kind name. The generic kinds are not hint names."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**An unresolvable hint is a no-op.** An unknown or disabled provider, another tenant's provider, a URL or an ambiguous name is ignored, and the response is byte-identical to a request without the hint. It resolves only against the tenant's own public provider list, so it cannot be used to probe for providers.",
+          "**Precedence:** a hint that resolves beats the client's `default_idp`, which beats the chooser. `default_idp` must name a provider the tenant can sign in with (`400 validation_error` otherwise, on create and on update); a default whose provider was later disabled is ignored, not an error. Dynamic registration and client ID metadata documents cannot set it.",
+          "**Every lane, and PAR.** The hint is read whatever `authn_request_params` says. Under PAR the pushed hint is authoritative and a query copy beside the `request_uri` is ignored. A browser that already holds a session is not sent to sign in, so the hint is moot; a re-authentication hop carries it.",
+          "**The sign-in page redirects after a short pause** (1.5 s, 3 s with reduced motion) behind a visible \"Choose another way to sign in\" button, and never loops: no redirect after an error return, for a provider already started in the last ten minutes, or for an unmatched value.",
+          "**Coming from Keycloak?** There is deliberately no `kc_idp_hint` alias. Rename the parameter and give the equivalent provider the same `provider_slug`.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Resolution order, `default_idp` validation, the page's no-loop guards and the migration note: [`docs/admin/oidc-authn-parameters.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).",
+      },
       { type: "h", id: "sensitive-scopes", text: "The `address` and `phone` scopes" },
       {
         type: "p",

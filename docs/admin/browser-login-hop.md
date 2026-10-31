@@ -82,6 +82,7 @@ browser session for them to be about. Two later waves read them, both behind
 |---|---|
 | W4 | `&reauth=1` and `&acr=…` — reauthenticate, and which factor to demand |
 | W5 | `&login_hint=…`, `&display=…`, `&ui_locale=…` — pre-fill, layout, language |
+| G-B | `&idp=<uuid>` — the provider to start with; **not** behind `authn_request_params` (see below) |
 
 Everything in that table is built by one function
 (`axiam_oauth2::login_hop::build_login_redirect_for`), which is why the
@@ -89,6 +90,19 @@ Everything in that table is built by one function
 apply identically to all of it. See
 [`docs/compliance/oidc-conformance.md`](../compliance/oidc-conformance.md)
 rows 23–25.
+
+### The `idp` parameter
+
+`&idp=<uuid>` is the one addition to the `/login` URL that does **not** wait for
+`authn_request_params: honour`. It is the id of the federation provider the
+sign-in page should start with — resolved on the server from the request's
+`axiam_idp_hint` or from the client's `default_idp` — and it is appended on every
+lane, to the first hop and to the re-authentication hop alike. It is a validated
+UUID of a provider the tenant's public list already shows, never the relying
+party's string, and when nothing resolves the URL is byte-identical to one
+built without the feature. It is never put on a `/consent` redirect. The
+resolution rules, `default_idp` and the page's auto-redirect behaviour are in
+[Choosing the provider](oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).
 
 ---
 

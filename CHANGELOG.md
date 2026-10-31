@@ -66,8 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default_idp` the tenant cannot see is refused with `400` on create and on
   update. Read on every `authn_request_params` lane and for `fapi2` clients;
   it changes nothing that is issued, and with a live session no sign-in page
-  is shown. Dynamic registration and CIMD cannot set `default_idp`. Schema
-  v113 (`oauth2_client.default_idp`, additive).
+  is shown. Dynamic registration and CIMD cannot set `default_idp`. The sign-in
+  page starts the matched provider by itself after 1.5 seconds (3 with reduced
+  motion), behind a "Choose another way to sign in" control, and never loops
+  (no redirect after a failed provider leg, for an unlisted id, or for a
+  provider already started in the last ten minutes); the console client form
+  gains a "Default identity provider" select. There is deliberately no
+  `kc_idp_hint` alias. Documented in `docs/admin/oidc-authn-parameters.md`
+  (with a Keycloak migration note) and `docs/admin/browser-login-hop.md`;
+  threat-model entries T-493 and T-494; OpenAPI regenerated. Schema
+  v113 (`oauth2_client.default_idp`, additive). (G-B, #817)
 
 ### Changed
 

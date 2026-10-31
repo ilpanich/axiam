@@ -139,8 +139,9 @@ export interface OAuth2Client {
    * the sign-in carried no `axiam_idp_hint`. Omitted by the server when unset.
    * Admin-managed clients only: a dcr/cimd registration cannot set it.
    *
-   * Hand-written until W3.3 regenerates `sdks/openapi.json` and this file is
-   * reconciled with `OAuth2ClientResponse.default_idp`.
+   * Reconciled with `OAuth2ClientResponse.default_idp` in `sdks/openapi.json`
+   * (the spec types it `string | null`; the server skips it when `None`, so
+   * the optional `string` here is the wire shape).
    */
   default_idp?: string;
 }

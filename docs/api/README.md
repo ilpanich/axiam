@@ -243,6 +243,16 @@ provider until an operator lists the app's client IDs. Setup, the request and
 error tables, nonce rules, replay semantics and the audit record are in
 [`native-sign-in.md`](native-sign-in.md). It is not token exchange.
 
+## Choosing the sign-in provider on the authorization endpoint
+
+`GET /oauth2/authorize` and the body of `POST /oauth2/par` accept AXIAM's
+`axiam_idp_hint` — a provider's UUID, its `provider_slug` or a branded kind name
+(`google`, `github`, `facebook`, `apple`, `microsoft`) — and a client can carry a
+`default_idp`. A hint that names nothing is ignored. There is no `kc_idp_hint`
+alias. Forms, precedence, PAR, the sign-in page's auto-redirect and the Keycloak
+migration note are in
+[`../admin/oidc-authn-parameters.md`](../admin/oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).
+
 ## MCP servers
 
 Fronting a [Model Context Protocol](https://modelcontextprotocol.io) server

@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.45.0",
  "diagramCount": 10,
- "total": 492,
+ "total": 494,
  "open": 21,
- "mitigated": 461,
+ "mitigated": 463,
  "notApplicable": 10,
  "areas": [
   {
@@ -85,7 +85,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 90,
+   "total": 92,
    "open": 0,
    "notApplicable": 0
   },
@@ -148,7 +148,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Tampering",
-   "total": 96,
+   "total": 97,
    "open": 1,
    "notApplicable": 2
   },
@@ -172,7 +172,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Elevation of privilege",
-   "total": 97,
+   "total": 98,
    "open": 4,
    "notApplicable": 1
   }
@@ -192,7 +192,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 207,
+   "total": 209,
    "open": 8,
    "notApplicable": 3
   },

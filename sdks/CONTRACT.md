@@ -2116,6 +2116,12 @@ verifier, at the `jwks_uri` the discovery document advertises.
 3. **Client authentication is `client_secret_post`.** `client_id`/`client_secret` travel in the
    form body. SDKs MUST NOT send an `Authorization: Basic` header to `/oauth2/*`.
 
+   **No redirect is followed (amended 2026-10-31, C165-13; normative).** An SDK MUST NOT follow an HTTP
+   redirect from a `POST` to an `/oauth2/*` endpoint; a `3xx` is surfaced as `NetworkError`
+   ([§2](#§2-error-taxonomy)). A 307/308 would re-send the form, and its credentials, to the redirect
+   target. AXIAM never redirects these endpoints, so only an intermediary or a wrong base URL
+   triggers it.
+
    **Rationale amended 2026-09 (contract 1.41, W8).** The rule previously rested on the server
    documenting no alternative. It now documents one: `client_secret_basic` (RFC 6749 §2.3.1) is
    accepted server-side and advertised in `token_endpoint_auth_methods_supported`, for the
@@ -8329,7 +8335,12 @@ for a strong method: it is refused with `invalid_client`, not ignored.
    when set, the form body carries `axiam_idp_hint=<value>` **exactly once**, beside the fields of
    rule 1, and the field is absent when it is unset. An SDK whose `oidc_par` takes its parameters from
    the `oidc_begin` URL carries it over like the others; one whose `oidc_par` takes them as arguments
-   takes `idp_hint` as an argument too. The server reads the **pushed** hint, which is authoritative
+   takes `idp_hint` as an argument too. **Either way, the hint `oidc_begin` already put on the URL is
+   not lost (amended 2026-10-31, C165-11, D-N36; normative).** When `oidc_par`'s own `idp_hint`
+   argument is unset, it pushes the `axiam_idp_hint` that the `oidc_begin` URL (the request it was
+   given) carries; when both are set, **the argument wins** and exactly one value is pushed. So
+   `oidc_begin(idp_hint="x")` followed by `oidc_par(request)` pushes `x`, and an SDK MUST NOT drop it
+   silently. The server reads the **pushed** hint, which is authoritative
    (RFC 9126 §4): a copy on the authorization URL beside a `request_uri` is ignored, and rule 2
    still forbids it, so the redirect URL stays exactly `client_id` and `request_uri` — an SDK MUST
    NOT add `axiam_idp_hint` to it "to be safe". The push never refuses a hint: it is trimmed, bounded
@@ -8398,6 +8409,12 @@ is not sensitive.
   pushed form carries `axiam_idp_hint=corp-okta` exactly once; without one the field is absent; and
   in both cases the authorization URL built from the `request_uri` carries **exactly** `client_id`
   and `request_uri` (assert the full parameter set again, so a hint cannot leak into it).
+- **`par_idp_hint_from_begin_url_pushed`** (amended 2026-10-31, C165-11, D-N36; rule 8). A request
+  from `oidc_begin(idp_hint="corp-okta")`, passed to `oidc_par` with **no** `idp_hint` argument,
+  pushes `axiam_idp_hint=corp-okta` exactly once; the redirect URL is still exactly `client_id` and
+  `request_uri`.
+- **`par_idp_hint_argument_wins`** (amended 2026-10-31, C165-11, D-N36; rule 8). The same request with
+  `oidc_par`'s `idp_hint = "other"` pushes `axiam_idp_hint=other` exactly once and never `corp-okta`.
 
 ---
 
@@ -14235,6 +14252,30 @@ the maintainer's of 2026-10-30 and 2026-10-31 (D-N1 to D-N31 of the plan).
   wholesale on a federation-config write and never on the public provider listing). The `native_login`
   block is administrator configuration and no SDK helper interprets it.
 
+Amended 2026-10-31 (the W4.13 review, `claude_dev/sdk-contract-1.65-conformance-review.md`; D-N33,
+D-N36), no version change (1.65 is unreleased; the W7.1b precedent of 1.63/1.64 above) and nothing
+breaking. **Text only** unless marked *SDK code*:
+(1) **C165-09** — [§37.9](#§379-required-tests) test 5: a slug-only client raises the §12.3 rule 4
+taxonomy error, not "the validation error". (2) **C165-10** — §37.9 test 3 and [§37.8](#§378-what-an-sdk-does-not-do):
+a discovery fetch to find `token_endpoint` is not counted and is not the forbidden support check.
+(3) **C165-11** (D-N36, option (a)) — [§26.2](#§262-semantics-normative) rule 8: `oidc_par` pushes the
+`axiam_idp_hint` the begin URL carries when its own `idp_hint` argument is unset, and the argument
+wins when both are set; [§26.6](#§266-required-tests) gains `par_idp_hint_from_begin_url_pushed` and
+`par_idp_hint_argument_wins`. *SDK code:* the nine SDKs that ignore the begin URL's hint today —
+TypeScript, Python, Java, Kotlin, C#, Go, Swift, C and C++ (Rust reads it from the URL; PHP already
+serves both). (4) **C165-12** — [§37.2](#§372-semantics-normative) rule 9: where the SDK's two adoption
+precedents differ it MAY offer either one's opt-in, off by default; text only. (5) **C165-13** —
+[§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 3: no redirect is followed on a `POST` to
+`/oauth2/*`, a `3xx` is a `NetworkError`; §37.2 rule 12 adds "nor sent anywhere but the token
+endpoint". *SDK code:* the SDKs of finding C165-14 — Go, PHP, TypeScript (Node), Swift and Rust
+(same-host only; Rust for `/oauth2/*` on `http_bare`) — with the mock test C165-14 describes (a `307`
+to another host gives `NetworkError`, and the other host sees no request). (6) **C165-15** — §37.9
+test 12 scans §19 attributes only where the SDK emits §19 events for the call; text only.
+(7) **C165-19** — [§37.3](#§373-error-mapping): a grant-local mapper is allowed when it dispatches
+on `error` at any status; text only. **Server floor (D-N33):** federation-config admin calls of a
+1.2-line SDK need an AXIAM server 1.2.0 or later (`FederationConfigResponse.native_login` is required
+from 1.2.0).
+
 **What changes in `openapi.json` and the registry.** `info.version` is **1.2.0** and the digest is
 re-stamped; the registry still holds 202 operations in 29 namespaces. The spec gained, over 1.64's,
 the members listed in (g), (i) and (j), the `RefreshReuseResponse` schema and the documented query
@@ -14883,7 +14924,9 @@ An SDK MUST NOT send a field outside that set, and MUST omit (rather than send e
    token set as the client's own credential is the **same MAY** as `login_client_credentials`
    ([§12.1](#§121-canonical-operation-set-and-endpoint-map)) and `device_login`
    ([§14.3](#§143-device_login--the-composed-helper) rule 4), and an SDK MUST follow whichever
-   posture it already took there rather than inventing a third. The refresh token is refreshed through
+   posture it already took there rather than inventing a third. Where the SDK's two precedents differ,
+   it MAY offer the opt-in either one offers, off by default; it MUST NOT adopt by default (amended
+   2026-10-31, C165-12). The refresh token is refreshed through
    `oidc_refresh` and therefore through the §9 single-flight guard, which, from contract 1.65, is also
    what keeps the SDK from ending the session by replaying a rotated token (§9, last paragraph).
 10. **No retry, ever, and no refinement of `invalid_grant` (normative).** The provider's token is
@@ -14918,7 +14961,8 @@ An SDK MUST NOT send a field outside that set, and MUST omit (rather than send e
     `toString` / `__repr__` / `ToString` / `String()` rendering, request-body trace or §19 telemetry
     attribute, on the success path **and on every failure path** (a failed sign-in is exactly when a
     naive implementation logs the request body). The helper keeps neither after the call returns:
-    not in the SDK's state, not in a cache, not in an `OidcStateStore` (§12.3 rule 1), not on disk. An
+    not in the SDK's state, not in a cache, not in an `OidcStateStore` (§12.3 rule 1), not on disk, and
+    not sent anywhere but the token endpoint (no redirect is followed, §12.1 rule 3). An
     error built from the response MUST NOT embed the request. SDK documentation SHOULD tell the app to
     hold the raw nonce only for the length of the attempt. The hashed nonce is not a secret (it
     travels to the provider and into the token) and the contract does not restrict it.
@@ -14943,6 +14987,11 @@ at any status, dispatched on `error`. Status and `Retry-After` columns are what 
 A `401` from this grant never enters the §9 refresh guard, and an SDK has no session to refresh when
 it calls it. The `error_description` of a refusal other than `invalid_grant` is the server's own text
 and may be surfaced; the description of `invalid_grant` is surfaced as received and not interpreted.
+
+This deliberately differs from [§14.2](#§142-polling-normative--the-part-implementations-get-wrong)
+rule 6, which governs a poll; an SDK whose shared `/oauth2/*` mapper implements rule 6 may map this
+grant with its own, provided it dispatches on `error` at any status (amended 2026-10-31, C165-19; this
+is the one grant-local mapper §26.3 does not forbid).
 
 ### §37.4 `native_nonce` — the pair the two parties need (SHOULD)
 
@@ -15026,7 +15075,8 @@ not cache a provider token, a nonce or a result. It does not read the token's cl
 anything, including which `scopes` to ask for. And it does not call the discovery document to
 decide whether the server supports the grant: the grant URN is listed in `grant_types_supported`
 (D-N15), so a caller MAY read it, but whether *this client* may use it is the client's
-registration, and a refusal says so (`unauthorized_client`).
+registration, and a refusal says so (`unauthorized_client`). Reading `token_endpoint` from the
+discovery document, as every §12 operation does, is not that (amended 2026-10-31, C165-10).
 
 ### §37.9 Required tests
 
@@ -15045,13 +15095,16 @@ compared.
    the hash).
 3. **`provider_sent_verbatim`.** A UUID and a slug (`Corp-Okta`, mixed case) are each sent
    unchanged; a kind name (`google`) is sent as given and not translated; the test records **one**
-   request in total (no `sso_providers` lookup, no discovery fetch).
+   request to the token endpoint and no `sso_providers` lookup; a discovery fetch made to find
+   `token_endpoint` (cold cache, no configuration passed) is not counted, and the test may pre-warm
+   the cache or pass the configuration (amended 2026-10-31, C165-10).
 4. **`public_client_sends_client_id_only`** and **`confidential_client_sends_its_credential`**. A
    client constructed with no secret sends `client_id` and nothing else, and is not refused
    client-side; one configured with a secret sends `client_secret` in the body (never a Basic
    header), whichever of `client_secret_post` and `client_secret_basic` the mock names.
 5. **`empty_inputs_refused_locally`.** An empty `provider`, `id_token` or `nonce` raises the SDK's
-   validation error with **zero** requests; so does a slug-only client (§12.3 rule 4).
+   validation error with **zero** requests; a slug-only client raises the §12.3 rule 4
+   taxonomy error (`AuthError`), also with zero requests (amended 2026-10-31, C165-09).
 6. **`generic_invalid_grant_mapped`.** `400 {"error":"invalid_grant","error_description":"the
    provider ID token is not acceptable"}` raises `OAuthProtocolError` with `error` and
    `error_description` exposed and `message == "invalid_grant: the provider ID token is not
@@ -15078,7 +15131,8 @@ compared.
 12. **`no_secret_in_logs_or_errors`.** With fixture values for the ID token and the raw nonce, a
     success and **every** failure of tests 5 to 10 are run with the SDK's logging at its most
     verbose; the captured log output, each raised error's message, context and debug rendering, and
-    any §19 telemetry attributes are scanned for both fixture values and contain neither. The same
+    any §19 telemetry attributes (where the SDK emits §19 events for the call, C165-15) are scanned for
+    both fixture values and contain neither. The same
     scan covers `ProviderNonce.raw`'s rendering (§37.4) when `native_nonce` is shipped.
 13. **`native_nonce_pair`** (SDKs that ship §37.4). `raw` decodes to at least 32 bytes and is
     base64url without padding; `hashed` is 64 lower-case hexadecimal characters equal to `SHA-256(raw)`

@@ -3227,6 +3227,11 @@ where
             federation_login_state_repo: federation_login_state_repo.clone(),
             sso_handoff_code_repo: sso_handoff_code_repo.clone(),
             assertion_replay_repo: assertion_replay_repo.clone(),
+            // G-A (W2.3) — the native sign-in grant's replay guard; the same
+            // table the cleanup sweep above prunes.
+            provider_id_token_replay_repo: axiam_db::SurrealProviderIdTokenReplayRepository::new(
+                db_handle.clone(),
+            ),
             oidc_federation_service: oidc_federation_service.clone(),
             #[cfg(feature = "saml")]
             saml_federation_service: saml_federation_service.clone(),

@@ -443,6 +443,14 @@ const KNOWN_GRANT_TYPES: &[&str] = &[
     axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
     // G-7 — CIBA; its metadata is validated by `validate_ciba`.
     CIBA_GRANT_TYPE,
+    // G-A (W2.3) — native sign-in with a provider ID token. Registrable, never
+    // implied: no default grant set and no other registration path (DCR, CIMD)
+    // grants it, so a client holds it only when an administrator listed it.
+    // Permitted to a public client — the mobile app it exists for has no
+    // secret — because what it rests on is the provider's signed ID token,
+    // issued to a client ID the operator listed on the provider, and bound to
+    // the app's nonce; not the `client_id`.
+    axiam_oauth2::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE,
 ];
 
 /// G-7 — validate a registration's CIBA metadata (the rules are

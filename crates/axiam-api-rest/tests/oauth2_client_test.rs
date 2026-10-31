@@ -1325,6 +1325,8 @@ async fn update_oauth2_client_accepts_device_code_and_token_exchange_grants() {
         "urn:ietf:params:oauth:grant-type:device_code",
         "device_code",
         "urn:ietf:params:oauth:grant-type:token-exchange",
+        // G-A (W2.3).
+        "urn:axiam:params:oauth:grant-type:provider-id-token",
     ] {
         let req = test::TestRequest::put()
             .uri(&format!("/api/v1/oauth2-clients/{id}"))
@@ -1343,6 +1345,50 @@ async fn update_oauth2_client_accepts_device_code_and_token_exchange_grants() {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["grant_types"][0], grant);
     }
+}
+
+/// G-A (W2.3) — the provider-id-token grant is registrable through the admin
+/// API, on a public client too (the native app it exists for has no secret),
+/// and is never part of what a client gets without listing it.
+#[actix_rt::test]
+async fn a_public_native_client_can_be_registered_for_the_provider_id_token_grant() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let grant = axiam_oauth2::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE;
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "iOS app",
+            "redirect_uris": [],
+            "grant_types": [grant, "refresh_token"],
+            "scopes": ["openid", "profile"],
+            "token_endpoint_auth_method": "none"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["grant_types"],
+        serde_json::json!([grant, "refresh_token"])
+    );
+
+    // An ordinary registration does not acquire it.
+    let plain = create_test_client(&app, &token).await;
+    assert!(
+        !plain["grant_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == grant)
+    );
 }
 
 /// The impersonation capability marker stays NON-registrable through this API.

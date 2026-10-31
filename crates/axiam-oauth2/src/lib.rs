@@ -29,6 +29,7 @@ pub mod oidc;
 pub mod par;
 pub mod pkce;
 pub mod private_key_jwt;
+pub use token::provider_id_token;
 pub mod redirect_uri;
 pub mod refresh_reuse;
 pub mod resource;

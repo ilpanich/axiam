@@ -995,6 +995,9 @@ impl<C: Connection + Clone> AppState<C> {
                 federation_login_state_repo: SurrealFederationLoginStateRepository::new(db.clone()),
                 sso_handoff_code_repo: SurrealSsoHandoffCodeRepository::new(db.clone()),
                 assertion_replay_repo: assertion_replay_repo.clone(),
+                provider_id_token_replay_repo: axiam_db::SurrealProviderIdTokenReplayRepository::new(
+                    db.clone(),
+                ),
                 oidc_federation_service: None,
                 #[cfg(feature = "saml")]
                 // R101W2-01: signature verification under the same gate as

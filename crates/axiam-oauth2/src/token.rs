@@ -41,6 +41,12 @@ mod ciba_grant;
 #[path = "token_device.rs"]
 mod device_grant;
 
+/// G-A (W2.3) — native sign-in with a provider ID token. A child module, as
+/// the CIBA grant is, so that it issues through this module's private
+/// machinery; re-exported at the crate root as `crate::provider_id_token`.
+#[path = "provider_id_token.rs"]
+pub mod provider_id_token;
+
 /// The single `error_description` every token-endpoint client-authentication
 /// failure returns, whatever actually went wrong (SEC-086).
 ///
@@ -241,6 +247,17 @@ pub struct TokenRequest {
     /// for `grant_type=urn:openid:params:grant-type:ciba`. The REST layer
     /// routes that grant to `TokenService::exchange_ciba`.
     pub auth_req_id: Option<String>,
+
+    // --- G-A / native sign-in with a provider ID token (W2.3) ------------
+    /// The federation provider that issued `id_token`: its UUID or its
+    /// `provider_slug`, for
+    /// `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`.
+    pub provider: Option<String>,
+    /// The ID token the provider issued to the native app.
+    pub id_token: Option<String>,
+    /// The raw nonce the app generated and handed to the provider's SDK; the
+    /// ID token's `nonce` is this value or its SHA-256 hex.
+    pub nonce: Option<String>,
 }
 
 impl TokenRequest {

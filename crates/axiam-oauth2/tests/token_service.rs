@@ -1206,6 +1206,9 @@ fn base_req(grant: &str) -> TokenRequest {
         client_assertion: None,
         client_assertion_type: None,
         auth_req_id: None,
+        provider: None,
+        id_token: None,
+        nonce: None,
     }
 }
 

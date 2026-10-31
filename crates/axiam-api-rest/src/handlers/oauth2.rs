@@ -19,6 +19,9 @@ use axiam_oauth2::mtls::PresentedCertificate;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document_for,
 };
+use axiam_oauth2::provider_id_token::{
+    NATIVE_LOGIN_AUDIT_ACTION, PROVIDER_ID_TOKEN_GRANT_TYPE, PUBLIC_REFUSAL_DESCRIPTION,
+};
 use axiam_oauth2::redirect_uri::any_redirect_uri_matches;
 use axiam_oauth2::token::{
     CLIENT_AUTH_FAILED, IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
@@ -2197,6 +2200,14 @@ async fn token_inner<C: Connection + Clone>(
         // authenticated by the credential its registration names rather than
         // by the secret it was also, unavoidably, issued.
         return handle_token_exchange(tenant_id, form, &state, &ctx).await;
+    }
+
+    // G-A (W2.3) — native sign-in with a provider ID token. Its own arm for
+    // the reason the token exchange has one: the grant's collaborators (the
+    // OIDC federation service, the replay store, the consent records) are the
+    // REST layer's, and the audit record is written here.
+    if grant_type == PROVIDER_ID_TOKEN_GRANT_TYPE {
+        return handle_provider_id_token(&req, tenant_id, form, &state, &ctx).await;
     }
 
     // X2 / UMA 2.0 §3.3.1. Third grant dispatched here for the same structural
@@ -4827,6 +4838,303 @@ async fn handle_token_exchange<C: Connection + Clone>(
                 "token exchange refused"
             );
             build_oauth2_error_response(&e)
+        }
+    }
+}
+
+/// G-A (W2.3) — `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`:
+/// a native app signs in with an ID token a federation provider issued to it
+/// (plan §3.1).
+///
+/// The order is the design (see `axiam_oauth2::provider_id_token`):
+///
+/// 1. the client authenticates (a public client with `client_id` alone), its
+///    profile's rules run, it must hold the grant, and its token binding is
+///    decided — then the `oauth2_provider_id_token` bucket is charged;
+/// 2. the request's parameters, scopes and target are checked — before the
+///    provider token is touched, so a malformed request does not spend it;
+/// 3. `axiam-federation` verifies the token and resolves the user (§3.1
+///    steps 2–7), every refusal one generic `invalid_grant`;
+/// 4. consent is resolved for that user and decided (`consent_required` for
+///    anything needing a ceremony, D-N6);
+/// 5. the token set is issued, and `federation.native_login` recorded.
+///
+/// Every attempt that passes step 1 is audited, accepted or refused, with a
+/// reason code — never the token, never the nonce.
+async fn handle_provider_id_token<C: Connection + Clone>(
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    form: TokenRequest,
+    state: &web::Data<AppState<C>>,
+    ctx: &TokenRequestContext,
+) -> HttpResponse {
+    // --- 1. the client ---------------------------------------------------
+    let client = match state
+        .oauth2
+        .token_service
+        .authenticate_provider_id_token_client(tenant_id, &form, ctx)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            if matches!(e, OAuth2Error::InvalidClient(_)) {
+                // Detached, as at every other grant (§22.3 residual 1).
+                let tenant_repo = state.tenant_repo.clone();
+                let audit_repo = state.audit_repo.clone();
+                let attempted = form.client_id.clone();
+                let peer = peer_ip(req);
+                let forwarded = client_ip(req);
+                actix_web::rt::spawn(async move {
+                    append_client_auth_failure_audit(
+                        &tenant_repo,
+                        &audit_repo,
+                        tenant_id,
+                        attempted.as_deref(),
+                        PROVIDER_ID_TOKEN_GRANT_TYPE,
+                        peer,
+                        forwarded,
+                    )
+                    .await;
+                });
+            }
+            return build_oauth2_error_response(&e);
+        }
+    };
+
+    // The grant's own bucket, `login_per_min` per address — the preset of the
+    // password login it stands in for. Applied here rather than as route
+    // middleware because `/oauth2/token` serves every grant and the grant is
+    // known only once the body is read. Keyed on the caller's address, not on
+    // the client: a mobile app's one public `client_id` is shared by every
+    // person signing in with it, and a per-client bucket would let one caller
+    // lock all of them out. Charged after step 1, so an unauthenticated
+    // caller cannot spend it for a confidential client.
+    let address = client_ip(req).unwrap_or_else(|| "unknown".to_owned());
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_provider_id_token:{address}"),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.login_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Retry-After", "60"))
+            .json(OAuth2ErrorResponse {
+                error: "rate_limit_exceeded".into(),
+                error_description: "too many native sign-in attempts from this address".into(),
+            });
+    }
+
+    let client_id = client.client().client_id.clone();
+    let requested_provider = form.provider.clone();
+    let audit = NativeLoginAudit {
+        tenant_id,
+        client_id: &client_id,
+        requested_provider: requested_provider.as_deref(),
+        ip_address: peer_ip(req),
+    };
+
+    // --- 2. the request --------------------------------------------------
+    let grant = match state
+        .oauth2
+        .token_service
+        .prepare_provider_id_token_grant(client, &form)
+        .await
+    {
+        Ok(grant) => grant,
+        Err(e) => {
+            audit.refused(state, None, e.error_code()).await;
+            return build_oauth2_error_response(&e);
+        }
+    };
+    let native = match axiam_oauth2::provider_id_token::native_request(&form) {
+        Ok(native) => native,
+        Err(e) => return build_oauth2_error_response(&e),
+    };
+
+    // --- 3. §3.1 steps 2–7 -----------------------------------------------
+    // No federation service means no encryption key, so no provider's
+    // configuration can be read and none can be trusted: the same generic
+    // refusal as an unknown provider.
+    let Some(federation) = state.federation.oidc_federation_service.as_ref() else {
+        audit.refused(state, None, "federation_unavailable").await;
+        return build_oauth2_error_response(&OAuth2Error::InvalidGrant(
+            PUBLIC_REFUSAL_DESCRIPTION.into(),
+        ));
+    };
+    let subject = match federation
+        .verify_native_id_token(
+            &state.tenant_repo,
+            &state.federation.provider_id_token_replay_repo,
+            tenant_id,
+            &native,
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+    {
+        Ok(subject) => subject,
+        Err(e) => {
+            audit.refused(state, None, e.reason_code()).await;
+            return build_oauth2_error_response(&axiam_oauth2::provider_id_token::refusal_for(&e));
+        }
+    };
+
+    // --- 4. consent, for the user the token signed in --------------------
+    let scope = grant.scopes().join(" ");
+    let (sensitive, sensitive_switch_off) =
+        resolve_sensitive_scopes(state, tenant_id, subject.user_id, &client_id, Some(&scope)).await;
+    let external =
+        resolve_external_consent(state, tenant_id, subject.user_id, &client_id, Some(&scope)).await;
+    let consent = axiam_oauth2::provider_id_token::ConsentState {
+        sensitive,
+        sensitive_switch_off,
+        external,
+    };
+
+    // --- 5. the token set --------------------------------------------------
+    match state
+        .oauth2
+        .token_service
+        .issue_provider_id_token_grant(
+            tenant_id,
+            &grant,
+            &subject,
+            native.nonce,
+            consent,
+            axiam_oauth2::provider_id_token::SignInOrigin {
+                ip_address: client_ip(req),
+                user_agent: crate::extractors::client_info::user_agent(req),
+            },
+            ctx,
+        )
+        .await
+    {
+        Ok(response) => {
+            // Audited before the tokens are returned: for a first sign-in
+            // this record is the evidence that a provider's token created an
+            // AXIAM user.
+            audit.accepted(state, &subject, grant.scopes()).await;
+            HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(response)
+        }
+        Err(e) => {
+            audit.refused(state, Some(&subject), e.error_code()).await;
+            build_oauth2_error_response(&e)
+        }
+    }
+}
+
+/// The `federation.native_login` audit record of one request (step 9).
+///
+/// What it records: the client, the provider (the resolved one once known;
+/// until then the request's name for it, bounded), the outcome, a reason
+/// code, and whether the sign-in provisioned the user. What it never records:
+/// the ID token, the nonce, or anything derived from either.
+struct NativeLoginAudit<'a> {
+    tenant_id: Uuid,
+    client_id: &'a str,
+    requested_provider: Option<&'a str>,
+    ip_address: Option<String>,
+}
+
+impl NativeLoginAudit<'_> {
+    async fn refused<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: Option<&axiam_federation::native_login::NativeSubject>,
+        reason_code: &str,
+    ) {
+        tracing::info!(
+            target: "axiam::audit",
+            event = NATIVE_LOGIN_AUDIT_ACTION,
+            tenant_id = %self.tenant_id,
+            client_id = %self.client_id,
+            outcome = "refused",
+            reason = reason_code,
+            "native sign-in refused"
+        );
+        self.append(state, subject, AuditOutcome::Failure, reason_code, None)
+            .await;
+    }
+
+    async fn accepted<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: &axiam_federation::native_login::NativeSubject,
+        scopes: &[String],
+    ) {
+        tracing::info!(
+            target: "axiam::audit",
+            event = NATIVE_LOGIN_AUDIT_ACTION,
+            tenant_id = %self.tenant_id,
+            client_id = %self.client_id,
+            outcome = "accepted",
+            user_id = %subject.user_id,
+            federation_config_id = %subject.provider_id,
+            jit_provisioned = subject.newly_provisioned,
+            "native sign-in"
+        );
+        self.append(
+            state,
+            Some(subject),
+            AuditOutcome::Success,
+            "accepted",
+            Some(scopes),
+        )
+        .await;
+    }
+
+    async fn append<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: Option<&axiam_federation::native_login::NativeSubject>,
+        outcome: AuditOutcome,
+        reason_code: &str,
+        scopes: Option<&[String]>,
+    ) {
+        let accepted = outcome == AuditOutcome::Success;
+        let (actor_id, actor_type) = match subject {
+            Some(s) if accepted => (s.user_id, ActorType::User),
+            _ => (Uuid::nil(), ActorType::System),
+        };
+        let metadata = serde_json::json!({
+            "client_id": self.client_id,
+            "outcome": if accepted { "accepted" } else { "refused" },
+            "reason_code": reason_code,
+            // Caller-supplied until resolved, so bounded like a client id.
+            "provider": subject
+                .map(|s| s.provider_id.to_string())
+                .or_else(|| self.requested_provider.map(truncate_bytes_on_char_boundary)),
+            "provider_name": subject.map(|s| s.provider_name.as_str()),
+            "provider_kind": subject.map(|s| s.provider_kind),
+            "provider_inherited": subject.map(|s| s.inherited),
+            "user_id": subject.map(|s| s.user_id),
+            "external_subject": subject.map(|s| s.external_subject.as_str()),
+            "newly_provisioned": subject.is_some_and(|s| s.newly_provisioned),
+            "granted_scopes": scopes.map(|s| s.join(" ")),
+        });
+        if let Err(e) = state
+            .audit_repo
+            .append(CreateAuditLogEntry {
+                tenant_id: self.tenant_id,
+                actor_id,
+                actor_type,
+                action: NATIVE_LOGIN_AUDIT_ACTION.into(),
+                resource_id: subject.map(|s| s.provider_id),
+                outcome,
+                ip_address: self.ip_address.clone(),
+                metadata: Some(metadata),
+            })
+            .await
+        {
+            // Never propagated: a sign-in must not fail because the audit sink
+            // is unavailable (T-15-04).
+            tracing::error!(
+                error = %e,
+                tenant_id = %self.tenant_id,
+                "failed to write the {NATIVE_LOGIN_AUDIT_ACTION} audit row"
+            );
         }
     }
 }

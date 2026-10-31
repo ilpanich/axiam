@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native sign-in with a provider ID token: a new grant at `POST /oauth2/token`,
+  `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`, with
+  `provider` (a federation provider's UUID or `provider_slug`), `id_token` and
+  `nonce` (the app's raw nonce; the token's `nonce` may be it or its SHA-256
+  hex), optional `scope` and `resource`. A mobile app that signed the user in
+  with the provider's own SDK (Sign in with Google, Sign in with Apple, an OIDC
+  provider's native SDK) exchanges the ID token for the client's ordinary
+  sign-in token set: an access token naming the client and a new session, a
+  refresh token under the usual rotation and client binding, and an AXIAM ID
+  token carrying the request's nonce when `openid` was asked; DPoP- and
+  certificate-bound clients get bound tokens. Off unless an operator enables
+  `native_login` on an OIDC provider and lists the app's client IDs, and only
+  for a client whose `grant_types` lists the grant (public clients included).
+  Every refusal of the token or the configuration is one `invalid_grant`
+  ("the provider ID token is not acceptable"); a scope that would need the
+  user's consent is `consent_required`. Rate limited per address at
+  `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` (bucket `oauth2_provider_id_token`), and
+  audited as `federation.native_login` (never the token or the nonce). (G-A)
+
 ### Changed
 
 - A refused refresh-token replay now revokes the session the replayed token

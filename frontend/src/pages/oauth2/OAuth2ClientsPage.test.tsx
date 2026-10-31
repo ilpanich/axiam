@@ -986,3 +986,62 @@ describe("OAuth2ClientsPage — device-code grant on a confidential client (1.1.
     );
   });
 });
+
+// ─── G-A: native sign-in grant ───────────────────────────────────────────────
+
+const PROVIDER_ID_TOKEN_GRANT =
+  "urn:axiam:params:oauth:grant-type:provider-id-token";
+
+describe("OAuth2ClientsPage — provider ID token grant (G-A)", () => {
+  it("offers the grant, unticked, with its helper text, on the create form", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    const box = within(dialog).getByLabelText(PROVIDER_ID_TOKEN_GRANT);
+    expect(box).not.toBeChecked();
+    expect(dialog).toHaveTextContent(
+      "Native app sign-in with a provider ID token (e.g. Sign in with Google/Apple on mobile). Also requires native login to be enabled on the federation provider.",
+    );
+  });
+
+  it("submits the grant when selected", async () => {
+    apiMock.get.mockResolvedValue(res(clients));
+    apiMock.post.mockResolvedValue(res({ ...clients[0], client_secret: "s" }));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Client/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Mobile");
+    await userEvent.click(within(dialog).getByLabelText(PROVIDER_ID_TOKEN_GRANT));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalled());
+    expect(apiMock.post.mock.calls[0][1].grant_types).toEqual([
+      "authorization_code",
+      PROVIDER_ID_TOKEN_GRANT,
+    ]);
+  });
+
+  it("shows a held grant ticked in the edit form and keeps it on save", async () => {
+    apiMock.get.mockResolvedValue(
+      res([{ ...clients[0], grant_types: ["authorization_code", PROVIDER_ID_TOKEN_GRANT] }]),
+    );
+    apiMock.put.mockResolvedValue(res(clients[0]));
+    renderWithProviders(<OAuth2ClientsPage />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Edit OAuth2 client Web App" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText(PROVIDER_ID_TOKEN_GRANT)).toBeChecked();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalled());
+    expect(apiMock.put.mock.calls[0][1].grant_types).toContain(PROVIDER_ID_TOKEN_GRANT);
+  });
+
+  it("labels the grant in the list rather than printing the URN", async () => {
+    apiMock.get.mockResolvedValue(
+      res([{ ...clients[0], grant_types: [PROVIDER_ID_TOKEN_GRANT] }]),
+    );
+    renderWithProviders(<OAuth2ClientsPage />);
+    expect(await screen.findByText("Provider ID Token")).toBeInTheDocument();
+  });
+});

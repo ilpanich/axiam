@@ -202,11 +202,27 @@ export interface CreateOAuth2ClientResponse extends OAuth2Client {
 
 // ─── Available options ────────────────────────────────────────────────────────
 
+/**
+ * G-A — native app sign-in with a provider ID token (Sign in with Google /
+ * Apple on mobile). Accepted on public clients, and in no default set: it is
+ * granted per client, and the federation provider must also enable native
+ * login. Mirrors `PROVIDER_ID_TOKEN_GRANT_TYPE` and `KNOWN_GRANT_TYPES` on the server.
+ */
+export const PROVIDER_ID_TOKEN_GRANT =
+  "urn:axiam:params:oauth:grant-type:provider-id-token";
+
 export const GRANT_TYPES = [
   "authorization_code",
   "client_credentials",
   "refresh_token",
+  PROVIDER_ID_TOKEN_GRANT,
 ] as const;
+
+/** Per-grant explanatory text shown under the option in the client editor. */
+export const GRANT_TYPE_HINTS: Record<string, string> = {
+  [PROVIDER_ID_TOKEN_GRANT]:
+    "Native app sign-in with a provider ID token (e.g. Sign in with Google/Apple on mobile). Also requires native login to be enabled on the federation provider.",
+};
 
 export type GrantType = (typeof GRANT_TYPES)[number];
 

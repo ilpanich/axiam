@@ -252,6 +252,107 @@ export function validateTokenExchangeTrust(
 }
 
 /**
+ * G-A — trust for accepting this provider's ID tokens from native apps
+ * (`native_login` on the federation config; the OAuth2 grant
+ * `urn:axiam:params:oauth:grant-type:provider-id-token`).
+ *
+ * Off by default and separate from browser login: configuring a provider for
+ * "Sign in with X" in the browser is not agreement to accept ID tokens minted
+ * for a mobile app. Mirrors `NativeLoginTrust`
+ * (`crates/axiam-core/src/models/federation.rs`); the wire type is
+ * `NativeLoginTrustRequest` / `NativeLoginTrustResponse` in axiam-api-rest.
+ *
+ * Hand-written: `sdks/openapi.json` has not been regenerated for it yet, so
+ * there is no generated type to import. Reconcile when the spec is next
+ * regenerated.
+ */
+export interface NativeLoginTrust {
+  enabled: boolean;
+  /** iOS bundle ID / Android client ID / Apple app ID the native SDK uses. */
+  client_ids: string[];
+  max_token_age_secs: number;
+}
+
+/** Server default: off, no client IDs, 300 s. Mirrors `NativeLoginTrust::default()`. */
+export const DEFAULT_NATIVE_LOGIN_TRUST: NativeLoginTrust = {
+  enabled: false,
+  client_ids: [],
+  max_token_age_secs: 300,
+};
+
+/** `MAX_NATIVE_LOGIN_CLIENT_IDS` on the server. */
+export const MAX_NATIVE_LOGIN_CLIENT_IDS = 64;
+/** `MAX_NATIVE_LOGIN_CLIENT_ID_LEN` on the server (bytes). */
+export const MAX_NATIVE_LOGIN_CLIENT_ID_LEN = 512;
+
+/** Byte length, as the server counts it (`str::len`). */
+function utf8Length(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/**
+ * Check one client ID against the list it would join, in the server's order
+ * (blank, length, duplicate). Returns a reason or `null`.
+ */
+export function validateNativeLoginClientId(
+  candidate: string,
+  existing: readonly string[],
+): string | null {
+  if (candidate.trim() === "") {
+    return "A client ID must not be blank.";
+  }
+  const len = utf8Length(candidate);
+  if (len > MAX_NATIVE_LOGIN_CLIENT_ID_LEN) {
+    return `A client ID of ${len} characters is too long; the maximum is ${MAX_NATIVE_LOGIN_CLIENT_ID_LEN}.`;
+  }
+  if (existing.includes(candidate)) {
+    return `'${candidate}' is already listed.`;
+  }
+  if (existing.length >= MAX_NATIVE_LOGIN_CLIENT_IDS) {
+    return `At most ${MAX_NATIVE_LOGIN_CLIENT_IDS} client IDs may be listed.`;
+  }
+  return null;
+}
+
+/**
+ * Client-side mirror of `NativeLoginTrust::validate`.
+ *
+ * The server is the authority and rejects the same cases (its own error is
+ * still shown if it disagrees); this lets an operator find out before they
+ * submit. Like the server, every rule except the non-empty one applies whether
+ * or not `enabled` is set. Returns a reason, or `null` when acceptable.
+ */
+export function validateNativeLoginTrust(t: NativeLoginTrust): string | null {
+  if (t.enabled && t.client_ids.length === 0) {
+    return "Native sign-in needs at least one client ID when enabled. There is no accept-all value, and the web client ID is accepted only when it is listed.";
+  }
+  if (t.client_ids.length > MAX_NATIVE_LOGIN_CLIENT_IDS) {
+    return `Native sign-in lists ${t.client_ids.length} client IDs; the maximum is ${MAX_NATIVE_LOGIN_CLIENT_IDS}.`;
+  }
+  if (t.client_ids.some((c) => c.trim() === "")) {
+    return "Native sign-in client IDs must not contain a blank entry.";
+  }
+  const tooLong = t.client_ids.find(
+    (c) => utf8Length(c) > MAX_NATIVE_LOGIN_CLIENT_ID_LEN,
+  );
+  if (tooLong !== undefined) {
+    return `A native sign-in client ID of ${utf8Length(tooLong)} characters is too long; the maximum is ${MAX_NATIVE_LOGIN_CLIENT_ID_LEN}.`;
+  }
+  const dup = t.client_ids.find((c, i) => t.client_ids.indexOf(c) !== i);
+  if (dup !== undefined) {
+    return `Native sign-in lists client ID '${dup}' more than once.`;
+  }
+  if (
+    !Number.isInteger(t.max_token_age_secs) ||
+    t.max_token_age_secs < 1 ||
+    t.max_token_age_secs > MAX_TOKEN_AGE_CEILING_SECS
+  ) {
+    return `Native sign-in maximum token age must be a whole number between 1 and ${MAX_TOKEN_AGE_CEILING_SECS} seconds.`;
+  }
+  return null;
+}
+
+/**
  * Server → client representation of a federation config.
  * Note: `client_secret` is write-only and is NEVER returned by the backend.
  */
@@ -266,6 +367,8 @@ export interface FederationConfig {
   enabled: boolean;
   /** X4. Always present on responses; absent on pre-X4 servers. */
   token_exchange?: TokenExchangeTrust;
+  /** G-A. Absent on a server without native sign-in. */
+  native_login?: NativeLoginTrust;
   // --- login-provider fields (absent on a pre-1.30 server) ---
   provider_kind?: ProviderKind;
   provider_slug?: string | null;
@@ -311,6 +414,7 @@ export interface CreateFederationConfigRequest {
   idp_signing_cert_pem?: string | null;
   allowed_algorithms?: string[];
   token_exchange?: TokenExchangeTrust;
+  native_login?: NativeLoginTrust;
   provider_kind?: ProviderKind;
   provider_slug?: string | null;
   allow_tenant_inheritance?: boolean;
@@ -349,6 +453,8 @@ export interface UpdateFederationConfigRequest {
    * believed they had removed.
    */
   token_exchange?: TokenExchangeTrust;
+  /** Replaced wholesale, exactly like `token_exchange`. OIDC providers only may enable it. */
+  native_login?: NativeLoginTrust;
   // `provider_kind` is deliberately not updatable: it selects the protocol and
   // the override key, and changing it on a live config would silently re-point
   // which inherited provider a tenant is shadowing.

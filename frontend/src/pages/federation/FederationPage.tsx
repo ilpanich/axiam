@@ -4,6 +4,9 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import {
   federationService,
   validateTokenExchangeTrust,
+  validateNativeLoginTrust,
+  DEFAULT_NATIVE_LOGIN_TRUST,
+  type NativeLoginTrust,
   DEFAULT_TOKEN_EXCHANGE_TRUST,
   PROVIDER_KINDS,
   PROVIDER_KIND_DEFAULTS,
@@ -19,6 +22,7 @@ import { ProviderIconField } from "./ProviderIconField";
 import { ProviderMark } from "@/components/providers/ProviderMark";
 import { useAuthStore } from "@/stores/auth";
 import { TokenExchangeTrustEditor } from "./TokenExchangeTrustEditor";
+import { NativeLoginTrustEditor } from "./NativeLoginTrustEditor";
 import {
   parseScopeMap,
   stringifyAudiences,
@@ -727,6 +731,9 @@ function useConfigFormState() {
   const [tokenExchange, setTokenExchange] = useState<TokenExchangeTrust>(
     DEFAULT_TOKEN_EXCHANGE_TRUST,
   );
+  const [nativeLogin, setNativeLogin] = useState<NativeLoginTrust>(
+    DEFAULT_NATIVE_LOGIN_TRUST,
+  );
   const [audiencesText, setAudiencesText] = useState("");
   const [scopeMapText, setScopeMapText] = useState("");
 
@@ -790,6 +797,7 @@ function useConfigFormState() {
     setEnabled(true);
     setError("");
     setTokenExchange(DEFAULT_TOKEN_EXCHANGE_TRUST);
+    setNativeLogin(DEFAULT_NATIVE_LOGIN_TRUST);
     setAudiencesText("");
     setScopeMapText("");
   }
@@ -833,6 +841,7 @@ function useConfigFormState() {
     setError("");
     const trust = config.token_exchange ?? DEFAULT_TOKEN_EXCHANGE_TRUST;
     setTokenExchange(trust);
+    setNativeLogin(config.native_login ?? DEFAULT_NATIVE_LOGIN_TRUST);
     setAudiencesText(stringifyAudiences(trust.accepted_audiences));
     setScopeMapText(stringifyScopeMap(trust.scope_map));
   }
@@ -920,6 +929,8 @@ function useConfigFormState() {
     setError,
     tokenExchange,
     setTokenExchange,
+    nativeLogin,
+    setNativeLogin,
     audiencesText,
     setAudiencesText,
     scopeMapText,
@@ -1219,6 +1230,15 @@ export function FederationPage() {
         return;
       }
       payload.token_exchange = trust;
+
+      // G-A. Same rule: the complete block, replaced wholesale. Only OIDC
+      // providers carry it — the server refuses an enabled block elsewhere.
+      const nativeError = validateNativeLoginTrust(editForm.nativeLogin);
+      if (nativeError) {
+        editForm.setError(nativeError);
+        return;
+      }
+      payload.native_login = editForm.nativeLogin;
     }
 
     editMutation.mutate({ id: editConfig.id, payload });
@@ -1463,6 +1483,14 @@ export function FederationPage() {
           scopeMapText={editForm.scopeMapText}
           onScopeMapTextChange={editForm.setScopeMapText}
           isOidc={editConfig?.protocol !== "Saml"}
+          idPrefix="edit"
+        />
+        {/* G-A — native app sign-in trust. A separate trust decision from
+            both browser login and token exchange; OIDC only. */}
+        <NativeLoginTrustEditor
+          value={editForm.nativeLogin}
+          onChange={editForm.setNativeLogin}
+          isOidc={editConfig?.protocol === "OidcConnect"}
           idPrefix="edit"
         />
       </FormDialog>

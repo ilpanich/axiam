@@ -8,6 +8,8 @@ import {
   scopeCeilingMessage,
   DEVICE_CODE_GRANT,
   GRANT_TYPES,
+  GRANT_TYPE_HINTS,
+  PROVIDER_ID_TOKEN_GRANT,
   OAUTH2_SCOPES,
   OAUTH2_SCOPE_HINTS,
   CLIENT_PROFILES,
@@ -47,6 +49,7 @@ const GRANT_TYPE_LABELS: Record<string, string> = {
   authorization_code: "Auth Code",
   client_credentials: "Client Creds",
   refresh_token: "Refresh Token",
+  [PROVIDER_ID_TOKEN_GRANT]: "Provider ID Token",
 };
 
 function GrantTypeBadge({ type }: { type: string }) {
@@ -631,6 +634,7 @@ function ClientFormFields({
         options={GRANT_TYPES}
         selected={grantTypes}
         onChange={onGrantTypesChange}
+        hintMap={GRANT_TYPE_HINTS}
       />
       <DeviceGrantNotice
         grantTypes={grantTypes}

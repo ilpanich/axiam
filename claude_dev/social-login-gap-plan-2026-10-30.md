@@ -515,6 +515,80 @@ say a cross-client presentation is always audited
 one invocation (per-crate binaries instead); the frontend suite (no console
 change in W1).
 
+#### W2 — native sign-in (`claude/social-gap-w2`, closed 2026-10-31)
+
+**Base** `fc8f888` (the plan branch after W1). **PR:** none (single PR after
+W5); the plan branch was fast-forwarded to the wave head. **Commits**, each
+signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `0349f3c` | W2.1 | `NativeLoginTrust` on OIDC federation configs (off by default; 1–64 client IDs ≤ 512 bytes, no duplicates; `max_token_age_secs` 1..=3600, default 300; OIDC only); schema **v111**; admin `PUT /api/v1/federation-configs/{id}` (not the PATCH §3.1 named); never on the public provider listing |
+| `9b733e4` | W2.2 | `axiam-federation::native_login` (steps 2–7); `token_shape` marker list shared with X4; `provider_resolution` moved from axiam-api-rest; a crate-private multi-audience core behind `verify_id_token_full` (browser behaviour unchanged); `federation_id_token_replay` (schema **v112**, own trait, sweep, write-conflict retry) |
+| `8157a17` | orchestrator | D-N10, D-N11; §3.1 steps 6–7 corrected |
+| `9c24a61` | W2.3 | grant `urn:axiam:params:oauth:grant-type:provider-id-token`; dispatch; limiter bucket; audit `federation.native_login`; session + `sid` |
+| `2811532` | orchestrator | D-N12…D-N15 |
+| `75f79e6` | W2.4 | admin UI trust card; grant option in the client editor; coverage matrix |
+| `c4e7e18` | W2.5 | discovery lists the grant (D-N15); OpenAPI + management registry regenerated; `docs/api/native-sign-in.md`; website page and blocks; T-489…T-492 (model 2.45.0, 492 threats); `CLAUDE.md` protocol line |
+| `6346fd3` | F4 | `security-review-social-gap-w2-2026-10-31.md`: **1 High**, 1 Medium, 3 Low, 5 Info |
+| `e2c0be9` | orchestrator | D-N16…D-N19 |
+| `81d0dee` `34f2e14` `a12dbe5` | sweep 1 | #828, #829, #830 |
+| `2ba70c7` | orchestrator | D-N18 wording: the per-client binding is not part of 1.2.0 |
+| `94f3483` | F4 addendum 1 | 9 of 10 closed, F4-W2-10 partly; 1 Low + 4 Info new → #831 |
+| `ace76a9` | orchestrator | D-N20, D-N21 |
+| `24f6929` | sweep 2 | #831 |
+| `64380ae` | F4 addendum 2 | all closed or closed as decided; no new finding; F4-W2-15 is a PR-description note |
+
+**Deltas against §4 and §3.1.**
+- **Replay store (D-N10, then D-N19, then F4-W2-11):** a dedicated table, not
+  `oauth2_proof_replay`; keyed deployment-wide on (issuer, SHA-256 of the JWS
+  signing input), kept to `exp` + 2 × leeway, left out of the tenant purge
+  (deleting early would re-enable a token elsewhere).
+- **Subject resolution (D-N11):** the browser path (`map_identity` →
+  `provision_or_link_identity`); there is no `subject_mapping` setting.
+- **Nonce (D-N16, D-N21):** hashed form only — SHA-256(request nonce) hex,
+  either case, must equal the claim. §3.1 step 5's raw form is withdrawn: it
+  bound nothing.
+- **Audience (D-N17):** azp-first; Google Android tokens (`aud` = web,
+  `azp` = Android) sign in with only the app IDs listed.
+- **Grant (D-N12…D-N14):** a session per sign-in; `fapi2` clients under FAPI
+  rules; `consent_required` spends the token, every user-independent check
+  (including the sensitive-scope switch and the nonce bound) runs before it.
+  An omitted `scope` is the empty set. The `login.post_auth` gate runs before
+  issuance (#828; CONTRACT §22 lists the grant, version not bumped — W4).
+- **Limiter:** `oauth2_provider_id_token:{tenant}:{ip}`; no address is refused.
+- **Residuals recorded:** per-tenant (not per-client) trust, T-489 (D-N18);
+  the first-sign-in account-existence signal shared with browser login, T-491
+  (D-N20); JWKS refetch reachable by caller-chosen `kid`, T-491.
+- **Beyond scope, accepted:** `website/src/docs/operate.ts` sweep list was two
+  short (`oauth2_refresh_token` also missing) — fixed.
+- **OpenAPI** regenerated in W2.5 and sweep 1; `TokenRequest` gains
+  `provider`, `id_token`, `nonce`. W4 re-vendors `openapi.json`,
+  `management-registry.json` and CONTRACT §22.
+
+**Tests**, before → after: `axiam-federation` lib 349 → 404; `axiam-oauth2`
+lib 636 → 648; new `provider_id_token_test` 21, `federation_id_token_replay_test`
+4; `oauth2_client_test` 45 → 46; `axiam-db` schema tests +1 (v112); frontend
++29 (2416 total, line coverage 96.61 %). Unchanged and green:
+`external_token_exchange_test` 28, `token_exchange_test` 31, `oauth2_flow_test`
+46, `token_service` 166, `rate_limit_bucket_names_test` 21,
+`sec095_federated_login_gate_test` 4, `axiam-server` lib 175, `cleanup_task` 65.
+
+**Issues filed:** [#828](https://github.com/ilpanich/axiam/issues/828),
+[#829](https://github.com/ilpanich/axiam/issues/829),
+[#830](https://github.com/ilpanich/axiam/issues/830),
+[#831](https://github.com/ilpanich/axiam/issues/831) — all fixed in-wave, close
+with the 1.2.0 PR. **Open after two sweeps:** F4-W2-15 (Info, PR note): a dev
+database that ran the pre-sweep v112 keeps the old required fields and fails
+closed on native sign-in — drop `federation_id_token_replay` and the v112
+stamp; no release affected. **Optional, not filed:** a non-base64 or DER
+signature segment is audited `claim_rejected` rather than `bad_signature`
+(same wire answer); the OpenAPI text says "lower-case SHA-256 hex" (accurate
+guidance; say "either case" at the next regeneration).
+
+**Not run:** OIDF conformance suite; a real Google/Apple token (the stub IdP
+mints the shapes); `npm run test:a11y` (CI step).
+
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,
 plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.

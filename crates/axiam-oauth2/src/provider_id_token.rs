@@ -49,7 +49,10 @@
 //!    written, so a malformed request does not spend the token.
 //! 3. **Steps 2–7** run in `axiam-federation` (the provider, the signature,
 //!    the claims, the shape, the replay record, the user). Every refusal is
-//!    one `invalid_grant` on the wire ([`refusal_for`]).
+//!    one `invalid_grant` on the wire ([`refusal_for`]). The token endpoint
+//!    then fires `login.post_auth` for the resolved user (CONTRACT §22,
+//!    F4-W2-01) — the gate every interactive sign-in passes — and a veto is
+//!    the same `invalid_grant`.
 //! 4. **Consent** (D-N6): a scope that would need a consent ceremony is
 //!    `consent_required` ([`decide_consent`]) — there is nobody to ask on
 //!    this request, so it is answered as `prompt=none` is at `/authorize`.
@@ -301,6 +304,12 @@ impl ProviderIdTokenGrant {
     /// The scopes this sign-in will be granted, in request order.
     pub fn scopes(&self) -> &[String] {
         &self.scopes
+    }
+
+    /// The organization of the requesting tenant, as the client
+    /// authentication read it — what `login.post_auth` is told (F4-W2-01).
+    pub fn organization_id(&self) -> Uuid {
+        self.client.organization_id
     }
 }
 

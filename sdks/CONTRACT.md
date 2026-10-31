@@ -6314,7 +6314,9 @@ requires a network call to be understood is not a contract.
 (clarified 2026-08, SEC-095).** The event fires on password authentication, on
 SAML ACS (`POST /api/v1/auth/federation/saml/acs`), on the OIDC callback
 (`POST /api/v1/auth/federation/oidc/callback`) and on usernameless passkey
-sign-in (`POST /api/v1/auth/webauthn/authenticate/discoverable/finish`) — in
+sign-in (`POST /api/v1/auth/webauthn/authenticate/discoverable/finish`) and on
+native sign-in with a provider ID token (`POST /oauth2/token` with
+`grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`) — in
 every case after the credentials verify and before any session or token is
 issued, which is what the row above has always said. MFA completion and the
 username-bound WebAuthn `authenticate/finish` ceremony are **not** separate

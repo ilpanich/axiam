@@ -203,8 +203,8 @@ access token carries `client_id` and `sid` (see [Session](#the-session-it-create
 
 **One answer for every refusal.** A wrong audience, a bad signature, an expired
 or replayed token, a provider that is switched off, a provider that does not
-exist and an account that may not sign in are all the same `invalid_grant` with
-the same description. A caller cannot tell a wrong token from a wrong
+exist, an account that may not sign in and a `login.post_auth` veto are all the
+same `invalid_grant` with the same description. A caller cannot tell a wrong token from a wrong
 configuration. The reason is in the server log and the audit record
 (`reason_code`), where an operator can read it.
 
@@ -256,7 +256,12 @@ The order is the design. Each step runs before the next.
 7. **Replay.** The token's SHA-256 is recorded; a second presentation is refused
    (see [Single use](#single-use-and-replay)).
 8. **User.** The subject is resolved (see [Who the user is](#who-the-user-is))
-   and the account must be allowed to act (active, not locked).
+   and the account must be allowed to act (active, not locked). Then the
+   `login.post_auth` reactor event fires for that user, as it does on every
+   interactive sign-in ([`sdks/CONTRACT.md`](../../sdks/CONTRACT.md) §22): a
+   veto, a `require_mfa` (this grant has no step-up to perform) or a
+   `fail_closed` reactor failure refuses the sign-in as the same generic
+   `invalid_grant`, before any session or token exists.
 9. **Consent**, then **issue**: the session, the access token, the optional
    refresh token and the optional ID token.
 
@@ -375,7 +380,8 @@ The `reason_code` is where a refusal is told apart: `provider_not_found`,
 `bad_signature`, `wrong_issuer`, `wrong_audience`, `azp_refused`, `expired`,
 `too_old`, `issued_in_future`, `claim_rejected`, `wrong_token_shape`,
 `nonce_missing`, `nonce_mismatch`, `replayed`, `replay_guard_unavailable`,
-`subject_unmapped`, `account_refused`, `server_error`, and `accepted`.
+`subject_unmapped`, `account_refused`, `reactor_denied` (the `login.post_auth`
+gate refused), `server_error`, and `accepted`.
 
 **The record never carries the ID token or the nonce.** Until a provider
 resolves, `provider` is what the request named (bounded in length).

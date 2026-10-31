@@ -35,6 +35,7 @@ use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
 };
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::reactor::{DynReactorGate, ReactorOutcome, SharedReactorGate};
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, FederationConfigRepository, OAuth2ClientRepository,
@@ -285,7 +286,15 @@ macro_rules! test_app {
     ($f:expr) => {
         test_app!($f, 19, false)
     };
-    ($f:expr, $login:expr, $paths:expr) => {{
+    ($f:expr, $login:expr, $paths:expr) => {
+        test_app!(@build $f, $login, $paths, None)
+    };
+    // F4-W2-01: with a reactor gate installed as the composition root
+    // installs it — on `AuthService` and on the token service.
+    (@gate $f:expr, $gate:expr) => {
+        test_app!(@build $f, 19, false, Some($gate))
+    };
+    (@build $f:expr, $login:expr, $paths:expr, $gate:expr) => {{
         let auth = test_auth_config($paths);
         let jwks_cache = Arc::new(JwksCache::new_allow_private_networks());
         let mut state = AppState::for_test($f.db.clone(), auth.clone());
@@ -310,6 +319,16 @@ macro_rules! test_app {
         // Below the counter's cold-entry threshold (20), so a test's budget
         // does not depend on where in the wall-clock minute it runs.
         state.rate_limit_cfg.login_per_min = $login;
+        let gate: Option<SharedReactorGate> = $gate;
+        if let Some(gate) = gate {
+            state.auth_service = state.auth_service.clone().with_reactor_gate(gate.clone());
+            state.oauth2.token_service = state
+                .oauth2
+                .token_service
+                .clone()
+                .with_reactor_gate(gate.clone());
+            state.events.reactor_gate = gate;
+        }
         let sessions = Arc::new(SurrealSessionRepository::new($f.db.clone()));
         test::init_service(
             App::new()
@@ -981,6 +1000,142 @@ async fn the_token_exchange_still_refuses_the_same_id_token() {
         status, 200,
         "an ID token labelled jwt is still refused: {body}"
     );
+}
+
+// ===========================================================================
+// The `login.post_auth` gate (F4-W2-01, #828)
+// ===========================================================================
+
+/// A reactor gate with one fixed answer that records what it was asked — the
+/// SEC-095 tests' double: what is under test is the call site.
+struct FixedGate {
+    outcome: ReactorOutcome,
+    seen: Arc<std::sync::Mutex<Vec<(&'static str, Value)>>>,
+}
+
+impl DynReactorGate for FixedGate {
+    fn intercept_dyn<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        event: &'static str,
+        payload: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
+        self.seen.lock().unwrap().push((event, payload));
+        Box::pin(std::future::ready(self.outcome.clone()))
+    }
+
+    fn can_dispatch_dyn(&self) -> bool {
+        true
+    }
+}
+
+type GateLog = Arc<std::sync::Mutex<Vec<(&'static str, Value)>>>;
+
+fn gate(outcome: ReactorOutcome) -> (SharedReactorGate, GateLog) {
+    let seen: GateLog = Arc::default();
+    (
+        Arc::new(FixedGate {
+            outcome,
+            seen: Arc::clone(&seen),
+        }),
+        seen,
+    )
+}
+
+fn login_post_auth_calls(seen: &GateLog) -> Vec<Value> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|(event, _)| *event == "login.post_auth")
+        .map(|(_, payload)| payload.clone())
+        .collect()
+}
+
+async fn session_rows(f: &Fixture) -> usize {
+    let mut r = f.db.query("SELECT * FROM session").await.unwrap();
+    let rows: Vec<Value> = r.take(0).unwrap();
+    rows.len()
+}
+
+/// CONTRACT §22: `login.post_auth` covers every interactive sign-in. A
+/// reactor that vetoes it — the embargoed-region example — refuses the native
+/// grant as it refuses the password, SAML, OIDC and passkey sign-ins: the
+/// generic `invalid_grant`, no token, no session, and an audit row saying why.
+/// A `require_mfa` the grant cannot honour is refused the same way.
+#[actix_web::test]
+async fn a_login_post_auth_veto_refuses_the_native_grant() {
+    for (case, outcome) in [
+        (
+            "deny",
+            ReactorOutcome::Deny {
+                reason: "login from an embargoed region".into(),
+            },
+        ),
+        ("require_mfa", ReactorOutcome::RequireMfa),
+    ] {
+        let f = setup().await;
+        let (gate, seen) = gate(outcome);
+        let app = test_app!(@gate f, gate);
+        let app_client = native_client(&f, "ios-app").await;
+
+        let nonce = "nonce-vetoed";
+        let token = id_token(&f, nonce, "ada", json!({}));
+        let (status, body) = token_endpoint!(
+            app,
+            f,
+            grant_body(&app_client, SLUG, &token, nonce, "openid")
+        );
+        assert_generic_invalid_grant(status, &body, case);
+        assert!(body.get("access_token").is_none(), "{case}");
+        assert!(body.get("refresh_token").is_none(), "{case}");
+        assert_eq!(session_rows(&f).await, 0, "{case}: no session was created");
+
+        let calls = login_post_auth_calls(&seen);
+        assert_eq!(calls.len(), 1, "{case}: the gate was asked once");
+        assert_eq!(calls[0]["tenant_id"], f.tenant_id.to_string(), "{case}");
+        assert!(calls[0]["user_id"].is_string(), "{case}");
+        assert_eq!(calls[0]["ip_address"], "127.0.0.1", "{case}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .all(|(event, _)| *event != "token.pre_issue"),
+            "{case}: nothing was about to be issued"
+        );
+
+        let rows = native_login_rows(&f).await;
+        assert_eq!(reason_codes(&rows), ["reactor_denied"], "{case}");
+        assert_eq!(
+            rows[0].outcome,
+            axiam_core::models::audit::AuditOutcome::Failure
+        );
+    }
+}
+
+/// An allowing gate is consulted with the user the token signed in, and the
+/// sign-in proceeds exactly as without one.
+#[actix_web::test]
+async fn an_allowing_login_post_auth_gate_passes_the_native_grant() {
+    let f = setup().await;
+    let (gate, seen) = gate(ReactorOutcome::Allow);
+    let app = test_app!(@gate f, gate);
+    let app_client = native_client(&f, "ios-app").await;
+
+    let nonce = "nonce-allowed";
+    let token = id_token(&f, nonce, "grace", json!({}));
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, nonce, "openid")
+    );
+    assert_eq!(status, 200, "{body}");
+    let user_id = claims_of(body["access_token"].as_str().unwrap())["sub"].clone();
+
+    let calls = login_post_auth_calls(&seen);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["user_id"], user_id);
+    assert_eq!(session_rows(&f).await, 1);
+    assert_eq!(reason_codes(&native_login_rows(&f).await), ["accepted"]);
 }
 
 // ===========================================================================

@@ -4864,7 +4864,9 @@ async fn handle_token_exchange<C: Connection + Clone>(
 /// 2. the request's parameters, scopes and target are checked — before the
 ///    provider token is touched, so a malformed request does not spend it;
 /// 3. `axiam-federation` verifies the token and resolves the user (§3.1
-///    steps 2–7), every refusal one generic `invalid_grant`;
+///    steps 2–7), every refusal one generic `invalid_grant`; then the
+///    `login.post_auth` reactor gate runs for that user (CONTRACT §22,
+///    F4-W2-01), a refusal the same `invalid_grant`;
 /// 4. consent is resolved for that user and decided (`consent_required` for
 ///    anything needing a ceremony, D-N6);
 /// 5. the token set is issued, and `federation.native_login` recorded.
@@ -4988,6 +4990,28 @@ async fn handle_provider_id_token<C: Connection + Clone>(
         }
     };
 
+    // --- 3b. the `login.post_auth` gate (F4-W2-01, #828) -----------------
+    // CONTRACT §22: the event covers every interactive sign-in, after the
+    // credentials verify and before any session or token exists. This is one,
+    // so it fires here — through the adapter the SAML, OIDC and usernameless
+    // passkey paths share (SEC-095), which refuses a `require_mfa` because a
+    // one-round-trip grant has no step-up to route it into. The provider
+    // token is already spent at this point; that is the D-N14 rule for every
+    // user-dependent refusal, and the app obtains a fresh one.
+    if let Err(reason_code) =
+        native_login_post_auth(state, req, tenant_id, grant.organization_id(), &subject).await
+    {
+        audit.refused(state, Some(&subject), reason_code).await;
+        let refusal = if reason_code == NATIVE_POST_AUTH_DENIED {
+            OAuth2Error::InvalidGrant(PUBLIC_REFUSAL_DESCRIPTION.into())
+        } else {
+            OAuth2Error::ServerError(
+                axiam_oauth2::provider_id_token::SERVER_REFUSAL_DESCRIPTION.into(),
+            )
+        };
+        return build_oauth2_error_response(&refusal);
+    }
+
     // --- 4. consent, for the user the token signed in --------------------
     let scope = grant.scopes().join(" ");
     let (sensitive, sensitive_switch_off) =
@@ -5032,6 +5056,59 @@ async fn handle_provider_id_token<C: Connection + Clone>(
             audit.refused(state, Some(&subject), e.error_code()).await;
             build_oauth2_error_response(&e)
         }
+    }
+}
+
+/// The audit reason code of a native sign-in a `login.post_auth` reactor
+/// refused — a veto, a `fail_closed` transport failure, or a `require_mfa` the
+/// grant cannot honour (F4-W2-01).
+const NATIVE_POST_AUTH_DENIED: &str = "reactor_denied";
+
+/// F4-W2-01 (#828): fire `login.post_auth` for a verified native sign-in.
+///
+/// The user is re-read from the tenant the subject was resolved in, so the
+/// reactor sees the same payload the password, SAML, OIDC and usernameless
+/// passkey paths send (`AuthService::intercept_login_post_auth` builds it
+/// once for all of them).
+///
+/// Returns the audit reason code of a refusal: [`NATIVE_POST_AUTH_DENIED`]
+/// when the gate refused — answered as the generic `invalid_grant`, which is
+/// how the token endpoint already answers a `token.pre_issue` veto — or
+/// `server_error` when the user could not be read.
+async fn native_login_post_auth<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    organization_id: Uuid,
+    subject: &axiam_federation::native_login::NativeSubject,
+) -> Result<(), &'static str> {
+    let user = state
+        .user_repo
+        .get_by_id(tenant_id, subject.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                tenant_id = %tenant_id,
+                "native sign-in could not read the user for login.post_auth"
+            );
+            "server_error"
+        })?;
+    match state
+        .auth_service
+        .intercept_federated_login_post_auth(
+            tenant_id,
+            organization_id,
+            &user,
+            client_ip(req).as_deref(),
+            crate::extractors::client_info::user_agent(req).as_deref(),
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        // The only error the gate produces is its refusal; anything else is
+        // refused the same way rather than read as an allow.
+        Err(_) => Err(NATIVE_POST_AUTH_DENIED),
     }
 }
 

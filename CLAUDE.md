@@ -39,6 +39,7 @@ AXIAM is a **multi-tenant** system. Organizations are top-level entities contain
 - MFA support: TOTP, plus WebAuthn passkeys and security keys with a per-tenant attestation policy
 - OPAQUE (RFC 9807) as an optional augmented PAKE — off by default, enabled per organization or tenant
 - Certificate-based authentication (mTLS for IoT devices)
+- Native sign-in with a provider ID token (`urn:axiam:params:oauth:grant-type:provider-id-token`): a mobile app presents the ID token its Google/Apple/Facebook-Limited-Login SDK produced; off per OIDC provider until an operator lists the app's client IDs, single-use, not token exchange (see `docs/api/native-sign-in.md`)
 - gRPC for low-latency authz checks in service mesh
 - AMQP for async/deferred authz decisions
 - RBAC engine is default-deny with **deny-override**: an explicit `effect: "deny"` grant overrides every allow, at any depth of the resource hierarchy and at equal specificity (SEC-040 closed; see `claude_dev/deny-override-design.md` for the precedence table and why deny-override rather than most-specific-wins)

@@ -233,6 +233,16 @@ service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
 
+## Native sign-in with a provider ID token
+
+A mobile or desktop app that signs a user in with a provider's native SDK
+(Google, Apple, Facebook Limited Login) presents the provider's ID token at
+`POST /oauth2/token` with `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`
+and receives the client's ordinary token set, with a session. It is off per
+provider until an operator lists the app's client IDs. Setup, the request and
+error tables, nonce rules, replay semantics and the audit record are in
+[`native-sign-in.md`](native-sign-in.md). It is not token exchange.
+
 ## MCP servers
 
 Fronting a [Model Context Protocol](https://modelcontextprotocol.io) server

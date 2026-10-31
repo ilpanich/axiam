@@ -2094,6 +2094,16 @@ pub async fn authorize<C: Connection + Clone>(
 /// client_credentials, and refresh_token grant types. The `tenant_id` is
 /// passed as a query parameter since the token endpoint is unauthenticated
 /// (the client is authenticating itself here).
+///
+/// Also serves the native sign-in grant
+/// `urn:axiam:params:oauth:grant-type:provider-id-token`, which signs a user
+/// in with an ID token a mobile or desktop app obtained from a federated OIDC
+/// provider's native SDK. Parameters: `provider` (federation config UUID or
+/// provider slug), `id_token`, `nonce` (the raw nonce or its SHA-256 hex), and
+/// optional `scope` and `resource`. Every refusal of the provider token is
+/// `invalid_grant` ("the provider ID token is not acceptable"); the grant is
+/// rate limited per client address (`rate_limit_exceeded`). This is not token
+/// exchange (RFC 8693).
 #[utoipa::path(
     post,
     path = "/oauth2/token",
@@ -2110,7 +2120,7 @@ pub async fn authorize<C: Connection + Clone>(
          body = OAuth2ErrorResponse),
         (status = 401, description = "`invalid_client`: client authentication failed; carries a `WWW-Authenticate` challenge",
          body = OAuth2ErrorResponse),
-        (status = 429, description = "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+        (status = 429, description = "`rate_limit_exceeded` from the route limiters and from the provider-id-token grant (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
          body = OAuth2ErrorResponse),
         (status = 500, description = "`server_error`: an internal failure; the body always carries `error_description`",
          body = OAuth2ErrorResponse),

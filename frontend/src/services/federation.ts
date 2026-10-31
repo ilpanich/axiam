@@ -262,9 +262,10 @@ export function validateTokenExchangeTrust(
  * (`crates/axiam-core/src/models/federation.rs`); the wire type is
  * `NativeLoginTrustRequest` / `NativeLoginTrustResponse` in axiam-api-rest.
  *
- * Hand-written: `sdks/openapi.json` has not been regenerated for it yet, so
- * there is no generated type to import. Reconcile when the spec is next
- * regenerated.
+ * Hand-written, and reconciled against `sdks/openapi.json` (W2.5): the
+ * response schema requires all three members, which is this interface; the
+ * request schema makes `max_token_age_secs` optional (omitted: 300), and this
+ * form always sends it.
  */
 export interface NativeLoginTrust {
   enabled: boolean;

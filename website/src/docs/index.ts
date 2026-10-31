@@ -64,7 +64,7 @@ export const DOC_SECTIONS: DocSectionGroup[] = [
   },
   {
     label: "OAuth2 & OIDC",
-    slugs: ["oauth2", "device-flow", "token-exchange", "agents", "logout", "fapi2", "par"],
+    slugs: ["oauth2", "device-flow", "token-exchange", "native-sign-in", "agents", "logout", "fapi2", "par"],
   },
   {
     label: "APIs & integration",

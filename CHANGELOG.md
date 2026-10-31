@@ -26,7 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("the provider ID token is not acceptable"); a scope that would need the
   user's consent is `consent_required`. Rate limited per address at
   `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` (bucket `oauth2_provider_id_token`), and
-  audited as `federation.native_login` (never the token or the nonce). (G-A)
+  audited as `federation.native_login` (never the token or the nonce). Each
+  provider ID token is accepted once: a dedicated `federation_id_token_replay`
+  record (schema v112, additive) is kept until the token's `exp` plus 60
+  seconds and swept by a new cleanup job of the same name, which appears in
+  `GET /health/jobs`. The per-provider `native_login` trust block
+  (`enabled`, `client_ids`, `max_token_age_secs`) is set on
+  `PUT /api/v1/federation-configs/{id}` and in the admin console, which also
+  lists the grant on the OAuth2 client form; the grant is listed in
+  `grant_types_supported` of the OIDC discovery document. The OpenAPI spec is
+  regenerated, and `docs/api/native-sign-in.md` documents the grant, with
+  threat-model entries T-489 to T-492. It is not token exchange: X4 still
+  refuses ID tokens. (G-A, #816)
 
 ### Changed
 

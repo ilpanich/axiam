@@ -8,6 +8,10 @@ X4 is how you get one: present the partner's token at the ordinary
 [token-exchange](token-exchange.md) endpoint and receive an AXIAM access token
 scoped to what the resolved AXIAM user may actually do.
 
+**This is not how you sign a user in.** A native app holding a provider's ID
+token for the person using it signs in through the separate
+[native sign-in grant](native-sign-in.md); X4 refuses ID tokens.
+
 This extends [`token-exchange.md`](token-exchange.md); **every rule there still
 applies.** What is new is which subject tokens are admissible, and the trust
 configuration that decides.

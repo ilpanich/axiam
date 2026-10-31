@@ -717,12 +717,72 @@ export const OAUTH2_PAGES: DocPage[] = [
         text: "Because exchange only narrows, it is not a privilege-escalation mechanism — and it is also not a way to *grant* a service access to something the user cannot reach. If a downstream call needs authority the user does not have, that is a role-model problem, not an exchange problem.",
       },
       {
+        type: "note",
+        text: "Token exchange is not how a user signs in. A native app signing a user in with a provider's ID token uses [native sign-in](#/docs/native-sign-in).",
+      },
+      {
         type: "links",
         links: [
           {
             label: "Federated token exchange",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/api/federated-token-exchange.md",
             note: "Accepting a partner IdP's token — Entra, Okta or Keycloak — and turning it into an AXIAM one.",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "native-sign-in",
+    section: "OAuth2 & OIDC",
+    navLabel: "Native sign-in",
+    title: "Native sign-in with a provider ID token",
+    intro:
+      "A mobile or desktop app that signed a user in with Google, Apple or Facebook's native SDK presents the provider's ID token and receives AXIAM's ordinary token set, with a session.",
+    blocks: [
+      { type: "h", id: "what", text: "What it is" },
+      {
+        type: "p",
+        text: "A native SDK hands the app an **ID token** signed for that app, with no browser redirect for the authorization-code flow to finish. The app presents the token at `POST /oauth2/token` with `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`. AXIAM verifies it, resolves the AXIAM user it belongs to, and answers with the client's own sign-in token set.",
+      },
+      {
+        type: "note",
+        text: "The rule everything else serves: **an ID token is accepted as a sign-in only when it was issued to us** — to a client ID the operator listed on the provider for exactly this purpose. Never the web client ID unless it is listed, and never \"any audience\".",
+      },
+      {
+        type: "warn",
+        text: "This is not [token exchange](#/docs/token-exchange). Token exchange narrows a token a service already holds, creates no session, and refuses ID tokens; native sign-in takes a provider's ID token and creates a session. If you hold an access token and want a narrower one, that is not this page.",
+      },
+      { type: "h", id: "setup", text: "Operator setup" },
+      {
+        type: "list",
+        items: [
+          "**It is off by default, per provider**, and a separate switch from `token_exchange`: configuring a provider for browser login is not agreement to accept its ID tokens from apps.",
+          "**Only OIDC providers** can enable it — Google, Apple, Microsoft, generic OIDC and Facebook's OIDC variant (Limited Login). SAML and OAuth2-protocol providers are refused.",
+          "**List the app's client IDs** in the provider's `native_login.client_ids` (Google's iOS and Android client IDs, Apple's bundle ID, the Facebook app ID). The list must not be empty, and matching is exact.",
+          "**Register the grant on the client** (`grant_types`). A client without it gets `unauthorized_client`. Add `refresh_token` for a refresh token; a refresh token is issued only to a client that holds it.",
+        ],
+      },
+      { type: "h", id: "behaviour", text: "How it behaves" },
+      {
+        type: "list",
+        items: [
+          "**One answer for every refusal.** A wrong audience, a bad signature, an expired or replayed token and a provider that is switched off are all the same `invalid_grant`. The reason is in the audit record (`federation.native_login`), which never carries the token or the nonce.",
+          "**Single use.** Each ID token is accepted once. The record is written only after the signature and the nonce check out, so only the app that holds both can spend it, and a record that cannot be written refuses the sign-in.",
+          "**The nonce** is the raw value the app generated, or its SHA-256 hex (Apple's pattern); a token with no `nonce` is refused.",
+          "**The same user as the browser.** A native and a browser sign-in through the same provider resolve to the same AXIAM user, and an unverified email is never marked verified.",
+          "**A session, not a bare token.** The access token carries `sid`, so logout, a password reset or an administrator's revocation ends it. The grant has its own rate-limit bucket on the login preset.",
+          "**Consent.** A scope that needs a consent ceremony is `consent_required`; the provider token is already spent, so the app completes consent and obtains a fresh one.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Native sign-in",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/native-sign-in.md",
+            note: "Setup, the request and error tables, nonce rules, validation order, replay, the audit fields and a worked curl example.",
           },
         ],
       },

@@ -635,6 +635,11 @@ pub fn build_discovery_document_for(
             // G-7 / CIBA Core §10.1; asserted against
             // `axiam_core::models::ciba::CIBA_GRANT_TYPE` in the tests.
             "urn:openid:params:grant-type:ciba".into(),
+            // D-N15 / G-A. A native app discovers the sign-in-with-a-provider
+            // -ID-token grant here; the URN is `crate::provider_id_token::
+            // PROVIDER_ID_TOKEN_GRANT_TYPE`, asserted against it in the tests.
+            // Whether a given client holds it is still its own registration.
+            crate::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE.into(),
         ],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
@@ -925,6 +930,20 @@ mod tests {
     /// no user code, the grant type, the three signing algorithms a signed
     /// authentication request may use (D-61) — and the endpoint as an mTLS
     /// alias, since a `tls_client_auth` CIBA client authenticates there.
+    #[test]
+    fn discovery_lists_the_provider_id_token_grant() {
+        let doc = super::tests::doc(None);
+        assert!(
+            doc.grant_types_supported
+                .iter()
+                .any(|g| g == crate::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE)
+        );
+        assert_eq!(
+            crate::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE,
+            "urn:axiam:params:oauth:grant-type:provider-id-token"
+        );
+    }
+
     #[test]
     fn discovery_lists_exactly_the_ciba_that_is_implemented() {
         let tenant_doc = doc_for_tenant(Some(MTLS));

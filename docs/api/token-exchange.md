@@ -20,9 +20,10 @@ check answers — is in
 [`claude_dev/token-exchange-design.md`](../../claude_dev/token-exchange-design.md).
 
 Token exchange is not how a user signs in to an app. It narrows a token a
-service already holds; it does not establish a session. A native app that
-wants to sign a user in with a provider's ID token waits for the native
-sign-in endpoint planned under issue #816.
+service already holds; it does not establish a session, and it refuses ID
+tokens. **This is not how you sign a user in:** a native app that wants to sign
+a user in with a provider's ID token uses the native sign-in grant, described
+in [`native-sign-in.md`](native-sign-in.md).
 
 ## Request
 

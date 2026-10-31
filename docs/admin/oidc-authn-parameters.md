@@ -421,7 +421,11 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
   automatic redirect. That fails safe (one click, never a token), and the page
   cannot tell (a) from (b) without the server saying more than it should about
   a dead session. `fresh` is not removed from the address bar, so a reload stays
-  quiet too.
+  quiet too. `reauth` and `acr` are removed (a reload must not sign the person
+  out again), so the page writes `fresh=1` in their place when it honoured
+  either (#836, F4-W3-17): a reload of an interaction hop stays quiet as well,
+  with the provider still highlighted. It does not count as another
+  re-authentication for the loop guard, which counts `reauth=1` only.
 - **No loop.** What stops a loop on a real failure: the failed leg ends on the
   SSO callback page, whose **Back to sign in** link carries no `idp`, so the
   page it opens has nothing to start; a relying party that restarts the request

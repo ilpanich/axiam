@@ -371,6 +371,76 @@ describe("LoginPage — idp on a re-authentication hop", () => {
     expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
     expect(startCalls()).toHaveLength(0);
   });
+
+  /**
+   * #836 (F4-W3-17) — an interaction hop carries `reauth=1` or a step-up `acr`
+   * with `idp`, and never `fresh`. The page strips the mark from the address
+   * bar, so it writes `fresh=1` in its place: the reload stays quiet and keeps
+   * the provider highlighted. Returns the URL the page left behind, read once
+   * `ready` has rendered and before any countdown could fire.
+   */
+  async function firstLoad(query: string, ready: () => Promise<unknown>): Promise<string> {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    function LocationProbe() {
+      return <output data-testid="search">{useLocation().search}</output>;
+    }
+    renderWithProviders(
+      <>
+        <LoginPage />
+        <LocationProbe />
+      </>,
+      { route: `/login${query}` },
+    );
+    await submitWorkspace(user);
+    await ready();
+    const search = screen.getByTestId("search").textContent ?? "";
+    cleanup();
+    vi.useRealTimers();
+    return search;
+  }
+
+  it.each([
+    ["reauth=1 alone", `?return_to=${authorize("x=1")}&reauth=1&idp=${IDP}`],
+    ["a step-up acr alone", `?return_to=${authorize("x=1")}&acr=urn:axiam:acr:mfa&idp=${IDP}`],
+  ])("stays quiet on reload of a hop marked by %s: the strip writes fresh=1", async (_label, query) => {
+    const search = await firstLoad(query, () =>
+      screen.findByRole("button", { name: "Sign in with Acme SSO" }),
+    );
+    const left = new URLSearchParams(search);
+    expect(left.has("reauth")).toBe(false);
+    expect(left.has("acr")).toBe(false);
+    expect(left.get("fresh")).toBe("1");
+    expect(left.get("idp")).toBe(IDP);
+    expect(startCalls()).toHaveLength(0);
+
+    // The reload: the URL as the page left it.
+    await setup(search);
+    const suggested = await screen.findByRole("button", { name: "Sign in with Acme SSO" });
+    await advance(5000);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
+    expect(startCalls()).toHaveLength(0);
+    expect(suggested).toHaveAttribute("data-suggested", "true");
+  });
+
+  it.each([
+    ["reauth=0", `?return_to=${authorize("x=1")}&reauth=0&idp=${IDP}`],
+    ["an unknown acr", `?return_to=${authorize("x=1")}&acr=urn%3Aother&idp=${IDP}`],
+  ])("writes no fresh when the stripped %s was no mark: a hop with neither still auto-starts", async (_label, query) => {
+    // The first load is itself unmarked: it counts down, and is left before
+    // the start (unmounting clears the timer), so no attempt is recorded.
+    const search = await firstLoad(query, () => screen.findByTestId("idp-auto-redirect"));
+    const left = new URLSearchParams(search);
+    expect(left.has("reauth")).toBe(false);
+    expect(left.has("acr")).toBe(false);
+    expect(left.has("fresh")).toBe(false);
+    expect(startCalls()).toHaveLength(0);
+
+    await setup(search);
+    await screen.findByTestId("idp-auto-redirect");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+  });
 });
 
 /**

@@ -1189,9 +1189,14 @@ fn redirect_with_error<C: Connection + Clone>(
     // #835 (D-N29) — with the consumed start `state`, as on the success path,
     // so the SPA's "Back to sign in" can keep the hop of *this* sign-in.
     let target = spa_return_target(redirect_uri, &[("error", safe)], start_state)?;
+    // #836 (F4-W3-19) — the same two headers as the success exit of this
+    // endpoint. Nothing in this URL is live (a sanitised code and the spent
+    // `state`), but one endpoint's two exits should not differ in what they
+    // let travel onward as a referrer.
     Ok(HttpResponse::SeeOther()
         .insert_header((actix_web::http::header::LOCATION, target))
         .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .insert_header(("Referrer-Policy", "no-referrer"))
         .finish())
 }
 

@@ -121,6 +121,9 @@ already says `reauth=1`) and never on a `/consent` redirect. It changes nothing
 that is issued: the return leg is judged on the session the sign-in created,
 exactly as without it. Unlike `reauth`, it does not end a session or count
 against the re-authentication loop guard, because a first hop has no session.
+The sign-in page also writes it itself, in place of a `reauth=1` or step-up
+`acr` it strips from the address bar, so that a reload of an interaction hop
+stays quiet too (#836). The server never reads it.
 The full list of what marks a re-authentication is in
 [What the sign-in page does with `idp`](oidc-authn-parameters.md#what-the-sign-in-page-does-with-idp).
 

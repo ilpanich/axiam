@@ -243,7 +243,8 @@ export function LoginPage() {
   // Under PAR this page could not see those values at all, and reading them
   // out of `return_to` was a second parser of one value (F4-W3-12, -14).
   // `fresh` is not stripped from the URL: unlike `reauth` it has no effect to
-  // repeat, and a reload must stay quiet.
+  // repeat, and a reload must stay quiet. For the same reason the strip below
+  // writes it in place of a `reauth`/`acr` it removes (#836, F4-W3-17).
   const [freshAuthRequired] = useState(
     () =>
       reauthRequested ||
@@ -286,15 +287,27 @@ export function LoginPage() {
       // `return_to` deliberately does NOT — a user who reloads this page must
       // still land back on the authorization request they came from, and the
       // value is re-validated on every read anyway.
+      //
+      // #836 (F4-W3-17) — but `reauth` and `acr` are also two of the three
+      // marks that keep this hop from auto-starting the hinted provider, and
+      // `idp` stays. Stripped bare, a reload would read an unmarked hop and
+      // start the provider for the person after the workspace step: the
+      // unattended re-authentication D-N26 rules out, behind one reload. So
+      // when this load was marked, the mark is carried on as `fresh=1`, the
+      // one that has no effect to repeat: the reload stays quiet, keeps the
+      // provider highlighted, and — `reauth` being gone — neither signs out
+      // again nor counts as another hop for the loop guard. `fresh` is read
+      // only here; the server writes it on a first leg and never reads it.
       const next = new URLSearchParams(searchParams);
       next.delete("bootstrapped");
       next.delete("org");
       next.delete("tenant");
       next.delete("reauth");
       next.delete("acr");
+      if (freshAuthRequired) next.set("fresh", "1");
       setSearchParams(next, { replace: true });
     }
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, freshAuthRequired]);
 
   // W3 — `reauth` mode. End whatever session this browser still holds before
   // showing the form, so that what follows is a real authentication event:

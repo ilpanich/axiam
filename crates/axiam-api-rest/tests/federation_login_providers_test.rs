@@ -2164,6 +2164,80 @@ async fn an_oauth2_login_may_not_name_a_foreign_redirect_target() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// #836 (F4-W3-19) — a provider's error on the form-post return is a `303`
+/// back to the SPA, and it leaves with the same headers as the success `303`:
+/// not cached, and no referrer onward. The error is sanitised, the redirect
+/// URI's own query is kept, and the consumed start `state` rides along.
+#[actix_rt::test]
+async fn the_form_post_error_redirect_sends_no_referrer() {
+    let f = setup("form-error-referrer").await;
+    let auth = same_origin_auth_config();
+    let app = test_app!(f.db.clone(), auth.clone());
+
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "form-error-referrer-admin",
+        json!({
+            "provider": "GitHub",
+            "provider_kind": "github",
+            "protocol": "OAuth2",
+            "client_id": "gh-client",
+            "client_secret": "gh-secret",
+            "authorization_endpoint": "https://github.example/login/oauth/authorize",
+            "token_endpoint": "https://github.example/token",
+            "userinfo_endpoint": "https://github.example/user",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oauth2/start")
+        .set_json(json!({
+            "org_slug": f.org_slug,
+            "tenant_slug": f.tenant_slug,
+            "federation_config_id": created["id"],
+            "redirect_uri": "https://axiam.test/auth/sso/callback?keep=1",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(status, 200, "{body}");
+    let start_state = body["state"].as_str().expect("the start answers a state");
+    let encoded: String = url::form_urlencoded::byte_serialize(start_state.as_bytes()).collect();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/federation/oidc/callback/form")
+        .insert_header((
+            actix_web::http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        ))
+        .set_payload(format!("state={encoded}&error=access_denied%22%3Cx"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} missing on the error 303"))
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(header("referrer-policy"), "no-referrer");
+    assert_eq!(header("cache-control"), "no-store");
+    assert_eq!(
+        header("location"),
+        format!("https://axiam.test/auth/sso/callback?keep=1&error=provider_error&state={encoded}")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Explicit `null` on an update (contract §27)
 // ---------------------------------------------------------------------------
